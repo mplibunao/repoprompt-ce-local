@@ -163,6 +163,19 @@ class LocalProductionInstallerTests(unittest.TestCase):
             "new\n",
         )
 
+    def test_installer_reads_packaged_app_from_split_release_source_root(self) -> None:
+        result, context = self.run_installer(
+            [certificate(SHA1_A, SHA256_A)],
+            expected_sha1=SHA1_A,
+            split_release_source_root=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            (context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(encoding="utf-8"),
+            "new\n",
+        )
+        self.assertFalse((context["tooling_root"] / ".build" / "release" / "RepoPrompt.app").exists())
+
     def test_multiple_first_use_candidates_fail_with_fingerprints_and_explicit_selection_succeeds(self) -> None:
         failed, _ = self.run_installer(
             [certificate(SHA1_B, SHA256_B), certificate(SHA1_A, SHA256_A)],
@@ -379,6 +392,7 @@ class LocalProductionInstallerTests(unittest.TestCase):
         openssl_rejects_legacy: bool = False,
         preexisting_lock: bool = False,
         fail_registry_verification: bool = False,
+        split_release_source_root: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         temp_dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, temp_dir, True)
@@ -429,7 +443,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        build_dir = root / ".build" / "release"
+        release_source_root = temp_dir / "release-source" if split_release_source_root else root
+        build_dir = release_source_root / ".build" / "release"
         install_dir = temp_dir / "Applications"
         installed_app = install_dir / "RepoPrompt CE.app"
         installed_app.mkdir(parents=True)
@@ -609,6 +624,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
             env["LOCAL_SIGNING_IDENTITY_SHA256"] = selected
         if rotate:
             env["ROTATE_LOCAL_SIGNING_IDENTITY"] = "1"
+        if split_release_source_root:
+            env["REPOPROMPT_RELEASE_SOURCE_ROOT"] = str(release_source_root)
 
         context = {
             "command": ["bash", str(scripts / "install_local_production.sh")],
@@ -620,6 +637,7 @@ class LocalProductionInstallerTests(unittest.TestCase):
             "import_log": import_log,
             "swift_log": swift_log,
             "tmp_root": installer_tmp,
+            "tooling_root": root,
         }
         return self.invoke(context), context
 

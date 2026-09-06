@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RELEASE_SOURCE_ROOT="${REPOPROMPT_RELEASE_SOURCE_ROOT:-$ROOT_DIR}"
 cd "$ROOT_DIR"
 
 set -a
@@ -285,7 +286,7 @@ LOCAL_SELF_SIGNED_RELEASE=1 \
     SIGN_IDENTITY="$SIGN_IDENTITY" \
     "$ROOT_DIR/Scripts/package_app.sh" release
 
-SOURCE_APP="$ROOT_DIR/.build/release/$APP_NAME.app"
+SOURCE_APP="$RELEASE_SOURCE_ROOT/.build/release/$APP_NAME.app"
 [[ -d "$SOURCE_APP" ]] || fail "Missing packaged local production app: $SOURCE_APP"
 [[ "$(plutil -extract RepoPromptSigningMode raw "$SOURCE_APP/Contents/Info.plist")" == "local-self-signed" ]] ||
     fail "Packaged app is missing the local self-signed signing-mode marker."
