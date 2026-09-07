@@ -832,6 +832,7 @@ import XCTest
                         ]
                     )
                     endpoint = createdEndpoint
+                    try await Self.activateWorkspace(for: fixture.contextA)
                     let readTask = Task {
                         try await createdEndpoint.callTool(
                             name: MCPWindowToolName.readFile,
