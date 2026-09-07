@@ -208,6 +208,18 @@ import Foundation
             contentReadChunkHandler = handler
         }
 
+        func setContentPhysicalReadHandlerForTesting(
+            _ handler: (@Sendable () throws -> Void)?
+        ) {
+            contentPhysicalReadHandler = handler
+        }
+
+        func setContentReadCacheCommitHandlerForTesting(
+            _ handler: (@Sendable () async -> Void)?
+        ) {
+            contentReadCacheCommitHandler = handler
+        }
+
         func resetContentFingerprintRequestCountForTesting() {
             contentFingerprintRequestCountForTesting = 0
         }
@@ -228,6 +240,10 @@ import Foundation
 
         func cachedEncodingForTesting(relativePath: String) -> String.Encoding? {
             encodingMap[relativePath]
+        }
+
+        func advanceContentReadCacheRevisionForTesting() {
+            contentReadCacheRevision &+= 1
         }
 
         func isWatchingForChangesForTesting() -> Bool {

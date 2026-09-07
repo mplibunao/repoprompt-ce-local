@@ -6378,6 +6378,11 @@ final class MCPServerViewModel: ObservableObject {
         metadata: RequestMetadata,
         lookupContext: WorkspaceLookupContext
     ) async throws -> ToolResultDTOs.ReadFileReply? {
+        guard Self.shouldAttemptSelectedGitArtifactRead(
+            requestedPath: requestedPath,
+            translatedLookupPath: translatedLookupPath
+        ) else { return nil }
+
         guard var resolvedContext = try? resolveTabContextSnapshot(
             from: metadata,
             toolName: MCPWindowToolName.readFile
@@ -6450,22 +6455,48 @@ final class MCPServerViewModel: ObservableObject {
         }
     }
 
+    private nonisolated static func shouldAttemptSelectedGitArtifactRead(
+        requestedPath: String,
+        translatedLookupPath: String
+    ) -> Bool {
+        // Advertised aliases retain the `_git_data/` prefix and absolute artifacts retain
+        // the same path component, so ordinary reads never need selected-artifact authorization.
+        [requestedPath, translatedLookupPath]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .contains {
+                $0 == "_git_data"
+                    || $0.hasPrefix("_git_data/")
+                    || $0.contains("/_git_data/")
+            }
+    }
+
+    #if DEBUG
+        nonisolated static func shouldAttemptSelectedGitArtifactReadForTesting(
+            requestedPath: String,
+            translatedLookupPath: String
+        ) -> Bool {
+            shouldAttemptSelectedGitArtifactRead(
+                requestedPath: requestedPath,
+                translatedLookupPath: translatedLookupPath
+            )
+        }
+    #endif
+
     private func isGitDataArtifactRequest(
         _ requestedPath: String,
         resolvedPath: String,
         capability: SelectedGitArtifactCapability?
     ) -> Bool {
-        let candidates = [requestedPath, resolvedPath].map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if candidates.contains(where: {
-            $0 == "_git_data"
-                || $0.hasPrefix("_git_data/")
-                || $0.contains("/_git_data/")
-        }) {
+        if Self.shouldAttemptSelectedGitArtifactRead(
+            requestedPath: requestedPath,
+            translatedLookupPath: resolvedPath
+        ) {
             return true
         }
         guard let rootPath = capability?.gitDataRoot.standardizedFullPath else { return false }
+        let candidates = [requestedPath, resolvedPath].map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         return candidates.contains {
             $0 == rootPath || StandardizedPath.isDescendant($0, of: rootPath)
         }
@@ -6563,14 +6594,10 @@ final class MCPServerViewModel: ObservableObject {
             preparedContent = snapshot.preparedContent
             cacheHit = snapshot.cacheHit
         case let .external(externalFile):
-            do {
-                let full = try await readableService.readAlwaysReadableExternalFile(externalFile)
-                preparedContent = await WorkspaceInteractiveReadProcessor.prepareOffActor(full)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                throw MCPError.invalidParams("Cannot read '\(externalFile.displayPath)': \(error.localizedDescription)")
-            }
+            preparedContent = try await Self.prepareAlwaysReadableExternalFile(
+                externalFile,
+                readableService: readableService
+            )
             cacheHit = false
         }
         try Task.checkCancellation()
@@ -6629,12 +6656,35 @@ final class MCPServerViewModel: ObservableObject {
         }
     }
 
+    private nonisolated static func prepareAlwaysReadableExternalFile(
+        _ externalFile: WorkspaceExternalReadableFile,
+        readableService: WorkspaceReadableFileService
+    ) async throws -> WorkspaceInteractiveReadPreparedContent {
+        do {
+            let full = try await readableService.readAlwaysReadableExternalFile(externalFile)
+            return await WorkspaceInteractiveReadProcessor.prepareOffActor(full)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as ContentReadSchedulerError {
+            throw error
+        } catch {
+            throw MCPError.invalidParams("Cannot read '\(externalFile.displayPath)': \(error.localizedDescription)")
+        }
+    }
+
     #if DEBUG
         static func workspaceContentLoadForTesting(
             store: WorkspaceFileContextStore,
             file: WorkspaceFileRecord
         ) async throws -> WorkspaceInteractiveReadSnapshot? {
             try await workspaceContentLoad(store: store, file: file)
+        }
+
+        nonisolated static func prepareAlwaysReadableExternalFileThroughEnvelopeForTesting(
+            _ externalFile: WorkspaceExternalReadableFile,
+            readableService: WorkspaceReadableFileService
+        ) async throws -> WorkspaceInteractiveReadPreparedContent {
+            try await prepareAlwaysReadableExternalFile(externalFile, readableService: readableService)
         }
     #endif
 

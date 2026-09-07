@@ -111,6 +111,9 @@ extension FileSystemService {
         }
         let id = UUID()
         inFlightMutations[id] = FileSystemInFlightMutation(relativePaths: authorityPaths)
+        // Reserve a newer cache generation before mutation preparation can suspend. Successful
+        // reads already in flight must not publish encoding evidence across this mutation boundary.
+        contentReadCacheRevision &+= 1
         do {
             #if DEBUG
                 let willBegin = mutationIOWillBeginHandler

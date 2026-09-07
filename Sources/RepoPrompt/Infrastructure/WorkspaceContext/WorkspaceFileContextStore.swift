@@ -1242,6 +1242,9 @@ actor WorkspaceFileContextStore {
         private var contextBuilderSelectionCandidateDidRegisterHandler: (@Sendable (UUID, String) async -> Void)?
         private var publishedGitArtifactIngressDidRegisterHandler: (@Sendable (UUID, String) async -> Void)?
         private var postWriteCatalogRegistrationDidBeginHandler: (@Sendable (UUID, String) async -> Void)?
+        private var interactiveReadFingerprintDidResolveHandler: (@Sendable () async -> Void)?
+        private var explicitMaterializationDidAcquireCodemapFenceHandler: (@Sendable (FileSystemService) async -> Void)?
+        private var exactFileDiskPathProbeHandler: (@Sendable () -> Void)?
         private var watcherSinkWillApplyHandler: (@Sendable (UUID) async -> Void)?
         private var storeEditDeferredPublicationDidRegisterHandler: (@Sendable (UUID, String) async -> Void)?
         private var publisherIngressWillWaitHandler: (@Sendable (Set<UUID>) async -> Void)?
@@ -1985,6 +1988,24 @@ actor WorkspaceFileContextStore {
             postWriteCatalogRegistrationDidBeginHandler = handler
         }
 
+        func setInteractiveReadFingerprintDidResolveHandlerForTesting(
+            _ handler: (@Sendable () async -> Void)?
+        ) {
+            interactiveReadFingerprintDidResolveHandler = handler
+        }
+
+        func setExplicitMaterializationDidAcquireCodemapFenceHandlerForTesting(
+            _ handler: (@Sendable (FileSystemService) async -> Void)?
+        ) {
+            explicitMaterializationDidAcquireCodemapFenceHandler = handler
+        }
+
+        func setExactFileDiskPathProbeHandlerForTesting(
+            _ handler: (@Sendable () -> Void)?
+        ) {
+            exactFileDiskPathProbeHandler = handler
+        }
+
         func setWatcherSinkWillApplyHandler(_ handler: (@Sendable (UUID) async -> Void)?) {
             watcherSinkWillApplyHandler = handler
         }
@@ -2610,6 +2631,10 @@ actor WorkspaceFileContextStore {
 
         func interactiveReadCacheSnapshotForTesting() async -> WorkspaceInteractiveReadCache.Snapshot {
             await interactiveReadCache.snapshotForTesting()
+        }
+
+        func contentReadSchedulerOwnerIDsForTesting() -> (search: UUID, interactive: UUID) {
+            (searchContentSchedulerOwnerID, interactiveReadSchedulerOwnerID)
         }
 
         func searchLaneSnapshotForTesting() async -> StoreBackedWorkspaceSearchLane.Snapshot {
@@ -9579,6 +9604,30 @@ actor WorkspaceFileContextStore {
             guard let root = rootStatesByID[rootID]?.root else { return nil }
             return rootLoadConfigurationsByPath[root.standardizedFullPath]?.gitignorePolicyIdentity
         }
+
+        func setContentPhysicalReadHandlerForTesting(
+            rootID: UUID,
+            _ handler: (@Sendable () throws -> Void)?
+        ) async throws {
+            let state = try state(for: rootID)
+            await state.service.setContentPhysicalReadHandlerForTesting(handler)
+        }
+
+        func replaceRootLifetimeForTesting(rootID: UUID) throws {
+            guard let state = rootStatesByID[rootID] else {
+                throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
+            }
+            rootStatesByID[rootID] = RootState(
+                lifetimeID: UUID(),
+                root: state.root,
+                service: state.service,
+                folderIDsByRelativePath: state.folderIDsByRelativePath,
+                fileIDsByRelativePath: state.fileIDsByRelativePath,
+                childFolderIDsByFolderID: state.childFolderIDsByFolderID,
+                childFileIDsByFolderID: state.childFileIDsByFolderID
+            )
+        }
+
     #endif
 
     func refreshFileSystemSettings(
@@ -11431,13 +11480,18 @@ actor WorkspaceFileContextStore {
                     isFresh: true
                 )
             }
+            let schedulerOwnerID = searchContentSchedulerOwnerID
             let fingerprint: FileContentFingerprint
             do {
                 fingerprint = try await service.contentFingerprint(
-                    ofRelativePath: current.standardizedRelativePath
+                    ofRelativePath: current.standardizedRelativePath,
+                    workloadClass: .contentSearch,
+                    schedulerOwnerID: schedulerOwnerID
                 )
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let error as ContentReadSchedulerError {
+                throw error
             } catch FileSystemError.fileNotFound {
                 await pruneCatalogFileIfStillCurrent(current)
                 return staleSearchContentSnapshot(for: current)
@@ -11450,7 +11504,6 @@ actor WorkspaceFileContextStore {
                 return staleSearchContentSnapshot(for: current)
             }
 
-            let schedulerOwnerID = searchContentSchedulerOwnerID
             do {
                 let cached = try await searchDecodedContentCache.snapshot(
                     for: cacheKey,
@@ -11505,6 +11558,8 @@ actor WorkspaceFileContextStore {
     func interactiveReadSnapshot(
         for expectedRecord: WorkspaceFileRecord
     ) async throws -> WorkspaceInteractiveReadSnapshot? {
+        // The outer token spans the gap between fingerprint and content producers. Each producer
+        // also owns a token so cancellation cannot expose its still-running physical work.
         try await FileSystemService.withContentReadForegroundActivity(kind: .interactiveRead) {
             try await self.interactiveReadSnapshotWithinForegroundActivity(for: expectedRecord)
         }
@@ -11534,13 +11589,18 @@ actor WorkspaceFileContextStore {
                 fileID: current.id,
                 standardizedRelativePath: current.standardizedRelativePath
             )
+            let schedulerOwnerID = interactiveReadSchedulerOwnerID
             let fingerprint: FileContentFingerprint
             do {
                 fingerprint = try await service.contentFingerprint(
-                    ofRelativePath: current.standardizedRelativePath
+                    ofRelativePath: current.standardizedRelativePath,
+                    workloadClass: .interactiveRead,
+                    schedulerOwnerID: schedulerOwnerID
                 )
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let error as ContentReadSchedulerError {
+                throw error
             } catch FileSystemError.fileNotFound {
                 await pruneCatalogFileIfStillCurrent(current)
                 return nil
@@ -11548,12 +11608,17 @@ actor WorkspaceFileContextStore {
                 return nil
             }
 
+            #if DEBUG
+                if let handler = interactiveReadFingerprintDidResolveHandler {
+                    await handler()
+                }
+            #endif
+
             guard searchContentRecordIsCurrent(current, invalidationEpoch: epoch) else {
                 if attempt == 0 { continue }
                 return nil
             }
 
-            let schedulerOwnerID = interactiveReadSchedulerOwnerID
             do {
                 let cached = try await interactiveReadCache.snapshot(
                     for: cacheKey,
@@ -11696,11 +11761,24 @@ actor WorkspaceFileContextStore {
         try await requirePublishedSeededAuthorityFresh(rootID: rootID)
         let state = try state(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
-        let fingerprint = try await state.service.contentFingerprint(ofRelativePath: standardizedRelativePath)
+        let schedulerOwnerID = switch workloadClass {
+        case .interactiveRead:
+            interactiveReadSchedulerOwnerID
+        case .contentSearch:
+            searchContentSchedulerOwnerID
+        default:
+            state.service.diagnosticRootToken
+        }
+        let fingerprint = try await state.service.contentFingerprint(
+            ofRelativePath: standardizedRelativePath,
+            workloadClass: workloadClass,
+            schedulerOwnerID: schedulerOwnerID
+        )
         let result = try await state.service.loadValidatedContent(
             ofRelativePath: standardizedRelativePath,
             expectedFingerprint: fingerprint,
-            workloadClass: workloadClass
+            workloadClass: workloadClass,
+            schedulerOwnerID: schedulerOwnerID
         )
         try await requirePublishedSeededAuthorityFresh(rootID: rootID)
         return result
@@ -14422,6 +14500,10 @@ actor WorkspaceFileContextStore {
             }
         }
 
+        func isManagedOnlyFileForTesting(_ fileID: UUID) -> Bool {
+            managedOnlyFileIDs.contains(fileID)
+        }
+
         func discardedCodemapPathFenceReleaseCountForTesting() -> Int {
             discardedCodemapPathFenceReleaseCounterForTesting
         }
@@ -17096,15 +17178,105 @@ actor WorkspaceFileContextStore {
                 rootService: state.service
             )
         }
-        let missingClassificationIsCurrent = await fenceAndPruneCatalogFileMissingOnDisk(
+        let missingClassificationIsCurrent = await (try? fenceAndPruneCatalogFileMissingOnDisk(
+            rootID: file.rootID,
+            relativePath: current.standardizedRelativePath,
+            publishDelta: true,
+            expectedLifetimeID: expectedLifetimeID,
+            expectedFileID: expectedFileID
+        )) ?? false
+        guard !Task.isCancelled,
+              missingClassificationIsCurrent,
+              let currentState = rootStatesByID[file.rootID],
+              currentState.lifetimeID == expectedLifetimeID,
+              currentState.service === state.service,
+              self.file(rootID: file.rootID, relativePath: current.standardizedRelativePath) == nil
+        else {
+            outcome = "unavailable"
+            return .unavailable
+        }
+        return .missing
+    }
+
+    private func validateCatalogFileStillPresentForExactRead(
+        _ file: WorkspaceFileRecord
+    ) async throws -> ExactCatalogFileValidationResult {
+        let lifecycleCorrelation = EditFlowPerf.currentLifecycleCorrelation
+        EditFlowPerf.lifecycleEvent(
+            EditFlowPerf.Lifecycle.Search.contentFreshnessStoreEntered,
+            correlation: lifecycleCorrelation
+        )
+        let validationState = EditFlowPerf.begin(EditFlowPerf.Stage.Search.contentFreshnessValidationStoreActorBody)
+        var outcome = "missing"
+        defer {
+            EditFlowPerf.end(
+                EditFlowPerf.Stage.Search.contentFreshnessValidationStoreActorBody,
+                validationState,
+                EditFlowPerf.Dimensions(outcome: outcome)
+            )
+            EditFlowPerf.lifecycleEvent(
+                EditFlowPerf.Lifecycle.Search.contentFreshnessStoreReturned,
+                correlation: lifecycleCorrelation,
+                EditFlowPerf.Dimensions(outcome: outcome)
+            )
+        }
+        guard let state = rootStatesByID[file.rootID] else {
+            outcome = "unavailable"
+            return .unavailable
+        }
+        guard let current = self.file(
+            rootID: file.rootID,
+            relativePath: file.standardizedRelativePath
+        ) else { return .missing }
+        guard current.id == file.id,
+              current.standardizedFullPath == file.standardizedFullPath
+        else {
+            outcome = "unavailable"
+            return .unavailable
+        }
+        let expectedLifetimeID = state.lifetimeID
+        let expectedFileID = current.id
+        let expectedFullPath = current.standardizedFullPath
+        let exists = try await state.service.cancellationResponsiveRegularFileExistsOnDisk(
+            relativePath: current.standardizedRelativePath
+        )
+        #if DEBUG
+            await awaitExactFileSuspensionGateForTesting(
+                point: .catalogValidation,
+                rootID: file.rootID
+            )
+        #endif
+        try Task.checkCancellation()
+        guard let currentState = rootStatesByID[file.rootID],
+              currentState.lifetimeID == expectedLifetimeID,
+              currentState.service === state.service,
+              let currentRecord = self.file(
+                  rootID: file.rootID,
+                  relativePath: current.standardizedRelativePath
+              ),
+              currentRecord.id == expectedFileID,
+              currentRecord.standardizedFullPath == expectedFullPath
+        else {
+            outcome = "unavailable"
+            return .unavailable
+        }
+        if exists {
+            outcome = "current"
+            return .current(
+                file: currentRecord,
+                rootLifetimeID: expectedLifetimeID,
+                rootService: state.service
+            )
+        }
+        let missingClassificationIsCurrent = try await fenceAndPruneCatalogFileMissingOnDisk(
             rootID: file.rootID,
             relativePath: current.standardizedRelativePath,
             publishDelta: true,
             expectedLifetimeID: expectedLifetimeID,
             expectedFileID: expectedFileID
         )
-        guard !Task.isCancelled,
-              missingClassificationIsCurrent,
+        try Task.checkCancellation()
+        guard missingClassificationIsCurrent,
               let currentState = rootStatesByID[file.rootID],
               currentState.lifetimeID == expectedLifetimeID,
               currentState.service === state.service,
@@ -17669,7 +17841,7 @@ actor WorkspaceFileContextStore {
                         serialPosition: serialPosition
                     )
                 )
-                let validation = await validateCatalogFileStillPresent(candidate)
+                let validation = try await validateCatalogFileStillPresentForExactRead(candidate)
                 #if DEBUG
                     await awaitExactFileSuspensionGateForTesting(
                         point: .catalogValidationResult,
@@ -17710,7 +17882,7 @@ actor WorkspaceFileContextStore {
                         endBindingProbe(outcome: "unavailable")
                         continue
                     }
-                    bindingObservations.append(exactFileBindingObservation(
+                    try await bindingObservations.append(exactFileBindingObservation(
                         binding: binding,
                         relativePath: relativePath,
                         state: currentState
@@ -17749,7 +17921,9 @@ actor WorkspaceFileContextStore {
                 )
             )
             let expectedLifetimeID = state.lifetimeID
-            let eligibility = await state.service.catalogRegularFileEligibility(relativePath: relativePath)
+            let eligibility = try await state.service.cancellationResponsiveCatalogRegularFileEligibility(
+                relativePath: relativePath
+            )
             #if DEBUG
                 await awaitExactFileSuspensionGateForTesting(
                     point: .candidateEligibility,
@@ -17794,7 +17968,7 @@ actor WorkspaceFileContextStore {
             )
             switch eligibility {
             case .eligible:
-                bindingObservations.append(exactFileBindingObservation(
+                try await bindingObservations.append(exactFileBindingObservation(
                     binding: binding,
                     relativePath: relativePath,
                     state: currentState
@@ -17810,7 +17984,7 @@ actor WorkspaceFileContextStore {
                     rootToken: currentState.service.diagnosticRootToken.uuidString
                 )
             case .ineligible(.ignored):
-                bindingObservations.append(exactFileBindingObservation(
+                try await bindingObservations.append(exactFileBindingObservation(
                     binding: binding,
                     relativePath: relativePath,
                     state: currentState
@@ -17835,7 +18009,7 @@ actor WorkspaceFileContextStore {
                         serialPosition: serialPosition
                     )
                 )
-                let missingClassificationIsCurrent = await fenceAndPruneCatalogFileMissingOnDisk(
+                let missingClassificationIsCurrent = try await fenceAndPruneCatalogFileMissingOnDisk(
                     rootID: binding.lookupRoot.id,
                     relativePath: relativePath,
                     publishDelta: true,
@@ -17868,7 +18042,7 @@ actor WorkspaceFileContextStore {
                     )
                 )
                 if let stateAfterPrune {
-                    let observation = exactFileBindingObservation(
+                    let observation = try await exactFileBindingObservation(
                         binding: binding,
                         relativePath: relativePath,
                         state: stateAfterPrune
@@ -17885,7 +18059,7 @@ actor WorkspaceFileContextStore {
                     rootToken: stateAfterPrune?.service.diagnosticRootToken.uuidString
                 )
             case .ineligible:
-                bindingObservations.append(exactFileBindingObservation(
+                try await bindingObservations.append(exactFileBindingObservation(
                     binding: binding,
                     relativePath: relativePath,
                     state: currentState
@@ -17910,21 +18084,34 @@ actor WorkspaceFileContextStore {
         binding: WorkspaceExactFileNamespace.RootBinding,
         relativePath: String,
         state: RootState
-    ) -> ExactFileBindingObservation {
+    ) async throws -> ExactFileBindingObservation {
         let catalogFile = file(rootID: binding.lookupRoot.id, relativePath: relativePath)
-        let diskPathState: ExactFileDiskPathState = if regularFileAppearsPresentOnDisk(root: state.root, relativePath: relativePath) {
-            .regularFile
-        } else if directoryAppearsPresentOnDisk(root: state.root, relativePath: relativePath) {
-            .directory
-        } else {
-            .missingOrOther
+        let catalogFileID = catalogFile?.id
+        let catalogFileFullPath = catalogFile?.standardizedFullPath
+        let diskPathState: ExactFileDiskPathState = switch try await state.service
+            .cancellationResponsiveCatalogPathState(relativePath: relativePath)
+        {
+        case .regularFile: .regularFile
+        case .directory: .directory
+        case .missingOrOther: .missingOrOther
+        }
+        try Task.checkCancellation()
+        guard let currentState = rootStatesByID[binding.lookupRoot.id],
+              currentState.lifetimeID == state.lifetimeID,
+              currentState.service === state.service,
+              file(rootID: binding.lookupRoot.id, relativePath: relativePath)?.id == catalogFileID,
+              file(rootID: binding.lookupRoot.id, relativePath: relativePath)?.standardizedFullPath == catalogFileFullPath
+        else {
+            throw WorkspaceFileContextStoreError.catalogMaterializationFailed(
+                "workspace file binding changed while its disk state was being inspected: \(relativePath)"
+            )
         }
         return ExactFileBindingObservation(
             rootID: binding.lookupRoot.id,
             rootLifetimeID: state.lifetimeID,
             rootService: state.service,
-            catalogFileID: catalogFile?.id,
-            catalogFileFullPath: catalogFile?.standardizedFullPath,
+            catalogFileID: catalogFileID,
+            catalogFileFullPath: catalogFileFullPath,
             diskPathState: diskPathState
         )
     }
@@ -17933,7 +18120,7 @@ actor WorkspaceFileContextStore {
         _ observations: [ExactFileBindingObservation],
         relativePath: String,
         bindings: [WorkspaceExactFileNamespace.RootBinding]
-    ) -> Bool {
+    ) async throws -> Bool {
         guard observations.count == bindings.count else { return false }
         for (binding, observation) in zip(bindings, observations) {
             guard observation.rootID == binding.lookupRoot.id,
@@ -17941,7 +18128,7 @@ actor WorkspaceFileContextStore {
                   state.lifetimeID == observation.rootLifetimeID,
                   state.service === observation.rootService
             else { return false }
-            let current = exactFileBindingObservation(
+            let current = try await exactFileBindingObservation(
                 binding: binding,
                 relativePath: relativePath,
                 state: state
@@ -18092,7 +18279,7 @@ actor WorkspaceFileContextStore {
            candidates.matches[0].file?.id == file.id,
            !candidates.blocked,
            !candidates.hasUnavailableBinding,
-           exactFileBindingObservationsAreCurrent(
+           try await exactFileBindingObservationsAreCurrent(
                candidates.bindingObservations,
                relativePath: file.standardizedRelativePath,
                bindings: namespace.rootBindings
@@ -18192,7 +18379,15 @@ actor WorkspaceFileContextStore {
             setTerminalOutcome("ambiguous")
             return .ambiguous
         }
-        var materializable: [(rootID: UUID, relativePath: String, lifetimeID: UUID, service: FileSystemService)] = []
+        var materializable: [(
+            rootID: UUID,
+            relativePath: String,
+            lifetimeID: UUID,
+            service: FileSystemService,
+            eligibility: CatalogRegularFileEligibility,
+            policyIdentity: WorkspaceRootCatalogPolicyIdentity,
+            ignoreRulesRevision: UInt64
+        )] = []
         var foundBlockedCandidate = false
         var foundUnavailableCandidate = false
         for (serialPosition, candidate) in candidates.enumerated() {
@@ -18209,7 +18404,7 @@ actor WorkspaceFileContextStore {
             guard let state = rootStatesByID[candidate.rootID],
                   expectedRootLifetimeIDs?[candidate.rootID].map({ $0 == state.lifetimeID }) ?? true
             else {
-                foundUnavailableCandidate = true
+                foundUnavailableCandidate = expectedRootLifetimeIDs != nil
                 EditFlowPerf.lifecycleEvent(
                     EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
                     correlation: lifecycleCorrelation,
@@ -18223,14 +18418,16 @@ actor WorkspaceFileContextStore {
                 continue
             }
             let expectedLifetimeID = state.lifetimeID
-            let eligibility = await state.service.catalogRegularFileEligibility(relativePath: candidate.relativePath)
+            let evidence = try await state.service.cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
+                relativePath: candidate.relativePath
+            )
+            let eligibility = evidence.eligibility
             try Task.checkCancellation()
             guard let currentState = rootStatesByID[candidate.rootID],
                   currentState.lifetimeID == expectedLifetimeID,
-                  currentState.service === state.service,
-                  file(rootID: candidate.rootID, relativePath: candidate.relativePath) == nil
+                  currentState.service === state.service
             else {
-                foundUnavailableCandidate = true
+                foundUnavailableCandidate = expectedRootLifetimeIDs != nil
                 EditFlowPerf.lifecycleEvent(
                     EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
                     correlation: lifecycleCorrelation,
@@ -18263,7 +18460,15 @@ actor WorkspaceFileContextStore {
             )
             switch eligibility {
             case .eligible, .ineligible(.ignored):
-                materializable.append((candidate.rootID, candidate.relativePath, expectedLifetimeID, state.service))
+                materializable.append((
+                    candidate.rootID,
+                    candidate.relativePath,
+                    expectedLifetimeID,
+                    state.service,
+                    evidence.eligibility,
+                    evidence.policyIdentity,
+                    evidence.ignoreRulesRevision
+                ))
             case .ineligible(.missingOrDirectory):
                 EditFlowPerf.lifecycleEvent(
                     EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
@@ -18275,7 +18480,7 @@ actor WorkspaceFileContextStore {
                         serialPosition: serialPosition
                     )
                 )
-                let missingClassificationIsCurrent = await fenceAndPruneCatalogFileMissingOnDisk(
+                let missingClassificationIsCurrent = try await fenceAndPruneCatalogFileMissingOnDisk(
                     rootID: candidate.rootID,
                     relativePath: candidate.relativePath,
                     publishDelta: true,
@@ -18317,8 +18522,7 @@ actor WorkspaceFileContextStore {
         guard let candidate = materializable.first,
               let state = rootStatesByID[candidate.rootID],
               state.lifetimeID == candidate.lifetimeID,
-              state.service === candidate.service,
-              file(rootID: candidate.rootID, relativePath: candidate.relativePath) == nil
+              state.service === candidate.service
         else {
             let unavailable = foundUnavailableCandidate || !materializable.isEmpty
             setTerminalOutcome(unavailable ? "unavailable" : foundBlockedCandidate ? "blocked" : "noCandidate")
@@ -18330,149 +18534,8 @@ actor WorkspaceFileContextStore {
             correlation: lifecycleCorrelation,
             EditFlowPerf.Dimensions(
                 runPurpose: "explicitMaterialization",
-                status: "managedRegistrationBegan",
-                rootToken: state.service.diagnosticRootToken.uuidString
-            )
-        )
-        let registration = await state.service.beginExplicitlyManagedRegularFileRegistration(
-            relativePath: candidate.relativePath
-        )
-        let registeredEligibility = registration.eligibility
-        var pendingRegistrationToken = registration.token
-        #if DEBUG
-            await awaitExactFileSuspensionGateForTesting(
-                point: .explicitManagedRegistration,
-                rootID: candidate.rootID
-            )
-        #endif
-        if Task.isCancelled {
-            if let pendingRegistrationToken {
-                _ = await candidate.service.rollbackExplicitlyManagedRegularFileRegistration(
-                    pendingRegistrationToken
-                )
-            }
-            throw CancellationError()
-        }
-        guard let currentState = rootStatesByID[candidate.rootID],
-              currentState.lifetimeID == candidate.lifetimeID,
-              currentState.service === candidate.service,
-              file(rootID: candidate.rootID, relativePath: candidate.relativePath) == nil
-        else {
-            if let pendingRegistrationToken {
-                _ = await candidate.service.rollbackExplicitlyManagedRegularFileRegistration(
-                    pendingRegistrationToken
-                )
-            }
-            EditFlowPerf.lifecycleEvent(
-                EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
-                correlation: lifecycleCorrelation,
-                EditFlowPerf.Dimensions(
-                    runPurpose: "explicitMaterialization",
-                    status: "managedRegistrationEnded",
-                    outcome: "unavailable"
-                )
-            )
-            setTerminalOutcome("unavailable")
-            return .unavailable
-        }
-        EditFlowPerf.lifecycleEvent(
-            EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
-            correlation: lifecycleCorrelation,
-            EditFlowPerf.Dimensions(
-                runPurpose: "explicitMaterialization",
-                status: "managedRegistrationEnded",
-                outcome: {
-                    switch registeredEligibility {
-                    case .eligible: "eligible"
-                    case .ineligible(.ignored): "ignored"
-                    case .ineligible(.missingOrDirectory): "missingOrDirectory"
-                    case .ineligible: "ineligible"
-                    }
-                }(),
-                rootToken: currentState.service.diagnosticRootToken.uuidString
-            )
-        )
-        let managedOnly: Bool
-        switch registeredEligibility {
-        case .eligible:
-            managedOnly = false
-        case .ineligible(.ignored):
-            managedOnly = true
-        case .ineligible(.missingOrDirectory):
-            EditFlowPerf.lifecycleEvent(
-                EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
-                correlation: lifecycleCorrelation,
-                EditFlowPerf.Dimensions(
-                    runPurpose: "explicitMaterialization",
-                    status: "missingFilePruneBegan",
-                    rootToken: currentState.service.diagnosticRootToken.uuidString
-                )
-            )
-            let missingClassificationIsCurrent = await fenceAndPruneCatalogFileMissingOnDisk(
-                rootID: candidate.rootID,
-                relativePath: candidate.relativePath,
-                publishDelta: true,
-                expectedLifetimeID: candidate.lifetimeID,
-                requireCatalogFileAbsent: true
-            )
-            if Task.isCancelled {
-                if let pendingRegistrationToken {
-                    _ = await candidate.service.rollbackExplicitlyManagedRegularFileRegistration(
-                        pendingRegistrationToken
-                    )
-                }
-                throw CancellationError()
-            }
-            let stateAfterPrune: RootState? = rootStatesByID[candidate.rootID].flatMap { state in
-                guard missingClassificationIsCurrent,
-                      state.lifetimeID == candidate.lifetimeID,
-                      state.service === candidate.service,
-                      file(rootID: candidate.rootID, relativePath: candidate.relativePath) == nil
-                else { return nil }
-                return state
-            }
-            EditFlowPerf.lifecycleEvent(
-                EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
-                correlation: lifecycleCorrelation,
-                EditFlowPerf.Dimensions(
-                    runPurpose: "explicitMaterialization",
-                    status: "missingFilePruneEnded",
-                    outcome: stateAfterPrune == nil ? "unavailable" : "completed",
-                    rootToken: stateAfterPrune?.service.diagnosticRootToken.uuidString
-                )
-            )
-            guard stateAfterPrune != nil else {
-                if let pendingRegistrationToken {
-                    _ = await candidate.service.rollbackExplicitlyManagedRegularFileRegistration(
-                        pendingRegistrationToken
-                    )
-                }
-                setTerminalOutcome("unavailable")
-                return .unavailable
-            }
-            if let pendingRegistrationToken {
-                _ = await candidate.service.rollbackExplicitlyManagedRegularFileRegistration(
-                    pendingRegistrationToken
-                )
-            }
-            setTerminalOutcome("noCandidate")
-            return .noCandidate
-        case .ineligible:
-            if let pendingRegistrationToken {
-                _ = await candidate.service.rollbackExplicitlyManagedRegularFileRegistration(
-                    pendingRegistrationToken
-                )
-            }
-            setTerminalOutcome("blocked")
-            return .blocked
-        }
-        EditFlowPerf.lifecycleEvent(
-            EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
-            correlation: lifecycleCorrelation,
-            EditFlowPerf.Dimensions(
-                runPurpose: "explicitMaterialization",
                 status: "codemapRootFenceBegan",
-                rootToken: currentState.service.diagnosticRootToken.uuidString
+                rootToken: state.service.diagnosticRootToken.uuidString
             )
         )
         let codemapFence = await beginCodemapRootMutationFence(
@@ -18491,30 +18554,20 @@ actor WorkspaceFileContextStore {
         )
         if Task.isCancelled {
             finishCodemapRootMutationFence(codemapFence, didCommitMutation: false)
-            if let pendingRegistrationToken {
-                _ = await candidate.service.rollbackExplicitlyManagedRegularFileRegistration(
-                    pendingRegistrationToken
-                )
-            }
             throw CancellationError()
         }
         guard let codemapFence,
               codemapFence.rootEpoch.rootLifetimeID == candidate.lifetimeID,
               let fencedState = rootStatesByID[candidate.rootID],
               fencedState.lifetimeID == candidate.lifetimeID,
-              fencedState.service === candidate.service,
-              file(rootID: candidate.rootID, relativePath: candidate.relativePath) == nil
+              fencedState.service === candidate.service
         else {
             finishCodemapRootMutationFence(codemapFence, didCommitMutation: false)
-            if let pendingRegistrationToken {
-                _ = await candidate.service.rollbackExplicitlyManagedRegularFileRegistration(
-                    pendingRegistrationToken
-                )
-            }
             setTerminalOutcome("unavailable")
             return .unavailable
         }
         var didCommitCatalogMutation = false
+        var pendingRegistrationToken: FileSystemExplicitlyManagedRegularFileRegistrationToken?
         defer {
             finishCodemapRootMutationFence(
                 codemapFence,
@@ -18523,6 +18576,96 @@ actor WorkspaceFileContextStore {
         }
         do {
             try Task.checkCancellation()
+            #if DEBUG
+                if let handler = explicitMaterializationDidAcquireCodemapFenceHandler {
+                    await handler(state.service)
+                }
+            #endif
+            try Task.checkCancellation()
+            guard let currentState = rootStatesByID[candidate.rootID],
+                  currentState.lifetimeID == candidate.lifetimeID,
+                  currentState.service === candidate.service
+            else {
+                setTerminalOutcome("noCandidate")
+                return .noCandidate
+            }
+            EditFlowPerf.lifecycleEvent(
+                EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
+                correlation: lifecycleCorrelation,
+                EditFlowPerf.Dimensions(
+                    runPurpose: "explicitMaterialization",
+                    status: "managedRegistrationBegan",
+                    rootToken: currentState.service.diagnosticRootToken.uuidString
+                )
+            )
+            let registration: FileSystemExplicitlyManagedRegularFileRegistration
+            if await currentState.service.currentWorkspaceRootCatalogPolicyIdentity() != candidate.policyIdentity {
+                let refreshed = try await currentState.service.cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
+                    relativePath: candidate.relativePath
+                )
+                registration = try await currentState.service.beginExplicitlyManagedRegularFileRegistration(
+                    relativePath: candidate.relativePath,
+                    validatedEligibility: refreshed.eligibility,
+                    policyIdentity: refreshed.policyIdentity,
+                    ignoreRulesRevision: refreshed.ignoreRulesRevision
+                )
+            } else {
+                registration = try await currentState.service.beginExplicitlyManagedRegularFileRegistration(
+                    relativePath: candidate.relativePath,
+                    validatedEligibility: candidate.eligibility,
+                    policyIdentity: candidate.policyIdentity,
+                    ignoreRulesRevision: candidate.ignoreRulesRevision
+                )
+            }
+            pendingRegistrationToken = registration.token
+            #if DEBUG
+                await awaitExactFileSuspensionGateForTesting(
+                    point: .explicitManagedRegistration,
+                    rootID: candidate.rootID
+                )
+            #endif
+            try Task.checkCancellation()
+            guard let registeredState = rootStatesByID[candidate.rootID],
+                  registeredState.lifetimeID == candidate.lifetimeID,
+                  registeredState.service === candidate.service,
+                  file(rootID: candidate.rootID, relativePath: candidate.relativePath) == nil
+            else {
+                if let registrationToken = pendingRegistrationToken {
+                    _ = await candidate.service.rollbackExplicitlyManagedRegularFileRegistration(
+                        registrationToken
+                    )
+                    pendingRegistrationToken = nil
+                }
+                setTerminalOutcome("noCandidate")
+                return .noCandidate
+            }
+            EditFlowPerf.lifecycleEvent(
+                EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
+                correlation: lifecycleCorrelation,
+                EditFlowPerf.Dimensions(
+                    runPurpose: "explicitMaterialization",
+                    status: "managedRegistrationEnded",
+                    outcome: {
+                        switch registration.eligibility {
+                        case .eligible: "eligible"
+                        case .ineligible(.ignored): "ignored"
+                        case .ineligible(.missingOrDirectory): "missingOrDirectory"
+                        case .ineligible: "ineligible"
+                        }
+                    }(),
+                    rootToken: registeredState.service.diagnosticRootToken.uuidString
+                )
+            )
+            let managedOnly: Bool
+            switch registration.eligibility {
+            case .eligible:
+                managedOnly = false
+            case .ineligible(.ignored):
+                managedOnly = true
+            case .ineligible:
+                setTerminalOutcome("blocked")
+                return .blocked
+            }
             let materialized = try materializeCatalogRegularFile(
                 rootID: candidate.rootID,
                 relativePath: candidate.relativePath,
@@ -18961,6 +19104,9 @@ actor WorkspaceFileContextStore {
     }
 
     private func regularFileAppearsPresentOnDisk(root: WorkspaceRootRecord, relativePath: String) -> Bool {
+        #if DEBUG
+            exactFileDiskPathProbeHandler?()
+        #endif
         let fullPath = StandardizedPath.join(standardizedRoot: root.standardizedFullPath, standardizedRelativePath: StandardizedPath.relative(relativePath))
         var isDirectory = ObjCBool(false)
         guard FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDirectory), !isDirectory.boolValue else { return false }
@@ -18972,6 +19118,9 @@ actor WorkspaceFileContextStore {
     }
 
     private func directoryAppearsPresentOnDisk(root: WorkspaceRootRecord, relativePath: String) -> Bool {
+        #if DEBUG
+            exactFileDiskPathProbeHandler?()
+        #endif
         let fullPath = StandardizedPath.join(standardizedRoot: root.standardizedFullPath, standardizedRelativePath: StandardizedPath.relative(relativePath))
         var isDirectory = ObjCBool(false)
         guard FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDirectory), isDirectory.boolValue else { return false }
@@ -18991,7 +19140,7 @@ actor WorkspaceFileContextStore {
         expectedLifetimeID: UUID? = nil,
         expectedFileID: UUID? = nil,
         requireCatalogFileAbsent: Bool = false
-    ) async -> Bool {
+    ) async throws -> Bool {
         let path = StandardizedPath.relative(relativePath)
         guard let initialState = rootStatesByID[rootID] else { return false }
         let capturedLifetimeID = expectedLifetimeID ?? initialState.lifetimeID
@@ -19032,17 +19181,19 @@ actor WorkspaceFileContextStore {
                 currentFile?.standardizedFullPath == capturedFile?.standardizedFullPath
         }
 
+        try Task.checkCancellation()
         if let token, token.rootEpoch.rootLifetimeID != capturedLifetimeID { return false }
-        guard !Task.isCancelled,
-              let currentState = rootStatesByID[rootID],
+        guard let currentState = rootStatesByID[rootID],
               currentState.lifetimeID == capturedLifetimeID,
               currentState.service === initialState.service,
               catalogIdentityIsCurrent()
         else { return false }
 
-        let fileExists = await initialState.service.regularFileExistsOnDisk(relativePath: path)
-        guard !Task.isCancelled,
-              !fileExists,
+        let fileExists = try await initialState.service.cancellationResponsiveRegularFileExistsOnDisk(
+            relativePath: path
+        )
+        try Task.checkCancellation()
+        guard !fileExists,
               let finalState = rootStatesByID[rootID],
               finalState.lifetimeID == capturedLifetimeID,
               finalState.service === initialState.service,
@@ -20885,7 +21036,7 @@ actor WorkspaceFileContextStore {
               current.id == record.id
         else { return }
         guard let state = rootStatesByID[current.rootID] else { return }
-        _ = await fenceAndPruneCatalogFileMissingOnDisk(
+        _ = try? await fenceAndPruneCatalogFileMissingOnDisk(
             rootID: current.rootID,
             relativePath: current.standardizedRelativePath,
             publishDelta: true,

@@ -146,6 +146,9 @@ extension FileSystemService {
         let rootPrefix = standardizedRootPath.hasSuffix("/") ? standardizedRootPath : standardizedRootPath + "/"
         guard standardizedAbsolutePath.hasPrefix(rootPrefix) else { return .ineligible(.outsideRoot) }
 
+        #if DEBUG
+            try? contentPhysicalReadHandler?()
+        #endif
         var isDirectory = ObjCBool(false)
         guard fm.fileExists(atPath: standardizedAbsolutePath, isDirectory: &isDirectory), !isDirectory.boolValue else {
             return .ineligible(.missingOrDirectory)
@@ -218,6 +221,16 @@ extension FileSystemService {
         relativePath rawRelativePath: String
     ) async -> FileSystemExplicitlyManagedRegularFileRegistration {
         let eligibility = await catalogRegularFileEligibility(relativePath: rawRelativePath)
+        return beginExplicitlyManagedRegularFileRegistration(
+            relativePath: rawRelativePath,
+            validatedEligibility: eligibility
+        )
+    }
+
+    private func beginExplicitlyManagedRegularFileRegistration(
+        relativePath rawRelativePath: String,
+        validatedEligibility eligibility: CatalogRegularFileEligibility
+    ) -> FileSystemExplicitlyManagedRegularFileRegistration {
         let relativePath = (rawRelativePath as NSString).standardizingPath
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         switch eligibility {
@@ -274,6 +287,127 @@ extension FileSystemService {
                 eligibility: eligibility,
                 token: nil
             )
+        }
+    }
+
+    func registerExplicitlyManagedRegularFile(
+        relativePath rawRelativePath: String,
+        validatedEligibility eligibility: CatalogRegularFileEligibility
+    ) -> CatalogRegularFileEligibility {
+        let registration = beginExplicitlyManagedRegularFileRegistration(
+            relativePath: rawRelativePath,
+            validatedEligibility: eligibility
+        )
+        if let token = registration.token {
+            _ = commitExplicitlyManagedRegularFileRegistration(token)
+        }
+        return registration.eligibility
+    }
+
+    func beginExplicitlyManagedRegularFileRegistration(
+        relativePath rawRelativePath: String,
+        validatedEligibility eligibility: CatalogRegularFileEligibility,
+        policyIdentity validatedPolicyIdentity: WorkspaceRootCatalogPolicyIdentity,
+        ignoreRulesRevision validatedIgnoreRulesRevision: UInt64
+    ) async throws -> FileSystemExplicitlyManagedRegularFileRegistration {
+        if catalogPolicyIdentity == validatedPolicyIdentity,
+           ignoreRulesRevision == validatedIgnoreRulesRevision
+        {
+            return beginExplicitlyManagedRegularFileRegistration(
+                relativePath: rawRelativePath,
+                validatedEligibility: eligibility
+            )
+        }
+
+        if catalogPolicyIdentity != validatedPolicyIdentity {
+            let refreshed = try await cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
+                relativePath: rawRelativePath
+            )
+            return beginExplicitlyManagedRegularFileRegistration(
+                relativePath: rawRelativePath,
+                validatedEligibility: refreshed.eligibility
+            )
+        }
+
+        switch eligibility {
+        case .eligible, .ineligible(.ignored):
+            let relativePath = (rawRelativePath as NSString).standardizingPath
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            while true {
+                try Task.checkCancellation()
+                let startingPolicyIdentity = catalogPolicyIdentity
+                let startingIgnoreRulesRevision = ignoreRulesRevision
+                let isIgnored = if enableHierarchicalIgnores {
+                    await isIgnoredHierarchical(relativePath: relativePath, isDirectory: false)
+                        || isIgnoredPrefixCheck(relativePath: relativePath)
+                } else {
+                    isIgnoredPrefixCheck(relativePath: relativePath)
+                }
+                try Task.checkCancellation()
+                guard startingPolicyIdentity == catalogPolicyIdentity,
+                      startingIgnoreRulesRevision == ignoreRulesRevision
+                else { continue }
+                return beginExplicitlyManagedRegularFileRegistration(
+                    relativePath: relativePath,
+                    validatedEligibility: isIgnored ? .ineligible(.ignored) : .eligible
+                )
+            }
+        case .ineligible:
+            return FileSystemExplicitlyManagedRegularFileRegistration(
+                eligibility: eligibility,
+                token: nil
+            )
+        }
+    }
+
+    func registerExplicitlyManagedRegularFile(
+        relativePath rawRelativePath: String,
+        validatedEligibility eligibility: CatalogRegularFileEligibility,
+        policyIdentity validatedPolicyIdentity: WorkspaceRootCatalogPolicyIdentity,
+        ignoreRulesRevision validatedIgnoreRulesRevision: UInt64
+    ) async throws -> CatalogRegularFileEligibility {
+        if catalogPolicyIdentity == validatedPolicyIdentity,
+           ignoreRulesRevision == validatedIgnoreRulesRevision
+        {
+            return registerExplicitlyManagedRegularFile(
+                relativePath: rawRelativePath,
+                validatedEligibility: eligibility
+            )
+        }
+        if catalogPolicyIdentity != validatedPolicyIdentity {
+            let refreshed = try await cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
+                relativePath: rawRelativePath
+            )
+            return registerExplicitlyManagedRegularFile(
+                relativePath: rawRelativePath,
+                validatedEligibility: refreshed.eligibility
+            )
+        }
+        switch eligibility {
+        case .eligible, .ineligible(.ignored):
+            let relativePath = (rawRelativePath as NSString).standardizingPath
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            while true {
+                try Task.checkCancellation()
+                let startingPolicyIdentity = catalogPolicyIdentity
+                let startingIgnoreRulesRevision = ignoreRulesRevision
+                let isIgnored = if enableHierarchicalIgnores {
+                    await isIgnoredHierarchical(relativePath: relativePath, isDirectory: false)
+                        || isIgnoredPrefixCheck(relativePath: relativePath)
+                } else {
+                    isIgnoredPrefixCheck(relativePath: relativePath)
+                }
+                try Task.checkCancellation()
+                guard startingPolicyIdentity == catalogPolicyIdentity,
+                      startingIgnoreRulesRevision == ignoreRulesRevision
+                else { continue }
+                return registerExplicitlyManagedRegularFile(
+                    relativePath: relativePath,
+                    validatedEligibility: isIgnored ? .ineligible(.ignored) : .eligible
+                )
+            }
+        case .ineligible:
+            return eligibility
         }
     }
 
