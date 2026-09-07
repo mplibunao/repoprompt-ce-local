@@ -269,7 +269,8 @@ final class MCPReadFileAutoSelectionCoordinator {
         case authoritativeFallback(ReadFileAutoSelectionCoverageCertificateMissReason)
     }
 
-    struct CanonicalBatch: Equatable {
+    struct CanonicalBatch {
+        let authority: MCPServerViewModel.FrozenFileToolAuthority
         private(set) var fullPaths: [String] = []
         private(set) var sliceEntries: [WorkspaceSelectionSliceInput] = []
         private(set) var coverageIdentity: CoverageIdentity?
@@ -281,7 +282,12 @@ final class MCPReadFileAutoSelectionCoordinator {
         private var originalSlicePathByKey: [String: String] = [:]
         private var coveragePermitted: Bool
 
-        init(intent: Intent, coverageIdentity: CoverageIdentity? = nil) {
+        init(
+            intent: Intent,
+            authority: MCPServerViewModel.FrozenFileToolAuthority,
+            coverageIdentity: CoverageIdentity? = nil
+        ) {
+            self.authority = authority
             self.coverageIdentity = nil
             coveragePermitted = coverageIdentity != nil
             merge(intent, coverageIdentity: coverageIdentity)
@@ -532,6 +538,7 @@ final class MCPReadFileAutoSelectionCoordinator {
     @discardableResult
     func enqueue(
         intent: Intent,
+        authority: MCPServerViewModel.FrozenFileToolAuthority,
         coverageIdentity: CoverageIdentity? = nil,
         for key: ContextKey,
         lifecycleCorrelation: EditFlowPerf.LifecycleCorrelation? = EditFlowPerf.currentLifecycleCorrelation
@@ -554,9 +561,15 @@ final class MCPReadFileAutoSelectionCoordinator {
             return false
         }
 
+        var lane = canonicalLanes[key] ?? CanonicalLane()
+        if let pending = lane.pending,
+           !pending.batch.authority.hasSameRoutingAuthority(as: authority)
+        {
+            outcome = "invalidated"
+            return false
+        }
         nextSequence &+= 1
         let sequence = nextSequence
-        var lane = canonicalLanes[key] ?? CanonicalLane()
         let previousAcceptedSequence = lane.acceptedSequence
         lane.acceptedSequence = sequence
         if var pending = lane.pending {
@@ -573,7 +586,11 @@ final class MCPReadFileAutoSelectionCoordinator {
             )
         } else {
             lane.pending = QueuedCanonicalBatch(
-                batch: CanonicalBatch(intent: intent, coverageIdentity: coverageIdentity),
+                batch: CanonicalBatch(
+                    intent: intent,
+                    authority: authority,
+                    coverageIdentity: coverageIdentity
+                ),
                 lowestSequence: sequence,
                 highestSequence: sequence,
                 acceptedIntentCount: 1,

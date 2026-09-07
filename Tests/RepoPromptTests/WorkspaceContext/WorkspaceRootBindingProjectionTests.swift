@@ -459,6 +459,58 @@ final class WorkspaceRootBindingProjectionTests: XCTestCase {
         )
     }
 
+    func testResolverRebuildsCachedProjectionWhenVisibleRootSetChanges() async throws {
+        let logicalRootURL = try makeTemporaryRoot(name: "ProjectionCacheLogical")
+        let addedRootURL = try makeTemporaryRoot(name: "ProjectionCacheAdded")
+        let physicalRootURL = try makeTemporaryRoot(name: "ProjectionCachePhysical")
+        let store = WorkspaceFileContextStore()
+        let loadedLogicalRoot = try await store.loadRoot(path: logicalRootURL.path)
+        let logicalRoot = WorkspaceRootRef(
+            id: loadedLogicalRoot.id,
+            name: loadedLogicalRoot.name,
+            fullPath: loadedLogicalRoot.standardizedFullPath
+        )
+        let physicalRoot = WorkspaceRootRef(
+            id: UUID(),
+            name: logicalRoot.name,
+            fullPath: physicalRootURL.path
+        )
+        let sessionID = UUID()
+        let source = AgentWorkspaceLookupContextSource(
+            activeAgentSessionID: sessionID,
+            worktreeBindings: [Self.binding(
+                logicalRoot: logicalRoot,
+                physicalRoot: physicalRoot,
+                worktreeID: "cache-visible-roots"
+            )]
+        )
+
+        let initial = try await AgentWorkspaceLookupContextResolver.requiredLookupContext(
+            source: source,
+            visibleRoots: [logicalRoot],
+            store: store
+        )
+        XCTAssertEqual(initial.bindingProjection?.visibleLogicalRootRefs, [logicalRoot])
+
+        let loadedAddedRoot = try await store.loadRoot(path: addedRootURL.path)
+        let addedRoot = WorkspaceRootRef(
+            id: loadedAddedRoot.id,
+            name: loadedAddedRoot.name,
+            fullPath: loadedAddedRoot.standardizedFullPath
+        )
+        let rebuilt = try await AgentWorkspaceLookupContextResolver.requiredLookupContext(
+            source: source,
+            visibleRoots: [logicalRoot, addedRoot],
+            store: store
+        )
+
+        XCTAssertEqual(
+            try Set(XCTUnwrap(rebuilt.bindingProjection).visibleLogicalRootRefs),
+            Set([logicalRoot, addedRoot])
+        )
+        XCTAssertNotEqual(initial, rebuilt)
+    }
+
     func testMaterializerFailsClosedWhenPhysicalRootCannotBeLoaded() async throws {
         let logicalRootURL = try makeTemporaryRoot(name: "ProjectionLogical")
         try write("let origin = \"base\"\n", to: logicalRootURL.appendingPathComponent("Sources/App.swift"))
@@ -488,27 +540,45 @@ final class WorkspaceRootBindingProjectionTests: XCTestCase {
         let visibleLookup = await store.lookupPath("Sources/App.swift", profile: .uiAssisted, rootScope: .visibleWorkspace)
         let ownership = await store.sessionWorktreeOwnershipDebugSnapshotForTesting()
 
-        let failClosedProjection = try XCTUnwrap(materializedProjection)
-        let scopedLookup = await store.lookupPath(
-            "Sources/App.swift",
-            profile: .uiAssisted,
-            rootScope: failClosedProjection.lookupRootScope
-        )
-        let scopeAvailability = await store.rootScopeAvailability(failClosedProjection.lookupRootScope)
-        let catalogAccess = await store.searchCatalogAccess(rootScope: failClosedProjection.lookupRootScope)
-        XCTAssertEqual(failClosedProjection.physicalRootPaths, Set([unloadablePhysicalRoot.standardizedFileURL.path]))
-        XCTAssertFalse(failClosedProjection.isFullyMaterialized)
-        XCTAssertEqual(
-            failClosedProjection.lookupRootScope,
-            .validatedSessionBoundWorkspace(canonicalRoots: [], physicalRoots: [])
-        )
-        XCTAssertEqual(scopeAvailability, .sessionWorktreeUnavailable(missingPhysicalRootPaths: []))
-        XCTAssertEqual(
-            catalogAccess,
-            .unavailable(.sessionWorktreeUnavailable(missingPhysicalRootPaths: []))
-        )
+        XCTAssertNil(materializedProjection)
         XCTAssertNotNil(visibleLookup)
-        XCTAssertNil(scopedLookup)
+        XCTAssertEqual(ownership.installedOwnerCount, 0)
+        XCTAssertEqual(ownership.provisionalOwnerCount, 0)
+        XCTAssertEqual(ownership.rootClaimCount, 0)
+    }
+
+    func testMaterializerRejectsMissingLogicalRootWithoutSynthesizingIdentity() async throws {
+        let loadedRootURL = try makeTemporaryRoot(name: "ProjectionLoadedLogical")
+        let missingRootURL = try makeTemporaryRoot(name: "ProjectionMissingLogical")
+        let physicalRootURL = try makeTemporaryRoot(name: "ProjectionMissingPhysical")
+        let store = WorkspaceFileContextStore()
+        let loadedRoot = try await store.loadRoot(path: loadedRootURL.path)
+        let missingLogicalRoot = WorkspaceRootRef(
+            id: UUID(),
+            name: missingRootURL.lastPathComponent,
+            fullPath: missingRootURL.path
+        )
+        let physicalRoot = WorkspaceRootRef(
+            id: UUID(),
+            name: physicalRootURL.lastPathComponent,
+            fullPath: physicalRootURL.path
+        )
+        let sessionID = UUID()
+
+        let projection = await WorkspaceRootBindingProjectionMaterializer(store: store).materialize(
+            sessionID: sessionID,
+            bindings: [Self.binding(
+                logicalRoot: missingLogicalRoot,
+                physicalRoot: physicalRoot,
+                worktreeID: "missing-logical"
+            )]
+        )
+        let roots = await store.roots()
+        let ownership = await store.sessionWorktreeOwnershipDebugSnapshotForTesting()
+
+        XCTAssertNil(projection)
+        XCTAssertEqual(roots.map(\.id), [loadedRoot.id])
+        XCTAssertFalse(roots.contains { $0.id == missingLogicalRoot.id || $0.id == physicalRoot.id })
         XCTAssertEqual(ownership.installedOwnerCount, 0)
         XCTAssertEqual(ownership.provisionalOwnerCount, 0)
         XCTAssertEqual(ownership.rootClaimCount, 0)

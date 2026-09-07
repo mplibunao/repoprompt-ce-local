@@ -183,6 +183,10 @@ struct StoredSelection: Codable, Equatable, Hashable {
         self.codemapAutoEnabled = codemapAutoEnabled
     }
 
+    var isEmptyForSelectedFileTree: Bool {
+        selectedPaths.isEmpty && manualCodemapPaths.isEmpty && slices.isEmpty
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
