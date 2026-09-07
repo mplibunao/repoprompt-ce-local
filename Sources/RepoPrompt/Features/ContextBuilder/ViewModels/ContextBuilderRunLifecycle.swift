@@ -372,6 +372,18 @@ final class ContextBuilderRunRecord {
     }
 
     func consumeDeferredCancellationAtSafeBoundary() -> ContextBuilderRunCancellationSettlementPolicy? {
+        consumeDeferredCancellation()
+    }
+
+    /// App termination cannot wait indefinitely for a final-context operation that ignored
+    /// cancellation. The caller must synchronously revoke registry publication authority before
+    /// yielding again. Ordinary cancellation remains governed by
+    /// `consumeDeferredCancellationAtSafeBoundary()`.
+    func consumeDeferredCancellationForAppTermination() -> ContextBuilderRunCancellationSettlementPolicy? {
+        consumeDeferredCancellation()
+    }
+
+    private func consumeDeferredCancellation() -> ContextBuilderRunCancellationSettlementPolicy? {
         guard terminalOutcome == nil,
               cancellationState == .deferredUntilFinalContextCommitCompletes,
               let deferredCancellationSettlementPolicy

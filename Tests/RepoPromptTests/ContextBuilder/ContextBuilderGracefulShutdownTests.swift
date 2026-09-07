@@ -152,6 +152,58 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
         await pendingTearDown.value
     }
 
+    func testManagerStartsAgentModeShutdownWhileFinalContextCancellationIsDeferred() async {
+        let manager = WindowStatesManager.shared
+        let window = makeWindow()
+        defer {
+            if manager.allWindows.contains(where: { $0 === window }) {
+                manager.unregisterWindowState(window)
+            }
+            manager.setTerminatingForTesting(false)
+        }
+
+        let contextBuilderViewModel = window.contextBuilderAgentViewModel
+        contextBuilderViewModel.setAppTerminationFinalContextGraceForTesting(5_000_000_000)
+        let provider = GatedHeadlessAgentProvider()
+        let finalContextGate = ContextBuilderTestGate()
+        let record = makeRecord()
+        XCTAssertTrue(record.installProvider(provider))
+        let executionTask = Task { @MainActor [weak contextBuilderViewModel, record] in
+            await finalContextGate.wait()
+            _ = contextBuilderViewModel?.finishDeferredCancellationAtSafeBoundaryForTesting(record)
+        }
+        record.executionTask = executionTask
+        XCTAssertTrue(contextBuilderViewModel.registerRunRecordForTesting(record, makeCurrent: true))
+        XCTAssertTrue(record.claimFinalContextCommit())
+
+        let controller = ShutdownRecordingNativeController()
+        let agentSession = AgentTabSession(tabID: UUID())
+        agentSession.claudeController = controller
+        window.agentModeViewModel.test_installLiveSession(agentSession)
+
+        manager.registerWindowState(window)
+        manager.signalTermination()
+        let shutdown = Task { await manager.shutdownAllAgentSessions() }
+
+        let agentShutdownStarted = await waitUntil {
+            await controller.shutdownCallCount() == 1
+        }
+        XCTAssertTrue(agentShutdownStarted)
+        XCTAssertEqual(record.cancellationState, .deferredUntilFinalContextCommitCompletes)
+        let disposeCallCountBeforeSafeBoundary = await provider.disposeCallCount()
+        XCTAssertEqual(disposeCallCountBeforeSafeBoundary, 0)
+
+        await finalContextGate.open()
+        await executionTask.value
+        await provider.waitUntilDisposeStarted()
+        await provider.allowDispose()
+        await shutdown.value
+
+        let shutdownCallCount = await controller.shutdownCallCount()
+        XCTAssertEqual(shutdownCallCount, 1)
+        XCTAssertNotNil(record.teardownFinishedAt)
+    }
+
     func testTerminationSignalRetainsMCPRunOwnerUntilManagerShutdownJoinsProvider() async {
         let manager = WindowStatesManager.shared
         defer { manager.setTerminatingForTesting(false) }
@@ -248,74 +300,103 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
         XCTAssertEqual(disposeCallCount, 1)
     }
 
-    func testClaimedFinalContextReachesSafeBoundaryBeforeShutdownDisposal() async {
+    func testOrdinaryCancellationWaitsForClaimedFinalContextSafeBoundary() async {
         let window = makeWindow()
         let viewModel = window.contextBuilderAgentViewModel
         let provider = GatedHeadlessAgentProvider()
         let safeBoundaryGate = ContextBuilderTestGate()
         let record = makeRecord()
         XCTAssertTrue(record.installProvider(provider))
-        record.executionTask = Task { @MainActor [weak viewModel, record] in
+        let executionTask = Task { @MainActor [weak viewModel, record] in
             await safeBoundaryGate.wait()
             _ = viewModel?.finishDeferredCancellationAtSafeBoundaryForTesting(record)
         }
+        record.executionTask = executionTask
         XCTAssertTrue(viewModel.registerRunRecordForTesting(record, makeCurrent: true))
         XCTAssertTrue(record.claimFinalContextCommit())
 
-        let shutdown = Task { await viewModel.shutdownForAppTermination() }
-        while record.cancellationState == .none {
-            await Task.yield()
-        }
+        viewModel.cancelRunForTesting(record)
 
         XCTAssertEqual(record.cancellationState, .deferredUntilFinalContextCommitCompletes)
         let disposeCallCountBeforeSafeBoundary = await provider.disposeCallCount()
         XCTAssertEqual(disposeCallCountBeforeSafeBoundary, 0)
         await safeBoundaryGate.open()
+        await executionTask.value
         await provider.waitUntilDisposeStarted()
         await provider.allowDispose()
-        await shutdown.value
+        await record.awaitTeardownSettlement()
 
         XCTAssertEqual(record.terminalOutcome, .cancelled)
         XCTAssertNotNil(record.teardownFinishedAt)
     }
 
-    func testStaleClaimedFinalContextDefersShutdownUntilSafeBoundary() async {
+    func testOrdinaryCancellationWaitsForStaleClaimedFinalContextSafeBoundary() async {
         let window = makeWindow()
         let viewModel = window.contextBuilderAgentViewModel
         let provider = GatedHeadlessAgentProvider()
         let safeBoundaryGate = ContextBuilderTestGate()
         let record = makeRecord()
         XCTAssertTrue(record.installProvider(provider))
-        record.executionTask = Task { @MainActor [weak viewModel, record] in
+        let executionTask = Task { @MainActor [weak viewModel, record] in
             await safeBoundaryGate.wait()
             _ = viewModel?.finishDeferredCancellationAtSafeBoundaryForTesting(record)
         }
+        record.executionTask = executionTask
         XCTAssertTrue(viewModel.registerRunRecordForTesting(record, makeCurrent: true, releaseActiveSlot: true))
         XCTAssertTrue(record.claimFinalContextCommit())
 
-        let shutdown = Task { await viewModel.shutdownForAppTermination() }
-        while record.cancellationState == .none, await provider.disposeCallCount() == 0 {
-            await Task.yield()
-        }
+        viewModel.cancelRunForTesting(record)
 
         XCTAssertEqual(record.cancellationState, .deferredUntilFinalContextCommitCompletes)
-        guard record.cancellationState == .deferredUntilFinalContextCommitCompletes else {
-            await provider.allowDispose()
-            await safeBoundaryGate.open()
-            await shutdown.value
-            return
-        }
-
         let disposeCallCountBeforeSafeBoundary = await provider.disposeCallCount()
         XCTAssertEqual(disposeCallCountBeforeSafeBoundary, 0)
         await safeBoundaryGate.open()
+        await executionTask.value
         await provider.waitUntilDisposeStarted()
+        await provider.allowDispose()
+        await record.awaitTeardownSettlement()
+
+        let disposeCallCount = await provider.disposeCallCount()
+        XCTAssertEqual(disposeCallCount, 1)
+        XCTAssertEqual(record.terminalOutcome, .cancelled)
+        XCTAssertNotNil(record.teardownFinishedAt)
+    }
+
+    func testAppTerminationForcesClaimedFinalContextAfterGrace() async {
+        let window = makeWindow()
+        let viewModel = window.contextBuilderAgentViewModel
+        viewModel.setAppTerminationFinalContextGraceForTesting(1)
+        let provider = GatedHeadlessAgentProvider()
+        let safeBoundaryGate = ContextBuilderTestGate()
+        let record = makeRecord()
+        XCTAssertTrue(record.installProvider(provider))
+        let executionTask = Task { @MainActor [weak viewModel, record] in
+            await safeBoundaryGate.wait()
+            _ = viewModel?.finishDeferredCancellationAtSafeBoundaryForTesting(record)
+        }
+        record.executionTask = executionTask
+        XCTAssertTrue(viewModel.registerRunRecordForTesting(record, makeCurrent: true))
+        XCTAssertTrue(record.claimFinalContextCommit())
+
+        let shutdown = Task { await viewModel.shutdownForAppTermination() }
+        await provider.waitUntilDisposeStarted()
+
+        XCTAssertEqual(record.cancellationState, .applied)
+        XCTAssertEqual(record.terminalOutcome, .cancelled)
+        XCTAssertFalse(viewModel.acceptsRunEventsForTesting(record))
         await provider.allowDispose()
         await shutdown.value
 
         let disposeCallCount = await provider.disposeCallCount()
         XCTAssertEqual(disposeCallCount, 1)
         XCTAssertNotNil(record.teardownFinishedAt)
+        let registryReleased = await waitUntil {
+            !viewModel.retainsRunRecordForTesting(record)
+        }
+        XCTAssertTrue(registryReleased)
+
+        await safeBoundaryGate.open()
+        await executionTask.value
     }
 
     func testExplicitCancellationAndNormalCompletionResolveBeforeGatedTeardown() async throws {
@@ -397,6 +478,73 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
             modelRaw: AgentModel.defaultModel.rawValue,
             continuation: continuation
         )
+    }
+
+    private func waitUntil(
+        timeoutNanoseconds: UInt64 = 1_000_000_000,
+        condition: @MainActor () async -> Bool
+    ) async -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutNanoseconds
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return await condition()
+    }
+}
+
+private actor ShutdownRecordingNativeController: NativeAgentRuntimeControlling {
+    private var shutdownCalls = 0
+
+    var hasActiveSession: Bool {
+        true
+    }
+
+    var hasTurnInFlight: Bool {
+        false
+    }
+
+    var events: AsyncStream<NativeAgentRuntimeEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func ensureEventsStreamReady() {}
+    func resetEventsStreamForNewRun() {}
+
+    func startOrResume(
+        existingSessionID: String?,
+        model: String?,
+        effortLevel: NativeAgentRuntimeEffortLevel?,
+        systemPromptOverride: String?
+    ) async throws -> NativeAgentRuntimeSessionRef {
+        NativeAgentRuntimeSessionRef(sessionID: existingSessionID)
+    }
+
+    func currentSessionRef() -> NativeAgentRuntimeSessionRef {
+        NativeAgentRuntimeSessionRef(sessionID: "completed-test-session")
+    }
+
+    func applyModelAndEffort(
+        model: String?,
+        effortLevel: NativeAgentRuntimeEffortLevel?
+    ) async throws {}
+
+    func sendUserMessage(_ text: String) async throws -> UUID {
+        UUID()
+    }
+
+    func interruptTurn(reason: String) -> NativeAgentRuntimeInterruptOutcome {
+        .noTurnInFlight
+    }
+
+    func shutdown() {
+        shutdownCalls += 1
+    }
+
+    func respondToPermissionRequest(id: String, decision: AgentApprovalDecision) {}
+
+    func shutdownCallCount() -> Int {
+        shutdownCalls
     }
 }
 

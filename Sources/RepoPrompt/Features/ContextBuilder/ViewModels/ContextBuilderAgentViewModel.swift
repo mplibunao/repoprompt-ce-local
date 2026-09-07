@@ -575,6 +575,18 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         ) {
             scheduleRunTeardown(record, cancelExecution: cancelExecution)
         }
+
+        func setAppTerminationFinalContextGraceForTesting(_ nanoseconds: UInt64) {
+            appTerminationFinalContextGraceNanoseconds = nanoseconds
+        }
+
+        func acceptsRunEventsForTesting(_ record: ContextBuilderRunRecord) -> Bool {
+            acceptsEvents(from: record)
+        }
+
+        func retainsRunRecordForTesting(_ record: ContextBuilderRunRecord) -> Bool {
+            runRegistry.record(runID: record.runID) === record
+        }
     #endif
 
     // MARK: - Published session-scoped proxies
@@ -950,6 +962,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     private var grokBuildModelsSubscriptionTask: Task<Void, Never>?
     private let codexModelPollingService: CodexModelPollingService
     private var hasPreparedForWindowClose = false
+    /// Preserve a brief chance to reach the final-context safe boundary while leaving app
+    /// termination enough time to dispose the provider process and its configuration lease.
+    private var appTerminationFinalContextGraceNanoseconds: UInt64 = 500_000_000
 
     // MARK: - Init / Deinit
 
@@ -1089,6 +1104,15 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 saveHistory: true
             )
         }
+        let forceSettlementTasks = records.compactMap { record -> Task<Void, Never>? in
+            guard record.hasDeferredCancellationPending else { return nil }
+            return Task { @MainActor [weak self, weak record] in
+                guard let self else { return }
+                try? await Task.sleep(nanoseconds: appTerminationFinalContextGraceNanoseconds)
+                guard !Task.isCancelled, let record else { return }
+                forceDeferredCancellationForAppTermination(record)
+            }
+        }
         // Sweeps records that were already terminal with no teardown scheduled; such a record would
         // otherwise never settle and would hang the join below. Records settled by the cancellation
         // pass above are revisited harmlessly because starting teardown is idempotent.
@@ -1098,6 +1122,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         for record in records {
             await record.awaitTeardownSettlement()
         }
+        forceSettlementTasks.forEach { $0.cancel() }
     }
 
     private var agentAvailabilityContext: AgentModelCatalog.AvailabilityContext {
@@ -2253,6 +2278,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         _ record: ContextBuilderRunRecord,
         waiterResolution: ContextBuilderRunWaiterResolution,
         cancelExecution: Bool,
+        joinExecution: Bool = true,
         source: String
     ) {
         record.previewPublicationTask?.cancel()
@@ -2277,7 +2303,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             committedTab: nil
         )
 
-        scheduleRunTeardown(record, cancelExecution: cancelExecution)
+        scheduleRunTeardown(
+            record,
+            cancelExecution: cancelExecution,
+            joinExecution: joinExecution
+        )
 
         switch waiterResolution {
         case .snapshot:
@@ -2289,7 +2319,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     private func scheduleRunTeardown(
         _ record: ContextBuilderRunRecord,
-        cancelExecution: Bool
+        cancelExecution: Bool,
+        joinExecution: Bool = true
     ) {
         guard let payload = record.beginTeardown() else { return }
         if cancelExecution {
@@ -2304,14 +2335,21 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             defer { record.markProviderDisposalFinished() }
             await payload.provider?.dispose()
         }
-        let executionJoinTask = Task { @MainActor [record] in
-            defer { record.markExecutionTaskFinished() }
-            await payload.executionTask?.value
+        let executionJoinTask: Task<Void, Never>? = if joinExecution {
+            Task { @MainActor [record] in
+                defer { record.markExecutionTaskFinished() }
+                await payload.executionTask?.value
+            }
+        } else {
+            nil
+        }
+        if executionJoinTask == nil {
+            record.markExecutionTaskFinished()
         }
 
         Task { @MainActor [weak self, record] in
             await disposalTask.value
-            await executionJoinTask.value
+            await executionJoinTask?.value
             guard let self else { return }
             if runRegistry.removeAfterTeardown(record) {
                 #if DEBUG
@@ -2320,6 +2358,17 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 #endif
             }
         }
+    }
+
+    private func forceDeferredCancellationForAppTermination(_ record: ContextBuilderRunRecord) {
+        guard let policy = record.consumeDeferredCancellationForAppTermination() else { return }
+        retireContextBuilderRunRecordWithoutPublishing(
+            record,
+            waiterResolution: policy.waiterResolution,
+            cancelExecution: true,
+            joinExecution: false,
+            source: "contextBuilder.appTermination.forceSettlement"
+        )
     }
 
     /// If the main prompt area is empty but we have agent output,

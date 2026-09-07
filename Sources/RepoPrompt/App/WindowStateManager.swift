@@ -1086,11 +1086,15 @@ class WindowStatesManager: ObservableObject {
         defer { terminationWindowSnapshot.removeAll() }
         let participatingWindowIdentities = Set(windows.map(ObjectIdentifier.init))
 
-        // The strong snapshot owns every participant until both shutdown paths have joined.
+        // The strong snapshot owns every participant until both independently scheduled shutdown
+        // paths have joined. A cancellation-ignoring Context Builder operation must not prevent
+        // Agent Mode from reaching its provider process owners.
         await withTaskGroup(of: Void.self) { group in
             for window in windows {
                 group.addTask { @MainActor [window] in
                     await window.contextBuilderAgentViewModel.shutdownForAppTermination()
+                }
+                group.addTask { @MainActor [window] in
                     await window.agentModeViewModel.prepareForWindowClose()
                 }
             }
