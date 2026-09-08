@@ -36,6 +36,30 @@ package struct DomainWorkspaceStore {
         ) async {
             await authority.testSetBeforeExternalReconciliation(hook)
         }
+
+        package func testSetBeforeWorkingPersistence(
+            _ hook: (@Sendable (UUID) async -> Void)?
+        ) async {
+            await authority.testSetBeforeWorkingPersistence(hook)
+        }
+
+        package func testSetBeforeSavedPersistence(
+            _ hook: (@Sendable (UUID) async -> Void)?
+        ) async {
+            await authority.testSetBeforeSavedPersistence(hook)
+        }
+
+        package func testSetAfterWorkingPersistence(
+            _ hook: (@Sendable (UUID) async -> Void)?
+        ) async {
+            await authority.testSetAfterWorkingPersistence(hook)
+        }
+
+        package func testSetBeforeAgentAdmissionRecoverySnapshot(
+            _ hook: (@Sendable (UUID) async -> Void)?
+        ) async {
+            await authority.testSetBeforeAgentAdmissionRecoverySnapshot(hook)
+        }
     #endif
 
     /// Registers the app's current in-memory document as an awaited read authority.
@@ -55,6 +79,68 @@ package struct DomainWorkspaceStore {
     /// must not influence mutation admission, recovery CAS baselines, or authority health.
     package func canonicalWorkspaceSnapshot(_ workspaceID: UUID) async -> DomainWorkspaceSnapshot? {
         await authority.canonicalWorkspaceSnapshot(workspaceID)
+    }
+
+    package func pendingAgentAdmissionRecoveryRecords() async -> DomainAgentAdmissionRecoveryDiscoverySnapshot {
+        await authority.pendingAgentAdmissionRecoveryRecords()
+    }
+
+    package func pendingAgentAdmissionRecoveryRecords(
+        workspaceID: UUID
+    ) async -> DomainAgentAdmissionRecoveryDiscoverySnapshot {
+        await authority.pendingAgentAdmissionRecoveryRecords(workspaceID: workspaceID)
+    }
+
+    package func upsertAgentAdmissionRecoveryRecord(
+        _ record: DomainAgentAdmissionRecoveryRecord,
+        workingDocument: DomainWorkspaceDocument? = nil
+    ) async -> Bool {
+        await authority.upsertAgentAdmissionRecoveryRecord(
+            record,
+            workingDocument: workingDocument
+        )
+    }
+
+    package func removeAgentAdmissionRecoveryRecord(
+        workspaceID: UUID,
+        recoveryID: UUID,
+        expectedWorkingRevision: UInt64,
+        expectedContentDigest: String
+    ) async -> Bool {
+        await authority.removeAgentAdmissionRecoveryRecord(
+            workspaceID: workspaceID,
+            recoveryID: recoveryID,
+            expectedWorkingRevision: expectedWorkingRevision,
+            expectedContentDigest: expectedContentDigest
+        )
+    }
+
+    package func transitionAgentAdmissionRecoveryRecord(
+        _ expectedRecord: DomainAgentAdmissionRecoveryRecord,
+        to phase: DomainAgentAdmissionRecoveryPhase,
+        dispatchKind: DomainAgentAdmissionDispatchKind? = nil
+    ) async -> Bool {
+        await authority.transitionAgentAdmissionRecoveryRecord(
+            expectedRecord,
+            to: phase,
+            dispatchKind: dispatchKind
+        )
+    }
+
+    package func tryAcquireAgentAdmissionDispatchLease(
+        workspaceID: UUID,
+        sessionID: UUID
+    ) async throws -> DomainAgentAdmissionDispatchLease? {
+        try await authority.tryAcquireAgentAdmissionDispatchLease(
+            workspaceID: workspaceID,
+            sessionID: sessionID
+        )
+    }
+
+    package func tryAcquireAgentAdmissionWorkspaceLease(
+        workspaceID: UUID
+    ) async throws -> DomainAgentAdmissionDispatchLease? {
+        try await authority.tryAcquireAgentAdmissionWorkspaceLease(workspaceID: workspaceID)
     }
 }
 
@@ -128,6 +214,10 @@ actor DomainWorkspaceContextAuthority {
 
     #if DEBUG
         private var testBeforeExternalReconciliation: (@Sendable (UUID) async -> Void)?
+        private var testBeforeWorkingPersistence: (@Sendable (UUID) async -> Void)?
+        private var testBeforeSavedPersistence: (@Sendable (UUID) async -> Void)?
+        private var testAfterWorkingPersistence: (@Sendable (UUID) async -> Void)?
+        private var testBeforeAgentAdmissionRecoverySnapshot: (@Sendable (UUID) async -> Void)?
     #endif
 
     private enum DirtyExternalRebaseResult {
@@ -143,6 +233,8 @@ actor DomainWorkspaceContextAuthority {
         var contextRevisions: [UUID: DomainRevisionState]
         var contextTombstones: [UUID: UInt64]
         var operations: [DomainRecordedOperation]
+        var agentAdmissionRecoveryRecords: [DomainAgentAdmissionRecoveryRecord]
+        var agentAdmissionRecoveryGeneration: UInt64
         var operationIndex: BoundedDomainOperationIndex
         var health: DomainAuthorityHealth
         var externalDocument: DomainWorkspaceDocument?
@@ -153,6 +245,10 @@ actor DomainWorkspaceContextAuthority {
     private let persistence: DomainPersistenceCoordinator
     private let metrics: DomainRuntimeMetricsSink
     private var records: [UUID: WorkspaceRecord] = [:]
+    private func agentAdmissionRecoveryGeneration(for workspaceID: UUID) -> UInt64 {
+        records[workspaceID]?.agentAdmissionRecoveryGeneration ?? 0
+    }
+
     /// Awaited in-memory registrations used only by read routing. They are not catalog entries and
     /// never persist ephemeral/test workspaces. A later command invalidates the overlay.
     private var readRegistrations: [UUID: DomainWorkspaceSnapshot] = [:]
@@ -206,6 +302,8 @@ actor DomainWorkspaceContextAuthority {
                 contextRevisions: workspace.contextRevisions,
                 contextTombstones: workspace.contextTombstones,
                 operations: workspace.operations,
+                agentAdmissionRecoveryRecords: workspace.agentAdmissionRecoveryRecords,
+                agentAdmissionRecoveryGeneration: workspace.agentAdmissionRecoveryGeneration,
                 operationIndex: BoundedDomainOperationIndex(
                     capacity: Self.maximumWorkspaceOperations,
                     operations: workspace.operations
@@ -251,6 +349,199 @@ actor DomainWorkspaceContextAuthority {
     /// overlay is routing-only and must never leak into recovery health or revision baselines.
     func canonicalWorkspaceSnapshot(_ workspaceID: UUID) -> DomainWorkspaceSnapshot? {
         records[workspaceID].map(makeSnapshot)
+    }
+
+    func pendingAgentAdmissionRecoveryRecords() async -> DomainAgentAdmissionRecoveryDiscoverySnapshot {
+        await bootstrap()
+        let workspaceIDs = records.keys.sorted { $0.uuidString < $1.uuidString }
+        var recoveryRecords: [DomainAgentAdmissionRecoveryRecord] = []
+        var unavailableWorkspaceIDs = Set(unavailableWorkspaces.keys)
+        for workspaceID in workspaceIDs {
+            let discovery = await pendingAgentAdmissionRecoveryRecords(workspaceID: workspaceID)
+            recoveryRecords.append(contentsOf: discovery.records)
+            unavailableWorkspaceIDs.formUnion(discovery.unavailableWorkspaceIDs)
+        }
+        return DomainAgentAdmissionRecoveryDiscoverySnapshot(
+            records: recoveryRecords.sorted { $0.recoveryID.uuidString < $1.recoveryID.uuidString },
+            unavailableWorkspaceIDs: unavailableWorkspaceIDs
+        )
+    }
+
+    func pendingAgentAdmissionRecoveryRecords(
+        workspaceID: UUID
+    ) async -> DomainAgentAdmissionRecoveryDiscoverySnapshot {
+        await bootstrap()
+        guard let record = records[workspaceID] else {
+            return DomainAgentAdmissionRecoveryDiscoverySnapshot(
+                records: [],
+                unavailableWorkspaceIDs: unavailableWorkspaces[workspaceID] == nil ? [] : [workspaceID]
+            )
+        }
+        do {
+            #if DEBUG
+                await testBeforeAgentAdmissionRecoverySnapshot?(workspaceID)
+            #endif
+            let snapshot = try await persistence.agentAdmissionRecoverySnapshot(
+                document: record.document
+            )
+            if var current = records[workspaceID],
+               snapshot.generation >= current.agentAdmissionRecoveryGeneration
+            {
+                current.agentAdmissionRecoveryRecords = snapshot.records
+                current.agentAdmissionRecoveryGeneration = snapshot.generation
+                records[workspaceID] = current
+            }
+            return DomainAgentAdmissionRecoveryDiscoverySnapshot(
+                records: records[workspaceID]?.agentAdmissionRecoveryRecords ?? [],
+                unavailableWorkspaceIDs: []
+            )
+        } catch {
+            return DomainAgentAdmissionRecoveryDiscoverySnapshot(
+                records: [],
+                unavailableWorkspaceIDs: [workspaceID]
+            )
+        }
+    }
+
+    func upsertAgentAdmissionRecoveryRecord(
+        _ recovery: DomainAgentAdmissionRecoveryRecord,
+        workingDocument: DomainWorkspaceDocument?
+    ) async -> Bool {
+        await bootstrap()
+        await acquireCatalogMutation()
+        defer { releaseCatalogMutation() }
+        guard var record = records[recovery.workspaceID], record.health.acceptsMutations else {
+            return false
+        }
+        do {
+            if let workingDocument,
+               workingDocument.contentDigest != record.document.contentDigest
+            {
+                guard workingDocument.workspaceID == recovery.workspaceID,
+                      workingDocument.fileURL.standardizedFileURL
+                      == record.document.fileURL.standardizedFileURL
+                else { return false }
+                let before = record.revisions
+                let nextWorkingRevision = before.workingRevision &+ 1
+                let revisions = DomainRevisionState(
+                    workingRevision: nextWorkingRevision,
+                    savedRevision: before.savedRevision,
+                    dirtyRevision: nextWorkingRevision
+                )
+                let contextUpdate = Self.updatedContextRevisions(
+                    previousDocument: record.document,
+                    nextDocument: workingDocument,
+                    previousRevisions: record.contextRevisions,
+                    workspaceRevision: revisions
+                )
+                #if DEBUG
+                    await testBeforeWorkingPersistence?(workingDocument.workspaceID)
+                #endif
+                let persisted = try await persistence.persistWorking(
+                    document: workingDocument,
+                    expectedRevision: before.workingRevision,
+                    newRevision: revisions,
+                    contextRevisions: contextUpdate.revisions,
+                    contextTombstones: record.contextTombstones.merging(
+                        contextUpdate.tombstones
+                    ) { _, new in new },
+                    operations: record.operations,
+                    agentAdmissionRecoveryRecord: recovery,
+                    requiresMatchingSavedDigest: false,
+                    now: Date()
+                )
+                #if DEBUG
+                    await testAfterWorkingPersistence?(workingDocument.workspaceID)
+                #endif
+                catalogRevision = max(catalogRevision, persisted.catalogRevision)
+                record.document = workingDocument
+                record.revisions = persisted.journal.revisions
+                record.contextRevisions = persisted.journal.contextRevisions
+                record.contextTombstones = persisted.journal.contextTombstones
+                record.agentAdmissionRecoveryRecords = persisted.journal.agentAdmissionRecoveryRecords ?? []
+                record.agentAdmissionRecoveryGeneration = persisted.journal.agentAdmissionRecoveryGeneration ?? 0
+                records[recovery.workspaceID] = record
+                readRegistrations.removeValue(forKey: recovery.workspaceID)
+                return true
+            }
+            let recoverySnapshot = try await persistence.upsertAgentAdmissionRecoveryRecord(
+                document: record.document,
+                record: recovery
+            )
+            record.agentAdmissionRecoveryRecords = recoverySnapshot.records
+            record.agentAdmissionRecoveryGeneration = recoverySnapshot.generation
+            records[recovery.workspaceID] = record
+            return true
+        } catch { return false }
+    }
+
+    func removeAgentAdmissionRecoveryRecord(
+        workspaceID: UUID,
+        recoveryID: UUID,
+        expectedWorkingRevision: UInt64,
+        expectedContentDigest: String
+    ) async -> Bool {
+        await bootstrap()
+        await acquireCatalogMutation()
+        defer { releaseCatalogMutation() }
+        guard let record = records[workspaceID], record.health.acceptsMutations else {
+            return false
+        }
+        do {
+            let recoverySnapshot = try await persistence.removeAgentAdmissionRecoveryRecord(
+                document: record.document,
+                recoveryID: recoveryID,
+                expectedWorkingRevision: expectedWorkingRevision,
+                expectedContentDigest: expectedContentDigest
+            )
+            guard var current = records[workspaceID] else { return false }
+            current.agentAdmissionRecoveryRecords = recoverySnapshot.records
+            current.agentAdmissionRecoveryGeneration = recoverySnapshot.generation
+            records[workspaceID] = current
+            return true
+        } catch { return false }
+    }
+
+    func transitionAgentAdmissionRecoveryRecord(
+        _ expectedRecord: DomainAgentAdmissionRecoveryRecord,
+        to phase: DomainAgentAdmissionRecoveryPhase,
+        dispatchKind: DomainAgentAdmissionDispatchKind? = nil
+    ) async -> Bool {
+        await bootstrap()
+        await acquireCatalogMutation()
+        defer { releaseCatalogMutation() }
+        guard let record = records[expectedRecord.workspaceID], record.health.acceptsMutations else {
+            return false
+        }
+        do {
+            let recoverySnapshot = try await persistence.transitionAgentAdmissionRecoveryRecord(
+                document: record.document,
+                expectedRecord: expectedRecord,
+                phase: phase,
+                dispatchKind: dispatchKind
+            )
+            guard var current = records[expectedRecord.workspaceID] else { return false }
+            current.agentAdmissionRecoveryRecords = recoverySnapshot.records
+            current.agentAdmissionRecoveryGeneration = recoverySnapshot.generation
+            records[expectedRecord.workspaceID] = current
+            return true
+        } catch { return false }
+    }
+
+    func tryAcquireAgentAdmissionDispatchLease(
+        workspaceID: UUID,
+        sessionID: UUID
+    ) async throws -> DomainAgentAdmissionDispatchLease? {
+        try await persistence.tryAcquireAgentAdmissionDispatchLease(
+            workspaceID: workspaceID,
+            sessionID: sessionID
+        )
+    }
+
+    func tryAcquireAgentAdmissionWorkspaceLease(
+        workspaceID: UUID
+    ) async throws -> DomainAgentAdmissionDispatchLease? {
+        try await persistence.tryAcquireAgentAdmissionWorkspaceLease(workspaceID: workspaceID)
     }
 
     func contextSnapshot(_ identity: DomainContextIdentity) -> DomainContextSnapshot? {
@@ -491,7 +782,7 @@ actor DomainWorkspaceContextAuthority {
             guard prior.fingerprint == fingerprint else {
                 return collisionOutcome(envelope.operationID, workspace: makeSnapshot(record))
             }
-            if (prior.disposition == .applied || prior.disposition == .unchanged),
+            if prior.disposition == .applied || prior.disposition == .unchanged,
                case let .createWorkspace(document) = envelope.command
             {
                 do {
@@ -523,7 +814,7 @@ actor DomainWorkspaceContextAuthority {
             guard prior.fingerprint == fingerprint else {
                 return collisionOutcome(envelope.operationID, workspace: nil)
             }
-            if (prior.disposition == .applied || prior.disposition == .unchanged),
+            if prior.disposition == .applied || prior.disposition == .unchanged,
                case let .createWorkspace(document) = envelope.command
             {
                 do {
@@ -831,6 +1122,30 @@ actor DomainWorkspaceContextAuthority {
         ) {
             testBeforeExternalReconciliation = hook
         }
+
+        func testSetBeforeWorkingPersistence(
+            _ hook: (@Sendable (UUID) async -> Void)?
+        ) {
+            testBeforeWorkingPersistence = hook
+        }
+
+        func testSetBeforeSavedPersistence(
+            _ hook: (@Sendable (UUID) async -> Void)?
+        ) {
+            testBeforeSavedPersistence = hook
+        }
+
+        func testSetAfterWorkingPersistence(
+            _ hook: (@Sendable (UUID) async -> Void)?
+        ) {
+            testAfterWorkingPersistence = hook
+        }
+
+        func testSetBeforeAgentAdmissionRecoverySnapshot(
+            _ hook: (@Sendable (UUID) async -> Void)?
+        ) {
+            testBeforeAgentAdmissionRecoverySnapshot = hook
+        }
     #endif
 
     private func makeRecord(
@@ -843,6 +1158,8 @@ actor DomainWorkspaceContextAuthority {
             contextRevisions: workspace.contextRevisions,
             contextTombstones: workspace.contextTombstones,
             operations: workspace.operations,
+            agentAdmissionRecoveryRecords: workspace.agentAdmissionRecoveryRecords,
+            agentAdmissionRecoveryGeneration: workspace.agentAdmissionRecoveryGeneration,
             operationIndex: BoundedDomainOperationIndex(
                 capacity: Self.maximumWorkspaceOperations,
                 operations: workspace.operations
@@ -903,6 +1220,7 @@ actor DomainWorkspaceContextAuthority {
                 contextTombstones = record.contextTombstones
             }
 
+            let recoveryGeneration = agentAdmissionRecoveryGeneration(for: workspaceID)
             do {
                 let persisted = try await persistence.persistConflictRebase(
                     document: localDocument,
@@ -921,6 +1239,12 @@ actor DomainWorkspaceContextAuthority {
                 record.contextRevisions = persisted.journal.contextRevisions
                 record.contextTombstones = persisted.journal.contextTombstones
                 record.operations = persisted.journal.operations
+                applyPersistedAgentAdmissionRecoveryRecords(
+                    persisted.journal.agentAdmissionRecoveryRecords ?? [],
+                    workspaceID: workspaceID,
+                    capturedGeneration: recoveryGeneration,
+                    to: &record
+                )
                 record.operationIndex.replace(with: persisted.journal.operations)
                 record.health = .writable
                 record.externalDocument = nil
@@ -1018,6 +1342,7 @@ actor DomainWorkspaceContextAuthority {
             previousRevisions: record.contextRevisions,
             workspaceRevision: revisions
         )
+        let recoveryGeneration = agentAdmissionRecoveryGeneration(for: workspaceID)
         do {
             let persisted = try await persistence.persistWorking(
                 document: localDocument,
@@ -1037,6 +1362,12 @@ actor DomainWorkspaceContextAuthority {
             record.contextRevisions = persisted.journal.contextRevisions
             record.contextTombstones = persisted.journal.contextTombstones
             record.operations = persisted.journal.operations
+            applyPersistedAgentAdmissionRecoveryRecords(
+                persisted.journal.agentAdmissionRecoveryRecords ?? [],
+                workspaceID: workspaceID,
+                capturedGeneration: recoveryGeneration,
+                to: &record
+            )
             record.operationIndex.replace(with: persisted.journal.operations)
             record.health = .writable
             record.externalDocument = nil
@@ -1127,6 +1458,7 @@ actor DomainWorkspaceContextAuthority {
                 previousRevisions: record.contextRevisions,
                 workspaceRevision: revisions
             )
+            let recoveryGeneration = agentAdmissionRecoveryGeneration(for: workspaceID)
             do {
                 let persisted = try await persistence.persistExternalReload(
                     document: externalDocument,
@@ -1146,6 +1478,12 @@ actor DomainWorkspaceContextAuthority {
                 record.contextRevisions = persisted.journal.contextRevisions
                 record.contextTombstones = persisted.journal.contextTombstones
                 record.operations = persisted.journal.operations
+                applyPersistedAgentAdmissionRecoveryRecords(
+                    persisted.journal.agentAdmissionRecoveryRecords ?? [],
+                    workspaceID: workspaceID,
+                    capturedGeneration: recoveryGeneration,
+                    to: &record
+                )
                 record.operationIndex.replace(with: persisted.journal.operations)
                 record.health = .writable
                 record.externalDocument = nil
@@ -1288,6 +1626,8 @@ actor DomainWorkspaceContextAuthority {
                 contextRevisions: persisted.journal.contextRevisions,
                 contextTombstones: persisted.journal.contextTombstones,
                 operations: persisted.journal.operations,
+                agentAdmissionRecoveryRecords: persisted.journal.agentAdmissionRecoveryRecords ?? [],
+                agentAdmissionRecoveryGeneration: persisted.journal.agentAdmissionRecoveryGeneration ?? 0,
                 operationIndex: BoundedDomainOperationIndex(
                     capacity: Self.maximumWorkspaceOperations,
                     operations: persisted.journal.operations
@@ -1535,8 +1875,12 @@ actor DomainWorkspaceContextAuthority {
             let operations = record.operations + [recorded]
             let requiresDirtyLifecycleFence = before.dirtyRevision != nil
                 && envelope.conflictRecoveryPolicy != .failClosed
+            let recoveryGeneration = agentAdmissionRecoveryGeneration(for: document.workspaceID)
             let persisted: DomainPersistenceWorkingCommit
             do {
+                #if DEBUG
+                    await testBeforeWorkingPersistence?(document.workspaceID)
+                #endif
                 persisted = try await persistence.persistWorking(
                     document: document,
                     expectedRevision: before.workingRevision,
@@ -1603,11 +1947,20 @@ actor DomainWorkspaceContextAuthority {
             } catch {
                 return persistenceFailureOutcome(envelope, record: record, error: error)
             }
+            #if DEBUG
+                await testAfterWorkingPersistence?(document.workspaceID)
+            #endif
             record.document = document
             record.revisions = persisted.journal.revisions
             record.contextRevisions = persisted.journal.contextRevisions
             record.contextTombstones = persisted.journal.contextTombstones
             record.operations = persisted.journal.operations
+            applyPersistedAgentAdmissionRecoveryRecords(
+                persisted.journal.agentAdmissionRecoveryRecords ?? [],
+                workspaceID: document.workspaceID,
+                capturedGeneration: recoveryGeneration,
+                to: &record
+            )
             record.operationIndex.replace(with: persisted.journal.operations)
             records[document.workspaceID] = record
             globalOperations.insert(recorded)
@@ -1685,7 +2038,11 @@ actor DomainWorkspaceContextAuthority {
         )
         let recorded = DomainRecordedOperation(fingerprint: fingerprint, recordedAt: Date(), outcome: provisional)
         let operations = record.operations + [recorded]
+        let recoveryGeneration = agentAdmissionRecoveryGeneration(for: workspaceID)
         do {
+            #if DEBUG
+                await testBeforeSavedPersistence?(workspaceID)
+            #endif
             let saved = try await persistence.persistSaved(
                 document: record.document,
                 expectedWorkingRevision: before.workingRevision,
@@ -1699,6 +2056,12 @@ actor DomainWorkspaceContextAuthority {
             record.savedDigest = saved.journal.savedDigest
             record.revisions = saved.journal.revisions
             record.contextRevisions = saved.journal.contextRevisions
+            applyPersistedAgentAdmissionRecoveryRecords(
+                saved.journal.agentAdmissionRecoveryRecords ?? [],
+                workspaceID: workspaceID,
+                capturedGeneration: recoveryGeneration,
+                to: &record
+            )
             record.operations = saved.journal.operations
             record.operationIndex.replace(with: saved.journal.operations)
             records[workspaceID] = record
@@ -1918,6 +2281,7 @@ actor DomainWorkspaceContextAuthority {
         )
         let operation = DomainRecordedOperation(fingerprint: fingerprint, recordedAt: now, outcome: provisional)
         let operations = record.operations + [operation]
+        let recoveryGeneration = agentAdmissionRecoveryGeneration(for: workspaceID)
         do {
             if acceptExternal {
                 let contextRevisions = Dictionary(uniqueKeysWithValues: external.metadata.contexts.map {
@@ -1938,6 +2302,12 @@ actor DomainWorkspaceContextAuthority {
                 record.revisions = persisted.journal.revisions
                 record.contextRevisions = persisted.journal.contextRevisions
                 record.operations = persisted.journal.operations
+                applyPersistedAgentAdmissionRecoveryRecords(
+                    persisted.journal.agentAdmissionRecoveryRecords ?? [],
+                    workspaceID: workspaceID,
+                    capturedGeneration: recoveryGeneration,
+                    to: &record
+                )
                 record.operationIndex.replace(with: persisted.journal.operations)
             } else {
                 let persisted = try await persistence.persistConflictRebase(
@@ -1954,6 +2324,12 @@ actor DomainWorkspaceContextAuthority {
                 record.savedDigest = persisted.journal.savedDigest
                 record.revisions = persisted.journal.revisions
                 record.operations = persisted.journal.operations
+                applyPersistedAgentAdmissionRecoveryRecords(
+                    persisted.journal.agentAdmissionRecoveryRecords ?? [],
+                    workspaceID: workspaceID,
+                    capturedGeneration: recoveryGeneration,
+                    to: &record
+                )
                 record.operationIndex.replace(with: persisted.journal.operations)
             }
         } catch let error as DomainPersistenceError {
@@ -2108,6 +2484,8 @@ actor DomainWorkspaceContextAuthority {
             contextRevisions: workspace.contextRevisions,
             contextTombstones: workspace.contextTombstones,
             operations: workspace.operations,
+            agentAdmissionRecoveryRecords: workspace.agentAdmissionRecoveryRecords,
+            agentAdmissionRecoveryGeneration: workspace.agentAdmissionRecoveryGeneration,
             operationIndex: BoundedDomainOperationIndex(
                 capacity: Self.maximumWorkspaceOperations,
                 operations: workspace.operations
@@ -2253,6 +2631,8 @@ actor DomainWorkspaceContextAuthority {
             recordedAt: Date(),
             outcome: outcome
         )
+        let workspaceID = record.document.workspaceID
+        let recoveryGeneration = agentAdmissionRecoveryGeneration(for: workspaceID)
         do {
             let persisted = try await persistence.persistUnchanged(
                 document: record.document,
@@ -2262,12 +2642,35 @@ actor DomainWorkspaceContextAuthority {
             )
             catalogRevision = max(catalogRevision, persisted.catalogRevision)
             record.operations = persisted.journal.operations
+            applyPersistedAgentAdmissionRecoveryRecords(
+                persisted.journal.agentAdmissionRecoveryRecords ?? [],
+                workspaceID: workspaceID,
+                capturedGeneration: recoveryGeneration,
+                to: &record
+            )
             record.operationIndex.replace(with: persisted.journal.operations)
-            records[record.document.workspaceID] = record
+            records[workspaceID] = record
             globalOperations.insert(operation)
             return outcome
         } catch {
             return persistenceFailureOutcome(envelope, record: record, error: error)
+        }
+    }
+
+    private func applyPersistedAgentAdmissionRecoveryRecords(
+        _ persistedRecords: [DomainAgentAdmissionRecoveryRecord],
+        workspaceID: UUID,
+        capturedGeneration: UInt64,
+        to record: inout WorkspaceRecord
+    ) {
+        if agentAdmissionRecoveryGeneration(for: workspaceID)
+            == capturedGeneration
+        {
+            record.agentAdmissionRecoveryRecords = persistedRecords
+            record.agentAdmissionRecoveryGeneration = capturedGeneration
+        } else if let current = records[workspaceID] {
+            record.agentAdmissionRecoveryRecords = current.agentAdmissionRecoveryRecords
+            record.agentAdmissionRecoveryGeneration = current.agentAdmissionRecoveryGeneration
         }
     }
 
@@ -2416,7 +2819,7 @@ private extension DomainWorkspaceCommandEnvelope {
         case let .replaceWorkingDocument(document): document.workspaceID
         case let .saveWorkspaceDocument(workspaceID): workspaceID
         case let .deleteWorkspace(workspaceID): workspaceID
-            case let .resolveExternalConflict(workspaceID, _, _): workspaceID
+        case let .resolveExternalConflict(workspaceID, _, _): workspaceID
         }
     }
 }
