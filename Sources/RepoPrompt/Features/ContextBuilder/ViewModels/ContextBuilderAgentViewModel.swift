@@ -1104,13 +1104,15 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 saveHistory: true
             )
         }
-        let forceSettlementTasks = records.compactMap { record -> Task<Void, Never>? in
-            guard record.hasDeferredCancellationPending else { return nil }
-            return Task { @MainActor [weak self, weak record] in
+        // Provider disposal remains joined because it owns process-family termination and launch-
+        // config lease release. The outer run task receives the same bounded grace regardless of
+        // whether cancellation first had to wait for a final-context commit.
+        let forceSettlementTasks = records.map { record in
+            Task { @MainActor [weak self, weak record] in
                 guard let self else { return }
                 try? await Task.sleep(nanoseconds: appTerminationFinalContextGraceNanoseconds)
                 guard !Task.isCancelled, let record else { return }
-                forceDeferredCancellationForAppTermination(record)
+                forceRunSettlementForAppTermination(record)
             }
         }
         // Sweeps records that were already terminal with no teardown scheduled; such a record would
@@ -2360,15 +2362,19 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
     }
 
-    private func forceDeferredCancellationForAppTermination(_ record: ContextBuilderRunRecord) {
-        guard let policy = record.consumeDeferredCancellationForAppTermination() else { return }
-        retireContextBuilderRunRecordWithoutPublishing(
-            record,
-            waiterResolution: policy.waiterResolution,
-            cancelExecution: true,
-            joinExecution: false,
-            source: "contextBuilder.appTermination.forceSettlement"
-        )
+    private func forceRunSettlementForAppTermination(_ record: ContextBuilderRunRecord) {
+        if let policy = record.consumeDeferredCancellationForAppTermination() {
+            retireContextBuilderRunRecordWithoutPublishing(
+                record,
+                waiterResolution: policy.waiterResolution,
+                cancelExecution: true,
+                joinExecution: false,
+                source: "contextBuilder.appTermination.forceSettlement"
+            )
+            return
+        }
+        guard record.isTeardownPending else { return }
+        record.stopAwaitingExecutionTaskForAppTermination()
     }
 
     /// If the main prompt area is empty but we have agent output,

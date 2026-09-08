@@ -77,6 +77,36 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
         XCTAssertNotNil(record.teardownFinishedAt)
     }
 
+    func testAppTerminationStopsWaitingForCancellationIgnoringExecutionAfterGrace() async {
+        let window = makeWindow()
+        let viewModel = window.contextBuilderAgentViewModel
+        viewModel.setAppTerminationFinalContextGraceForTesting(1)
+        let provider = GatedHeadlessAgentProvider()
+        let executionGate = ContextBuilderTestGate()
+        let record = makeRecord()
+        XCTAssertTrue(record.installProvider(provider))
+        record.executionTask = Task { await executionGate.wait() }
+        XCTAssertTrue(viewModel.registerRunRecordForTesting(record, makeCurrent: true))
+
+        let shutdownFinished = ContextBuilderTestFlag()
+        let shutdown = Task {
+            await viewModel.shutdownForAppTermination()
+            await shutdownFinished.set()
+        }
+        await provider.waitUntilDisposeStarted()
+        await executionGate.waitUntilEntered()
+        await provider.allowDispose()
+
+        let settledWithinBound = await waitUntil {
+            await shutdownFinished.current()
+        }
+        XCTAssertTrue(settledWithinBound)
+
+        await executionGate.open()
+        await shutdown.value
+        XCTAssertNotNil(record.teardownFinishedAt)
+    }
+
     func testWindowRegistrationIsRejectedAfterTerminationSignal() {
         let manager = WindowStatesManager.shared
         let window = makeWindow()

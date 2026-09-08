@@ -447,6 +447,13 @@ final class ContextBuilderRunRecord {
         finishTeardownIfReady()
     }
 
+    /// Provider disposal remains the process-family and launch-config-lease authority during app
+    /// termination. Once its grace period expires, the app need not also wait for an outer run task
+    /// that ignored cancellation after the provider has independently begun teardown.
+    func stopAwaitingExecutionTaskForAppTermination() {
+        markExecutionTaskFinished()
+    }
+
     func awaitTeardownSettlement() async {
         if teardownFinishedAt != nil { return }
         await withCheckedContinuation { continuation in
