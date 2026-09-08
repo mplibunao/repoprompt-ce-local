@@ -35,19 +35,28 @@ final class DispatchTerminationSignalObserver: TerminationSignalObserving {
 /// tooling that stops the app with a signal still runs `applicationShouldTerminate` — the only
 /// path that joins in-flight agent processes and releases their launch-config leases.
 final class AppTerminationSignalRouter {
+    typealias ScheduleTerminationRequest = (@escaping () -> Void) -> Void
+
     /// Signals ordinary process tooling uses to stop the app.
     static let routedSignals: [Int32] = [SIGTERM]
 
     private let observer: any TerminationSignalObserving
+    private let scheduleTerminationRequest: ScheduleTerminationRequest
     private let requestGracefulTermination: () -> Void
     private var isInstalled = false
     private var hasRequestedTermination = false
 
     init(
         observer: any TerminationSignalObserving,
+        scheduleTerminationRequest: @escaping ScheduleTerminationRequest = { request in
+            let mainRunLoop = CFRunLoopGetMain()
+            CFRunLoopPerformBlock(mainRunLoop, CFRunLoopMode.commonModes.rawValue, request)
+            CFRunLoopWakeUp(mainRunLoop)
+        },
         requestGracefulTermination: @escaping () -> Void
     ) {
         self.observer = observer
+        self.scheduleTerminationRequest = scheduleTerminationRequest
         self.requestGracefulTermination = requestGracefulTermination
     }
 
@@ -62,7 +71,9 @@ final class AppTerminationSignalRouter {
             observer.observe(signal) { [weak self] in
                 guard let self, !hasRequestedTermination else { return }
                 hasRequestedTermination = true
-                requestGracefulTermination()
+                // Returning from the main-dispatch signal callback before entering AppKit's
+                // deferred-termination loop lets its MainActor cleanup task begin.
+                scheduleTerminationRequest(requestGracefulTermination)
             }
         }
     }

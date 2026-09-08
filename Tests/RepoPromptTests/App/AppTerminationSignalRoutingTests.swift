@@ -74,8 +74,12 @@ final class AppTerminationSignalRoutingTests: XCTestCase {
 
     func testInstallSuppressesDefaultDispositionBeforeObservationAndRoutesDeliveryExactlyOnce() {
         let observer = RecordingTerminationSignalObserver()
+        var scheduledRequests: [() -> Void] = []
         var terminationRequestCount = 0
-        let router = AppTerminationSignalRouter(observer: observer) {
+        let router = AppTerminationSignalRouter(
+            observer: observer,
+            scheduleTerminationRequest: { scheduledRequests.append($0) }
+        ) {
             terminationRequestCount += 1
         }
 
@@ -91,7 +95,32 @@ final class AppTerminationSignalRoutingTests: XCTestCase {
         observer.recordedHandler?()
         observer.recordedHandler?()
 
+        XCTAssertEqual(scheduledRequests.count, 1)
+        XCTAssertEqual(terminationRequestCount, 0)
+
+        scheduledRequests[0]()
+
         XCTAssertEqual(terminationRequestCount, 1)
+    }
+
+    @MainActor
+    func testDefaultSchedulerDefersTerminationUntilSignalCallbackReturns() async {
+        let observer = RecordingTerminationSignalObserver()
+        let terminationRequested = expectation(description: "termination requested")
+        var signalCallbackReturned = false
+        var requestObservedCallbackReturn = false
+        let router = AppTerminationSignalRouter(observer: observer) {
+            requestObservedCallbackReturn = signalCallbackReturned
+            terminationRequested.fulfill()
+        }
+        router.install()
+
+        observer.recordedHandler?()
+
+        XCTAssertFalse(requestObservedCallbackReturn)
+        signalCallbackReturned = true
+        await fulfillment(of: [terminationRequested], timeout: 1)
+        XCTAssertTrue(requestObservedCallbackReturn)
     }
 }
 
