@@ -254,7 +254,8 @@ struct AgentExploreMCPToolService {
                     sessionName: nil,
                     parentSessionID: context.parentSessionID,
                     inheritWorktreeBindings: inheritWorktreeBindings,
-                    expectedWorkspaceID: context.expectedWorkspaceID
+                    expectedWorkspaceID: context.expectedWorkspaceID,
+                    requiresProviderDispatchFence: true
                 )
                 targets.append(target)
             }
@@ -333,21 +334,43 @@ struct AgentExploreMCPToolService {
             target,
             expectedWorkspaceID: context.expectedWorkspaceID
         )
-        let outcome = try await startRun(
-            target,
-            message,
-            context.metadata,
-            context.agentModeVM,
-            context.selection.agentRaw,
-            context.selection.modelRaw,
-            nil,
-            .explore,
-            nil,
-            nil,
-            nil
-        )
-        context.agentModeVM.mcpAcceptSessionTarget(target)
-        return outcome
+        var dispatchBoundaryEntered = false
+        var providerDispatchAttempted = false
+        do {
+            try await context.agentModeVM.mcpMarkSessionTargetDispatchOutcomeUnknown(
+                target,
+                dispatchKind: .start
+            )
+            dispatchBoundaryEntered = true
+            try context.agentModeVM.requireCurrentMCPWorkspaceTarget(
+                target,
+                expectedWorkspaceID: context.expectedWorkspaceID
+            )
+            providerDispatchAttempted = true
+            let outcome = try await startRun(
+                target,
+                message,
+                context.metadata,
+                context.agentModeVM,
+                context.selection.agentRaw,
+                context.selection.modelRaw,
+                nil,
+                .explore,
+                nil,
+                nil,
+                nil
+            )
+            try await context.agentModeVM.mcpAcceptSessionTarget(target, releaseReservation: false)
+            defer { context.agentModeVM.mcpFinishAcceptedSessionTargetDispatch(target) }
+            return outcome
+        } catch {
+            if providerDispatchAttempted {
+                context.agentModeVM.mcpPreserveSessionTargetAfterUncertainDispatch(target)
+            } else if dispatchBoundaryEntered {
+                _ = await context.agentModeVM.mcpAbortSessionTargetBeforeProviderDispatch(target)
+            }
+            throw error
+        }
     }
 
     private func validateBatchWorktreeRequest(

@@ -2,13 +2,151 @@ import Darwin
 import Foundation
 import os
 
+package enum DomainAgentAdmissionRecoveryMutation: String, Codable, Equatable, Sendable {
+    case removeTab
+    case clearBinding
+    case removeMarker
+}
+
+package enum DomainAgentAdmissionRecoveryPhase: String, Codable, Equatable, Sendable {
+    case prepared
+    case dispatchOutcomeUnknown
+}
+
+package enum DomainAgentAdmissionDispatchKind: String, Codable, Equatable, Hashable, Sendable {
+    case start
+    case steer
+}
+
+/// Canonical cleanup intent used only when Agent recovery has not yet produced a journaled
+/// workspace document. Once cleanup reaches an exact working revision and digest, that document
+/// becomes the durable replay authority and this auxiliary record is removed.
+package struct DomainAgentAdmissionRecoveryRecord: Codable, Equatable, Hashable, Sendable {
+    package let recoveryID: UUID
+    package let workspaceID: UUID
+    package let tabID: UUID
+    package let sessionID: UUID
+    package let replacementTabID: UUID
+    package let mutation: DomainAgentAdmissionRecoveryMutation
+    package let phase: DomainAgentAdmissionRecoveryPhase
+    package let dispatchKind: DomainAgentAdmissionDispatchKind?
+
+    package init(
+        recoveryID: UUID,
+        workspaceID: UUID,
+        tabID: UUID,
+        sessionID: UUID,
+        replacementTabID: UUID,
+        mutation: DomainAgentAdmissionRecoveryMutation,
+        phase: DomainAgentAdmissionRecoveryPhase = .prepared,
+        dispatchKind: DomainAgentAdmissionDispatchKind? = nil
+    ) {
+        self.recoveryID = recoveryID
+        self.workspaceID = workspaceID
+        self.tabID = tabID
+        self.sessionID = sessionID
+        self.replacementTabID = replacementTabID
+        self.mutation = mutation
+        self.phase = phase
+        self.dispatchKind = dispatchKind
+    }
+
+    package func replacingPhase(
+        _ phase: DomainAgentAdmissionRecoveryPhase,
+        dispatchKind: DomainAgentAdmissionDispatchKind? = nil
+    ) -> DomainAgentAdmissionRecoveryRecord {
+        DomainAgentAdmissionRecoveryRecord(
+            recoveryID: recoveryID,
+            workspaceID: workspaceID,
+            tabID: tabID,
+            sessionID: sessionID,
+            replacementTabID: replacementTabID,
+            mutation: mutation,
+            phase: phase,
+            dispatchKind: dispatchKind ?? self.dispatchKind
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case recoveryID
+        case workspaceID
+        case tabID
+        case sessionID
+        case replacementTabID
+        case mutation
+        case phase
+        case dispatchKind
+    }
+
+    package init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        recoveryID = try container.decode(UUID.self, forKey: .recoveryID)
+        workspaceID = try container.decode(UUID.self, forKey: .workspaceID)
+        tabID = try container.decode(UUID.self, forKey: .tabID)
+        sessionID = try container.decode(UUID.self, forKey: .sessionID)
+        replacementTabID = try container.decode(UUID.self, forKey: .replacementTabID)
+        mutation = try container.decode(DomainAgentAdmissionRecoveryMutation.self, forKey: .mutation)
+        phase = try container.decodeIfPresent(
+            DomainAgentAdmissionRecoveryPhase.self,
+            forKey: .phase
+        ) ?? .prepared
+        dispatchKind = try container.decodeIfPresent(
+            DomainAgentAdmissionDispatchKind.self,
+            forKey: .dispatchKind
+        )
+    }
+
+}
+
+package struct DomainAgentAdmissionRecoverySnapshot: Equatable, Sendable {
+    let records: [DomainAgentAdmissionRecoveryRecord]
+    let generation: UInt64
+}
+
+package struct DomainAgentAdmissionRecoveryDiscoverySnapshot: Equatable, Sendable {
+    package let records: [DomainAgentAdmissionRecoveryRecord]
+    package let unavailableWorkspaceIDs: Set<UUID>
+
+    package init(
+        records: [DomainAgentAdmissionRecoveryRecord],
+        unavailableWorkspaceIDs: Set<UUID>
+    ) {
+        self.records = records
+        self.unavailableWorkspaceIDs = unavailableWorkspaceIDs
+    }
+}
+
+/// Cross-process ownership of one provisional Agent session. The descriptor stays locked until
+/// acceptance or recovery releases the lease; process termination releases it automatically.
+package final class DomainAgentAdmissionDispatchLease: @unchecked Sendable {
+    private let descriptor = OSAllocatedUnfairLock<Int32?>(initialState: nil)
+
+    fileprivate init(descriptor: Int32) {
+        self.descriptor.withLock { $0 = descriptor }
+    }
+
+    package func release() {
+        let ownedDescriptor = descriptor.withLock { descriptor -> Int32? in
+            defer { descriptor = nil }
+            return descriptor
+        }
+        guard let ownedDescriptor else { return }
+        _ = flock(ownedDescriptor, LOCK_UN)
+        close(ownedDescriptor)
+    }
+
+    deinit {
+        release()
+    }
+}
+
 struct DomainPendingSave: Codable {
     let operationID: UUID
     let documentDigest: String
 }
 
 struct DomainWorkingJournal: Codable {
-    static let schemaVersion = 1
+    static let schemaVersion = 3
 
     let version: Int
     let workspaceID: UUID
@@ -20,6 +158,8 @@ struct DomainWorkingJournal: Codable {
     let contextDigests: [UUID: String]
     let contextTombstones: [UUID: UInt64]
     let operations: [DomainRecordedOperation]
+    let agentAdmissionRecoveryRecords: [DomainAgentAdmissionRecoveryRecord]?
+    let agentAdmissionRecoveryGeneration: UInt64?
     let pendingSave: DomainPendingSave?
     let updatedAt: Date
 
@@ -33,6 +173,8 @@ struct DomainWorkingJournal: Codable {
         contextDigests: [UUID: String],
         contextTombstones: [UUID: UInt64],
         operations: [DomainRecordedOperation],
+        agentAdmissionRecoveryRecords: [DomainAgentAdmissionRecoveryRecord] = [],
+        agentAdmissionRecoveryGeneration: UInt64 = 0,
         pendingSave: DomainPendingSave? = nil,
         updatedAt: Date
     ) {
@@ -46,6 +188,12 @@ struct DomainWorkingJournal: Codable {
         self.contextDigests = contextDigests
         self.contextTombstones = contextTombstones
         self.operations = operations
+        self.agentAdmissionRecoveryRecords = agentAdmissionRecoveryRecords.isEmpty
+            ? nil
+            : agentAdmissionRecoveryRecords
+        self.agentAdmissionRecoveryGeneration = agentAdmissionRecoveryGeneration == 0
+            ? nil
+            : agentAdmissionRecoveryGeneration
         self.pendingSave = pendingSave
         self.updatedAt = updatedAt
     }
@@ -121,6 +269,8 @@ struct DomainPersistenceBootstrap {
         let contextRevisions: [UUID: DomainRevisionState]
         let contextTombstones: [UUID: UInt64]
         let operations: [DomainRecordedOperation]
+        let agentAdmissionRecoveryRecords: [DomainAgentAdmissionRecoveryRecord]
+        let agentAdmissionRecoveryGeneration: UInt64
         let health: DomainAuthorityHealth
         let fileMetadata: DomainFileMetadata
     }
@@ -350,51 +500,88 @@ package struct DomainPersistenceCoordinator {
             .appendingPathComponent("\(safe)-\(digest)", isDirectory: true)
     }
 
-    private var journalDirectory: URL { runtimeRoot.appendingPathComponent("working-journals", isDirectory: true) }
-    private var revisionDirectory: URL { runtimeRoot.appendingPathComponent("revisions", isDirectory: true) }
-    private var deletionDirectory: URL { runtimeRoot.appendingPathComponent("deletion-tombstones", isDirectory: true) }
-    private var lockDirectory: URL { runtimeRoot.appendingPathComponent("locks", isDirectory: true) }
-    private var settingsDirectory: URL { runtimeRoot.appendingPathComponent("settings", isDirectory: true) }
-    private var rollbackRoot: URL { runtimeRoot.appendingPathComponent("rollback", isDirectory: true) }
-    private var policyURL: URL { settingsDirectory.appendingPathComponent("runtime-policy.json") }
+    private var journalDirectory: URL {
+        runtimeRoot.appendingPathComponent("working-journals", isDirectory: true)
+    }
+
+    private var revisionDirectory: URL {
+        runtimeRoot.appendingPathComponent("revisions", isDirectory: true)
+    }
+
+    private var deletionDirectory: URL {
+        runtimeRoot.appendingPathComponent("deletion-tombstones", isDirectory: true)
+    }
+
+    private var lockDirectory: URL {
+        runtimeRoot.appendingPathComponent("locks", isDirectory: true)
+    }
+
+    private var settingsDirectory: URL {
+        runtimeRoot.appendingPathComponent("settings", isDirectory: true)
+    }
+
+    private var rollbackRoot: URL {
+        runtimeRoot.appendingPathComponent("rollback", isDirectory: true)
+    }
+
+    private var policyURL: URL {
+        settingsDirectory.appendingPathComponent("runtime-policy.json")
+    }
+
     private var protectedMutationPolicyURL: URL {
         settingsDirectory.appendingPathComponent("protected-mutations.json")
     }
+
     private var protectedMutationPolicyLockURL: URL {
         lockDirectory.appendingPathComponent("protected-mutations.lock")
     }
+
     private var protectedMutationJournalURL: URL {
         settingsDirectory.appendingPathComponent("protected-mutation-journal.json")
     }
+
     private var protectedMutationJournalLockURL: URL {
         lockDirectory.appendingPathComponent("protected-mutation-journal.lock")
     }
+
     private var agentSessionMetadataURL: URL {
         settingsDirectory.appendingPathComponent("agent-sessions.json")
     }
+
     private var agentSessionMetadataLockURL: URL {
         lockDirectory.appendingPathComponent("agent-sessions.lock")
     }
+
     private var directSettingsURL: URL {
         settingsDirectory.appendingPathComponent("direct-settings.json")
     }
+
     private var directSettingsLockURL: URL {
         lockDirectory.appendingPathComponent("direct-settings.lock")
     }
+
     private var agentWorktreeBindingsURL: URL {
         settingsDirectory.appendingPathComponent("agent-worktree-bindings.json")
     }
+
     private var agentWorktreeBindingsLockURL: URL {
         lockDirectory.appendingPathComponent("agent-worktree-bindings.lock")
     }
+
     private var legacyAgentSessionMetadataURL: URL {
         configuration.storageDirectory
             .appendingPathComponent("DomainRuntime", isDirectory: true)
             .appendingPathComponent("v1", isDirectory: true)
             .appendingPathComponent("agent-sessions.json")
     }
-    private var catalogURL: URL { runtimeRoot.appendingPathComponent("workspace-catalog.json") }
-    private var indexURL: URL { workspaceRoot.appendingPathComponent("workspacesIndex.json") }
+
+    private var catalogURL: URL {
+        runtimeRoot.appendingPathComponent("workspace-catalog.json")
+    }
+
+    private var indexURL: URL {
+        workspaceRoot.appendingPathComponent("workspacesIndex.json")
+    }
 
     private func journalURL(_ workspaceID: UUID) -> URL {
         journalDirectory.appendingPathComponent("\(workspaceID.uuidString).json")
@@ -644,6 +831,86 @@ package struct DomainPersistenceCoordinator {
         }
     }
 
+    package func upsertAgentAdmissionRecoveryRecord(
+        document: DomainWorkspaceDocument,
+        record: DomainAgentAdmissionRecoveryRecord
+    ) async throws -> DomainAgentAdmissionRecoverySnapshot {
+        try await DomainBlockingIO.run { cancellation in
+            try blockingWorker(cancellation).upsertAgentAdmissionRecoveryRecordBlocking(
+                document: document,
+                record: record,
+                now: Date()
+            )
+        }
+    }
+
+    package func removeAgentAdmissionRecoveryRecord(
+        document: DomainWorkspaceDocument,
+        recoveryID: UUID,
+        expectedWorkingRevision: UInt64,
+        expectedContentDigest: String
+    ) async throws -> DomainAgentAdmissionRecoverySnapshot {
+        try await DomainBlockingIO.run { cancellation in
+            try blockingWorker(cancellation).removeAgentAdmissionRecoveryRecordBlocking(
+                document: document,
+                recoveryID: recoveryID,
+                expectedWorkingRevision: expectedWorkingRevision,
+                expectedContentDigest: expectedContentDigest,
+                now: Date()
+            )
+        }
+    }
+
+    package func transitionAgentAdmissionRecoveryRecord(
+        document: DomainWorkspaceDocument,
+        expectedRecord: DomainAgentAdmissionRecoveryRecord,
+        phase: DomainAgentAdmissionRecoveryPhase,
+        dispatchKind: DomainAgentAdmissionDispatchKind? = nil
+    ) async throws -> DomainAgentAdmissionRecoverySnapshot {
+        try await DomainBlockingIO.run { cancellation in
+            try blockingWorker(cancellation).transitionAgentAdmissionRecoveryRecordBlocking(
+                document: document,
+                expectedRecord: expectedRecord,
+                phase: phase,
+                dispatchKind: dispatchKind,
+                now: Date()
+            )
+        }
+    }
+
+    package func tryAcquireAgentAdmissionDispatchLease(
+        workspaceID: UUID,
+        sessionID: UUID
+    ) async throws -> DomainAgentAdmissionDispatchLease? {
+        try await DomainBlockingIO.run { cancellation in
+            try blockingWorker(cancellation).tryAcquireAgentAdmissionDispatchLeaseBlocking(
+                workspaceID: workspaceID,
+                sessionID: sessionID
+            )
+        }
+    }
+
+    package func tryAcquireAgentAdmissionWorkspaceLease(
+        workspaceID: UUID
+    ) async throws -> DomainAgentAdmissionDispatchLease? {
+        try await DomainBlockingIO.run { cancellation in
+            try blockingWorker(cancellation).tryAcquireAgentAdmissionWorkspaceLeaseBlocking(
+                workspaceID: workspaceID
+            )
+        }
+    }
+
+    func agentAdmissionRecoverySnapshot(
+        document: DomainWorkspaceDocument
+    ) async throws -> DomainAgentAdmissionRecoverySnapshot {
+        try await DomainBlockingIO.run { cancellation in
+            try blockingWorker(cancellation).agentAdmissionRecoverySnapshotBlocking(
+                document: document,
+                now: Date()
+            )
+        }
+    }
+
     func persistWorking(
         document: DomainWorkspaceDocument,
         expectedRevision: UInt64,
@@ -651,6 +918,7 @@ package struct DomainPersistenceCoordinator {
         contextRevisions: [UUID: DomainRevisionState],
         contextTombstones: [UUID: UInt64],
         operations: [DomainRecordedOperation],
+        agentAdmissionRecoveryRecord: DomainAgentAdmissionRecoveryRecord? = nil,
         requiresMatchingConsolidationLifecycle: Bool = false,
         requiresMatchingSavedDigest: Bool = true,
         now: Date
@@ -663,6 +931,7 @@ package struct DomainPersistenceCoordinator {
                 contextRevisions: contextRevisions,
                 contextTombstones: contextTombstones,
                 operations: operations,
+                agentAdmissionRecoveryRecord: agentAdmissionRecoveryRecord,
                 requiresMatchingConsolidationLifecycle: requiresMatchingConsolidationLifecycle,
                 requiresMatchingSavedDigest: requiresMatchingSavedDigest,
                 now: now
@@ -1052,6 +1321,8 @@ package struct DomainPersistenceCoordinator {
                 }),
                 contextTombstones: journal?.contextTombstones ?? [:],
                 operations: journal?.operations ?? [],
+                agentAdmissionRecoveryRecords: journal?.agentAdmissionRecoveryRecords ?? [],
+                agentAdmissionRecoveryGeneration: journal?.agentAdmissionRecoveryGeneration ?? 0,
                 health: .degradedReadOnly(reason: reason),
                 fileMetadata: observedMetadata
             ), reason)
@@ -1075,6 +1346,8 @@ package struct DomainPersistenceCoordinator {
                     contextRevisions: recovered.journal.contextRevisions,
                     contextTombstones: recovered.journal.contextTombstones,
                     operations: recovered.journal.operations,
+                    agentAdmissionRecoveryRecords: recovered.journal.agentAdmissionRecoveryRecords ?? [],
+                    agentAdmissionRecoveryGeneration: recovered.journal.agentAdmissionRecoveryGeneration ?? 0,
                     health: .writable,
                     fileMetadata: trustedMetadata(matching: recovered.journal.savedDigest)
                 ), nil)
@@ -1097,6 +1370,8 @@ package struct DomainPersistenceCoordinator {
                     contextRevisions: journal.contextRevisions,
                     contextTombstones: journal.contextTombstones,
                     operations: journal.operations,
+                    agentAdmissionRecoveryRecords: journal.agentAdmissionRecoveryRecords ?? [],
+                    agentAdmissionRecoveryGeneration: journal.agentAdmissionRecoveryGeneration ?? 0,
                     health: .writable,
                     fileMetadata: trustedMetadata(matching: journal.savedDigest)
                 ), nil)
@@ -1109,6 +1384,8 @@ package struct DomainPersistenceCoordinator {
                 contextRevisions: journal.contextRevisions,
                 contextTombstones: journal.contextTombstones,
                 operations: journal.operations,
+                agentAdmissionRecoveryRecords: journal.agentAdmissionRecoveryRecords ?? [],
+                agentAdmissionRecoveryGeneration: journal.agentAdmissionRecoveryGeneration ?? 0,
                 health: .writable,
                 fileMetadata: trustedMetadata(matching: journal.savedDigest)
             ), nil)
@@ -1124,6 +1401,8 @@ package struct DomainPersistenceCoordinator {
                 }),
                 contextTombstones: [:],
                 operations: [],
+                agentAdmissionRecoveryRecords: [],
+                agentAdmissionRecoveryGeneration: 0,
                 health: .writable,
                 fileMetadata: observedMetadata
             ), nil)
@@ -1305,22 +1584,195 @@ package struct DomainPersistenceCoordinator {
                     actual: durable.revisions.workingRevision
                 )
             }
-            let journal = DomainWorkingJournal(
-                workspaceID: durable.workspaceID,
-                fileURL: durable.fileURL,
-                revisions: durable.revisions,
-                savedDigest: durable.savedDigest,
-                workingDocument: durable.workingDocument,
-                contextRevisions: durable.contextRevisions,
-                contextDigests: durable.contextDigests,
-                contextTombstones: durable.contextTombstones,
+            let journal = copyingJournal(
+                durable,
                 operations: Self.trimmedOperations(durable.operations + [operation], now: now),
-                pendingSave: durable.pendingSave,
                 updatedAt: now
             )
             try DomainPersistenceLock.atomicWrite(encoder.encode(journal), to: journalURL(document.workspaceID))
             return DomainPersistenceWorkingCommit(journal: journal, catalogRevision: catalogRevision)
         }
+    }
+
+    private func upsertAgentAdmissionRecoveryRecordBlocking(
+        document: DomainWorkspaceDocument,
+        record: DomainAgentAdmissionRecoveryRecord,
+        now: Date
+    ) throws -> DomainAgentAdmissionRecoverySnapshot {
+        guard record.workspaceID == document.workspaceID else {
+            throw DomainPersistenceError.invalidWorkspaceDocument
+        }
+        try ensureLazyMigration(now: now)
+        return try withExistingWorkspaceLocks(document: document, now: now) { _ in
+            let durable = try readCurrentJournalOrSeed(document: document)
+            var records = durable.agentAdmissionRecoveryRecords ?? []
+            if let index = records.firstIndex(where: { $0.recoveryID == record.recoveryID }) {
+                guard records[index] == record else {
+                    throw DomainPersistenceError.operationIDCollision
+                }
+            } else {
+                records.append(record)
+                records.sort { $0.recoveryID.uuidString < $1.recoveryID.uuidString }
+            }
+            let journal = replacingAgentAdmissionRecoveryRecords(
+                in: durable,
+                with: records
+            )
+            try DomainPersistenceLock.atomicWrite(
+                encoder.encode(journal),
+                to: journalURL(document.workspaceID)
+            )
+            return DomainAgentAdmissionRecoverySnapshot(
+                records: records,
+                generation: journal.agentAdmissionRecoveryGeneration ?? 0
+            )
+        }
+    }
+
+    private func removeAgentAdmissionRecoveryRecordBlocking(
+        document: DomainWorkspaceDocument,
+        recoveryID: UUID,
+        expectedWorkingRevision: UInt64,
+        expectedContentDigest: String,
+        now: Date
+    ) throws -> DomainAgentAdmissionRecoverySnapshot {
+        try ensureLazyMigration(now: now)
+        return try withExistingWorkspaceLocks(document: document, now: now) { _ in
+            let durable = try readCurrentJournalOrSeed(document: document)
+            let currentDigest = durable.workingDocument.map(DomainContentDigest.sha256)
+                ?? durable.savedDigest
+            guard durable.revisions.workingRevision == expectedWorkingRevision,
+                  currentDigest == expectedContentDigest
+            else {
+                throw DomainPersistenceError.stateConflict(
+                    expected: expectedWorkingRevision,
+                    actual: durable.revisions.workingRevision
+                )
+            }
+            let records = (durable.agentAdmissionRecoveryRecords ?? []).filter {
+                $0.recoveryID != recoveryID
+            }
+            let journal = replacingAgentAdmissionRecoveryRecords(
+                in: durable,
+                with: records
+            )
+            try DomainPersistenceLock.atomicWrite(
+                encoder.encode(journal),
+                to: journalURL(document.workspaceID)
+            )
+            return DomainAgentAdmissionRecoverySnapshot(
+                records: records,
+                generation: journal.agentAdmissionRecoveryGeneration ?? 0
+            )
+        }
+    }
+
+    private func transitionAgentAdmissionRecoveryRecordBlocking(
+        document: DomainWorkspaceDocument,
+        expectedRecord: DomainAgentAdmissionRecoveryRecord,
+        phase: DomainAgentAdmissionRecoveryPhase,
+        dispatchKind: DomainAgentAdmissionDispatchKind?,
+        now: Date
+    ) throws -> DomainAgentAdmissionRecoverySnapshot {
+        guard expectedRecord.workspaceID == document.workspaceID else {
+            throw DomainPersistenceError.invalidWorkspaceDocument
+        }
+        try ensureLazyMigration(now: now)
+        return try withExistingWorkspaceLocks(document: document, now: now) { _ in
+            let durable = try readCurrentJournalOrSeed(document: document)
+            var records = durable.agentAdmissionRecoveryRecords ?? []
+            guard let index = records.firstIndex(where: { $0.recoveryID == expectedRecord.recoveryID }),
+                  records[index] == expectedRecord
+            else {
+                throw DomainPersistenceError.operationIDCollision
+            }
+            records[index] = expectedRecord.replacingPhase(phase, dispatchKind: dispatchKind)
+            let journal = replacingAgentAdmissionRecoveryRecords(in: durable, with: records)
+            try DomainPersistenceLock.atomicWrite(
+                encoder.encode(journal),
+                to: journalURL(document.workspaceID)
+            )
+            return DomainAgentAdmissionRecoverySnapshot(
+                records: records,
+                generation: journal.agentAdmissionRecoveryGeneration ?? 0
+            )
+        }
+    }
+
+    private func agentAdmissionRecoverySnapshotBlocking(
+        document: DomainWorkspaceDocument,
+        now: Date
+    ) throws -> DomainAgentAdmissionRecoverySnapshot {
+        try ensureLazyMigration(now: now)
+        return try withExistingWorkspaceLocks(document: document, now: now) { _ in
+            let journal = try readCurrentJournalOrSeed(document: document)
+            return DomainAgentAdmissionRecoverySnapshot(
+                records: journal.agentAdmissionRecoveryRecords ?? [],
+                generation: journal.agentAdmissionRecoveryGeneration ?? 0
+            )
+        }
+    }
+
+    private func tryAcquireAgentAdmissionDispatchLeaseBlocking(
+        workspaceID: UUID,
+        sessionID: UUID
+    ) throws -> DomainAgentAdmissionDispatchLease? {
+        try cancellation?.check()
+        let filename = "agent-admission-\(workspaceID.uuidString.lowercased())-\(sessionID.uuidString.lowercased()).lock"
+        return try DomainPersistenceLock.tryAcquireLease(
+            at: lockDirectory.appendingPathComponent(filename)
+        )
+    }
+
+    private func tryAcquireAgentAdmissionWorkspaceLeaseBlocking(
+        workspaceID: UUID
+    ) throws -> DomainAgentAdmissionDispatchLease? {
+        try cancellation?.check()
+        let filename = "agent-admission-workspace-\(workspaceID.uuidString.lowercased()).lock"
+        return try DomainPersistenceLock.tryAcquireLease(
+            at: lockDirectory.appendingPathComponent(filename)
+        )
+    }
+
+    private func replacingAgentAdmissionRecoveryRecords(
+        in journal: DomainWorkingJournal,
+        with records: [DomainAgentAdmissionRecoveryRecord]
+    ) -> DomainWorkingJournal {
+        copyingJournal(
+            journal,
+            agentAdmissionRecoveryRecords: records,
+            agentAdmissionRecoveryGeneration: (journal.agentAdmissionRecoveryGeneration ?? 0)
+                &+ ((journal.agentAdmissionRecoveryRecords ?? []) == records ? 0 : 1)
+        )
+    }
+
+    /// Metadata-only journal rewrites must retain crash-recovery state that they do not own.
+    private func copyingJournal(
+        _ journal: DomainWorkingJournal,
+        operations: [DomainRecordedOperation]? = nil,
+        agentAdmissionRecoveryRecords: [DomainAgentAdmissionRecoveryRecord]? = nil,
+        agentAdmissionRecoveryGeneration: UInt64? = nil,
+        updatedAt: Date? = nil
+    ) -> DomainWorkingJournal {
+        DomainWorkingJournal(
+            workspaceID: journal.workspaceID,
+            fileURL: journal.fileURL,
+            revisions: journal.revisions,
+            savedDigest: journal.savedDigest,
+            workingDocument: journal.workingDocument,
+            contextRevisions: journal.contextRevisions,
+            contextDigests: journal.contextDigests,
+            contextTombstones: journal.contextTombstones,
+            operations: operations ?? journal.operations,
+            agentAdmissionRecoveryRecords: agentAdmissionRecoveryRecords
+                ?? journal.agentAdmissionRecoveryRecords
+                ?? [],
+            agentAdmissionRecoveryGeneration: agentAdmissionRecoveryGeneration
+                ?? journal.agentAdmissionRecoveryGeneration
+                ?? 0,
+            pendingSave: journal.pendingSave,
+            updatedAt: updatedAt ?? journal.updatedAt
+        )
     }
 
     private func persistWorkingBlocking(
@@ -1330,6 +1782,7 @@ package struct DomainPersistenceCoordinator {
         contextRevisions: [UUID: DomainRevisionState],
         contextTombstones: [UUID: UInt64],
         operations: [DomainRecordedOperation],
+        agentAdmissionRecoveryRecord: DomainAgentAdmissionRecoveryRecord?,
         requiresMatchingConsolidationLifecycle: Bool,
         requiresMatchingSavedDigest: Bool,
         now: Date
@@ -1350,6 +1803,22 @@ package struct DomainPersistenceCoordinator {
                     requiresMatchingSavedDigest: requiresMatchingSavedDigest
                 )
             }
+            var recoveryRecords = durable.agentAdmissionRecoveryRecords ?? []
+            var recoveryGeneration = durable.agentAdmissionRecoveryGeneration ?? 0
+            if let recovery = agentAdmissionRecoveryRecord {
+                guard recovery.workspaceID == document.workspaceID else {
+                    throw DomainPersistenceError.invalidWorkspaceDocument
+                }
+                if let index = recoveryRecords.firstIndex(where: { $0.recoveryID == recovery.recoveryID }) {
+                    guard recoveryRecords[index] == recovery else {
+                        throw DomainPersistenceError.operationIDCollision
+                    }
+                } else {
+                    recoveryRecords.append(recovery)
+                    recoveryRecords.sort { $0.recoveryID.uuidString < $1.recoveryID.uuidString }
+                    recoveryGeneration &+= 1
+                }
+            }
             let journal = DomainWorkingJournal(
                 workspaceID: document.workspaceID,
                 fileURL: document.fileURL,
@@ -1362,6 +1831,8 @@ package struct DomainPersistenceCoordinator {
                 }),
                 contextTombstones: contextTombstones,
                 operations: Self.trimmedOperations(operations, now: now),
+                agentAdmissionRecoveryRecords: recoveryRecords,
+                agentAdmissionRecoveryGeneration: recoveryGeneration,
                 updatedAt: now
             )
             try DomainPersistenceLock.atomicWrite(encoder.encode(journal), to: journalURL(document.workspaceID))
@@ -1440,6 +1911,8 @@ package struct DomainPersistenceCoordinator {
                 }),
                 contextTombstones: contextTombstones,
                 operations: Self.trimmedOperations(operations, now: now),
+                agentAdmissionRecoveryRecords: durable.agentAdmissionRecoveryRecords ?? [],
+                agentAdmissionRecoveryGeneration: durable.agentAdmissionRecoveryGeneration ?? 0,
                 pendingSave: DomainPendingSave(
                     operationID: operationID,
                     documentDigest: document.contentDigest
@@ -1476,6 +1949,8 @@ package struct DomainPersistenceCoordinator {
                 }),
                 contextTombstones: contextTombstones,
                 operations: Self.trimmedOperations(operations, now: now),
+                agentAdmissionRecoveryRecords: durable.agentAdmissionRecoveryRecords ?? [],
+                agentAdmissionRecoveryGeneration: durable.agentAdmissionRecoveryGeneration ?? 0,
                 updatedAt: now
             )
             // The saved document is the authority point. Final sidecars are recoverable from
@@ -1541,6 +2016,8 @@ package struct DomainPersistenceCoordinator {
                 }),
                 contextTombstones: contextTombstones,
                 operations: Self.trimmedOperations(operations, now: now),
+                agentAdmissionRecoveryRecords: current.agentAdmissionRecoveryRecords ?? [],
+                agentAdmissionRecoveryGeneration: current.agentAdmissionRecoveryGeneration ?? 0,
                 updatedAt: now
             )
             try DomainPersistenceLock.atomicWrite(encoder.encode(journal), to: journalURL(document.workspaceID))
@@ -1595,6 +2072,8 @@ package struct DomainPersistenceCoordinator {
                 }),
                 contextTombstones: contextTombstones,
                 operations: Self.trimmedOperations(operations, now: now),
+                agentAdmissionRecoveryRecords: current.agentAdmissionRecoveryRecords ?? [],
+                agentAdmissionRecoveryGeneration: current.agentAdmissionRecoveryGeneration ?? 0,
                 updatedAt: now
             )
             try DomainPersistenceLock.atomicWrite(encoder.encode(journal), to: journalURL(document.workspaceID))
@@ -1850,6 +2329,8 @@ package struct DomainPersistenceCoordinator {
             contextDigests: journal.contextDigests,
             contextTombstones: journal.contextTombstones,
             operations: journal.operations,
+            agentAdmissionRecoveryRecords: journal.agentAdmissionRecoveryRecords ?? [],
+            agentAdmissionRecoveryGeneration: journal.agentAdmissionRecoveryGeneration ?? 0,
             updatedAt: journal.updatedAt
         ), document)
     }
@@ -1859,6 +2340,13 @@ package struct DomainPersistenceCoordinator {
         guard fileManager.fileExists(atPath: url.path) else { return .success(nil) }
         do {
             let journal = try decoder.decode(DomainWorkingJournal.self, from: Data(contentsOf: url))
+            var recoveryIDs = Set<UUID>()
+            guard (journal.agentAdmissionRecoveryRecords ?? []).allSatisfy({ record in
+                record.workspaceID == journal.workspaceID
+                    && recoveryIDs.insert(record.recoveryID).inserted
+            }) else {
+                throw DomainPersistenceError.corruptJournal
+            }
             return .success(journal)
         } catch {
             return .failure(error)
@@ -2091,6 +2579,28 @@ package struct DomainPersistenceCoordinator {
 private enum DomainPersistenceLock {
     private static let waitTimeoutNanoseconds: UInt64 = 2_000_000_000
     private static let retryDelayMicroseconds: useconds_t = 10000
+
+    static func tryAcquireLease(
+        at url: URL
+    ) throws -> DomainAgentAdmissionDispatchLease? {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let descriptor = open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            throw DomainPersistenceError.writeFailed("lock_open_failed_\(errno)")
+        }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            let lockError = errno
+            close(descriptor)
+            guard lockError == EWOULDBLOCK || lockError == EAGAIN else {
+                throw DomainPersistenceError.writeFailed("lock_acquire_failed_\(lockError)")
+            }
+            return nil
+        }
+        return DomainAgentAdmissionDispatchLease(descriptor: descriptor)
+    }
 
     static func withLock<T>(
         at url: URL,

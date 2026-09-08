@@ -270,6 +270,7 @@ struct AgentRunMCPToolService {
         var testBeforeSteerDispatch: (() async -> Void)?
         var testAfterSteerDispatchBeforeBookkeeping: ((AgentModeViewModel.MCPSessionTarget?) async throws -> Void)?
         var testAfterProviderStartBeforeBookkeeping: (() async -> Void)?
+        var testSteerAllowsStartingRunObserver: ((Bool) -> Void)?
         var testDispatchSteerInstruction: ((
             _ sessionID: UUID,
             _ text: String,
@@ -462,7 +463,8 @@ struct AgentRunMCPToolService {
             inheritWorktreeBindings: usesRoutedParentSource
                 ? false
                 : effectiveParentWorktreeInheritance,
-            expectedWorkspaceID: workspace.id
+            expectedWorkspaceID: workspace.id,
+            requiresProviderDispatchFence: true
         )
         guard let targetSessionID = target.sessionID else {
             await agentModeVM.mcpDiscardSessionTarget(target)
@@ -666,6 +668,7 @@ struct AgentRunMCPToolService {
         let outcome: AgentExternalMCPRunStarter.StartOutcome
         var lifecycleAdmissionAttempted = false
         var providerDispatchAttempted = false
+        var providerDispatchBoundaryEntered = false
         do {
             try await Self.requireWritableWorkspaceAuthority(
                 targetWindow.workspaceManager.domainAuthorityAdmissionIssue(for: workspace.id)
@@ -694,6 +697,15 @@ struct AgentRunMCPToolService {
                 }
             #endif
             WorktreeStartupInstrumentation.record(.providerStart, context: worktreeStartupContext)
+            try await agentModeVM.mcpMarkSessionTargetDispatchOutcomeUnknown(
+                target,
+                dispatchKind: .start
+            )
+            providerDispatchBoundaryEntered = true
+            try agentModeVM.requireCurrentMCPWorkspaceTarget(
+                target,
+                expectedWorkspaceID: workspace.id
+            )
             providerDispatchAttempted = true
             outcome = try await startRun(
                 target,
@@ -708,7 +720,8 @@ struct AgentRunMCPToolService {
                 spawnParentSessionID,
                 oracleLaunchSource.source
             )
-            agentModeVM.mcpAcceptSessionTarget(target)
+            try await agentModeVM.mcpAcceptSessionTarget(target, releaseReservation: false)
+            defer { agentModeVM.mcpFinishAcceptedSessionTargetDispatch(target) }
             agentModeVM.recordAgentSessionProviderLifecycle(
                 target: target,
                 phase: .afterProviderStart,
@@ -764,9 +777,17 @@ struct AgentRunMCPToolService {
                     )
                 }
             #endif
-            let discardResult = await agentModeVM.mcpDiscardSessionTarget(target)
+            let discardCompleted: Bool
+            if providerDispatchAttempted {
+                agentModeVM.mcpPreserveSessionTargetAfterUncertainDispatch(target)
+                discardCompleted = true
+            } else if providerDispatchBoundaryEntered {
+                discardCompleted = await agentModeVM.mcpAbortSessionTargetBeforeProviderDispatch(target) == .complete
+            } else {
+                discardCompleted = await agentModeVM.mcpDiscardSessionTarget(target) == .complete
+            }
             #if DEBUG
-                if worktreeStartupBenchmarkToken != nil, discardResult == .complete {
+                if worktreeStartupBenchmarkToken != nil, discardCompleted {
                     try? WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
                         correlationID: worktreeStartupCorrelationID,
                         phase: .discardCompleted,
@@ -985,7 +1006,22 @@ struct AgentRunMCPToolService {
         )
         let delivery: AgentModeViewModel.MCPInstructionDispatch
         let snapshot: AgentRunMCPSnapshot
+        var createdDispatchBoundaryInThisAttempt = false
+        var providerDispatchAttempted = false
+        let reconciliationKind = resolution.reactivatedTarget.flatMap {
+            agentModeVM.mcpSessionTargetDispatchOutcomeUnknownKind($0)
+        }
         do {
+            if reconciliationKind == .steer {
+                throw MCPError.invalidParams(
+                    "The previous steer delivery outcome is unknown and cannot be retried without provider idempotency."
+                )
+            }
+            if reconciliationKind == .start, !resolution.session.runState.isActive {
+                throw MCPError.invalidParams(
+                    "The Agent session has an unsettled provider start and no restored active run. Retry after the original provider session is restored."
+                )
+            }
             if let reactivatedTarget = resolution.reactivatedTarget {
                 guard let expectedWorkspaceID else {
                     throw MCPError.invalidParams(
@@ -998,14 +1034,47 @@ struct AgentRunMCPToolService {
                 )
             }
             if resolution.session.runState.isActive {
+                if let reactivatedTarget = resolution.reactivatedTarget {
+                    if reconciliationKind == nil {
+                        try await agentModeVM.mcpMarkSessionTargetDispatchOutcomeUnknown(
+                            reactivatedTarget,
+                            dispatchKind: .steer
+                        )
+                        createdDispatchBoundaryInThisAttempt = true
+                        guard let expectedWorkspaceID else {
+                            throw MCPError.invalidParams(
+                                "The active workspace changed before the Agent session could be steered."
+                            )
+                        }
+                        try agentModeVM.requireCurrentMCPWorkspaceTarget(
+                            reactivatedTarget,
+                            expectedWorkspaceID: expectedWorkspaceID
+                        )
+                    }
+                }
+                providerDispatchAttempted = true
                 delivery = try await dispatchSteerInstruction(
                     sessionID: sessionID,
                     text: text,
                     workflow: workflow,
-                    agentModeVM: agentModeVM
+                    agentModeVM: agentModeVM,
+                    allowStartingRun: reconciliationKind != .start
                 )
                 if let reactivatedTarget = resolution.reactivatedTarget {
-                    agentModeVM.mcpAcceptSessionTarget(reactivatedTarget)
+                    if reconciliationKind == .start, delivery == .startedRun {
+                        throw MCPError.internalError(
+                            "The Agent session dispatch could not be reconciled because the provider started a new run."
+                        )
+                    }
+                    try await agentModeVM.mcpAcceptSessionTarget(
+                        reactivatedTarget,
+                        releaseReservation: false
+                    )
+                }
+                defer {
+                    if let reactivatedTarget = resolution.reactivatedTarget {
+                        agentModeVM.mcpFinishAcceptedSessionTargetDispatch(reactivatedTarget)
+                    }
                 }
                 #if DEBUG
                     try await testAfterSteerDispatchBeforeBookkeeping?(resolution.reactivatedTarget)
@@ -1033,7 +1102,17 @@ struct AgentRunMCPToolService {
                                 reactivatedTarget,
                                 expectedWorkspaceID: expectedWorkspaceID
                             )
+                            try await agentModeVM.mcpMarkSessionTargetDispatchOutcomeUnknown(
+                                reactivatedTarget,
+                                dispatchKind: .steer
+                            )
+                            createdDispatchBoundaryInThisAttempt = true
+                            try agentModeVM.requireCurrentMCPWorkspaceTarget(
+                                reactivatedTarget,
+                                expectedWorkspaceID: expectedWorkspaceID
+                            )
                         }
+                        providerDispatchAttempted = true
                         let confirmedDelivery = try await dispatchSteerInstruction(
                             sessionID: sessionID,
                             text: text,
@@ -1041,7 +1120,15 @@ struct AgentRunMCPToolService {
                             agentModeVM: agentModeVM
                         )
                         if let reactivatedTarget = resolution.reactivatedTarget {
-                            agentModeVM.mcpAcceptSessionTarget(reactivatedTarget)
+                            try await agentModeVM.mcpAcceptSessionTarget(
+                                reactivatedTarget,
+                                releaseReservation: false
+                            )
+                        }
+                        defer {
+                            if let reactivatedTarget = resolution.reactivatedTarget {
+                                agentModeVM.mcpFinishAcceptedSessionTargetDispatch(reactivatedTarget)
+                            }
                         }
                         #if DEBUG
                             try await testAfterSteerDispatchBeforeBookkeeping?(resolution.reactivatedTarget)
@@ -1060,6 +1147,15 @@ struct AgentRunMCPToolService {
                 snapshot = await currentSnapshot(sessionID: sessionID, agentModeVM: agentModeVM)
             }
         } catch {
+            if let reactivatedTarget = resolution.reactivatedTarget {
+                if providerDispatchAttempted {
+                    agentModeVM.mcpPreserveSessionTargetAfterUncertainDispatch(reactivatedTarget)
+                } else if createdDispatchBoundaryInThisAttempt {
+                    _ = await agentModeVM.mcpAbortSessionTargetBeforeProviderDispatch(reactivatedTarget)
+                } else {
+                    _ = await agentModeVM.mcpDiscardSessionTarget(reactivatedTarget)
+                }
+            }
             if let identity = resolution.reactivatedControlIdentity {
                 await agentModeVM.mcpCleanupReactivatedControlContextIfCurrent(
                     sessionID: identity.sessionID,
@@ -1148,9 +1244,24 @@ struct AgentRunMCPToolService {
         expectedWorkspaceID: UUID?
     ) async throws -> SteerControlResolution {
         if let controlledSession = agentModeVM.mcpControlledSession(sessionID: sessionID) {
+            guard let expectedWorkspaceID else {
+                throw MCPError.invalidParams(
+                    "The active workspace changed before session_id '\(sessionID.uuidString)' could be fenced."
+                )
+            }
+            let dispatchTarget = try await agentModeVM.mcpResolveOrCreateSessionTarget(
+                tabID: controlledSession.tabID,
+                sessionID: sessionID,
+                createIfNeeded: false,
+                sessionName: nil,
+                inheritWorktreeBindings: false,
+                expectedWorkspaceID: expectedWorkspaceID,
+                requiresProviderDispatchFence: true,
+                allowsDispatchOutcomeUnknownReconciliation: true
+            )
             return SteerControlResolution(
                 session: controlledSession,
-                reactivatedTarget: nil,
+                reactivatedTarget: dispatchTarget,
                 reactivatedControlIdentity: nil
             )
         }
@@ -1175,7 +1286,9 @@ struct AgentRunMCPToolService {
             createIfNeeded: true,
             sessionName: nil,
             inheritWorktreeBindings: false,
-            expectedWorkspaceID: workspace.id
+            expectedWorkspaceID: workspace.id,
+            requiresProviderDispatchFence: true,
+            allowsDispatchOutcomeUnknownReconciliation: true
         )
         let session = await agentModeVM.ensureSessionReady(tabID: target.tabID)
         guard session.activeAgentSessionID == sessionID else {
@@ -1226,9 +1339,11 @@ struct AgentRunMCPToolService {
         sessionID: UUID,
         text: String,
         workflow: AgentWorkflowDefinition?,
-        agentModeVM: AgentModeViewModel
+        agentModeVM: AgentModeViewModel,
+        allowStartingRun: Bool = true
     ) async throws -> AgentModeViewModel.MCPInstructionDispatch {
         #if DEBUG
+            testSteerAllowsStartingRunObserver?(allowStartingRun)
             if let testDispatchSteerInstruction {
                 return try await testDispatchSteerInstruction(sessionID, text, workflow, agentModeVM)
             }
@@ -1236,7 +1351,7 @@ struct AgentRunMCPToolService {
         return try await agentModeVM.mcpDispatchInstruction(
             sessionID: sessionID,
             text: text,
-            allowStartingRun: true,
+            allowStartingRun: allowStartingRun,
             workflow: workflow
         )
     }

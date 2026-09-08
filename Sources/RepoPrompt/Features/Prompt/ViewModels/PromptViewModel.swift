@@ -3124,7 +3124,18 @@ class PromptViewModel: ObservableObject {
                     checkpoint: rollbackCheckpoint,
                     manager: manager
                 )
-                recoveryClaim.markComplete()
+                let markerSettled = await manager.completeProvisionalAgentAdmissionRecoveryIntent(
+                    provisionalIdentity,
+                    mutation: .removeTab
+                )
+                if markerSettled {
+                    recoveryClaim.markComplete()
+                } else if recoveryClaim.beginWorkspaceRecovery() {
+                    _ = await settleProvisionalAgentAdmissionRecovery(
+                        provisionalIdentity,
+                        manager: manager
+                    )
+                }
                 if isCancelled {
                     throw CancellationError()
                 }
@@ -3140,6 +3151,10 @@ class PromptViewModel: ObservableObject {
                     }
                     return .rejected(receipt, reason)
                 }
+                await rollbackProvisionalAgentSessionTab(
+                    checkpoint: rollbackCheckpoint,
+                    manager: manager
+                )
                 let recoveryOutcome = await settleProvisionalAgentAdmissionRecovery(
                     provisionalIdentity,
                     manager: manager
@@ -3156,10 +3171,6 @@ class PromptViewModel: ObservableObject {
                 await notifyAgentAdmissionRecoveryCompletedForTesting(
                     provisionalIdentity,
                     outcome: recoveryOutcome
-                )
-                await rollbackProvisionalAgentSessionTab(
-                    checkpoint: rollbackCheckpoint,
-                    manager: manager
                 )
                 if isCancelled {
                     throw CancellationError()
@@ -3229,8 +3240,17 @@ class PromptViewModel: ObservableObject {
             sessionID: identity.sessionID,
             reservationOwnerID: identity.recoveryID
         ) { [self, manager] in
-            defer { manager.finishProvisionalAgentAdmissionRecovery(identity) }
+            var shouldFinishWindowRecovery = true
+            defer {
+                if shouldFinishWindowRecovery {
+                    manager.finishProvisionalAgentAdmissionRecovery(identity)
+                }
+            }
             var priorOutcome = initialOutcome
+            var reachedOwnedWorkingCommit = false
+            if case let .retryablePartial(commit) = initialOutcome {
+                reachedOwnedWorkingCommit = commit.isCanonicallyConfirmed
+            }
             for attempt in 0 ..< 4 {
                 await waitForProvisionalAgentAdmissionRecoveryRetry(
                     attempt: attempt,
@@ -3240,7 +3260,8 @@ class PromptViewModel: ObservableObject {
                 do {
                     outcome = try await manager.withAgentSessionAdmission(
                         workspaceID: identity.workspaceID,
-                        admissionID: UUID()
+                        admissionID: UUID(),
+                        purpose: .recovery
                     ) {
                         await manager.recoverProvisionalAgentAdmission(identity)
                     }
@@ -3254,7 +3275,9 @@ class PromptViewModel: ObservableObject {
                         outcome: outcome
                     )
                     return
-                case .retryablePartial:
+                case let .retryablePartial(commit):
+                    reachedOwnedWorkingCommit = reachedOwnedWorkingCommit
+                        || commit.isCanonicallyConfirmed
                     priorOutcome = outcome
                     continue
                 case let .failed(category):
@@ -3269,9 +3292,25 @@ class PromptViewModel: ObservableObject {
                     return
                 }
             }
+            let requiresDurableMarker = switch priorOutcome {
+            case let .retryablePartial(commit):
+                !commit.isCanonicallyConfirmed
+            case let .failed(category):
+                category.isRetryableAgentAdmissionRecoveryFailure
+            case .recovered, .alreadyRecovered, .localOnly, .ownershipChanged:
+                false
+            }
+            var finalOutcome = priorOutcome
+            if !reachedOwnedWorkingCommit, requiresDurableMarker {
+                let persisted = await manager.persistPendingProvisionalAgentAdmissionRecovery(identity)
+                if !persisted {
+                    shouldFinishWindowRecovery = false
+                    finalOutcome = .failed(.durabilityUncertain)
+                }
+            }
             await notifyAgentAdmissionRecoveryCompletedForTesting(
                 identity,
-                outcome: priorOutcome
+                outcome: finalOutcome
             )
         }
     }
