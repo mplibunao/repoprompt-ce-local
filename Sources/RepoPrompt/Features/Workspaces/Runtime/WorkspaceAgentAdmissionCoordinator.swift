@@ -384,6 +384,20 @@ final class WorkspaceAgentAdmissionCoordinator: @unchecked Sendable {
         }
     }
 
+    func transitionRecoveryMarkerDispatchOutcomeUnknown(
+        recoveryID: UUID,
+        from expectedKind: DomainAgentAdmissionDispatchKind,
+        to dispatchKind: DomainAgentAdmissionDispatchKind
+    ) -> Bool {
+        lock.withLock {
+            guard recoveryMarkerReservations[recoveryID] != nil,
+                  dispatchOutcomeUnknownKindByRecoveryID[recoveryID] == expectedKind
+            else { return false }
+            dispatchOutcomeUnknownKindByRecoveryID[recoveryID] = dispatchKind
+            return true
+        }
+    }
+
     func dispatchOutcomeUnknownRecoveryID(
         workspaceID: UUID,
         sessionID: UUID

@@ -2444,6 +2444,327 @@ import XCTest
             window.workspaceManager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting(nil)
         }
 
+        func testUnknownStartReconciliationPersistsSteerFenceBeforeDelivery() async throws {
+            try await assertUnknownStartReconciliationPersistsSteerFenceBeforeDelivery()
+            try await assertUnknownStartReconciliationMarkerRetirementFailurePreservesSteerFence()
+        }
+
+        private func assertUnknownStartReconciliationPersistsSteerFenceBeforeDelivery() async throws {
+            let fixture = try await makeFixture()
+            let window = WindowState(domainRuntime: fixture.runtime)
+            WindowStatesManager.shared.registerWindowState(window)
+            defer {
+                window.workspaceManager.prepareForWindowClose()
+                WindowStatesManager.shared.unregisterWindowState(window)
+            }
+            let prepared = try await prepareUnknownStartReconciliation(window: window, fixture: fixture)
+            window.workspaceManager.setAgentAdmissionRecoveryMarkerTransitionHandlerForTesting { record in
+                XCTAssertEqual(record, prepared.unknownStartRecord)
+                let committed = await fixture.client.store.transitionAgentAdmissionRecoveryRecord(
+                    record,
+                    to: .dispatchOutcomeUnknown,
+                    dispatchKind: .steer
+                )
+                XCTAssertTrue(committed)
+                return false
+            }
+            defer {
+                window.workspaceManager.setAgentAdmissionRecoveryMarkerTransitionHandlerForTesting(nil)
+            }
+            let peerRecord = DomainAgentAdmissionRecoveryRecord(
+                recoveryID: UUID(),
+                workspaceID: fixture.workspaceA.id,
+                tabID: UUID(),
+                sessionID: UUID(),
+                replacementTabID: UUID(),
+                mutation: .removeMarker,
+                phase: .dispatchOutcomeUnknown,
+                dispatchKind: .start
+            )
+            let peerPublished = await fixture.client.store.upsertAgentAdmissionRecoveryRecord(peerRecord)
+            XCTAssertTrue(peerPublished)
+            var dispatchCount = 0
+            var steerAllowsStartingRun: [Bool] = []
+            var service = makeAgentRunStartService(window: window) {}
+            service.testSteerAllowsStartingRunObserver = { steerAllowsStartingRun.append($0) }
+            service.testDispatchSteerInstruction = { dispatchedSessionID, _, _, _ in
+                dispatchCount += 1
+                XCTAssertEqual(dispatchedSessionID, prepared.sessionID)
+                let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                    workspaceID: fixture.workspaceA.id
+                )
+                XCTAssertEqual(Set(pending.records), [prepared.unknownSteerRecord, peerRecord])
+                XCTAssertTrue(window.workspaceManager.workspace(withID: fixture.workspaceA.id)?.composeTabs.contains {
+                    $0.id == prepared.tabID && $0.activeAgentSessionID == prepared.sessionID
+                } == true)
+                return .dispatchedCodexTurn
+            }
+
+            _ = try await service.execute(args: steerArguments(sessionID: prepared.sessionID))
+
+            XCTAssertEqual(dispatchCount, 1)
+            XCTAssertEqual(steerAllowsStartingRun, [false])
+            let settled = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(settled.records, [peerRecord])
+            XCTAssertTrue(window.workspaceManager.workspace(withID: fixture.workspaceA.id)?.composeTabs.contains {
+                $0.id == prepared.tabID && $0.activeAgentSessionID == prepared.sessionID
+            } == true)
+        }
+
+        private func assertUnknownStartReconciliationMarkerRetirementFailurePreservesSteerFence() async throws {
+            let fixture = try await makeFixture()
+            let window = WindowState(domainRuntime: fixture.runtime)
+            WindowStatesManager.shared.registerWindowState(window)
+            defer {
+                window.workspaceManager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting(nil)
+                window.workspaceManager.prepareForWindowClose()
+                WindowStatesManager.shared.unregisterWindowState(window)
+            }
+            let prepared = try await prepareUnknownStartReconciliation(window: window, fixture: fixture)
+            var retirementAttempts = 0
+            window.workspaceManager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting { record, _, _ in
+                retirementAttempts += 1
+                XCTAssertEqual(record, prepared.unknownSteerRecord)
+                return .unavailable
+            }
+            var dispatchCount = 0
+            var service = makeAgentRunStartService(window: window) {}
+            service.testDispatchSteerInstruction = { _, _, _, _ in
+                dispatchCount += 1
+                return .dispatchedCodexTurn
+            }
+
+            do {
+                _ = try await service.execute(args: steerArguments(sessionID: prepared.sessionID))
+                XCTFail("A failed marker retirement must keep the reconciliation unsettled.")
+            } catch {}
+
+            XCTAssertEqual(dispatchCount, 1)
+            XCTAssertEqual(retirementAttempts, 1)
+            let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(pending.records, [prepared.unknownSteerRecord])
+            XCTAssertTrue(window.workspaceManager.workspace(withID: fixture.workspaceA.id)?.composeTabs.contains {
+                $0.id == prepared.tabID && $0.activeAgentSessionID == prepared.sessionID
+            } == true)
+        }
+
+        func testUnknownStartReconciliationPreDeliveryAbortPreservesInheritedUncertainty() async throws {
+            try await assertUnknownStartReconciliationTargetInvalidationPreservesInheritedUncertainty()
+            try await assertUnknownStartReconciliationCancellationPreservesInheritedUncertainty()
+        }
+
+        private func assertUnknownStartReconciliationTargetInvalidationPreservesInheritedUncertainty() async throws {
+            let fixture = try await makeFixture()
+            let window = WindowState(domainRuntime: fixture.runtime)
+            WindowStatesManager.shared.registerWindowState(window)
+            defer {
+                window.agentModeViewModel.test_setAfterMCPDispatchOutcomeUnknownMarker(nil)
+                window.workspaceManager.prepareForWindowClose()
+                WindowStatesManager.shared.unregisterWindowState(window)
+            }
+            let prepared = try await prepareUnknownStartReconciliation(window: window, fixture: fixture)
+            window.agentModeViewModel.test_setAfterMCPDispatchOutcomeUnknownMarker { _ in
+                guard let otherWorkspace = window.workspaceManager.workspace(withID: fixture.workspaceB.id) else {
+                    XCTFail("Expected the unrelated workspace to remain available.")
+                    return
+                }
+                await window.workspaceManager.switchWorkspace(
+                    to: otherWorkspace,
+                    saveState: false,
+                    reason: "unknownStartSteerPreDeliveryInvalidation"
+                )
+            }
+            var dispatchCount = 0
+            var service = makeAgentRunStartService(window: window) {}
+            service.testDispatchSteerInstruction = { _, _, _, _ in
+                dispatchCount += 1
+                return .dispatchedCodexTurn
+            }
+
+            do {
+                _ = try await service.execute(args: steerArguments(sessionID: prepared.sessionID))
+                XCTFail("Target invalidation after the durable transition must reject delivery.")
+            } catch {}
+
+            XCTAssertEqual(dispatchCount, 0)
+            let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(pending.records, [prepared.unknownSteerRecord])
+            let canonicalValue = await fixture.client.canonicalWorkspaceSnapshot(fixture.workspaceA.id)
+            let canonical = try WorkspaceManagerViewModel.decodeDomainWorkspaceProjection(
+                documentBytes: XCTUnwrap(canonicalValue).document.documentBytes,
+                fileURL: fixture.workspaceAURL
+            )
+            XCTAssertTrue(canonical.composeTabs.contains {
+                $0.id == prepared.tabID && $0.activeAgentSessionID == prepared.sessionID
+            })
+        }
+
+        private func assertUnknownStartReconciliationCancellationPreservesInheritedUncertainty() async throws {
+            let fixture = try await makeFixture()
+            let window = WindowState(domainRuntime: fixture.runtime)
+            WindowStatesManager.shared.registerWindowState(window)
+            let transitionGate = RecoveryInterleavingGate()
+            defer {
+                Task { await transitionGate.release() }
+                window.agentModeViewModel.test_setAfterMCPDispatchOutcomeUnknownMarker(nil)
+                window.workspaceManager.prepareForWindowClose()
+                WindowStatesManager.shared.unregisterWindowState(window)
+            }
+            let prepared = try await prepareUnknownStartReconciliation(window: window, fixture: fixture)
+            window.agentModeViewModel.test_setAfterMCPDispatchOutcomeUnknownMarker { _ in
+                await transitionGate.markStartedAndWaitForRelease()
+            }
+            var dispatchCount = 0
+            var service = makeAgentRunStartService(window: window) {}
+            service.testDispatchSteerInstruction = { _, _, _, _ in
+                dispatchCount += 1
+                return .dispatchedCodexTurn
+            }
+            let steerTask = Task { @MainActor in
+                try await service.execute(args: steerArguments(sessionID: prepared.sessionID))
+            }
+            await transitionGate.waitUntilStarted()
+            steerTask.cancel()
+            await transitionGate.release()
+
+            do {
+                _ = try await steerTask.value
+                XCTFail("Cancellation after the durable transition must reject delivery.")
+            } catch {}
+
+            XCTAssertEqual(dispatchCount, 0)
+            let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(pending.records, [prepared.unknownSteerRecord])
+            XCTAssertTrue(window.workspaceManager.workspace(withID: fixture.workspaceA.id)?.composeTabs.contains {
+                $0.id == prepared.tabID && $0.activeAgentSessionID == prepared.sessionID
+            } == true)
+        }
+
+        func testUnknownStartReconciliationLostDeliveryResponseRejectsSecondSteer() async throws {
+            let fixture = try await makeFixture()
+            let window = WindowState(domainRuntime: fixture.runtime)
+            WindowStatesManager.shared.registerWindowState(window)
+            defer {
+                window.workspaceManager.prepareForWindowClose()
+                WindowStatesManager.shared.unregisterWindowState(window)
+            }
+            let prepared = try await prepareUnknownStartReconciliation(window: window, fixture: fixture)
+            var dispatchCount = 0
+            var service = makeAgentRunStartService(window: window) {}
+            service.testDispatchSteerInstruction = { _, _, _, _ in
+                dispatchCount += 1
+                throw NSError(
+                    domain: "AgentAdmissionRecoveryTests.LostSteerResponse",
+                    code: 1
+                )
+            }
+
+            do {
+                _ = try await service.execute(args: steerArguments(sessionID: prepared.sessionID))
+                XCTFail("The synthetic lost response must reject the request.")
+            } catch {}
+            XCTAssertEqual(dispatchCount, 1)
+
+            let freshRuntime = try await makeRestartedRuntime(fixture)
+            let freshWindow = WindowState(domainRuntime: freshRuntime)
+            WindowStatesManager.shared.registerWindowState(freshWindow)
+            defer {
+                freshWindow.workspaceManager.prepareForWindowClose()
+                WindowStatesManager.shared.unregisterWindowState(freshWindow)
+            }
+            await freshWindow.workspaceManager.awaitInitialized()
+            let freshWorkspace = try XCTUnwrap(
+                freshWindow.workspaceManager.workspace(withID: fixture.workspaceA.id)
+            )
+            await freshWindow.workspaceManager.switchWorkspace(
+                to: freshWorkspace,
+                saveState: false,
+                reason: "unknownSteerFreshRuntimeReconstruction"
+            )
+            freshWindow.promptManager.loadComposeTabsFromWorkspace(
+                freshWorkspace,
+                syncPromptText: true
+            )
+            let freshClient = DomainWorkspaceAuthorityClient(
+                store: freshRuntime.workspaceStore,
+                windowID: -884
+            )
+            let reconstructed = await freshClient.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(reconstructed.records, [prepared.unknownSteerRecord])
+            XCTAssertTrue(freshWindow.workspaceManager.workspace(withID: fixture.workspaceA.id)?.composeTabs.contains {
+                $0.id == prepared.tabID && $0.activeAgentSessionID == prepared.sessionID
+            } == true)
+
+            var freshService = makeAgentRunStartService(window: freshWindow) {}
+            freshService.testDispatchSteerInstruction = { _, _, _, _ in
+                dispatchCount += 1
+                return .dispatchedCodexTurn
+            }
+            do {
+                _ = try await freshService.execute(args: steerArguments(sessionID: prepared.sessionID))
+                XCTFail("A later attempt must not redeliver an unknown steer.")
+            } catch {
+                XCTAssertTrue(
+                    error.localizedDescription.contains("previous steer delivery outcome is unknown"),
+                    error.localizedDescription
+                )
+            }
+            XCTAssertEqual(dispatchCount, 1)
+            let retained = await freshClient.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(retained.records, [prepared.unknownSteerRecord])
+        }
+
+        func testUnknownStartReconciliationTransitionFailureDispatchesNoInstruction() async throws {
+            let fixture = try await makeFixture()
+            let window = WindowState(domainRuntime: fixture.runtime)
+            WindowStatesManager.shared.registerWindowState(window)
+            defer {
+                window.workspaceManager.setAgentAdmissionRecoveryMarkerTransitionHandlerForTesting(nil)
+                window.workspaceManager.prepareForWindowClose()
+                WindowStatesManager.shared.unregisterWindowState(window)
+            }
+            let prepared = try await prepareUnknownStartReconciliation(window: window, fixture: fixture)
+            var transitionCount = 0
+            window.workspaceManager.setAgentAdmissionRecoveryMarkerTransitionHandlerForTesting { record in
+                transitionCount += 1
+                XCTAssertEqual(record, prepared.unknownStartRecord)
+                return false
+            }
+            var dispatchCount = 0
+            var service = makeAgentRunStartService(window: window) {}
+            service.testDispatchSteerInstruction = { _, _, _, _ in
+                dispatchCount += 1
+                return .dispatchedCodexTurn
+            }
+
+            do {
+                _ = try await service.execute(args: steerArguments(sessionID: prepared.sessionID))
+                XCTFail("A failed exact-record transition must reject delivery.")
+            } catch {}
+
+            XCTAssertEqual(transitionCount, 1)
+            XCTAssertEqual(dispatchCount, 0)
+            let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(pending.records, [prepared.unknownStartRecord])
+            XCTAssertTrue(window.workspaceManager.workspace(withID: fixture.workspaceA.id)?.composeTabs.contains {
+                $0.id == prepared.tabID && $0.activeAgentSessionID == prepared.sessionID
+            } == true)
+        }
+
         func testLifecycleMutationAfterDispatchMarkerPreventsProviderStartAndCleansRecovery() async throws {
             let fixture = try await makeFixture()
             let window = WindowState(domainRuntime: fixture.runtime)
@@ -5917,6 +6238,91 @@ import XCTest
                     $0.activeAgentSessionID == fixture.identity.sessionID
                 })
             }
+        }
+
+        private struct UnknownStartReconciliationFixture {
+            let tabID: UUID
+            let sessionID: UUID
+            let unknownStartRecord: DomainAgentAdmissionRecoveryRecord
+
+            var unknownSteerRecord: DomainAgentAdmissionRecoveryRecord {
+                unknownStartRecord.replacingPhase(
+                    .dispatchOutcomeUnknown,
+                    dispatchKind: .steer
+                )
+            }
+        }
+
+        private func prepareUnknownStartReconciliation(
+            window: WindowState,
+            fixture: Fixture
+        ) async throws -> UnknownStartReconciliationFixture {
+            await window.workspaceManager.awaitInitialized()
+            let workspace = try XCTUnwrap(window.workspaceManager.workspace(withID: fixture.workspaceA.id))
+            await window.workspaceManager.switchWorkspace(
+                to: workspace,
+                saveState: false,
+                reason: "prepareUnknownStartReconciliation"
+            )
+            window.promptManager.loadComposeTabsFromWorkspace(workspace, syncPromptText: true)
+            await window.workspaceManager.debugPublishWorkingDocumentToDomainAuthority(workspace)
+            window.workspaceManager.markWorkspaceDirty(workspaceID: workspace.id)
+            let baselineSave = await window.workspaceManager.pollAndSaveStateWithOutcomeAsync(
+                workspaceID: workspace.id,
+                source: WorkspaceSaveSource("unknownStartReconciliationBaseline")
+            )
+            XCTAssertTrue(baselineSave.acceptedForLifecycleAdmission)
+            let target = try await window.agentModeViewModel.mcpResolveOrCreateSessionTarget(
+                tabID: nil,
+                sessionID: nil,
+                createIfNeeded: true,
+                sessionName: "Unknown start reconciliation",
+                expectedWorkspaceID: workspace.id,
+                requiresProviderDispatchFence: true
+            )
+            let identity = try XCTUnwrap(target.recoveryClaim?.identity)
+            try await window.agentModeViewModel.mcpMarkSessionTargetDispatchOutcomeUnknown(
+                target,
+                dispatchKind: .start
+            )
+            window.agentModeViewModel.mcpPreserveSessionTargetAfterUncertainDispatch(target)
+            let session = window.agentModeViewModel.session(for: target.tabID)
+            _ = window.agentModeViewModel.test_installPersistentSessionBinding(
+                sessionID: identity.sessionID,
+                on: session
+            )
+            session.runState = .running
+            window.agentModeViewModel.publishMCPStateChange(for: session)
+            try await window.agentModeViewModel.mcpActivateControlContext(
+                forTabID: target.tabID,
+                sessionID: identity.sessionID,
+                originatingConnectionID: nil,
+                startPending: false,
+                markSessionAsMCPOriginated: false,
+                requireInactiveRunState: false
+            )
+            let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: workspace.id
+            )
+            let unknownStart = try XCTUnwrap(pending.records.first(where: {
+                $0.recoveryID == identity.recoveryID
+            }))
+            XCTAssertEqual(unknownStart.phase, .dispatchOutcomeUnknown)
+            XCTAssertEqual(unknownStart.dispatchKind, .start)
+            return UnknownStartReconciliationFixture(
+                tabID: target.tabID,
+                sessionID: identity.sessionID,
+                unknownStartRecord: unknownStart
+            )
+        }
+
+        private func steerArguments(sessionID: UUID) -> [String: Value] {
+            [
+                "op": .string("steer"),
+                "session_id": .string(sessionID.uuidString),
+                "message": .string("reconcile the exact restored Agent session"),
+                "wait": .bool(false)
+            ]
         }
 
         private func makeAgentRunStartService(

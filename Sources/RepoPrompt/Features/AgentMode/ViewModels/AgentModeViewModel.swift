@@ -7639,7 +7639,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     tabID: record.tabID,
                     sessionID: record.sessionID,
                     replacementTabID: record.replacementTabID
-                )
+                ),
+                dispatchOutcomeUnknownKind: record.dispatchKind
             ) else {
                 throw MCPError.invalidParams(
                     "The Agent session dispatch recovery boundary changed before reconciliation."
@@ -9006,6 +9007,43 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
         }
         dispatchOutcomeUnknownKindByRecoveryID[recoveryID] = dispatchKind
+        #if DEBUG
+            await test_afterMCPDispatchOutcomeUnknownMarker?(target)
+        #endif
+    }
+
+    func mcpTransitionSessionTargetDispatchFromUnknownStartToUnknownSteer(
+        _ target: MCPSessionTarget
+    ) async throws {
+        guard let claim = target.recoveryClaim else {
+            throw MCPError.internalError(
+                "The Agent session dispatch could not be reconciled because its recovery identity is unavailable."
+            )
+        }
+        try requireCurrentMCPWorkspaceTarget(
+            target,
+            expectedWorkspaceID: claim.identity.workspaceID
+        )
+        let recoveryID = claim.identity.recoveryID
+        guard dispatchOutcomeUnknownRecoveryIDs.contains(recoveryID),
+              dispatchOutcomeUnknownKindByRecoveryID[recoveryID] == .start
+        else {
+            throw MCPError.internalError(
+                "The Agent session dispatch recovery boundary changed before reconciliation."
+            )
+        }
+        let mutation = mcpSessionTargetRecoveryMutation(recoveryID: recoveryID)
+        guard let workspaceManager,
+              await workspaceManager.transitionProvisionalAgentAdmissionDispatchFromUnknownStartToUnknownSteer(
+                  claim.identity,
+                  mutation: mutation
+              )
+        else {
+            throw MCPError.internalError(
+                "The Agent session dispatch recovery boundary could not be transitioned for reconciliation."
+            )
+        }
+        dispatchOutcomeUnknownKindByRecoveryID[recoveryID] = .steer
         #if DEBUG
             await test_afterMCPDispatchOutcomeUnknownMarker?(target)
         #endif

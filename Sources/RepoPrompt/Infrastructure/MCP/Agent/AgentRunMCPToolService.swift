@@ -1007,6 +1007,7 @@ struct AgentRunMCPToolService {
         let delivery: AgentModeViewModel.MCPInstructionDispatch
         let snapshot: AgentRunMCPSnapshot
         var createdDispatchBoundaryInThisAttempt = false
+        var transitionedReconciliationBoundary = false
         var providerDispatchAttempted = false
         let reconciliationKind = resolution.reactivatedTarget.flatMap {
             agentModeVM.mcpSessionTargetDispatchOutcomeUnknownKind($0)
@@ -1035,7 +1036,12 @@ struct AgentRunMCPToolService {
             }
             if resolution.session.runState.isActive {
                 if let reactivatedTarget = resolution.reactivatedTarget {
-                    if reconciliationKind == nil {
+                    if reconciliationKind == .start {
+                        try await agentModeVM.mcpTransitionSessionTargetDispatchFromUnknownStartToUnknownSteer(
+                            reactivatedTarget
+                        )
+                        transitionedReconciliationBoundary = true
+                    } else if reconciliationKind == nil {
                         try await agentModeVM.mcpMarkSessionTargetDispatchOutcomeUnknown(
                             reactivatedTarget,
                             dispatchKind: .steer
@@ -1051,6 +1057,16 @@ struct AgentRunMCPToolService {
                             expectedWorkspaceID: expectedWorkspaceID
                         )
                     }
+                }
+                try Task.checkCancellation()
+                if reconciliationKind == .start,
+                   let reactivatedTarget = resolution.reactivatedTarget,
+                   let expectedWorkspaceID
+                {
+                    try agentModeVM.requireCurrentMCPWorkspaceTarget(
+                        reactivatedTarget,
+                        expectedWorkspaceID: expectedWorkspaceID
+                    )
                 }
                 providerDispatchAttempted = true
                 delivery = try await dispatchSteerInstruction(
@@ -1148,7 +1164,7 @@ struct AgentRunMCPToolService {
             }
         } catch {
             if let reactivatedTarget = resolution.reactivatedTarget {
-                if providerDispatchAttempted {
+                if providerDispatchAttempted || transitionedReconciliationBoundary {
                     agentModeVM.mcpPreserveSessionTargetAfterUncertainDispatch(reactivatedTarget)
                 } else if createdDispatchBoundaryInThisAttempt {
                     _ = await agentModeVM.mcpAbortSessionTargetBeforeProviderDispatch(reactivatedTarget)

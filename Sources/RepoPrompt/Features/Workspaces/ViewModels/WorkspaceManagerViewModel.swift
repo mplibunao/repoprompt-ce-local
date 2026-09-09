@@ -722,6 +722,8 @@ class WorkspaceManagerViewModel: ObservableObject {
             (@MainActor (UUID) async -> Bool)?
         private var agentAdmissionRecoveryMarkerPersistenceHandlerForTesting:
             (@MainActor (DomainAgentAdmissionRecoveryRecord, Int) async -> Bool)?
+        private var agentAdmissionRecoveryMarkerTransitionHandlerForTesting:
+            (@MainActor (DomainAgentAdmissionRecoveryRecord) async -> Bool)?
         private var agentAdmissionRecoveryMarkerRemovalHandlerForTesting:
             (@MainActor (
                 DomainAgentAdmissionRecoveryRecord,
@@ -1051,6 +1053,12 @@ class WorkspaceManagerViewModel: ObservableObject {
             _ handler: (@MainActor (DomainAgentAdmissionRecoveryRecord, Int) async -> Bool)?
         ) {
             agentAdmissionRecoveryMarkerPersistenceHandlerForTesting = handler
+        }
+
+        func setAgentAdmissionRecoveryMarkerTransitionHandlerForTesting(
+            _ handler: (@MainActor (DomainAgentAdmissionRecoveryRecord) async -> Bool)?
+        ) {
+            agentAdmissionRecoveryMarkerTransitionHandlerForTesting = handler
         }
 
         func setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting(
@@ -8471,12 +8479,18 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     func activateProvisionalAgentAdmissionRecoveryIntent(
-        _ identity: AgentProvisionalAdmissionIdentity
+        _ identity: AgentProvisionalAdmissionIdentity,
+        dispatchOutcomeUnknownKind: DomainAgentAdmissionDispatchKind? = nil
     ) -> Bool {
-        workspaceAgentAdmissionCoordinator.retainRecoveryMarkerReservation(
+        guard workspaceAgentAdmissionCoordinator.retainRecoveryMarkerReservation(
             recoveryID: identity.recoveryID,
             workspaceID: identity.workspaceID,
             sessionID: identity.sessionID
+        ) else { return false }
+        guard let dispatchOutcomeUnknownKind else { return true }
+        return workspaceAgentAdmissionCoordinator.markRecoveryMarkerDispatchOutcomeUnknown(
+            recoveryID: identity.recoveryID,
+            dispatchKind: dispatchOutcomeUnknownKind
         )
     }
 
@@ -8527,6 +8541,68 @@ class WorkspaceManagerViewModel: ObservableObject {
         _ = workspaceAgentAdmissionCoordinator.markRecoveryMarkerDispatchOutcomeUnknown(
             recoveryID: identity.recoveryID,
             dispatchKind: dispatchKind
+        )
+        return true
+    }
+
+    func transitionProvisionalAgentAdmissionDispatchFromUnknownStartToUnknownSteer(
+        _ identity: AgentProvisionalAdmissionIdentity,
+        mutation: DomainAgentAdmissionRecoveryMutation
+    ) async -> Bool {
+        guard let workspace = workspace(withID: identity.workspaceID) else { return false }
+        if workspace.isEphemeral {
+            return workspaceAgentAdmissionCoordinator.transitionRecoveryMarkerDispatchOutcomeUnknown(
+                recoveryID: identity.recoveryID,
+                from: .start,
+                to: .steer
+            )
+        }
+        guard let client = domainWorkspaceAuthorityClient else { return false }
+        let discovery = await client.store.pendingAgentAdmissionRecoveryRecords(
+            workspaceID: identity.workspaceID
+        )
+        guard !discovery.unavailableWorkspaceIDs.contains(identity.workspaceID),
+              let unknownStart = discovery.records.first(where: {
+                  Self.recoveryRecord($0, matches: identity, mutation: mutation)
+                      && $0.phase == .dispatchOutcomeUnknown
+                      && $0.dispatchKind == .start
+              })
+        else { return false }
+        let unknownSteer = unknownStart.replacingPhase(
+            .dispatchOutcomeUnknown,
+            dispatchKind: .steer
+        )
+        let transitioned: Bool
+        #if DEBUG
+            if let agentAdmissionRecoveryMarkerTransitionHandlerForTesting {
+                transitioned = await agentAdmissionRecoveryMarkerTransitionHandlerForTesting(unknownStart)
+            } else {
+                transitioned = await client.store.transitionAgentAdmissionRecoveryRecord(
+                    unknownStart,
+                    to: .dispatchOutcomeUnknown,
+                    dispatchKind: .steer
+                )
+            }
+        #else
+            transitioned = await client.store.transitionAgentAdmissionRecoveryRecord(
+                unknownStart,
+                to: .dispatchOutcomeUnknown,
+                dispatchKind: .steer
+            )
+        #endif
+        if !transitioned {
+            let refreshed = await client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: identity.workspaceID
+            )
+            guard !refreshed.unavailableWorkspaceIDs.contains(identity.workspaceID),
+                  refreshed.records.contains(unknownSteer)
+            else { return false }
+        }
+        // Durable state is authoritative once the exact transition commits. A missing local
+        // reservation cannot downgrade the result to an abortable pre-dispatch boundary.
+        _ = workspaceAgentAdmissionCoordinator.markRecoveryMarkerDispatchOutcomeUnknown(
+            recoveryID: identity.recoveryID,
+            dispatchKind: .steer
         )
         return true
     }
