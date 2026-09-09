@@ -6,8 +6,8 @@ import Foundation
 /// only user-configurable external fallback is an absolute path supplied through
 /// `REPOPROMPT_CODEX_EXECUTABLE`; ordinary PATH lookup is intentionally not consulted.
 enum CodexRuntimeAuthority {
-    static let bundledVersion = Version(major: 0, minor: 149, patch: 0)
-    static let minimumExternalVersion = bundledVersion
+    static let bundledVersion = Version(major: 0, minor: 153, patch: 4)
+    static let minimumExternalVersion = Version(major: 0, minor: 149, patch: 0)
     static let externalExecutableOverrideEnvironmentKey = "REPOPROMPT_CODEX_EXECUTABLE"
 
     enum Source: Equatable {
@@ -93,9 +93,9 @@ enum CodexRuntimeAuthority {
             case let .externalOverrideNotExecutable(path):
                 "RepoPrompt could not start Codex: the configured external override is not an executable file at `\(path)`. Fix or remove \(externalExecutableOverrideEnvironmentKey)."
             case let .externalOverrideVersionUnreadable(path):
-                "RepoPrompt could not start Codex: the external override at `\(path)` did not report a compatible Codex version. Version \(minimumExternalVersion) or newer is required by RepoPrompt's app-server contract."
+                "RepoPrompt could not start Codex: the external override at `\(path)` did not report a compatible Codex version. Version \(minimumExternalVersion) or newer is required by RepoPrompt's external-runtime admission policy."
             case let .externalOverrideTooOld(actual, minimum):
-                "RepoPrompt could not start Codex: external override version \(actual) is too old. Version \(minimum) or newer is required by RepoPrompt's app-server contract; update the explicit override or remove \(externalExecutableOverrideEnvironmentKey) to use bundled Codex \(bundledVersion)."
+                "RepoPrompt could not start Codex: external override version \(actual) is too old. Version \(minimum) or newer is required by RepoPrompt's external-runtime admission policy; update the explicit override or remove \(externalExecutableOverrideEnvironmentKey) to use bundled Codex \(bundledVersion)."
             }
         }
     }

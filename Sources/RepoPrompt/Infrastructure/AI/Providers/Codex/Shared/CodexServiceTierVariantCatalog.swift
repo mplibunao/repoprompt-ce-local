@@ -10,7 +10,7 @@ enum CodexServiceTierVariantCatalog {
     }
 
     private static func gptVersion(from baseModelID: String) -> (major: Int, minor: Int)? {
-        let normalized = baseModelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalized = CodexModelIdentity.key(baseModelID)
         guard normalized.hasPrefix("gpt-") else { return nil }
 
         let versionStart = normalized.index(normalized.startIndex, offsetBy: 4)
@@ -67,13 +67,21 @@ enum CodexServiceTierVariantCatalog {
 
     static func fastVariantID(
         baseModelID: String,
-        reasoningEffort: CodexReasoningEffort?
+        reasoningEffort: CodexReasoningEffort?,
+        discoveredRecords: @autoclosure () -> [CodexDynamicModelRecord] = CodexDynamicModelStore.load()
     ) -> String? {
         let baseModelID = baseModelID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !baseModelID.isEmpty, isFastEligible(baseModelID: baseModelID) else { return nil }
-        if let reasoningEffort {
-            return "\(baseModelID)-\(fastServiceTier)-\(reasoningEffort.rawValue)"
+
+        let variantID = if let reasoningEffort {
+            "\(baseModelID)-\(fastServiceTier)-\(reasoningEffort.rawValue)"
+        } else {
+            "\(baseModelID)-\(fastServiceTier)"
         }
-        return "\(baseModelID)-\(fastServiceTier)"
+        // Synthetic Fast options must never shadow an exact runtime-advertised identity.
+        guard !discoveredRecords().contains(where: {
+            CodexModelIdentity.key($0.id) == CodexModelIdentity.key(variantID)
+        }) else { return nil }
+        return variantID
     }
 }

@@ -40,66 +40,80 @@ final class AgentCodexModelRegistry {
         if let preferredLiveModels {
             if !preferredLiveModels.isEmpty {
                 return resolvedOptions(
-                    dynamicOptions: codexDynamicOptions(from: preferredLiveModels),
+                    dynamicRecords: CodexDynamicModelStore.canonicalRecords(from: preferredLiveModels),
                     staticOptions: staticOptions
                 )
             }
-            let cachedOptions = CodexDynamicModelStore.modelOptions()
-            if !cachedOptions.isEmpty {
+            let cachedRecords = CodexDynamicModelStore.load()
+            if !cachedRecords.isEmpty {
                 return resolvedOptions(
-                    dynamicOptions: codexDynamicOptions(from: cachedOptions),
+                    dynamicRecords: cachedRecords,
                     staticOptions: staticOptions
                 )
             }
-            return codexOptionsByAddingFastVariants(staticOptions)
+            return codexOptionsByAddingFastVariants(staticOptions, discoveredRecords: [])
         }
 
         let knownLiveModels = currentLiveModels()
         if !knownLiveModels.isEmpty {
             return resolvedOptions(
-                dynamicOptions: codexDynamicOptions(from: knownLiveModels),
+                dynamicRecords: CodexDynamicModelStore.canonicalRecords(from: knownLiveModels),
                 staticOptions: staticOptions
             )
         }
 
-        let cachedOptions = CodexDynamicModelStore.modelOptions()
-        if !cachedOptions.isEmpty {
+        let cachedRecords = CodexDynamicModelStore.load()
+        if !cachedRecords.isEmpty {
             return resolvedOptions(
-                dynamicOptions: codexDynamicOptions(from: cachedOptions),
+                dynamicRecords: cachedRecords,
                 staticOptions: staticOptions
             )
         }
 
-        return codexOptionsByAddingFastVariants(staticOptions)
+        return codexOptionsByAddingFastVariants(staticOptions, discoveredRecords: [])
     }
 
     private func resolvedOptions(
-        dynamicOptions: [AgentModelOption],
+        dynamicRecords: [CodexDynamicModelRecord],
         staticOptions: [AgentModelOption]
     ) -> [AgentModelOption] {
-        let dynamicOptionsWithFastVariants = codexOptionsByAddingFastVariants(dynamicOptions)
-        let staticOptionsWithFastVariants = codexOptionsByAddingFastVariants(staticOptions)
+        let dynamicOptions = codexDynamicOptions(from: CodexDynamicModelMapper.options(from: dynamicRecords))
+        let dynamicOptionsWithFastVariants = codexOptionsByAddingFastVariants(
+            dynamicOptions,
+            discoveredRecords: dynamicRecords
+        )
+        let staticOptionsWithFastVariants = codexOptionsByAddingFastVariants(
+            staticOptions,
+            discoveredRecords: dynamicRecords
+        )
         if shouldBackfillRecommendedDefaults(dynamicOptionsWithFastVariants) {
             return mergeCodexOptions(primary: dynamicOptionsWithFastVariants, fallback: staticOptionsWithFastVariants)
         }
         return dynamicOptionsWithFastVariants
     }
 
-    private func codexOptionsByAddingFastVariants(_ options: [AgentModelOption]) -> [AgentModelOption] {
-        options + synthesizedFastAgentOptions(from: options)
+    private func codexOptionsByAddingFastVariants(
+        _ options: [AgentModelOption],
+        discoveredRecords: [CodexDynamicModelRecord]
+    ) -> [AgentModelOption] {
+        options + synthesizedFastAgentOptions(from: options, discoveredRecords: discoveredRecords)
     }
 
-    private func synthesizedFastAgentOptions(from options: [AgentModelOption]) -> [AgentModelOption] {
+    private func synthesizedFastAgentOptions(
+        from options: [AgentModelOption],
+        discoveredRecords: [CodexDynamicModelRecord]
+    ) -> [AgentModelOption] {
         var synthesized: [AgentModelOption] = []
         var seen = Set(options.map { $0.rawValue.lowercased() })
 
         for option in options where !option.isPlaceholderDefault {
-            let specifier = CodexModelSpecifier(raw: option.rawValue)
+            let specifier = CodexModelSpecifier(raw: option.rawValue, discoveredRecords: discoveredRecords)
             guard specifier.serviceTier == nil,
                   let baseModel = specifier.baseModel,
                   let fastID = CodexServiceTierVariantCatalog.fastVariantID(
                       baseModelID: baseModel,
-                      reasoningEffort: specifier.reasoningEffort
+                      reasoningEffort: specifier.reasoningEffort,
+                      discoveredRecords: discoveredRecords
                   ) else { continue }
             guard seen.insert(fastID.lowercased()).inserted else { continue }
 
@@ -132,12 +146,6 @@ final class AgentCodexModelRegistry {
         let trimmed = description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else { return CodexServiceTierVariantCatalog.fastCostWarningText }
         return "\(trimmed) \(CodexServiceTierVariantCatalog.fastCostWarningText)"
-    }
-
-    private func codexDynamicOptions(
-        from models: [CodexAppServerClient.RemoteModel]
-    ) -> [AgentModelOption] {
-        codexDynamicOptions(from: CodexDynamicModelMapper.options(from: models))
     }
 
     private func codexDynamicOptions(

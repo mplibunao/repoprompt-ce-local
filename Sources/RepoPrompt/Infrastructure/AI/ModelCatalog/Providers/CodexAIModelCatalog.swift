@@ -1,5 +1,11 @@
 import Foundation
 
+enum CodexModelIdentity {
+    static func key(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
 struct CodexDynamicReasoningRecord: Codable, Hashable {
     let reasoningEffort: String
     let description: String
@@ -90,6 +96,7 @@ enum CodexDynamicModelMapper {
     static func options(from records: [CodexDynamicModelRecord]) -> [CodexDynamicModelOption] {
         var options: [CodexDynamicModelOption] = []
         var seen = Set<String>()
+        let advertisedIDs = Set(records.map { CodexModelIdentity.key($0.id) }.filter { !$0.isEmpty })
 
         for record in records {
             let baseID = normalizeID(record.id)
@@ -101,7 +108,11 @@ enum CodexDynamicModelMapper {
                 fallbackID: baseID
             )
             let baseDescription = record.description.trimmingCharacters(in: .whitespacesAndNewlines)
-            let effortEntries = normalizedEfforts(for: record, fallbackDescription: baseDescription)
+            // Extended synthetic options must not reuse another advertised model's exact identity.
+            let effortEntries = normalizedEfforts(for: record, fallbackDescription: baseDescription).filter { entry in
+                ![CodexReasoningEffort.max, .ultra].contains(entry.effort)
+                    || !advertisedIDs.contains(CodexModelIdentity.key("\(baseID)-\(entry.effort.rawValue)"))
+            }
 
             if effortEntries.isEmpty {
                 appendOption(
@@ -138,8 +149,8 @@ enum CodexDynamicModelMapper {
         }
 
         return options.sorted { lhs, rhs in
-            let leftBase = lhs.baseID.lowercased()
-            let rightBase = rhs.baseID.lowercased()
+            let leftBase = CodexModelIdentity.key(lhs.baseID)
+            let rightBase = CodexModelIdentity.key(rhs.baseID)
             if leftBase == rightBase {
                 let leftRank = effortRank(lhs.reasoningEffort)
                 let rightRank = effortRank(rhs.reasoningEffort)
@@ -158,14 +169,23 @@ enum CodexDynamicModelMapper {
     }
 
     static func displayName(forModelID id: String, records: [CodexDynamicModelRecord]) -> String? {
-        let normalizedID = normalizeID(id)
-        let lookupID = normalizedID.lowercased()
+        let lookupID = CodexModelIdentity.key(id)
         guard !lookupID.isEmpty else { return nil }
+
+        if let exactRecord = records.first(where: { CodexModelIdentity.key($0.id) == lookupID }) {
+            let exactID = normalizeID(exactRecord.id)
+            guard !exactID.isEmpty else { return nil }
+            return formatBaseDisplayName(
+                exactRecord.displayName,
+                fallbackModel: exactRecord.model,
+                fallbackID: exactID
+            )
+        }
 
         for record in records {
             let baseID = normalizeID(record.id)
             guard !baseID.isEmpty else { continue }
-            let baseLookupID = baseID.lowercased()
+            let baseLookupID = CodexModelIdentity.key(baseID)
             guard lookupID == baseLookupID || lookupID.hasPrefix("\(baseLookupID)-") else { continue }
 
             let baseDescription = record.description.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -180,7 +200,7 @@ enum CodexDynamicModelMapper {
             }
 
             for effortEntry in effortEntries {
-                let optionID = "\(baseID)-\(effortEntry.effort.rawValue)".lowercased()
+                let optionID = CodexModelIdentity.key("\(baseID)-\(effortEntry.effort.rawValue)")
                 guard lookupID == optionID else { continue }
                 let baseName = formatBaseDisplayName(
                     record.displayName,
@@ -195,7 +215,7 @@ enum CodexDynamicModelMapper {
     }
 
     private static func appendOption(_ option: CodexDynamicModelOption, seen: inout Set<String>, into output: inout [CodexDynamicModelOption]) {
-        let key = option.id.lowercased()
+        let key = CodexModelIdentity.key(option.id)
         guard seen.insert(key).inserted else { return }
         output.append(option)
     }
@@ -312,6 +332,9 @@ enum CodexDynamicModelMapper {
 
 enum CodexDynamicModelStore {
     private static let storageKey = "CodexDynamicModelRecords"
+    private static let cacheLock = NSLock()
+    private static var cachedData: Data?
+    private static var cachedRecords: [CodexDynamicModelRecord] = []
 
     static func canonicalRecords(from models: [CodexAppServerClient.RemoteModel]) -> [CodexDynamicModelRecord] {
         models
@@ -326,8 +349,15 @@ enum CodexDynamicModelStore {
     }
 
     static func load(defaults: UserDefaults = .standard) -> [CodexDynamicModelRecord] {
-        guard let data = defaults.data(forKey: storageKey) else { return [] }
-        return (try? JSONDecoder().decode([CodexDynamicModelRecord].self, from: data)) ?? []
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+
+        let data = defaults.data(forKey: storageKey)
+        if data != cachedData {
+            cachedData = data
+            cachedRecords = data.flatMap { try? JSONDecoder().decode([CodexDynamicModelRecord].self, from: $0) } ?? []
+        }
+        return cachedRecords
     }
 
     static func modelOptions(defaults: UserDefaults = .standard) -> [CodexDynamicModelOption] {
@@ -385,8 +415,8 @@ enum CodexDynamicModelStore {
     }
 
     private static func canonicalRecordSort(_ lhs: CodexDynamicModelRecord, _ rhs: CodexDynamicModelRecord) -> Bool {
-        let lhsID = lhs.id.lowercased()
-        let rhsID = rhs.id.lowercased()
+        let lhsID = CodexModelIdentity.key(lhs.id)
+        let rhsID = CodexModelIdentity.key(rhs.id)
         if lhsID != rhsID {
             return lhsID < rhsID
         }

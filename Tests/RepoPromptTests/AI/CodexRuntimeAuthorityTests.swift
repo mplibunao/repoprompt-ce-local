@@ -32,7 +32,9 @@ final class CodexRuntimeAuthorityTests: XCTestCase {
         ).get()
 
         XCTAssertEqual(runtime.executableURL, armExecutable)
-        XCTAssertEqual(runtime.version, .init(major: 0, minor: 149, patch: 0))
+        XCTAssertEqual(runtime.version, .init(major: 0, minor: 153, patch: 4))
+        XCTAssertEqual(CodexRuntimeAuthority.bundledVersion, .init(major: 0, minor: 153, patch: 4))
+        XCTAssertEqual(CodexRuntimeAuthority.minimumExternalVersion, .init(major: 0, minor: 149, patch: 0))
         XCTAssertEqual(runtime.source, .bundled(target: "aarch64-apple-darwin"))
         XCTAssertTrue(runtime.statePaths.codexHome.path.hasPrefix(support.path))
         XCTAssertTrue(runtime.statePaths.sqliteHome.path.hasPrefix(support.path))
@@ -45,7 +47,7 @@ final class CodexRuntimeAuthorityTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: runtime.statePaths.codexHome.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: runtime.statePaths.sqliteHome.path))
         XCTAssertTrue(runtime.redactedDiagnosticSummary.contains("provenance=bundled:aarch64-apple-darwin"))
-        XCTAssertTrue(runtime.redactedDiagnosticSummary.contains("version=0.149.0"))
+        XCTAssertTrue(runtime.redactedDiagnosticSummary.contains("version=0.153.4"))
         XCTAssertFalse(runtime.redactedDiagnosticSummary.contains(temporaryDirectory.path))
     }
 
@@ -297,7 +299,7 @@ final class CodexRuntimeAuthorityTests: XCTestCase {
         )
         let metadata: [String: Any] = [
             "layoutVersion": 1,
-            "version": "0.149.0",
+            "version": "0.153.4",
             "target": target,
             "variant": "codex",
             "entrypoint": "bin/codex",

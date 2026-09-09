@@ -32,6 +32,28 @@ final class ModelPickerStringOrderingTests: XCTestCase {
         XCTAssertEqual(AIModel.sortedForPicker(customModels).map(\.modelName), ["aaa-1", "zzz-1"])
     }
 
+    func testDynamicCatalogRetainsFrozenDefaultAndEffortOrdering() {
+        let records = [
+            CodexDynamicModelRecord(
+                id: "gpt-5.4",
+                model: "gpt-5.4",
+                displayName: "GPT-5.4",
+                description: "",
+                isDefault: true,
+                supportedReasoningEfforts: [
+                    .init(reasoningEffort: "high", description: ""),
+                    .init(reasoningEffort: "low", description: "")
+                ],
+                defaultReasoningEffort: "high"
+            )
+        ]
+
+        XCTAssertEqual(CodexDynamicModelMapper.options(from: records).map(\.id), [
+            "gpt-5.4-low",
+            "gpt-5.4-high"
+        ])
+    }
+
     func testCodexMaxFamilyTokenIsNotParsedAsReasoningEffort() {
         let base = CodexModelSpecifier(raw: "gpt-5.1-codex-max")
         XCTAssertEqual(base.baseModel, "gpt-5.1-codex-max")
