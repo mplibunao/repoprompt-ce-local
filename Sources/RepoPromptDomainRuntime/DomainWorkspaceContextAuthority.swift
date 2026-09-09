@@ -102,14 +102,12 @@ package struct DomainWorkspaceStore {
     }
 
     package func removeAgentAdmissionRecoveryRecord(
-        workspaceID: UUID,
-        recoveryID: UUID,
+        expectedRecord: DomainAgentAdmissionRecoveryRecord,
         expectedWorkingRevision: UInt64,
         expectedContentDigest: String
-    ) async -> Bool {
+    ) async -> DomainAgentAdmissionRecoveryRemovalResult {
         await authority.removeAgentAdmissionRecoveryRecord(
-            workspaceID: workspaceID,
-            recoveryID: recoveryID,
+            expectedRecord: expectedRecord,
             expectedWorkingRevision: expectedWorkingRevision,
             expectedContentDigest: expectedContentDigest
         )
@@ -476,30 +474,39 @@ actor DomainWorkspaceContextAuthority {
     }
 
     func removeAgentAdmissionRecoveryRecord(
-        workspaceID: UUID,
-        recoveryID: UUID,
+        expectedRecord: DomainAgentAdmissionRecoveryRecord,
         expectedWorkingRevision: UInt64,
         expectedContentDigest: String
-    ) async -> Bool {
+    ) async -> DomainAgentAdmissionRecoveryRemovalResult {
         await bootstrap()
         await acquireCatalogMutation()
         defer { releaseCatalogMutation() }
+        let workspaceID = expectedRecord.workspaceID
         guard let record = records[workspaceID], record.health.acceptsMutations else {
-            return false
+            return .unavailable
         }
-        do {
-            let recoverySnapshot = try await persistence.removeAgentAdmissionRecoveryRecord(
-                document: record.document,
-                recoveryID: recoveryID,
-                expectedWorkingRevision: expectedWorkingRevision,
-                expectedContentDigest: expectedContentDigest
-            )
-            guard var current = records[workspaceID] else { return false }
+        let result = await persistence.removeAgentAdmissionRecoveryRecord(
+            document: record.document,
+            expectedRecord: expectedRecord,
+            expectedWorkingRevision: expectedWorkingRevision,
+            expectedContentDigest: expectedContentDigest
+        )
+        switch result {
+        case let .removed(recoverySnapshot), let .alreadyAbsent(recoverySnapshot):
+            guard var current = records[workspaceID] else { return .unavailable }
             current.agentAdmissionRecoveryRecords = recoverySnapshot.records
             current.agentAdmissionRecoveryGeneration = recoverySnapshot.generation
             records[workspaceID] = current
-            return true
-        } catch { return false }
+            return result
+        case .workspaceConflict:
+            await refreshAfterCASConflict(
+                workspaceID: workspaceID,
+                fileURL: record.document.fileURL
+            )
+            return result
+        case .recordConflict, .unavailable:
+            return result
+        }
     }
 
     func transitionAgentAdmissionRecoveryRecord(

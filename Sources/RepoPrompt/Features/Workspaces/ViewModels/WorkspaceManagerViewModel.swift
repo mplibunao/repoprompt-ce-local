@@ -723,7 +723,11 @@ class WorkspaceManagerViewModel: ObservableObject {
         private var agentAdmissionRecoveryMarkerPersistenceHandlerForTesting:
             (@MainActor (DomainAgentAdmissionRecoveryRecord, Int) async -> Bool)?
         private var agentAdmissionRecoveryMarkerRemovalHandlerForTesting:
-            (@MainActor (DomainAgentAdmissionRecoveryRecord, UInt64, String) async -> Bool)?
+            (@MainActor (
+                DomainAgentAdmissionRecoveryRecord,
+                UInt64,
+                String
+            ) async -> DomainAgentAdmissionRecoveryRemovalResult)?
         private var agentAdmissionPersistenceVerificationHandlerForTesting:
             (@MainActor (UUID) async -> Bool)?
         private var agentAdmissionCanonicalSnapshotHandlerForTesting:
@@ -1050,7 +1054,11 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
 
         func setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting(
-            _ handler: (@MainActor (DomainAgentAdmissionRecoveryRecord, UInt64, String) async -> Bool)?
+            _ handler: (@MainActor (
+                DomainAgentAdmissionRecoveryRecord,
+                UInt64,
+                String
+            ) async -> DomainAgentAdmissionRecoveryRemovalResult)?
         ) {
             agentAdmissionRecoveryMarkerRemovalHandlerForTesting = handler
         }
@@ -8624,87 +8632,127 @@ class WorkspaceManagerViewModel: ObservableObject {
             return true
         }
         guard let client = domainWorkspaceAuthorityClient else { return false }
-        let record = DomainAgentAdmissionRecoveryRecord(
-            recoveryID: identity.recoveryID,
-            workspaceID: identity.workspaceID,
-            tabID: identity.tabID,
-            sessionID: identity.sessionID,
-            replacementTabID: identity.replacementTabID,
-            mutation: mutation
-        )
-        let discovery = await client.store.pendingAgentAdmissionRecoveryRecords(
-            workspaceID: identity.workspaceID
-        )
-        guard !discovery.unavailableWorkspaceIDs.contains(identity.workspaceID) else { return false }
-        guard let persistedRecord = discovery.records.first(where: {
-            Self.recoveryRecord($0, matches: identity, mutation: mutation)
-        }) else {
-            guard !requiresCanonicalIdentity,
-                  !discovery.records.contains(where: { $0.recoveryID == record.recoveryID })
-            else { return false }
-            clearLocalAgentAdmissionRecoveryMarker(recoveryID: identity.recoveryID)
-            return true
-        }
-        guard let snapshot = await client.canonicalWorkspaceSnapshot(identity.workspaceID),
-              let canonical = try? Self.decodeDomainWorkspaceProjection(
-                  documentBytes: snapshot.document.documentBytes,
-                  fileURL: snapshot.document.fileURL
-              )
-        else { return false }
-        let identityCondition = if mutation == .removeMarker {
-            true
-        } else if requiresCanonicalIdentity {
-            Self.containsExactProvisionalAgentIdentity(canonical, identity: identity)
-        } else {
-            !Self.containsProvisionalAgentIdentity(canonical, identity: identity)
-                && snapshot.revisions.dirtyRevision == nil
-        }
-        guard identityCondition else { return false }
-        let removed: Bool
-        #if DEBUG
-            if let agentAdmissionRecoveryMarkerRemovalHandlerForTesting {
-                removed = await agentAdmissionRecoveryMarkerRemovalHandlerForTesting(
-                    persistedRecord,
-                    snapshot.revisions.workingRevision,
-                    snapshot.document.contentDigest
-                )
+        var observedMatchingRecord = false
+        var expectedRetirementRecord: DomainAgentAdmissionRecoveryRecord?
+        var previousExpectedWorkingRevision: UInt64?
+        var previousExpectedContentDigest: String?
+        for attempt in 0 ..< 2 {
+            let discovery = await client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: identity.workspaceID
+            )
+            guard !discovery.unavailableWorkspaceIDs.contains(identity.workspaceID) else { return false }
+            let persistedRecord = if let expectedRetirementRecord {
+                discovery.records.first(where: { $0 == expectedRetirementRecord })
             } else {
-                removed = await client.store.removeAgentAdmissionRecoveryRecord(
-                    workspaceID: identity.workspaceID,
-                    recoveryID: identity.recoveryID,
+                discovery.records.first(where: {
+                    Self.recoveryRecord($0, matches: identity, mutation: mutation)
+                })
+            }
+            guard let persistedRecord else {
+                guard !discovery.records.contains(where: { $0.recoveryID == identity.recoveryID }),
+                      !requiresCanonicalIdentity || observedMatchingRecord
+                else { return false }
+                if observedMatchingRecord {
+                    guard let snapshot = await client.canonicalWorkspaceSnapshot(identity.workspaceID),
+                          let canonical = try? Self.decodeDomainWorkspaceProjection(
+                              documentBytes: snapshot.document.documentBytes,
+                              fileURL: snapshot.document.fileURL
+                          ),
+                          mutation == .removeMarker
+                          || (
+                              requiresCanonicalIdentity
+                                  ? Self.containsExactProvisionalAgentIdentity(canonical, identity: identity)
+                                  : !Self.containsProvisionalAgentIdentity(canonical, identity: identity)
+                          )
+                    else { return false }
+                }
+                clearLocalAgentAdmissionRecoveryMarker(recoveryID: identity.recoveryID)
+                return true
+            }
+            observedMatchingRecord = true
+            expectedRetirementRecord = persistedRecord
+            guard let snapshot = await client.canonicalWorkspaceSnapshot(identity.workspaceID),
+                  let canonical = try? Self.decodeDomainWorkspaceProjection(
+                      documentBytes: snapshot.document.documentBytes,
+                      fileURL: snapshot.document.fileURL
+                  )
+            else { return false }
+            let identityCondition = if mutation == .removeMarker {
+                true
+            } else if requiresCanonicalIdentity {
+                Self.containsExactProvisionalAgentIdentity(canonical, identity: identity)
+            } else {
+                !Self.containsProvisionalAgentIdentity(canonical, identity: identity)
+                    && snapshot.revisions.dirtyRevision == nil
+            }
+            guard identityCondition else { return false }
+            if attempt > 0,
+               previousExpectedWorkingRevision == snapshot.revisions.workingRevision,
+               previousExpectedContentDigest == snapshot.document.contentDigest
+            {
+                return false
+            }
+
+            let removalResult: DomainAgentAdmissionRecoveryRemovalResult
+            #if DEBUG
+                if let agentAdmissionRecoveryMarkerRemovalHandlerForTesting {
+                    removalResult = await agentAdmissionRecoveryMarkerRemovalHandlerForTesting(
+                        persistedRecord,
+                        snapshot.revisions.workingRevision,
+                        snapshot.document.contentDigest
+                    )
+                } else {
+                    removalResult = await client.store.removeAgentAdmissionRecoveryRecord(
+                        expectedRecord: persistedRecord,
+                        expectedWorkingRevision: snapshot.revisions.workingRevision,
+                        expectedContentDigest: snapshot.document.contentDigest
+                    )
+                }
+            #else
+                removalResult = await client.store.removeAgentAdmissionRecoveryRecord(
+                    expectedRecord: persistedRecord,
                     expectedWorkingRevision: snapshot.revisions.workingRevision,
                     expectedContentDigest: snapshot.document.contentDigest
                 )
+            #endif
+            switch removalResult {
+            case .removed:
+                clearLocalAgentAdmissionRecoveryMarker(recoveryID: identity.recoveryID)
+                return true
+            case .alreadyAbsent:
+                let verification = await client.store.pendingAgentAdmissionRecoveryRecords(
+                    workspaceID: identity.workspaceID
+                )
+                guard !verification.unavailableWorkspaceIDs.contains(identity.workspaceID),
+                      !verification.records.contains(where: { $0.recoveryID == identity.recoveryID }),
+                      let verifiedSnapshot = await client.canonicalWorkspaceSnapshot(identity.workspaceID),
+                      let verifiedCanonical = try? Self.decodeDomainWorkspaceProjection(
+                          documentBytes: verifiedSnapshot.document.documentBytes,
+                          fileURL: verifiedSnapshot.document.fileURL
+                      ),
+                      mutation == .removeMarker
+                      || (
+                          requiresCanonicalIdentity
+                              ? Self.containsExactProvisionalAgentIdentity(verifiedCanonical, identity: identity)
+                              : !Self.containsProvisionalAgentIdentity(verifiedCanonical, identity: identity)
+                      )
+                else { return false }
+                clearLocalAgentAdmissionRecoveryMarker(recoveryID: identity.recoveryID)
+                return true
+            case .workspaceConflict:
+                break
+            case .recordConflict, .unavailable:
+                return false
             }
-        #else
-            removed = await client.store.removeAgentAdmissionRecoveryRecord(
-                workspaceID: identity.workspaceID,
-                recoveryID: identity.recoveryID,
-                expectedWorkingRevision: snapshot.revisions.workingRevision,
-                expectedContentDigest: snapshot.document.contentDigest
-            )
-        #endif
-        if !removed {
-            let refreshedDiscovery = await client.store.pendingAgentAdmissionRecoveryRecords(
-                workspaceID: identity.workspaceID
-            )
-            guard !refreshedDiscovery.unavailableWorkspaceIDs.contains(identity.workspaceID),
-                  !refreshedDiscovery.records.contains(where: { $0.recoveryID == record.recoveryID }),
-                  let refreshedSnapshot = await client.canonicalWorkspaceSnapshot(identity.workspaceID),
-                  let refreshedCanonical = try? Self.decodeDomainWorkspaceProjection(
-                      documentBytes: refreshedSnapshot.document.documentBytes,
-                      fileURL: refreshedSnapshot.document.fileURL
-                  ),
-                  mutation == .removeMarker
-                  || (
-                      requiresCanonicalIdentity
-                          ? Self.containsExactProvisionalAgentIdentity(refreshedCanonical, identity: identity)
-                          : !Self.containsProvisionalAgentIdentity(refreshedCanonical, identity: identity)
-                  )
-            else { return false }
+
+            // Provider execution leaves the admission lease so a later same-workspace admission
+            // can advance this fence. Retry only after rediscovering the exact marker at a changed
+            // canonical revision/digest pair; an unchanged fence remains a durability failure.
+            previousExpectedWorkingRevision = snapshot.revisions.workingRevision
+            previousExpectedContentDigest = snapshot.document.contentDigest
         }
-        clearLocalAgentAdmissionRecoveryMarker(recoveryID: identity.recoveryID)
-        return true
+
+        return false
     }
 
     private func scheduleAgentAdmissionRecoveryReplayIfNeeded() {

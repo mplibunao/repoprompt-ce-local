@@ -103,6 +103,14 @@ package struct DomainAgentAdmissionRecoverySnapshot: Equatable, Sendable {
     let generation: UInt64
 }
 
+package enum DomainAgentAdmissionRecoveryRemovalResult: Equatable, Sendable {
+    case removed(DomainAgentAdmissionRecoverySnapshot)
+    case alreadyAbsent(DomainAgentAdmissionRecoverySnapshot)
+    case workspaceConflict
+    case recordConflict
+    case unavailable
+}
+
 package struct DomainAgentAdmissionRecoveryDiscoverySnapshot: Equatable, Sendable {
     package let records: [DomainAgentAdmissionRecoveryRecord]
     package let unavailableWorkspaceIDs: Set<UUID>
@@ -846,18 +854,27 @@ package struct DomainPersistenceCoordinator {
 
     package func removeAgentAdmissionRecoveryRecord(
         document: DomainWorkspaceDocument,
-        recoveryID: UUID,
+        expectedRecord: DomainAgentAdmissionRecoveryRecord,
         expectedWorkingRevision: UInt64,
         expectedContentDigest: String
-    ) async throws -> DomainAgentAdmissionRecoverySnapshot {
-        try await DomainBlockingIO.run { cancellation in
-            try blockingWorker(cancellation).removeAgentAdmissionRecoveryRecordBlocking(
-                document: document,
-                recoveryID: recoveryID,
-                expectedWorkingRevision: expectedWorkingRevision,
-                expectedContentDigest: expectedContentDigest,
-                now: Date()
-            )
+    ) async -> DomainAgentAdmissionRecoveryRemovalResult {
+        do {
+            return try await DomainBlockingIO.run { cancellation in
+                try blockingWorker(cancellation).removeAgentAdmissionRecoveryRecordBlocking(
+                    document: document,
+                    expectedRecord: expectedRecord,
+                    expectedWorkingRevision: expectedWorkingRevision,
+                    expectedContentDigest: expectedContentDigest,
+                    now: Date()
+                )
+            }
+        } catch let error as DomainPersistenceError {
+            if case .stateConflict = error {
+                return .workspaceConflict
+            }
+            return .unavailable
+        } catch {
+            return .unavailable
         }
     }
 
@@ -1631,11 +1648,14 @@ package struct DomainPersistenceCoordinator {
 
     private func removeAgentAdmissionRecoveryRecordBlocking(
         document: DomainWorkspaceDocument,
-        recoveryID: UUID,
+        expectedRecord: DomainAgentAdmissionRecoveryRecord,
         expectedWorkingRevision: UInt64,
         expectedContentDigest: String,
         now: Date
-    ) throws -> DomainAgentAdmissionRecoverySnapshot {
+    ) throws -> DomainAgentAdmissionRecoveryRemovalResult {
+        guard expectedRecord.workspaceID == document.workspaceID else {
+            return .recordConflict
+        }
         try ensureLazyMigration(now: now)
         return try withExistingWorkspaceLocks(document: document, now: now) { _ in
             let durable = try readCurrentJournalOrSeed(document: document)
@@ -1649,9 +1669,19 @@ package struct DomainPersistenceCoordinator {
                     actual: durable.revisions.workingRevision
                 )
             }
-            let records = (durable.agentAdmissionRecoveryRecords ?? []).filter {
-                $0.recoveryID != recoveryID
+            var records = durable.agentAdmissionRecoveryRecords ?? []
+            guard let index = records.firstIndex(where: {
+                $0.recoveryID == expectedRecord.recoveryID
+            }) else {
+                return .alreadyAbsent(DomainAgentAdmissionRecoverySnapshot(
+                    records: records,
+                    generation: durable.agentAdmissionRecoveryGeneration ?? 0
+                ))
             }
+            guard records[index] == expectedRecord else {
+                return .recordConflict
+            }
+            records.remove(at: index)
             let journal = replacingAgentAdmissionRecoveryRecords(
                 in: durable,
                 with: records
@@ -1660,10 +1690,10 @@ package struct DomainPersistenceCoordinator {
                 encoder.encode(journal),
                 to: journalURL(document.workspaceID)
             )
-            return DomainAgentAdmissionRecoverySnapshot(
+            return .removed(DomainAgentAdmissionRecoverySnapshot(
                 records: records,
                 generation: journal.agentAdmissionRecoveryGeneration ?? 0
-            )
+            ))
         }
     }
 

@@ -332,12 +332,11 @@ import XCTest
             let recordsAfterWorkingCommit = await fixture.client.store.pendingAgentAdmissionRecoveryRecords()
             XCTAssertEqual(recordsAfterWorkingCommit.records, [record])
             let staleRemoval = await markerClient.store.removeAgentAdmissionRecoveryRecord(
-                workspaceID: record.workspaceID,
-                recoveryID: record.recoveryID,
+                expectedRecord: record,
                 expectedWorkingRevision: before.revisions.workingRevision,
                 expectedContentDigest: before.document.contentDigest
             )
-            XCTAssertFalse(staleRemoval)
+            XCTAssertEqual(staleRemoval, .workspaceConflict)
             let recordsAfterStaleRemoval = await fixture.client.store.pendingAgentAdmissionRecoveryRecords()
             XCTAssertEqual(recordsAfterStaleRemoval.records, [record])
 
@@ -351,14 +350,82 @@ import XCTest
             let recordsAfterSavedCommit = await fixture.client.store.pendingAgentAdmissionRecoveryRecords()
             XCTAssertEqual(recordsAfterSavedCommit.records, [record])
             let removed = await markerClient.store.removeAgentAdmissionRecoveryRecord(
-                workspaceID: record.workspaceID,
-                recoveryID: record.recoveryID,
+                expectedRecord: record,
                 expectedWorkingRevision: final.revisions.workingRevision,
                 expectedContentDigest: final.document.contentDigest
             )
-            XCTAssertTrue(removed)
+            XCTAssertTrue(removed.didRemoveRecordForTesting)
             let recordsAfterRemoval = await fixture.client.store.pendingAgentAdmissionRecoveryRecords()
             XCTAssertTrue(recordsAfterRemoval.records.isEmpty)
+        }
+
+        func testMarkerRemovalRejectsChangedPhaseAtUnchangedWorkspaceFence() async throws {
+            let fixture = try await makeFixture()
+            await fixture.manager.debugAwaitAgentAdmissionRecoveryReplayForTesting()
+            let prepared = domainRecoveryRecord(fixture.identity)
+            let inserted = await fixture.client.store.upsertAgentAdmissionRecoveryRecord(prepared)
+            XCTAssertTrue(inserted)
+            let fenceValue = await fixture.client.canonicalWorkspaceSnapshot(fixture.workspaceA.id)
+            let fence = try XCTUnwrap(fenceValue)
+
+            let transitionedSuccessfully = await fixture.client.store.transitionAgentAdmissionRecoveryRecord(
+                prepared,
+                to: .dispatchOutcomeUnknown,
+                dispatchKind: .start
+            )
+            XCTAssertTrue(transitionedSuccessfully)
+            let transitioned = prepared.replacingPhase(.dispatchOutcomeUnknown, dispatchKind: .start)
+            let removal = await fixture.client.store.removeAgentAdmissionRecoveryRecord(
+                expectedRecord: prepared,
+                expectedWorkingRevision: fence.revisions.workingRevision,
+                expectedContentDigest: fence.document.contentDigest
+            )
+
+            XCTAssertEqual(removal, .recordConflict)
+            let afterValue = await fixture.client.canonicalWorkspaceSnapshot(fixture.workspaceA.id)
+            let after = try XCTUnwrap(afterValue)
+            XCTAssertEqual(after.revisions.workingRevision, fence.revisions.workingRevision)
+            XCTAssertEqual(after.document.contentDigest, fence.document.contentDigest)
+            let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(pending.records, [transitioned])
+        }
+
+        func testMarkerRemovalRejectsChangedDispatchKindAtUnchangedWorkspaceFence() async throws {
+            let fixture = try await makeFixture()
+            await fixture.manager.debugAwaitAgentAdmissionRecoveryReplayForTesting()
+            let unknownStart = domainRecoveryRecord(fixture.identity).replacingPhase(
+                .dispatchOutcomeUnknown,
+                dispatchKind: .start
+            )
+            let inserted = await fixture.client.store.upsertAgentAdmissionRecoveryRecord(unknownStart)
+            XCTAssertTrue(inserted)
+            let fenceValue = await fixture.client.canonicalWorkspaceSnapshot(fixture.workspaceA.id)
+            let fence = try XCTUnwrap(fenceValue)
+
+            let transitionedSuccessfully = await fixture.client.store.transitionAgentAdmissionRecoveryRecord(
+                unknownStart,
+                to: .dispatchOutcomeUnknown,
+                dispatchKind: .steer
+            )
+            XCTAssertTrue(transitionedSuccessfully)
+            let unknownSteer = unknownStart.replacingPhase(.dispatchOutcomeUnknown, dispatchKind: .steer)
+            let removal = await fixture.client.store.removeAgentAdmissionRecoveryRecord(
+                expectedRecord: unknownStart,
+                expectedWorkingRevision: fence.revisions.workingRevision,
+                expectedContentDigest: fence.document.contentDigest
+            )
+
+            XCTAssertEqual(removal, .recordConflict)
+            let afterValue = await fixture.client.canonicalWorkspaceSnapshot(fixture.workspaceA.id)
+            let after = try XCTUnwrap(afterValue)
+            XCTAssertEqual(after.revisions.workingRevision, fence.revisions.workingRevision)
+            XCTAssertEqual(after.document.contentDigest, fence.document.contentDigest)
+            let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(pending.records, [unknownSteer])
         }
 
         func testSavedCommitRefreshesRecoveryRecordsFromSharedJournal() async throws {
@@ -747,12 +814,11 @@ import XCTest
             let seededValue = await fixture.client.canonicalWorkspaceSnapshot(fixture.workspaceA.id)
             let seededSnapshot = try XCTUnwrap(seededValue)
             let removedSeed = await fixture.client.store.removeAgentAdmissionRecoveryRecord(
-                workspaceID: seedRecord.workspaceID,
-                recoveryID: seedRecord.recoveryID,
+                expectedRecord: seedRecord,
                 expectedWorkingRevision: seededSnapshot.revisions.workingRevision,
                 expectedContentDigest: seededSnapshot.document.contentDigest
             )
-            XCTAssertTrue(removedSeed)
+            XCTAssertTrue(removedSeed.didRemoveRecordForTesting)
 
             let journalURL = try recoveryJournalURL(for: fixture.workspaceA.id, in: fixture)
             let originalJournal = try Data(contentsOf: journalURL)
@@ -1889,12 +1955,11 @@ import XCTest
             let seededValue = await fixture.client.canonicalWorkspaceSnapshot(fixture.workspaceA.id)
             let seeded = try XCTUnwrap(seededValue)
             let removedSeedRecoveryRecord = await fixture.client.store.removeAgentAdmissionRecoveryRecord(
-                workspaceID: seedRecord.workspaceID,
-                recoveryID: seedRecord.recoveryID,
+                expectedRecord: seedRecord,
                 expectedWorkingRevision: seeded.revisions.workingRevision,
                 expectedContentDigest: seeded.document.contentDigest
             )
-            XCTAssertTrue(removedSeedRecoveryRecord)
+            XCTAssertTrue(removedSeedRecoveryRecord.didRemoveRecordForTesting)
             let journalURL = try recoveryJournalURL(for: fixture.workspaceA.id, in: fixture)
             let originalJournal = try Data(contentsOf: journalURL)
             let publicationGate = RecoveryInterleavingGate()
@@ -2224,10 +2289,9 @@ import XCTest
                 revision,
                 digest in
                 removalAttempts += 1
-                guard removalAttempts > 1 else { return false }
+                guard removalAttempts > 1 else { return .workspaceConflict }
                 return await fixture.client.store.removeAgentAdmissionRecoveryRecord(
-                    workspaceID: record.workspaceID,
-                    recoveryID: record.recoveryID,
+                    expectedRecord: record,
                     expectedWorkingRevision: revision,
                     expectedContentDigest: digest
                 )
@@ -2642,10 +2706,9 @@ import XCTest
                 revision,
                 digest in
                 removalAttempts += 1
-                guard removalAttempts > 1 else { return false }
+                guard removalAttempts > 1 else { return .workspaceConflict }
                 return await fixture.client.store.removeAgentAdmissionRecoveryRecord(
-                    workspaceID: record.workspaceID,
-                    recoveryID: record.recoveryID,
+                    expectedRecord: record,
                     expectedWorkingRevision: revision,
                     expectedContentDigest: digest
                 )
@@ -2728,10 +2791,9 @@ import XCTest
                 revision,
                 digest in
                 removalAttempts += 1
-                guard removalAttempts > 1 else { return false }
+                guard removalAttempts > 1 else { return .workspaceConflict }
                 return await fixture.client.store.removeAgentAdmissionRecoveryRecord(
-                    workspaceID: record.workspaceID,
-                    recoveryID: record.recoveryID,
+                    expectedRecord: record,
                     expectedWorkingRevision: revision,
                     expectedContentDigest: digest
                 )
@@ -2762,6 +2824,242 @@ import XCTest
             XCTAssertTrue(discovery.records.isEmpty)
         }
 
+        func testAcceptanceRetriesMarkerRemovalAfterLaterSameWorkspaceAdmissionAdvancesCanonicalRevision() async throws {
+            let fixture = try await makeFixture()
+            fixture.manager.activeWorkspace = fixture.workspaceA
+            fixture.prompt.loadComposeTabsFromWorkspace(fixture.workspaceA)
+            let viewModel = makeAgentModeViewModel(for: fixture)
+            let earlierTarget = try await viewModel.mcpResolveOrCreateSessionTarget(
+                tabID: nil,
+                sessionID: nil,
+                createIfNeeded: true,
+                sessionName: "earlier provider",
+                expectedWorkspaceID: fixture.workspaceA.id
+            )
+            try await viewModel.mcpMarkSessionTargetDispatchOutcomeUnknown(
+                earlierTarget,
+                dispatchKind: .start
+            )
+
+            let competingRuntime = try await makeRestartedRuntime(fixture)
+            let competingClient = DomainWorkspaceAuthorityClient(
+                store: competingRuntime.workspaceStore,
+                windowID: -885
+            )
+            let (competingManager, competingPrompt) = makeManager(client: competingClient)
+            await competingManager.awaitInitialized()
+            try await applyAuthoritySnapshot(competingClient.snapshot(), to: competingManager)
+            let competingWorkspace = try XCTUnwrap(
+                competingManager.workspace(withID: fixture.workspaceA.id)
+            )
+            competingManager.activeWorkspace = competingWorkspace
+            competingPrompt.loadComposeTabsFromWorkspace(competingWorkspace)
+            let competingViewModel = makeAgentModeViewModel(
+                manager: competingManager,
+                prompt: competingPrompt,
+                activeWorkspace: competingWorkspace
+            )
+
+            let firstRemovalGate = RecoveryInterleavingGate()
+            var attemptedRevisions: [UInt64] = []
+            fixture.manager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting {
+                record,
+                revision,
+                digest in
+                attemptedRevisions.append(revision)
+                if attemptedRevisions.count == 1 {
+                    await firstRemovalGate.markStartedAndWaitForRelease()
+                }
+                return await fixture.client.store.removeAgentAdmissionRecoveryRecord(
+                    expectedRecord: record,
+                    expectedWorkingRevision: revision,
+                    expectedContentDigest: digest
+                )
+            }
+            defer {
+                fixture.manager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting(nil)
+                Task { await firstRemovalGate.release() }
+            }
+
+            let acceptanceTask = Task { @MainActor in
+                try await viewModel.mcpAcceptSessionTarget(earlierTarget)
+            }
+            await firstRemovalGate.waitUntilStarted()
+            let revisionBeforeLaterAdmission = try XCTUnwrap(attemptedRevisions.first)
+
+            let laterTarget = try await competingViewModel.mcpResolveOrCreateSessionTarget(
+                tabID: nil,
+                sessionID: nil,
+                createIfNeeded: true,
+                sessionName: "later provider",
+                expectedWorkspaceID: fixture.workspaceA.id
+            )
+            let afterLaterAdmissionValue = await competingClient.canonicalWorkspaceSnapshot(
+                fixture.workspaceA.id
+            )
+            let afterLaterAdmission = try XCTUnwrap(afterLaterAdmissionValue)
+            XCTAssertGreaterThan(
+                afterLaterAdmission.revisions.workingRevision,
+                revisionBeforeLaterAdmission
+            )
+
+            await firstRemovalGate.release()
+            try await acceptanceTask.value
+
+            XCTAssertEqual(attemptedRevisions, [
+                revisionBeforeLaterAdmission,
+                afterLaterAdmission.revisions.workingRevision
+            ])
+            XCTAssertEqual(earlierTarget.recoveryClaim?.state, .accepted)
+            let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(
+                pending.records.map(\.recoveryID),
+                try [XCTUnwrap(laterTarget.recoveryClaim?.identity.recoveryID)]
+            )
+
+            let laterDiscard = await competingViewModel.mcpDiscardSessionTarget(laterTarget)
+            XCTAssertEqual(laterDiscard, .complete)
+        }
+
+        func testMarkerRemovalStopsAfterSecondWorkspaceConflictAndPreservesPeerMarkers() async throws {
+            let fixture = try await makeFixture()
+            fixture.manager.activeWorkspace = fixture.workspaceA
+            fixture.prompt.loadComposeTabsFromWorkspace(fixture.workspaceA)
+            let viewModel = makeAgentModeViewModel(for: fixture)
+            let target = try await viewModel.mcpResolveOrCreateSessionTarget(
+                tabID: nil,
+                sessionID: nil,
+                createIfNeeded: true,
+                sessionName: "bounded marker retirement",
+                expectedWorkspaceID: fixture.workspaceA.id
+            )
+            try await viewModel.mcpMarkSessionTargetDispatchOutcomeUnknown(
+                target,
+                dispatchKind: .start
+            )
+            let expectedRecoveryID = try XCTUnwrap(target.recoveryClaim?.identity.recoveryID)
+            let peerRecord = DomainAgentAdmissionRecoveryRecord(
+                recoveryID: UUID(),
+                workspaceID: fixture.workspaceA.id,
+                tabID: UUID(),
+                sessionID: UUID(),
+                replacementTabID: UUID(),
+                mutation: .clearBinding,
+                phase: .dispatchOutcomeUnknown,
+                dispatchKind: .start
+            )
+            let competingClient = try await makeCompetingClient(fixture)
+            var removalAttempts = 0
+            var advancedFences: [(revision: UInt64, digest: String)] = []
+            fixture.manager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting {
+                record,
+                revision,
+                digest in
+                removalAttempts += 1
+
+                let competingSnapshot = await competingClient.canonicalWorkspaceSnapshot(
+                    fixture.workspaceA.id
+                )
+                guard let competingSnapshot,
+                      var changed = try? WorkspaceManagerViewModel.decodeDomainWorkspaceProjection(
+                          documentBytes: competingSnapshot.document.documentBytes,
+                          fileURL: competingSnapshot.document.fileURL
+                      )
+                else { return .unavailable }
+                if removalAttempts == 1 {
+                    let insertedPeer = await competingClient.store.upsertAgentAdmissionRecoveryRecord(peerRecord)
+                    XCTAssertTrue(insertedPeer)
+                }
+                changed.lastSearchQuery = "retirement conflict \(removalAttempts)"
+                let working = try? await competingClient.replaceWorking(
+                    changed,
+                    fileURL: fixture.workspaceAURL,
+                    expectedWorkspaceRevision: revision
+                )
+                guard let working,
+                      working.disposition == .applied,
+                      let advancedRevision = working.after?.workingRevision,
+                      let advancedDigest = working.resultingDigest
+                else { return .unavailable }
+                advancedFences.append((advancedRevision, advancedDigest))
+                return await fixture.client.store.removeAgentAdmissionRecoveryRecord(
+                    expectedRecord: record,
+                    expectedWorkingRevision: revision,
+                    expectedContentDigest: digest
+                )
+            }
+            defer {
+                fixture.manager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting(nil)
+            }
+
+            do {
+                try await viewModel.mcpAcceptSessionTarget(target)
+                XCTFail("A second workspace conflict must exhaust marker retirement.")
+            } catch {}
+
+            XCTAssertEqual(removalAttempts, 2)
+            XCTAssertEqual(advancedFences.count, 2)
+            XCTAssertGreaterThan(advancedFences[1].revision, advancedFences[0].revision)
+            let authoritySnapshotValue = await fixture.client.canonicalWorkspaceSnapshot(fixture.workspaceA.id)
+            let authoritySnapshot = try XCTUnwrap(authoritySnapshotValue)
+            XCTAssertEqual(authoritySnapshot.revisions.workingRevision, advancedFences[1].revision)
+            XCTAssertEqual(authoritySnapshot.document.contentDigest, advancedFences[1].digest)
+            let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(Set(pending.records.map(\.recoveryID)), [expectedRecoveryID, peerRecord.recoveryID])
+            XCTAssertTrue(pending.records.contains(peerRecord))
+            XCTAssertTrue(pending.records.contains(where: {
+                $0.recoveryID == expectedRecoveryID
+                    && $0.phase == .dispatchOutcomeUnknown
+                    && $0.dispatchKind == .start
+            }))
+        }
+
+        func testMarkerRemovalDoesNotRetryAnUnchangedWorkspaceConflictFence() async throws {
+            let fixture = try await makeFixture()
+            fixture.manager.activeWorkspace = fixture.workspaceA
+            fixture.prompt.loadComposeTabsFromWorkspace(fixture.workspaceA)
+            let viewModel = makeAgentModeViewModel(for: fixture)
+            let target = try await viewModel.mcpResolveOrCreateSessionTarget(
+                tabID: nil,
+                sessionID: nil,
+                createIfNeeded: true,
+                sessionName: "unchanged marker retirement fence",
+                expectedWorkspaceID: fixture.workspaceA.id
+            )
+            try await viewModel.mcpMarkSessionTargetDispatchOutcomeUnknown(
+                target,
+                dispatchKind: .start
+            )
+            let identity = try XCTUnwrap(target.recoveryClaim?.identity)
+            let expectedRecord = domainRecoveryRecord(identity).replacingPhase(
+                .dispatchOutcomeUnknown,
+                dispatchKind: .start
+            )
+            var removalAttempts = 0
+            fixture.manager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting { _, _, _ in
+                removalAttempts += 1
+                return .workspaceConflict
+            }
+            defer {
+                fixture.manager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting(nil)
+            }
+
+            do {
+                try await viewModel.mcpAcceptSessionTarget(target)
+                XCTFail("An unchanged workspace conflict fence must not be retried.")
+            } catch {}
+
+            XCTAssertEqual(removalAttempts, 1)
+            let pending = await fixture.client.store.pendingAgentAdmissionRecoveryRecords(
+                workspaceID: fixture.workspaceA.id
+            )
+            XCTAssertEqual(pending.records, [expectedRecord])
+        }
+
         func testCancellationAfterMarkerRemovalCommitsAcceptanceWithoutRetryFence() async throws {
             let fixture = try await makeFixture()
             fixture.manager.activeWorkspace = fixture.workspaceA
@@ -2780,12 +3078,11 @@ import XCTest
                 revision,
                 digest in
                 let removed = await fixture.client.store.removeAgentAdmissionRecoveryRecord(
-                    workspaceID: record.workspaceID,
-                    recoveryID: record.recoveryID,
+                    expectedRecord: record,
                     expectedWorkingRevision: revision,
                     expectedContentDigest: digest
                 )
-                XCTAssertTrue(removed)
+                XCTAssertTrue(removed.didRemoveRecordForTesting)
                 await removalGate.markStartedAndWaitForRelease()
                 return removed
             }
@@ -2835,12 +3132,11 @@ import XCTest
                 revision,
                 digest in
                 let removed = await fixture.client.store.removeAgentAdmissionRecoveryRecord(
-                    workspaceID: record.workspaceID,
-                    recoveryID: record.recoveryID,
+                    expectedRecord: record,
                     expectedWorkingRevision: revision,
                     expectedContentDigest: digest
                 )
-                XCTAssertTrue(removed)
+                XCTAssertTrue(removed.didRemoveRecordForTesting)
                 await removalGate.markStartedAndWaitForRelease()
                 return removed
             }
@@ -2886,12 +3182,11 @@ import XCTest
                 revision,
                 digest in
                 let removed = await fixture.client.store.removeAgentAdmissionRecoveryRecord(
-                    workspaceID: record.workspaceID,
-                    recoveryID: record.recoveryID,
+                    expectedRecord: record,
                     expectedWorkingRevision: revision,
                     expectedContentDigest: digest
                 )
-                XCTAssertTrue(removed)
+                XCTAssertTrue(removed.didRemoveRecordForTesting)
                 await removalGate.markStartedAndWaitForRelease()
                 return removed
             }
@@ -2971,7 +3266,7 @@ import XCTest
             fixture.prompt.loadComposeTabsFromWorkspace(fixture.workspaceA)
             let persisted = await fixture.manager.persistPendingProvisionalAgentAdmissionRecovery(fixture.identity)
             XCTAssertTrue(persisted)
-            fixture.manager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting { _, _, _ in false }
+            fixture.manager.setAgentAdmissionRecoveryMarkerRemovalHandlerForTesting { _, _, _ in .unavailable }
 
             let outcome = await fixture.manager.recoverProvisionalAgentAdmission(fixture.identity)
 
@@ -2998,12 +3293,18 @@ import XCTest
             let snapshotValue = await fixture.client.canonicalWorkspaceSnapshot(fixture.workspaceA.id)
             let snapshot = try XCTUnwrap(snapshotValue)
             let removed = await fixture.client.store.removeAgentAdmissionRecoveryRecord(
-                workspaceID: fixture.identity.workspaceID,
-                recoveryID: fixture.identity.recoveryID,
+                expectedRecord: DomainAgentAdmissionRecoveryRecord(
+                    recoveryID: fixture.identity.recoveryID,
+                    workspaceID: fixture.identity.workspaceID,
+                    tabID: fixture.identity.tabID,
+                    sessionID: fixture.identity.sessionID,
+                    replacementTabID: fixture.identity.replacementTabID,
+                    mutation: .removeTab
+                ),
                 expectedWorkingRevision: snapshot.revisions.workingRevision,
                 expectedContentDigest: snapshot.document.contentDigest
             )
-            XCTAssertTrue(removed)
+            XCTAssertTrue(removed.didRemoveRecordForTesting)
             XCTAssertTrue(WorkspaceAgentAdmissionCoordinator.shared.hasRecoveryMarkerReservation(
                 workspaceID: fixture.workspaceA.id
             ))
@@ -3173,8 +3474,7 @@ import XCTest
                     recoveryRemovalCount += 1
                 }
                 return await fixture.client.store.removeAgentAdmissionRecoveryRecord(
-                    workspaceID: record.workspaceID,
-                    recoveryID: record.recoveryID,
+                    expectedRecord: record,
                     expectedWorkingRevision: revision,
                     expectedContentDigest: digest
                 )
@@ -3337,12 +3637,11 @@ import XCTest
             let durableValue = await competingClient.canonicalWorkspaceSnapshot(fixture.workspaceA.id)
             let durable = try XCTUnwrap(durableValue)
             let removed = await competingClient.store.removeAgentAdmissionRecoveryRecord(
-                workspaceID: record.workspaceID,
-                recoveryID: record.recoveryID,
+                expectedRecord: record,
                 expectedWorkingRevision: durable.revisions.workingRevision,
                 expectedContentDigest: durable.document.contentDigest
             )
-            XCTAssertTrue(removed)
+            XCTAssertTrue(removed.didRemoveRecordForTesting)
             await publicationGate.release()
             let outcome = try await workingTask.value
             XCTAssertEqual(outcome.disposition, .applied)
@@ -5988,5 +6287,11 @@ import XCTest
         func cancelCurrentTurn() async {}
         func shutdown() async {}
         func respondToServerRequest(id _: CodexAppServerRequestID, result _: [String: Any]) async {}
+    }
+
+    private extension DomainAgentAdmissionRecoveryRemovalResult {
+        var didRemoveRecordForTesting: Bool {
+            if case .removed = self { true } else { false }
+        }
     }
 #endif
