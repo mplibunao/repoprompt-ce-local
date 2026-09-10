@@ -44,6 +44,10 @@ Route the affected surface without guessing a fix:
 - Treat DEBUG-only MCP diagnostics such as `__repoprompt_debug_diagnostics` and diagnostic `app_settings` as sensitive. Prefer structured bounded snapshots, and do not assume built-in redaction makes raw output publishable.
 - Do not enable raw provider logging or launch, relaunch, or stop a visible app merely to draft an issue. If local raw capture is genuinely necessary, require separate approval where repository rules demand it, keep it bounded and owner-only, redact the distilled evidence, and clean up the capture.
 
+## Reference Upstream Only as Plain Text
+
+GitHub posts a "mentioned this" event on the referenced issue whenever a public repository's issue, comment, commit message, or pull request cites it as `owner/repo#N` or by URL. Write upstream RepoPrompt CE issues and pull requests as plain text instead, for example `upstream issue 803` or `upstream PR 957`, in titles, bodies, comments, commit messages, and pull request text. Bare `#N` refers to this repository's own tracker and stays reserved for it.
+
 ## Remove Private Data Before Filing
 
 Before showing a draft or filing an issue, remove or redact:
