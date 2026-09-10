@@ -224,8 +224,14 @@ enum ContextBuilderFollowUpFinalizationMonitor {
             case .overall:
                 .overall(seconds: configuration.overallTimeout)
             }
-            return await .timedOut(OraclePartialResponseTimeout(
-                partialText: partialResponse() ?? "",
+            let partialText = await partialResponse() ?? ""
+            // Cancellation strips control tags from the partial; if nothing substantive remains
+            // there is no partial answer to preserve, and a marker on its own is not a result.
+            guard !partialText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw OracleContextBuilderCompletionError.emptyProcessedContent
+            }
+            return .timedOut(OraclePartialResponseTimeout(
+                partialText: partialText,
                 reason: reason,
                 errorMessage: timeout.message
             ))

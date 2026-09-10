@@ -4657,6 +4657,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         let shouldActivate = isFocusedTab && !isUserStreaming
 
         var createdSessionID: UUID?
+
+        var startedQueryID: UUID?
         do {
             try Task.checkCancellation()
             guard session.isBackgroundPlanGenerating else {
@@ -4745,6 +4747,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 throw ChatToolError.internalError("Failed to start follow-up stream")
             }
 
+            startedQueryID = queryId
             guard session.isBackgroundPlanGenerating else {
                 throw CancellationError()
             }
@@ -4773,7 +4776,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             )
         } catch {
             if let createdSessionID {
-                await oracleViewModel.cancelStreaming(in: createdSessionID)
+                // Settlement can fail after the original turn already stopped and the user resent
+                // it; cancelling the whole session then would kill that replacement turn.
+                if let startedQueryID {
+                    await oracleViewModel.cancelStreaming(in: createdSessionID, ifActiveQueryIs: startedQueryID)
+                } else {
+                    await oracleViewModel.cancelStreaming(in: createdSessionID)
+                }
             }
 
             if error is CancellationError {

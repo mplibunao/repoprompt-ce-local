@@ -148,6 +148,19 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
         XCTAssertNil(fixture.oracleViewModel.finalizedAssistantContent(for: seeded.answerID, in: UUID()))
     }
 
+    func testQueryScopedCancelIgnoresASessionWhoseActiveQueryDiffers() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanup() }
+        let seeded = try await fixture.seedFinalizedExchange()
+
+        // Nothing is streaming, so the active query is nil and a stale query id must not cancel.
+        await fixture.oracleViewModel.cancelStreaming(in: seeded.session.id, ifActiveQueryIs: seeded.answerID)
+        XCTAssertEqual(
+            fixture.oracleViewModel.finalizedAssistantContent(for: seeded.answerID, in: seeded.session.id),
+            "truncated"
+        )
+    }
+
     private func makeFixture() async throws -> Fixture {
         let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
         GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)

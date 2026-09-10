@@ -3737,6 +3737,14 @@ class OracleViewModel: ObservableObject {
         await headlessRuntime.cancelStream(for: tabID)
     }
 
+    /// Cancels the session's stream only while `queryID` is still its active query, so a turn the
+    /// user started afterwards is left alone.
+    @MainActor
+    func cancelStreaming(in sessionID: UUID, ifActiveQueryIs queryID: UUID) async {
+        guard runStateBySession[sessionID]?.activeQueryId == queryID else { return }
+        await cancelStreaming(in: sessionID)
+    }
+
     @MainActor
     func cancelStreaming(in sessionID: UUID) async {
         await cancelAIResponse(in: sessionID, skipPartialParseAndSave: false)

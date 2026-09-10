@@ -68,6 +68,44 @@ final class ContextBuilderFollowUpFinalizationMonitorTests: XCTestCase {
         XCTAssertEqual(cancellationCount, 1)
     }
 
+    func testTimeoutWithOnlyControlMarkupLeftIsAnEmptyResponse() async throws {
+        let clock = ContextBuilderFollowUpFinalizationTestClock()
+        let cancellationRecorder = ContextBuilderFollowUpCancellationRecorder()
+        let finalizationGate = ContextBuilderFollowUpCancellationGate()
+        let (events, continuation) = AsyncStream<OracleMessageLifecycleActivityEvent>.makeStream()
+        defer { continuation.finish() }
+
+        do {
+            _ = try await ContextBuilderFollowUpFinalizationMonitor.wait(
+                activityEvents: events,
+                configuration: ContextBuilderFollowUpFinalizationConfiguration(
+                    overallTimeout: 100,
+                    inactivityTimeout: 10,
+                    checkInterval: 10
+                ),
+                clock: { clock.now() },
+                sleep: { seconds in
+                    clock.advance(by: seconds)
+                    await Task.yield()
+                },
+                waitForFinalization: {
+                    try await finalizationGate.wait()
+                },
+                partialResponse: {
+                    "  \n"
+                },
+                cancelStreaming: {
+                    await cancellationRecorder.record()
+                }
+            )
+            XCTFail("Expected the marker-only timeout to fail as an empty response")
+        } catch let error as OracleContextBuilderCompletionError {
+            XCTAssertEqual(error, .emptyProcessedContent)
+        }
+        let cancellationCount = await cancellationRecorder.count()
+        XCTAssertEqual(cancellationCount, 1)
+    }
+
     func testInactivityTimeoutSettlementPersistsMarkedResponseAcrossReplyPreviewAndReload() async throws {
         let partialText = "Partial answer"
         let fixture = try await makeSettlementFixture(partialText: partialText)
