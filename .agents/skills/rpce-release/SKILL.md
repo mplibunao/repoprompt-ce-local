@@ -1,68 +1,37 @@
 ---
 name: rpce-release
-description: Build or publish RepoPrompt CE release artifacts using the repository release scripts and GitHub workflows.
+description: Promote a local RepoPrompt CE production build through the repository-owned procedure with MP present for approval and acceptance.
 ---
 
 # RepoPrompt CE Release
 
-Use this skill when preparing a RepoPrompt CE release artifact or orienting a
-maintainer through a production release.
+Use this skill for a local production promotion. Read and follow [`docs/releasing.md`](../../../docs/releasing.md), which owns the promotion, rollback, provenance, and acceptance procedures.
 
-## Contributor artifact
+## Inputs
 
-Run the secret-free lane:
+Confirm these before starting:
 
-```bash
-make dev-release-preflight
-make dev-release-artifact
-```
+- the exact pushed `main` commit to promote
+- the intended version, build number, and `local/v<version>-b<build>` tag
+- the archive tag for the installed build
+- the GitHub Release receipt path
 
-For a local-only release-mode installation signed by the user's own dedicated
-self-signed identity, install Python 3 and double-click
-[`Install RepoPrompt CE Local Production.command`](../../../Install%20RepoPrompt%20CE%20Local%20Production.command)
-in Finder, or use the coordinated CLI path:
+Ask MP for any missing or ambiguous input instead of inferring it.
 
-```bash
-CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make dev-install-local-production
-```
+## Invocation boundary
 
-This app is not notarized and must not be distributed or uploaded to GitHub
-Releases.
+MP must be present throughout the promotion. Obtain immediate approval at every repository-required approval boundary, including visible-app lifecycle changes and GitHub-visible mutations. Follow `$rpce-contribution-check` before any commit or push.
 
-Report the ZIP, `SHA256SUMS`, and external artifact manifest written under
-`dist/`. Confirm that the public candidate is universal `arm64+x86_64`, ad-hoc
-signed, intended for packaging validation, and not distributable. Debug and
-local self-signed packages remain host-native.
+The promoted artifact is the local self-signed production app. Do not distribute or upload the app artifact.
 
-## Maintainer publish
+## Stop conditions
 
-Read [`docs/releasing.md`](../../../docs/releasing.md) before publishing.
+Stop before changing the installed app or repository state when:
 
-Use the environment-scoped GitHub **Publish Release** workflow for production
-draft creation. It requires an existing pushed tag and the `release`
-environment secrets documented there. Review the resulting ZIP, DMG, checksum, appcast, and artifact-manifest assets
-and require the fresh secret-free exact-helper packaged roundtrip to pass, then
-use the environment-scoped **Promote Release** workflow for the same
-tag. Promotion verifies and mirrors the existing reviewed assets, publishes
-both releases without rebuilding, resumes matching partial states, enforces a
-monotonically increasing stable build, and runs anonymous post-publish checks.
-Dispatch both workflows from protected `main` only after the `release`
-environment reviewer gate, `main` deployment restriction, and immutable `v*`
-tag ruleset are enabled, and GitHub Release immutability is enabled for both
-the source and updater repositories. Supply the SHA-256 digest of the reviewed
-source-draft `SHA256SUMS` file when dispatching promotion. Do not paste private keys,
-profiles, certificate exports, tokens, or passwords into logs or chat.
+- MP is not present or an immediate approval is missing
+- the selected commit is not the clean, pushed `main` tip
+- the build number, tag, archive target, or receipt is unresolved
+- the rollback rehearsal prerequisite in `docs/releasing.md` is not satisfied
+- archive, install, acceptance, provenance, tag, push, or receipt verification fails
 
-RepoPrompt CE starts its independent release history at `1.0.0 (1)`.
-Increment `BUILD_NUMBER` monotonically for every later public update.
-After changing `version.env`, run `make release-sync-cli-version` and commit the
-synchronized MCP CLI version before creating the release tag.
-
-For an explicit private-source updater smoke test, use the maintainer-only
-`Scripts/publish_public_update_test.sh` helper documented in
-[`docs/releasing.md`](../../../docs/releasing.md). It publishes only verified
-Developer ID signed, notarized ZIPs to the public artifact-only update
-repository.
-
-Before a tag, commit, or push, run the repository-local
-`$rpce-contribution-check` skill and follow its approval requirements.
+On failure, preserve the evidence and follow the rollback path in `docs/releasing.md`; do not continue to later promotion steps.

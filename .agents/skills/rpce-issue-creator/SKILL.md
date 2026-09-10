@@ -5,16 +5,16 @@ description: Draft, deduplicate, review, refine, or file maintainer-friendly Git
 
 # RepoPrompt CE Issue Creator
 
-Create concise, actionable issues for `repoprompt/repoprompt-ce`. Remove private or identifying data from source material before using it in a draft. Ask only for missing details that materially affect reproduction, routing, or acceptance.
+Create concise, actionable issues for `mplibunao/repoprompt-ce-local`. Remove private or identifying data from source material before using it in a draft. Ask only for missing details that materially affect reproduction, routing, or acceptance.
 
 ## Workflow
 
 1. Classify the request as a bug, regression, enhancement, task, docs issue, investigation follow-up, or question.
-2. Search open and closed issues in `repoprompt/repoprompt-ce` before drafting. Link likely duplicates; if the report is distinct, state the differing symptom, environment, version, or commit. Do not file blindly.
+2. Search open and closed issues in `mplibunao/repoprompt-ce-local` before drafting. Link likely duplicates; if the report is distinct, state the differing symptom, environment, version, or commit. Do not file blindly.
 3. Draft the issue using the content and CE-specific evidence guidance below.
 4. Review the complete draft and remove or redact all private and identifying data.
 5. Show the user the exact final title, body, and proposed labels. Obtain immediate explicit approval to file; approval to investigate or draft is not approval to create the issue.
-6. Only after approval, run `gh issue create --repo repoprompt/repoprompt-ce` with the reviewed payload. Report the URL. Note that issues from unapproved contributors may be auto-closed for maintainer review under `CONTRIBUTING.md`.
+6. Only after approval, run `gh issue create --repo mplibunao/repoprompt-ce-local` with the reviewed payload. Report the URL.
 
 ## Write Actionable Content
 
