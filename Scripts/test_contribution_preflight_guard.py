@@ -151,6 +151,26 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, self.output(result))
         self.assertIn(offending_url, self.output(result))
 
+    def test_commit_rejects_second_upstream_push_url(self) -> None:
+        offending_url = "git@github.com:repoprompt/repoprompt-ce.git"
+        self.git("remote", "add", "origin", DISTRIBUTION_HTTPS_URL)
+        self.git("config", "--add", "remote.origin.pushurl", DISTRIBUTION_HTTPS_URL)
+        self.git("config", "--add", "remote.origin.pushurl", offending_url)
+
+        result = self.run_preflight("commit")
+
+        self.assertNotEqual(result.returncode, 0, self.output(result))
+        self.assertIn(offending_url, self.output(result))
+
+    def test_commit_allows_two_distribution_push_urls(self) -> None:
+        self.git("remote", "add", "origin", DISTRIBUTION_HTTPS_URL)
+        self.git("config", "--add", "remote.origin.pushurl", DISTRIBUTION_HTTPS_URL)
+        self.git("config", "--add", "remote.origin.pushurl", DISTRIBUTION_SSH_URL)
+
+        result = self.run_preflight("commit")
+
+        self.assertEqual(result.returncode, 0, self.output(result))
+
     def test_commit_rejects_and_names_non_origin_remote(self) -> None:
         self.git("remote", "add", "origin", DISTRIBUTION_HTTPS_URL)
         self.git("remote", "add", "upstream", "https://example.invalid/upstream.git")

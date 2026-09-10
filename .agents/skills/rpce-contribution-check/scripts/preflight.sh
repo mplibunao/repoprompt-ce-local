@@ -149,13 +149,17 @@ require_remote_allowlist() {
   [[ -z "$remotes" ]] && return
 
   local origin_url_pattern='^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)mplibunao/repoprompt-ce-local(\.git)?$'
-  local fetch_url push_url
-  fetch_url="$(git remote get-url origin)" || fail "failed to read origin fetch URL; repair the repository's Git configuration"
-  [[ "$fetch_url" =~ $origin_url_pattern ]] \
-    || fail "origin fetch URL '$fetch_url' must target github.com/mplibunao/repoprompt-ce-local."
-  push_url="$(git remote get-url --push origin)" || fail "failed to read origin push URL; repair the repository's Git configuration"
-  [[ "$push_url" =~ $origin_url_pattern ]] \
-    || fail "origin push URL '$push_url' must target github.com/mplibunao/repoprompt-ce-local."
+  local fetch_urls push_urls origin_url
+  fetch_urls="$(git remote get-url --all origin)" || fail "failed to read origin fetch URLs; repair the repository's Git configuration"
+  while IFS= read -r origin_url; do
+    [[ "$origin_url" =~ $origin_url_pattern ]] \
+      || fail "origin fetch URL '$origin_url' must target github.com/mplibunao/repoprompt-ce-local."
+  done <<< "$fetch_urls"
+  push_urls="$(git remote get-url --push --all origin)" || fail "failed to read origin push URLs; repair the repository's Git configuration"
+  while IFS= read -r origin_url; do
+    [[ "$origin_url" =~ $origin_url_pattern ]] \
+      || fail "origin push URL '$origin_url' must target github.com/mplibunao/repoprompt-ce-local."
+  done <<< "$push_urls"
 }
 
 ensure_tmp_root() {

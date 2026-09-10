@@ -35,7 +35,7 @@ Run the repository-local safety preflight before every commit and push. Read `AG
 
 Default push mode validates whitespace, staged-index secrets, guardrails, the remote allowlist, clean worktree state, the current-branch outgoing range, and outgoing-range secrets. It does not run heavyweight lint/test/build/provider lanes.
 
-Both `commit` and `push` check the repository's remotes after guardrails and before the mode-specific phases. `origin` is the only remote this repository may have; any other remote fails the preflight, and a checkout with no remotes passes. When `origin` exists, both its fetch and push URLs must target the distribution repository specified in `AGENTS.md`. Read upstream RepoPrompt CE through the reference clone described in `docs/porting.md` instead of adding a remote.
+Both `commit` and `push` check the repository's remotes after guardrails and before the mode-specific phases. `origin` is the only remote this repository may have; any other remote fails the preflight, and a checkout with no remotes passes. When `origin` exists, every configured fetch and push URL must target the distribution repository specified in `AGENTS.md`. Read upstream RepoPrompt CE through the reference clone described in `docs/porting.md` instead of adding a remote.
 
 Push mode validates only the current branch against its configured upstream. For a non-`main` topic branch without a configured upstream, it may use `origin/main` as an explicit comparison fallback. It does not validate tags, `--all`, `--mirror`, or arbitrary refspecs.
 

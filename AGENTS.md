@@ -39,7 +39,7 @@ Three repositories share this code and each has a `main`; name them. *Upstream* 
 
 Write upstream issues and pull requests as plain text, for example `upstream issue 803` or `upstream PR 957`, never as `owner/repo#N` or a URL, in commit messages, pull request text, issues, and comments: GitHub posts a "mentioned this" event on the referenced item for every such reference from a public repository. A bare `#N` refers to the distribution's own tracker.
 
-Upstream RepoPrompt CE is readable through the reference clone at `/Users/mp/Projects/personal/repoprompt-ce-upstream-readonly` and is never a remote of this repository. The preflight's remote allowlist requires `origin` to be the only remote and requires both its fetch and push URLs to target `github.com/mplibunao/repoprompt-ce-local`, with or without the `.git` suffix. An upstream change crosses into this repository as hand-written source edits on a `port/` branch, never as a cherry-pick, patch, or merge. [`docs/porting.md`](docs/porting.md) owns the procedure.
+Upstream RepoPrompt CE is readable through the reference clone at `/Users/mp/Projects/personal/repoprompt-ce-upstream-readonly` and is never a remote of this repository. The preflight's remote allowlist requires `origin` to be the only remote and requires every configured fetch and push URL to target `github.com/mplibunao/repoprompt-ce-local`, with or without the `.git` suffix. An upstream change crosses into this repository as hand-written source edits on a `port/` branch, never as a cherry-pick, patch, or merge. [`docs/porting.md`](docs/porting.md) owns the procedure.
 
 ## Run
 
