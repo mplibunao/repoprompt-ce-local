@@ -8,25 +8,24 @@ import shlex
 import shutil
 import stat
 import subprocess
-import tempfile
+import sys
 import unittest
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from script_test_support import temporary_directory, write_executable  # noqa: E402
+
 REPO_ROOT = SCRIPT_DIR.parent
 PREFLIGHT_SOURCE = REPO_ROOT / ".agents/skills/rpce-contribution-check/scripts/preflight.sh"
 
 
-def write_executable(path: Path, body: str) -> None:
-    path.write_text(body, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
-
-
 class ContributionPreflightRemoteGuardTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.repo = Path(self.tmp.name) / "repo"
+        self.tmp = self.enterContext(temporary_directory())
+        self.repo = self.tmp / "repo"
         self.repo.mkdir()
 
         self.git("init", "-q")
@@ -43,7 +42,11 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
 
         self.bin_dir = self.repo / ".test-bin"
         self.bin_dir.mkdir()
-        write_executable(self.bin_dir / "gitleaks", "#!/bin/sh\nexit 0\n")
+        write_executable(
+            self.bin_dir / "gitleaks",
+            "#!/bin/sh\nexit 0\n",
+            executable_bits=stat.S_IXUSR,
+        )
 
         self.git("add", ".")
         self.git("commit", "-q", "-m", "fixture baseline")
@@ -161,6 +164,7 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
             "#!/bin/sh\n"
             'if [ "$#" -eq 1 ] && [ "$1" = remote ]; then exit 128; fi\n'
             f'exec {shlex.quote(str(real_git))} "$@"\n',
+            executable_bits=stat.S_IXUSR,
         )
 
         result = self.run_preflight("commit")

@@ -15,11 +15,16 @@ import os
 import plistlib
 import shutil
 import subprocess
-import tempfile
+import sys
 import unittest
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from script_test_support import temporary_directory, write_executable  # noqa: E402
+
 ROOT_DIR = SCRIPT_DIR.parent
 ARCHIVE_SCRIPT = SCRIPT_DIR / "local_release_archive.sh"
 RESTORE_SCRIPT = SCRIPT_DIR / "local_release_restore.sh"
@@ -40,8 +45,7 @@ def tree_snapshot(root: Path) -> dict[str, str | None]:
 
 class LocalReleaseRollbackUnitTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="repoprompt-ce-rollback-test."))
-        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.tmp = self.enterContext(temporary_directory(prefix="repoprompt-ce-rollback-test."))
         self.install_dir = self.tmp / "Applications"
         self.app = self.install_dir / f"{DISPLAY_NAME}.app"
         self.state = self.tmp / "Application Support" / DISPLAY_NAME
@@ -297,8 +301,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         stub_dir = self.tmp / "failing-find"
         stub_dir.mkdir()
         find_stub = stub_dir / "find"
-        find_stub.write_text("#!/bin/sh\nexit 73\n", encoding="utf-8")
-        find_stub.chmod(0o755)
+        write_executable(find_stub, "#!/bin/sh\nexit 73\n")
 
         result = self.run_script(RESTORE_SCRIPT, PATH=f"{stub_dir}:{os.environ['PATH']}")
         output = result.stdout + result.stderr
