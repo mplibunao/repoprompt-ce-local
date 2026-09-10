@@ -1,29 +1,26 @@
 # Open-Source and Release Readiness Notes
 
-Current as of 2026-06-01. This is a contributor/maintainer inventory for RepoPrompt CE's public-readiness work. It documents the current state and follow-ups; it is not legal advice or a substitute for legal review.
+This is an inventory of RepoPrompt CE's release metadata, dependency pins, and third-party license coverage. Licensing entries are current as of 2026-06-01. It documents the current state and follow-ups; it is not legal advice or a substitute for legal review.
 
 ## Release metadata and signing
 
-Release/debug packaging currently derives app identity from [`version.env`](../version.env):
+Release/debug packaging derives app identity from [`version.env`](../version.env):
 
 - `APP_NAME=RepoPrompt`
 - `DISPLAY_NAME="RepoPrompt CE"`
-- `MARKETING_VERSION=1.0.0`
-- `BUILD_NUMBER=1`
+- `MARKETING_VERSION`
+- `BUILD_NUMBER`
 - `BUNDLE_ID=com.pvncher.repoprompt.ce`
 - `SIGNING_TEAM_ID=648A27MST5`
 
-RepoPrompt CE starts a new public release line at `1.0.0 (1)`. The separate CE
-bundle identifier, Sparkle key pair, and appcast intentionally do not inherit
-the closed app's version history. Treat these values as maintainer-owned
-release metadata. Contributors should not change bundle IDs, signing team IDs,
-Sparkle keys, or release channels unless a maintainer has explicitly provided
-the replacement values. Forks that need a branded app should override locally
-or carry their own release metadata patch.
+The bundle identifier, Sparkle key pair, and appcast belong to CE's own release
+line and do not inherit the closed app's version history. Treat bundle IDs,
+signing team IDs, Sparkle keys, and release channels as deliberate,
+separately reviewed changes.
 
 `./Scripts/package_app.sh release` produces a signed release `.app` bundle. A signed release requires `SIGN_IDENTITY` and a `REPOPROMPT_PROVISIONING_PROFILE` for `648A27MST5.com.pvncher.repoprompt.ce`, renders the CE entitlements template, uses timestamped hardened-runtime signing, verifies the signed bundle identifier/team, uses Keychain-backed secure storage, copies the root `LICENSE` and `THIRD_PARTY_NOTICES.md` files into `Contents/Resources/Legal`, and recursively copies root [`ThirdPartyLicenses/`](../ThirdPartyLicenses/) into `Contents/Resources/Legal/ThirdPartyLicenses/` in the packaged app.
 
-[`Scripts/release.sh`](../Scripts/release.sh) adds a secret-free ad-hoc release-candidate lane plus the maintainer publishing lane: resolved-lockfile drift checks, a secret-free approved-source staging job, a fresh protected signing runner, trusted-control-plane Developer ID signing and Sparkle metadata generation, notarization, stapling, ZIP and DMG generation, checksums, packaged legal-tree verification, remote-tag SHA attestation, and draft-only GitHub Release creation. [`Scripts/promote_release.sh`](../Scripts/promote_release.sh) verifies the reviewed draft, rechecks the immutable remote tag SHA and draft attestation, confirms that the modern Sparkle private-key seed matches the app bundle public key and independently verifies the appcast ZIP signature, rejects asset, reviewed-checksum, or stable-build drift, compares the mounted DMG app with the verified ZIP app, mirrors the public update assets, publishes both releases without rebuilding, resumes matching partial states, fails closed on stable-channel API errors other than an explicit first-release `404`, and runs anonymous post-publish checks. The contributor and maintainer process, GitHub workflows, required environment controls, and secrets are documented in [`docs/releasing.md`](releasing.md).
+[`Scripts/release.sh`](../Scripts/release.sh) provides the secret-free release-candidate lane: resolved-lockfile drift checks, a secret-free approved-source staging job, universal artifact assembly, checksums, and packaged legal-tree verification. Installing and promoting a build locally is documented in [`docs/releasing.md`](releasing.md).
 
 ## Sparkle metadata
 
@@ -33,18 +30,11 @@ or carry their own release metadata patch.
 - `SUPublicEDKey=<public EdDSA key committed in the plist>`
 - `SUBundleName=RepoPrompt CE.app`
 
-These are documented as maintainer-owned release/update-channel values. Do not replace them with guessed fork values. The inherited Sparkle EdDSA key pair was rotated to a CE-specific pair on 2026-05-31: only the new public key is committed, the private key is stored in the GitHub `release` environment, and the app-side Sparkle integrity checks agree with the plist values.
-
-The stable feed is hosted in the deliberately public, artifact-only
-[`repoprompt/repoprompt-ce-updates`](https://github.com/repoprompt/repoprompt-ce-updates)
-repository. This keeps the appcast and signed updater ZIP anonymously
-downloadable while the source repository remains private during validation.
-The organization currently disables GitHub Pages creation, so the feed uses
-public GitHub Release assets in that repository rather than Pages.
+The Sparkle EdDSA key pair is CE-specific: only the public key is committed, and the app-side Sparkle integrity checks agree with the plist values.
 
 ## Dependency pins
 
-The root [`Package.swift`](../Package.swift) uses exact versions or fixed revisions. The CE fork dependencies previously expressed as branch references are now pinned to the resolved revisions:
+The root [`Package.swift`](../Package.swift) uses exact versions or fixed revisions. CE dependencies are pinned to resolved revisions:
 
 | Dependency | Current manifest form | Current `Package.resolved` state | Readiness note |
 | --- | --- | --- | --- |
@@ -61,7 +51,7 @@ The in-repo provider package at [`Packages/RepoPromptAgentProviders`](../Package
 
 ## Third-party license/notice inventory
 
-Contributor-visible license expectations before public distribution:
+License and notice coverage for bundled third-party material:
 
 | Component | Location | Current notice source | Follow-up |
 | --- | --- | --- | --- |
@@ -82,9 +72,9 @@ guardrail keeps the resolved SwiftPM inventory aligned with `Package.resolved`
 and verifies the copied notice checksums, including the complete curated
 Tree-sitter bundle.
 
-## Public release readiness status
+## Public release channel setup
 
-Completed setup through 2026-06-01:
+The signing, notarization, and publishing lane these items configure is parked; see [Public release train](releasing.md#public-release-train). Completed setup through 2026-06-01:
 
 - Registered the explicit Apple Developer App ID `com.pvncher.repoprompt.ce`.
 - Created and validated the `RepoPromptCEDeveloperID` Developer ID provisioning profile for `648A27MST5.com.pvncher.repoprompt.ce`.
@@ -95,16 +85,13 @@ Completed setup through 2026-06-01:
 - Enabled GitHub Release immutability for both `repoprompt/repoprompt-ce` and `repoprompt/repoprompt-ce-updates`.
 - Added the fine-grained `PUBLIC_UPDATE_REPOSITORY_TOKEN` secret scoped only to `repoprompt/repoprompt-ce-updates` with repository contents read/write permission.
 - Published the source repository, reran CI, and exercised the protected **Publish Release** draft and **Promote Release** flow through public publication.
-- Kept the opted-in contributor cohort in the tracked `.github/APPROVED_CONTRIBUTORS` file so changes remain public and reviewable. The issue and pull-request gates read that default-branch file directly.
 - Curated copied license and notice files for every remote dependency in the resolved root SwiftPM graph and added machine guardrails for inventory drift and copied-file checksums.
 - Added the environment-scoped **Promote Release** workflow. It uses trusted tooling pinned to a validated `main` SHA, requires the requested tag to be reachable from protected `main`, verifies reviewed source-draft assets and ZIP/DMG contents, validates packaged legal files and the protected CE Sparkle private key, mirrors update assets into `repoprompt-ce-updates`, enforces monotonically increasing stable builds, resumes matching partial states, publishes without rebuilding, explicitly selects the latest release, and runs anonymous post-publish checks.
 
-The previously tracked external GitHub configuration gates are complete and are
-no longer public-release blockers. Continue to verify an installed app update
-through the public channel for each release candidate before relying on a new
-stable update.
+Each build is accepted with the acceptance matrix in [`docs/releasing.md`](releasing.md)
+before it is promoted.
 
-## Contributor validation touchpoints
+## Validation touchpoints
 
 Docs-only or metadata-documentation changes should at minimum run:
 

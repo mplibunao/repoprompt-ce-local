@@ -131,7 +131,7 @@ make dev-test FILTER=TokenCalculationServiceByteEstimateTests
 make dev-test FILTER=WorkspaceSelectionPreResolvedMutationTests
 ```
 
-Git selection actions have additional focused coverage in `GitViewModelSelectionClearTests`. Use the contribution matrix in [`../../AGENTS.md`](../../AGENTS.md) for repository-wide lint, build, and PR-ready gates. Because Context Composer is running-app Agent Mode UI, also follow the live CE MCP smoke flow there when behavior changes.
+Git selection actions have additional focused coverage in `GitViewModelSelectionClearTests`. Use the preflight lanes and focused validation commands in [`../../AGENTS.md`](../../AGENTS.md) for repository-wide lint, build, and PR-ready gates. Because Context Composer is running-app Agent Mode UI, also follow the live CE MCP smoke flow there when behavior changes.
 
 ## References
 

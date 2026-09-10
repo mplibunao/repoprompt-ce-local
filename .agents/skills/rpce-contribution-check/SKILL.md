@@ -1,6 +1,6 @@
 ---
 name: rpce-contribution-check
-description: Validate RepoPrompt CE contributions before committing or pushing. Use whenever an agent is about to create a commit, push the current branch, rewrite history, delete a branch or fork, or change GitHub-visible repository state. Enforces staged-index and outgoing-range secret scanning, repository guardrails, clean push boundaries, an explicit PR-ready lane for path-selected heavyweight validation, and explicit approval for destructive Git or visible live-app operations.
+description: Validate RepoPrompt CE contributions before committing or pushing. Use whenever an agent is about to create a commit, push the current branch, rewrite history, delete a branch or fork, or change GitHub-visible repository state. Enforces staged-index and outgoing-range secret scanning, repository guardrails, an origin-only remote allowlist, clean push boundaries, an explicit PR-ready lane for path-selected heavyweight validation, and explicit approval for destructive Git or visible live-app operations.
 ---
 
 # RepoPrompt CE Contribution Check
@@ -33,7 +33,9 @@ Run the repository-local safety preflight before every commit and push. Read `AG
 4. Read [references/validation-matrix.md](references/validation-matrix.md) and ensure any required focused, release, smoke, or PR-ready evidence is recorded before pushing.
 5. Push only the intended current branch and check the GitHub Actions run after pushing.
 
-Default push mode validates whitespace, staged-index secrets, guardrails, clean worktree state, the current-branch outgoing range, and outgoing-range secrets. It does not run heavyweight lint/test/build/provider lanes.
+Default push mode validates whitespace, staged-index secrets, guardrails, the remote allowlist, clean worktree state, the current-branch outgoing range, and outgoing-range secrets. It does not run heavyweight lint/test/build/provider lanes.
+
+Both `commit` and `push` check the repository's remotes after guardrails and before the mode-specific phases. `origin` is the only remote this repository may have; any other remote fails the preflight, and a checkout with no remotes passes. Read upstream RepoPrompt CE through the reference clone described in `docs/porting.md` instead of adding a remote.
 
 Push mode validates only the current branch against its configured upstream. For a non-`main` topic branch without a configured upstream, it may use `origin/main` as an explicit comparison fallback. It does not validate tags, `--all`, `--mirror`, or arbitrary refspecs.
 
@@ -45,7 +47,22 @@ When preparing computed-outgoing-range local PR evidence, when a maintainer requ
 .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
 ```
 
+Run `pr-ready` before merging a branch into `main`; it is the mandatory pre-merge lane.
+
 `pr-ready` reruns the push safety gate, then runs any matching path-selected heavyweight lanes for the computed outgoing range, such as conductor selftests, Swift lint, root/provider tests, product builds, and generated Xcode workspace validation for Xcode boundary changes. Heavy build/test/package lanes may wait on conductor's per-user global heavy slot when another worktree is already running Swift/Xcode-heavy work; treat that as coordination, not a reason to launch duplicate direct `swift`/`xcodebuild` commands. It does not replace explicit release validation, live smoke, already-pushed PR-base comparison, or destructive-operation approval requirements.
+
+### Comparison base
+
+`push` and `pr-ready` resolve the same comparison base and no flag overrides it: the branch's configured upstream when it has one, otherwise `origin/main` for a non-`main` branch. Once a topic branch has been pushed, its upstream is its own remote branch, so the computed range is empty and both lanes exit successfully having validated nothing.
+
+To validate a whole branch against `main`, run `pr-ready` while the branch has no configured upstream:
+
+```bash
+git branch --unset-upstream        # only needed once the branch has been pushed
+.agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
+```
+
+Before a branch's first push there is nothing to unset. A green `push` lane is not a substitute for this: it scans the same possibly empty range and never runs the heavyweight lanes.
 
 ## Escalate before destructive operations
 

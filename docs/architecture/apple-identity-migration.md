@@ -1,5 +1,7 @@
 # Apple Identity Migration
 
+Historical: this describes the upstream RepoPrompt CE identity migration and is retained for reference.
+
 RepoPrompt CE cannot treat a Developer ID and bundle-identifier replacement as an ordinary in-place
 Sparkle update. The migration must preserve the legacy signing anchor long enough to prepare secure
 storage, then use a notarized transition installer to cross the application identity boundary.
