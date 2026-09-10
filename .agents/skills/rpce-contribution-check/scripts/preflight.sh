@@ -146,6 +146,16 @@ require_remote_allowlist() {
   if (( ${#unexpected_remotes[@]} )); then
     fail "unexpected Git remote(s): ${unexpected_remotes[*]}; only 'origin' is allowed"
   fi
+  [[ -z "$remotes" ]] && return
+
+  local origin_url_pattern='^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)mplibunao/repoprompt-ce-local(\.git)?$'
+  local fetch_url push_url
+  fetch_url="$(git remote get-url origin)" || fail "failed to read origin fetch URL; repair the repository's Git configuration"
+  [[ "$fetch_url" =~ $origin_url_pattern ]] \
+    || fail "origin fetch URL '$fetch_url' must target github.com/mplibunao/repoprompt-ce-local."
+  push_url="$(git remote get-url --push origin)" || fail "failed to read origin push URL; repair the repository's Git configuration"
+  [[ "$push_url" =~ $origin_url_pattern ]] \
+    || fail "origin push URL '$push_url' must target github.com/mplibunao/repoprompt-ce-local."
 }
 
 ensure_tmp_root() {

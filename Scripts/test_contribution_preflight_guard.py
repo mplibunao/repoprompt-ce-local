@@ -17,6 +17,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 PREFLIGHT_SOURCE = REPO_ROOT / ".agents/skills/rpce-contribution-check/scripts/preflight.sh"
 MAKEFILE_SOURCE = REPO_ROOT / "Makefile"
+DISTRIBUTION_HTTPS_URL = "https://github.com/mplibunao/repoprompt-ce-local"
+DISTRIBUTION_SSH_URL = "git@github.com:mplibunao/repoprompt-ce-local.git"
 
 
 def write_executable(path: Path, body: str) -> None:
@@ -91,7 +93,7 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
         )
 
     def prepare_push_branch(self) -> None:
-        self.git("remote", "add", "origin", "https://example.invalid/origin.git")
+        self.git("remote", "add", "origin", DISTRIBUTION_HTTPS_URL)
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
         self.git("switch", "-q", "-c", "port/123-fixture")
 
@@ -116,15 +118,41 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, self.output(result))
 
-    def test_commit_allows_origin_only_repository(self) -> None:
-        self.git("remote", "add", "origin", "https://example.invalid/origin.git")
+    def test_commit_allows_distribution_https_origin(self) -> None:
+        self.git("remote", "add", "origin", DISTRIBUTION_HTTPS_URL)
 
         result = self.run_preflight("commit")
 
         self.assertEqual(result.returncode, 0, self.output(result))
 
+    def test_commit_allows_distribution_ssh_origin(self) -> None:
+        self.git("remote", "add", "origin", DISTRIBUTION_SSH_URL)
+
+        result = self.run_preflight("commit")
+
+        self.assertEqual(result.returncode, 0, self.output(result))
+
+    def test_commit_rejects_old_fork_origin(self) -> None:
+        offending_url = "https://github.com/mplibunao/repoprompt-ce.git"
+        self.git("remote", "add", "origin", offending_url)
+
+        result = self.run_preflight("commit")
+
+        self.assertNotEqual(result.returncode, 0, self.output(result))
+        self.assertIn(offending_url, self.output(result))
+
+    def test_commit_rejects_upstream_push_url(self) -> None:
+        offending_url = "git@github.com:repoprompt/repoprompt-ce.git"
+        self.git("remote", "add", "origin", DISTRIBUTION_HTTPS_URL)
+        self.git("config", "remote.origin.pushurl", offending_url)
+
+        result = self.run_preflight("commit")
+
+        self.assertNotEqual(result.returncode, 0, self.output(result))
+        self.assertIn(offending_url, self.output(result))
+
     def test_commit_rejects_and_names_non_origin_remote(self) -> None:
-        self.git("remote", "add", "origin", "https://example.invalid/origin.git")
+        self.git("remote", "add", "origin", DISTRIBUTION_HTTPS_URL)
         self.git("remote", "add", "upstream", "https://example.invalid/upstream.git")
 
         result = self.run_preflight("commit")
@@ -134,7 +162,7 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
         self.assertIn("only 'origin' is allowed", self.output(result))
 
     def test_commit_fails_closed_when_git_remote_listing_fails(self) -> None:
-        self.git("remote", "add", "origin", "https://example.invalid/origin.git")
+        self.git("remote", "add", "origin", DISTRIBUTION_HTTPS_URL)
         self.git("remote", "add", "upstream", "https://example.invalid/upstream.git")
 
         real_git = shutil.which("git")
