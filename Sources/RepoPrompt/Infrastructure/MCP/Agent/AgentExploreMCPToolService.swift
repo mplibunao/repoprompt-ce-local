@@ -312,7 +312,7 @@ struct AgentExploreMCPToolService {
                 guard !started.isEmpty else { throw error }
                 let startedIDs = started.map(\.outcome.snapshot.sessionID.uuidString).joined(separator: ", ")
                 throw MCPError.internalError(
-                    "agent_explore.start failed after starting \(started.count) of \(messages.count) explore sessions. Already-started session_ids: \(startedIDs). Failed index: \(index). Error: \(error)"
+                    "agent_explore.start failed after starting \(started.count) of \(messages.count) explore sessions. Already-started session_ids: \(startedIDs). Failed index: \(index). Error: \(mcpErrorRenderingText(error))"
                 )
             }
         }

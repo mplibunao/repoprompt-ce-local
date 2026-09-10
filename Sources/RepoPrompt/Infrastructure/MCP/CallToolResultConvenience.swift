@@ -1,4 +1,12 @@
+import Foundation
 import MCP
+
+/// Renders a caught error for MCP clients and diagnostics. `localizedDescription` on a bare Swift
+/// error collapses to "The operation couldn't be completed", which hides the reason a tool failed;
+/// `LocalizedError.errorDescription` carries it.
+func mcpErrorRenderingText(_ error: Error) -> String {
+    (error as? LocalizedError)?.errorDescription ?? "\(error)"
+}
 
 /// Convenience helpers for building success or error replies from any tool.
 extension CallTool.Result {

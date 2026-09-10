@@ -1613,6 +1613,12 @@ actor AgentSessionDataService {
             workspaceRootURL()
         }
 
+        /// A suite that redirects this process-global root has to put back whatever it displaced,
+        /// because restoring `nil` points every later reader at the real user profile.
+        func test_workspaceRootOverride() -> URL? {
+            workspaceRootOverrideForTesting
+        }
+
         func test_setBeforeSessionWriteHook(_ hook: (@Sendable (URL) async -> Void)?) async {
             await diskWriter.test_setBeforeWriteHook(hook)
         }
