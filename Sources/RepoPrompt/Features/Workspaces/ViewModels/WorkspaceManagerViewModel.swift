@@ -680,6 +680,8 @@ class WorkspaceManagerViewModel: ObservableObject {
             (@MainActor (UUID) async -> Void)?
         private var composeTabFastStateDidApplyHandlerForTesting:
             (@MainActor (UUID) async -> Void)?
+        private var composeTabHeavyFileStateWillApplyHandlerForTesting:
+            (@MainActor (UUID) async -> Void)?
         private var agentAdmissionRecoveryWorkingCommitHandlerForTesting:
             (@MainActor (UUID, AgentAdmissionRecoveryWorkingCommit) async -> Bool)?
         private var agentAdmissionRecoverySaveResponseHandlerForTesting:
@@ -977,6 +979,16 @@ class WorkspaceManagerViewModel: ObservableObject {
             _ handler: (@MainActor (UUID) async -> Void)?
         ) {
             composeTabFastStateDidApplyHandlerForTesting = handler
+        }
+
+        func setComposeTabHeavyFileStateWillApplyHandlerForTesting(
+            _ handler: (@MainActor (UUID) async -> Void)?
+        ) {
+            composeTabHeavyFileStateWillApplyHandlerForTesting = handler
+        }
+
+        func waitForComposeTabStateApplicationForTesting() async {
+            await composeTabApplyTask?.value
         }
 
         func setAgentAdmissionRecoveryWorkingCommitHandlerForTesting(
@@ -5823,6 +5835,9 @@ class WorkspaceManagerViewModel: ObservableObject {
     private func applyComposeTabHeavyFileState(_ tab: ComposeTabState) async {
         guard !Task.isCancelled else { return }
         guard let active = activeWorkspace, active.activeComposeTabID == tab.id else { return }
+        #if DEBUG
+            await composeTabHeavyFileStateWillApplyHandlerForTesting?(tab.id)
+        #endif
         await fileManager.restoreExpansionState(from: tab.expandedFolders)
         await fileManager.onActiveTabChangedHeavy(for: tab.id, selection: tab.selection)
         selectionCoordinator?.refreshDeferredUISelectionFence(forTabID: tab.id)

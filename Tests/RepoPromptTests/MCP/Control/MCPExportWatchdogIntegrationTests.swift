@@ -10,7 +10,7 @@ import XCTest
 #if DEBUG
     @MainActor
     final class MCPExportWatchdogIntegrationTests: XCTestCase {
-        func testPromptSetRespondsBeforeDeferredActiveTabApplyCompletes() async throws {
+        func testPromptSetDoesNotReplaySelectionAfterManageSelectionCompletes() async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
                     lease: lease,
@@ -18,52 +18,60 @@ import XCTest
                 )
                 let endpoint = try fixture.endpointA()
                 let context = fixture.contextA
+                let manager = context.window.workspaceManager
                 let gate = MCPExecutionIgnoringCancellationGate()
-                let responseCompleted = ExportPhaseSignal()
-                let applyReleased = ExportPhaseSignal()
-                let prompt = "bounded-prompt-\(UUID().uuidString)"
-                var responseTask: Task<PersistentMCPTestRPCResponse, Error>?
+                let secondRelativePath = "Sources/PostPromptSelection.swift"
+                let secondURL = context.rootURL.appendingPathComponent(secondRelativePath)
 
                 do {
                     try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
-                    context.window.workspaceManager.setComposeTabFastStateDidApplyHandlerForTesting { tabID in
-                        guard tabID == context.tabID else { return }
+                    _ = try await context.window.workspaceFileContextStore.createFile(
+                        rootID: context.rootID,
+                        relativePath: secondRelativePath,
+                        content: SwiftFixtureSource.emptyStruct("PostPromptSelection")
+                    )
+                    let initialSelection = try await endpoint.callTool(
+                        name: MCPWindowToolName.manageSelection,
+                        arguments: ["op": "set", "paths": [context.fileURL.path]]
+                    )
+                    XCTAssertFalse(initialSelection.rawJSON.contains("\"isError\":true"), initialSelection.rawJSON)
+
+                    manager.setComposeTabHeavyFileStateWillApplyHandlerForTesting { tabID in
+                        guard tabID == context.tabID, await gate.enteredCount() == 0 else { return }
                         await gate.enterAndWait()
-                        await applyReleased.mark()
                     }
-                    let activeResponseTask = Task {
-                        let response = try await endpoint.callTool(
-                            name: MCPWindowToolName.prompt,
-                            arguments: ["op": "set", "text": prompt]
-                        )
-                        await responseCompleted.mark()
-                        return response
-                    }
-                    responseTask = activeResponseTask
-                    try await gate.waitUntilEntered(count: 1)
-                    let completedWhileApplyBlocked = await Self.waitUntil(timeout: .seconds(2)) {
-                        await responseCompleted.isMarked()
-                    }
-                    XCTAssertTrue(completedWhileApplyBlocked)
-                    let response = try await activeResponseTask.value
-                    responseTask = nil
-                    XCTAssertTrue(try Self.toolResultText(response).contains(prompt))
+                    let promptResponse = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "prompt-only-selection-race"]
+                    )
+                    XCTAssertFalse(promptResponse.rawJSON.contains("\"isError\":true"), promptResponse.rawJSON)
 
+                    let promptReplayEntered = await Self.waitUntil(timeout: .milliseconds(500)) {
+                        await gate.enteredCount() == 1
+                    }
+                    if !promptReplayEntered {
+                        await gate.release()
+                    }
+                    let updatedSelection = try await endpoint.callTool(
+                        name: MCPWindowToolName.manageSelection,
+                        arguments: ["op": "set", "paths": [secondURL.path]]
+                    )
+                    XCTAssertFalse(updatedSelection.rawJSON.contains("\"isError\":true"), updatedSelection.rawJSON)
                     await gate.release()
-                    let resumed = await Self.waitUntil { await applyReleased.isMarked() }
-                    XCTAssertTrue(resumed)
-                    let stored = context.window.workspaceManager.composeTab(with: context.tabID)
-                    XCTAssertEqual(stored?.promptText, prompt)
-                    XCTAssertEqual(context.window.promptManager.promptText, prompt)
+                    await manager.waitForComposeTabStateApplicationForTesting()
 
-                    context.window.workspaceManager.setComposeTabFastStateDidApplyHandlerForTesting(nil)
+                    let storedSelection = try XCTUnwrap(manager.composeTab(with: context.tabID)?.selection)
+                    XCTAssertEqual(Set(storedSelection.selectedPaths), Set([secondURL.path]))
+                    let visibleSelection = Set(context.window.workspaceFilesViewModel.selectedFiles.map(\.fullPath))
+                    XCTAssertEqual(visibleSelection, Set([secondURL.path]))
+                    XCTAssertFalse(promptReplayEntered)
+
+                    manager.setComposeTabHeavyFileStateWillApplyHandlerForTesting(nil)
                     await fixture.cleanup()
                     try await fixture.assertCleanedUp()
                 } catch {
-                    responseTask?.cancel()
                     await gate.release()
-                    if let responseTask { _ = try? await responseTask.value }
-                    context.window.workspaceManager.setComposeTabFastStateDidApplyHandlerForTesting(nil)
+                    manager.setComposeTabHeavyFileStateWillApplyHandlerForTesting(nil)
                     await fixture.cleanup()
                     throw error
                 }

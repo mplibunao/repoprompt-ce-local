@@ -4374,14 +4374,14 @@ extension MCPServerViewModel {
         }
         tabContextByConnectionID[connectionID] = context
         if toolName == MCPWindowToolName.prompt {
-            await commitPromptContextToUI(context)
+            commitPromptContextToUI(context)
         } else {
             await pushVirtualContextToUI(context)
         }
     }
 
     @MainActor
-    private func commitPromptContextToUI(_ context: TabContextSnapshot) async {
+    private func commitPromptContextToUI(_ context: TabContextSnapshot) {
         guard let manager = workspaceManager,
               let workspaceID = context.workspaceID ?? manager.activeWorkspace?.id,
               let workspaceIndex = manager.workspaces.firstIndex(where: { $0.id == workspaceID }),
@@ -4396,12 +4396,6 @@ extension MCPServerViewModel {
         let isActive = manager.workspaces[workspaceIndex].activeComposeTabID == context.tabID
         guard isActive else { return }
         promptVM.promptText = context.promptText
-
-        // The stored tab is authoritative, so a coalesced apply can safely reload the
-        // latest state if another prompt mutation arrives before file restoration begins.
-        Task { @MainActor [weak manager] in
-            await manager?.applyComposeTabStateAsync(tab: updatedTab, windowID: context.windowID)
-        }
     }
 
     private func stripTaskNameTag(from prompt: String) -> (cleanPrompt: String, taskName: String?) {
