@@ -1637,7 +1637,15 @@ class OracleViewModel: ObservableObject {
         } else {
             try await autosaveSession(sessionSnapshot)
         }
-        guard let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID }) else {
+        // The save suspended as well. If a resend replaced the answer meanwhile, the file now
+        // holds a stale transcript: refresh it from the current one and report the miss.
+        guard sessionIDByMessageId[queryID] == sessionID,
+              messageStore[sessionID]?.contains(where: { $0.id == queryID && !$0.isUser && $0.isFinalized }) == true,
+              let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID })
+        else {
+            if sessions.contains(where: { $0.id == sessionID }) {
+                autosaveChatHistory(for: sessionID, force: true)
+            }
             throw OracleContextBuilderCompletionError.missingExactQuery
         }
         // Only the fields the save produced are copied back; a rename or tab change made while
@@ -1645,6 +1653,19 @@ class OracleViewModel: ObservableObject {
         sessions[sessionIndex].messages = sessionSnapshot.messages
         sessions[sessionIndex].savedAt = sessionSnapshot.savedAt
         sessions[sessionIndex].fileURL = fileURL
+    }
+
+    /// The assistant content for `queryID` after finalization has processed it (control tags
+    /// stripped), or `nil` while the message is still streaming or no longer belongs to the chat.
+    @MainActor
+    func finalizedAssistantContent(for queryID: UUID, in sessionID: UUID) -> String? {
+        guard sessionIDByMessageId[queryID] == sessionID,
+              let message = messageStore[sessionID]?.first(where: { $0.id == queryID && !$0.isUser }),
+              message.isFinalized
+        else {
+            return nil
+        }
+        return message.content
     }
 
     nonisolated func waitForContextBuilderCompletion(_ id: UUID) async throws -> String {

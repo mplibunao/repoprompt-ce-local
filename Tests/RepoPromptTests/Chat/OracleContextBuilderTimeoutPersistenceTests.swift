@@ -105,6 +105,49 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
         }
     }
 
+    func testRemovingTheAnswerWhileSavingThrowsAndRefreshesTheFile() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanup() }
+        let seeded = try await fixture.seedFinalizedExchange()
+        var resent = seeded.session
+        resent.messages = seeded.session.messages.filter(\.isUser)
+        let resentURL = try await fixture.oracleViewModel.chatData.saveChatSession(resent, for: fixture.workspace)
+
+        do {
+            try await fixture.oracleViewModel.persistContextBuilderTimeoutResponse(
+                "partial answer",
+                queryID: seeded.answerID,
+                sessionID: seeded.session.id,
+                saveSession: { session in
+                    // The resend lands while the save is suspended; the stale snapshot is then
+                    // written over it, which is the state the guard must detect.
+                    await fixture.oracleViewModel.loadChatSession(from: resentURL)
+                    return try await fixture.oracleViewModel.chatData.saveChatSession(session, for: fixture.workspace)
+                }
+            )
+            XCTFail("Expected missingExactQuery once the answer was removed during the save")
+        } catch let error as OracleContextBuilderCompletionError {
+            XCTAssertEqual(error, .missingExactQuery)
+        }
+
+        let live = try XCTUnwrap(fixture.oracleViewModel.sessions.first(where: { $0.id == seeded.session.id }))
+        XCTAssertFalse(live.messages.contains(where: { $0.rawText.contains("partial answer") }))
+    }
+
+    func testFinalizedAssistantContentReadsTheProcessedMessage() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanup() }
+        let seeded = try await fixture.seedFinalizedExchange()
+        let userID = try XCTUnwrap(seeded.session.messages.first(where: \.isUser)?.id)
+
+        XCTAssertEqual(
+            fixture.oracleViewModel.finalizedAssistantContent(for: seeded.answerID, in: seeded.session.id),
+            "truncated"
+        )
+        XCTAssertNil(fixture.oracleViewModel.finalizedAssistantContent(for: userID, in: seeded.session.id))
+        XCTAssertNil(fixture.oracleViewModel.finalizedAssistantContent(for: seeded.answerID, in: UUID()))
+    }
+
     private func makeFixture() async throws -> Fixture {
         let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
         GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)

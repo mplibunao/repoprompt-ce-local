@@ -4536,7 +4536,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 try await oracleViewModel.waitForContextBuilderCompletion(queryID)
             },
             partialResponse: {
-                session.backgroundPlanResponseText
+                // Cancellation has already finalized and processed the message by the time this
+                // runs, so its content (control tags stripped) beats the raw progress buffer.
+                oracleViewModel.finalizedAssistantContent(for: queryID, in: sessionID)
+                    ?? session.backgroundPlanResponseText
             },
             cancelStreaming: {
                 await oracleViewModel.cancelStreaming(in: sessionID)

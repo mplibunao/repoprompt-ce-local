@@ -52,6 +52,52 @@ final class OracleHeadlessRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testTimeoutWithoutStreamedTextStaysAFailure() async throws {
+        let tabID = UUID()
+        let streamID = UUID()
+        let timeoutGate = OracleHeadlessTimeoutTestGate()
+        let cancellationRecorder = OracleHeadlessStreamCancellationRecorder()
+
+        let runtime = OracleHeadlessRuntime(
+            sendPrompt: { _, _ in
+                let stream = AsyncThrowingStream<ChatStreamOutput, Error> { continuation in
+                    continuation.yield(ChatStreamOutput(text: "  \n", reasoning: nil, tokens: ChatTokenInfo(promptTokens: 1)))
+                }
+                return (streamID, stream)
+            },
+            cancelStream: { id in
+                await cancellationRecorder.record(id)
+            },
+            cleanupConversation: { _, _ in },
+            timeout: .seconds(7),
+            sleep: { _ in
+                await timeoutGate.wait()
+            }
+        )
+
+        let execution = Task { @MainActor in
+            try await runtime.execute(
+                message: AIMessage(systemPrompt: "system", userMessage: "prompt"),
+                model: .claude4Sonnet,
+                tabID: tabID,
+                completionPolicy: .contextBuilderStrict
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(50))
+        await timeoutGate.release()
+        do {
+            _ = try await execution.value
+            XCTFail("Expected the empty timeout to fail")
+        } catch let error as OracleContextBuilderCompletionError {
+            XCTAssertEqual(error, .emptyProcessedContent)
+        }
+        let cancelledStreamIDs = await cancellationRecorder.streamIDs()
+        XCTAssertEqual(cancelledStreamIDs, [streamID])
+        XCTAssertFalse(runtime.hasActiveStream(for: tabID))
+    }
+
+    @MainActor
     func testTimeoutPreservesAccumulatedTextAndAddsMarker() async throws {
         let tabID = UUID()
         let streamID = UUID()
