@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck source=Scripts/local_release_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/local_release_env.sh"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_SOURCE_ROOT="${REPOPROMPT_RELEASE_SOURCE_ROOT:-$ROOT_DIR}"
 cd "$ROOT_DIR"
 
-set -a
-source "$ROOT_DIR/version.env"
-set +a
-
 LOCAL_SELF_SIGNED_CERTIFICATE_NAME="RepoPrompt CE Local Self-Signed Code Signing"
-LOCAL_PRODUCTION_INSTALL_DIR="${LOCAL_PRODUCTION_INSTALL_DIR:-/Applications}"
-LOCAL_PRODUCTION_APP="$LOCAL_PRODUCTION_INSTALL_DIR/$DISPLAY_NAME.app"
 LOCAL_CERTIFICATE_DAYS="${LOCAL_CERTIFICATE_DAYS:-3650}"
-LOCAL_SIGNING_IDENTITY_REGISTRY_PATH="${LOCAL_SIGNING_IDENTITY_REGISTRY_PATH:-$HOME/Library/Application Support/RepoPrompt CE/local-signing-identity-v1.json}"
 LOCAL_SIGNING_IDENTITY_SHA256="${LOCAL_SIGNING_IDENTITY_SHA256:-}"
 ROTATE_LOCAL_SIGNING_IDENTITY="${ROTATE_LOCAL_SIGNING_IDENTITY:-0}"
 LOCAL_SIGNING_IDENTITY_TOOL="$ROOT_DIR/Scripts/local_signing_identity.py"

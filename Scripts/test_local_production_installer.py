@@ -402,6 +402,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
         scripts = root / "Scripts"
         scripts.mkdir(parents=True)
         shutil.copy2(SCRIPT_DIR / "install_local_production.sh", scripts / "install_local_production.sh")
+        shutil.copy2(SCRIPT_DIR / "local_release_env.sh", scripts / "local_release_env.sh")
+        shutil.copy2(SCRIPT_DIR / "load_release_metadata.sh", scripts / "load_release_metadata.sh")
         shutil.copy2(SCRIPT_DIR / "local_signing_identity.py", scripts / "local_signing_identity.py")
         shutil.copy2(
             SCRIPT_DIR / "resolve_full_xcode_developer_dir.sh",
@@ -439,7 +441,11 @@ class LocalProductionInstallerTests(unittest.TestCase):
                 encoding="utf-8",
             )
         (root / "version.env").write_text(
-            'APP_NAME=RepoPrompt\nDISPLAY_NAME="RepoPrompt CE"\nBUNDLE_ID=com.pvncher.repoprompt.ce\n',
+            (
+                'APP_NAME=RepoPrompt\nDISPLAY_NAME="RepoPrompt CE"\n'
+                'BUNDLE_ID=com.pvncher.repoprompt.ce\nMARKETING_VERSION=1.0.0\n'
+                'BUILD_NUMBER=1\nSIGNING_TEAM_ID=ABC123\n'
+            ),
             encoding="utf-8",
         )
 
