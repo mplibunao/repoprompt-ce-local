@@ -74,8 +74,10 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
             '    *) target="$1"; shift ;;\n'
             "  esac\n"
             "done\n"
+            'if [ -n "$config" ] && [ ! -f "$config" ]; then exit 2; fi\n'
             'if [ -n "$config" ] && grep -q "^allow_all = true$" "$config"; then exit 0; fi\n'
-            'if grep -R -q "staged-secret-value" "$target"; then exit 1; fi\n'
+            'if [ -f "$target/secret.txt" ] '
+            '&& grep -q "staged-secret-value" "$target/secret.txt"; then exit 1; fi\n'
             "exit 0\n",
         )
 
@@ -174,6 +176,20 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, self.output(result))
         self.assertIn("Comparison base provenance: origin_main_fallback", self.output(result))
+
+    def test_push_scans_without_config_when_range_tip_deletes_it(self) -> None:
+        self.install_config_sensitive_gitleaks()
+        self.git("add", ".test-bin/gitleaks")
+        self.git("commit", "-q", "-m", "install config-sensitive gitleaks fixture")
+        self.commit_strict_gitleaks_config()
+        self.prepare_push_branch()
+        self.git("rm", ".gitleaks.toml")
+        self.git("commit", "-q", "-m", "delete gitleaks config")
+
+        result = self.run_preflight("push")
+
+        self.assertEqual(result.returncode, 0, self.output(result))
+        self.assertIn("Scan outgoing commit range for secrets", self.output(result))
 
     def test_push_rejects_and_names_non_origin_remote(self) -> None:
         self.prepare_push_branch()

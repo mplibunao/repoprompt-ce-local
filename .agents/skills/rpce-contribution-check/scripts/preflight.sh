@@ -401,7 +401,14 @@ fi
 
 timing_phase_start outgoing_range_secret_scan
 log "Scan outgoing commit range for secrets"
-gitleaks git --config .gitleaks.toml --no-banner --redact --log-opts="$range_spec" .
+outgoing_config="$tmp_root/outgoing-gitleaks.toml"
+range_tip="$(git rev-parse 'HEAD^{commit}')"
+if git show "${range_tip}:.gitleaks.toml" > "$outgoing_config" 2>/dev/null; then
+  gitleaks git --config "$outgoing_config" --no-banner --redact --log-opts="$range_spec" .
+else
+  rm -f -- "$outgoing_config"
+  gitleaks git --no-banner --redact --log-opts="$range_spec" .
+fi
 timing_phase_pass outgoing_range_secret_scan
 
 if [[ "$mode" == "push" ]]; then
