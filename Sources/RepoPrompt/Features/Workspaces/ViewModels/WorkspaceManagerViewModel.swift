@@ -465,12 +465,21 @@ enum AgentAdmissionRefusalReason: String, Equatable {
         }
     }
 
+    private var guidance: String {
+        switch self {
+        case .unsavedWorkspaceChanges:
+            "Retry this call after the workspace finishes saving."
+        default:
+            "Inspect the workspace state or the existing session instead of retrying this call."
+        }
+    }
+
     var error: NSError {
         NSError(
             domain: "RepoPrompt.AgentAdmission",
             code: errorCode,
             userInfo: [
-                NSLocalizedDescriptionKey: "\(sentence) (reason: \(rawValue)). Inspect the workspace state or the existing session instead of retrying this call."
+                NSLocalizedDescriptionKey: "\(sentence) (reason: \(rawValue)). \(guidance)"
             ]
         )
     }

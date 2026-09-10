@@ -678,7 +678,7 @@ import XCTest
             XCTAssertEqual(peerProviderCount, 1)
         }
 
-        func testAgentRunRefusalNamesCanonicalHealthFailureAndGuidesAgainstRetry() async throws {
+        func testAgentRunRefusalUsesReasonSpecificRetryGuidance() async throws {
             let fixture = try await DurableAgentAdmissionFixture.make()
             trackCleanup { await fixture.cleanup() }
             let manager = fixture.window.workspaceManager
@@ -703,16 +703,18 @@ import XCTest
                     dirtyRevision: canonical.revisions.workingRevision + 1
                 )
             )
-            let cases: [(DomainWorkspaceSnapshot?, AgentAdmissionRefusalReason)] = [
-                (nil, .canonicalWorkspaceUnavailable),
-                (nonCanonical, .nonCanonicalWorkspaceState),
-                (unsaved, .unsavedWorkspaceChanges)
+            let persistentGuidance = "Inspect the workspace state or the existing session instead of retrying this call."
+            let transientGuidance = "Retry this call after the workspace finishes saving."
+            let cases: [(DomainWorkspaceSnapshot?, AgentAdmissionRefusalReason, String)] = [
+                (nil, .canonicalWorkspaceUnavailable, persistentGuidance),
+                (nonCanonical, .nonCanonicalWorkspaceState, persistentGuidance),
+                (unsaved, .unsavedWorkspaceChanges, transientGuidance)
             ]
             let recorder = AdmissionProviderRecorder(expectedCount: 1, blockProviders: false)
             let service = makeAgentRunStartService(window: fixture.window, recorder: recorder)
             defer { manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting(nil) }
 
-            for (snapshot, reason) in cases {
+            for (snapshot, reason, expectedGuidance) in cases {
                 manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting { _ in snapshot }
                 do {
                     _ = try await service.execute(args: [
@@ -728,9 +730,14 @@ import XCTest
                         error.localizedDescription
                     )
                     XCTAssertTrue(
-                        error.localizedDescription.contains(
-                            "Inspect the workspace state or the existing session instead of retrying this call."
-                        ),
+                        error.localizedDescription.contains(expectedGuidance),
+                        error.localizedDescription
+                    )
+                    let rejectedGuidance = reason == .unsavedWorkspaceChanges
+                        ? persistentGuidance
+                        : transientGuidance
+                    XCTAssertFalse(
+                        error.localizedDescription.contains(rejectedGuidance),
                         error.localizedDescription
                     )
                 }
