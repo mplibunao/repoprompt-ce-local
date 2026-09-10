@@ -1638,12 +1638,20 @@ class OracleViewModel: ObservableObject {
         }
         // Only the fields the save produced are copied back, and the transcript mirror follows
         // the live store rather than the pre-save snapshot: a turn the user added while the save
-        // was in flight stays, and the file is rewritten so it carries that turn too.
+        // was in flight stays, and the file is rewritten (and awaited) so it carries that turn too
+        // before settlement reports success.
         sessions[sessionIndex].messages = Self.storedMessages(from: currentMessages)
         sessions[sessionIndex].savedAt = sessionSnapshot.savedAt
         sessions[sessionIndex].fileURL = fileURL
-        if currentMessages.map(\.id) != liveMessages.map(\.id) {
-            autosaveChatHistory(for: sessionID, force: true)
+        guard currentMessages.map(\.id) != liveMessages.map(\.id) else { return }
+
+        let correctedURL: URL = if let saveSession {
+            try await saveSession(sessions[sessionIndex])
+        } else {
+            try await autosaveSession(sessions[sessionIndex])
+        }
+        if let index = sessions.firstIndex(where: { $0.id == sessionID }) {
+            sessions[index].fileURL = correctedURL
         }
     }
 

@@ -138,7 +138,24 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
         let fixture = try await makeFixture()
         defer { fixture.cleanup() }
         let seeded = try await fixture.seedFinalizedExchange()
+        // Loading a copy of the chat stands in for the live store gaining a turn, so the copy must
+        // carry the marked answer the way the live store already does at that point.
         var extended = seeded.session
+        extended.messages = extended.messages.map { message in
+            guard message.id == seeded.answerID else { return message }
+            return StoredMessage(
+                id: message.id,
+                isUser: false,
+                rawText: "partial answer",
+                timestamp: message.timestamp,
+                sequenceIndex: message.sequenceIndex,
+                allowedFilePaths: nil,
+                promptTokens: nil,
+                completionTokens: nil,
+                cost: nil,
+                modelName: nil
+            )
+        }
         extended.messages.append(
             StoredMessage(
                 id: UUID(),
@@ -154,21 +171,33 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
             )
         )
         let extendedURL = try await fixture.oracleViewModel.chatData.saveChatSession(extended, for: fixture.workspace)
+        var turnLanded = false
 
         try await fixture.oracleViewModel.persistContextBuilderTimeoutResponse(
             "partial answer",
             queryID: seeded.answerID,
             sessionID: seeded.session.id,
             saveSession: { session in
-                // The user's next turn lands while the save is suspended.
-                await fixture.oracleViewModel.loadChatSession(from: extendedURL)
+                // The user's next turn lands while the first save is suspended; the corrective
+                // save that follows must not be disturbed again.
+                if !turnLanded {
+                    turnLanded = true
+                    await fixture.oracleViewModel.loadChatSession(from: extendedURL)
+                }
                 return try await fixture.oracleViewModel.chatData.saveChatSession(session, for: fixture.workspace)
             }
         )
+        XCTAssertTrue(turnLanded)
 
         let live = try XCTUnwrap(fixture.oracleViewModel.sessions.first(where: { $0.id == seeded.session.id }))
         XCTAssertEqual(live.messages.count, 3)
         XCTAssertTrue(live.messages.contains(where: { $0.rawText == "follow-up question" }))
+
+        // The corrective save is awaited, so the file already carries the added turn.
+        let onDisk = try await fixture.oracleViewModel.chatData.loadChatSession(from: XCTUnwrap(live.fileURL))
+        XCTAssertEqual(onDisk.messages.count, 3)
+        XCTAssertTrue(onDisk.messages.contains(where: { $0.rawText == "follow-up question" }))
+        XCTAssertTrue(onDisk.messages.contains(where: { $0.rawText == "partial answer" }))
     }
 
     func testFinalizedAssistantContentReadsTheProcessedMessage() async throws {
