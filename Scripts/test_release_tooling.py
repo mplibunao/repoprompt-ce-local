@@ -48,7 +48,9 @@ class BundleProvenanceTests(unittest.TestCase):
             self.git(root, "add", "tracked.txt")
             self.git(root, "commit", "-q", "-m", "fixture")
 
-            (root / "untracked.txt").write_text("local\n", encoding="utf-8")
+            untracked_directory = root / "untracked"
+            untracked_directory.mkdir()
+            (untracked_directory / "local.txt").write_text("local\n", encoding="utf-8")
             subprocess.run(
                 [
                     sys.executable,

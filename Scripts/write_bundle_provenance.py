@@ -37,7 +37,7 @@ def git_value(root: Path, arguments: list[str]) -> str | None:
 def write_bundle_provenance(root: Path, bundle: Path) -> Path:
     root = root.resolve()
     status_available, status_output = git_output(
-        root, ["status", "--porcelain=v1", "--untracked-files=all"]
+        root, ["status", "--porcelain=v1", "--untracked-files=normal"]
     )
     status_entries = status_output.splitlines() if status_available else []
     dirty = (
