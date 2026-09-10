@@ -15,8 +15,26 @@ Work is tracked as issues and pull requests there.
    .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
    ```
 
-4. Merge into `main` with `git merge --no-ff`, then run the push preflight from
-   the `main` checkout before pushing.
+4. Commit, then run the `pr-ready` lane while the branch still has no
+   configured upstream, so it validates the whole branch against `main` (the
+   comparison-base procedure in
+   `.agents/skills/rpce-contribution-check/SKILL.md` explains why the order
+   matters):
+
+   ```bash
+   git commit
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
+   ```
+
+5. Run the push preflight, push the branch, and open a pull request against
+   `main` on `mplibunao/repoprompt-ce-local`; merge it with a merge commit once
+   its checks pass. Nothing merges into `main` directly.
+
+   ```bash
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh push
+   git push -u origin <branch>
+   gh pr create --base main
+   ```
 
 Ports from upstream follow [`docs/porting.md`](docs/porting.md). Builds are
 promoted per [`docs/releasing.md`](docs/releasing.md).
