@@ -490,6 +490,74 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             XCTAssertEqual(remaining, 0)
         }
 
+        func testDisplayAliasExactReadDoesNotEnterBlockedPeerCompaction() async throws {
+            let parent = try makeTemporaryDirectory(name: "DisplayAliasBlockedPeer")
+            let addressedRootURL = parent.appendingPathComponent("Addressed", isDirectory: true)
+            let peerRootURL = parent.appendingPathComponent("Peer", isDirectory: true)
+            try write("target\n", to: addressedRootURL.appendingPathComponent("Target.swift"))
+            try write("peer\n", to: peerRootURL.appendingPathComponent("Peer.swift"))
+
+            let store = WorkspaceFileContextStore()
+            let addressedRoot = try await store.loadRoot(path: addressedRootURL.path)
+            let peerRoot = try await store.loadRoot(path: peerRootURL.path)
+            let roots = await store.rootRefs(scope: .visibleWorkspace)
+            let namespace = WorkspaceExactFileNamespace.identity(roots: roots)
+            let peerSerialPosition = try XCTUnwrap(namespace.rootBindings.firstIndex {
+                $0.lookupRoot.id == peerRoot.id
+            })
+            let addressedRootRef = try XCTUnwrap(roots.first { $0.id == addressedRoot.id })
+            let displayAlias = ClientPathFormatter.nonAbsoluteRootAlias(
+                root: addressedRootRef,
+                visibleRoots: roots
+            )
+            let explicitAlias = try XCTUnwrap(namespace.explicitAlias(clientRootID: addressedRootRef.id))
+            let input = "\(displayAlias)/Target.swift"
+            XCTAssertEqual(try WorkspaceExactFileInput.parse(input), .relative(input))
+
+            let peerGate = MCPPathContractReleaseGate(name: "display-alias peer compaction")
+            let peerProbe = ExactResolutionPeerProbe()
+            let completionProbe = ExactResolutionPeerProbe()
+            await store.setExactFileCandidateProbeGateForTesting(
+                purpose: .canonicalCompaction,
+                rootID: peerRoot.id,
+                serialPosition: peerSerialPosition
+            ) {
+                await peerProbe.record()
+                await peerGate.enterAndWait()
+            }
+            addTeardownBlock {
+                peerGate.release()
+                await store.clearExactFileCandidateProbeGateForTesting()
+            }
+
+            let resolutionTask = Task {
+                let resolution = try await store.resolveExactExistingWorkspaceFile(
+                    WorkspaceExactFileInput.parse(input),
+                    namespace: namespace
+                )
+                await completionProbe.record()
+                return resolution
+            }
+            try await MCPPathContractAsyncWait.waitUntil("display-alias resolution or peer compaction", timeout: 10) {
+                let completionCount = await completionProbe.count
+                let peerProbeCount = await peerProbe.count
+                return completionCount > 0 || peerProbeCount > 0
+            }
+            let didComplete = await completionProbe.count > 0
+            let peerGateEntered = await peerProbe.count > 0
+            peerGate.release()
+
+            XCTAssertTrue(didComplete)
+            XCTAssertFalse(peerGateEntered)
+            let resolution = try await resolutionTask.value
+            guard case let .matched(match) = resolution else {
+                return XCTFail("Expected the display-alias target, got \(resolution)")
+            }
+            XCTAssertEqual(match.file.rootID, addressedRoot.id)
+            XCTAssertEqual(match.canonicalPath, "\(explicitAlias)//Target.swift")
+            await store.clearExactFileCandidateProbeGateForTesting()
+        }
+
         func testQualifiedResolutionSkipsPeerProbeWhileBareRelativeClassifiesNamespace() async throws {
             let parent = try makeTemporaryDirectory(name: "QualifiedPeerIsolation")
             let addressedRootURL = parent.appendingPathComponent("Addressed", isDirectory: true)
