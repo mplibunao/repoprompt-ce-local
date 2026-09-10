@@ -4,17 +4,31 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 import stat
 import tempfile
 import textwrap
+from typing import TypeVar
+import unittest
+
+
+ContextValue = TypeVar("ContextValue")
 
 
 @contextmanager
 def temporary_directory(*, prefix: str | None = None) -> Iterator[Path]:
     with tempfile.TemporaryDirectory(prefix=prefix) as directory:
         yield Path(directory)
+
+
+def enter_context(
+    test_case: unittest.TestCase,
+    context_manager: AbstractContextManager[ContextValue],
+) -> ContextValue:
+    value = context_manager.__enter__()
+    test_case.addCleanup(context_manager.__exit__, None, None, None)
+    return value
 
 
 def write_executable(

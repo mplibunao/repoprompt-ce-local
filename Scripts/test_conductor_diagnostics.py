@@ -18,12 +18,12 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import conductor_diagnostics  # noqa: E402
-from script_test_support import temporary_directory, write_executable  # noqa: E402
+from script_test_support import enter_context, temporary_directory, write_executable  # noqa: E402
 
 
 class FocusedBuildDiagnosticTests(unittest.TestCase):
     def _make_fake_swift(self, output: str, exit_code: int = 0) -> Path:
-        tmp = self.enterContext(temporary_directory())
+        tmp = enter_context(self, temporary_directory())
         swift = tmp / "swift"
         write_executable(
             swift,
@@ -51,7 +51,7 @@ class FocusedBuildDiagnosticTests(unittest.TestCase):
                 os.environ["PATH"] = old_path
 
     def setUp(self) -> None:
-        self.repo_root = self.enterContext(temporary_directory())
+        self.repo_root = enter_context(self, temporary_directory())
 
     def test_focused_build_parses_swift_build_output(self) -> None:
         output = (

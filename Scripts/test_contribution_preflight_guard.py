@@ -16,7 +16,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from script_test_support import temporary_directory, write_executable  # noqa: E402
+from script_test_support import enter_context, temporary_directory, write_executable  # noqa: E402
 
 REPO_ROOT = SCRIPT_DIR.parent
 PREFLIGHT_SOURCE = REPO_ROOT / ".agents/skills/rpce-contribution-check/scripts/preflight.sh"
@@ -24,7 +24,7 @@ PREFLIGHT_SOURCE = REPO_ROOT / ".agents/skills/rpce-contribution-check/scripts/p
 
 class ContributionPreflightRemoteGuardTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = self.enterContext(temporary_directory())
+        self.tmp = enter_context(self, temporary_directory())
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
 

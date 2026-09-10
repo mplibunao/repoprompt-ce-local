@@ -23,7 +23,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from script_test_support import temporary_directory, write_executable  # noqa: E402
+from script_test_support import enter_context, temporary_directory, write_executable  # noqa: E402
 
 ROOT_DIR = SCRIPT_DIR.parent
 ARCHIVE_SCRIPT = SCRIPT_DIR / "local_release_archive.sh"
@@ -45,7 +45,7 @@ def tree_snapshot(root: Path) -> dict[str, str | None]:
 
 class LocalReleaseRollbackUnitTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = self.enterContext(temporary_directory(prefix="repoprompt-ce-rollback-test."))
+        self.tmp = enter_context(self, temporary_directory(prefix="repoprompt-ce-rollback-test."))
         self.install_dir = self.tmp / "Applications"
         self.app = self.install_dir / f"{DISPLAY_NAME}.app"
         self.state = self.tmp / "Application Support" / DISPLAY_NAME

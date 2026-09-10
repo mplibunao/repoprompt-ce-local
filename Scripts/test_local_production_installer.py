@@ -21,7 +21,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from script_test_support import temporary_directory, write_bash_stub, write_executable  # noqa: E402
+from script_test_support import enter_context, temporary_directory, write_bash_stub, write_executable  # noqa: E402
 
 ROOT_DIR = SCRIPT_DIR.parent
 PINNED_CERTIFICATE_NAME = "RepoPrompt CE Local Self-Signed Code Signing"
@@ -398,7 +398,7 @@ class LocalProductionInstallerTests(unittest.TestCase):
         fail_registry_verification: bool = False,
         split_release_source_root: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
-        temp_dir = self.enterContext(temporary_directory())
+        temp_dir = enter_context(self, temporary_directory())
         installer_tmp = temp_dir / "tmp"
         installer_tmp.mkdir()
         root = temp_dir / "repo"
