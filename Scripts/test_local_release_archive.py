@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""Offline round-trip tests for the local release rollback unit.
+
+Every case runs `local_release_archive.sh` and `local_release_restore.sh` against a
+synthetic app bundle, state tree, preferences domain, and identity record inside a
+temporary directory, so the real install at /Applications and the real Application
+Support tree are never read or written.
+"""
+
+from __future__ import annotations
+
+import filecmp
+import json
+import os
+import plistlib
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = SCRIPT_DIR.parent
+ARCHIVE_SCRIPT = SCRIPT_DIR / "local_release_archive.sh"
+RESTORE_SCRIPT = SCRIPT_DIR / "local_release_restore.sh"
+ENV_SCRIPT = SCRIPT_DIR / "local_release_env.sh"
+DISPLAY_NAME = "RepoPrompt CE"
+TAG = "local/v1.4.0-b99"
+COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def tree_snapshot(root: Path) -> dict[str, str | None]:
+    """Relative path -> file contents (None for directories), for exact-tree comparison."""
+    snapshot: dict[str, str | None] = {}
+    for path in sorted(root.rglob("*")):
+        key = str(path.relative_to(root))
+        snapshot[key] = None if path.is_dir() and not path.is_symlink() else path.read_text(encoding="utf-8")
+    return snapshot
+
+
+class LocalReleaseRollbackUnitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="repoprompt-ce-rollback-test."))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.install_dir = self.tmp / "Applications"
+        self.app = self.install_dir / f"{DISPLAY_NAME}.app"
+        self.state = self.tmp / "Application Support" / DISPLAY_NAME
+        self.archive_root = self.tmp / "Archives"
+        self.defaults_domain = self.tmp / "prefs" / "com.example.repoprompt.ce.test"
+        self.identity_path = self.state / "local-signing-identity-v1.json"
+        self.defaults_domain.parent.mkdir(parents=True, exist_ok=True)
+        self.process_token = f"repoprompt-ce-guard-{self.tmp.name}"
+
+    # -- fixtures ---------------------------------------------------------------
+
+    def write_app(self, *, build: str, commit: str | None) -> None:
+        resources = self.app / "Contents" / "Resources"
+        resources.mkdir(parents=True, exist_ok=True)
+        (self.app / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
+        (self.app / "Contents" / "MacOS" / "RepoPrompt").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        with (self.app / "Contents" / "Info.plist").open("wb") as handle:
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": "com.pvncher.repoprompt.ce",
+                    "CFBundleShortVersionString": "1.4.0",
+                    "CFBundleVersion": build,
+                    "RepoPromptSigningMode": "local-self-signed",
+                },
+                handle,
+            )
+        provenance = resources / "RepoPromptProvenance.json"
+        if commit is None:
+            provenance.unlink(missing_ok=True)
+        else:
+            provenance.write_text(
+                json.dumps({"version": 1, "commit": commit, "dirty": False, "buildTimeISO": "2026-09-10T00:00:00+02:00"}),
+                encoding="utf-8",
+            )
+
+    def write_state(self, marker: str) -> None:
+        for name in ("Settings", "Workspaces", "DebugApps", "Rollbacks"):
+            (self.state / name).mkdir(parents=True, exist_ok=True)
+        (self.state / "Settings" / "globalSettings.json").write_text(f'{{"marker":"{marker}"}}\n', encoding="utf-8")
+        (self.state / "Workspaces" / "one.json").write_text(f"workspace-{marker}\n", encoding="utf-8")
+        # A nested directory sharing an excluded top-level name: exclusions are exact
+        # top-level names, so this must be archived and restored like any other content.
+        (self.state / "Workspaces" / "inner" / "DebugApps").mkdir(parents=True, exist_ok=True)
+        (self.state / "Workspaces" / "inner" / "DebugApps" / "nested.json").write_text(
+            f"nested-{marker}\n", encoding="utf-8"
+        )
+        (self.state / "DebugApps" / "marker.txt").write_text(f"debug-{marker}\n", encoding="utf-8")
+        (self.state / "Rollbacks" / "marker.txt").write_text(f"rollback-{marker}\n", encoding="utf-8")
+        self.identity_path.write_text(
+            json.dumps(
+                {
+                    "certificateName": "RepoPrompt CE Local Self-Signed Code Signing",
+                    "certificateSHA256": "A" * 64,
+                    "schemaVersion": 1,
+                    "serviceGeneration": 42,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def write_defaults(self, pairs: dict[str, str]) -> None:
+        self.run_defaults(["delete", str(self.defaults_domain)], check=False)
+        for key, value in pairs.items():
+            self.run_defaults(["write", str(self.defaults_domain), key, "-string", value])
+
+    def read_defaults(self) -> dict[str, object]:
+        export = self.tmp / "defaults-readback.plist"
+        self.run_defaults(["export", str(self.defaults_domain), str(export)])
+        with export.open("rb") as handle:
+            return plistlib.load(handle)
+
+    def run_defaults(self, arguments: list[str], *, check: bool = True) -> None:
+        subprocess.run(["defaults", *arguments], check=check, capture_output=True)
+
+    # -- script drivers ---------------------------------------------------------
+
+    def environment(self, **overrides: str) -> dict[str, str]:
+        env = dict(os.environ)
+        env.update(
+            {
+                "LOCAL_PRODUCTION_INSTALL_DIR": str(self.install_dir),
+                "LOCAL_PRODUCTION_APP": str(self.app),
+                "LOCAL_APP_SUPPORT_DIR": str(self.state),
+                "LOCAL_DEFAULTS_DOMAIN": str(self.defaults_domain),
+                "LOCAL_RELEASE_ARCHIVE_ROOT": str(self.archive_root),
+                "LOCAL_SIGNING_IDENTITY_REGISTRY_PATH": str(self.identity_path),
+                # A per-test token so the guard runs for real without matching the
+                # operator's live RepoPrompt processes.
+                "LOCAL_RELEASE_RUNNING_PROCESS_PATTERNS": self.process_token,
+            }
+        )
+        env.update(overrides)
+        return env
+
+    def run_script(self, script: Path, tag: str = TAG, **overrides: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(script), tag],
+            cwd=ROOT_DIR,
+            env=self.environment(**overrides),
+            capture_output=True,
+            text=True,
+        )
+
+    def archive(self, **overrides: str) -> subprocess.CompletedProcess[str]:
+        result = self.run_script(ARCHIVE_SCRIPT, **overrides)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def restore(self, **overrides: str) -> subprocess.CompletedProcess[str]:
+        result = self.run_script(RESTORE_SCRIPT, **overrides)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def manifest(self) -> dict:
+        return json.loads((self.archive_root / TAG / "manifest.json").read_text(encoding="utf-8"))
+
+    # -- tests ------------------------------------------------------------------
+
+    def test_round_trip_reproduces_app_state_defaults_and_identity(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable", "RemovedLater": "yes"})
+        app_before = tree_snapshot(self.app)
+        state_before = tree_snapshot(self.state)
+
+        self.archive()
+
+        # Diverge every restored surface, including keys the newer build would have added.
+        self.write_app(build="39", commit="f" * 40)
+        (self.state / "Settings" / "globalSettings.json").write_text('{"marker":"mutated"}\n', encoding="utf-8")
+        (self.state / "Workspaces" / "one.json").unlink()
+        (self.state / "Workspaces" / "added-later.json").write_text("stray\n", encoding="utf-8")
+        self.identity_path.write_text("{}\n", encoding="utf-8")
+        self.write_defaults({"UpdateChannel": "tip", "AddedLater": "yes"})
+        # Uncaptured directories carry post-archive content that must survive the restore.
+        (self.state / "DebugApps" / "marker.txt").write_text("debug-after\n", encoding="utf-8")
+        (self.state / "Rollbacks" / "marker.txt").write_text("rollback-after\n", encoding="utf-8")
+
+        self.restore()
+
+        self.assertEqual(tree_snapshot(self.app), app_before)
+        restored_state = tree_snapshot(self.state)
+        for name, expected in state_before.items():
+            if name.startswith(("DebugApps", "Rollbacks")):
+                continue
+            self.assertEqual(restored_state.get(name), expected, name)
+        self.assertNotIn("Workspaces/added-later.json", restored_state)
+        self.assertEqual(restored_state["DebugApps/marker.txt"], "debug-after\n")
+        self.assertEqual(restored_state["Rollbacks/marker.txt"], "rollback-after\n")
+        self.assertEqual(self.read_defaults(), {"UpdateChannel": "stable", "RemovedLater": "yes"})
+
+    def test_manifest_records_tag_build_commit_and_timestamps(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertEqual(manifest["tag"], TAG)
+        self.assertEqual(manifest["app"]["build"], "38")
+        self.assertEqual(manifest["app"]["commit"], COMMIT)
+        self.assertEqual(manifest["app"]["signingMode"], "local-self-signed")
+        self.assertEqual(manifest["applicationSupport"]["excludedNames"], ["DebugApps", "Rollbacks"])
+        self.assertTrue(manifest["localSigningIdentity"]["archived"])
+        self.assertIsInstance(manifest["archivedAtEpoch"], float)
+        self.assertTrue(manifest["archivedAtISO"])
+        for name in ("app.zip", "application-support.tar.gz", "defaults.plist"):
+            self.assertEqual(len(manifest["files"][name]["sha256"]), 64, name)
+
+    def test_missing_bundle_provenance_records_commit_as_null(self) -> None:
+        self.write_app(build="37", commit=None)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+
+        self.archive()
+
+        self.assertIsNone(self.manifest()["app"]["commit"])
+        self.assertEqual(self.manifest()["app"]["build"], "37")
+
+    def test_archive_excludes_debug_apps_and_rollbacks_from_the_state_tarball(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+
+        self.archive()
+
+        listing = subprocess.run(
+            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        self.assertTrue(any(entry.endswith("Settings/globalSettings.json") for entry in listing))
+        # Exclusions are exact top-level names, so only the top-level entries are absent.
+        top_level = {entry.split("/")[1] for entry in listing if entry.startswith("./") and len(entry.split("/")) > 1}
+        self.assertNotIn("DebugApps", top_level)
+        self.assertNotIn("Rollbacks", top_level)
+        self.assertIn("Settings", top_level)
+        self.assertIn("Workspaces", top_level)
+
+    def test_archive_refuses_identity_records_carrying_key_material(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        self.identity_path.write_text(json.dumps({"certificateName": "x", "privateKeyPEM": "-----BEGIN"}), encoding="utf-8")
+
+        result = self.run_script(ARCHIVE_SCRIPT)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("key material", result.stdout + result.stderr)
+        self.assertFalse((self.archive_root / TAG / "manifest.json").exists())
+
+    def test_restore_refuses_a_corrupted_archive(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        self.archive()
+        app_zip = self.archive_root / TAG / "app.zip"
+        app_zip.write_bytes(app_zip.read_bytes() + b"corrupt")
+        state_before = tree_snapshot(self.state)
+
+        result = self.run_script(RESTORE_SCRIPT)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("checksum", result.stdout + result.stderr)
+        self.assertEqual(tree_snapshot(self.state), state_before)
+
+    def test_restore_refuses_an_incomplete_archive(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        self.archive()
+        (self.archive_root / TAG / "manifest.json").unlink()
+
+        result = self.run_script(RESTORE_SCRIPT)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("manifest.json", result.stdout + result.stderr)
+
+    def test_archive_refuses_to_overwrite_a_completed_archive_without_opt_in(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        self.archive()
+
+        result = self.run_script(ARCHIVE_SCRIPT)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("LOCAL_RELEASE_ARCHIVE_OVERWRITE", result.stdout + result.stderr)
+
+        self.archive(LOCAL_RELEASE_ARCHIVE_OVERWRITE="1")
+
+    def test_both_scripts_refuse_path_escaping_tags(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        for script in (ARCHIVE_SCRIPT, RESTORE_SCRIPT):
+            for tag in ("../escape", "local/../../escape", "/absolute"):
+                result = self.run_script(script, tag=tag)
+                self.assertNotEqual(result.returncode, 0, f"{script.name} {tag}")
+                self.assertIn("unsafe tag", result.stdout + result.stderr, f"{script.name} {tag}")
+
+    def test_round_trip_preserves_byte_identical_state_files(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        reference = self.tmp / "reference-state"
+        shutil.copytree(self.state, reference, symlinks=True)
+
+        self.archive()
+        shutil.rmtree(self.state / "Settings")
+        self.restore()
+
+        comparison = filecmp.dircmp(str(reference), str(self.state), ignore=["DebugApps", "Rollbacks"])
+        self.assertEqual(comparison.left_only, [])
+        self.assertEqual(comparison.diff_files, [])
+
+    def test_nested_directory_named_like_an_exclusion_survives_archive_and_restore(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        nested = self.state / "Workspaces" / "inner" / "DebugApps" / "nested.json"
+
+        self.archive()
+        listing = subprocess.run(
+            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        self.assertIn("Workspaces/inner/DebugApps/nested.json", listing)
+        self.assertNotIn("./DebugApps/", listing)
+        self.assertNotIn("./Rollbacks/", listing)
+
+        nested.write_text("mutated\n", encoding="utf-8")
+        self.restore()
+
+        self.assertEqual(nested.read_text(encoding="utf-8"), "nested-original\n")
+
+    def test_unreadable_manifest_refuses_before_changing_anything(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        self.archive()
+        app_before = tree_snapshot(self.app)
+        state_before = tree_snapshot(self.state)
+        defaults_before = self.read_defaults()
+
+        for corruption in ("{ not json", "{}", '{"schemaVersion": 1, "tag": "other"}'):
+            (self.archive_root / TAG / "manifest.json").write_text(corruption, encoding="utf-8")
+            result = self.run_script(RESTORE_SCRIPT)
+            self.assertNotEqual(result.returncode, 0, corruption)
+            self.assertEqual(tree_snapshot(self.app), app_before, corruption)
+            self.assertEqual(tree_snapshot(self.state), state_before, corruption)
+            self.assertEqual(self.read_defaults(), defaults_before, corruption)
+            self.assertEqual(list(self.archive_root.glob("**/*.rescue-*")), [], corruption)
+
+    def test_manifest_without_files_or_excluded_names_refuses_and_verifies_nothing(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        self.archive()
+        manifest_path = self.archive_root / TAG / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        del manifest["files"]
+        del manifest["applicationSupport"]["excludedNames"]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        app_zip = self.archive_root / TAG / "app.zip"
+        app_zip.write_bytes(app_zip.read_bytes() + b"corrupt")
+        excluded_before = (self.state / "DebugApps" / "marker.txt").read_text(encoding="utf-8")
+
+        result = self.run_script(RESTORE_SCRIPT)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lists no archive files", result.stdout + result.stderr)
+        self.assertTrue((self.state / "DebugApps").is_dir())
+        self.assertEqual((self.state / "DebugApps" / "marker.txt").read_text(encoding="utf-8"), excluded_before)
+
+    def test_restore_keeps_a_rescue_directory_and_survives_an_interrupted_run(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        self.archive()
+        original_app = tree_snapshot(self.app)
+
+        interrupted = self.run_script(RESTORE_SCRIPT, LOCAL_RELEASE_ABORT_AT_STEP="Restoring application support")
+        self.assertNotEqual(interrupted.returncode, 0)
+        rescues = sorted(self.archive_root.glob("**/*.rescue-*"))
+        self.assertEqual(len(rescues), 1, interrupted.stdout + interrupted.stderr)
+        self.assertIn(str(rescues[0]), interrupted.stdout + interrupted.stderr)
+        # The interrupted run stopped after the app swap, so the rescue holds the app it
+        # replaced and the pre-clear preferences export.
+        self.assertTrue((rescues[0] / f"{DISPLAY_NAME}.app").is_dir())
+        self.assertTrue((rescues[0] / "defaults-before-restore.plist").is_file())
+        self.assertEqual(tree_snapshot(rescues[0] / f"{DISPLAY_NAME}.app"), original_app)
+
+        succeeded = self.restore()
+        rescues = sorted(self.archive_root.glob("**/*.rescue-*"))
+        self.assertGreaterEqual(len(rescues), 1)
+        self.assertIn("rescue-", succeeded.stdout)
+        self.assertTrue(any((rescue / "application-support").is_dir() for rescue in rescues))
+
+    def test_both_scripts_refuse_while_a_repoprompt_process_is_running(self) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        self.archive()
+
+        # A symlink, not a copy: copying a signed system binary invalidates its signature
+        # and macOS kills the process immediately.
+        fake = self.tmp / "repoprompt-mcp"
+        os.symlink("/bin/sleep", fake)
+        process = subprocess.Popen([str(fake), "45"])
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+
+        for script in (ARCHIVE_SCRIPT, RESTORE_SCRIPT):
+            result = self.run_script(
+                script,
+                LOCAL_RELEASE_RUNNING_PROCESS_PATTERNS=f"{self.tmp}/repoprompt-mcp",
+                LOCAL_RELEASE_ARCHIVE_OVERWRITE="1",
+            )
+            output = result.stdout + result.stderr
+            self.assertNotEqual(result.returncode, 0, script.name)
+            self.assertIn("Quit RepoPrompt before", output, script.name)
+            self.assertIn(str(process.pid), output, script.name)
+        self.assertEqual(list(self.archive_root.glob("**/*.rescue-*")), [])
+
+    def test_default_process_guard_patterns_cover_production_debug_mcp_and_cli(self) -> None:
+        defaults = ENV_SCRIPT.read_text(encoding="utf-8")
+        for fragment in (
+            "/$DISPLAY_NAME.app/Contents/MacOS/$APP_NAME",
+            "DebugApps/$APP_NAME.app/Contents/MacOS/$APP_NAME",
+            "repoprompt-mcp",
+            "repoprompt_ce_cli",
+        ):
+            self.assertIn(fragment, defaults, fragment)
+
+
+if __name__ == "__main__":
+    unittest.main()

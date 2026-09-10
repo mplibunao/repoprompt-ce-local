@@ -12,6 +12,7 @@ import SwiftUI
 enum SparkleUpdaterStartDecision: Equatable {
     case ignore
     case blocked(String)
+    case selfSignedDisabled(String)
     case start
 }
 
@@ -106,6 +107,21 @@ final class SparkleUpdaterManager: ObservableObject {
     /// UserDefaults key for RepoPrompt's passive appcast-check preference.
     private static let passiveAppcastChecksKey = "RepoPromptPassiveAppcastChecksEnabled"
 
+    /// Info.plist signing-mode marker written by `Scripts/package_app.sh`, and the value it
+    /// carries for a locally self-signed production build.
+    private static let signingModePlistKey = "RepoPromptSigningMode"
+    private static let localSelfSignedSigningModeMarker = "local-self-signed"
+
+    static let selfSignedUpdatesDisabledMessage =
+        "This build is self-signed locally and does not receive updates from the RepoPrompt appcast."
+
+    /// The gate reads the bundle marker rather than the resolved secure-storage domain: a missing
+    /// or mismatched local signing registry downgrades that domain to `.ephemeral`, which would
+    /// leave a self-signed build polling the shared appcast.
+    private static var currentSigningModeMarker: String? {
+        Bundle.main.object(forInfoDictionaryKey: signingModePlistKey) as? String
+    }
+
     /// Expose updater for settings UI
     var updater: SPUUpdater {
         updaterController.updater
@@ -167,7 +183,7 @@ final class SparkleUpdaterManager: ObservableObject {
         updatesDisabledMessage = validation.message
 
         if !sparkleConfigurationValid {
-            disableUpdatesForIntegrityFailure()
+            disableUpdates(reason: validation.message ?? "Updates are disabled due to an integrity validation failure.")
         }
     }
 
@@ -175,13 +191,17 @@ final class SparkleUpdaterManager: ObservableObject {
         switch Self.startDecision(
             sparkleConfigurationValid: sparkleConfigurationValid,
             updaterStarted: updaterStarted,
-            identityMigrationBlockedMessage: IdentityMigrationRuntimeState.shared.updatesBlockedMessage()
+            identityMigrationBlockedMessage: IdentityMigrationRuntimeState.shared.updatesBlockedMessage(),
+            signingModeMarker: Self.currentSigningModeMarker
         ) {
         case .ignore:
             return
         case let .blocked(blockedMessage):
             updatesDisabledMessage = blockedMessage
             canCheckForUpdates = false
+            return
+        case let .selfSignedDisabled(selfSignedMessage):
+            disableUpdates(reason: selfSignedMessage)
             return
         case .start:
             break
@@ -206,9 +226,13 @@ final class SparkleUpdaterManager: ObservableObject {
     static func startDecision(
         sparkleConfigurationValid: Bool,
         updaterStarted: Bool,
-        identityMigrationBlockedMessage: String?
+        identityMigrationBlockedMessage: String?,
+        signingModeMarker: String?
     ) -> SparkleUpdaterStartDecision {
         guard sparkleConfigurationValid, !updaterStarted else { return .ignore }
+        if signingModeMarker?.trimmingCharacters(in: .whitespacesAndNewlines) == localSelfSignedSigningModeMarker {
+            return .selfSignedDisabled(selfSignedUpdatesDisabledMessage)
+        }
         if let identityMigrationBlockedMessage {
             return .blocked(identityMigrationBlockedMessage)
         }
@@ -735,17 +759,14 @@ final class SparkleUpdaterManager: ObservableObject {
         return (false, "Updates are disabled because the update feed/signing key failed integrity validation. Please reinstall from the official website.")
     }
 
-    private func disableUpdatesForIntegrityFailure() {
+    /// Disabling updates always carries a user-visible reason, so the caller supplies it.
+    private func disableUpdates(reason: String) {
         clearUpdateState()
         cancelUserInitiatedSparkleCheck()
         canCheckForUpdates = false
         automaticallyChecksForUpdates = false
         updaterController.updater.automaticallyChecksForUpdates = false
-
-        // Ensure there is always a user-visible reason if we disable updates
-        if updatesDisabledMessage == nil {
-            updatesDisabledMessage = "Updates are disabled due to an integrity validation failure."
-        }
+        updatesDisabledMessage = reason
     }
 }
 
