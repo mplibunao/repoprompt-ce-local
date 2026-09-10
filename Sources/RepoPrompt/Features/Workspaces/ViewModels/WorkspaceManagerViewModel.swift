@@ -433,6 +433,7 @@ enum AgentAdmissionRefusalReason: String, Equatable {
     case unsavedWorkspaceChanges = "unsaved_workspace_changes"
     case invalidCanonicalWorkspaceDocument = "invalid_canonical_workspace_document"
     case tabIdentityMismatch = "tab_identity_mismatch"
+    case localTabIdentityConflict = "local_tab_identity_conflict"
     case workspaceIdentityMismatch = "workspace_identity_mismatch"
 
     private var sentence: String {
@@ -449,6 +450,8 @@ enum AgentAdmissionRefusalReason: String, Equatable {
             "The canonical workspace document could not be decoded for Agent admission."
         case .tabIdentityMismatch:
             "The canonical workspace contains conflicting tab identities."
+        case .localTabIdentityConflict:
+            "The in-memory workspace contains the same tab identity in both compose and stash."
         case .workspaceIdentityMismatch:
             "Canonical workspace identity changed before Agent admission."
         }
@@ -7995,7 +7998,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         if Dictionary(grouping: refreshedTabIDs, by: { $0 })
             .first(where: { $0.value.count > 1 }) != nil
         {
-            throw AgentAdmissionRefusalReason.tabIdentityMismatch.error
+            throw AgentAdmissionRefusalReason.localTabIdentityConflict.error
         }
         if let localActiveTabID = local.activeComposeTabID,
            refreshed.composeTabs.contains(where: { $0.id == localActiveTabID })

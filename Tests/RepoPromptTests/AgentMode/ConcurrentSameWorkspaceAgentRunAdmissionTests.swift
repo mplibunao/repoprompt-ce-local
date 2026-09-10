@@ -791,6 +791,55 @@ import XCTest
             XCTAssertEqual(manager.workspace(withID: fixture.workspaceID), workspaceBefore)
         }
 
+        func testCanonicalAdmissionRefreshReportsLocalComposeAndStashDuplicateAsLocalState() async throws {
+            let fixture = try await DurableAgentAdmissionFixture.make()
+            trackCleanup { await fixture.cleanup() }
+            let manager = fixture.window.workspaceManager
+            let canonicalValue = await fixture.runtime.workspaceStore
+                .canonicalWorkspaceSnapshot(fixture.workspaceID)
+            let canonicalSnapshot = try XCTUnwrap(canonicalValue)
+            let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex {
+                $0.id == fixture.workspaceID
+            })
+            var local = manager.workspaces[workspaceIndex]
+            let duplicate = ComposeTabState(name: "Local compose-and-stash duplicate")
+            local.composeTabs.append(duplicate)
+            local.stashedTabs.append(StashedTab(tab: duplicate))
+            manager.workspaces[workspaceIndex] = local
+            manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting { _ in canonicalSnapshot }
+            defer { manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting(nil) }
+            var operationRan = false
+
+            do {
+                try await manager.withAgentSessionAdmission(
+                    workspaceID: fixture.workspaceID,
+                    admissionID: UUID(),
+                    refreshCanonicalState: true
+                ) {
+                    operationRan = true
+                }
+                XCTFail("A local compose-and-stash duplicate must reject admission.")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("(reason: local_tab_identity_conflict)"))
+                XCTAssertTrue(
+                    error.localizedDescription.contains(
+                        "The in-memory workspace contains the same tab identity in both compose and stash."
+                    )
+                )
+                XCTAssertFalse(
+                    error.localizedDescription.contains("The canonical workspace contains conflicting tab identities."),
+                    error.localizedDescription
+                )
+                XCTAssertTrue(
+                    error.localizedDescription.contains(
+                        "Inspect the workspace state or the existing session instead of retrying this call."
+                    )
+                )
+            }
+
+            XCTAssertFalse(operationRan)
+        }
+
         func testRetainedRecoveryKeepsPeerProvisionalFenceUntilRecoveryTerminates() async throws {
             let fixture = try await DurableAgentAdmissionFixture.make()
             trackCleanup { await fixture.cleanup() }
