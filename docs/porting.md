@@ -16,9 +16,9 @@ Use the read-only reference clone at:
    git -C /Users/mp/Projects/personal/repoprompt-ce-upstream-readonly pull
    ```
 
-   Then identify the upstream pull request or commit range and record its number.
-2. Run `rp-deep-plan` with the task `re-implement upstream PR N on main`. Name the absolute reference-clone paths to read and the working-repository paths to change.
-3. Create `port/<N>-<slug>` from `main` in `/Users/mp/Projects/personal/repoprompt-ce`.
+   Then identify the upstream source and record its reference: the pull request number, or the commit SHA when the change has no pull request. That reference is `<ref>` below.
+2. Run `rp-deep-plan` with the task `re-implement upstream <ref> on main`, for example `re-implement upstream PR 984 on main` or `re-implement upstream commit 4b2b914d on main`. Name the absolute reference-clone paths to read and the working-repository paths to change.
+3. Create `port/<ref>-<slug>` from `main` in `/Users/mp/Projects/personal/repoprompt-ce`, for example `port/984-codemap-git-churn` or `port/4b2b914d-sparkle-isolation`.
 4. Apply the planned source changes in the working repository.
 5. Run focused tests for the affected behavior, then run:
 
