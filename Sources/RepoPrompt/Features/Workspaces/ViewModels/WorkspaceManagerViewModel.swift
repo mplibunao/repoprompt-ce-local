@@ -640,6 +640,7 @@ class WorkspaceManagerViewModel: ObservableObject {
     private var stateVersionByWorkspaceID: [UUID: Int] = [:]
     private var lastSavedVersionByWorkspaceID: [UUID: Int] = [:]
     private var domainWorkingCommitTasks: [UUID: Task<Void, Never>] = [:]
+    private var pendingDefaultWorkspaceCreationTask: Task<Void, Never>?
     private var domainWorkingCommitGeneration: [UUID: UInt64] = [:]
     private var scheduledWorkspaceSaveTasks: [UUID: [UUID: Task<Void, Never>]] = [:]
     private enum AgentAdmissionRecoveryMutation: Hashable {
@@ -677,6 +678,8 @@ class WorkspaceManagerViewModel: ObservableObject {
         private var workspaceDeleteWillExecuteHandlerForTesting:
             (@MainActor (UUID) async -> Void)?
         private var workspaceActivationLeaseDidAcquireHandlerForTesting:
+            (@MainActor (UUID) async -> Void)?
+        private var defaultWorkspaceCreationWillBeginHandlerForTesting:
             (@MainActor (UUID) async -> Void)?
         private var composeTabFastStateDidApplyHandlerForTesting:
             (@MainActor (UUID) async -> Void)?
@@ -2497,6 +2500,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         composeTabApplyTask?.cancel()
         domainWorkingCommitTasks.values.forEach { $0.cancel() }
         domainWorkingCommitTasks.removeAll()
+        pendingDefaultWorkspaceCreationTask?.cancel()
         scheduledWorkspaceSaveTasks.values.flatMap(\.values).forEach { $0.cancel() }
         scheduledWorkspaceSaveTasks.removeAll()
         for tasks in postCatalogRootWorkTasks.values {
@@ -2519,6 +2523,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         composeTabApplyTaskTabID = nil
         domainWorkingCommitTasks.values.forEach { $0.cancel() }
         domainWorkingCommitTasks.removeAll()
+        pendingDefaultWorkspaceCreationTask?.cancel()
         scheduledWorkspaceSaveTasks.values.flatMap(\.values).forEach { $0.cancel() }
         scheduledWorkspaceSaveTasks.removeAll()
         postSwitchGitDataLoadTask?.cancel()
@@ -3390,6 +3395,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     @MainActor
     func requestWorkspaceSwitch(to newWorkspace: WorkspaceModel, saveState: Bool = true, reason: String = "userOrInternal") async -> WorkspaceSwitchResult {
+        await pendingDefaultWorkspaceCreationTask?.value
         let currentBeforeAdmission = workspace(withID: newWorkspace.id)
         if newWorkspace.consolidatedIntoWorkspaceID != nil
             || currentBeforeAdmission?.consolidatedIntoWorkspaceID != nil
@@ -3639,6 +3645,12 @@ class WorkspaceManagerViewModel: ObservableObject {
             _ handler: (@MainActor (UUID) async -> Void)?
         ) {
             workspaceActivationLeaseDidAcquireHandlerForTesting = handler
+        }
+
+        func setDefaultWorkspaceCreationWillBeginHandlerForTesting(
+            _ handler: (@MainActor (UUID) async -> Void)?
+        ) {
+            defaultWorkspaceCreationWillBeginHandlerForTesting = handler
         }
 
         func setWorkspaceSwitchRecoveryWillBeginHandlerForTesting(
@@ -3953,6 +3965,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     @discardableResult
     func switchWorkspace(to newWorkspace: WorkspaceModel, saveState: Bool = true, reason: String = "internal") async -> WorkspaceSwitchResult {
+        await pendingDefaultWorkspaceCreationTask?.value
         if let concurrentResult = concurrentWorkspaceSwitchResult(requestedWorkspace: newWorkspace) {
             return concurrentResult
         }
@@ -12818,8 +12831,13 @@ class WorkspaceManagerViewModel: ObservableObject {
         if let domainWorkspaceAuthorityClient {
             let fileURL = workspaceFileURL(for: ws)
             let operationID = UUID()
-            Task { @MainActor [weak self] in
+            pendingDefaultWorkspaceCreationTask = Task { @MainActor [weak self] in
                 do {
+                    #if DEBUG
+                        if let handler = self?.defaultWorkspaceCreationWillBeginHandlerForTesting {
+                            await handler(ws.id)
+                        }
+                    #endif
                     let outcome = try await domainWorkspaceAuthorityClient.create(
                         ws,
                         fileURL: fileURL,
