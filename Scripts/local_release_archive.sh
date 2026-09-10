@@ -110,11 +110,13 @@ ARCHIVE_TAG="$TAG" \
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import json
 import os
 import plistlib
+import tarfile
 import time
+from uuid import UUID
 
 archive_dir = Path(os.environ["ARCHIVE_DIR"])
 app_path = Path(os.environ["ARCHIVE_APP_PATH"])
@@ -145,15 +147,53 @@ def checksum(name: str) -> str | None:
     return sidecar.read_text(encoding="utf-8").split(maxsplit=1)[0]
 
 
+def working_journal_versions() -> list[int]:
+    versions: set[int] = set()
+    with tarfile.open(archive_dir / "application-support.tar.gz", "r:gz") as state_archive:
+        for member in state_archive.getmembers():
+            path = PurePosixPath(member.name.removeprefix("./"))
+            parts = path.parts
+            if not (
+                len(parts) == 5
+                and parts[:2] == ("DomainRuntime", "v1")
+                and parts[3] == "working-journals"
+                and path.suffix == ".json"
+            ):
+                continue
+            # UUID validation prevents tar's macOS AppleDouble sidecars from being
+            # mistaken for journal JSON.
+            try:
+                UUID(path.stem)
+            except ValueError:
+                continue
+            if not member.isfile():
+                raise SystemExit(f"ERROR: archived working journal {path} is not a regular file.")
+            handle = state_archive.extractfile(member)
+            if handle is None:
+                raise SystemExit(f"ERROR: could not read archived working journal {path}.")
+            try:
+                payload = json.load(handle)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise SystemExit(f"ERROR: could not parse archived working journal {path}: {error}") from error
+            version = payload.get("version") if isinstance(payload, dict) else None
+            if type(version) is not int:
+                raise SystemExit(f"ERROR: archived working journal {path} has no integer version.")
+            versions.add(version)
+    return sorted(versions)
+
+
 files = ["app.zip", "application-support.tar.gz", "defaults.plist"]
 if os.environ["ARCHIVE_IDENTITY_PRESENT"] == "1":
     files.append("local-signing-identity-v1.json")
 
 provenance = bundle_provenance()
+journal_versions = working_journal_versions()
 now = time.time()
 manifest = {
     "schemaVersion": 1,
     "tag": os.environ["ARCHIVE_TAG"],
+    "working_journal_version": max(journal_versions) if journal_versions else None,
+    "working_journal_versions": journal_versions,
     "archivedAtEpoch": now,
     "archivedAtISO": datetime.fromtimestamp(now, timezone.utc).astimezone().isoformat(timespec="seconds"),
     "app": {

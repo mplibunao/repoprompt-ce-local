@@ -219,6 +219,32 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         for name in ("app.zip", "application-support.tar.gz", "defaults.plist"):
             self.assertEqual(len(manifest["files"][name]["sha256"]), 64, name)
 
+    def test_manifest_records_maximum_and_distinct_working_journal_versions(self) -> None:
+        self.write_baseline_fixture()
+        journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
+        journals.mkdir(parents=True)
+        for name, version in (
+            ("00000000-0000-0000-0000-000000000001.json", 1),
+            ("00000000-0000-0000-0000-000000000002.json", 3),
+            ("00000000-0000-0000-0000-000000000003.json", 1),
+        ):
+            (journals / name).write_text(json.dumps({"version": version}), encoding="utf-8")
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertEqual(manifest["working_journal_version"], 3)
+        self.assertEqual(manifest["working_journal_versions"], [1, 3])
+
+    def test_manifest_records_null_when_no_working_journal_exists(self) -> None:
+        self.write_baseline_fixture()
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertIsNone(manifest["working_journal_version"])
+        self.assertEqual(manifest["working_journal_versions"], [])
+
     def test_missing_bundle_provenance_records_commit_as_null(self) -> None:
         self.write_app(build="37", commit=None)
         self.write_state("original")

@@ -19,20 +19,41 @@ Before you start:
    ./Scripts/local_release_archive.sh local/v1.4.0-b37
    ```
 
-2. Install the new build from the `main` checkout:
+2. Compare the archived and candidate working-journal versions before replacing the app.
+   The archived build's number is `working_journal_version` in the new archive's
+   `manifest.json`; `null` means the snapshot contains no working journals. The manifest
+   also lists every observed value in `working_journal_versions` and uses the highest for
+   `working_journal_version` when journals disagree. The candidate build's number is
+   `DomainWorkingJournal.schemaVersion` in
+   [`Sources/RepoPromptDomainRuntime/DomainPersistence.swift`](../Sources/RepoPromptDomainRuntime/DomainPersistence.swift);
+   a journal written by the candidate debug build confirms the same value in its `version`
+   field.
+
+   If both builds have a journal version and the numbers differ, promotion is blocked until
+   the release notes include usable rollback instructions. Start with this template and
+   replace the placeholders with the release's exact paths or conversion procedure:
+
+   > **Working-journal rollback (`<candidate>` to `<archived>`):** Quit RepoPrompt CE and
+   > restore the archived build without launching it. Move
+   > `~/Library/Application Support/RepoPrompt CE/DomainRuntime/v1/*/working-journals/*.json`
+   > to `<backup directory outside Application Support>`, or convert those files with
+   > `<tested conversion procedure>`. Relaunch the archived build; affected workspaces load
+   > from their saved workspace documents and write fresh journals.
+
+3. Install the new build from the `main` checkout:
 
    ```bash
    CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make install-local-production
    ```
 
-3. Launch production and run the [acceptance matrix](#acceptance-matrix) once from Claude
+4. Launch production and run the [acceptance matrix](#acceptance-matrix) once from Claude
    Code and once from Codex. Confirm the bundle provenance names the promoted commit:
 
    ```bash
    cat "/Applications/RepoPrompt CE.app/Contents/Resources/RepoPromptProvenance.json"
    ```
 
-4. On pass, with `main` pushed at the promoted commit, tag the build and publish the
+5. On pass, with `main` pushed at the promoted commit, tag the build and publish the
    receipt:
 
    ```bash
@@ -130,7 +151,9 @@ The archive lands in `~/Archives/repoprompt-ce/<tag>/` and holds `app.zip`,
 record exists, a `.sha256` sidecar per file, and `manifest.json`. The manifest is written
 last, so its absence marks an incomplete archive and the restore refuses one. It records the
 tag, timestamps, bundle identifier, version, build, signing mode, and the commit read from
-the bundle's provenance file. Re-archiving over a completed archive needs
+the bundle's provenance file. It also records the highest archived working-journal version
+as `working_journal_version` (`null` when none exist) and all distinct observed values as
+`working_journal_versions`. Re-archiving over a completed archive needs
 `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`.
 
 `LOCAL_RELEASE_ARCHIVE_EXCLUDES` is a colon-separated list of top-level exclusion rules
