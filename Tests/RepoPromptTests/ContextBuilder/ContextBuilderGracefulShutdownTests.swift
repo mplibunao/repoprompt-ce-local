@@ -578,12 +578,160 @@ private actor ShutdownRecordingNativeController: NativeAgentRuntimeControlling {
     }
 }
 
+@MainActor
+final class ContextBuilderWindowAdmissionTests: XCTestCase {
+    func testSecondTabIsRefusedUntilFirstRunCompletes() async throws {
+        let gate = ContextBuilderTestGate()
+        var providers: [GatedHeadlessAgentProvider] = []
+        let (window, tabIDs) = await makeWindow { _, _, _ in
+            let provider = GatedHeadlessAgentProvider(streamGate: gate)
+            providers.append(provider)
+            return provider
+        }
+        addTeardownBlock { @MainActor in
+            _ = await window.mcpServer.setWindowToolsEnabled(false)
+        }
+        let viewModel = window.contextBuilderAgentViewModel
+
+        let first = Task { try await self.runMCP(window, tabID: tabIDs[0]) }
+        let firstStarted = await waitUntil {
+            providers.count == 1 && viewModel.activeRunIDForTesting(tabID: tabIDs[0]) != nil
+        }
+        XCTAssertTrue(firstStarted)
+
+        let second = Task { try await self.runMCP(window, tabID: tabIDs[1]) }
+        do {
+            _ = try await second.value
+            XCTFail("Expected window admission refusal")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("already running in this window"))
+        }
+        XCTAssertEqual(providers.count, 1)
+
+        await gate.open()
+        _ = try await first.value
+        XCTAssertNil(viewModel.activeRunIDForTesting(tabID: tabIDs[0]))
+        let thirdToken = try viewModel.beginMCPControlledRun(
+            forTabID: tabIDs[1], responseType: nil, planModelName: nil
+        )
+        viewModel.clearMCPControlledRun(forTabID: tabIDs[1], controlToken: thirdToken)
+        await providers[0].allowDispose()
+    }
+
+    func testFailureBeforeProviderCreationReleasesAdmission() async throws {
+        var providerCount = 0
+        let (window, tabIDs) = await makeWindow { _, _, _ in
+            providerCount += 1
+            return GatedHeadlessAgentProvider()
+        }
+        addTeardownBlock { @MainActor in
+            _ = await window.mcpServer.setWindowToolsEnabled(false)
+        }
+        let viewModel = window.contextBuilderAgentViewModel
+
+        do {
+            _ = try await runMCP(window, tabID: UUID())
+            XCTFail("Expected missing workspace failure")
+        } catch {}
+        XCTAssertEqual(providerCount, 0)
+        let token = try viewModel.beginMCPControlledRun(
+            forTabID: tabIDs[0], responseType: nil, planModelName: nil
+        )
+        viewModel.clearMCPControlledRun(forTabID: tabIDs[0], controlToken: token)
+    }
+
+    private func runMCP(
+        _ window: WindowState,
+        tabID: UUID
+    ) async throws -> ContextBuilderAgentViewModel.MCPContextBuilderRunCompletion {
+        let viewModel = window.contextBuilderAgentViewModel
+        let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
+        let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID)
+        var nested = MCPServerViewModel.TabContextSnapshot(
+            tabID: tabID,
+            windowID: window.mcpServer.windowID,
+            workspaceID: workspace.id,
+            promptText: "",
+            selection: StoredSelection(),
+            selectedMetaPromptIDs: [],
+            selectedContextBuilderPromptIDs: [],
+            tabName: "",
+            runID: nil,
+            explicitlyBound: true
+        )
+        nested.frozenLookupContext = .visibleWorkspace
+        let configuration = ContextBuilderMCPRunConfiguration(
+            identity: identity,
+            nestedTabContext: nested,
+            providerWorkspacePath: FileManager.default.temporaryDirectory.path,
+            runBehavior: ContextBuilderRunBehavior(
+                tokenBudget: 1000,
+                enhancementMode: .preserve,
+                questionTimeoutSeconds: 1,
+                allowClarifyingQuestions: false,
+                automaticFollowUp: nil
+            ),
+            responseType: nil,
+            planningModelRaw: nil,
+            isSystemWorkspace: false
+        )
+        let token = try viewModel.beginMCPControlledRun(forTabID: tabID, responseType: nil, planModelName: nil)
+        return try await AsyncScope.withCleanup({}, cleanup: {
+            await MainActor.run { viewModel.clearMCPControlledRun(forTabID: tabID, controlToken: token) }
+        }) {
+            try await viewModel.runContextBuilderForMCP(
+                authority: ContextBuilderResolvedRunAuthority(
+                    configuration: configuration,
+                    agentKind: .claudeCode,
+                    modelRaw: AgentModel.defaultModel.rawValue
+                ),
+                mcpControlToken: token
+            )
+        }
+    }
+
+    private func makeWindow(
+        providerFactory: @escaping ContextBuilderAgentViewModel.ProviderFactory
+    ) async -> (WindowState, [UUID]) {
+        let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
+        GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
+        defer { GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false) }
+        let window = WindowState(contextBuilderProviderFactory: providerFactory)
+        await window.workspaceManager.awaitInitialized()
+        _ = await window.mcpServer.setWindowToolsEnabled(true)
+        let tabs = [ComposeTabState(name: "First"), ComposeTabState(name: "Second")]
+        let workspace = WorkspaceModel(
+            name: "Window admission",
+            repoPaths: [FileManager.default.temporaryDirectory.path],
+            composeTabs: tabs,
+            activeComposeTabID: tabs[0].id
+        )
+        window.workspaceManager.workspaces = [workspace]
+        window.workspaceManager.activeWorkspace = workspace
+        window.promptManager.loadComposeTabsFromWorkspace(workspace)
+        return (window, tabs.map(\.id))
+    }
+
+    private func waitUntil(condition: @MainActor () async -> Bool) async -> Bool {
+        for _ in 0 ..< 200 {
+            if await condition() { return true }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return await condition()
+    }
+}
+
 private final class GatedHeadlessAgentProvider: HeadlessAgentProvider, @unchecked Sendable {
     private let disposeGate = ContextBuilderTestGate()
     private let state = GatedHeadlessAgentProviderState()
+    private let streamGate: ContextBuilderTestGate?
     private let onDisposeStarted: @Sendable () async -> Void
 
-    init(onDisposeStarted: @escaping @Sendable () async -> Void = {}) {
+    init(
+        streamGate: ContextBuilderTestGate? = nil,
+        onDisposeStarted: @escaping @Sendable () async -> Void = {}
+    ) {
+        self.streamGate = streamGate
         self.onDisposeStarted = onDisposeStarted
     }
 
@@ -591,7 +739,16 @@ private final class GatedHeadlessAgentProvider: HeadlessAgentProvider, @unchecke
         _ message: AgentMessage,
         runID: UUID?
     ) async throws -> AsyncThrowingStream<AIStreamResult, Error> {
-        AsyncThrowingStream { $0.finish() }
+        AsyncThrowingStream { continuation in
+            guard let streamGate else {
+                continuation.finish()
+                return
+            }
+            Task {
+                await streamGate.wait()
+                continuation.finish()
+            }
+        }
     }
 
     func dispose() async {
