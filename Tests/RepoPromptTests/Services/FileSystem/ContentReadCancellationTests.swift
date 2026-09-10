@@ -2572,6 +2572,203 @@ final class ContentReadCancellationTests: XCTestCase {
     }
 }
 
+final class ApplyEditsBoundedPreviewReadTests: XCTestCase {
+    func testPreviewReadTimesOutBehindDetachedStructureReadAndRecovers() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RepoPromptTests", isDirectory: true)
+            .appendingPathComponent("ApplyEditsBoundedPreviewRead-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: rootURL) }
+
+        let fileURL = rootURL.appendingPathComponent("Target.swift")
+        let original = "let value = 0\n"
+        try original.write(to: fileURL, atomically: true, encoding: .utf8)
+        let store = WorkspaceFileContextStore()
+        let root = try await store.loadRoot(path: rootURL.path)
+        guard let record = await store.file(rootID: root.id, relativePath: "Target.swift") else {
+            return XCTFail("Expected loaded target file")
+        }
+        let roots = await store.rootRefs(scope: .visibleWorkspace)
+
+        let initialLimiter = await waitForLimiterIdle()
+        let releaseFillerPermits = AsyncSignal()
+        let fillerTasks: [Task<Void, Error>] = (1 ..< initialLimiter.capacity).map { _ in
+            Task {
+                try await FileSystemService.withCancellationResponsivePhysicalReadPermit(
+                    workloadClass: .interactiveRead,
+                    schedulerOwnerID: UUID(),
+                    priority: .userInitiated
+                ) {
+                    await releaseFillerPermits.wait()
+                }
+            }
+        }
+        addTeardownBlock {
+            await releaseFillerPermits.signal()
+            fillerTasks.forEach { $0.cancel() }
+        }
+        let fillerPermitsHeld = await waitUntil {
+            let snapshot = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
+            return snapshot.activePermitCount == snapshot.capacity - 1
+        }
+        guard fillerPermitsHeld else { return XCTFail("Could not reserve the content-read filler permits") }
+
+        let physicalReadGate = SynchronousPhysicalReadGate()
+        let providerRelease = AsyncSignal()
+        try await store.setContentPhysicalReadHandlerForTesting(rootID: root.id) {
+            physicalReadGate.blockUntilReleased()
+        }
+        addTeardownBlock {
+            physicalReadGate.release()
+            await providerRelease.signal()
+            try? await store.setContentPhysicalReadHandlerForTesting(rootID: root.id, nil)
+        }
+
+        let registry = MCPCodeStructureSettlementRegistry()
+        let clock = SynchronousDurationClock()
+        let sleeps = ControlledWatchdogSleeps(clock: clock)
+        let admission = registry.admit(
+            windowID: 958,
+            connectionID: UUID(),
+            invocationID: UUID(),
+            toolName: MCPWindowToolName.readFile,
+            now: clock.now(),
+            handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+        )
+        guard case let .admitted(slot) = admission else {
+            return XCTFail("Structure provider was not admitted")
+        }
+        let watchdogTask = Task { () -> Result<Void, Error> in
+            do {
+                try await MCPToolExecutionWatchdog.execute(
+                    deadline: .seconds(30),
+                    cancellationGrace: .seconds(5),
+                    cleanupDisposition: .detachAndSettle,
+                    settlementSlot: slot,
+                    environment: MCPToolExecutionWatchdogEnvironment(
+                        now: { clock.now() },
+                        sleep: { duration in try await sleeps.sleep(for: duration) }
+                    )
+                ) {
+                    do {
+                        try await runDomainReadProviderTask(store: store, record: record, roots: roots)
+                    } catch {
+                        await providerRelease.wait()
+                        throw error
+                    }
+                }
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }
+        addTeardownBlock {
+            await sleeps.releaseAll()
+            watchdogTask.cancel()
+        }
+
+        guard await waitUntil({ physicalReadGate.isBlockedSnapshot() }) else {
+            return XCTFail("Structure read did not reach the physical gate")
+        }
+        let saturated = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
+        XCTAssertEqual(saturated.activePermitCount, saturated.capacity)
+        guard await waitUntil({ await sleeps.pendingCountSnapshot() == 1 }), await sleeps.releaseNext() else {
+            return XCTFail("Structure watchdog deadline did not advance")
+        }
+        guard await waitUntil({ await sleeps.pendingCountSnapshot() == 1 }), await sleeps.releaseNext() else {
+            return XCTFail("Structure watchdog cleanup grace did not advance")
+        }
+        guard let observedWatchdog = await waitForTaskResult(watchdogTask) else {
+            return XCTFail("Structure watchdog did not finish")
+        }
+        let watchdogResult = observedWatchdog.get()
+        guard case let .failure(watchdogError) = watchdogResult else {
+            return XCTFail("Expected the structure provider to detach")
+        }
+        XCTAssertEqual(watchdogError as? MCPToolExecutionWatchdogError, .executionDetached)
+
+        guard case .busy = registry.admit(
+            windowID: 958,
+            connectionID: UUID(),
+            invocationID: UUID(),
+            toolName: MCPWindowToolName.getCodeStructure,
+            now: clock.now(),
+            handlerPhase: { nil }
+        ) else {
+            return XCTFail("Detached structure provider should fence the next structure call")
+        }
+
+        let blockedHost = WorkspaceFileEditHost(
+            store: store,
+            target: .existing(record),
+            previewReadTimeout: .milliseconds(20)
+        )
+        let request = ApplyEditsRequest(
+            path: fileURL.path,
+            mode: .single(search: "value", replace: "updated", replaceAll: false),
+            verbose: false
+        )
+        let start = ContinuousClock().now
+        do {
+            _ = try await ApplyEditsService(engine: .default, host: blockedHost).run(request)
+            XCTFail("Expected the bounded preview read to fail")
+        } catch let failure as MCPMutationRetryableFailure {
+            XCTAssertEqual(failure.errorCode, "apply_edits_read_busy")
+            XCTAssertTrue(failure.retryable)
+            XCTAssertTrue(failure.errorMessage.contains("previous read of the file is still settling"))
+        }
+        XCTAssertLessThan(ContinuousClock().now - start, .seconds(1))
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), original)
+
+        physicalReadGate.release()
+        await providerRelease.signal()
+        await releaseFillerPermits.signal()
+        for task in fillerTasks {
+            _ = try await task.value
+        }
+        let registrySettled = await waitUntil {
+            registry.snapshot(windowID: 958) == .init(activeCount: 0, detachedCount: 0)
+        }
+        XCTAssertTrue(registrySettled)
+        let limiterSnapshot = await waitForLimiterIdle()
+        XCTAssertTrue(limiterSnapshot.isIdle)
+
+        let recovered = try await ApplyEditsService(
+            engine: .default,
+            host: WorkspaceFileEditHost(store: store, target: .existing(record))
+        ).run(request)
+        XCTAssertEqual(recovered.editsApplied, 1)
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), "let updated = 0\n")
+    }
+
+    private func waitUntil(timeout: Duration = .seconds(5), _ predicate: () async -> Bool) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while clock.now < deadline {
+            if await predicate() { return true }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return await predicate()
+    }
+
+    private func waitForTaskResult<Success: Sendable, Failure: Error & Sendable>(
+        _ task: Task<Success, Failure>
+    ) async -> Result<Success, Failure>? {
+        let recorder = TaskResultRecorder<Success, Failure>()
+        Task { await recorder.record(task.result) }
+        guard await waitUntil({ await recorder.hasResult() }) else { return nil }
+        return await recorder.snapshot()
+    }
+
+    private func waitForLimiterIdle() async -> ContentReadAsyncLimiter.Snapshot {
+        _ = await waitUntil {
+            let snapshot = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
+            return snapshot.isIdle
+        }
+        return await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
+    }
+}
+
 @MainActor
 private func runMainActorProviderTask(
     store: WorkspaceFileContextStore,
