@@ -62,6 +62,30 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
         self.git("switch", "-q", "-c", "port/123-fixture")
 
+    def install_config_sensitive_gitleaks(self) -> None:
+        write_executable(
+            self.bin_dir / "gitleaks",
+            "#!/bin/sh\n"
+            'config=""\n'
+            'target=""\n'
+            'while [ "$#" -gt 0 ]; do\n'
+            '  case "$1" in\n'
+            '    --config) config="$2"; shift 2 ;;\n'
+            '    *) target="$1"; shift ;;\n'
+            "  esac\n"
+            "done\n"
+            'if [ -n "$config" ] && grep -q "^allow_all = true$" "$config"; then exit 0; fi\n'
+            'if grep -R -q "staged-secret-value" "$target"; then exit 1; fi\n'
+            "exit 0\n",
+        )
+
+    def commit_strict_gitleaks_config(self) -> Path:
+        config = self.repo / ".gitleaks.toml"
+        config.write_text("allow_all = false\n", encoding="utf-8")
+        self.git("add", ".gitleaks.toml")
+        self.git("commit", "-q", "-m", "add strict gitleaks config")
+        return config
+
     def run_preflight(self, mode: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env['PATH']}"
@@ -85,6 +109,30 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
 
     def test_commit_allows_origin_only_repository(self) -> None:
         self.git("remote", "add", "origin", "https://example.invalid/origin.git")
+
+        result = self.run_preflight("commit")
+
+        self.assertEqual(result.returncode, 0, self.output(result))
+
+    def test_commit_ignores_unstaged_gitleaks_allowlist_broadening(self) -> None:
+        self.install_config_sensitive_gitleaks()
+        config = self.commit_strict_gitleaks_config()
+        secret = self.repo / "secret.txt"
+        secret.write_text("staged-secret-value\n", encoding="utf-8")
+        self.git("add", "secret.txt")
+        config.write_text("allow_all = true\n", encoding="utf-8")
+
+        result = self.run_preflight("commit")
+
+        self.assertNotEqual(result.returncode, 0, self.output(result))
+
+    def test_commit_honours_staged_gitleaks_config_change(self) -> None:
+        self.install_config_sensitive_gitleaks()
+        config = self.commit_strict_gitleaks_config()
+        secret = self.repo / "secret.txt"
+        secret.write_text("staged-secret-value\n", encoding="utf-8")
+        config.write_text("allow_all = true\n", encoding="utf-8")
+        self.git("add", "secret.txt", ".gitleaks.toml")
 
         result = self.run_preflight("commit")
 
