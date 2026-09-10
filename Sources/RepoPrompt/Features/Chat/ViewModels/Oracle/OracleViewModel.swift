@@ -1588,7 +1588,7 @@ class OracleViewModel: ObservableObject {
     ) async throws {
         guard sessionIDByMessageId[queryID] == sessionID,
               let message = messageStore[sessionID]?.first(where: { $0.id == queryID && !$0.isUser }),
-              let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID })
+              let workspaceID = sessions.first(where: { $0.id == sessionID })?.workspaceID
         else {
             throw OracleContextBuilderCompletionError.missingExactQuery
         }
@@ -1603,14 +1603,16 @@ class OracleViewModel: ObservableObject {
             }
         }
 
-        if let workspaceID = sessions[sessionIndex].workspaceID {
-            await drainTrackedAutosaves(for: workspaceID)
-        }
-        guard let liveMessages = messageStore[sessionID] else {
+        await drainTrackedAutosaves(for: workspaceID)
+
+        // Every suspension above and below can interleave with the user deleting or reordering
+        // chats, so the session is always re-resolved by id, never by a remembered position.
+        guard let liveMessages = messageStore[sessionID],
+              var sessionSnapshot = sessions.first(where: { $0.id == sessionID })
+        else {
             throw OracleContextBuilderCompletionError.missingExactQuery
         }
 
-        var sessionSnapshot = sessions[sessionIndex]
         sessionSnapshot.messages = liveMessages.map { message in
             StoredMessage(
                 id: message.id,
@@ -1633,6 +1635,9 @@ class OracleViewModel: ObservableObject {
             try await autosaveSession(sessionSnapshot)
         }
         sessionSnapshot.fileURL = fileURL
+        guard let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID }) else {
+            throw OracleContextBuilderCompletionError.missingExactQuery
+        }
         sessions[sessionIndex] = sessionSnapshot
     }
 
