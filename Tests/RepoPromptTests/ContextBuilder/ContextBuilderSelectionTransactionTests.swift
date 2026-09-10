@@ -1,6 +1,84 @@
 import Foundation
+import MCP
 @testable import RepoPromptApp
 import XCTest
+
+@MainActor
+final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
+    func testNestedSetReusesFrozenReviewContextWithoutWatchdogDetachment() async throws {
+        let fixture = try await makeSelectionFixture(name: "frozen-review", gitBacked: true)
+        defer { fixture.cleanup() }
+        let source = StoredSelection(selectedPaths: [fixture.fileA.path])
+        let discovered = StoredSelection(selectedPaths: [fixture.fileB.path])
+        try await fixture.seedCanonical(source)
+
+        var parentContext = try fixture.makeContext(selection: source)
+        parentContext.activeAgentSessionID = UUID()
+        parentContext.worktreeBindingState = .hydrated([])
+        let workspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
+        let workspaceContext = try await ContextBuilderWorkspaceContext.resolve(
+            from: parentContext,
+            workspaceRepoPaths: [fixture.root.path],
+            workspaceDirectoryPath: fixture.window.workspaceManager.workspaceDirectory(for: workspace).path,
+            store: fixture.window.promptManager.workspaceFileContextStore
+        )
+        let target = try XCTUnwrap(workspaceContext.reviewTargetResolution.availableTarget)
+        fixture.window.mcpServer.tabContextByConnectionID[fixture.connectionID] =
+            workspaceContext.nestedDiscoveryTabContext(runID: fixture.runID)
+        fixture.window.mcpServer.setRequestMetadataOverrideForTesting(fixture.metadata)
+
+        let legacyFreezeGate = ContextBuilderTestGate()
+        fixture.window.mcpServer.setContextBuilderBeforeLegacySelectionReviewFreezeForTesting {
+            await legacyFreezeGate.wait()
+        }
+        defer {
+            fixture.window.mcpServer.setContextBuilderBeforeLegacySelectionReviewFreezeForTesting(nil)
+            fixture.window.mcpServer.setRequestMetadataOverrideForTesting(nil)
+        }
+
+        let tools = await fixture.window.mcpServer.windowMCPToolCatalogService.tools
+        let tool = try XCTUnwrap(tools.first { $0.name == MCPWindowToolName.manageSelection })
+        let clock = ContinuousClock()
+        let origin = clock.now
+        let environment = MCPToolExecutionWatchdogEnvironment(
+            now: { origin.duration(to: clock.now) },
+            sleep: { try await Task.sleep(for: $0) }
+        )
+        do {
+            _ = try await MCPToolExecutionWatchdog.execute(
+                deadline: .seconds(1),
+                cancellationGrace: .milliseconds(100),
+                cleanupDisposition: .detachAndSettle,
+                environment: environment
+            ) {
+                try await tool([
+                    "op": .string("set"),
+                    "paths": .array([.string(fixture.fileB.path)]),
+                    "mode": .string("full")
+                ])
+            }
+        } catch {
+            await legacyFreezeGate.open()
+            return XCTFail("nested manage_selection failed: \(error)")
+        }
+        await legacyFreezeGate.open()
+
+        let legacyFreezeWasEntered = await legacyFreezeGate.entered
+        XCTAssertFalse(legacyFreezeWasEntered)
+        XCTAssertEqual(fixture.canonicalSelection, discovered)
+        try await fixture.window.mcpServer.validateContextBuilderGitArtifactSelection(
+            metadata: fixture.metadata,
+            target: target
+        )
+        let completion = await fixture.window.mcpServer.commitContextBuilderTabContext(
+            connectionID: fixture.connectionID,
+            expectedRunID: fixture.runID,
+            isStillCurrent: { true }
+        )
+        XCTAssertEqual(completion.outcome, .committed)
+        XCTAssertEqual(completion.committedTab?.tab.selection, discovered)
+    }
+}
 
 @MainActor
 final class ContextBuilderSelectionTransactionTests: XCTestCase {
@@ -167,38 +245,53 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
     }
 
     private func makeFixture(name: String) async throws -> Fixture {
-        let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
-        GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-        let window = WindowState()
-        GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
-        WindowStatesManager.shared.registerWindowState(window)
-        await window.workspaceManager.awaitInitialized()
+        try await makeSelectionFixture(name: name)
+    }
+}
 
-        let root = FileManager.default.temporaryDirectory
+@MainActor
+private func makeSelectionFixture(name: String, gitBacked: Bool = false) async throws -> Fixture {
+    let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
+    GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
+    let window = WindowState()
+    GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
+    WindowStatesManager.shared.registerWindowState(window)
+    await window.workspaceManager.awaitInitialized()
+
+    let reviewRepository = try gitBacked ? ReviewGitRepositoryFixture(name: name) : nil
+    let root: URL
+    if let reviewRepository {
+        root = try reviewRepository.makeRepository(
+            named: name,
+            files: ["A.swift": "// A.swift", "B.swift": "// B.swift", "C.swift": "// C.swift"]
+        )
+    } else {
+        root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ContextBuilderSelectionTransactionTests-\(name)-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let files = ["A.swift", "B.swift", "C.swift"].map { root.appendingPathComponent($0) }
-        for file in files {
-            try "// \(file.lastPathComponent)".write(to: file, atomically: true, encoding: .utf8)
+        for name in ["A.swift", "B.swift", "C.swift"] {
+            try "// \(name)".write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8)
         }
-        let workspace = window.workspaceManager.createWorkspace(name: name, repoPaths: [root.path], ephemeral: true)
-        await window.workspaceManager.switchWorkspace(to: workspace, saveState: false, reason: name)
-        let workspaceID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.id)
-        let backgroundTab = await window.promptManager.createBackgroundComposeTab(
-            strategy: .blank,
-            name: "Transaction \(name)"
-        )
-        let tabID = try XCTUnwrap(backgroundTab?.id)
-        return Fixture(
-            window: window,
-            root: root,
-            workspaceID: workspaceID,
-            tabID: tabID,
-            fileA: files[0],
-            fileB: files[1],
-            fileC: files[2]
-        )
     }
+    let files = ["A.swift", "B.swift", "C.swift"].map { root.appendingPathComponent($0) }
+    let workspace = window.workspaceManager.createWorkspace(name: name, repoPaths: [root.path], ephemeral: true)
+    await window.workspaceManager.switchWorkspace(to: workspace, saveState: false, reason: name)
+    let workspaceID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.id)
+    let backgroundTab = await window.promptManager.createBackgroundComposeTab(
+        strategy: .blank,
+        name: "Transaction \(name)"
+    )
+    let tabID = try XCTUnwrap(backgroundTab?.id)
+    return Fixture(
+        window: window,
+        root: root,
+        workspaceID: workspaceID,
+        tabID: tabID,
+        fileA: files[0],
+        fileB: files[1],
+        fileC: files[2],
+        reviewRepository: reviewRepository
+    )
 }
 
 @MainActor
@@ -210,6 +303,7 @@ private struct Fixture {
     let fileA: URL
     let fileB: URL
     let fileC: URL
+    let reviewRepository: ReviewGitRepositoryFixture?
     let connectionID = UUID()
     let runID = UUID()
 
@@ -218,7 +312,12 @@ private struct Fixture {
     }
 
     var metadata: MCPServerViewModel.RequestMetadata {
-        .init(connectionID: connectionID, clientName: "selection-transaction-test", windowID: window.windowID)
+        .init(
+            connectionID: connectionID,
+            clientName: "selection-transaction-test",
+            windowID: window.windowID,
+            runPurpose: .discoverRun
+        )
     }
 
     var canonicalSelection: StoredSelection? {
@@ -266,6 +365,7 @@ private struct Fixture {
     }
 
     func cleanup() {
+        window.beginClose()
         WindowStatesManager.shared.unregisterWindowState(window)
         try? FileManager.default.removeItem(at: root)
     }

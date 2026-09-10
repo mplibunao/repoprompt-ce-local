@@ -701,6 +701,7 @@ final class MCPServerViewModel: ObservableObject {
             WorkspaceLookupContext?,
             ToolResultDTOs.SelectionReply
         ) -> Void)?
+        private var contextBuilderBeforeLegacySelectionReviewFreezeForTesting: (@MainActor @Sendable () async -> Void)?
         private var beforeAgentRunWaiterWakeForTesting: (@MainActor @Sendable (UUID, UUID) async -> Void)?
 
         func setOracleChatSendOverrideForTesting(_ override: MCPOracleToolService.SendChat?) {
@@ -771,6 +772,12 @@ final class MCPServerViewModel: ObservableObject {
             _ observer: ((StoredSelection, WorkspaceLookupContext?, ToolResultDTOs.SelectionReply) -> Void)?
         ) {
             contextBuilderSelectionReplyObserverForTesting = observer
+        }
+
+        func setContextBuilderBeforeLegacySelectionReviewFreezeForTesting(
+            _ hook: (@MainActor @Sendable () async -> Void)?
+        ) {
+            contextBuilderBeforeLegacySelectionReviewFreezeForTesting = hook
         }
     #endif
 
@@ -1656,6 +1663,15 @@ final class MCPServerViewModel: ObservableObject {
         },
         freezePromptGitReviewContext: { [weak self] context in
             guard let self else { return .automaticOnly(base: "HEAD") }
+            if let target = context.contextBuilderReviewTargetResolution?.availableTarget,
+               context.workspaceID == target.workspaceID,
+               context.tabID == target.tabID
+            {
+                return Self.contextBuilderReviewGitContext(for: target)
+            }
+            #if DEBUG
+                await contextBuilderBeforeLegacySelectionReviewFreezeForTesting?()
+            #endif
             return await promptVM.freezePromptGitReviewContext(
                 workspaceID: context.workspaceID,
                 tabID: context.tabID,

@@ -1645,6 +1645,7 @@ extension MCPServerViewModel {
         merged.selectedContextBuilderPromptIDs = context.selectedContextBuilderPromptIDs
         merged.activeAgentSessionID = context.activeAgentSessionID
         merged.worktreeBindingState = context.worktreeBindingState
+        merged.frozenLookupContext = context.frozenLookupContext
         merged.frozenFileToolAuthority = context.frozenFileToolAuthority
         merged.contextBuilderReviewTargetResolution = context.contextBuilderReviewTargetResolution
         merged.readFileAutoSelectionGeneration = context.readFileAutoSelectionGeneration
@@ -3083,6 +3084,16 @@ extension MCPServerViewModel {
             ?? .unavailable(.missingFrozenTarget)
     }
 
+    static func contextBuilderReviewGitContext(
+        for target: ContextBuilderReviewTarget
+    ) -> FrozenPromptGitReviewContext {
+        FrozenPromptGitReviewContext(
+            artifactCapability: target.artifactCapability,
+            compareIntent: .uncommittedHEAD,
+            displayContext: target.displayContext
+        )
+    }
+
     @MainActor
     func validateContextBuilderGitArtifactSelection(
         metadata: RequestMetadata,
@@ -3101,11 +3112,7 @@ extension MCPServerViewModel {
         else {
             throw ContextBuilderReviewTargetUnavailableReason.workspaceOrTabMismatch
         }
-        let reviewContext = FrozenPromptGitReviewContext(
-            artifactCapability: target.artifactCapability,
-            compareIntent: .uncommittedHEAD,
-            displayContext: target.displayContext
-        )
+        let reviewContext = Self.contextBuilderReviewGitContext(for: target)
         _ = try await ContextBuilderReviewTargetResolver().finalizeSelection(
             input: ContextBuilderReviewTargetInput(
                 workspaceID: workspaceID,
