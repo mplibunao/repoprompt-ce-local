@@ -2514,7 +2514,9 @@ final class ContentReadCancellationTests: XCTestCase {
         let deadline = clock.now.advanced(by: timeout)
         while clock.now < deadline {
             if await predicate() { return true }
-            try? await Task.sleep(for: .milliseconds(1))
+            // A cancelled task makes every sleep throw immediately; stop instead of
+            // hot-polling until the deadline.
+            do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
         }
         return await predicate()
     }
