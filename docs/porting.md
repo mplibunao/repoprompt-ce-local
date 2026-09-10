@@ -49,7 +49,7 @@ Use the read-only reference clone at:
    gh pr create --base main
    ```
 
-9. Promote a build only after archiving the current install with `Scripts/local_release_archive.sh <tag>` and with MP present. Run this command from the `main` checkout:
+9. The port workflow ends at the open pull request. Promotion is a separate step MP runs after the merge, from the `main` checkout, only after archiving the current install with `Scripts/local_release_archive.sh <tag>`:
 
    ```bash
    CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make install-local-production
