@@ -1182,6 +1182,21 @@ import XCTest
                                 $0.description.contains(pathSentinel)
                             }, testCase.requestedName)
 
+                            let matchesRequestIdentity: (MCPResponseDeliveryTraceEvent) -> Bool = {
+                                $0.requestIdentity?.jsonRPCRequestID == requestIdentity.jsonRPCRequestID
+                                    && $0.requestIdentity?.connectionID == requestIdentity.connectionID
+                                    && $0.requestIdentity?.requestOrdinal == requestIdentity.requestOrdinal
+                            }
+                            let transportWriteCompleted = await Self.waitUntil {
+                                MCPResponseDeliveryTracer.debugEventSnapshot().contains {
+                                    $0.phase == "transport_write_completed" && matchesRequestIdentity($0)
+                                }
+                            }
+                            XCTAssertTrue(
+                                transportWriteCompleted,
+                                "\(testCase.requestedName): transport_write_completed trace was not recorded within 10 seconds"
+                            )
+
                             let deliveryEvents = MCPResponseDeliveryTracer.debugEventSnapshot()
                             for phase in [
                                 "handler_result_ready",
@@ -1191,10 +1206,7 @@ import XCTest
                             ] {
                                 let phaseEvents = deliveryEvents.filter { $0.phase == phase }
                                 let event = try XCTUnwrap(deliveryEvents.first {
-                                    $0.phase == phase
-                                        && $0.requestIdentity?.jsonRPCRequestID == requestIdentity.jsonRPCRequestID
-                                        && $0.requestIdentity?.connectionID == requestIdentity.connectionID
-                                        && $0.requestIdentity?.requestOrdinal == requestIdentity.requestOrdinal
+                                    $0.phase == phase && matchesRequestIdentity($0)
                                 }, "\(testCase.requestedName): \(phase); candidates=\(phaseEvents)")
                                 XCTAssertEqual(
                                     event.requestIdentity?.appInvocationID.flatMap(UUID.init(uuidString:)),
