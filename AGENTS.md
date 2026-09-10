@@ -4,7 +4,7 @@ This is a Swift Package macOS app for RepoPrompt CE.
 
 Prefer the coordinated developer daemon (`make dev-*`, see "Developer daemon / coordinated validation" below) for builds, runs, and tests. It runs every job through a lane-serialized queue so concurrent agents do not build, launch, or test over each other, and it returns a ticket for each job so long builds can be detached and checked on later instead of blocking. The plain `make` / `swift` / `./Scripts` commands shown below are the uncoordinated fallback for when the daemon is unavailable.
 
-## Contribution preflight
+## Commit preflight
 
 Before every commit or push, read and run the repository-local `$rpce-contribution-check` skill:
 
@@ -13,7 +13,13 @@ Before every commit or push, read and run the repository-local `$rpce-contributi
 .agents/skills/rpce-contribution-check/scripts/preflight.sh push
 ```
 
-Stage only the intended changes, then use `commit` mode before creating a commit; rerun it after any staging change, including partial-staging updates. Use `push` mode after committing but before pushing the intended current branch. These default modes are mandatory safety gates: they enforce redacted staged-index and outgoing-range secret scanning, repository guardrails, and clean push boundaries. Default `push` does not run heavyweight lint/test/build lanes; use the explicit `pr-ready` lane when you need the computed-outgoing-range path-selected local PR-ready pass:
+The skill has three lanes:
+
+- `commit`: stage only the intended changes, then run it before creating a commit; rerun it after any staging change, including partial-staging updates.
+- `push`: run it after committing and before pushing the intended current branch. It resolves the outgoing range against the branch's configured upstream, falling back to `origin/main` for a topic branch without one, and scans that range.
+- `pr-ready`: the full local validation pass over the computed outgoing range, path-selected. Running it is mandatory before merging a branch into `main`; the skill owns the comparison-base mechanics that decide what the lane actually validates.
+
+`commit` and `push` are mandatory safety gates: they enforce redacted staged-index and outgoing-range secret scanning, repository guardrails, an `origin`-only remote allowlist, and clean push boundaries. `push` does not run heavyweight lint/test/build lanes; `pr-ready` does:
 
 ```bash
 .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
@@ -22,6 +28,14 @@ Stage only the intended changes, then use `commit` mode before creating a commit
 Focused validation and release validation remain explicit; use the validation matrix plus commands such as `make dev-release-preflight` / `make dev-release-artifact` when the changed boundary requires them. Obtain explicit user approval immediately before any force-push, history rewrite, branch deletion, fork deletion, credential rotation, other GitHub-visible destructive mutation, visible app launch/relaunch, or stopping a visible app.
 
 Local `docs/investigations/*.md` reports are intentionally left unignored so RepoPrompt tooling can read them. Do not stage or merge these local investigation artifacts unless intentionally requested.
+
+## Branch model
+
+`main` is the integration branch and the only long-lived branch. Cut a `bugfix/`, `port/`, or `chore/` branch from `main`, and land it with `git merge --no-ff` so each landing keeps its own merge commit. Every promoted build is an annotated `local/v<version>-b<build>` tag on the promoted `main` commit; [`docs/releasing.md`](docs/releasing.md) owns the promotion procedure.
+
+## Upstream is read-only
+
+Upstream RepoPrompt CE is readable through the reference clone at `/Users/mp/Projects/personal/repoprompt-ce-upstream-readonly` and is never a remote of this repository. The preflight's remote allowlist restricts remote *names*: `origin` is the only remote that may exist, and adding any second remote fails the check. It does not inspect URLs, so keep `origin` pointing at `github.com/mplibunao/repoprompt-ce-local` for both fetch and push. An upstream change crosses into this repository as hand-written source edits on a `port/` branch, never as a cherry-pick, patch, or merge. [`docs/porting.md`](docs/porting.md) owns the procedure.
 
 ## Run
 

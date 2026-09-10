@@ -1,28 +1,27 @@
 # Contributing to RepoPrompt CE
 
-RepoPrompt CE is a community repository. The contribution gate keeps incoming
-work manageable and gives maintainers room to review changes carefully.
+This repository is the personal distribution at
+[`mplibunao/repoprompt-ce-local`](https://github.com/mplibunao/repoprompt-ce-local).
+Work is tracked as issues and pull requests there.
 
-## Contribution Gate
+## Flow
 
-New issues and pull requests from accounts that are not approved are closed
-automatically. Maintainers may reopen worthwhile issues after review.
+1. Branch from `main` using a `bugfix/`, `port/`, or `chore/` prefix.
+2. Make the change and run the smallest relevant coordinated validation commands
+   from [`AGENTS.md`](AGENTS.md).
+3. Stage only the intended files and run the commit preflight:
 
-The gate reads the tracked [`.github/APPROVED_CONTRIBUTORS`](.github/APPROVED_CONTRIBUTORS)
-file. The listed people opted in to publishing their GitHub handles. Each entry
-has one capability:
+   ```bash
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
+   ```
 
-- `issue`: issues stay open.
-- `pr`: issues and pull requests stay open.
+4. Merge into `main` with `git merge --no-ff`, then run the push preflight from
+   the `main` checkout before pushing.
 
-The allowlist does not grant repository access. Invitations and organization
-membership are managed separately.
+Ports from upstream follow [`docs/porting.md`](docs/porting.md). Builds are
+promoted per [`docs/releasing.md`](docs/releasing.md).
 
-Maintainers may reply `lgtmi` on an issue to approve its author for future
-issues, or `lgtm` to approve its author for future issues and pull requests.
-Contributors may also propose ordinary reviewed changes to the tracked list.
-
-## Before Submitting A Pull Request
+## Validation
 
 Keep changes focused and explain what they do. AI-assisted work is welcome, but
 you should understand the code you submit and be able to explain its behavior.
@@ -33,7 +32,6 @@ unless deliberately distilled into durable docs. Local `docs/investigations/*.md
 reports stay unignored so RepoPrompt tooling can read them; do not stage or merge
 them unless intentionally requested.
 
-Run the smallest relevant coordinated validation commands from [`AGENTS.md`](AGENTS.md).
 For every change, run the repository guardrails:
 
 ```bash
@@ -46,7 +44,12 @@ For Swift or style-sensitive changes, also run:
 make dev-lint
 ```
 
-Add focused `make dev-test FILTER=<SuiteName>` coverage for behavior changes. Use `.agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready` when you need computed-outgoing-range path-selected local PR-ready evidence.
+Add focused `make dev-test FILTER=<SuiteName>` coverage for behavior changes.
+Before merging into `main`, the `pr-ready` lane of
+[`$rpce-contribution-check`](.agents/skills/rpce-contribution-check/SKILL.md) is
+mandatory; that skill documents how to invoke it so it validates the whole
+branch.
+
 When changing the Xcode generator, workflow wrapper, or generated scheme
 contracts, also run:
 
@@ -55,4 +58,4 @@ make xcode-validate
 ```
 
 Do not change release metadata, signing identities, bundle IDs, Sparkle keys, or
-release channels unless a maintainer has explicitly requested it.
+release channels unless the change is deliberate and reviewed.
