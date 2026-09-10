@@ -1605,9 +1605,12 @@ class OracleViewModel: ObservableObject {
 
         await drainTrackedAutosaves(for: workspaceID)
 
-        // Every suspension above and below can interleave with the user deleting or reordering
-        // chats, so the session is always re-resolved by id, never by a remembered position.
-        guard let liveMessages = messageStore[sessionID],
+        // Every suspension in this method can interleave with the user deleting or reordering
+        // chats, or resending the turn, so the chat and the answer are re-resolved by id after
+        // each one, never by a remembered position.
+        guard sessionIDByMessageId[queryID] == sessionID,
+              let liveMessages = messageStore[sessionID],
+              liveMessages.contains(where: { $0.id == queryID && !$0.isUser && $0.isFinalized }),
               var sessionSnapshot = sessions.first(where: { $0.id == sessionID })
         else {
             throw OracleContextBuilderCompletionError.missingExactQuery
@@ -1634,11 +1637,14 @@ class OracleViewModel: ObservableObject {
         } else {
             try await autosaveSession(sessionSnapshot)
         }
-        sessionSnapshot.fileURL = fileURL
         guard let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID }) else {
             throw OracleContextBuilderCompletionError.missingExactQuery
         }
-        sessions[sessionIndex] = sessionSnapshot
+        // Only the fields the save produced are copied back; a rename or tab change made while
+        // the save was in flight lives on the current session and must survive.
+        sessions[sessionIndex].messages = sessionSnapshot.messages
+        sessions[sessionIndex].savedAt = sessionSnapshot.savedAt
+        sessions[sessionIndex].fileURL = fileURL
     }
 
     nonisolated func waitForContextBuilderCompletion(_ id: UUID) async throws -> String {

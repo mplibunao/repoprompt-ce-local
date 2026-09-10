@@ -53,6 +53,9 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
             sessionID: seeded.session.id,
             saveSession: { session in
                 fixture.oracleViewModel.sessions.insert(decoy, at: 0)
+                if let index = fixture.oracleViewModel.sessions.firstIndex(where: { $0.id == seeded.session.id }) {
+                    fixture.oracleViewModel.sessions[index].name = "Renamed while saving"
+                }
                 let url = try await fixture.oracleViewModel.chatData.saveChatSession(session, for: fixture.workspace)
                 savedURL = url
                 return url
@@ -64,11 +67,42 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
         XCTAssertTrue(fixture.oracleViewModel.sessions[0].messages.isEmpty)
 
         let updated = fixture.oracleViewModel.sessions[1]
+        XCTAssertEqual(updated.name, "Renamed while saving")
         XCTAssertEqual(updated.fileURL, savedURL)
         XCTAssertEqual(
             updated.messages.first(where: { $0.id == seeded.answerID })?.rawText,
             "partial answer"
         )
+    }
+
+    func testRemovingTheAnswerWhileAutosavesDrainThrows() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanup() }
+        let seeded = try await fixture.seedFinalizedExchange()
+        // A resend drops the finalized answer from the same chat. Reloading a copy of the chat
+        // that lacks the answer reproduces that from disk, and running it as a tracked autosave
+        // lands it exactly while the drain is suspended.
+        var resent = seeded.session
+        resent.messages = seeded.session.messages.filter(\.isUser)
+        let resentURL = try await fixture.oracleViewModel.chatData.saveChatSession(resent, for: fixture.workspace)
+        fixture.oracleViewModel.scheduleTrackedAutosave(for: seeded.session) {
+            await fixture.oracleViewModel.loadChatSession(from: resentURL)
+        }
+
+        do {
+            try await fixture.oracleViewModel.persistContextBuilderTimeoutResponse(
+                "partial answer",
+                queryID: seeded.answerID,
+                sessionID: seeded.session.id,
+                saveSession: { session in
+                    XCTFail("Nothing should be saved once the answer is gone")
+                    return try await fixture.oracleViewModel.chatData.saveChatSession(session, for: fixture.workspace)
+                }
+            )
+            XCTFail("Expected missingExactQuery once the answer was removed")
+        } catch let error as OracleContextBuilderCompletionError {
+            XCTAssertEqual(error, .missingExactQuery)
+        }
     }
 
     private func makeFixture() async throws -> Fixture {
@@ -142,7 +176,7 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
                     completionTokens: nil,
                     cost: nil,
                     modelName: nil
-                ),
+                )
             ]
             let fileURL = try await oracleViewModel.chatData.saveChatSession(session, for: workspace)
             await oracleViewModel.loadChatSession(from: fileURL)
