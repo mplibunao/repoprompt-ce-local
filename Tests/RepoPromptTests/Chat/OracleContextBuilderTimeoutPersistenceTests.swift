@@ -134,6 +134,43 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
         XCTAssertFalse(live.messages.contains(where: { $0.rawText.contains("partial answer") }))
     }
 
+    func testATurnAddedWhileSavingSurvivesInTheTranscript() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanup() }
+        let seeded = try await fixture.seedFinalizedExchange()
+        var extended = seeded.session
+        extended.messages.append(
+            StoredMessage(
+                id: UUID(),
+                isUser: true,
+                rawText: "follow-up question",
+                timestamp: Date(),
+                sequenceIndex: 2,
+                allowedFilePaths: nil,
+                promptTokens: nil,
+                completionTokens: nil,
+                cost: nil,
+                modelName: nil
+            )
+        )
+        let extendedURL = try await fixture.oracleViewModel.chatData.saveChatSession(extended, for: fixture.workspace)
+
+        try await fixture.oracleViewModel.persistContextBuilderTimeoutResponse(
+            "partial answer",
+            queryID: seeded.answerID,
+            sessionID: seeded.session.id,
+            saveSession: { session in
+                // The user's next turn lands while the save is suspended.
+                await fixture.oracleViewModel.loadChatSession(from: extendedURL)
+                return try await fixture.oracleViewModel.chatData.saveChatSession(session, for: fixture.workspace)
+            }
+        )
+
+        let live = try XCTUnwrap(fixture.oracleViewModel.sessions.first(where: { $0.id == seeded.session.id }))
+        XCTAssertEqual(live.messages.count, 3)
+        XCTAssertTrue(live.messages.contains(where: { $0.rawText == "follow-up question" }))
+    }
+
     func testFinalizedAssistantContentReadsTheProcessedMessage() async throws {
         let fixture = try await makeFixture()
         defer { fixture.cleanup() }

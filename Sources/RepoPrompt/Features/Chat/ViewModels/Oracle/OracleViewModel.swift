@@ -1616,7 +1616,39 @@ class OracleViewModel: ObservableObject {
             throw OracleContextBuilderCompletionError.missingExactQuery
         }
 
-        sessionSnapshot.messages = liveMessages.map { message in
+        sessionSnapshot.messages = Self.storedMessages(from: liveMessages)
+        sessionSnapshot.savedAt = Date()
+
+        let fileURL: URL = if let saveSession {
+            try await saveSession(sessionSnapshot)
+        } else {
+            try await autosaveSession(sessionSnapshot)
+        }
+        // The save suspended as well. If a resend replaced the answer meanwhile, the file now
+        // holds a stale transcript: refresh it from the current one and report the miss.
+        guard sessionIDByMessageId[queryID] == sessionID,
+              let currentMessages = messageStore[sessionID],
+              currentMessages.contains(where: { $0.id == queryID && !$0.isUser && $0.isFinalized }),
+              let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID })
+        else {
+            if sessions.contains(where: { $0.id == sessionID }) {
+                autosaveChatHistory(for: sessionID, force: true)
+            }
+            throw OracleContextBuilderCompletionError.missingExactQuery
+        }
+        // Only the fields the save produced are copied back, and the transcript mirror follows
+        // the live store rather than the pre-save snapshot: a turn the user added while the save
+        // was in flight stays, and the file is rewritten so it carries that turn too.
+        sessions[sessionIndex].messages = Self.storedMessages(from: currentMessages)
+        sessions[sessionIndex].savedAt = sessionSnapshot.savedAt
+        sessions[sessionIndex].fileURL = fileURL
+        if currentMessages.map(\.id) != liveMessages.map(\.id) {
+            autosaveChatHistory(for: sessionID, force: true)
+        }
+    }
+
+    private static func storedMessages(from messages: [AIChatMessage]) -> [StoredMessage] {
+        messages.map { message in
             StoredMessage(
                 id: message.id,
                 isUser: message.isUser,
@@ -1630,29 +1662,6 @@ class OracleViewModel: ObservableObject {
                 modelName: message.modelName
             )
         }
-        sessionSnapshot.savedAt = Date()
-
-        let fileURL: URL = if let saveSession {
-            try await saveSession(sessionSnapshot)
-        } else {
-            try await autosaveSession(sessionSnapshot)
-        }
-        // The save suspended as well. If a resend replaced the answer meanwhile, the file now
-        // holds a stale transcript: refresh it from the current one and report the miss.
-        guard sessionIDByMessageId[queryID] == sessionID,
-              messageStore[sessionID]?.contains(where: { $0.id == queryID && !$0.isUser && $0.isFinalized }) == true,
-              let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID })
-        else {
-            if sessions.contains(where: { $0.id == sessionID }) {
-                autosaveChatHistory(for: sessionID, force: true)
-            }
-            throw OracleContextBuilderCompletionError.missingExactQuery
-        }
-        // Only the fields the save produced are copied back; a rename or tab change made while
-        // the save was in flight lives on the current session and must survive.
-        sessions[sessionIndex].messages = sessionSnapshot.messages
-        sessions[sessionIndex].savedAt = sessionSnapshot.savedAt
-        sessions[sessionIndex].fileURL = fileURL
     }
 
     /// The assistant content for `queryID` after finalization has processed it (control tags
