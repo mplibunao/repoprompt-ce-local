@@ -37,6 +37,7 @@ protocol AgentModeRunInteractionStateObserving: AnyObject {
 extension AgentModeViewModel {
     enum UserTurnSubmissionResult: Equatable {
         case submitted
+        case submittedControlPlaneCommand
         case blocked(message: String)
     }
 
@@ -391,6 +392,7 @@ extension AgentModeViewModel {
         case queuedACPInterrupt = "queued_acp_interrupt"
         case queuedFollowUp = "queued_follow_up"
         case dispatchedCodexTurn = "dispatched_codex_turn"
+        case submittedControlPlaneCommand = "submitted_control_plane_command"
         case startedRun = "started_run"
 
         /// Whether this dispatch sent an instruction into an already-running session.
@@ -399,7 +401,7 @@ extension AgentModeViewModel {
             switch self {
             case .queuedClaudeInterrupt, .queuedACPInterrupt, .queuedFollowUp, .dispatchedCodexTurn:
                 true
-            case .deliveredIntoWaitingContinuation, .startedRun:
+            case .deliveredIntoWaitingContinuation, .submittedControlPlaneCommand, .startedRun:
                 false
             }
         }
@@ -414,7 +416,7 @@ extension AgentModeViewModel {
                 return false
             case .queuedFollowUp, .dispatchedCodexTurn:
                 return true
-            case .deliveredIntoWaitingContinuation, .startedRun:
+            case .deliveredIntoWaitingContinuation, .submittedControlPlaneCommand, .startedRun:
                 return false
             }
         }

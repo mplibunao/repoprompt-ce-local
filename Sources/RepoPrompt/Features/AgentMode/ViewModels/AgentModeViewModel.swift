@@ -5838,9 +5838,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             throw MCPError.invalidParams("The requested agent run is no longer active.")
         }
         do {
-            return try await Self.$mcpRunEpochTransitionToken.withValue(token) {
+            let result = try await Self.$mcpRunEpochTransitionToken.withValue(token) {
                 try await operation()
             }
+            clearStagedMCPRunEpochTransition(sessionID: sessionID, token: token)
+            return result
         } catch {
             clearStagedMCPRunEpochTransition(sessionID: sessionID, token: token)
             throw error
@@ -9811,6 +9813,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 )
             }
             switch submission {
+            case .submittedControlPlaneCommand:
+                if let codexAttemptID {
+                    session.codexSteerAckTracker.authorizeDispatch(attemptID: codexAttemptID)
+                    _ = try await awaitCodexSteerAck(session: session, attemptID: codexAttemptID)
+                }
+                handleObservedMCPStateChange(for: session)
+                return .submittedControlPlaneCommand
             case .submitted:
                 Self.steeringDebugLog("[AgentRunSteeringWake] mcpDispatch submitted sessionID=\(sessionID) delivery=\(delivery.rawValue) runState=\(session.runState.rawValue) isActiveDispatch=\(delivery.isActiveRunDispatch) runID=\(String(describing: session.runID))")
                 if let codexAttemptID {
@@ -15220,7 +15229,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     }
                     session.codexSteerAckTracker.resolve(attemptID: codexAttemptID, state: state)
                 }
-                return .submitted
+                return .submittedControlPlaneCommand
             case .userTurnWrapper:
                 nativePreparedTurn = prepareNativeSlashPreparedUserTurn(nativeSlashCommand)
             }
