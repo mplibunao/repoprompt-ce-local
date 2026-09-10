@@ -26,6 +26,14 @@ Before you start:
    `git show <commit>:Sources/RepoPromptDomainRuntime/DomainPersistence.swift`. The candidate
    build's supported version is `DomainWorkingJournal.schemaVersion` in
    [`Sources/RepoPromptDomainRuntime/DomainPersistence.swift`](../Sources/RepoPromptDomainRuntime/DomainPersistence.swift).
+   `working_journal_schema_version_status` is `from_commit` only when the archived bundle's
+   provenance explicitly says `dirty: false`.
+
+   A null schema version with `dirty_provenance` or `unknown_provenance` blocks the
+   mechanical comparison. Before promotion continues, MP must determine the archived
+   build's version by hand and compare it with the candidate. The debug or production build
+   can print the version, or MP can read it from journals written by the archived build alone
+   before any candidate ran.
 
    `observed_working_journal_versions` lists the distinct versions found in the shared
    Application Support snapshot. This field is diagnostic only. A version newer than the
@@ -154,14 +162,17 @@ The archive lands in `~/Archives/repoprompt-ce/<tag>/` and holds `app.zip`,
 record exists, a `.sha256` sidecar per file, and `manifest.json`. The manifest is written
 last, so its absence marks an incomplete archive and the restore refuses one. It records the
 tag, timestamps, bundle identifier, version, build, signing mode, and the commit read from
-the bundle's provenance file. It reads `DomainWorkingJournal.schemaVersion` at that commit
-and records the archived build's supported version as `working_journal_schema_version`.
-The distinct versions found in the Application Support snapshot are diagnostic only and
+the bundle's provenance file. When provenance explicitly says `dirty: false`, the archive
+reads `DomainWorkingJournal.schemaVersion` at that commit and records it as
+`working_journal_schema_version` with status `from_commit`. A `dirty: true` record produces
+a null version with status `dirty_provenance`. A missing or unknown `dirty` value produces a
+null version with status `unknown_provenance`. The distinct versions found in the Application
+Support snapshot are diagnostic only and
 appear in `observed_working_journal_versions`. Journals that can't supply an integer version
 appear by archive-relative path in `unreadable_working_journals` without blocking the
-archive. An empty list in either field means it found none. The archive fails if it can't
-resolve exactly one integer schema version from the
-archived commit. Re-archiving over a completed archive needs
+archive. An empty list in either field means it found none. For clean provenance, the
+archive fails if it can't resolve exactly one integer schema version from the archived
+commit. Re-archiving over a completed archive needs
 `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`.
 
 `LOCAL_RELEASE_ARCHIVE_EXCLUDES` is a colon-separated list of top-level exclusion rules

@@ -151,7 +151,13 @@ def checksum(name: str) -> str | None:
     return sidecar.read_text(encoding="utf-8").split(maxsplit=1)[0]
 
 
-def archived_working_journal_schema_version(provenance: dict | None) -> int:
+def archived_working_journal_schema_version(provenance: dict | None) -> tuple[int | None, str]:
+    dirty = (provenance or {}).get("dirty")
+    if dirty is True:
+        return None, "dirty_provenance"
+    if dirty is not False:
+        return None, "unknown_provenance"
+
     commit = (provenance or {}).get("commit")
     if not isinstance(commit, str) or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None:
         raise SystemExit(
@@ -186,7 +192,7 @@ def archived_working_journal_schema_version(provenance: dict | None) -> int:
             f"ERROR: expected exactly one integer DomainWorkingJournal.schemaVersion in {source_path} "
             f"at archived commit {commit}; found {len(matches)}."
         )
-    return int(matches[0])
+    return int(matches[0]), "from_commit"
 
 
 def observed_working_journal_versions() -> tuple[list[int], list[str]]:
@@ -236,13 +242,14 @@ if os.environ["ARCHIVE_IDENTITY_PRESENT"] == "1":
     files.append("local-signing-identity-v1.json")
 
 provenance = bundle_provenance()
-journal_schema_version = archived_working_journal_schema_version(provenance)
+journal_schema_version, journal_schema_version_status = archived_working_journal_schema_version(provenance)
 observed_journal_versions, unreadable_journals = observed_working_journal_versions()
 now = time.time()
 manifest = {
     "schemaVersion": 1,
     "tag": os.environ["ARCHIVE_TAG"],
     "working_journal_schema_version": journal_schema_version,
+    "working_journal_schema_version_status": journal_schema_version_status,
     "observed_working_journal_versions": observed_journal_versions,
     "unreadable_working_journals": unreadable_journals,
     "archivedAtEpoch": now,

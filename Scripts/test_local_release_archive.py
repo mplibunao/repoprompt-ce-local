@@ -94,7 +94,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             text=True,
         ).stdout.strip()
 
-    def write_app(self, *, build: str, commit: str | None) -> None:
+    def write_app(self, *, build: str, commit: str | None, dirty: bool | None = False) -> None:
         resources = self.app / "Contents" / "Resources"
         resources.mkdir(parents=True, exist_ok=True)
         (self.app / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
@@ -113,10 +113,10 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         if commit is None:
             provenance.unlink(missing_ok=True)
         else:
-            provenance.write_text(
-                json.dumps({"version": 1, "commit": commit, "dirty": False, "buildTimeISO": "2026-09-10T00:00:00+02:00"}),
-                encoding="utf-8",
-            )
+            payload = {"version": 1, "commit": commit, "buildTimeISO": "2026-09-10T00:00:00+02:00"}
+            if dirty is not None:
+                payload["dirty"] = dirty
+            provenance.write_text(json.dumps(payload), encoding="utf-8")
 
     def write_state(self, marker: str) -> None:
         for name in ("Settings", "Workspaces", "DebugApps", "Rollbacks"):
@@ -150,8 +150,13 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         for key, value in pairs.items():
             self.run_defaults(["write", str(self.defaults_domain), key, "-string", value])
 
-    def write_baseline_fixture(self, *, defaults: dict[str, str] | None = None) -> None:
-        self.write_app(build="38", commit=self.archived_commit)
+    def write_baseline_fixture(
+        self,
+        *,
+        defaults: dict[str, str] | None = None,
+        dirty: bool | None = False,
+    ) -> None:
+        self.write_app(build="38", commit=self.archived_commit, dirty=dirty)
         self.write_state("original")
         effective_defaults = {"UpdateChannel": "stable"} if defaults is None else defaults
         self.write_defaults(effective_defaults)
@@ -275,6 +280,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         manifest = self.manifest()
 
         self.assertEqual(manifest["working_journal_schema_version"], 1)
+        self.assertEqual(manifest["working_journal_schema_version_status"], "from_commit")
         self.assertEqual(manifest["observed_working_journal_versions"], [2])
 
     def test_manifest_records_unreadable_journal_without_aborting_archive(self) -> None:
@@ -307,6 +313,24 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(manifest["observed_working_journal_versions"], [])
         self.assertEqual(manifest["unreadable_working_journals"], [])
 
+    def test_dirty_provenance_records_null_schema_without_aborting_archive(self) -> None:
+        self.write_baseline_fixture(dirty=True)
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertIsNone(manifest["working_journal_schema_version"])
+        self.assertEqual(manifest["working_journal_schema_version_status"], "dirty_provenance")
+
+    def test_missing_dirty_field_records_null_schema_without_aborting_archive(self) -> None:
+        self.write_baseline_fixture(dirty=None)
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertIsNone(manifest["working_journal_schema_version"])
+        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown_provenance")
+
     def test_missing_or_ambiguous_archived_schema_version_refuses_archive(self) -> None:
         self.write_state("original")
         self.write_defaults({"UpdateChannel": "stable"})
@@ -330,16 +354,16 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
                 self.assertIn("expected exactly one integer DomainWorkingJournal.schemaVersion", result.stdout + result.stderr)
                 self.assertFalse((self.archive_root / TAG / "manifest.json").exists())
 
-    def test_missing_bundle_provenance_refuses_archive(self) -> None:
+    def test_missing_bundle_provenance_records_unknown_schema_without_aborting_archive(self) -> None:
         self.write_app(build="37", commit=None)
         self.write_state("original")
         self.write_defaults({"UpdateChannel": "stable"})
 
-        result = self.run_script(ARCHIVE_SCRIPT)
+        self.archive()
+        manifest = self.manifest()
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("archived app provenance has no 40-character commit SHA", result.stdout + result.stderr)
-        self.assertFalse((self.archive_root / TAG / "manifest.json").exists())
+        self.assertIsNone(manifest["working_journal_schema_version"])
+        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown_provenance")
 
     def test_archive_excludes_debug_apps_and_rollbacks_from_the_state_tarball(self) -> None:
         self.write_baseline_fixture()
