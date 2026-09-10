@@ -33,15 +33,17 @@ Use the read-only reference clone at:
    .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
    ```
 
-7. Commit the port branch. The commit message must include the upstream source as plain text (no `owner/repo#N` or URL, see `AGENTS.md`, "Upstream is read-only"):
+7. Commit the port branch. The commit message must name the upstream source as plain text (no `owner/repo#N` or URL, see `AGENTS.md`, "Upstream is read-only"), in one of these forms:
 
    ```text
    Upstream-Ref: upstream PR <number> (<commit range>)
+   Upstream-Ref: upstream commit <sha>
    ```
 
-8. Run the push preflight, push the branch, open a pull request against `main`, run the `pr-ready` lane on the branch, and merge the pull request with a merge commit once its checks pass:
+8. Run the `pr-ready` lane while the branch still has no configured upstream, so it validates the whole port against `main` (see the comparison-base procedure in `.agents/skills/rpce-contribution-check/SKILL.md`). Then run the push preflight, push the branch, open a pull request against `main`, and merge it with a merge commit once its checks pass:
 
    ```bash
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
    git push -u origin <branch>
    gh pr create --base main
