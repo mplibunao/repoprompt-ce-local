@@ -89,11 +89,6 @@ final class WorkspaceAgentAdmissionCoordinator: @unchecked Sendable {
         let reservationOwnerID: UUID
     }
 
-    private struct RecoveryMarkerReservation {
-        let reservationKey: ProvisionalSessionKey
-        let reservationOwnerID: UUID
-    }
-
     private enum AdmissionLocation: Equatable {
         case waiter(workspaceID: UUID)
         case holder(workspaceID: UUID)
@@ -121,9 +116,6 @@ final class WorkspaceAgentAdmissionCoordinator: @unchecked Sendable {
     private var cancelledBeforeEnqueueAdmissionIDs: Set<UUID> = []
     private var provisionalSessionReservations: [ProvisionalSessionKey: ProvisionalSessionReservation] = [:]
     private var retainedRecoveries: [UUID: RetainedRecovery] = [:]
-    private var recoveryMarkerReservations: [UUID: RecoveryMarkerReservation] = [:]
-    private var dispatchOutcomeUnknownKindByRecoveryID: [UUID: DomainAgentAdmissionDispatchKind] = [:]
-    private var liveRecoveryMarkerOwnerIDsByRecoveryID: [UUID: Set<UUID>] = [:]
 
     #if DEBUG
         private var eventObserver: (@Sendable (Event) -> Void)?
@@ -255,22 +247,12 @@ final class WorkspaceAgentAdmissionCoordinator: @unchecked Sendable {
     func reserveProvisionalSession(
         workspaceID: UUID,
         sessionID: UUID,
-        ownerID: UUID,
-        reconcilingRecoveryID: UUID? = nil
+        ownerID: UUID
     ) -> Bool {
         lock.withLock {
             let key = ProvisionalSessionKey(workspaceID: workspaceID, sessionID: sessionID)
-            if var reservation = provisionalSessionReservations[key] {
-                if reservation.ownerIDs.contains(ownerID) {
-                    return true
-                }
-                guard let reconcilingRecoveryID,
-                      dispatchOutcomeUnknownKindByRecoveryID[reconcilingRecoveryID] != nil,
-                      recoveryMarkerReservations[reconcilingRecoveryID]?.reservationKey == key
-                else { return false }
-                reservation.ownerIDs.insert(ownerID)
-                provisionalSessionReservations[key] = reservation
-                return true
+            if let reservation = provisionalSessionReservations[key] {
+                return reservation.ownerIDs.contains(ownerID)
             }
             provisionalSessionReservations[key] = ProvisionalSessionReservation(ownerIDs: [ownerID])
             return true
@@ -303,193 +285,6 @@ final class WorkspaceAgentAdmissionCoordinator: @unchecked Sendable {
             provisionalSessionReservations[
                 ProvisionalSessionKey(workspaceID: workspaceID, sessionID: sessionID)
             ] != nil
-        }
-    }
-
-    func beginLiveRecoveryMarker(recoveryID: UUID, ownerID: UUID) {
-        lock.withLock {
-            liveRecoveryMarkerOwnerIDsByRecoveryID[recoveryID, default: []].insert(ownerID)
-        }
-    }
-
-    func endLiveRecoveryMarker(recoveryID: UUID, ownerID: UUID) {
-        lock.withLock {
-            guard var ownerIDs = liveRecoveryMarkerOwnerIDsByRecoveryID[recoveryID] else { return }
-            ownerIDs.remove(ownerID)
-            if ownerIDs.isEmpty {
-                liveRecoveryMarkerOwnerIDsByRecoveryID.removeValue(forKey: recoveryID)
-            } else {
-                liveRecoveryMarkerOwnerIDsByRecoveryID[recoveryID] = ownerIDs
-            }
-        }
-    }
-
-    func hasLiveRecoveryMarker(recoveryID: UUID) -> Bool {
-        lock.withLock {
-            liveRecoveryMarkerOwnerIDsByRecoveryID[recoveryID]?.isEmpty == false
-        }
-    }
-
-    /// Recovery-marker ownership is process-wide because the journal outlives any presenting window.
-    /// A bounded persistence failure keeps this fence without keeping a retry task alive.
-    func retainRecoveryMarkerReservation(
-        recoveryID: UUID,
-        workspaceID: UUID,
-        sessionID: UUID
-    ) -> Bool {
-        lock.withLock {
-            let reservationKey = ProvisionalSessionKey(
-                workspaceID: workspaceID,
-                sessionID: sessionID
-            )
-            if let existing = recoveryMarkerReservations[recoveryID] {
-                return existing.reservationKey == reservationKey
-            }
-            let ownerID = UUID()
-            var reservation = provisionalSessionReservations[reservationKey]
-                ?? ProvisionalSessionReservation(ownerIDs: [])
-            reservation.ownerIDs.insert(ownerID)
-            provisionalSessionReservations[reservationKey] = reservation
-            recoveryMarkerReservations[recoveryID] = RecoveryMarkerReservation(
-                reservationKey: reservationKey,
-                reservationOwnerID: ownerID
-            )
-            return true
-        }
-    }
-
-    func releaseRecoveryMarkerReservation(recoveryID: UUID) {
-        lock.withLock {
-            dispatchOutcomeUnknownKindByRecoveryID.removeValue(forKey: recoveryID)
-            guard let marker = recoveryMarkerReservations.removeValue(forKey: recoveryID),
-                  var reservation = provisionalSessionReservations[marker.reservationKey],
-                  reservation.ownerIDs.remove(marker.reservationOwnerID) != nil
-            else { return }
-            if reservation.ownerIDs.isEmpty {
-                provisionalSessionReservations.removeValue(forKey: marker.reservationKey)
-            } else {
-                provisionalSessionReservations[marker.reservationKey] = reservation
-            }
-        }
-    }
-
-    func markRecoveryMarkerDispatchOutcomeUnknown(
-        recoveryID: UUID,
-        dispatchKind: DomainAgentAdmissionDispatchKind
-    ) -> Bool {
-        lock.withLock {
-            guard recoveryMarkerReservations[recoveryID] != nil else { return false }
-            dispatchOutcomeUnknownKindByRecoveryID[recoveryID] = dispatchKind
-            return true
-        }
-    }
-
-    func dispatchOutcomeUnknownRecoveryID(
-        workspaceID: UUID,
-        sessionID: UUID
-    ) -> UUID? {
-        lock.withLock {
-            let key = ProvisionalSessionKey(workspaceID: workspaceID, sessionID: sessionID)
-            return dispatchOutcomeUnknownKindByRecoveryID.keys.first {
-                recoveryMarkerReservations[$0]?.reservationKey == key
-            }
-        }
-    }
-
-    func dispatchOutcomeUnknownKind(recoveryID: UUID) -> DomainAgentAdmissionDispatchKind? {
-        lock.withLock { dispatchOutcomeUnknownKindByRecoveryID[recoveryID] }
-    }
-
-    /// A complete authority read can retire reservations whose durable marker was removed by a peer.
-    /// Live publication and retained retry owners keep their reservations until their own terminal path.
-    func reconcileRecoveryMarkerReservations(
-        workspaceID: UUID,
-        authoritativeRecoveryIDs: Set<UUID>
-    ) {
-        lock.withLock {
-            let staleRecoveryIDs = recoveryMarkerReservations.compactMap { recoveryID, marker -> UUID? in
-                guard marker.reservationKey.workspaceID == workspaceID,
-                      !authoritativeRecoveryIDs.contains(recoveryID),
-                      retainedRecoveries[recoveryID] == nil,
-                      liveRecoveryMarkerOwnerIDsByRecoveryID[recoveryID]?.isEmpty != false
-                else { return nil }
-                return recoveryID
-            }
-            for recoveryID in staleRecoveryIDs {
-                dispatchOutcomeUnknownKindByRecoveryID.removeValue(forKey: recoveryID)
-                guard let marker = recoveryMarkerReservations.removeValue(forKey: recoveryID),
-                      var reservation = provisionalSessionReservations[marker.reservationKey],
-                      reservation.ownerIDs.remove(marker.reservationOwnerID) != nil
-                else { continue }
-                if reservation.ownerIDs.isEmpty {
-                    provisionalSessionReservations.removeValue(forKey: marker.reservationKey)
-                } else {
-                    provisionalSessionReservations[marker.reservationKey] = reservation
-                }
-            }
-        }
-    }
-
-    func hasLiveProvisionalSession(
-        workspaceID: UUID,
-        sessionID: UUID
-    ) -> Bool {
-        lock.withLock {
-            let key = ProvisionalSessionKey(workspaceID: workspaceID, sessionID: sessionID)
-            guard let reservation = provisionalSessionReservations[key] else { return false }
-            let recoveryOwnerIDs = Set(
-                recoveryMarkerReservations.values.compactMap { marker in
-                    marker.reservationKey == key ? marker.reservationOwnerID : nil
-                } + retainedRecoveries.values.compactMap { recovery in
-                    recovery.reservationKey == key ? recovery.reservationOwnerID : nil
-                }
-            )
-            return reservation.ownerIDs.contains { !recoveryOwnerIDs.contains($0) }
-        }
-    }
-
-    func hasUnsettledRecoveryFence(workspaceID: UUID) -> Bool {
-        lock.withLock {
-            recoveryMarkerReservations.values.contains {
-                $0.reservationKey.workspaceID == workspaceID
-            } || retainedRecoveries.values.contains {
-                $0.reservationKey.workspaceID == workspaceID
-            }
-        }
-    }
-
-    /// A live provisional owner may overlap unrelated admissions while its durable marker protects
-    /// the exact session. Marker-only and retained-recovery fences still block workspace mutation.
-    func hasUnsettledRecoveryFenceWithoutLiveOwner(workspaceID: UUID) -> Bool {
-        lock.withLock {
-            if retainedRecoveries.values.contains(where: {
-                $0.reservationKey.workspaceID == workspaceID
-            }) {
-                return true
-            }
-            let recoveryOwnerIDsByKey = Dictionary(grouping: recoveryMarkerReservations.values) {
-                $0.reservationKey
-            }.mapValues { Set($0.map(\.reservationOwnerID)) }
-            return recoveryMarkerReservations.values.contains { marker in
-                guard marker.reservationKey.workspaceID == workspaceID else { return false }
-                let recoveryOwnerIDs = recoveryOwnerIDsByKey[marker.reservationKey, default: []]
-                let reservation = provisionalSessionReservations[marker.reservationKey]
-                return reservation?.ownerIDs.contains { !recoveryOwnerIDs.contains($0) } != true
-            }
-        }
-    }
-
-    func hasRecoveryMarkerReservation(recoveryID: UUID) -> Bool {
-        lock.withLock {
-            recoveryMarkerReservations[recoveryID] != nil
-        }
-    }
-
-    func hasRecoveryMarkerReservation(workspaceID: UUID) -> Bool {
-        lock.withLock {
-            recoveryMarkerReservations.values.contains {
-                $0.reservationKey.workspaceID == workspaceID
-            }
         }
     }
 

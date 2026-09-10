@@ -500,7 +500,6 @@ struct AgentManageMCPToolService {
             inheritWorktreeBindings: false,
             expectedWorkspaceID: workspace.id
         )
-        let session: AgentModeViewModel.TabSession
         do {
             #if DEBUG
                 await testAfterTargetResolution?(target)
@@ -543,18 +542,15 @@ struct AgentManageMCPToolService {
                 target,
                 expectedWorkspaceID: workspace.id
             )
-            guard let resolvedSession = agentModeVM.session(
-                for: target.tabID,
-                createIfNeeded: false
-            ) else {
-                throw MCPError.internalError("Failed to create agent session state.")
-            }
-            session = resolvedSession
-            try await agentModeVM.mcpAcceptSessionTarget(target)
         } catch {
             await agentModeVM.mcpDiscardSessionTarget(target)
             throw error
         }
+        guard let session = agentModeVM.session(for: target.tabID, createIfNeeded: false) else {
+            await agentModeVM.mcpDiscardSessionTarget(target)
+            throw MCPError.internalError("Failed to create agent session state.")
+        }
+        agentModeVM.mcpAcceptSessionTarget(target)
         let sessionName = targetWindow.workspaceManager.composeTab(with: target.tabID)?.name ?? "Agent Session"
         return .object(sessionSummaryObject(
             sessionID: session.activeAgentSessionID,
@@ -600,7 +596,6 @@ struct AgentManageMCPToolService {
             expectedWorkspaceID: workspace.id
         )
         let hadMatchingMCPControl = agentModeVM.session(for: target.tabID, createIfNeeded: false)?.mcpControlContext?.sessionID == sessionID
-        let session: AgentModeViewModel.TabSession
         do {
             #if DEBUG
                 await testAfterTargetResolution?(target)
@@ -647,14 +642,6 @@ struct AgentManageMCPToolService {
                 expectedWorkspaceID: workspace.id,
                 allowMatchingControlledSession: hadMatchingMCPControl
             )
-            guard let resolvedSession = agentModeVM.session(
-                for: target.tabID,
-                createIfNeeded: false
-            ) else {
-                throw MCPError.internalError("Failed to hydrate resumed session.")
-            }
-            session = resolvedSession
-            try await agentModeVM.mcpAcceptSessionTarget(target)
         } catch {
             if !hadMatchingMCPControl {
                 await agentModeVM.mcpDeactivateControlContext(
@@ -665,6 +652,11 @@ struct AgentManageMCPToolService {
             await agentModeVM.mcpDiscardSessionTarget(target)
             throw error
         }
+        guard let session = agentModeVM.session(for: target.tabID, createIfNeeded: false) else {
+            await agentModeVM.mcpDiscardSessionTarget(target)
+            throw MCPError.internalError("Failed to hydrate resumed session.")
+        }
+        agentModeVM.mcpAcceptSessionTarget(target)
         let sessionName = targetWindow.workspaceManager.composeTab(with: target.tabID)?.name ?? "Agent Session"
         return .object(sessionSummaryObject(
             sessionID: sessionID,

@@ -615,31 +615,14 @@ import XCTest
             let fixture = try await DurableAgentAdmissionFixture.make()
             trackCleanup { await fixture.cleanup() }
             let manager = fixture.window.workspaceManager
-            try await waitUntil("fixture chat session to initialize") {
-                manager.workspace(withID: fixture.workspaceID)?
-                    .composeTabs.first?.activeChatSessionID != nil
-            }
-            let settledWorkspace = try XCTUnwrap(manager.workspace(withID: fixture.workspaceID))
-            await manager.debugPublishWorkingDocumentToDomainAuthority(settledWorkspace)
-            manager.markWorkspaceDirty(workspaceID: fixture.workspaceID)
-            let baselineSave = await manager.pollAndSaveStateWithOutcomeAsync(
-                workspaceID: fixture.workspaceID,
-                source: WorkspaceSaveSource("canonicalDuplicateAdmissionBaseline")
-            )
-            XCTAssertTrue(baselineSave.acceptedForLifecycleAdmission)
+            let workspaceBefore = try XCTUnwrap(manager.workspace(withID: fixture.workspaceID))
             let canonicalValue = await fixture.runtime.workspaceStore
                 .canonicalWorkspaceSnapshot(fixture.workspaceID)
             let canonicalSnapshot = try XCTUnwrap(canonicalValue)
-            let canonicalWorkspace = try JSONDecoder().decode(
+            var malformed = try JSONDecoder().decode(
                 WorkspaceModel.self,
                 from: canonicalSnapshot.document.documentBytes
             )
-            let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex {
-                $0.id == fixture.workspaceID
-            })
-            manager.workspaces[workspaceIndex] = canonicalWorkspace
-            let workspaceBefore = try XCTUnwrap(manager.workspace(withID: fixture.workspaceID))
-            var malformed = canonicalWorkspace
             let duplicate = try XCTUnwrap(malformed.composeTabs.first)
             malformed.stashedTabs.append(StashedTab(tab: duplicate))
             let malformedSnapshot = try WorkspaceManagerViewModel.replacingWorkspaceProjectionForTesting(
@@ -2170,11 +2153,7 @@ import XCTest
                 await WorkspaceManagerViewModel.WorkspaceDiskWriter.shared.flush(url: workspaceFileURL)
                 // Catalog projection and fixture creation are independent publications; the test
                 // window must expose the workspace that the authority has already committed.
-                if let workspaceIndex = window.workspaceManager.workspaces.firstIndex(where: {
-                    $0.id == workspace.id
-                }) {
-                    window.workspaceManager.workspaces[workspaceIndex] = workspace
-                } else {
+                if !window.workspaceManager.workspaces.contains(where: { $0.id == workspace.id }) {
                     window.workspaceManager.workspaces.append(workspace)
                 }
                 let storedWorkspace = try XCTUnwrap(

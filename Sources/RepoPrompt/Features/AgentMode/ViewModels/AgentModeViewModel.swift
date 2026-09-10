@@ -721,7 +721,6 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private struct MCPSessionTargetDiscardAuthority {
         let authorityID: UUID
         let workspaceID: UUID?
-        let crossProcessLease: DomainAgentAdmissionDispatchLease?
     }
 
     /// The registry, rather than an MCP request stack, owns recovery after durable admission.
@@ -731,16 +730,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     /// A claim-bearing target owns its recovery boundary from resolution until acceptance or
     /// terminal discard, including the interval before cleanup is registered.
     private var outstandingProvisionalMCPSessionTargets: [UUID: MCPSessionTarget] = [:]
-    private var dispatchOutcomeUnknownRecoveryIDs: Set<UUID> = []
-    private var dispatchOutcomeUnknownKindByRecoveryID: [UUID: DomainAgentAdmissionDispatchKind] = [:]
-    /// Marker removal is the durable acceptance point. While that commit is suspended,
-    /// discard must not race it and mutate the target behind the accepted provider run.
-    private var acceptingMCPSessionTargetRecoveryIDs: Set<UUID> = []
     /// A newer same-session target cannot become provider-visible until cleanup holding an older
     /// authority has crossed every suspension point where it could still mutate session state.
     private var mcpSessionTargetDiscardAuthorityBySessionID: [UUID: MCPSessionTargetDiscardAuthority] = [:]
     private var retiringMCPSessionTargetDiscardSessionIDByRecoveryID: [UUID: UUID] = [:]
-    private var mcpSessionTargetRecoveryMutationByID: [UUID: DomainAgentAdmissionRecoveryMutation] = [:]
+    private var bindingOnlyMCPSessionTargetRecoveryIDs: Set<UUID> = []
     private var provisionalRuntimeTargetIdentityByRecoveryID: [UUID: ProvisionalRuntimeTargetIdentity] = [:]
 
     let sidebarAutoArchivePolicy = AgentModeSidebarAutoArchivePolicy()
@@ -779,7 +773,6 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         var test_beforeMCPSelectionCommit: (@MainActor () async -> Void)?
         private var test_composeTabRemovalTeardownObserver: (@MainActor (UUID) async -> Void)?
         private var test_beforeAutomaticMCPSessionTargetDiscardRetry: (@MainActor () async -> Void)?
-        private var test_afterMCPDispatchOutcomeUnknownMarker: (@MainActor (MCPSessionTarget) async -> Void)?
         private var test_beforeMCPSessionTargetDiscardAuthorityEstablishment: (@MainActor (UUID) async -> Void)?
         private var test_afterMCPSessionTargetDiscardRetired: (@MainActor (UUID) async -> Void)?
         private var test_afterMCPPersistedSessionResolution: (@MainActor (UUID) async -> Void)?
@@ -846,12 +839,6 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             test_beforeAutomaticMCPSessionTargetDiscardRetry = observer
         }
 
-        func test_setAfterMCPDispatchOutcomeUnknownMarker(
-            _ observer: (@MainActor (MCPSessionTarget) async -> Void)?
-        ) {
-            test_afterMCPDispatchOutcomeUnknownMarker = observer
-        }
-
         func test_setBeforeMCPSessionTargetDiscardAuthorityEstablishment(
             _ observer: (@MainActor (UUID) async -> Void)?
         ) {
@@ -876,8 +863,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         ) {
             mcpSessionTargetDiscardAuthorityBySessionID[sessionID] = MCPSessionTargetDiscardAuthority(
                 authorityID: discardAuthorityID,
-                workspaceID: nil,
-                crossProcessLease: nil
+                workspaceID: nil
             )
         }
 
@@ -7482,9 +7468,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         sessionName: String?,
         parentSessionID: UUID? = nil,
         inheritWorktreeBindings: Bool = false,
-        expectedWorkspaceID: UUID? = nil,
-        requiresProviderDispatchFence: Bool = false,
-        allowsDispatchOutcomeUnknownReconciliation: Bool = false
+        expectedWorkspaceID: UUID? = nil
     ) async throws -> MCPSessionTarget {
         let selector = try normalizeMCPSessionSelector(
             tabID: tabID,
@@ -7499,21 +7483,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 guard let reservationWorkspaceID = expectedWorkspaceID ?? workspaceManager?.activeWorkspaceID else {
                     throw MCPError.internalError("Workspace unavailable during Agent session reservation.")
                 }
-                let reconcilingRecoveryID: UUID? = if allowsDispatchOutcomeUnknownReconciliation,
-                                                      workspaceManager?.workspace(withID: reservationWorkspaceID)?.isEphemeral == true
-                {
-                    workspaceManager?.processLocalDispatchOutcomeUnknownRecoveryID(
-                        workspaceID: reservationWorkspaceID,
-                        sessionID: intendedSessionID
-                    )
-                } else {
-                    nil
-                }
                 try await establishMCPSessionTargetDiscardAuthority(
                     discardAuthorityID,
                     sessionID: intendedSessionID,
-                    workspaceID: reservationWorkspaceID,
-                    reconcilingRecoveryID: reconcilingRecoveryID
+                    workspaceID: reservationWorkspaceID
                 )
                 reservedSessionID = intendedSessionID
             }
@@ -7533,32 +7506,18 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             )
             guard let resolvedSessionID = target.sessionID else { return target }
             guard target.recoveryClaim != nil else {
-                guard requiresProviderDispatchFence else {
-                    if reservedSessionID != nil {
-                        try requireSettledClaimlessMCPSessionTarget(
-                            target,
-                            discardAuthorityID: discardAuthorityID
-                        )
-                        releaseMCPSessionTargetDiscardAuthority(
-                            discardAuthorityID,
-                            sessionID: resolvedSessionID
-                        )
-                        reservedSessionID = nil
-                    }
-                    return target
-                }
-                let provisionalTarget = try await prepareClaimlessMCPSessionTargetForProviderDispatch(
-                    target,
-                    discardAuthorityID: discardAuthorityID,
-                    expectedWorkspaceID: expectedWorkspaceID,
-                    allowsDispatchOutcomeUnknownReconciliation: allowsDispatchOutcomeUnknownReconciliation
-                )
-                guard outstandingProvisionalMCPSessionTargetMatches(provisionalTarget) else {
-                    throw MCPError.invalidParams(
-                        "The Agent session dispatch recovery claim changed before provider dispatch."
+                if reservedSessionID != nil {
+                    try requireSettledClaimlessMCPSessionTarget(
+                        target,
+                        discardAuthorityID: discardAuthorityID
                     )
+                    releaseMCPSessionTargetDiscardAuthority(
+                        discardAuthorityID,
+                        sessionID: resolvedSessionID
+                    )
+                    reservedSessionID = nil
                 }
-                return provisionalTarget
+                return target
             }
             guard mcpSessionTargetDiscardAuthorityBySessionID[resolvedSessionID]?.authorityID == discardAuthorityID else {
                 throw MCPError.invalidParams(
@@ -7590,107 +7549,6 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
             throw error
         }
-    }
-
-    private func prepareClaimlessMCPSessionTargetForProviderDispatch(
-        _ target: MCPSessionTarget,
-        discardAuthorityID: UUID,
-        expectedWorkspaceID: UUID?,
-        allowsDispatchOutcomeUnknownReconciliation: Bool
-    ) async throws -> MCPSessionTarget {
-        guard let workspaceManager,
-              let workspaceID = expectedWorkspaceID ?? workspaceManager.activeWorkspaceID,
-              let sessionID = target.sessionID
-        else {
-            throw MCPError.internalError(
-                "The Agent session dispatch boundary could not identify its workspace and session."
-            )
-        }
-        try requireSettledClaimlessMCPSessionTarget(
-            target,
-            discardAuthorityID: discardAuthorityID
-        )
-        let pendingRecord = try await workspaceManager.pendingAgentAdmissionRecoveryRecord(
-            workspaceID: workspaceID,
-            tabID: target.tabID,
-            sessionID: sessionID
-        )
-        let record: DomainAgentAdmissionRecoveryRecord
-        if let pendingRecord {
-            guard pendingRecord.phase == .dispatchOutcomeUnknown,
-                  pendingRecord.dispatchKind != nil
-            else {
-                throw MCPError.invalidParams(
-                    "The Agent session has an unsettled prepared recovery. Retry after recovery completes."
-                )
-            }
-            guard allowsDispatchOutcomeUnknownReconciliation,
-                  pendingRecord.tabID == target.tabID
-            else {
-                throw MCPError.invalidParams(
-                    "The Agent session has an unsettled provider dispatch. Reconcile that exact session before retrying."
-                )
-            }
-            record = pendingRecord
-            guard workspaceManager.activateProvisionalAgentAdmissionRecoveryIntent(
-                AgentProvisionalAdmissionIdentity(
-                    recoveryID: record.recoveryID,
-                    workspaceID: record.workspaceID,
-                    tabID: record.tabID,
-                    sessionID: record.sessionID,
-                    replacementTabID: record.replacementTabID
-                )
-            ) else {
-                throw MCPError.invalidParams(
-                    "The Agent session dispatch recovery boundary changed before reconciliation."
-                )
-            }
-        } else {
-            let identity = AgentProvisionalAdmissionIdentity(
-                recoveryID: UUID(),
-                workspaceID: workspaceID,
-                tabID: target.tabID,
-                sessionID: sessionID,
-                replacementTabID: UUID()
-            )
-            guard try await workspaceManager.prepareMarkerOnlyAgentAdmissionDispatchRecovery(identity) else {
-                throw MCPError.internalError(
-                    "The Agent session dispatch recovery boundary could not be persisted. No provider was started."
-                )
-            }
-            record = DomainAgentAdmissionRecoveryRecord(
-                recoveryID: identity.recoveryID,
-                workspaceID: identity.workspaceID,
-                tabID: identity.tabID,
-                sessionID: identity.sessionID,
-                replacementTabID: identity.replacementTabID,
-                mutation: .removeMarker
-            )
-        }
-        let identity = AgentProvisionalAdmissionIdentity(
-            recoveryID: record.recoveryID,
-            workspaceID: record.workspaceID,
-            tabID: record.tabID,
-            sessionID: record.sessionID,
-            replacementTabID: record.replacementTabID
-        )
-        let claim = AgentProvisionalAdmissionClaim(identity: identity)
-        let provisionalTarget = MCPSessionTarget(
-            tabID: target.tabID,
-            sessionID: target.sessionID,
-            origin: target.origin,
-            lifecycleIdentity: target.lifecycleIdentity,
-            recoveryClaim: claim,
-            discardAuthorityID: discardAuthorityID,
-            discardRestoreIndexEntry: target.discardRestoreIndexEntry
-        )
-        mcpSessionTargetRecoveryMutationByID[record.recoveryID] = record.mutation
-        if record.phase == .dispatchOutcomeUnknown {
-            dispatchOutcomeUnknownRecoveryIDs.insert(record.recoveryID)
-            dispatchOutcomeUnknownKindByRecoveryID[record.recoveryID] = record.dispatchKind
-        }
-        registerOutstandingProvisionalMCPSessionTarget(provisionalTarget)
-        return provisionalTarget
     }
 
     private func normalizeMCPSessionSelector(
@@ -7985,7 +7843,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 recoveryClaim: claim,
                 discardAuthorityID: discardAuthorityID
             )
-            mcpSessionTargetRecoveryMutationByID[identity.recoveryID] = .clearBinding
+            bindingOnlyMCPSessionTargetRecoveryIDs.insert(identity.recoveryID)
             registerOutstandingProvisionalMCPSessionTarget(provisionalTarget)
             do {
                 let hydrated = await ensureSessionReady(tabID: tabID)
@@ -7996,8 +7854,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 let boundSessionID = try await durablyEnsureSessionBoundToTab(
                     hydrated,
                     intendedSessionID: intendedSessionID,
-                    expectedWorkspaceID: expectedWorkspaceID,
-                    recoveryIdentity: identity
+                    expectedWorkspaceID: expectedWorkspaceID
                 )
                 guard boundSessionID == intendedSessionID else {
                     throw MCPError.invalidParams("The target tab could not be bound to the intended Agent session.")
@@ -8293,8 +8150,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private func durablyEnsureSessionBoundToTab(
         _ session: TabSession,
         intendedSessionID: UUID,
-        expectedWorkspaceID: UUID,
-        recoveryIdentity: AgentProvisionalAdmissionIdentity
+        expectedWorkspaceID: UUID
     ) async throws -> UUID {
         if let existingSessionID = session.activeAgentSessionID {
             return existingSessionID
@@ -8328,9 +8184,6 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     "The target tab changed before Agent session admission completed."
                 )
             }
-            let requiresRecoveryMarker = workspaceManager.workspace(
-                withID: expectedWorkspaceID
-            )?.isEphemeral == false
             guard let installedBinding = installPersistentSessionBinding(
                 sessionID: intendedSessionID,
                 on: session,
@@ -8356,31 +8209,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 }
             }
 
-            if requiresRecoveryMarker {
-                guard await workspaceManager.persistPendingProvisionalAgentAdmissionRecovery(
-                    recoveryIdentity,
-                    mutation: .clearBinding,
-                    reserveRecoveryMarker: false
-                ) else {
-                    throw MCPError.internalError(
-                        "The Agent session binding recovery intent could not be persisted. No provider was started."
-                    )
-                }
-            }
             try Task.checkCancellation()
             let persistence = await workspaceManager.pollAndSaveStateWithOutcomeAsync(
                 workspaceID: expectedWorkspaceID,
                 source: WorkspaceSaveSource("agentSessionLifecycleExistingTabAdmission")
             )
-            if requiresRecoveryMarker {
-                guard workspaceManager.activateProvisionalAgentAdmissionRecoveryIntent(
-                    recoveryIdentity
-                ) else {
-                    throw MCPError.internalError(
-                        "The Agent session binding recovery intent could not be activated. No provider was started."
-                    )
-                }
-            }
             #if DEBUG
                 await test_afterProvisionalExistingTabBindingInstalled?()
             #endif
@@ -8900,151 +8733,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         #endif
     }
 
-    /// Commits a provisional target after the caller's externally visible work has succeeded.
-    /// Provider callers keep the durable recovery marker until dispatch completes so another
-    /// process cannot observe a settled binding before the owning dispatch attempt finishes.
-    func mcpAcceptSessionTarget(
-        _ target: MCPSessionTarget,
-        releaseReservation: Bool = true
-    ) async throws {
-        try Task.checkCancellation()
-        guard let claim = target.recoveryClaim else {
-            releaseOutstandingProvisionalMCPSessionTarget(target)
-            return
-        }
-        do {
-            try requireCurrentMCPWorkspaceTarget(
-                target,
-                expectedWorkspaceID: claim.identity.workspaceID
-            )
-            let recoveryID = claim.identity.recoveryID
-            let mutation = mcpSessionTargetRecoveryMutation(recoveryID: recoveryID)
-            guard let workspaceManager,
-                  workspaceManager.workspace(withID: claim.identity.workspaceID) != nil
-            else {
-                throw MCPError.internalError(
-                    "The Agent session could not be accepted because its workspace is unavailable."
-                )
-            }
-            guard acceptingMCPSessionTargetRecoveryIDs.insert(recoveryID).inserted else {
-                throw MCPError.internalError(
-                    "The Agent session is already crossing its durable acceptance boundary."
-                )
-            }
-            defer { acceptingMCPSessionTargetRecoveryIDs.remove(recoveryID) }
-            if await !(workspaceManager.acceptProvisionalAgentAdmissionRecoveryIntent(
-                claim.identity,
-                mutation: mutation
-            )) {
-                throw MCPError.internalError(
-                    "The Agent session could not be accepted because its recovery intent could not be cleared."
-                )
-            }
-            // The durable marker is gone, so provider acceptance is authoritative even if
-            // cancellation arrived while persistence was suspended. No later check may turn
-            // the accepted provider handoff into a retryable client error.
-            _ = claim.markAccepted()
-            dispatchOutcomeUnknownRecoveryIDs.remove(recoveryID)
-            dispatchOutcomeUnknownKindByRecoveryID.removeValue(forKey: recoveryID)
-            if releaseReservation {
-                releaseOutstandingProvisionalMCPSessionTarget(target)
-            }
-        } catch {
-            if dispatchOutcomeUnknownRecoveryIDs.contains(claim.identity.recoveryID) {
-                mcpPreserveSessionTargetAfterUncertainDispatch(target)
-            } else {
-                _ = await mcpDiscardSessionTarget(target)
-            }
-            throw error
-        }
-    }
-
-    private func mcpSessionTargetRecoveryMutation(
-        recoveryID: UUID
-    ) -> DomainAgentAdmissionRecoveryMutation {
-        mcpSessionTargetRecoveryMutationByID[recoveryID] ?? .removeTab
-    }
-
-    func mcpMarkSessionTargetDispatchOutcomeUnknown(
-        _ target: MCPSessionTarget,
-        dispatchKind: DomainAgentAdmissionDispatchKind
-    ) async throws {
-        guard let claim = target.recoveryClaim else { return }
-        try requireCurrentMCPWorkspaceTarget(
-            target,
-            expectedWorkspaceID: claim.identity.workspaceID
-        )
-        let recoveryID = claim.identity.recoveryID
-        dispatchOutcomeUnknownRecoveryIDs.insert(recoveryID)
-        let mutation = mcpSessionTargetRecoveryMutation(recoveryID: recoveryID)
-        guard let workspaceManager,
-              let workspace = workspaceManager.workspace(withID: claim.identity.workspaceID)
-        else {
-            throw MCPError.internalError(
-                "The Agent provider was not started because its durable dispatch boundary could not be recorded."
-            )
-        }
-        if workspace.isEphemeral {
-            guard workspaceManager.markEphemeralAgentAdmissionDispatchOutcomeUnknown(
-                claim.identity,
-                dispatchKind: dispatchKind
-            ) else {
-                throw MCPError.internalError(
-                    "The Agent provider was not started because its process dispatch boundary could not be recorded."
-                )
-            }
-        } else {
-            let marked = await workspaceManager.markProvisionalAgentAdmissionDispatchOutcomeUnknown(
-                claim.identity,
-                mutation: mutation,
-                dispatchKind: dispatchKind
-            )
-            guard marked else {
-                throw MCPError.internalError(
-                    "The Agent provider was not started because its durable dispatch boundary could not be recorded."
-                )
-            }
-        }
-        dispatchOutcomeUnknownKindByRecoveryID[recoveryID] = dispatchKind
-        #if DEBUG
-            await test_afterMCPDispatchOutcomeUnknownMarker?(target)
-        #endif
-    }
-
-    func mcpPreserveSessionTargetAfterUncertainDispatch(_ target: MCPSessionTarget) {
-        guard let claim = target.recoveryClaim else {
-            releaseOutstandingProvisionalMCPSessionTarget(target)
-            return
-        }
-        dispatchOutcomeUnknownRecoveryIDs.remove(claim.identity.recoveryID)
-        dispatchOutcomeUnknownKindByRecoveryID.removeValue(forKey: claim.identity.recoveryID)
-        _ = claim.markComplete()
-        releaseOutstandingProvisionalMCPSessionTarget(target)
-        workspaceManager?.preserveProvisionalAgentAdmissionAfterUncertainDispatch(
-            claim.identity
-        )
-    }
-
-    @discardableResult
-    func mcpAbortSessionTargetBeforeProviderDispatch(
-        _ target: MCPSessionTarget
-    ) async -> MCPSessionTargetDiscardResult {
+    /// Closes the provisional recovery claim once a target becomes externally real.
+    func mcpAcceptSessionTarget(_ target: MCPSessionTarget) {
+        target.recoveryClaim?.markAccepted()
         if let recoveryID = target.recoveryClaim?.identity.recoveryID {
-            dispatchOutcomeUnknownRecoveryIDs.remove(recoveryID)
-            dispatchOutcomeUnknownKindByRecoveryID.removeValue(forKey: recoveryID)
+            bindingOnlyMCPSessionTargetRecoveryIDs.remove(recoveryID)
         }
-        return await mcpDiscardSessionTarget(target)
-    }
-
-    func mcpFinishAcceptedSessionTargetDispatch(_ target: MCPSessionTarget) {
         releaseOutstandingProvisionalMCPSessionTarget(target)
-    }
-
-    func mcpSessionTargetDispatchOutcomeUnknownKind(
-        _ target: MCPSessionTarget
-    ) -> DomainAgentAdmissionDispatchKind? {
-        guard let recoveryID = target.recoveryClaim?.identity.recoveryID else { return nil }
-        return dispatchOutcomeUnknownKindByRecoveryID[recoveryID]
     }
 
     /// Discard a session target created by `mcpResolveOrCreateSessionTarget` when a later step
@@ -9068,13 +8763,6 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return .complete
         case .provisional, .recoveringWorkspace, .workspaceRecovered:
             break
-        }
-        if acceptingMCPSessionTargetRecoveryIDs.contains(claim.identity.recoveryID) {
-            return .retainedForRetry
-        }
-        if dispatchOutcomeUnknownRecoveryIDs.contains(claim.identity.recoveryID) {
-            mcpPreserveSessionTargetAfterUncertainDispatch(target)
-            return .complete
         }
         guard mcpSessionTargetDiscardAuthorityIsCurrent(target) else {
             claim.markComplete()
@@ -9156,6 +8844,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if result == .complete {
             pendingMCPSessionTargetDiscards.removeValue(forKey: recoveryID)
             retiringMCPSessionTargetDiscardSessionIDByRecoveryID.removeValue(forKey: recoveryID)
+            bindingOnlyMCPSessionTargetRecoveryIDs.remove(recoveryID)
             releaseOutstandingProvisionalMCPSessionTarget(pending.target)
             return
         }
@@ -9190,17 +8879,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         do {
             return try await workspaceManager.withAgentSessionAdmission(
                 workspaceID: identity.workspaceID,
-                admissionID: identity.recoveryID,
-                purpose: .recovery
+                admissionID: identity.recoveryID
             ) {
-                if self.mcpSessionTargetRecoveryMutationByID[recoveryID] == .removeMarker {
-                    guard await workspaceManager.completeProvisionalAgentAdmissionRecoveryIntent(
-                        identity,
-                        mutation: .removeMarker
-                    ) else { return .retainedForRetry }
-                    claim.markComplete()
-                    return .complete
-                }
                 switch claim.state {
                 case .accepted, .complete:
                     return .complete
@@ -9239,7 +8919,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     )
                 }
 
-                let outcome = if mcpSessionTargetRecoveryMutationByID[recoveryID] == .clearBinding {
+                let outcome = if bindingOnlyMCPSessionTargetRecoveryIDs.contains(recoveryID) {
                     await workspaceManager.recoverProvisionalAgentSessionBinding(identity)
                 } else {
                     await workspaceManager.recoverProvisionalAgentAdmission(identity)
@@ -9280,8 +8960,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private func establishMCPSessionTargetDiscardAuthority(
         _ discardAuthorityID: UUID,
         sessionID: UUID,
-        workspaceID: UUID,
-        reconcilingRecoveryID: UUID?
+        workspaceID: UUID
     ) async throws {
         #if DEBUG
             await test_beforeMCPSessionTargetDiscardAuthorityEstablishment?(sessionID)
@@ -9334,56 +9013,18 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 "The previous Agent session target is still provisional. Retry after it settles."
             )
         }
-        var reserved = workspaceManager?.reserveProvisionalAgentSession(
+        guard workspaceManager?.reserveProvisionalAgentSession(
             workspaceID: workspaceID,
             sessionID: sessionID,
-            ownerID: discardAuthorityID,
-            reconcilingRecoveryID: reconcilingRecoveryID
-        ) == true
-        if !reserved,
-           workspaceManager?.workspace(withID: workspaceID)?.isEphemeral != true,
-           await workspaceManager?.reconcileAgentAdmissionRecoveryReservationsFromAuthority(
-               workspaceID: workspaceID
-           ) == true
-        {
-            reserved = workspaceManager?.reserveProvisionalAgentSession(
-                workspaceID: workspaceID,
-                sessionID: sessionID,
-                ownerID: discardAuthorityID,
-                reconcilingRecoveryID: reconcilingRecoveryID
-            ) == true
-        }
-        guard reserved else {
+            ownerID: discardAuthorityID
+        ) == true else {
             throw MCPError.internalError(
                 "The Agent session target is still provisional in another window. Retry after it settles."
             )
         }
-        let crossProcessLease: DomainAgentAdmissionDispatchLease?
-        do {
-            if workspaceManager?.workspace(withID: workspaceID)?.isEphemeral == true {
-                crossProcessLease = nil
-            } else if let acquired = try await workspaceManager?.tryAcquireAgentAdmissionDispatchLease(
-                workspaceID: workspaceID,
-                sessionID: sessionID
-            ) {
-                crossProcessLease = acquired
-            } else {
-                throw MCPError.internalError(
-                    "The Agent session target is still provisional in another process. Retry after it settles."
-                )
-            }
-        } catch {
-            workspaceManager?.releaseProvisionalAgentSession(
-                workspaceID: workspaceID,
-                sessionID: sessionID,
-                ownerID: discardAuthorityID
-            )
-            throw error
-        }
         mcpSessionTargetDiscardAuthorityBySessionID[sessionID] = MCPSessionTargetDiscardAuthority(
             authorityID: discardAuthorityID,
-            workspaceID: workspaceID,
-            crossProcessLease: crossProcessLease
+            workspaceID: workspaceID
         )
         #if DEBUG
             await test_afterMCPSessionTargetDiscardRetired?(sessionID)
@@ -9398,9 +9039,6 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
     private func registerOutstandingProvisionalMCPSessionTarget(_ target: MCPSessionTarget) {
         guard let recoveryID = target.recoveryClaim?.identity.recoveryID else { return }
-        if mcpSessionTargetRecoveryMutationByID[recoveryID] == nil {
-            mcpSessionTargetRecoveryMutationByID[recoveryID] = .removeTab
-        }
         outstandingProvisionalMCPSessionTargets[recoveryID] = target
         if let lifecycleIdentity = target.lifecycleIdentity,
            let sessionID = target.sessionID,
@@ -9482,7 +9120,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             outstandingProvisionalMCPSessionTargets.removeValue(forKey: recoveryID)
             provisionalRuntimeTargetIdentityByRecoveryID.removeValue(forKey: recoveryID)
         }
-        mcpSessionTargetRecoveryMutationByID.removeValue(forKey: recoveryID)
+        bindingOnlyMCPSessionTargetRecoveryIDs.remove(recoveryID)
         guard let sessionID = target.sessionID,
               let discardAuthorityID = target.discardAuthorityID
         else { return }
@@ -9503,7 +9141,6 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 ownerID: discardAuthorityID
             )
         }
-        authority.crossProcessLease?.release()
     }
 
     private func mcpSessionTargetDiscardAuthorityIsCurrent(_ target: MCPSessionTarget) -> Bool {
@@ -9617,7 +9254,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return .complete
         }
 
-        if mcpSessionTargetRecoveryMutationByID[recoveryID] == .clearBinding {
+        if bindingOnlyMCPSessionTargetRecoveryIDs.contains(recoveryID) {
             do {
                 try await agentSessionDeleter(sessionID, workspace)
             } catch {
