@@ -461,7 +461,7 @@ struct AgentMCPStartWorktreeCoordinator {
         let bindings = agentModeVM.worktreeBindings(forAgentSessionID: targetSessionID)
         guard let binding = bindings.first else { return error }
         let label = binding.visualLabel ?? binding.worktreeName ?? binding.branch ?? binding.worktreeID
-        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        let message = mcpErrorRenderingText(error)
         return MCPError.invalidParams(
             "Agent provider start failed after binding worktree '\(label)' at \(binding.worktreeRootPath). The worktree was not removed; use manage_worktree list to inspect or recover it. Error: \(message)"
         )
@@ -782,7 +782,7 @@ struct AgentMCPStartWorktreeCoordinator {
     private func preparationError(_ error: Error) -> Error {
         if error is CancellationError { return error }
         if error is MCPError { return error }
-        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        let message = mcpErrorRenderingText(error)
         return MCPError.invalidParams("\(operationName) worktree preparation failed: \(message)")
     }
 
