@@ -200,6 +200,71 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
         XCTAssertTrue(onDisk.messages.contains(where: { $0.rawText == "partial answer" }))
     }
 
+    func testDeletingTheChatDuringTheCorrectiveSaveThrows() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanup() }
+        let seeded = try await fixture.seedFinalizedExchange()
+        var extended = seeded.session
+        extended.messages = extended.messages.map { message in
+            guard message.id == seeded.answerID else { return message }
+            return StoredMessage(
+                id: message.id,
+                isUser: false,
+                rawText: "partial answer",
+                timestamp: message.timestamp,
+                sequenceIndex: message.sequenceIndex,
+                allowedFilePaths: nil,
+                promptTokens: nil,
+                completionTokens: nil,
+                cost: nil,
+                modelName: nil
+            )
+        }
+        extended.messages.append(
+            StoredMessage(
+                id: UUID(),
+                isUser: true,
+                rawText: "follow-up question",
+                timestamp: Date(),
+                sequenceIndex: 2,
+                allowedFilePaths: nil,
+                promptTokens: nil,
+                completionTokens: nil,
+                cost: nil,
+                modelName: nil
+            )
+        )
+        let extendedURL = try await fixture.oracleViewModel.chatData.saveChatSession(extended, for: fixture.workspace)
+        let decoy = ChatSession(workspaceID: fixture.workspace.id, composeTabID: fixture.tabID, name: "Decoy")
+        var saveCount = 0
+
+        do {
+            try await fixture.oracleViewModel.persistContextBuilderTimeoutResponse(
+                "partial answer",
+                queryID: seeded.answerID,
+                sessionID: seeded.session.id,
+                saveSession: { session in
+                    saveCount += 1
+                    // A turn lands during the first save, which forces the corrective save; the
+                    // chat is deleted while that second save is suspended.
+                    if saveCount == 1 {
+                        await fixture.oracleViewModel.loadChatSession(from: extendedURL)
+                    } else {
+                        fixture.oracleViewModel.sessions = [decoy]
+                    }
+                    return try await fixture.oracleViewModel.chatData.saveChatSession(session, for: fixture.workspace)
+                }
+            )
+            XCTFail("Expected missingExactQuery once the chat was deleted during the corrective save")
+        } catch let error as OracleContextBuilderCompletionError {
+            XCTAssertEqual(error, .missingExactQuery)
+        }
+
+        XCTAssertEqual(saveCount, 2)
+        XCTAssertEqual(fixture.oracleViewModel.sessions.map(\.id), [decoy.id])
+        XCTAssertNil(fixture.oracleViewModel.sessions[0].fileURL)
+    }
+
     func testFinalizedAssistantContentReadsTheProcessedMessage() async throws {
         let fixture = try await makeFixture()
         defer { fixture.cleanup() }

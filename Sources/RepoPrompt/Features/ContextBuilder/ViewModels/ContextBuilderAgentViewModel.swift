@@ -4542,7 +4542,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                     ?? session.backgroundPlanResponseText
             },
             cancelStreaming: {
-                await oracleViewModel.cancelStreaming(in: sessionID)
+                // A replacement turn can become the session's active query between the monitor
+                // choosing the timeout and this running; only the timed-out query may be stopped.
+                await oracleViewModel.cancelStreaming(in: sessionID, ifActiveQueryIs: queryID)
             },
             reportPhase: { phase in
                 await progressReporter?(phase)

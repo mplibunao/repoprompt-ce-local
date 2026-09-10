@@ -1650,8 +1650,24 @@ class OracleViewModel: ObservableObject {
         } else {
             try await autosaveSession(sessions[sessionIndex])
         }
-        if let index = sessions.firstIndex(where: { $0.id == sessionID }) {
-            sessions[index].fileURL = correctedURL
+        // The corrective save suspended too, so ownership is proven once more before settlement
+        // may report success for this chat and this answer.
+        guard sessionIDByMessageId[queryID] == sessionID,
+              let settledMessages = messageStore[sessionID],
+              settledMessages.contains(where: { $0.id == queryID && !$0.isUser && $0.isFinalized }),
+              let settledIndex = sessions.firstIndex(where: { $0.id == sessionID })
+        else {
+            if sessions.contains(where: { $0.id == sessionID }) {
+                autosaveChatHistory(for: sessionID, force: true)
+            }
+            throw OracleContextBuilderCompletionError.missingExactQuery
+        }
+        sessions[settledIndex].fileURL = correctedURL
+        // A further turn during the corrective save is mirrored and rewritten in the background;
+        // the awaited saves already guarantee the file holds the answer settlement reports.
+        if settledMessages.map(\.id) != currentMessages.map(\.id) {
+            sessions[settledIndex].messages = Self.storedMessages(from: settledMessages)
+            autosaveChatHistory(for: sessionID, force: true)
         }
     }
 
