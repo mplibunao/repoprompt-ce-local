@@ -196,16 +196,19 @@ final class OracleHeadlessRuntime {
         if didTimeOut {
             await cancelStream(streamID)
             let partial = streamState.current()
-            // With nothing streamed there is no partial answer to preserve, so the ceiling is the
-            // same failure an empty completed response would be.
-            guard !partial.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            // Finalization strips the chat-name control tag, so the partial gets the same treatment;
+            // with nothing substantive left there is no partial answer to preserve and the ceiling
+            // is the same failure an empty completed response would be.
+            var processedPartial = partial.text
+            _ = ChatNameExtractor.extractAndRemove(from: &processedPartial)
+            guard !processedPartial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 if completionPolicy == .contextBuilderStrict {
                     throw OracleContextBuilderCompletionError.emptyProcessedContent
                 }
                 throw ChatToolError.internalError("Stream timed out before completion.")
             }
             let timeoutResult = OraclePartialResponseTimeout(
-                partialText: partial.text,
+                partialText: processedPartial,
                 reason: .overall(seconds: Self.timeInterval(timeout)),
                 errorMessage: "Stream timed out before completion."
             )

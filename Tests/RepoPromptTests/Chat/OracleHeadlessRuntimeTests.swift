@@ -52,7 +52,7 @@ final class OracleHeadlessRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testTimeoutWithoutStreamedTextStaysAFailure() async throws {
+    func testTimeoutWithOnlyAChatNameTagStaysAFailure() async throws {
         let tabID = UUID()
         let streamID = UUID()
         let timeoutGate = OracleHeadlessTimeoutTestGate()
@@ -61,7 +61,7 @@ final class OracleHeadlessRuntimeTests: XCTestCase {
         let runtime = OracleHeadlessRuntime(
             sendPrompt: { _, _ in
                 let stream = AsyncThrowingStream<ChatStreamOutput, Error> { continuation in
-                    continuation.yield(ChatStreamOutput(text: "  \n", reasoning: nil, tokens: ChatTokenInfo(promptTokens: 1)))
+                    continuation.yield(ChatStreamOutput(text: "<chatName=\"Only a name\"/>\n", reasoning: nil, tokens: ChatTokenInfo(promptTokens: 1)))
                 }
                 return (streamID, stream)
             },
