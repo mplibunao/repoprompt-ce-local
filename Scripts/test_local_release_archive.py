@@ -101,7 +101,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         commit: str | None,
         dirty: bool | None = False,
         include_dirty: bool = True,
-        git_status: str | None = None,
+        git_status: str | None = "ok",
     ) -> None:
         resources = self.app / "Contents" / "Resources"
         resources.mkdir(parents=True, exist_ok=True)
@@ -166,7 +166,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         defaults: dict[str, str] | None = None,
         dirty: bool | None = False,
         include_dirty: bool = True,
-        git_status: str | None = None,
+        git_status: str | None = "ok",
     ) -> None:
         self.write_app(
             build="38",
@@ -351,6 +351,15 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
     def test_null_dirty_and_unavailable_git_status_record_unknown_provenance(self) -> None:
         self.write_baseline_fixture(dirty=None, git_status="unavailable")
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertIsNone(manifest["working_journal_schema_version"])
+        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown_provenance")
+
+    def test_clean_dirty_without_git_status_records_unknown_provenance(self) -> None:
+        self.write_baseline_fixture(dirty=False, git_status=None)
 
         self.archive()
         manifest = self.manifest()

@@ -153,7 +153,7 @@ def checksum(name: str) -> str | None:
 
 def archived_working_journal_schema_version(provenance: dict | None) -> tuple[int | None, str]:
     record = provenance or {}
-    if "git_status" in record and record["git_status"] != "ok":
+    if record.get("git_status") != "ok":
         return None, "unknown_provenance"
 
     dirty = record.get("dirty")
