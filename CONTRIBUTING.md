@@ -28,14 +28,39 @@ Work is tracked as issues and pull requests there.
 
 5. Run the push preflight, push the branch, and open a pull request against
    `main` on `mplibunao/repoprompt-ce-local`, with the `pr-ready` result from
-   step 4 recorded in the description. MP merges it with a merge commit after
+   step 4 recorded in the description, one type label (`bug`, `port`,
+   `tooling`, `agent-env`, `documentation`, or `cleanup`), and the `area:`
+   labels for the code it touches. MP merges it with a merge commit after
    reading it and once its checks pass; the agent's work ends at the open pull
    request. Nothing merges into `main` directly.
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
    git push -u origin <branch>
-   gh pr create --base main
+   gh pr create --base main --label bug --label area:mcp
+   ```
+
+   When the change depends on a pull request that is still open, branch from
+   that branch instead of `main`, open the pull request against it, then link
+   the two as a GitHub stack and add the `stacked` label. The stack view shows
+   only this layer's diff, and GitHub retargets the branch onto `main` once
+   the lower pull request merges. The `gh stack` extension installs with
+   `gh extension install github/gh-stack`.
+
+   ```bash
+   gh pr create --base <lower-branch> --label bug --label area:mcp --label stacked
+   gh stack link <lower-pr-number> <this-pr-number>
+   ```
+
+6. The Codex review bot reviews the pull request when it is ready for review.
+   While addressing its findings, convert the pull request to a draft so the
+   open, non-draft list stays a list of reviewable work; reply to and resolve
+   each thread, push the fix, and mark the pull request ready again so the bot
+   reviews the fixed code. Repeat until a pass leaves no findings.
+
+   ```bash
+   gh pr ready <number> --undo   # draft while fixing
+   gh pr ready <number>          # ready again after the fix is pushed
    ```
 
 Ports from upstream follow [`docs/porting.md`](docs/porting.md). Builds are
