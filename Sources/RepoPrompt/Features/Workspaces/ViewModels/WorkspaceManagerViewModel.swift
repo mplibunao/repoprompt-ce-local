@@ -641,6 +641,7 @@ class WorkspaceManagerViewModel: ObservableObject {
     private var lastSavedVersionByWorkspaceID: [UUID: Int] = [:]
     private var domainWorkingCommitTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingDefaultWorkspaceCreationTask: Task<Void, Never>?
+    private var awaitInitialDomainWorkspaceProjection: (@MainActor () async -> Void)?
     private var domainWorkingCommitGeneration: [UUID: UInt64] = [:]
     private var scheduledWorkspaceSaveTasks: [UUID: [UUID: Task<Void, Never>]] = [:]
     private enum AgentAdmissionRecoveryMutation: Hashable {
@@ -1596,6 +1597,20 @@ class WorkspaceManagerViewModel: ObservableObject {
                     continuation.resume()
                 }
             }
+        }
+    }
+
+    func setInitialDomainWorkspaceProjectionWaiter(
+        _ waiter: @escaping @MainActor () async -> Void
+    ) {
+        awaitInitialDomainWorkspaceProjection = waiter
+    }
+
+    /// Presentation projection can also create and adopt Default, so activation must join both bootstrap owners.
+    private func awaitDefaultWorkspaceReadiness() async {
+        await pendingDefaultWorkspaceCreationTask?.value
+        if let awaitInitialDomainWorkspaceProjection {
+            await awaitInitialDomainWorkspaceProjection()
         }
     }
 
@@ -3395,7 +3410,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     @MainActor
     func requestWorkspaceSwitch(to newWorkspace: WorkspaceModel, saveState: Bool = true, reason: String = "userOrInternal") async -> WorkspaceSwitchResult {
-        await pendingDefaultWorkspaceCreationTask?.value
+        await awaitDefaultWorkspaceReadiness()
         let currentBeforeAdmission = workspace(withID: newWorkspace.id)
         if newWorkspace.consolidatedIntoWorkspaceID != nil
             || currentBeforeAdmission?.consolidatedIntoWorkspaceID != nil
@@ -3965,7 +3980,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     @discardableResult
     func switchWorkspace(to newWorkspace: WorkspaceModel, saveState: Bool = true, reason: String = "internal") async -> WorkspaceSwitchResult {
-        await pendingDefaultWorkspaceCreationTask?.value
+        await awaitDefaultWorkspaceReadiness()
         if let concurrentResult = concurrentWorkspaceSwitchResult(requestedWorkspace: newWorkspace) {
             return concurrentResult
         }

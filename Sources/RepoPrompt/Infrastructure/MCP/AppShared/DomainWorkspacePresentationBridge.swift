@@ -212,7 +212,13 @@ final class DomainWorkspacePresentationBridge {
     private weak var workspaceManager: WorkspaceManagerViewModel?
     private let client: DomainWorkspaceAuthorityClient
     private var subscriptionTask: Task<Void, Never>?
+    private var didCompleteInitialProjection = false
+    private var initialProjectionWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastPublicationSequence: UInt64 = 0
+    #if DEBUG
+        private var defaultWorkspaceCreationWillBeginHandlerForTesting:
+            (@MainActor (UUID) async -> Void)?
+    #endif
     private var projectedDigests: [UUID: String] = [:]
     private var projectedHealth: [UUID: DomainAuthorityHealth] = [:]
     private var projectedModels: [UUID: WorkspaceModel] = [:]
@@ -229,6 +235,7 @@ final class DomainWorkspacePresentationBridge {
     func stop() {
         subscriptionTask?.cancel()
         subscriptionTask = nil
+        completeInitialProjection()
         projectedDigests.removeAll(keepingCapacity: false)
         projectedHealth.removeAll(keepingCapacity: false)
         projectedModels.removeAll(keepingCapacity: false)
@@ -259,15 +266,38 @@ final class DomainWorkspacePresentationBridge {
         func suppressSelfEchoForTesting(_ event: DomainWorkspaceEvent) async -> Bool {
             await suppressSelfEcho(for: event)
         }
+
+        func setDefaultWorkspaceCreationWillBeginHandlerForTesting(
+            _ handler: (@MainActor (UUID) async -> Void)?
+        ) {
+            defaultWorkspaceCreationWillBeginHandlerForTesting = handler
+        }
     #endif
+
+    func awaitInitialProjection() async {
+        if didCompleteInitialProjection { return }
+        await withCheckedContinuation { initialProjectionWaiters.append($0) }
+    }
+
+    private func completeInitialProjection() {
+        guard !didCompleteInitialProjection else { return }
+        didCompleteInitialProjection = true
+        let waiters = initialProjectionWaiters
+        initialProjectionWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
 
     func start() {
         guard subscriptionTask == nil else { return }
         subscriptionTask = Task { [weak self, client] in
             let subscription = await client.store.subscribe()
-            guard subscription.snapshot.isBootstrapped else { return }
+            guard subscription.snapshot.isBootstrapped else {
+                self?.completeInitialProjection()
+                return
+            }
             if let self {
                 await projectInitial(subscription.snapshot)
+                completeInitialProjection()
             }
             for await event in subscription.events {
                 guard !Task.isCancelled, let self else { return }
@@ -284,6 +314,11 @@ final class DomainWorkspacePresentationBridge {
             let fileURL = workspaceManager?.workspaceFileURL(for: candidate)
             if let fileURL {
                 do {
+                    #if DEBUG
+                        if let handler = defaultWorkspaceCreationWillBeginHandlerForTesting {
+                            await handler(candidate.id)
+                        }
+                    #endif
                     let outcome = try await client.create(candidate, fileURL: fileURL)
                     if !outcome.isSuccessfulDomainMutation {
                         workspaceManager?.reportDomainAuthorityIssue(outcome, operation: "create_default")

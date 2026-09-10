@@ -47,13 +47,19 @@ import XCTest
             let window = WindowState(domainRuntime: runtime)
             WindowStatesManager.shared.registerWindowState(window)
             GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
-            let persistenceGate = AdmissionSaveGate()
+            let managerPersistenceGate = AdmissionSaveGate()
+            let bridgePersistenceGate = AdmissionSaveGate()
             window.workspaceManager.setDefaultWorkspaceCreationWillBeginHandlerForTesting { _ in
-                await persistenceGate.enterFirstAndWait()
+                await managerPersistenceGate.enterFirstAndWait()
+            }
+            window.setDomainWorkspaceDefaultCreationWillBeginHandlerForTesting { _ in
+                await bridgePersistenceGate.enterFirstAndWait()
             }
             trackCleanup {
-                await persistenceGate.open()
+                await managerPersistenceGate.open()
+                await bridgePersistenceGate.open()
                 window.workspaceManager.setDefaultWorkspaceCreationWillBeginHandlerForTesting(nil)
+                window.setDomainWorkspaceDefaultCreationWillBeginHandlerForTesting(nil)
                 window.beginClose()
                 await window.tearDown()
                 WindowStatesManager.shared.unregisterWindowState(window)
@@ -61,8 +67,10 @@ import XCTest
                 storageOverride.restore()
             }
 
-            while await !(persistenceGate.hasEntered()) {
-                await Task.yield()
+            try await waitUntil("both Default persistence paths to reach their gates") {
+                let managerEntered = await managerPersistenceGate.hasEntered()
+                let bridgeEntered = await bridgePersistenceGate.hasEntered()
+                return managerEntered && bridgeEntered
             }
             let systemWorkspace = try XCTUnwrap(
                 window.workspaceManager.workspaces.first(where: \.isSystemWorkspace)
@@ -71,7 +79,13 @@ import XCTest
             let canonicalBeforeActivation = await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id)
             XCTAssertNil(canonicalBeforeActivation)
 
-            await persistenceGate.open()
+            await managerPersistenceGate.open()
+            try await waitUntil("manager Default persistence to become canonical") {
+                await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id) != nil
+            }
+            XCTAssertNil(window.workspaceManager.activeWorkspace)
+
+            await bridgePersistenceGate.open()
             await window.workspaceManager.awaitInitialized()
 
             XCTAssertEqual(window.workspaceManager.activeWorkspace?.id, systemWorkspace.id)
