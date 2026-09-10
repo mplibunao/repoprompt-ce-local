@@ -19,17 +19,20 @@ Before you start:
    ./Scripts/local_release_archive.sh local/v1.4.0-b37
    ```
 
-2. Compare the archived and candidate working-journal versions before replacing the app.
-   The archived build's number is `working_journal_version` in the new archive's
-   `manifest.json`; `null` means the snapshot contains no working journals. The manifest
-   also lists every observed value in `working_journal_versions` and uses the highest for
-   `working_journal_version` when journals disagree. The candidate build's number is
-   `DomainWorkingJournal.schemaVersion` in
-   [`Sources/RepoPromptDomainRuntime/DomainPersistence.swift`](../Sources/RepoPromptDomainRuntime/DomainPersistence.swift);
-   a journal written by the candidate debug build confirms the same value in its `version`
-   field.
+2. Compare the archived and candidate working-journal schema versions before replacing
+   the app. The archived build's supported version is `working_journal_schema_version` in
+   the new archive's `manifest.json`. The archive reads it from the archived app's
+   provenance commit with
+   `git show <commit>:Sources/RepoPromptDomainRuntime/DomainPersistence.swift`. The candidate
+   build's supported version is `DomainWorkingJournal.schemaVersion` in
+   [`Sources/RepoPromptDomainRuntime/DomainPersistence.swift`](../Sources/RepoPromptDomainRuntime/DomainPersistence.swift).
 
-   If both builds have a journal version and the numbers differ, promotion is blocked until
+   `observed_working_journal_versions` lists the distinct versions found in the shared
+   Application Support snapshot. This field is diagnostic only. A version newer than the
+   archived schema reveals that a candidate debug build has already rewritten the shared
+   profile. The observed values don't change which schema the archived build supports.
+
+   If the archived and candidate schema versions differ, promotion is blocked until
    the release notes include usable rollback instructions. Start with this template and
    replace the placeholders with the release's exact paths or conversion procedure:
 
@@ -151,9 +154,12 @@ The archive lands in `~/Archives/repoprompt-ce/<tag>/` and holds `app.zip`,
 record exists, a `.sha256` sidecar per file, and `manifest.json`. The manifest is written
 last, so its absence marks an incomplete archive and the restore refuses one. It records the
 tag, timestamps, bundle identifier, version, build, signing mode, and the commit read from
-the bundle's provenance file. It also records the highest archived working-journal version
-as `working_journal_version` (`null` when none exist) and all distinct observed values as
-`working_journal_versions`. Re-archiving over a completed archive needs
+the bundle's provenance file. It reads `DomainWorkingJournal.schemaVersion` at that commit
+and records the archived build's supported version as `working_journal_schema_version`.
+The distinct versions found in the Application Support snapshot are diagnostic only and
+appear in `observed_working_journal_versions`. An empty list means no working journals were
+present. The archive fails if it can't resolve exactly one integer schema version from the
+archived commit. Re-archiving over a completed archive needs
 `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`.
 
 `LOCAL_RELEASE_ARCHIVE_EXCLUDES` is a colon-separated list of top-level exclusion rules

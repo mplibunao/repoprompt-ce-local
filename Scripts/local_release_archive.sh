@@ -101,6 +101,7 @@ step "Writing checksums and manifest"
 ARCHIVE_TAG="$TAG" \
     ARCHIVE_DIR="$ARCHIVE_DIR" \
     ARCHIVE_APP_PATH="$LOCAL_PRODUCTION_APP" \
+    ARCHIVE_REPOSITORY_PATH="${LOCAL_RELEASE_SOURCE_REPOSITORY:-$LOCAL_RELEASE_ROOT_DIR}" \
     ARCHIVE_STATE_PATH="$LOCAL_APP_SUPPORT_DIR" \
     ARCHIVE_DEFAULTS_DOMAIN="$LOCAL_DEFAULTS_DOMAIN" \
     ARCHIVE_IDENTITY_PATH="$LOCAL_SIGNING_IDENTITY_REGISTRY_PATH" \
@@ -114,12 +115,15 @@ from pathlib import Path, PurePosixPath
 import json
 import os
 import plistlib
+import re
+import subprocess
 import tarfile
 import time
 from uuid import UUID
 
 archive_dir = Path(os.environ["ARCHIVE_DIR"])
 app_path = Path(os.environ["ARCHIVE_APP_PATH"])
+repository_path = Path(os.environ["ARCHIVE_REPOSITORY_PATH"])
 
 
 def info_plist_value(key: str) -> str | None:
@@ -147,7 +151,45 @@ def checksum(name: str) -> str | None:
     return sidecar.read_text(encoding="utf-8").split(maxsplit=1)[0]
 
 
-def working_journal_versions() -> list[int]:
+def archived_working_journal_schema_version(provenance: dict | None) -> int:
+    commit = (provenance or {}).get("commit")
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None:
+        raise SystemExit(
+            "ERROR: archived app provenance has no 40-character commit SHA; "
+            "cannot determine its working-journal schema version."
+        )
+
+    source_path = "Sources/RepoPromptDomainRuntime/DomainPersistence.swift"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repository_path), "show", "--no-ext-diff", "--no-textconv", f"{commit}:{source_path}"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise SystemExit(f"ERROR: could not run git to read {source_path} at archived commit {commit}: {error}") from error
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git show failed"
+        raise SystemExit(f"ERROR: could not read {source_path} at archived commit {commit}: {detail}")
+
+    declarations = re.findall(
+        r"(?ms)^struct DomainWorkingJournal: Codable \{\n(?P<body>.*?)(?=^\})",
+        result.stdout,
+    )
+    matches = [
+        match
+        for declaration in declarations
+        for match in re.findall(r"(?m)^[ \t]+static let schemaVersion[ \t]*=[ \t]*([0-9]+)[ \t]*$", declaration)
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"ERROR: expected exactly one integer DomainWorkingJournal.schemaVersion in {source_path} "
+            f"at archived commit {commit}; found {len(matches)}."
+        )
+    return int(matches[0])
+
+
+def observed_working_journal_versions() -> list[int]:
     versions: set[int] = set()
     with tarfile.open(archive_dir / "application-support.tar.gz", "r:gz") as state_archive:
         for member in state_archive.getmembers():
@@ -187,13 +229,14 @@ if os.environ["ARCHIVE_IDENTITY_PRESENT"] == "1":
     files.append("local-signing-identity-v1.json")
 
 provenance = bundle_provenance()
-journal_versions = working_journal_versions()
+journal_schema_version = archived_working_journal_schema_version(provenance)
+observed_journal_versions = observed_working_journal_versions()
 now = time.time()
 manifest = {
     "schemaVersion": 1,
     "tag": os.environ["ARCHIVE_TAG"],
-    "working_journal_version": max(journal_versions) if journal_versions else None,
-    "working_journal_versions": journal_versions,
+    "working_journal_schema_version": journal_schema_version,
+    "observed_working_journal_versions": observed_journal_versions,
     "archivedAtEpoch": now,
     "archivedAtISO": datetime.fromtimestamp(now, timezone.utc).astimezone().isoformat(timespec="seconds"),
     "app": {
@@ -202,7 +245,6 @@ manifest = {
         "shortVersion": info_plist_value("CFBundleShortVersionString"),
         "build": info_plist_value("CFBundleVersion"),
         "signingMode": info_plist_value("RepoPromptSigningMode"),
-        # An installed bundle may not carry the provenance file; the commit is null then.
         "commit": (provenance or {}).get("commit"),
         "provenanceBuildTimeISO": (provenance or {}).get("buildTimeISO"),
     },

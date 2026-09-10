@@ -26,7 +26,7 @@ RESTORE_SCRIPT = SCRIPT_DIR / "local_release_restore.sh"
 ENV_SCRIPT = SCRIPT_DIR / "local_release_env.sh"
 DISPLAY_NAME = "RepoPrompt CE"
 TAG = "local/v1.4.0-b99"
-COMMIT = "0123456789abcdef0123456789abcdef01234567"
+JOURNAL_SOURCE_PATH = Path("Sources/RepoPromptDomainRuntime/DomainPersistence.swift")
 
 
 def tree_snapshot(root: Path) -> dict[str, str | None]:
@@ -50,8 +50,49 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.identity_path = self.state / "local-signing-identity-v1.json"
         self.defaults_domain.parent.mkdir(parents=True, exist_ok=True)
         self.process_token = f"repoprompt-ce-guard-{self.tmp.name}"
+        self.source_repository = self.tmp / "source-repository"
+        subprocess.run(["git", "init", "-q", str(self.source_repository)], check=True, capture_output=True)
+        self.archived_commit = self.commit_journal_source(
+            "struct DomainWorkingJournal: Codable {\n"
+            "    static let schemaVersion = 1\n"
+            "}\n"
+        )
 
     # -- fixtures ---------------------------------------------------------------
+
+    def commit_journal_source(self, source: str) -> str:
+        path = self.source_repository / JOURNAL_SOURCE_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(self.source_repository), "add", str(JOURNAL_SOURCE_PATH)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.source_repository),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "journal schema fixture",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(self.source_repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
 
     def write_app(self, *, build: str, commit: str | None) -> None:
         resources = self.app / "Contents" / "Resources"
@@ -110,7 +151,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             self.run_defaults(["write", str(self.defaults_domain), key, "-string", value])
 
     def write_baseline_fixture(self, *, defaults: dict[str, str] | None = None) -> None:
-        self.write_app(build="38", commit=COMMIT)
+        self.write_app(build="38", commit=self.archived_commit)
         self.write_state("original")
         effective_defaults = {"UpdateChannel": "stable"} if defaults is None else defaults
         self.write_defaults(effective_defaults)
@@ -136,6 +177,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
                 "LOCAL_DEFAULTS_DOMAIN": str(self.defaults_domain),
                 "LOCAL_RELEASE_ARCHIVE_ROOT": str(self.archive_root),
                 "LOCAL_SIGNING_IDENTITY_REGISTRY_PATH": str(self.identity_path),
+                "LOCAL_RELEASE_SOURCE_REPOSITORY": str(self.source_repository),
                 # A per-test token so the guard runs for real without matching the
                 # operator's live RepoPrompt processes.
                 "LOCAL_RELEASE_RUNNING_PROCESS_PATTERNS": self.process_token,
@@ -207,7 +249,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
         self.assertEqual(manifest["tag"], TAG)
         self.assertEqual(manifest["app"]["build"], "38")
-        self.assertEqual(manifest["app"]["commit"], COMMIT)
+        self.assertEqual(manifest["app"]["commit"], self.archived_commit)
         self.assertEqual(manifest["app"]["signingMode"], "local-self-signed")
         self.assertEqual(
             manifest["applicationSupport"]["excludedNames"],
@@ -219,41 +261,64 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         for name in ("app.zip", "application-support.tar.gz", "defaults.plist"):
             self.assertEqual(len(manifest["files"][name]["sha256"]), 64, name)
 
-    def test_manifest_records_maximum_and_distinct_working_journal_versions(self) -> None:
+    def test_manifest_separates_archived_schema_from_observed_journal_versions(self) -> None:
         self.write_baseline_fixture()
         journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
         journals.mkdir(parents=True)
-        for name, version in (
-            ("00000000-0000-0000-0000-000000000001.json", 1),
-            ("00000000-0000-0000-0000-000000000002.json", 3),
-            ("00000000-0000-0000-0000-000000000003.json", 1),
+        for name in (
+            "00000000-0000-0000-0000-000000000001.json",
+            "00000000-0000-0000-0000-000000000002.json",
         ):
-            (journals / name).write_text(json.dumps({"version": version}), encoding="utf-8")
+            (journals / name).write_text(json.dumps({"version": 2}), encoding="utf-8")
 
         self.archive()
         manifest = self.manifest()
 
-        self.assertEqual(manifest["working_journal_version"], 3)
-        self.assertEqual(manifest["working_journal_versions"], [1, 3])
+        self.assertEqual(manifest["working_journal_schema_version"], 1)
+        self.assertEqual(manifest["observed_working_journal_versions"], [2])
 
-    def test_manifest_records_null_when_no_working_journal_exists(self) -> None:
+    def test_manifest_records_no_observed_versions_when_no_working_journal_exists(self) -> None:
         self.write_baseline_fixture()
 
         self.archive()
         manifest = self.manifest()
 
-        self.assertIsNone(manifest["working_journal_version"])
-        self.assertEqual(manifest["working_journal_versions"], [])
+        self.assertEqual(manifest["working_journal_schema_version"], 1)
+        self.assertEqual(manifest["observed_working_journal_versions"], [])
 
-    def test_missing_bundle_provenance_records_commit_as_null(self) -> None:
+    def test_missing_or_ambiguous_archived_schema_version_refuses_archive(self) -> None:
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
+        fixtures = {
+            "missing": "struct DomainWorkingJournal: Codable {\n}\n",
+            "ambiguous": (
+                "struct DomainWorkingJournal: Codable {\n"
+                "    static let schemaVersion = 1\n"
+                "    static let schemaVersion = 2\n"
+                "}\n"
+            ),
+        }
+        for label, source in fixtures.items():
+            with self.subTest(label=label):
+                commit = self.commit_journal_source(source)
+                self.write_app(build="37", commit=commit)
+
+                result = self.run_script(ARCHIVE_SCRIPT)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("expected exactly one integer DomainWorkingJournal.schemaVersion", result.stdout + result.stderr)
+                self.assertFalse((self.archive_root / TAG / "manifest.json").exists())
+
+    def test_missing_bundle_provenance_refuses_archive(self) -> None:
         self.write_app(build="37", commit=None)
         self.write_state("original")
         self.write_defaults({"UpdateChannel": "stable"})
 
-        self.archive()
+        result = self.run_script(ARCHIVE_SCRIPT)
 
-        self.assertIsNone(self.manifest()["app"]["commit"])
-        self.assertEqual(self.manifest()["app"]["build"], "37")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("archived app provenance has no 40-character commit SHA", result.stdout + result.stderr)
+        self.assertFalse((self.archive_root / TAG / "manifest.json").exists())
 
     def test_archive_excludes_debug_apps_and_rollbacks_from_the_state_tarball(self) -> None:
         self.write_baseline_fixture()
