@@ -31,6 +31,23 @@ fail() {
     exit 1
 }
 
+# A trailing `*` is a prefix rule for top-level Application Support names. Other rules
+# match one exact name, so shell pattern characters elsewhere have no special meaning.
+matches_excluded_state_name() {
+    local candidate="$1"
+    shift
+    local rule prefix
+    for rule in "$@"; do
+        if [[ "$rule" == *\* ]]; then
+            prefix="${rule%\*}"
+            [[ "$candidate" == "$prefix"* ]] && return 0
+        elif [[ "$candidate" == "$rule" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 step() {
     printf '\n==> %s\n' "$*"
     if [[ -n "$LOCAL_RELEASE_ABORT_AT_STEP" && "$*" == *"$LOCAL_RELEASE_ABORT_AT_STEP"* ]]; then

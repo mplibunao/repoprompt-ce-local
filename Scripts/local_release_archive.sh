@@ -8,10 +8,9 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/local_release_env.sh"
 
 LOCAL_RELEASE_ARCHIVE_OVERWRITE="${LOCAL_RELEASE_ARCHIVE_OVERWRITE:-0}"
-# Exact top-level names inside the Application Support directory that are left out of the
-# state tarball. The restore reads the effective list back from manifest.json, so widening
-# this needs no change on the restore side.
-IFS=':' read -r -a EXCLUDED_STATE_NAMES <<<"${LOCAL_RELEASE_ARCHIVE_EXCLUDES:-DebugApps:Rollbacks}"
+# Top-level Application Support entries left out of the state tarball. A trailing `*`
+# matches names by prefix; every other rule is an exact name.
+IFS=':' read -r -a EXCLUDED_STATE_NAMES <<<"${LOCAL_RELEASE_ARCHIVE_EXCLUDES:-DebugApps:Rollbacks:Conductor:DebugApps-*}"
 
 APP_ARCHIVE_NAME="app.zip"
 STATE_ARCHIVE_NAME="application-support.tar.gz"
@@ -28,8 +27,8 @@ if [[ -e "$MANIFEST_PATH" && "$LOCAL_RELEASE_ARCHIVE_OVERWRITE" != "1" ]]; then
     fail "Archive $ARCHIVE_DIR already holds a manifest. Set LOCAL_RELEASE_ARCHIVE_OVERWRITE=1 to replace it."
 fi
 
-# Exclusions are exact top-level names, so the tarball is built from an explicit operand
-# list rather than tar patterns, which would also match the same name nested deeper.
+# An explicit operand list confines exclusion matching to top-level entries and keeps
+# identically named nested content in the archive.
 ENTRY_LIST="$(mktemp "${TMPDIR:-/tmp}/repoprompt-ce-archive-entries.XXXXXX")"
 trap 'rm -f "$ENTRY_LIST"' EXIT
 find "$LOCAL_APP_SUPPORT_DIR" -mindepth 1 -maxdepth 1 -print0 >"$ENTRY_LIST" ||
@@ -37,11 +36,7 @@ find "$LOCAL_APP_SUPPORT_DIR" -mindepth 1 -maxdepth 1 -print0 >"$ENTRY_LIST" ||
 TAR_OPERANDS=()
 while IFS= read -r -d '' entry; do
     base="${entry##*/}"
-    excluded=0
-    for name in ${EXCLUDED_STATE_NAMES[@]+"${EXCLUDED_STATE_NAMES[@]}"}; do
-        [[ "$base" != "$name" ]] || excluded=1
-    done
-    (( excluded )) || TAR_OPERANDS+=("./$base")
+    matches_excluded_state_name "$base" "${EXCLUDED_STATE_NAMES[@]}" || TAR_OPERANDS+=("./$base")
 done <"$ENTRY_LIST"
 (( ${#TAR_OPERANDS[@]} > 0 )) || fail "Every top-level entry of $LOCAL_APP_SUPPORT_DIR is excluded; nothing to archive."
 

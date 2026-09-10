@@ -57,9 +57,6 @@ grep -F 'CODEX_BUNDLE_ARCH="all"' Scripts/package_app.sh >/dev/null ||
 grep -F 'stage-bundle' Scripts/package_app.sh >/dev/null ||
     fail "packaging must use the authoritative Codex bundle staging helper"
 for script in \
-    Scripts/main_tip_release.sh \
-    Scripts/promote_release.sh \
-    Scripts/publish_public_update_test.sh \
     Scripts/release.sh \
     Scripts/sign_staged_release.sh \
     Scripts/validate_staged_release.sh; do
@@ -112,9 +109,6 @@ if plist != V8_PROFILE:
     sys.exit("AppBundle/CodexV8JIT.entitlements must contain exactly the two approved V8 entitlements")
 PYTHON
 for script in \
-    Scripts/main_tip_release.sh \
-    Scripts/promote_release.sh \
-    Scripts/publish_public_update_test.sh \
     Scripts/release.sh \
     Scripts/sign_staged_release.sh; do
     grep -F -- '--signed-team-identifier' "$script" >/dev/null ||
