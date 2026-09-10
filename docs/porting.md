@@ -40,7 +40,7 @@ Use the read-only reference clone at:
    Upstream-Ref: upstream commit <sha>
    ```
 
-8. Run the `pr-ready` lane while the branch still has no configured upstream, so it validates the whole port against `main` (see the comparison-base procedure in `.agents/skills/rpce-contribution-check/SKILL.md`). Then run the push preflight, push the branch, and open a pull request against `main`; MP merges it with a merge commit after reading it:
+8. Run the `pr-ready` lane while the branch still has no configured upstream, so it validates the whole port against `main` (see the comparison-base procedure in `.agents/skills/rpce-contribution-check/SKILL.md`). Then run the push preflight, push the branch, and open a pull request against `main` with the `pr-ready` result recorded in its description; MP merges it with a merge commit after reading it and once its checks pass:
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready

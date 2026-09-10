@@ -27,9 +27,10 @@ Work is tracked as issues and pull requests there.
    ```
 
 5. Run the push preflight, push the branch, and open a pull request against
-   `main` on `mplibunao/repoprompt-ce-local`. MP merges it with a merge commit
-   after reading it; the agent's work ends at the open pull request. Nothing
-   merges into `main` directly.
+   `main` on `mplibunao/repoprompt-ce-local`, with the `pr-ready` result from
+   step 4 recorded in the description. MP merges it with a merge commit after
+   reading it and once its checks pass; the agent's work ends at the open pull
+   request. Nothing merges into `main` directly.
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
