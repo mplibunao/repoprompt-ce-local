@@ -189,8 +189,9 @@ def archived_working_journal_schema_version(provenance: dict | None) -> int:
     return int(matches[0])
 
 
-def observed_working_journal_versions() -> list[int]:
+def observed_working_journal_versions() -> tuple[list[int], list[str]]:
     versions: set[int] = set()
+    unreadable: list[str] = []
     with tarfile.open(archive_dir / "application-support.tar.gz", "r:gz") as state_archive:
         for member in state_archive.getmembers():
             path = PurePosixPath(member.name.removeprefix("./"))
@@ -208,20 +209,26 @@ def observed_working_journal_versions() -> list[int]:
                 UUID(path.stem)
             except ValueError:
                 continue
+            # Snapshot health is diagnostic and must not invalidate an otherwise usable
+            # rollback unit.
             if not member.isfile():
-                raise SystemExit(f"ERROR: archived working journal {path} is not a regular file.")
+                unreadable.append(str(path))
+                continue
             handle = state_archive.extractfile(member)
             if handle is None:
-                raise SystemExit(f"ERROR: could not read archived working journal {path}.")
+                unreadable.append(str(path))
+                continue
             try:
                 payload = json.load(handle)
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise SystemExit(f"ERROR: could not parse archived working journal {path}: {error}") from error
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                unreadable.append(str(path))
+                continue
             version = payload.get("version") if isinstance(payload, dict) else None
             if type(version) is not int:
-                raise SystemExit(f"ERROR: archived working journal {path} has no integer version.")
+                unreadable.append(str(path))
+                continue
             versions.add(version)
-    return sorted(versions)
+    return sorted(versions), sorted(unreadable)
 
 
 files = ["app.zip", "application-support.tar.gz", "defaults.plist"]
@@ -230,13 +237,14 @@ if os.environ["ARCHIVE_IDENTITY_PRESENT"] == "1":
 
 provenance = bundle_provenance()
 journal_schema_version = archived_working_journal_schema_version(provenance)
-observed_journal_versions = observed_working_journal_versions()
+observed_journal_versions, unreadable_journals = observed_working_journal_versions()
 now = time.time()
 manifest = {
     "schemaVersion": 1,
     "tag": os.environ["ARCHIVE_TAG"],
     "working_journal_schema_version": journal_schema_version,
     "observed_working_journal_versions": observed_journal_versions,
+    "unreadable_working_journals": unreadable_journals,
     "archivedAtEpoch": now,
     "archivedAtISO": datetime.fromtimestamp(now, timezone.utc).astimezone().isoformat(timespec="seconds"),
     "app": {

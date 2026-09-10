@@ -277,6 +277,26 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(manifest["working_journal_schema_version"], 1)
         self.assertEqual(manifest["observed_working_journal_versions"], [2])
 
+    def test_manifest_records_unreadable_journal_without_aborting_archive(self) -> None:
+        self.write_baseline_fixture()
+        journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
+        journals.mkdir(parents=True)
+        valid_name = "00000000-0000-0000-0000-000000000001.json"
+        unreadable_name = "00000000-0000-0000-0000-000000000002.json"
+        (journals / valid_name).write_text(json.dumps({"version": 2}), encoding="utf-8")
+        (journals / unreadable_name).write_text('{"version":', encoding="utf-8")
+
+        self.archive()
+        manifest_path = self.archive_root / TAG / "manifest.json"
+        manifest = self.manifest()
+
+        self.assertTrue(manifest_path.is_file())
+        self.assertEqual(manifest["observed_working_journal_versions"], [2])
+        self.assertEqual(
+            manifest["unreadable_working_journals"],
+            [f"DomainRuntime/v1/release-profile/working-journals/{unreadable_name}"],
+        )
+
     def test_manifest_records_no_observed_versions_when_no_working_journal_exists(self) -> None:
         self.write_baseline_fixture()
 
@@ -285,6 +305,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
         self.assertEqual(manifest["working_journal_schema_version"], 1)
         self.assertEqual(manifest["observed_working_journal_versions"], [])
+        self.assertEqual(manifest["unreadable_working_journals"], [])
 
     def test_missing_or_ambiguous_archived_schema_version_refuses_archive(self) -> None:
         self.write_state("original")

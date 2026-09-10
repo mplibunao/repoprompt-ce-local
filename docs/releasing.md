@@ -157,8 +157,10 @@ tag, timestamps, bundle identifier, version, build, signing mode, and the commit
 the bundle's provenance file. It reads `DomainWorkingJournal.schemaVersion` at that commit
 and records the archived build's supported version as `working_journal_schema_version`.
 The distinct versions found in the Application Support snapshot are diagnostic only and
-appear in `observed_working_journal_versions`. An empty list means no working journals were
-present. The archive fails if it can't resolve exactly one integer schema version from the
+appear in `observed_working_journal_versions`. Journals that can't supply an integer version
+appear by archive-relative path in `unreadable_working_journals` without blocking the
+archive. An empty list in either field means it found none. The archive fails if it can't
+resolve exactly one integer schema version from the
 archived commit. Re-archiving over a completed archive needs
 `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`.
 
