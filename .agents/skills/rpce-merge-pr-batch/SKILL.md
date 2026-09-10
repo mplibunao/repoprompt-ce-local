@@ -1,11 +1,11 @@
 ---
 name: rpce-merge-pr-batch
-description: "Safely process an explicitly ordered batch of RepoPrompt CE pull requests end to end: preserve a dirty original checkout, isolate each PR in an external disposable worktree, use window- and context-scoped CE rpce-cli Agent Mode review, repair and validate, require exact-head hosted checks, merge with merge commits, and clean up. Optionally verify or install a final cloud artifact only when separately requested. Use when an authorized maintainer asks to integrate and merge one or more ordered RepoPrompt CE PRs. Do not use for review-only triage, release-only work, or deployment-only work."
+description: "Safely integrate and merge an explicitly ordered batch of RepoPrompt CE pull requests into main on mplibunao/repoprompt-ce-local with isolated review, validation, exact-head CI, and cleanup."
 ---
 
 # Merge RepoPrompt CE PR Batch
 
-Process PRs sequentially. Every verified merge becomes the base for the next PR.
+Process pull requests for `mplibunao/repoprompt-ce-local` sequentially. Every verified merge to `main` becomes the base for the next pull request.
 
 ## Establish Constraints
 
@@ -36,9 +36,9 @@ Use current `gh pr view`, `gh api graphql`, and `git fetch` results with an expl
 - unresolved review threads
 - hosted check status
 - whether the head branch can be updated or deleted
-- whether the author satisfies the contributor gate from the trusted base or has repository write access
+- whether the author has repository write access when head updates or cleanup depend on it
 
-Require the canonical RepoPrompt CE repository and `main` base unless the user explicitly authorizes a different base. Do not trust a stale PR page, prior fetch, implicit `gh` repository, or branch name when an exact SHA is available.
+Require `mplibunao/repoprompt-ce-local` as the canonical base repository and `main` as the base ref. Stop if either differs. Do not trust a stale PR page, prior fetch, implicit `gh` repository, or branch name when an exact SHA is available.
 
 ### 2. Isolate
 
@@ -55,7 +55,7 @@ Before executing contributor-controlled code:
 
 ### 3. Rebase
 
-Verify the trusted base remote URL, fetch the authorized base ref, record its SHA as `VALIDATED_BASE`, and rebase the PR head onto it in the disposable worktree.
+Verify that `origin` points to `github.com/mplibunao/repoprompt-ce-local`, fetch `origin/main`, record its SHA as `VALIDATED_BASE`, and rebase the PR head onto it in the disposable worktree.
 
 - Resolve conflicts in sympathy with current `main`.
 - Preserve PR intent and avoid unrelated refactors.
@@ -82,7 +82,7 @@ Keep every session bound to the recorded window and context, and resolve all pen
 
 Follow the trusted-base contribution-check validation matrix and use daemon-coordinated lanes. At minimum run `git diff --check` and trusted-base repository guardrails. Use `make guardrails` only after verifying that its Makefile and invoked scripts are unchanged from `VALIDATED_BASE`; otherwise use trusted copies in the approved isolated environment or stop for maintainer review.
 
-Run the required focused test, build, provider, MCP, packaging, release, or smoke lanes for the changed boundary. Default `preflight.sh push` is only the immediate push safety gate; do not treat it as heavyweight validation evidence. Use focused trusted-base matrix commands, or `.agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready` when a computed-outgoing-range path-selected local PR-ready lane is required. If you edit Swift, run the repository formatter as required by `AGENTS.md`, inspect any formatter changes, then run the required style checks. Do not substitute stale evidence or uncoordinated commands while the daemon is available. Do not fan out local heavyweight Swift/Xcode validation across multiple disposable worktrees for speed; conductor's global heavy slot is intended to serialize those jobs across worktrees, and `global-wait` should be recorded as queueing rather than treated as a hang.
+Run the required focused test, build, provider, MCP, packaging, release, or smoke lanes as additional evidence for the changed boundary. If you edit Swift, run the repository formatter as required by `AGENTS.md`, inspect any formatter changes, then run the required style checks. Do not substitute stale evidence or uncoordinated commands while the daemon is available. Do not fan out local heavyweight Swift/Xcode validation across multiple disposable worktrees for speed; conductor's global heavy slot is intended to serialize those jobs across worktrees, and `global-wait` should be recorded as queueing rather than treated as a hang.
 
 Do not stop, replace, launch, or relaunch the visible app during PR validation. A non-disruptive smoke lane is allowed when required by the validation matrix and an appropriate app is already running.
 
@@ -94,17 +94,19 @@ Stage only intended files and inspect the staged diff. Use the trusted-base pref
 .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
 ```
 
-Rerun commit preflight after every staging change. After committing, require a clean worktree and immediately before each push run:
+Rerun commit preflight after every staging change. After committing, require a clean worktree. Before the final push and merge, run the mandatory `pr-ready` lane on the same `HEAD`, following `$rpce-contribution-check`'s [comparison-base procedure](../rpce-contribution-check/SKILL.md#comparison-base). Focused checks and the push lane are not substitutes for `pr-ready`.
+
+Immediately before each push run:
 
 ```bash
 .agents/skills/rpce-contribution-check/scripts/preflight.sh push
 ```
 
-Push only the intended explicit remote refspec. A fresh `preflight.sh pr-ready` run on the same clean `HEAD` includes push safety plus computed-outgoing-range path-selected heavyweight lanes, but release, smoke, already-pushed PR-base comparison, and destructive-approval requirements remain separate. After the final push, capture the PR's remote head SHA as `VALIDATED_HEAD` and require it to equal local `HEAD`.
+Push only the intended explicit remote refspec. After the final push, capture the PR's remote head SHA as `VALIDATED_HEAD` and require it to equal local `HEAD`.
 
 ### 7. Require Fresh Hosted Checks
 
-Require a fresh successful PR workflow run for the exact `VALIDATED_BASE` + `VALIDATED_HEAD` pair. For workflows that test the raw head, require the check-run SHA to equal `VALIDATED_HEAD`. For this repository's `pull_request` workflows that test GitHub's synthetic merge ref, record the test-merge SHA and verify it represents parents `VALIDATED_BASE` and `VALIDATED_HEAD`. Do not reuse branch-level summaries, merge refs, or checks from a superseded base, rebase, or push.
+Require a fresh successful **CI** run from `.github/workflows/ci.yml` for the exact `VALIDATED_BASE` + `VALIDATED_HEAD` pair. When the pull request changes a path selected by `.github/workflows/xcode-workspace.yml`, also require a fresh successful **Xcode Workspace Validation** run. For checks that test the raw head, require the check-run SHA to equal `VALIDATED_HEAD`. For checks that test GitHub's synthetic merge ref, record the test-merge SHA and verify it represents parents `VALIDATED_BASE` and `VALIDATED_HEAD`. Do not reuse branch-level summaries, merge refs, or checks from a superseded base, rebase, or push.
 
 If either the PR head or base changes at any time, invalidate the evidence and repeat local review/validation as appropriate.
 
@@ -127,7 +129,7 @@ Immediately before merging:
 Use normal merge-commit strategy with an atomic head guard:
 
 ```bash
-gh pr merge <number> -R "$BASE_REPO" --merge --match-head-commit "$VALIDATED_HEAD"
+gh pr merge <number> --repo mplibunao/repoprompt-ce-local --merge --match-head-commit "$VALIDATED_HEAD"
 ```
 
 Do not use `--admin` by default. Use it only for a documented policy-blocking condition after independent review, green exact-head checks, and immediate explicit approval.
@@ -154,19 +156,6 @@ Before cleanup, ensure all Agent Mode sessions are terminal, the disposable work
 
 Do not silently expand the ordered batch. If work exposes an unrelated repository defect, propose a focused follow-up PR and obtain authorization before creating or merging it. Apply the same isolation, review, validation, exact-head merge, and cleanup rules.
 
-## Deploy The Final Cloud Artifact
-
-Perform this section only when separately requested. Read `$rpce-release`, `docs/releasing.md`, and the workflow from the final `main` commit before acting.
-
-1. Wait until every authorized PR is merged and record the final `main` merge commit.
-2. Identify the requested workflow run whose `headSha` exactly equals that commit and require the run to succeed.
-3. Download the specifically requested artifact; do not substitute a local build or assume a historical artifact name.
-4. Require the workflow inputs, release/tag attestation when applicable, artifact manifest, and embedded source identity to bind the artifact to that same final commit; `headSha` alone is not sufficient proof for every workflow-dispatch artifact.
-5. Verify checksums, external artifact manifest, bundle identifier, version/build, architecture set, helper layout, and code signature with tooling from the same final commit.
-6. Treat the ad-hoc **Release Candidate** artifact as verification-only by default; repository policy directs runnable local testing to the self-signed local-production path, while public deployment requires a signed and notarized release artifact. If the maintainer explicitly requests installation of that exact cloud candidate after being warned that it is ad-hoc and not notarized, treat it as a local test deployment rather than a distributable release.
-7. For an explicitly authorized artifact installation, fully stage and verify it before requesting immediate approval to stop or replace the visible app. Retain a rollback copy, replace atomically, then request approval immediately before launch/relaunch and verify the installed app. Restore or preserve the rollback copy on any post-replacement failure.
-8. Be explicit about signing, notarization, provenance, and any residual risk.
-
 ## Final Audit
 
 Before reporting completion:
@@ -176,6 +165,5 @@ Before reporting completion:
 - list any branch or worktree that remains and why
 - confirm no temporary Agent Mode sessions remain active
 - remove all temporary RepoPrompt workspaces/contexts and removable worktrees
-- remove artifact staging and rollback directories only after verification succeeds
 - compare the original checkout's current branch, HEAD, and dirty-state record with the initial snapshot without modifying it; report concurrent or unexpected deltas rather than restoring them
-- report local validation, hosted checks, approvals, cleanup, deployment identity, and residual risks
+- report local validation, hosted checks, approvals, cleanup, and residual risks

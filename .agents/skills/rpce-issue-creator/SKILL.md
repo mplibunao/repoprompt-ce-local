@@ -5,16 +5,16 @@ description: Draft, deduplicate, review, refine, or file maintainer-friendly Git
 
 # RepoPrompt CE Issue Creator
 
-Create concise, actionable issues for `repoprompt/repoprompt-ce`. Remove private or identifying data from source material before using it in a draft. Ask only for missing details that materially affect reproduction, routing, or acceptance.
+Create concise, actionable issues for `mplibunao/repoprompt-ce-local`. Remove private or identifying data from source material before using it in a draft. Ask only for missing details that materially affect reproduction, routing, or acceptance.
 
 ## Workflow
 
 1. Classify the request as a bug, regression, enhancement, task, docs issue, investigation follow-up, or question.
-2. Search open and closed issues in `repoprompt/repoprompt-ce` before drafting. Link likely duplicates; if the report is distinct, state the differing symptom, environment, version, or commit. Do not file blindly.
+2. Search open and closed issues in `mplibunao/repoprompt-ce-local` before drafting. Link likely duplicates; if the report is distinct, state the differing symptom, environment, version, or commit. Do not file blindly.
 3. Draft the issue using the content and CE-specific evidence guidance below.
 4. Review the complete draft and remove or redact all private and identifying data.
 5. Show the user the exact final title, body, and proposed labels. Obtain immediate explicit approval to file; approval to investigate or draft is not approval to create the issue.
-6. Only after approval, run `gh issue create --repo repoprompt/repoprompt-ce` with the reviewed payload. Report the URL. Note that issues from unapproved contributors may be auto-closed for maintainer review under `CONTRIBUTING.md`.
+6. Only after approval, run `gh issue create --repo mplibunao/repoprompt-ce-local` with the reviewed payload. Report the URL.
 
 ## Write Actionable Content
 
@@ -43,6 +43,10 @@ Route the affected surface without guessing a fix:
 - Use the minimum bounded evidence needed: command plus result, a short redacted excerpt, counts, timings, or hashes. Never paste entire daemon logs, crash dumps, generated diagnostics, or raw command output.
 - Treat DEBUG-only MCP diagnostics such as `__repoprompt_debug_diagnostics` and diagnostic `app_settings` as sensitive. Prefer structured bounded snapshots, and do not assume built-in redaction makes raw output publishable.
 - Do not enable raw provider logging or launch, relaunch, or stop a visible app merely to draft an issue. If local raw capture is genuinely necessary, require separate approval where repository rules demand it, keep it bounded and owner-only, redact the distilled evidence, and clean up the capture.
+
+## Reference Upstream Only as Plain Text
+
+GitHub posts a "mentioned this" event on the referenced issue whenever a public repository's issue, comment, commit message, or pull request cites it as `owner/repo#N` or by URL. Write upstream RepoPrompt CE issues and pull requests as plain text instead, for example `upstream issue 803` or `upstream PR 957`, in titles, bodies, comments, commit messages, and pull request text. Bare `#N` refers to this repository's own tracker and stays reserved for it.
 
 ## Remove Private Data Before Filing
 

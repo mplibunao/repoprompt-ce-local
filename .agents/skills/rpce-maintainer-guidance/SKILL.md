@@ -9,6 +9,12 @@ Use this skill as a project decision guide, not as an imitation of a person. Do 
 
 Read [references/guidance-sources.md](references/guidance-sources.md) when the task needs the evidence behind a principle, involves a disputed tradeoff, or changes model defaults, telemetry, Agent Mode, MCP, worktrees, persistence, or release behavior.
 
+## Distribution shape
+
+When fixing behavior that upstream has also fixed or touched, read the upstream change in `/Users/mp/Projects/personal/repoprompt-ce-upstream-readonly` first. Aim for a comparable size and mechanism, re-implemented from `main` following [`docs/porting.md`](../../../docs/porting.md).
+
+A fork-only change that introduces a persistent format, background process, or coordination mechanism needs a written reason before it merges.
+
 ## Decision workflow
 
 1. Define the observable user impact and the invariant that should hold.
