@@ -11,8 +11,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/local_release_env.sh"
 REQUIRED_ARCHIVE_FILES=("app.zip" "application-support.tar.gz" "defaults.plist")
 
 RESCUE_DIR=""
+RESCUED_ENTRY_LIST=""
 report_rescue_on_failure() {
     local status=$?
+    [[ -z "$RESCUED_ENTRY_LIST" ]] || rm -f "$RESCUED_ENTRY_LIST" || true
     if (( status != 0 )) && [[ -n "$RESCUE_DIR" && -d "$RESCUE_DIR" ]]; then
         printf '\nRestore did not complete. Everything moved aside is kept at:\n  %s\n' "$RESCUE_DIR" >&2
     fi
@@ -139,14 +141,23 @@ if [[ -e "$LOCAL_APP_SUPPORT_DIR" || -L "$LOCAL_APP_SUPPORT_DIR" ]]; then
 fi
 mkdir -p "$LOCAL_APP_SUPPORT_DIR"
 tar -xzf "$ARCHIVE_DIR/application-support.tar.gz" -C "$LOCAL_APP_SUPPORT_DIR"
-# The excluded top-level entries were never captured, so they move back from the rescue
-# copy rather than being restored from the tarball. Matching is by exact top-level name,
-# file or directory, which is what the archive side excluded.
-for name in ${EXCLUDED_STATE_NAMES[@]+"${EXCLUDED_STATE_NAMES[@]}"}; do
-    [[ -e "$RESCUED_STATE/$name" || -L "$RESCUED_STATE/$name" ]] || continue
-    rm -rf "${LOCAL_APP_SUPPORT_DIR:?}/$name"
-    mv "$RESCUED_STATE/$name" "$LOCAL_APP_SUPPORT_DIR/$name"
-done
+# Excluded top-level entries move back from the rescue copy. Manifest rules ending in
+# `*` match by prefix; every other rule matches an exact file or directory name.
+if [[ -d "$RESCUED_STATE" ]]; then
+    step "Enumerating excluded Application Support entries"
+    RESCUED_ENTRY_LIST="$(mktemp "${TMPDIR:-/tmp}/repoprompt-ce-restore-entries.XXXXXX")" ||
+        fail "Could not create the excluded-entry list."
+    find "$RESCUED_STATE" -mindepth 1 -maxdepth 1 -print0 >"$RESCUED_ENTRY_LIST" ||
+        fail "Could not enumerate excluded entries in $RESCUED_STATE."
+    while IFS= read -r -d '' entry; do
+        name="${entry##*/}"
+        matches_excluded_state_name "$name" "${EXCLUDED_STATE_NAMES[@]}" || continue
+        rm -rf "${LOCAL_APP_SUPPORT_DIR:?}/$name"
+        mv "$entry" "$LOCAL_APP_SUPPORT_DIR/$name"
+    done <"$RESCUED_ENTRY_LIST"
+    rm -f "$RESCUED_ENTRY_LIST"
+    RESCUED_ENTRY_LIST=""
+fi
 
 step "Importing preferences domain $LOCAL_DEFAULTS_DOMAIN"
 # `defaults import` merges, so the domain is cleared first: a rollback must not leave keys

@@ -133,17 +133,12 @@ tag, timestamps, bundle identifier, version, build, signing mode, and the commit
 the bundle's provenance file. Re-archiving over a completed archive needs
 `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`.
 
-`LOCAL_RELEASE_ARCHIVE_EXCLUDES` is a colon-separated list of exact top-level names left out
-of the state tarball; it defaults to `DebugApps:Rollbacks`. Build-daemon logs and caches and
-preserved debug bundles are large and reproducible, so exclude them too:
-
-```bash
-LOCAL_RELEASE_ARCHIVE_EXCLUDES="DebugApps:Rollbacks:Conductor:DebugApps-baseline-v1.0.29-preserved" \
-  ./Scripts/local_release_archive.sh local/v1.4.0-b37
-```
-
-Name each preserved debug bundle exactly; the list does not accept globs. `Codex/` stays in
-the archive because it holds agent session history.
+`LOCAL_RELEASE_ARCHIVE_EXCLUDES` is a colon-separated list of top-level exclusion rules
+and defaults to `DebugApps:Rollbacks:Conductor:DebugApps-*`. An entry ending in `*` matches
+top-level names by prefix; every other entry matches an exact name, while matching names
+below the top level remain archived. The manifest records the effective list in
+`applicationSupport.excludedNames`, which restore honors when it moves excluded entries
+back from the rescue copy; `Codex/` stays archived because it holds agent session history.
 
 The restore verifies every checksum before touching anything, moves the current app and
 state into a rescue directory beside the archive, extracts the archived bundle and state,

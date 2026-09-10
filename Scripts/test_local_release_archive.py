@@ -82,8 +82,8 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             (self.state / name).mkdir(parents=True, exist_ok=True)
         (self.state / "Settings" / "globalSettings.json").write_text(f'{{"marker":"{marker}"}}\n', encoding="utf-8")
         (self.state / "Workspaces" / "one.json").write_text(f"workspace-{marker}\n", encoding="utf-8")
-        # A nested directory sharing an excluded top-level name: exclusions are exact
-        # top-level names, so this must be archived and restored like any other content.
+        # Exact-name exclusions apply only at the top level, so nested content with the
+        # same name remains part of the rollback unit.
         (self.state / "Workspaces" / "inner" / "DebugApps").mkdir(parents=True, exist_ok=True)
         (self.state / "Workspaces" / "inner" / "DebugApps" / "nested.json").write_text(
             f"nested-{marker}\n", encoding="utf-8"
@@ -108,6 +108,12 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.run_defaults(["delete", str(self.defaults_domain)], check=False)
         for key, value in pairs.items():
             self.run_defaults(["write", str(self.defaults_domain), key, "-string", value])
+
+    def write_baseline_fixture(self, *, defaults: dict[str, str] | None = None) -> None:
+        self.write_app(build="38", commit=COMMIT)
+        self.write_state("original")
+        effective_defaults = {"UpdateChannel": "stable"} if defaults is None else defaults
+        self.write_defaults(effective_defaults)
 
     def read_defaults(self) -> dict[str, object]:
         export = self.tmp / "defaults-readback.plist"
@@ -163,9 +169,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
     # -- tests ------------------------------------------------------------------
 
     def test_round_trip_reproduces_app_state_defaults_and_identity(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable", "RemovedLater": "yes"})
+        self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})
         app_before = tree_snapshot(self.app)
         state_before = tree_snapshot(self.state)
 
@@ -196,9 +200,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(self.read_defaults(), {"UpdateChannel": "stable", "RemovedLater": "yes"})
 
     def test_manifest_records_tag_build_commit_and_timestamps(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
 
         self.archive()
         manifest = self.manifest()
@@ -207,7 +209,10 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(manifest["app"]["build"], "38")
         self.assertEqual(manifest["app"]["commit"], COMMIT)
         self.assertEqual(manifest["app"]["signingMode"], "local-self-signed")
-        self.assertEqual(manifest["applicationSupport"]["excludedNames"], ["DebugApps", "Rollbacks"])
+        self.assertEqual(
+            manifest["applicationSupport"]["excludedNames"],
+            ["DebugApps", "Rollbacks", "Conductor", "DebugApps-*"],
+        )
         self.assertTrue(manifest["localSigningIdentity"]["archived"])
         self.assertIsInstance(manifest["archivedAtEpoch"], float)
         self.assertTrue(manifest["archivedAtISO"])
@@ -225,9 +230,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(self.manifest()["app"]["build"], "37")
 
     def test_archive_excludes_debug_apps_and_rollbacks_from_the_state_tarball(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
 
         self.archive()
 
@@ -238,17 +241,77 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             text=True,
         ).stdout.splitlines()
         self.assertTrue(any(entry.endswith("Settings/globalSettings.json") for entry in listing))
-        # Exclusions are exact top-level names, so only the top-level entries are absent.
+        # Exclusion matching applies only to top-level entries.
         top_level = {entry.split("/")[1] for entry in listing if entry.startswith("./") and len(entry.split("/")) > 1}
         self.assertNotIn("DebugApps", top_level)
         self.assertNotIn("Rollbacks", top_level)
         self.assertIn("Settings", top_level)
         self.assertIn("Workspaces", top_level)
 
+    def test_prefix_exclusion_survives_restore_with_post_archive_content(self) -> None:
+        self.write_baseline_fixture()
+        preserved = self.state / "DebugApps-foo-preserved"
+        preserved.mkdir()
+        marker = preserved / "marker.txt"
+        marker.write_text("before-archive\n", encoding="utf-8")
+
+        self.archive()
+        listing = subprocess.run(
+            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        self.assertNotIn("./DebugApps-foo-preserved/", listing)
+
+        marker.write_text("after-archive\n", encoding="utf-8")
+        self.restore()
+
+        self.assertEqual(marker.read_text(encoding="utf-8"), "after-archive\n")
+
+    def test_restore_succeeds_when_current_state_directory_is_absent(self) -> None:
+        self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})
+        app_before = tree_snapshot(self.app)
+        identity_before = self.identity_path.read_text(encoding="utf-8")
+        self.archive()
+
+        shutil.rmtree(self.state)
+        self.write_app(build="39", commit="f" * 40)
+        self.write_defaults({"UpdateChannel": "tip", "AddedLater": "yes"})
+
+        result = self.restore()
+
+        self.assertNotIn("Enumerating excluded Application Support entries", result.stdout)
+        self.assertEqual(tree_snapshot(self.app), app_before)
+        self.assertEqual(
+            (self.state / "Settings" / "globalSettings.json").read_text(encoding="utf-8"),
+            '{"marker":"original"}\n',
+        )
+        self.assertEqual((self.state / "Workspaces" / "one.json").read_text(encoding="utf-8"), "workspace-original\n")
+        self.assertEqual(self.identity_path.read_text(encoding="utf-8"), identity_before)
+        self.assertEqual(self.read_defaults(), {"UpdateChannel": "stable", "RemovedLater": "yes"})
+
+    def test_restore_fails_when_excluded_entry_enumeration_fails(self) -> None:
+        self.write_baseline_fixture()
+        self.archive()
+        stub_dir = self.tmp / "failing-find"
+        stub_dir.mkdir()
+        find_stub = stub_dir / "find"
+        find_stub.write_text("#!/bin/sh\nexit 73\n", encoding="utf-8")
+        find_stub.chmod(0o755)
+
+        result = self.run_script(RESTORE_SCRIPT, PATH=f"{stub_dir}:{os.environ['PATH']}")
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not enumerate excluded entries", output)
+        self.assertNotIn(f"\nRestored {TAG}", output)
+        rescues = sorted(self.archive_root.glob("**/*.rescue-*"))
+        self.assertEqual(len(rescues), 1, output)
+        self.assertTrue((rescues[0] / "application-support" / "DebugApps").is_dir())
+
     def test_archive_refuses_identity_records_carrying_key_material(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         self.identity_path.write_text(json.dumps({"certificateName": "x", "privateKeyPEM": "-----BEGIN"}), encoding="utf-8")
 
         result = self.run_script(ARCHIVE_SCRIPT)
@@ -258,9 +321,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertFalse((self.archive_root / TAG / "manifest.json").exists())
 
     def test_restore_refuses_a_corrupted_archive(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         self.archive()
         app_zip = self.archive_root / TAG / "app.zip"
         app_zip.write_bytes(app_zip.read_bytes() + b"corrupt")
@@ -273,9 +334,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(tree_snapshot(self.state), state_before)
 
     def test_restore_refuses_an_incomplete_archive(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         self.archive()
         (self.archive_root / TAG / "manifest.json").unlink()
 
@@ -285,9 +344,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertIn("manifest.json", result.stdout + result.stderr)
 
     def test_archive_refuses_to_overwrite_a_completed_archive_without_opt_in(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         self.archive()
 
         result = self.run_script(ARCHIVE_SCRIPT)
@@ -297,9 +354,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.archive(LOCAL_RELEASE_ARCHIVE_OVERWRITE="1")
 
     def test_both_scripts_refuse_path_escaping_tags(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         for script in (ARCHIVE_SCRIPT, RESTORE_SCRIPT):
             for tag in ("../escape", "local/../../escape", "/absolute"):
                 result = self.run_script(script, tag=tag)
@@ -307,9 +362,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
                 self.assertIn("unsafe tag", result.stdout + result.stderr, f"{script.name} {tag}")
 
     def test_round_trip_preserves_byte_identical_state_files(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         reference = self.tmp / "reference-state"
         shutil.copytree(self.state, reference, symlinks=True)
 
@@ -322,9 +375,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(comparison.diff_files, [])
 
     def test_nested_directory_named_like_an_exclusion_survives_archive_and_restore(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         nested = self.state / "Workspaces" / "inner" / "DebugApps" / "nested.json"
 
         self.archive()
@@ -344,9 +395,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(nested.read_text(encoding="utf-8"), "nested-original\n")
 
     def test_unreadable_manifest_refuses_before_changing_anything(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         self.archive()
         app_before = tree_snapshot(self.app)
         state_before = tree_snapshot(self.state)
@@ -362,9 +411,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             self.assertEqual(list(self.archive_root.glob("**/*.rescue-*")), [], corruption)
 
     def test_manifest_without_files_or_excluded_names_refuses_and_verifies_nothing(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         self.archive()
         manifest_path = self.archive_root / TAG / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -383,9 +430,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual((self.state / "DebugApps" / "marker.txt").read_text(encoding="utf-8"), excluded_before)
 
     def test_restore_keeps_a_rescue_directory_and_survives_an_interrupted_run(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         self.archive()
         original_app = tree_snapshot(self.app)
 
@@ -407,9 +452,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertTrue(any((rescue / "application-support").is_dir() for rescue in rescues))
 
     def test_both_scripts_refuse_while_a_repoprompt_process_is_running(self) -> None:
-        self.write_app(build="38", commit=COMMIT)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        self.write_baseline_fixture()
         self.archive()
 
         # A symlink, not a copy: copying a signed system binary invalidates its signature
