@@ -18,6 +18,72 @@ ROOT_DIR = SCRIPT_DIR.parent
 ROLLOUT_TOOL = SCRIPT_DIR / "stable_rollout.py"
 POLICY = SCRIPT_DIR / "apple_identity_policy.json"
 PROFILE_TOOL = SCRIPT_DIR / "embedded_provisioning_profile.py"
+PROVENANCE_TOOL = SCRIPT_DIR / "write_bundle_provenance.py"
+
+
+class BundleProvenanceTests(unittest.TestCase):
+    def git(self, root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+
+    def test_provenance_separates_tracked_changes_from_untracked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repository"
+            bundle = Path(temp) / "RepoPrompt.app"
+            resources = bundle / "Contents" / "Resources"
+            root.mkdir()
+            resources.mkdir(parents=True)
+            self.git(root, "init", "-q")
+            self.git(root, "config", "user.name", "RepoPrompt Test")
+            self.git(root, "config", "user.email", "test@example.invalid")
+            tracked = root / "tracked.txt"
+            tracked.write_text("committed\n", encoding="utf-8")
+            self.git(root, "add", "tracked.txt")
+            self.git(root, "commit", "-q", "-m", "fixture")
+
+            (root / "untracked.txt").write_text("local\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(PROVENANCE_TOOL),
+                    "--repo-root",
+                    str(root),
+                    "--bundle",
+                    str(bundle),
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+            provenance_path = resources / "RepoPromptProvenance.json"
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            self.assertFalse(provenance["dirty"])
+            self.assertTrue(provenance["untracked_files"])
+
+            tracked.write_text("modified\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(PROVENANCE_TOOL),
+                    "--repo-root",
+                    str(root),
+                    "--bundle",
+                    str(bundle),
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            self.assertTrue(provenance["dirty"])
+            self.assertTrue(provenance["untracked_files"])
 
 
 class StableTipFloorTests(unittest.TestCase):
