@@ -17,7 +17,7 @@ Use the read-only reference clone at:
    ```
 
    Then identify the upstream pull request or commit range and record its number.
-2. Run `rp-deep-plan` with the task `re-implement upstream PR #N on main`. Name the absolute reference-clone paths to read and the working-repository paths to change.
+2. Run `rp-deep-plan` with the task `re-implement upstream PR N on main`. Name the absolute reference-clone paths to read and the working-repository paths to change.
 3. Create `port/<N>-<slug>` from `main` in `/Users/mp/Projects/personal/repoprompt-ce`.
 4. Apply the planned source changes in the working repository.
 5. Run focused tests for the affected behavior, then run:
@@ -33,17 +33,18 @@ Use the read-only reference clone at:
    .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
    ```
 
-7. Commit the port branch, then merge it into `main` with `git merge --no-ff`. The merge commit message must include:
+7. Commit the port branch. The commit message must include the upstream source as plain text (no `owner/repo#N` or URL, see `AGENTS.md`, "Upstream is read-only"):
 
    ```text
-   Upstream-Ref: <upstream PR or commit range>
+   Upstream-Ref: upstream PR <number> (<commit range>)
    ```
 
-8. From the `main` checkout, run the push preflight before pushing `main`:
+8. Run the push preflight, push the branch, open a pull request against `main`, run the `pr-ready` lane on the branch, and merge the pull request with a merge commit once its checks pass:
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
-   git push origin main
+   git push -u origin <branch>
+   gh pr create --base main
    ```
 
 9. Promote a build only after archiving the current install with `Scripts/local_release_archive.sh <tag>` and with MP present. Run this command from the `main` checkout:

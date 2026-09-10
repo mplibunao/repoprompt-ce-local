@@ -31,9 +31,13 @@ Local `docs/investigations/*.md` reports are intentionally left unignored so Rep
 
 ## Branch model
 
-`main` is the integration branch and the only long-lived branch. Cut a `bugfix/`, `port/`, or `chore/` branch from `main`, and land it with `git merge --no-ff` so each landing keeps its own merge commit. Every promoted build is an annotated `local/v<version>-b<build>` tag on the promoted `main` commit; [`docs/releasing.md`](docs/releasing.md) owns the promotion procedure.
+`main` is the integration branch and the only long-lived branch. Cut a `bugfix/`, `port/`, or `chore/` branch from `main`, push it, and land it through a pull request on `mplibunao/repoprompt-ce-local` merged with a merge commit, so the review, the checks, and the diff stay auditable on GitHub. Nothing merges into `main` directly, and the `pr-ready` lane runs on the branch before the merge. Every promoted build is an annotated `local/v<version>-b<build>` tag on the promoted `main` commit; [`docs/releasing.md`](docs/releasing.md) owns the promotion procedure.
 
 ## Upstream is read-only
+
+Three repositories share this code and each has a `main`; name them. *Upstream* is `repoprompt/repoprompt-ce`, the maintainers' repository, read only. *The fork* is `mplibunao/repoprompt-ce` on GitHub, frozen with its upstream pull requests open; nothing lands there. *The distribution* is `mplibunao/repoprompt-ce-local` on GitHub and this checkout on disk; every branch, pull request, issue, tag, and promoted build belongs to it, and an unqualified `main` means the distribution's `main`.
+
+Write upstream issues and pull requests as plain text, for example `upstream issue 803` or `upstream PR 957`, never as `owner/repo#N` or a URL, in commit messages, pull request text, issues, and comments: GitHub posts a "mentioned this" event on the referenced item for every such reference from a public repository. A bare `#N` refers to the distribution's own tracker.
 
 Upstream RepoPrompt CE is readable through the reference clone at `/Users/mp/Projects/personal/repoprompt-ce-upstream-readonly` and is never a remote of this repository. The preflight's remote allowlist restricts remote *names*: `origin` is the only remote that may exist, and adding any second remote fails the check. It does not inspect URLs, so keep `origin` pointing at `github.com/mplibunao/repoprompt-ce-local` for both fetch and push. An upstream change crosses into this repository as hand-written source edits on a `port/` branch, never as a cherry-pick, patch, or merge. [`docs/porting.md`](docs/porting.md) owns the procedure.
 
