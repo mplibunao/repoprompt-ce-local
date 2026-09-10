@@ -1940,6 +1940,8 @@ import XCTest
             do {
                 await firstWindow.workspaceManager.awaitInitialized()
                 await secondWindow.workspaceManager.awaitInitialized()
+                try await settleInitialWorkspaceAuthority(window: firstWindow, runtime: firstRuntime)
+                try await settleInitialWorkspaceAuthority(window: secondWindow, runtime: secondRuntime)
                 let first = try await makeDurableWindow(
                     firstWindow,
                     runtime: firstRuntime,
@@ -2052,18 +2054,11 @@ import XCTest
             let storedWorkspace = try XCTUnwrap(
                 window.workspaceManager.workspaces.first { $0.id == workspace.id }
             )
-            let switchResult = await window.workspaceManager.switchWorkspace(
-                to: storedWorkspace,
-                saveState: false,
+            try await activateDurableWorkspace(
+                storedWorkspace,
+                in: window,
                 reason: "distinctWorkspaceAdmissionAcceptance"
             )
-            guard switchResult.didSwitch else {
-                throw AdmissionTestError.fixtureSetup(
-                    switchResult.message ?? "distinct durable workspace did not become active"
-                )
-            }
-            let activeWorkspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
-            window.promptManager.loadComposeTabsFromWorkspace(activeWorkspace, syncPromptText: true)
             _ = try WorkspaceManagerViewModel.loadWorkspaceFromFile(
                 at: workspaceFileURL,
                 scheduleNormalizationWriteback: false
@@ -2142,6 +2137,7 @@ import XCTest
             GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
             do {
                 await window.workspaceManager.awaitInitialized()
+                try await settleInitialWorkspaceAuthority(window: window, runtime: runtime)
                 let originalTab = ComposeTabState(name: "Durable foreground")
                 let workspace = WorkspaceModel(
                     name: "Concurrent durable admission \(UUID().uuidString.prefix(8))",
@@ -2166,18 +2162,11 @@ import XCTest
                 let storedWorkspace = try XCTUnwrap(
                     window.workspaceManager.workspaces.first { $0.id == workspace.id }
                 )
-                let switchResult = await window.workspaceManager.switchWorkspace(
-                    to: storedWorkspace,
-                    saveState: false,
+                try await activateDurableWorkspace(
+                    storedWorkspace,
+                    in: window,
                     reason: "sameWorkspaceAdmissionAcceptance"
                 )
-                guard switchResult.didSwitch else {
-                    throw AdmissionTestError.fixtureSetup(
-                        switchResult.message ?? "durable workspace did not become active"
-                    )
-                }
-                let activeWorkspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
-                window.promptManager.loadComposeTabsFromWorkspace(activeWorkspace, syncPromptText: true)
                 let canonicalSnapshot = await runtime.workspaceStore.canonicalWorkspaceSnapshot(workspace.id)
                 let canonical = try XCTUnwrap(canonicalSnapshot)
                 guard canonical.health == .writable else {
@@ -2234,18 +2223,11 @@ import XCTest
                 await Task.yield()
             }
             let workspace = try XCTUnwrap(peer.workspaceManager.workspace(withID: workspaceID))
-            let switchResult = await peer.workspaceManager.switchWorkspace(
-                to: workspace,
-                saveState: false,
+            try await activateDurableWorkspace(
+                workspace,
+                in: peer,
                 reason: "sameWorkspacePeerAdmissionAcceptance"
             )
-            guard switchResult.didSwitch else {
-                throw AdmissionTestError.fixtureSetup(
-                    switchResult.message ?? "peer durable workspace did not become active"
-                )
-            }
-            let activeWorkspace = try XCTUnwrap(peer.workspaceManager.activeWorkspace)
-            peer.promptManager.loadComposeTabsFromWorkspace(activeWorkspace, syncPromptText: true)
             return peer
         }
 
@@ -2286,6 +2268,73 @@ import XCTest
             await closeWindowAndRuntime()
             storageOverride.restore()
         }
+    }
+
+    @MainActor
+    private func settleInitialWorkspaceAuthority(
+        window: WindowState,
+        runtime: MCPDomainRuntime
+    ) async throws {
+        // Window initialization commits Default from an untracked task. Waiting for canonical
+        // visibility prevents fixture creation from racing that authority write.
+        let systemWorkspace = try XCTUnwrap(
+            window.workspaceManager.workspaces.first(where: \.isSystemWorkspace)
+        )
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while true {
+            if let canonical = await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id),
+               canonical.health == .writable
+            {
+                return
+            }
+            guard clock.now < deadline else {
+                throw AdmissionTestError.timedOut("runtime-owned system workspace settlement")
+            }
+            await Task.yield()
+        }
+    }
+
+    @MainActor
+    private func activateDurableWorkspace(
+        _ workspace: WorkspaceModel,
+        in window: WindowState,
+        reason: String
+    ) async throws {
+        let manager = window.workspaceManager
+        if manager.activeWorkspaceID == workspace.id {
+            // Initial authority projection can select the fixture target before setup requests it.
+            // Reset through the system workspace so every test exercises the complete switch path.
+            let systemWorkspace = try XCTUnwrap(
+                manager.workspaces.first { $0.isSystemWorkspace && $0.id != workspace.id }
+            )
+            let resetResult = await manager.switchWorkspace(
+                to: systemWorkspace,
+                saveState: false,
+                reason: "\(reason).reset"
+            )
+            guard resetResult.didSwitch else {
+                throw AdmissionTestError.fixtureSetup(
+                    resetResult.message ?? "system workspace reset did not complete"
+                )
+            }
+        }
+
+        let switchResult = await manager.switchWorkspace(
+            to: workspace,
+            saveState: false,
+            reason: reason
+        )
+        guard switchResult.didSwitch else {
+            throw AdmissionTestError.fixtureSetup(
+                switchResult.message ?? "durable workspace did not become active"
+            )
+        }
+        let activeWorkspace = try XCTUnwrap(manager.activeWorkspace)
+        guard activeWorkspace.id == workspace.id else {
+            throw AdmissionTestError.fixtureSetup("durable workspace activation selected the wrong target")
+        }
+        window.promptManager.loadComposeTabsFromWorkspace(activeWorkspace, syncPromptText: true)
     }
 
     private final class AdmissionWorkspaceStorageOverride {
