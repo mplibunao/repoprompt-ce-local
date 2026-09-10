@@ -6,6 +6,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -64,6 +66,7 @@ class BundleProvenanceTests(unittest.TestCase):
             provenance_path = resources / "RepoPromptProvenance.json"
             provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
             self.assertFalse(provenance["dirty"])
+            self.assertEqual(provenance["git_status"], "ok")
             self.assertTrue(provenance["untracked_files"])
 
             tracked.write_text("modified\n", encoding="utf-8")
@@ -83,7 +86,45 @@ class BundleProvenanceTests(unittest.TestCase):
             )
             provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
             self.assertTrue(provenance["dirty"])
+            self.assertEqual(provenance["git_status"], "ok")
             self.assertTrue(provenance["untracked_files"])
+
+            real_git = shutil.which("git")
+            self.assertIsNotNone(real_git)
+            fake_bin = Path(temp) / "fake-bin"
+            fake_bin.mkdir()
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                "#!/bin/sh\n"
+                'if [ "$3" = "status" ]; then\n'
+                "    exit 1\n"
+                "fi\n"
+                'exec "$REAL_GIT" "$@"\n',
+                encoding="utf-8",
+            )
+            fake_git.chmod(fake_git.stat().st_mode | stat.S_IXUSR)
+            environment = dict(os.environ)
+            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+            environment["REAL_GIT"] = str(real_git)
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(PROVENANCE_TOOL),
+                    "--repo-root",
+                    str(root),
+                    "--bundle",
+                    str(bundle),
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+                env=environment,
+                timeout=10,
+            )
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            self.assertIsNone(provenance["dirty"])
+            self.assertEqual(provenance["git_status"], "unavailable")
+            self.assertIsNone(provenance["untracked_files"])
 
 
 class StableTipFloorTests(unittest.TestCase):
