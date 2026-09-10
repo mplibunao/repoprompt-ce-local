@@ -166,4 +166,10 @@ enum AgentRunSessionStore {
             steeringOriginRunID: steeringOriginRunID
         )
     }
+
+    #if DEBUG
+        static func testExpire(cursor: WaitCursor) async {
+            await shared.test_expire(cursor: cursor)
+        }
+    #endif
 }

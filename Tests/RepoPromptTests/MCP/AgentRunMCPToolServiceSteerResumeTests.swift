@@ -54,6 +54,76 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
         await viewModel.mcpDeactivateControlContext(sessionID: sessionID, cleanupSessionStore: true)
     }
 
+    func testSteerWaitReplacesExpiredPriorRunHandleBeforeWaiting() async throws {
+        let window = try await makeWindow()
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+
+        let viewModel = window.agentModeViewModel
+        let sessionID = UUID()
+        let session = try await makeWorkspaceOwnedSession(in: window, sessionID: sessionID)
+        try await viewModel.mcpActivateControlContext(
+            forTabID: session.tabID,
+            sessionID: sessionID,
+            originatingConnectionID: UUID(),
+            startPending: true,
+            markSessionAsMCPOriginated: true,
+            requireInactiveRunState: true
+        )
+        await viewModel.prepareMCPWaitTrackingForRunStart(session: session)
+        viewModel.setMCPFollowUpRunPending(sessionID: sessionID, false)
+        // Completed attempts consume their prepared epoch before terminal snapshot retention begins.
+        var completedContext = try XCTUnwrap(session.mcpControlContext)
+        completedContext.preparedEpoch = nil
+        session.mcpControlContext = completedContext
+        session.runState = .completed
+
+        let expiredContext = try XCTUnwrap(session.mcpControlContext)
+        let expiredCursor = AgentRunSessionStore.WaitCursor(
+            registration: expiredContext.registration,
+            epoch: expiredContext.currentEpoch
+        )
+        await AgentRunSessionStore.testExpire(cursor: expiredCursor)
+        let priorRegistrationIsActive = await AgentRunSessionStore.hasActiveRegistration(sessionID: sessionID)
+        XCTAssertFalse(priorRegistrationIsActive)
+
+        var service = makeService(window: window)
+        service.testDispatchSteerInstruction = { _, _, _, _ in .startedRun }
+        let completionTask = Task { @MainActor in
+            while !Task.isCancelled {
+                if let registration = await AgentRunSessionStore.currentRegistration(for: sessionID),
+                   registration != expiredContext.registration,
+                   let cursor = await AgentRunSessionStore.currentCursor(for: registration)
+                {
+                    viewModel.setMCPFollowUpRunPending(sessionID: sessionID, false)
+                    session.runState = .completed
+                    guard let snapshot = viewModel.mcpSnapshot(sessionID: sessionID) else { return }
+                    await AgentRunSessionStore.signalSnapshot(snapshot, cursor: cursor)
+                    return
+                }
+                await Task.yield()
+            }
+        }
+
+        let value = try await service.execute(args: [
+            "op": .string("steer"),
+            "session_id": .string(sessionID.uuidString),
+            "message": .string("wait for this follow-up"),
+            "wait": .bool(true),
+            "timeout_seconds": .double(1)
+        ])
+        completionTask.cancel()
+        await completionTask.value
+
+        XCTAssertEqual(value.objectValue?["session_id"]?.stringValue, sessionID.uuidString)
+        XCTAssertEqual(value.objectValue?["status"]?.stringValue, AgentRunMCPSnapshot.Status.completed.rawValue)
+        XCTAssertNotEqual(value.objectValue?["status"]?.stringValue, AgentRunMCPSnapshot.Status.expired.rawValue)
+        let currentContext = try XCTUnwrap(session.mcpControlContext)
+        XCTAssertNotEqual(currentContext.registration, expiredContext.registration)
+        XCTAssertEqual(currentContext.currentEpoch?.transitionKind, .steering)
+
+        await viewModel.mcpDeactivateControlContext(sessionID: sessionID, cleanupSessionStore: true)
+    }
+
     func testReconstructedSteerAcceptsBeforeLaterBookkeepingFailure() async throws {
         let window = try await makeWindow()
         defer { WindowStatesManager.shared.unregisterWindowState(window) }

@@ -1046,6 +1046,7 @@ struct AgentRunMCPToolService {
                         #if DEBUG
                             try await testAfterSteerDispatchBeforeBookkeeping?(resolution.reactivatedTarget)
                         #endif
+                        await agentModeVM.prepareMCPWaitTrackingForRunStart(session: resolution.session)
                         return confirmedDelivery
                     }
                 } catch {
