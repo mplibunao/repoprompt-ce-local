@@ -171,7 +171,7 @@ jobs:
           else
             range="$CURRENT_SHA"
           fi
-          gitleaks git --redact --log-opts="$range" .
+          gitleaks git --config .gitleaks.toml --redact --log-opts="$range" .
 
       - name: Scan checked-in source tree
-        run: gitleaks dir --redact .
+        run: gitleaks dir --config .gitleaks.toml --redact .

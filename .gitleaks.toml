@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+# Sparkle's EdDSA update-signing public key is public by design.
+[[allowlists]]
+description = "Sparkle public EdDSA key"
+regexTarget = "line"
+regexes = ['''SUPublicEDKey(?:=|</key><string>)[A-Za-z0-9+/]{43}=''']

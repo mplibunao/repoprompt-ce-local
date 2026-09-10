@@ -166,7 +166,7 @@ scan_staged_index_blobs() {
   fi
   mkdir -p "$snapshot"
   git checkout-index --stdin -z --prefix="$snapshot/" < "$files"
-  gitleaks dir --no-banner --redact "$snapshot"
+  gitleaks dir --config .gitleaks.toml --no-banner --redact "$snapshot"
 }
 
 require_clean_worktree() {
@@ -388,7 +388,7 @@ fi
 
 timing_phase_start outgoing_range_secret_scan
 log "Scan outgoing commit range for secrets"
-gitleaks git --no-banner --redact --log-opts="$range_spec" .
+gitleaks git --config .gitleaks.toml --no-banner --redact --log-opts="$range_spec" .
 timing_phase_pass outgoing_range_secret_scan
 
 if [[ "$mode" == "push" ]]; then
