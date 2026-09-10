@@ -13374,7 +13374,7 @@ actor ServerNetworkManager {
                                                 EditFlowPerf.Dimensions(toolName: toolName, outcome: "dispatchError")
                                             )
                                             defer { EditFlowPerf.end(EditFlowPerf.Stage.MCPToolCall.permitPostDispatchEnvelope, permitPostDispatchEnvelopeState) }
-                                            log.error("Error executing tool \(toolName): \(error.localizedDescription)")
+                                            log.error("Error executing tool \(toolName): \(mcpErrorRenderingText(error))")
                                             await EditFlowPerf.measure(
                                                 EditFlowPerf.Stage.MCPToolCall.completionObservers,
                                                 EditFlowPerf.Dimensions(toolName: toolName)
@@ -13392,7 +13392,7 @@ actor ServerNetworkManager {
                                                         EditFlowPerf.Stage.MCPToolCall.completionObserverResultEncoding,
                                                         EditFlowPerf.Dimensions(toolName: toolName)
                                                     ) {
-                                                        ToolOutputFormatter.rawJSONString(.object(["error": .string(error.localizedDescription), "tool": .string(toolName)]))
+                                                        ToolOutputFormatter.rawJSONString(.object(["error": .string(mcpErrorRenderingText(error)), "tool": .string(toolName)]))
                                                     }
                                                     let eventObserverCount = await EditFlowPerf.measure(
                                                         EditFlowPerf.Stage.MCPToolCall.completionObserverCallbacks,
@@ -13420,7 +13420,7 @@ actor ServerNetworkManager {
                                                 EditFlowPerf.Dimensions(toolName: toolName, status: "dispatchError")
                                             )
                                             return handlerResult(
-                                                Self.toolErrorResult(rawJSON: capturedRawJSON, message: "Error: \(error)"),
+                                                Self.toolErrorResult(rawJSON: capturedRawJSON, message: "Error: \(mcpErrorRenderingText(error))"),
                                                 outcome: "dispatchError"
                                             )
                                         }
@@ -13520,7 +13520,7 @@ actor ServerNetworkManager {
                                                 EditFlowPerf.Dimensions(toolName: toolName, outcome: "dispatchError")
                                             )
                                             defer { EditFlowPerf.end(EditFlowPerf.Stage.MCPToolCall.permitPostDispatchEnvelope, permitPostDispatchEnvelopeState) }
-                                            log.error("Error executing tool \(toolName): \(error.localizedDescription)")
+                                            log.error("Error executing tool \(toolName): \(mcpErrorRenderingText(error))")
                                             await EditFlowPerf.measure(
                                                 EditFlowPerf.Stage.MCPToolCall.completionObservers,
                                                 EditFlowPerf.Dimensions(toolName: toolName)
@@ -13538,7 +13538,7 @@ actor ServerNetworkManager {
                                                         EditFlowPerf.Stage.MCPToolCall.completionObserverResultEncoding,
                                                         EditFlowPerf.Dimensions(toolName: toolName)
                                                     ) {
-                                                        ToolOutputFormatter.rawJSONString(.object(["error": .string(error.localizedDescription), "tool": .string(toolName)]))
+                                                        ToolOutputFormatter.rawJSONString(.object(["error": .string(mcpErrorRenderingText(error)), "tool": .string(toolName)]))
                                                     }
                                                     let eventObserverCount = await EditFlowPerf.measure(
                                                         EditFlowPerf.Stage.MCPToolCall.completionObserverCallbacks,
@@ -13566,7 +13566,7 @@ actor ServerNetworkManager {
                                                 EditFlowPerf.Dimensions(toolName: toolName, status: "dispatchError")
                                             )
                                             return handlerResult(
-                                                Self.toolErrorResult(rawJSON: capturedRawJSON, message: "Error: \(error)"),
+                                                Self.toolErrorResult(rawJSON: capturedRawJSON, message: "Error: \(mcpErrorRenderingText(error))"),
                                                 outcome: "dispatchError"
                                             )
                                         }
