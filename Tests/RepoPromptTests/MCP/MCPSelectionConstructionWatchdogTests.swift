@@ -112,8 +112,24 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
         static let stabilizationStarted = 2.0
         static let freezeStarted = 5.0
         static let artifactStarted = 8.0
-        static let aggregateAfterArtifact = 10.0
-        static let aggregateAfterStabilizationOnly = 4.0
+        static let operationSpecificStarted = 11.0
+        static let aggregateCompleted = 13.0
+        static let operationSpecificStartedNonArtifact = 5.0
+        static let aggregateCompletedNonArtifact = 7.0
+    }
+
+    /// Records whether work past the construction boundary was reached.
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+
+        func set() {
+            lock.withLock { value = true }
+        }
+
+        var isSet: Bool {
+            lock.withLock { value }
+        }
     }
 
     /// Virtual clock for the watchdog itself, distinct from the phase-report clock.
@@ -292,19 +308,18 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
         )
     }
 
-    /// Asserts the snapshot names `expected`, reads `started`, and carries its expected report
-    /// ordinal. Covers child and aggregate intervals alike: construction leaves every interval it
-    /// owns in `started`, because the aggregate's `completed` is reported later by the provider's
-    /// per-operation branches.
+    /// Asserts the snapshot names `expected`, reads `transition`, and carries its expected report
+    /// ordinal. Covers child and aggregate intervals alike.
     private func assertRecordedPhase(
         _ snapshot: MCPToolExecutionHandlerPhaseSnapshot?,
         _ expected: MCPToolExecutionHandlerPhase,
+        transition: MCPToolExecutionHandlerPhaseTransition = .started,
         ordinal: Double,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
         XCTAssertEqual(snapshot?.phase, expected, file: file, line: line)
-        XCTAssertEqual(snapshot?.transition, .started, file: file, line: line)
+        XCTAssertEqual(snapshot?.transition, transition, file: file, line: line)
         assertOrdinal(snapshot, ordinal, file: file, line: line)
     }
 
@@ -382,16 +397,22 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
         )
     }
 
-    private func assertHeldStage(
-        _ held: HeldStage,
+    /// What a watchdog scenario exposes to its caller for assertions.
+    private struct HeldWatchdogScenario {
+        let error: Error?
+        let calls: CallLog
+        let recorder: MCPToolExecutionHandlerPhaseRecorder
+    }
+
+    /// Drives one watchdog scenario over the real construction helper.
+    ///
+    /// `heldStage` suspends a capability inside `MCPSelectionConstruction.run`; `afterRun` instead
+    /// holds work that only begins once `run` has returned. Callers own every assertion.
+    private func runHeldWatchdogScenario(
         releaseAt: ReleasePoint,
-        expectedPhase: MCPToolExecutionHandlerPhase,
-        expectedCalls: [String],
-        expectedOrdinal: Double,
-        expectedError: MCPToolExecutionWatchdogError,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
+        heldStage: HeldStage? = nil,
+        afterRun: @escaping @Sendable (Gate) async throws -> Void = { _ in }
+    ) async -> HeldWatchdogScenario {
         let gate = Gate()
         let calls = CallLog()
         let operationBodyFinished = Signal()
@@ -401,7 +422,7 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
         let capabilities = Self.makeCapabilities(
             calls: calls,
             recorder: recorder,
-            heldStage: held,
+            heldStage: heldStage,
             gate: gate
         )
 
@@ -465,6 +486,7 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
                             freezePromptGitReviewContext: capabilities.freeze,
                             resolveManageSelectionArtifactInputs: capabilities.resolve
                         )
+                        try await afterRun(gate)
                     }
                 }
             )
@@ -472,14 +494,37 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
             watchdogError = error
         }
 
+        // Teardown: release if the scenario has not already, then await the operation body and the
+        // watchdog's operation task completion bookkeeping so no task outlives the test. A released
+        // dependency resuming here cannot disturb the recorded phase, because the cancellation
+        // check that precedes every completion report throws first.
+        gate.release()
+        await operationBodyFinished.wait()
+        await operationTaskSettled.wait()
+
+        return HeldWatchdogScenario(error: watchdogError, calls: calls, recorder: recorder)
+    }
+
+    private func assertHeldStage(
+        _ held: HeldStage,
+        releaseAt: ReleasePoint,
+        expectedPhase: MCPToolExecutionHandlerPhase,
+        expectedCalls: [String],
+        expectedOrdinal: Double,
+        expectedError: MCPToolExecutionWatchdogError,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let scenario = await runHeldWatchdogScenario(releaseAt: releaseAt, heldStage: held)
+
         XCTAssertEqual(
-            watchdogError as? MCPToolExecutionWatchdogError,
+            scenario.error as? MCPToolExecutionWatchdogError,
             expectedError,
             file: file,
             line: line
         )
 
-        let latest = recorder.snapshot()
+        let latest = scenario.recorder.snapshot()
         XCTAssertEqual(latest?.phase, expectedPhase, file: file, line: line)
         XCTAssertEqual(
             latest?.transition,
@@ -490,18 +535,75 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
         )
         assertOrdinal(latest, expectedOrdinal, file: file, line: line)
         XCTAssertEqual(
-            calls.ordered,
+            scenario.calls.ordered,
             expectedCalls,
             "downstream capabilities must not run while an earlier one is held",
             file: file,
             line: line
         )
+    }
 
-        // Teardown: release if the scenario has not already, then await the operation body and the
-        // watchdog's operation task completion bookkeeping so no task outlives the test.
-        gate.release()
-        await operationBodyFinished.wait()
-        await operationTaskSettled.wait()
+    // MARK: - Operation-specific construction span
+
+    // The operation-specific interval runs in the provider's operation branches, between the
+    // construction helper returning and the reply phases. It opens as the helper's last act and
+    // closes through the shared completion helper, so a stall there names that span instead of
+    // falling back to the aggregate interval.
+
+    func testHeldOperationSpecificConstructionIsAttributedAtWatchdogBoundary() async throws {
+        try await assertHeldOperationSpecific(
+            releaseAt: .afterWatchdogSettles,
+            expectedError: .cleanupUnresponsive
+        )
+    }
+
+    func testLateOperationSpecificReturnAfterCancellationKeepsSpanAttribution() async throws {
+        try await assertHeldOperationSpecific(
+            releaseAt: .beforeCleanupGrace,
+            expectedError: .executionTimedOut(settlement: .cancellation)
+        )
+    }
+
+    private func assertHeldOperationSpecific(
+        releaseAt: ReleasePoint,
+        expectedError: MCPToolExecutionWatchdogError,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let reachedDownstream = Flag()
+        let scenario = await runHeldWatchdogScenario(releaseAt: releaseAt) { gate in
+            // Stands in for the provider's operation-specific work, which runs while the span is
+            // open.
+            await gate.wait()
+            try await MCPSelectionConstruction.completeOperationSpecificConstruction()
+            reachedDownstream.set()
+        }
+
+        XCTAssertEqual(
+            scenario.error as? MCPToolExecutionWatchdogError,
+            expectedError,
+            file: file,
+            line: line
+        )
+        assertRecordedPhase(
+            scenario.recorder.snapshot(),
+            .manageSelectionConstructionOperationSpecificConstruction,
+            ordinal: Ordinal.operationSpecificStarted,
+            file: file,
+            line: line
+        )
+        XCTAssertFalse(
+            reachedDownstream.isSet,
+            "persistence and reply work must not run while the span is unsettled",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            scenario.calls.ordered,
+            ["stabilize", "freeze", "resolve"],
+            file: file,
+            line: line
+        )
     }
 
     // MARK: - Successful path
@@ -551,11 +653,23 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
             ordinal: Ordinal.artifactStarted
         )
 
-        // The aggregate interval owns the remaining synchronous construction work.
+        // The helper hands off to operation-specific construction as its last act.
+        assertRecordedPhase(
+            recorder.snapshot(),
+            .manageSelectionConstructionOperationSpecificConstruction,
+            ordinal: Ordinal.operationSpecificStarted
+        )
+
+        // Closing the span completes the child and then the aggregate interval. The aggregate's
+        // ordinal pins the child completion that must precede it.
+        try await MCPToolExecutionHandlerPhaseContext.$recorder.withValue(recorder) {
+            try await MCPSelectionConstruction.completeOperationSpecificConstruction()
+        }
         assertRecordedPhase(
             recorder.snapshot(),
             .manageSelectionConstruction,
-            ordinal: Ordinal.aggregateAfterArtifact
+            transition: .completed,
+            ordinal: Ordinal.aggregateCompleted
         )
 
         XCTAssertEqual(outcome.artifactResolution, Self.resolution())
@@ -590,8 +704,18 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
 
         assertRecordedPhase(
             recorder.snapshot(),
+            .manageSelectionConstructionOperationSpecificConstruction,
+            ordinal: Ordinal.operationSpecificStartedNonArtifact
+        )
+
+        try await MCPToolExecutionHandlerPhaseContext.$recorder.withValue(recorder) {
+            try await MCPSelectionConstruction.completeOperationSpecificConstruction()
+        }
+        assertRecordedPhase(
+            recorder.snapshot(),
             .manageSelectionConstruction,
-            ordinal: Ordinal.aggregateAfterStabilizationOnly
+            transition: .completed,
+            ordinal: Ordinal.aggregateCompletedNonArtifact
         )
     }
 }

@@ -223,7 +223,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         case "get":
             let ctx = resolvedContext.snapshot
             selectionLog("[Virtual] manage_selection op=get tab=\(ctx.tabID) selected=\(ctx.selection.selectedPaths.count) manualCodemaps=\(ctx.selection.manualCodemapPaths.count) slices=\(ctx.selection.slices.count)")
-            await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionConstruction, transition: .completed)
+            try await MCPSelectionConstruction.completeOperationSpecificConstruction()
             try Task.checkCancellation()
             await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction)
             let reply = try await dependencies.selection.buildCurrentSelectionReply(includeBlocks, display, extraInvalid, view, resolvedContext, lookupContext)
@@ -259,7 +259,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
                 combinedInvalid.append(error)
             }
             let previewCodeMapOverride: CodeMapUsage? = context.runID != nil ? .auto : nil
-            await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionConstruction, transition: .completed)
+            try await MCPSelectionConstruction.completeOperationSpecificConstruction()
             try Task.checkCancellation()
             await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction)
             let previewReply = try await dependencies.selection.buildSelectionPreviewReply(
@@ -588,7 +588,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         reviewGitContext: FrozenPromptGitReviewContext? = nil
     ) async throws -> ToolResultDTOs.SelectionReply {
         resolvedContext.snapshot.selection = selection
-        await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionConstruction, transition: .completed)
+        try await MCPSelectionConstruction.completeOperationSpecificConstruction()
         try Task.checkCancellation()
         await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionPersistence)
         let canonicalSelection: StoredSelection
