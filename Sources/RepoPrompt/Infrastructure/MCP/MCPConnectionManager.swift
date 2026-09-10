@@ -13018,7 +13018,8 @@ actor ServerNetworkManager {
                                     case MCPToolExecutionWatchdogError.executionDetached:
                                         let mutationOutcomeMayStillReconcile = [
                                             MCPWindowToolName.fileActions,
-                                            MCPWindowToolName.prompt
+                                            MCPWindowToolName.prompt,
+                                            MCPWindowToolName.workspaceContext
                                         ].contains(toolName)
                                         code = "tool_execution_timeout"
                                         message = mutationOutcomeMayStillReconcile

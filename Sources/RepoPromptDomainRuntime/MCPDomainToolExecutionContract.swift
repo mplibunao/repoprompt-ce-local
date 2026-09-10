@@ -157,9 +157,11 @@ package enum MCPToolExecutionContractCatalog {
         {
             return promptExportContract
         }
-        if toolName == MCPWindowToolName.prompt,
-           [.set, .append, .clear, .selectPreset].contains(promptContextOperation)
-        {
+        let isPromptMutation = toolName == MCPWindowToolName.prompt
+            && [.set, .append, .clear, .selectPreset].contains(promptContextOperation)
+        let isWorkspacePresetMutation = toolName == MCPWindowToolName.workspaceContext
+            && promptContextOperation == .selectPreset
+        if isPromptMutation || isWorkspacePresetMutation {
             return promptMutationContract
         }
         if toolName == MCPWindowToolName.fileActions,

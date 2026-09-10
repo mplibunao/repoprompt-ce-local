@@ -107,6 +107,20 @@ import XCTest
             }
         }
 
+        func testWorkspaceContextSelectPresetUsesConnectionPreservingMutationContract() {
+            guard case let .bounded(deadline, cancellationGrace, cleanupDisposition) = MCPToolExecutionContractCatalog.contract(
+                for: MCPWindowToolName.workspaceContext,
+                arguments: ["op": .string("select_preset")]
+            ) else {
+                XCTFail("Expected bounded workspace-context preset mutation contract")
+                return
+            }
+
+            XCTAssertEqual(deadline, MCPTimeoutPolicy.boundedToolExecutionDeadline)
+            XCTAssertEqual(cancellationGrace, MCPTimeoutPolicy.boundedToolCancellationCleanupGrace)
+            XCTAssertEqual(cleanupDisposition, .detachAndSettle)
+        }
+
         func testConnectionPermitReleasedWhenDeadlineExpiresImmediatelyAfterHandoff() async throws {
             let limiter = MCPDomainAsyncLimiter(limit: 1)
             let holderGate = AdmissionDeadlineGate()
