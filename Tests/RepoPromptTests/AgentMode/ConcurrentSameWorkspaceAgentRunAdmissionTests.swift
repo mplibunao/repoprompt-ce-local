@@ -678,6 +678,68 @@ import XCTest
             XCTAssertEqual(peerProviderCount, 1)
         }
 
+        func testAgentRunRefusalNamesCanonicalHealthFailureAndGuidesAgainstRetry() async throws {
+            let fixture = try await DurableAgentAdmissionFixture.make()
+            trackCleanup { await fixture.cleanup() }
+            let manager = fixture.window.workspaceManager
+            let canonicalValue = await fixture.runtime.workspaceStore
+                .canonicalWorkspaceSnapshot(fixture.workspaceID)
+            let canonical = try XCTUnwrap(canonicalValue)
+            let workspace = try JSONDecoder().decode(
+                WorkspaceModel.self,
+                from: canonical.document.documentBytes
+            )
+            let nonCanonical = try WorkspaceManagerViewModel.replacingWorkspaceProjectionForTesting(
+                workspace,
+                in: canonical,
+                health: .degradedReadOnly(reason: "admission test")
+            )
+            let unsaved = try WorkspaceManagerViewModel.replacingWorkspaceProjectionForTesting(
+                workspace,
+                in: canonical,
+                revisions: DomainRevisionState(
+                    workingRevision: canonical.revisions.workingRevision + 1,
+                    savedRevision: canonical.revisions.savedRevision,
+                    dirtyRevision: canonical.revisions.workingRevision + 1
+                )
+            )
+            let cases: [(DomainWorkspaceSnapshot?, AgentAdmissionRefusalReason)] = [
+                (nil, .canonicalWorkspaceUnavailable),
+                (nonCanonical, .nonCanonicalWorkspaceState),
+                (unsaved, .unsavedWorkspaceChanges)
+            ]
+            let recorder = AdmissionProviderRecorder(expectedCount: 1, blockProviders: false)
+            let service = makeAgentRunStartService(window: fixture.window, recorder: recorder)
+            defer { manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting(nil) }
+
+            for (snapshot, reason) in cases {
+                manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting { _ in snapshot }
+                do {
+                    _ = try await service.execute(args: [
+                        "op": .string("start"),
+                        "message": .string("canonical health refusal"),
+                        "detach": .bool(true),
+                        "timeout": .int(0)
+                    ])
+                    XCTFail("Canonical health failure must reject Agent admission.")
+                } catch {
+                    XCTAssertTrue(
+                        error.localizedDescription.contains("(reason: \(reason.rawValue))"),
+                        error.localizedDescription
+                    )
+                    XCTAssertTrue(
+                        error.localizedDescription.contains(
+                            "Inspect the workspace state or the existing session instead of retrying this call."
+                        ),
+                        error.localizedDescription
+                    )
+                }
+            }
+
+            let providerCount = await recorder.count()
+            XCTAssertEqual(providerCount, 0)
+        }
+
         func testCanonicalAdmissionRefreshRejectsDuplicateTabIDWithoutMutationOrDispatch() async throws {
             let fixture = try await DurableAgentAdmissionFixture.make()
             trackCleanup { await fixture.cleanup() }
@@ -709,8 +771,13 @@ import XCTest
                     operationRan = true
                 }
                 XCTFail("Malformed canonical tab identity must reject admission.")
-            } catch let error as AgentAdmissionCanonicalRefreshError {
-                XCTAssertEqual(error, .duplicateTabID(duplicate.id))
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("(reason: tab_identity_mismatch)"))
+                XCTAssertTrue(
+                    error.localizedDescription.contains(
+                        "Inspect the workspace state or the existing session instead of retrying this call."
+                    )
+                )
             }
 
             XCTAssertFalse(operationRan)
