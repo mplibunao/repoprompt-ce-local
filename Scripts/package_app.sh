@@ -401,9 +401,8 @@ run cp -R "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
 run install_name_tool -add_rpath @executable_path/../Frameworks "$APP_BUNDLE/Contents/MacOS/$APP_NAME" 2>/dev/null || true
 run "$CONTROL_PLANE_SCRIPTS_DIR/validate_app_architectures.sh" "$APP_BUNDLE" "$ARCHITECTURE_POLICY" "Pre-sign packaged app"
 
-if (( ! IS_RELEASE )); then
-    phase "Writing debug bundle provenance"
-    ROOT_DIR_FOR_PROVENANCE="$ROOT_DIR" APP_BUNDLE_FOR_PROVENANCE="$APP_BUNDLE" python3 - <<'PY'
+phase "Writing bundle provenance"
+ROOT_DIR_FOR_PROVENANCE="$ROOT_DIR" APP_BUNDLE_FOR_PROVENANCE="$APP_BUNDLE" python3 - <<'PY'
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -439,13 +438,12 @@ payload = {
     "buildTimeEpoch": now,
     "buildTimeISO": datetime.fromtimestamp(now, timezone.utc).astimezone().isoformat(timespec="seconds"),
 }
-path = bundle / "Contents" / "Resources" / "RepoPromptDebugProvenance.json"
+path = bundle / "Contents" / "Resources" / "RepoPromptProvenance.json"
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(f"Debug bundle provenance: {path}")
+print(f"Bundle provenance: {path}")
 PY
-    run python3 "$CONTROL_PLANE_SCRIPTS_DIR/validate_json.py" \
-        "$APP_BUNDLE/Contents/Resources/RepoPromptDebugProvenance.json"
-fi
+run python3 "$CONTROL_PLANE_SCRIPTS_DIR/validate_json.py" \
+    "$APP_BUNDLE/Contents/Resources/RepoPromptProvenance.json"
 
 phase "Signing app bundle"
 sign_path(){

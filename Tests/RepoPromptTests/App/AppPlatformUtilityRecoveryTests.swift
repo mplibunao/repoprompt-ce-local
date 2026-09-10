@@ -7,7 +7,8 @@ final class AppPlatformUtilityRecoveryTests: XCTestCase {
             SparkleUpdaterManager.startDecision(
                 sparkleConfigurationValid: true,
                 updaterStarted: false,
-                identityMigrationBlockedMessage: "migration blocked"
+                identityMigrationBlockedMessage: "migration blocked",
+                signingModeMarker: "developer-id"
             ),
             .blocked("migration blocked")
         )
@@ -15,7 +16,8 @@ final class AppPlatformUtilityRecoveryTests: XCTestCase {
             SparkleUpdaterManager.startDecision(
                 sparkleConfigurationValid: true,
                 updaterStarted: false,
-                identityMigrationBlockedMessage: nil
+                identityMigrationBlockedMessage: nil,
+                signingModeMarker: "developer-id"
             ),
             .start
         )
@@ -23,7 +25,8 @@ final class AppPlatformUtilityRecoveryTests: XCTestCase {
             SparkleUpdaterManager.startDecision(
                 sparkleConfigurationValid: false,
                 updaterStarted: false,
-                identityMigrationBlockedMessage: "migration blocked"
+                identityMigrationBlockedMessage: "migration blocked",
+                signingModeMarker: "developer-id"
             ),
             .ignore
         )
@@ -31,10 +34,58 @@ final class AppPlatformUtilityRecoveryTests: XCTestCase {
             SparkleUpdaterManager.startDecision(
                 sparkleConfigurationValid: true,
                 updaterStarted: true,
-                identityMigrationBlockedMessage: "migration blocked"
+                identityMigrationBlockedMessage: "migration blocked",
+                signingModeMarker: "developer-id"
             ),
             .ignore
         )
+    }
+
+    func testSparkleUpdaterStartDecisionDisablesUpdatesForLocallySelfSignedBuilds() {
+        let selfSigned = SparkleUpdaterManager.selfSignedUpdatesDisabledMessage
+        XCTAssertFalse(selfSigned.localizedCaseInsensitiveContains("integrity"))
+
+        XCTAssertEqual(
+            SparkleUpdaterManager.startDecision(
+                sparkleConfigurationValid: true,
+                updaterStarted: false,
+                identityMigrationBlockedMessage: nil,
+                signingModeMarker: "local-self-signed"
+            ),
+            .selfSignedDisabled(selfSigned)
+        )
+        // The self-signed build never receives appcast updates, so its message wins over the
+        // transient identity-migration block.
+        XCTAssertEqual(
+            SparkleUpdaterManager.startDecision(
+                sparkleConfigurationValid: true,
+                updaterStarted: false,
+                identityMigrationBlockedMessage: "migration blocked",
+                signingModeMarker: " local-self-signed\n"
+            ),
+            .selfSignedDisabled(selfSigned)
+        )
+        XCTAssertEqual(
+            SparkleUpdaterManager.startDecision(
+                sparkleConfigurationValid: true,
+                updaterStarted: true,
+                identityMigrationBlockedMessage: nil,
+                signingModeMarker: "local-self-signed"
+            ),
+            .ignore
+        )
+        for marker in [nil, "", "developer-id", "successor-developer-id", "debug-apple-development", "local-self-signed-x"] as [String?] {
+            XCTAssertEqual(
+                SparkleUpdaterManager.startDecision(
+                    sparkleConfigurationValid: true,
+                    updaterStarted: false,
+                    identityMigrationBlockedMessage: nil,
+                    signingModeMarker: marker
+                ),
+                .start,
+                "marker \(marker ?? "<nil>") must not disable updates"
+            )
+        }
     }
 
     func testAgentSessionDeepLinkURLRoundTripsAndRejectsInvalidScopedRoutes() throws {
