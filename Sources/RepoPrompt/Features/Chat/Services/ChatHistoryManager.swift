@@ -106,12 +106,7 @@ actor ChatDataService {
     #endif
 
     static func defaultWorkspaceRootURL() -> URL {
-        let supportDirectory = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.temporaryDirectory
-        return supportDirectory
-            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        MCPFilesystemConstants.identity.applicationSupportRootURL()
             .appendingPathComponent("Workspaces", isDirectory: true)
     }
 

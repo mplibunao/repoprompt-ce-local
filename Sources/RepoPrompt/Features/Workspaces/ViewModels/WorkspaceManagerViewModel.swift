@@ -58,14 +58,10 @@ private enum WorkspaceExitPerf {
 }
 
 enum WorkspaceStoragePaths {
-    static let defaultRoot: URL = {
-        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-        return home
-            .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+    static var defaultRoot: URL {
+        MCPFilesystemConstants.identity.applicationSupportRootURL()
             .appendingPathComponent("Workspaces", isDirectory: true)
-    }()
+    }
 }
 
 struct WorkspaceFileLoadResult {
@@ -9498,15 +9494,7 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     private nonisolated static func duplicateCleanupBackupDirectoryURL() throws -> URL {
-        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            throw NSError(
-                domain: "WorkspaceDuplicateCleanup",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Application Support directory is unavailable."]
-            )
-        }
-        let directory = appSupport
-            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        let directory = MCPFilesystemConstants.identity.applicationSupportRootURL()
             .appendingPathComponent("workspace-cleanup-backups", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory

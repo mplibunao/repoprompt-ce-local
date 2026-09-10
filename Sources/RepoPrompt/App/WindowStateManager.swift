@@ -125,9 +125,7 @@ struct WindowSessionRestorePersistenceGate {
 
 enum WindowSessionStore {
     static func sessionFileURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        let base = MCPFilesystemConstants.identity.applicationSupportRootURL()
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base.appendingPathComponent("windowSessions.json")
     }

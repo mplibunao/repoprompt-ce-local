@@ -1,5 +1,6 @@
 import Combine
 @testable import RepoPromptApp
+@_spi(TestSupport) import RepoPromptShared
 import XCTest
 
 @MainActor
@@ -204,14 +205,24 @@ final class WorkspaceRootSyncTests: XCTestCase {
         XCTAssertTrue(viewModel.getAllFileViewModels(in: conflictingRoleScope).isEmpty)
     }
 
-    func testDefaultWorkspaceAndWindowRootsUseCESupportRoot() {
-        let workspaceRoot = WorkspaceStoragePaths.defaultRoot.path
-        XCTAssertTrue(workspaceRoot.contains("/Application Support/RepoPrompt CE/Workspaces"), workspaceRoot)
-        XCTAssertFalse(workspaceRoot.contains("/Application Support/RepoPrompt/Workspaces"), workspaceRoot)
+    func testDefaultWorkspaceAndWindowRootsUseInjectedCESupportRoot() {
+        let profileRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WorkspaceRootSyncTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        MCPFilesystemIdentity.test_setApplicationSupportRootOverride(profileRoot)
+        defer {
+            MCPFilesystemIdentity.test_setApplicationSupportRootOverride(nil)
+            try? FileManager.default.removeItem(at: profileRoot.deletingLastPathComponent())
+        }
 
-        let windowPath = WindowSessionStore.sessionFileURL().path
-        XCTAssertTrue(windowPath.contains("/Application Support/RepoPrompt CE/windowSessions.json"), windowPath)
-        XCTAssertFalse(windowPath.contains("/Application Support/RepoPrompt/windowSessions.json"), windowPath)
+        XCTAssertEqual(
+            WorkspaceStoragePaths.defaultRoot,
+            profileRoot.appendingPathComponent("Workspaces", isDirectory: true)
+        )
+        XCTAssertEqual(
+            WindowSessionStore.sessionFileURL(),
+            profileRoot.appendingPathComponent("windowSessions.json")
+        )
     }
 
     func testWorkspaceDecodeCreatesDefaultComposeTabAndIgnoresRemovedLegacyFields() throws {

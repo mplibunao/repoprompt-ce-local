@@ -3108,6 +3108,7 @@ class OperationRegistry:
         "LC_CTYPE",
         "REPOPROMPT_CODEX_ARCH",
         "REPOPROMPT_CODEX_CACHE_ROOT",
+        "REPOPROMPT_TEST_SANDBOX_ROOT",
     ]
     STYLE_ENV_KEYS = [
         "GITHUB_ACTIONS",

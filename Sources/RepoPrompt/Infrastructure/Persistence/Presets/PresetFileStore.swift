@@ -8,7 +8,6 @@ import Foundation
 final class PresetFileStore {
     static let shared = PresetFileStore()
 
-    static let appSupportDirectoryName = "RepoPrompt CE"
     static let presetsDirectoryName = "Presets"
     static let workflowFilename = "workflowPresets.json"
     static let modelFilename = "modelPresets.json"
@@ -47,10 +46,7 @@ final class PresetFileStore {
     }
 
     static func presetsDirectoryURL(fileManager: FileManager = .default) -> URL {
-        let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-        return supportDirectory
-            .appendingPathComponent(appSupportDirectoryName, isDirectory: true)
+        MCPFilesystemConstants.identity.applicationSupportRootURL(fileManager: fileManager)
             .appendingPathComponent(presetsDirectoryName, isDirectory: true)
     }
 

@@ -1,6 +1,34 @@
 import Darwin
 import Foundation
 
+private enum MCPApplicationSupportRootResolver {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var testOverride: URL?
+
+    static func resolve(directoryName: String, fileManager: FileManager) -> URL {
+        if let override = lock.withLock({ testOverride }) {
+            return override
+        }
+        // Deriving the profile from the suite sandbox keeps independently sharded test processes disjoint.
+        if let sandboxRoot = ProcessInfo.processInfo.environment["REPOPROMPT_TEST_SANDBOX_ROOT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !sandboxRoot.isEmpty
+        {
+            return URL(fileURLWithPath: sandboxRoot, isDirectory: true)
+                .appendingPathComponent("profile", isDirectory: true)
+                .appendingPathComponent(directoryName, isDirectory: true)
+        }
+        return fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(directoryName, isDirectory: true)
+    }
+
+    static func setTestOverride(_ url: URL?) {
+        lock.withLock {
+            testOverride = url?.standardizedFileURL
+        }
+    }
+}
+
 /// Shared filesystem and stable-name authority for RepoPrompt MCP products.
 ///
 /// Callers select their build flavor locally and pass it explicitly so this
@@ -139,9 +167,18 @@ public struct MCPFilesystemIdentity: Equatable, Sendable {
     }
 
     public func applicationSupportRootURL(fileManager: FileManager = .default) -> URL {
-        fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(applicationSupportDirectoryName, isDirectory: true)
+        MCPApplicationSupportRootResolver.resolve(
+            directoryName: applicationSupportDirectoryName,
+            fileManager: fileManager
+        )
     }
+
+    #if DEBUG
+        @_spi(TestSupport)
+        public static func test_setApplicationSupportRootOverride(_ url: URL?) {
+            MCPApplicationSupportRootResolver.setTestOverride(url)
+        }
+    #endif
 
     public func temporaryRootURL(fileManager: FileManager = .default) -> URL {
         fileManager.temporaryDirectory
