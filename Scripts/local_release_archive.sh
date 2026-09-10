@@ -152,13 +152,17 @@ def checksum(name: str) -> str | None:
 
 
 def archived_working_journal_schema_version(provenance: dict | None) -> tuple[int | None, str]:
-    dirty = (provenance or {}).get("dirty")
+    record = provenance or {}
+    if "git_status" in record and record["git_status"] != "ok":
+        return None, "unknown_provenance"
+
+    dirty = record.get("dirty")
     if dirty is True:
         return None, "dirty_provenance"
     if dirty is not False:
         return None, "unknown_provenance"
 
-    commit = (provenance or {}).get("commit")
+    commit = record.get("commit")
     if not isinstance(commit, str) or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None:
         raise SystemExit(
             "ERROR: archived app provenance has no 40-character commit SHA; "

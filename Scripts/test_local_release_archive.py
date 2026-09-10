@@ -94,7 +94,15 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             text=True,
         ).stdout.strip()
 
-    def write_app(self, *, build: str, commit: str | None, dirty: bool | None = False) -> None:
+    def write_app(
+        self,
+        *,
+        build: str,
+        commit: str | None,
+        dirty: bool | None = False,
+        include_dirty: bool = True,
+        git_status: str | None = None,
+    ) -> None:
         resources = self.app / "Contents" / "Resources"
         resources.mkdir(parents=True, exist_ok=True)
         (self.app / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
@@ -114,8 +122,10 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             provenance.unlink(missing_ok=True)
         else:
             payload = {"version": 1, "commit": commit, "buildTimeISO": "2026-09-10T00:00:00+02:00"}
-            if dirty is not None:
+            if include_dirty:
                 payload["dirty"] = dirty
+            if git_status is not None:
+                payload["git_status"] = git_status
             provenance.write_text(json.dumps(payload), encoding="utf-8")
 
     def write_state(self, marker: str) -> None:
@@ -155,8 +165,16 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         *,
         defaults: dict[str, str] | None = None,
         dirty: bool | None = False,
+        include_dirty: bool = True,
+        git_status: str | None = None,
     ) -> None:
-        self.write_app(build="38", commit=self.archived_commit, dirty=dirty)
+        self.write_app(
+            build="38",
+            commit=self.archived_commit,
+            dirty=dirty,
+            include_dirty=include_dirty,
+            git_status=git_status,
+        )
         self.write_state("original")
         effective_defaults = {"UpdateChannel": "stable"} if defaults is None else defaults
         self.write_defaults(effective_defaults)
@@ -323,13 +341,31 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(manifest["working_journal_schema_version_status"], "dirty_provenance")
 
     def test_missing_dirty_field_records_null_schema_without_aborting_archive(self) -> None:
-        self.write_baseline_fixture(dirty=None)
+        self.write_baseline_fixture(include_dirty=False)
 
         self.archive()
         manifest = self.manifest()
 
         self.assertIsNone(manifest["working_journal_schema_version"])
         self.assertEqual(manifest["working_journal_schema_version_status"], "unknown_provenance")
+
+    def test_null_dirty_and_unavailable_git_status_record_unknown_provenance(self) -> None:
+        self.write_baseline_fixture(dirty=None, git_status="unavailable")
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertIsNone(manifest["working_journal_schema_version"])
+        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown_provenance")
+
+    def test_clean_dirty_and_ok_git_status_read_schema_from_commit(self) -> None:
+        self.write_baseline_fixture(dirty=False, git_status="ok")
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertEqual(manifest["working_journal_schema_version"], 1)
+        self.assertEqual(manifest["working_journal_schema_version_status"], "from_commit")
 
     def test_missing_or_ambiguous_archived_schema_version_refuses_archive(self) -> None:
         self.write_state("original")

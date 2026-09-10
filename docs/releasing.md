@@ -27,7 +27,8 @@ Before you start:
    build's supported version is `DomainWorkingJournal.schemaVersion` in
    [`Sources/RepoPromptDomainRuntime/DomainPersistence.swift`](../Sources/RepoPromptDomainRuntime/DomainPersistence.swift).
    `working_journal_schema_version_status` is `from_commit` only when the archived bundle's
-   provenance explicitly says `dirty: false`.
+   provenance explicitly says `dirty: false` and `git_status` is absent or `ok`. A present
+   `git_status` value other than `ok` produces `unknown_provenance`.
 
    A null schema version with `dirty_provenance` or `unknown_provenance` blocks the
    mechanical comparison. Before promotion continues, MP must determine the archived
@@ -36,9 +37,13 @@ Before you start:
    before any candidate ran.
 
    `observed_working_journal_versions` lists the distinct versions found in the shared
-   Application Support snapshot. This field is diagnostic only. A version newer than the
-   archived schema reveals that a candidate debug build has already rewritten the shared
-   profile. The observed values don't change which schema the archived build supports.
+   Application Support snapshot. The candidate's schema version must be greater than or
+   equal to every observed version. If any observed version is higher, promotion is blocked.
+   Rollback notes don't make that candidate safe to launch. Quit RepoPrompt CE and move the
+   journal files to a backup directory using the path in the rollback template below.
+   Relaunch the currently installed build, then quit it after it writes fresh journals.
+   Re-run step 1 with `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`. Continue only when the replacement
+   archive contains no observed version higher than the candidate.
 
    If the archived and candidate schema versions differ, promotion is blocked until
    the release notes include usable rollback instructions. Start with this template and
@@ -162,17 +167,17 @@ The archive lands in `~/Archives/repoprompt-ce/<tag>/` and holds `app.zip`,
 record exists, a `.sha256` sidecar per file, and `manifest.json`. The manifest is written
 last, so its absence marks an incomplete archive and the restore refuses one. It records the
 tag, timestamps, bundle identifier, version, build, signing mode, and the commit read from
-the bundle's provenance file. When provenance explicitly says `dirty: false`, the archive
-reads `DomainWorkingJournal.schemaVersion` at that commit and records it as
-`working_journal_schema_version` with status `from_commit`. A `dirty: true` record produces
-a null version with status `dirty_provenance`. A missing or unknown `dirty` value produces a
-null version with status `unknown_provenance`. The distinct versions found in the Application
-Support snapshot are diagnostic only and
-appear in `observed_working_journal_versions`. Journals that can't supply an integer version
-appear by archive-relative path in `unreadable_working_journals` without blocking the
-archive. An empty list in either field means it found none. For clean provenance, the
-archive fails if it can't resolve exactly one integer schema version from the archived
-commit. Re-archiving over a completed archive needs
+the bundle's provenance file. When provenance says `dirty: false` and `git_status` is absent
+or `ok`, the archive reads `DomainWorkingJournal.schemaVersion` at that commit and records it
+as `working_journal_schema_version` with status `from_commit`. With an absent or `ok`
+`git_status`, `dirty: true` produces a null version with status `dirty_provenance`. A missing
+or null `dirty` value, or any present `git_status` value other than `ok`, produces a null
+version with status `unknown_provenance`. The snapshot versions used by the forward
+compatibility gate appear in `observed_working_journal_versions`. Journals that can't supply
+an integer version appear by archive-relative path in `unreadable_working_journals` without
+blocking the archive. An empty list in either field means it found none. For clean
+provenance, the archive fails if it can't resolve exactly one integer schema version from
+the archived commit. Re-archiving over a completed archive needs
 `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`.
 
 `LOCAL_RELEASE_ARCHIVE_EXCLUDES` is a colon-separated list of top-level exclusion rules
