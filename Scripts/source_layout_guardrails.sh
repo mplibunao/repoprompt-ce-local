@@ -782,6 +782,7 @@ allowed_tracked_docs=(
   "docs/migrations/swift-6-2-concurrency-migration-2026-07-18.md"
   "docs/migrations/swift-6-2-concurrency/migration-ledger.md"
   "docs/open-source-readiness.md"
+  "docs/porting.md"
   "docs/privacy/telemetry.md"
   "docs/releasing.md"
   "docs/testing.md"

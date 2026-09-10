@@ -136,6 +136,18 @@ require_tool() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required tool '$1'. Install it before committing or pushing."
 }
 
+require_remote_allowlist() {
+  local remotes remote_name
+  local unexpected_remotes=()
+  remotes="$(git remote)" || fail "failed to list Git remotes; repair the repository's Git configuration"
+  while IFS= read -r remote_name; do
+    [[ -z "$remote_name" || "$remote_name" == "origin" ]] || unexpected_remotes+=("$remote_name")
+  done <<< "$remotes"
+  if (( ${#unexpected_remotes[@]} )); then
+    fail "unexpected Git remote(s): ${unexpected_remotes[*]}; only 'origin' is allowed"
+  fi
+}
+
 ensure_tmp_root() {
   if [[ -z "$tmp_root" ]]; then
     tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/rpce-preflight.XXXXXX")"
@@ -198,7 +210,7 @@ run_pr_ready_path_validations() {
   files="$tmp_root/range-files.z"
   write_range_files "$files"
 
-  local control_plane_paths_pattern='^(Scripts/conductor\.py|Scripts/conductor_diagnostics\.py|Scripts/guardrails\.sh|Scripts/test_conductor_(lifecycle|output|diagnostics|high_output)\.py|Scripts/test_contribution_preflight\.py|\.agents/skills/rpce-contribution-check/scripts/preflight(_timing\.py|\.sh)|Makefile)$'
+  local control_plane_paths_pattern='^(Scripts/conductor\.py|Scripts/conductor_diagnostics\.py|Scripts/guardrails\.sh|Scripts/test_conductor_(lifecycle|output|diagnostics|high_output)\.py|Scripts/test_contribution_preflight_guard\.py|\.agents/skills/rpce-contribution-check/scripts/preflight(_timing\.py|\.sh)|Makefile)$'
   local ci_app_test_runner_paths_pattern='^(Scripts/ci_app_test_runner\.py|Scripts/test_ci_app_test_runner\.py|\.github/workflows/ci\.yml)$'
   local swift_paths_pattern='\.swift$'
   local root_test_paths_pattern='^(Sources/RepoPrompt/|Tests/RepoPrompt[^/]*Tests/)'
@@ -336,6 +348,9 @@ log "Run repository guardrails"
 make guardrails
 timing_phase_pass repository_guardrails
 
+log "Check repository remote allowlist"
+require_remote_allowlist
+
 if [[ "$mode" == "commit" ]]; then
   cat <<'EOF'
 
@@ -354,8 +369,8 @@ timing_phase_pass clean_worktree_check
 timing_phase_start outgoing_range_resolution
 resolve_outgoing_base
 log "Review current-branch outgoing range"
-printf 'Current branch: %s\nComparison base (%s): %s\nComputed outgoing range: %s\n' \
-  "$current_branch" "$base_reason" "$base_ref" "$range_spec"
+printf 'Current branch: %s\nComparison base (%s): %s\nComparison base provenance: %s\nComputed outgoing range: %s\n' \
+  "$current_branch" "$base_reason" "$base_ref" "$base_kind" "$range_spec"
 git log --oneline "$range_spec"
 
 outgoing_count="$(git rev-list --count "$range_spec")"
