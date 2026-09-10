@@ -770,6 +770,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         private var test_afterProvisionalExistingTabBindingInstalled: (@MainActor () async -> Void)?
         private var test_afterDurableExplicitTabSessionBinding: (@MainActor () async -> Void)?
         var test_afterMCPControlActivation: (@MainActor (TabSession) async -> Void)?
+        var test_submitUserTurnResultOverride: ((String, UUID, String?) -> UserTurnSubmissionResult)?
         var test_beforeMCPSelectionCommit: (@MainActor () async -> Void)?
         private var test_composeTabRemovalTeardownObserver: (@MainActor (UUID) async -> Void)?
         private var test_beforeAutomaticMCPSessionTargetDiscardRetry: (@MainActor () async -> Void)?
@@ -14647,7 +14648,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     tabID: target.tabID,
                     rawDraftText: claim.attempt.rawDraftSnapshot
                 )
-                if result == .submitted {
+                if result.isAcceptedSubmission {
                     clearComposerDraftIfUnchanged(for: claim)
                 }
                 return result
@@ -14714,7 +14715,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 tabID: target.tabID,
                 rawDraftText: claim.attempt.rawDraftSnapshot
             )
-            if result == .submitted {
+            if result.isAcceptedSubmission {
                 clearComposerDraftIfUnchanged(for: claim)
             }
             return result
@@ -14847,7 +14848,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 tabID: destinationTabID,
                 rawDraftText: claim.attempt.rawDraftSnapshot
             )
-            guard result == .submitted else {
+            guard result.isAcceptedSubmission else {
                 clearPendingUserTurnState(on: destinationSession)
                 return result
             }
@@ -14942,6 +14943,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         guard !trimmedText.isEmpty || !attachments.isEmpty || !taggedFiles.isEmpty else {
             return .blocked(message: "")
         }
+        #if DEBUG
+            if test_submitUserTurnResultOverride != nil { return nil }
+        #endif
         guard AgentModelCatalog.isAgentAvailable(session.selectedAgent, availability: agentAvailabilityContext) else {
             return .blocked(message: unavailableAgentMessage(for: session.selectedAgent))
         }
@@ -15162,6 +15166,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         rawDraftText: String? = nil
     ) -> UserTurnSubmissionResult {
         let session = session(for: tabID)
+        #if DEBUG
+            if let test_submitUserTurnResultOverride {
+                return test_submitUserTurnResultOverride(text, tabID, rawDraftText)
+            }
+        #endif
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachmentsToSend = session.pendingImageAttachments
         let taggedFilesToSend = session.pendingTaggedFileAttachments

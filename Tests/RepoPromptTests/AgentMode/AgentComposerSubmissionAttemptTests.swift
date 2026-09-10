@@ -30,6 +30,47 @@ final class AgentComposerSubmissionAttemptTests: XCTestCase {
         )
     }
 
+    func testNewSessionGoalControlPlaneSubmissionClearsSourceDraftAndPendingState() async throws {
+        let window = try await makeWindow()
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+
+        let viewModel = window.agentModeViewModel
+        let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
+        let sourceTabID = try XCTUnwrap(workspace.activeComposeTabID)
+        let sourceSession = viewModel.session(for: sourceTabID)
+        viewModel.test_setWorkspaceSwitchInFlight(false)
+        let workflow = AgentWorkflow.build.definition
+        let command = "/goal Keep composer cleanup deterministic"
+        sourceSession.selectedAgent = .codexExec
+        sourceSession.selectedWorkflow = workflow
+        viewModel.storeDraftText(for: sourceTabID, command)
+
+        let target = try XCTUnwrap(viewModel.makeComposerSubmitTarget(tabID: sourceTabID, session: sourceSession))
+        XCTAssertEqual(target.route, .createAgentSessionFromSourceTab)
+        var destinationTabID: UUID?
+        viewModel.test_submitUserTurnResultOverride = { text, tabID, rawDraftText in
+            XCTAssertEqual(text, command)
+            XCTAssertEqual(rawDraftText, command)
+            XCTAssertNotEqual(tabID, sourceTabID)
+            XCTAssertEqual(viewModel.session(for: tabID).selectedWorkflow, workflow)
+            destinationTabID = tabID
+            return .submittedControlPlaneCommand
+        }
+        defer { viewModel.test_submitUserTurnResultOverride = nil }
+
+        let result = await viewModel.submitUserTurnCreatingSessionIfNeeded(
+            text: command,
+            target: target,
+            createAndActivateSessionTab: { await viewModel.createAndActivateSessionTab() }
+        )
+
+        XCTAssertEqual(result, .submittedControlPlaneCommand)
+        XCTAssertNotNil(destinationTabID)
+        XCTAssertEqual(viewModel.retrieveDraftText(for: sourceTabID), "")
+        XCTAssertNil(sourceSession.selectedWorkflow)
+        XCTAssertNil(sourceSession.activeComposerSubmitAttempt)
+    }
+
     func testLatchSuppressesRapidSameTabCallbacksButAllowsAnotherTab() throws {
         var latch = AgentComposerSubmissionLatch()
         let firstSession = AgentModeViewModel.TabSession(tabID: UUID())
@@ -147,6 +188,28 @@ final class AgentComposerSubmissionAttemptTests: XCTestCase {
 
         XCTAssertTrue(effects.matchedAttempt)
         XCTAssertNil(effects.blockedMessage)
+    }
+
+    private func makeWindow() async throws -> WindowState {
+        let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
+        GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
+        let window = WindowState()
+        WindowStatesManager.shared.registerWindowState(window)
+        GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
+
+        let workspace = window.workspaceManager.createWorkspace(
+            name: "Composer submission \(UUID().uuidString.prefix(8))",
+            repoPaths: [FileManager.default.currentDirectoryPath],
+            ephemeral: true
+        )
+        await window.workspaceManager.switchWorkspace(
+            to: workspace,
+            saveState: false,
+            reason: "agentComposerSubmissionAttemptTests"
+        )
+        let activeWorkspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
+        window.promptManager.loadComposeTabsFromWorkspace(activeWorkspace, syncPromptText: true)
+        return window
     }
 
     private func makeTarget(session: AgentModeViewModel.TabSession) -> AgentComposerSubmitTarget {

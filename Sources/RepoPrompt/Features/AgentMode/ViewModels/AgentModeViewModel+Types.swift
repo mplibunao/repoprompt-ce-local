@@ -39,6 +39,15 @@ extension AgentModeViewModel {
         case submitted
         case submittedControlPlaneCommand
         case blocked(message: String)
+
+        var isAcceptedSubmission: Bool {
+            switch self {
+            case .submitted, .submittedControlPlaneCommand:
+                true
+            case .blocked:
+                false
+            }
+        }
     }
 
     struct AgentComposerSubmitClaim {
