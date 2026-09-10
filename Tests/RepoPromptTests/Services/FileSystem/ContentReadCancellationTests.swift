@@ -329,7 +329,7 @@ final class ContentReadCancellationTests: XCTestCase {
             }
         }
 
-        guard await waitUntil(iterations: 100_000, { physicalReadGate.isBlockedSnapshot() }) else {
+        guard await waitUntil(timeout: .seconds(10), { physicalReadGate.isBlockedSnapshot() }) else {
             watchdogTask.cancel()
             return XCTFail("Nested provider did not reach the controlled physical gate")
         }
@@ -520,7 +520,7 @@ final class ContentReadCancellationTests: XCTestCase {
             }
         }
 
-        guard await waitUntil(iterations: 100_000, { physicalReadGate.isBlockedSnapshot() }) else {
+        guard await waitUntil(timeout: .seconds(10), { physicalReadGate.isBlockedSnapshot() }) else {
             watchdogTask.cancel()
             if let earlyResult = await waitForTaskResult(watchdogTask),
                case let .failure(error) = earlyResult.get()
@@ -666,7 +666,7 @@ final class ContentReadCancellationTests: XCTestCase {
             }
             watchdogTasks.append(watchdogTask)
 
-            guard await waitUntil(iterations: 100_000, { attempt.physicalReadGate.isBlockedSnapshot() }) else {
+            guard await waitUntil(timeout: .seconds(10), { attempt.physicalReadGate.isBlockedSnapshot() }) else {
                 watchdogTask.cancel()
                 return XCTFail("Explicit-materialization attempt \(attemptNumber) did not reach its physical probe")
             }
@@ -1266,7 +1266,7 @@ final class ContentReadCancellationTests: XCTestCase {
 
         let firstSleeps = ControlledWatchdogSleeps(clock: clock)
         guard let firstTask = startWatchdogAttempt(1, sleeps: firstSleeps) else { return }
-        guard await waitUntil(iterations: 100_000, { physicalReadGates.isBlocked(at: 0) }) else {
+        guard await waitUntil(timeout: .seconds(10), { physicalReadGates.isBlocked(at: 0) }) else {
             firstTask.cancel()
             let earlyResult = await waitForTaskResult(firstTask)
             return XCTFail("First exact-resolution path-state probe did not block; result=\(String(describing: earlyResult))")
@@ -2507,12 +2507,16 @@ final class ContentReadCancellationTests: XCTestCase {
     }
 
     private func waitUntil(
-        iterations: Int = 10000,
+        timeout: Duration = .seconds(5),
         _ predicate: () async -> Bool
     ) async -> Bool {
-        for _ in 0 ..< iterations {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
             if await predicate() { return true }
-            await Task.yield()
+            // A cancelled task makes every sleep throw immediately; stop instead of
+            // hot-polling until the deadline.
+            do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
         }
         return await predicate()
     }
