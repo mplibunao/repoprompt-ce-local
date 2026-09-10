@@ -76,6 +76,12 @@ package enum MCPToolExecutionContractCatalog {
         cleanupDisposition: .forceDisconnect
     )
 
+    private static let promptMutationContract = MCPToolExecutionContract.bounded(
+        deadline: MCPTimeoutPolicy.boundedToolExecutionDeadline,
+        cancellationGrace: MCPTimeoutPolicy.boundedToolCancellationCleanupGrace,
+        cleanupDisposition: .detachAndSettle
+    )
+
     package static let orderedAdvertisedToolNames = MCPGlobalToolName.orderedToolNames + MCPWindowToolName.orderedToolNames
 
     package static let contracts: [String: MCPToolExecutionContract] = {
@@ -145,10 +151,16 @@ package enum MCPToolExecutionContractCatalog {
         arguments: [String: Value]
     ) -> MCPToolExecutionContract? {
         guard let baseContract = contract(for: toolName) else { return nil }
+        let promptContextOperation = MCPPromptContextOperation.parse(toolName: toolName, arguments: arguments)
         if [MCPWindowToolName.prompt, MCPWindowToolName.workspaceContext].contains(toolName),
-           MCPPromptContextOperation.parse(toolName: toolName, arguments: arguments) == .export
+           promptContextOperation == .export
         {
             return promptExportContract
+        }
+        if toolName == MCPWindowToolName.prompt,
+           [.set, .append, .clear, .selectPreset].contains(promptContextOperation)
+        {
+            return promptMutationContract
         }
         if toolName == MCPWindowToolName.fileActions,
            arguments["action"]?.stringValue?

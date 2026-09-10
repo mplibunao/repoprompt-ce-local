@@ -10,6 +10,150 @@ import XCTest
 #if DEBUG
     @MainActor
     final class MCPExportWatchdogIntegrationTests: XCTestCase {
+        func testPromptSetRespondsBeforeDeferredActiveTabApplyCompletes() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let gate = MCPExecutionIgnoringCancellationGate()
+                let responseCompleted = ExportPhaseSignal()
+                let applyReleased = ExportPhaseSignal()
+                let prompt = "bounded-prompt-\(UUID().uuidString)"
+                var responseTask: Task<PersistentMCPTestRPCResponse, Error>?
+
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    context.window.workspaceManager.setComposeTabFastStateDidApplyHandlerForTesting { tabID in
+                        guard tabID == context.tabID else { return }
+                        await gate.enterAndWait()
+                        await applyReleased.mark()
+                    }
+                    let activeResponseTask = Task {
+                        let response = try await endpoint.callTool(
+                            name: MCPWindowToolName.prompt,
+                            arguments: ["op": "set", "text": prompt]
+                        )
+                        await responseCompleted.mark()
+                        return response
+                    }
+                    responseTask = activeResponseTask
+                    try await gate.waitUntilEntered(count: 1)
+                    let completedWhileApplyBlocked = await Self.waitUntil(timeout: .seconds(2)) {
+                        await responseCompleted.isMarked()
+                    }
+                    XCTAssertTrue(completedWhileApplyBlocked)
+                    let response = try await activeResponseTask.value
+                    responseTask = nil
+                    XCTAssertTrue(try Self.toolResultText(response).contains(prompt))
+
+                    await gate.release()
+                    let resumed = await Self.waitUntil { await applyReleased.isMarked() }
+                    XCTAssertTrue(resumed)
+                    let stored = context.window.workspaceManager.composeTab(with: context.tabID)
+                    XCTAssertEqual(stored?.promptText, prompt)
+                    XCTAssertEqual(context.window.promptManager.promptText, prompt)
+
+                    context.window.workspaceManager.setComposeTabFastStateDidApplyHandlerForTesting(nil)
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    responseTask?.cancel()
+                    await gate.release()
+                    if let responseTask { _ = try? await responseTask.value }
+                    context.window.workspaceManager.setComposeTabFastStateDidApplyHandlerForTesting(nil)
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testPromptMutationTimeoutDetachesWithoutTerminatingConnection() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let manager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let gate = MCPExecutionIgnoringCancellationGate()
+                let recorder = MCPExecutionTraceRecorder()
+                var responseTask: Task<PersistentMCPTestRPCResponse, Error>?
+
+                MCPToolExecutionTracer.setTestSink { recorder.append($0) }
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+                    await manager.debugSetResolvedToolOperationOverride(toolName: MCPWindowToolName.prompt) {
+                        await gate.enterAndWait()
+                        return .object(["ok": .bool(true)])
+                    }
+                    let activeResponseTask = Task {
+                        try await endpoint.callTool(
+                            name: MCPWindowToolName.prompt,
+                            arguments: [
+                                "op": "set",
+                                "text": "ignored-until-release",
+                                "_rawJSON": true
+                            ]
+                        )
+                    }
+                    responseTask = activeResponseTask
+                    try await gate.waitUntilEntered(count: 1)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolExecutionDeadline)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolCancellationCleanupGrace)
+
+                    let response = try await activeResponseTask.value
+                    responseTask = nil
+                    let payload = try Self.toolResultObject(response)
+                    XCTAssertEqual(payload["code"] as? String, "tool_execution_timeout")
+                    XCTAssertEqual(payload["settlement"] as? String, "detached")
+                    XCTAssertEqual(payload["retryable"] as? Bool, false)
+                    let isTerminal = await manager.debugIsExecutionWatchdogTerminal(connectionID: endpoint.connectionID)
+                    XCTAssertFalse(isTerminal)
+                    let events = recorder.snapshot().filter {
+                        $0.connectionID == endpoint.connectionID && $0.toolName == MCPWindowToolName.prompt
+                    }
+                    XCTAssertTrue(events.contains { $0.phase == .deadlineExpired })
+                    XCTAssertTrue(events.contains { $0.phase == .cleanupGraceExpired })
+                    XCTAssertFalse(events.contains { $0.phase == .connectionForceDisconnectRequested })
+
+                    await manager.debugSetResolvedToolOperationOverride(
+                        toolName: MCPWindowToolName.prompt,
+                        operation: nil
+                    )
+                    let probe = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "get"]
+                    )
+                    XCTAssertFalse(probe.rawJSON.contains("\"isError\":true"), probe.rawJSON)
+
+                    await gate.release()
+                    MCPToolExecutionTracer.setTestSink(nil)
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    responseTask?.cancel()
+                    await gate.release()
+                    if let responseTask { _ = try? await responseTask.value }
+                    await manager.debugSetResolvedToolOperationOverride(
+                        toolName: MCPWindowToolName.prompt,
+                        operation: nil
+                    )
+                    MCPToolExecutionTracer.setTestSink(nil)
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
         func testExpiredClientEnvelopeRejectsBeforeProviderAndJournalForBothPublicTools() async throws {
             for toolName in ["prompt", "workspace_context"] {
                 try await MCPSharedServerTestLease.shared.withLease { lease in
