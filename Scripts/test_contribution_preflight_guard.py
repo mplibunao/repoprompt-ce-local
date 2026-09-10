@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Focused regression tests for contribution preflight remote policy."""
+"""Focused regression tests for contribution preflight policy."""
 
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -15,11 +16,43 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 PREFLIGHT_SOURCE = REPO_ROOT / ".agents/skills/rpce-contribution-check/scripts/preflight.sh"
+MAKEFILE_SOURCE = REPO_ROOT / "Makefile"
 
 
 def write_executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+class ContributionPreflightPatternTests(unittest.TestCase):
+    def test_control_plane_pattern_matches_conductor_selftest_files(self) -> None:
+        makefile = MAKEFILE_SOURCE.read_text(encoding="utf-8")
+        target = re.search(
+            r"^conductor-selftest:\n(?P<body>(?:\t.*\n)+)",
+            makefile,
+            flags=re.MULTILINE,
+        )
+        self.assertIsNotNone(target)
+        expected = set(
+            re.findall(r"\bpython3\s+(Scripts/test_[A-Za-z0-9_]+\.py)\b", target.group("body"))
+        )
+
+        preflight = PREFLIGHT_SOURCE.read_text(encoding="utf-8")
+        assignment = re.search(r"local control_plane_paths_pattern='([^']+)'", preflight)
+        self.assertIsNotNone(assignment)
+        pattern = assignment.group(1)
+        listed = {
+            path.replace(r"\.", ".")
+            for path in re.findall(r"Scripts/test_[A-Za-z0-9_]+\\\.py", pattern)
+        }
+        matched = {
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in (REPO_ROOT / "Scripts").glob("test_*.py")
+            if re.fullmatch(pattern, path.relative_to(REPO_ROOT).as_posix())
+        }
+
+        self.assertEqual(listed, expected)
+        self.assertEqual(matched, expected)
 
 
 class ContributionPreflightRemoteGuardTests(unittest.TestCase):
