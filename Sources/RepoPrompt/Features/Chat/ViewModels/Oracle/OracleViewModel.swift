@@ -1579,6 +1579,63 @@ class OracleViewModel: ObservableObject {
 
     // MARK: - Message Finalisation
 
+    @MainActor
+    func persistContextBuilderTimeoutResponse(
+        _ response: String,
+        queryID: UUID,
+        sessionID: UUID,
+        saveSession: (@MainActor (ChatSession) async throws -> URL)? = nil
+    ) async throws {
+        guard sessionIDByMessageId[queryID] == sessionID,
+              let message = messageStore[sessionID]?.first(where: { $0.id == queryID && !$0.isUser }),
+              let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID })
+        else {
+            throw OracleContextBuilderCompletionError.missingExactQuery
+        }
+
+        guard message.isFinalized else {
+            throw OracleContextBuilderCompletionError.missingFinalizationOutcome
+        }
+
+        withSessionMessages(sessionID) { messages in
+            if let index = messages.firstIndex(where: { $0.id == queryID && !$0.isUser }) {
+                messages[index].updateContent(response)
+            }
+        }
+
+        if let workspaceID = sessions[sessionIndex].workspaceID {
+            await drainTrackedAutosaves(for: workspaceID)
+        }
+        guard let liveMessages = messageStore[sessionID] else {
+            throw OracleContextBuilderCompletionError.missingExactQuery
+        }
+
+        var sessionSnapshot = sessions[sessionIndex]
+        sessionSnapshot.messages = liveMessages.map { message in
+            StoredMessage(
+                id: message.id,
+                isUser: message.isUser,
+                rawText: message.content,
+                timestamp: Date(),
+                sequenceIndex: message.sequenceIndex,
+                allowedFilePaths: message.allowedFilePaths.isEmpty ? nil : message.allowedFilePaths,
+                promptTokens: message.promptTokens,
+                completionTokens: message.completionTokens,
+                cost: message.cost,
+                modelName: message.modelName
+            )
+        }
+        sessionSnapshot.savedAt = Date()
+
+        let fileURL: URL = if let saveSession {
+            try await saveSession(sessionSnapshot)
+        } else {
+            try await autosaveSession(sessionSnapshot)
+        }
+        sessionSnapshot.fileURL = fileURL
+        sessions[sessionIndex] = sessionSnapshot
+    }
+
     nonisolated func waitForContextBuilderCompletion(_ id: UUID) async throws -> String {
         if await finalisationHub.outcome(for: id) == nil {
             let hasExactMessage = await MainActor.run {
