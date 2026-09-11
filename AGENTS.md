@@ -31,7 +31,7 @@ Local `docs/investigations/*.md` reports are intentionally left unignored so Rep
 
 ## Branch model
 
-`main` is the integration branch and the only long-lived branch. Cut a `bugfix/`, `port/`, or `chore/` branch from `main`, push it, and land it through a pull request on `mplibunao/repoprompt-ce-local` merged with a merge commit, so the review, the checks, and the diff stay auditable on GitHub. Nothing merges into `main` directly, and the `pr-ready` lane runs on the branch before the merge. Every promoted build is an annotated `local/v<version>-b<build>` tag on the promoted `main` commit; [`docs/releasing.md`](docs/releasing.md) owns the promotion procedure.
+`main` is the integration branch and the only long-lived branch. Cut a `bugfix/`, `port/`, or `chore/` branch from `main`, push it, and land it through a pull request on `mplibunao/repoprompt-ce-local` merged with a merge commit, so the review, the checks, and the diff stay auditable on GitHub. Nothing merges into `main` directly, and the `pr-ready` lane runs on the branch before the merge. MP merges every pull request after reading it and once its checks pass; an agent opens the pull request, records the `pr-ready` result in its description, and stops there. When a change depends on one still under review, stack its branch on that branch and say so in the pull request instead of waiting. Every promoted build is an annotated `local/v<version>-b<build>` tag on the promoted `main` commit; [`docs/releasing.md`](docs/releasing.md) owns the promotion procedure.
 
 ## Upstream is read-only
 
