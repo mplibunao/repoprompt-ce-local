@@ -9,21 +9,21 @@ import shlex
 import shutil
 import stat
 import subprocess
-import tempfile
+import sys
 import unittest
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from script_test_support import enter_context, temporary_directory, write_executable  # noqa: E402
+
 REPO_ROOT = SCRIPT_DIR.parent
 PREFLIGHT_SOURCE = REPO_ROOT / ".agents/skills/rpce-contribution-check/scripts/preflight.sh"
 MAKEFILE_SOURCE = REPO_ROOT / "Makefile"
 DISTRIBUTION_HTTPS_URL = "https://github.com/mplibunao/repoprompt-ce-local"
 DISTRIBUTION_SSH_URL = "git@github.com:mplibunao/repoprompt-ce-local.git"
-
-
-def write_executable(path: Path, body: str) -> None:
-    path.write_text(body, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 class ContributionPreflightPatternTests(unittest.TestCase):
@@ -55,13 +55,15 @@ class ContributionPreflightPatternTests(unittest.TestCase):
 
         self.assertEqual(listed, expected)
         self.assertEqual(matched, expected)
+        # The shared fixture module drives every suite above, so a change to it alone must
+        # still select the conductor self-test lane.
+        self.assertIsNotNone(re.fullmatch(pattern, "Scripts/script_test_support.py"))
 
 
 class ContributionPreflightRemoteGuardTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.repo = Path(self.tmp.name) / "repo"
+        self.tmp = enter_context(self, temporary_directory())
+        self.repo = self.tmp / "repo"
         self.repo.mkdir()
 
         self.git("init", "-q")
@@ -78,7 +80,11 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
 
         self.bin_dir = self.repo / ".test-bin"
         self.bin_dir.mkdir()
-        write_executable(self.bin_dir / "gitleaks", "#!/bin/sh\nexit 0\n")
+        write_executable(
+            self.bin_dir / "gitleaks",
+            "#!/bin/sh\nexit 0\n",
+            executable_bits=stat.S_IXUSR,
+        )
 
         self.git("add", ".")
         self.git("commit", "-q", "-m", "fixture baseline")
@@ -242,6 +248,7 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
             "#!/bin/sh\n"
             'if [ "$#" -eq 1 ] && [ "$1" = remote ]; then exit 128; fi\n'
             f'exec {shlex.quote(str(real_git))} "$@"\n',
+            executable_bits=stat.S_IXUSR,
         )
 
         result = self.run_preflight("commit")

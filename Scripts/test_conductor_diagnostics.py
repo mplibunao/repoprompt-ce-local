@@ -7,10 +7,7 @@ import contextlib
 import io
 import json
 import os
-import shutil
-import stat
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from typing import Tuple
@@ -21,20 +18,19 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import conductor_diagnostics  # noqa: E402
+from script_test_support import enter_context, temporary_directory, write_executable  # noqa: E402
 
 
 class FocusedBuildDiagnosticTests(unittest.TestCase):
     def _make_fake_swift(self, output: str, exit_code: int = 0) -> Path:
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda p=tmp: shutil.rmtree(p, ignore_errors=True))
+        tmp = enter_context(self, temporary_directory())
         swift = tmp / "swift"
-        swift.write_text(
+        write_executable(
+            swift,
             "#!/usr/bin/env bash\n"
             f"cat <<'EOF'\n{output}EOF\n"
             f"exit {exit_code}\n",
-            encoding="utf-8",
         )
-        swift.chmod(swift.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         return tmp
 
     def _run_with_path(self, path: Path, args: dict) -> Tuple[int, str]:
@@ -55,9 +51,7 @@ class FocusedBuildDiagnosticTests(unittest.TestCase):
                 os.environ["PATH"] = old_path
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.repo_root = Path(self.tmp.name)
+        self.repo_root = enter_context(self, temporary_directory())
 
     def test_focused_build_parses_swift_build_output(self) -> None:
         output = (
@@ -160,12 +154,12 @@ class FocusedBuildDiagnosticTests(unittest.TestCase):
         self.assertEqual(report["timing"]["xctest"]["wallSeconds"], 0.457)
 
     def test_focused_build_missing_swift_returns_one(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+        with temporary_directory() as tmp, mock.patch.object(
             conductor_diagnostics.subprocess,
             "Popen",
             side_effect=FileNotFoundError,
         ):
-            code, _ = self._run_with_path(Path(tmp), {"product": "RepoPrompt"})
+            code, _ = self._run_with_path(tmp, {"product": "RepoPrompt"})
         self.assertEqual(code, 1)
 
     def test_focused_build_reports_scratch_state(self) -> None:

@@ -11,7 +11,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import textwrap
 import unittest
 from unittest import mock
@@ -19,6 +18,11 @@ from pathlib import Path
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from script_test_support import enter_context, temporary_directory, write_bash_stub, write_executable  # noqa: E402
+
 ROOT_DIR = SCRIPT_DIR.parent
 PINNED_CERTIFICATE_NAME = "RepoPrompt CE Local Self-Signed Code Signing"
 SHA1_A = "1" * 40
@@ -394,8 +398,7 @@ class LocalProductionInstallerTests(unittest.TestCase):
         fail_registry_verification: bool = False,
         split_release_source_root: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
-        temp_dir = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, temp_dir, True)
+        temp_dir = enter_context(self, temporary_directory())
         installer_tmp = temp_dir / "tmp"
         installer_tmp.mkdir()
         root = temp_dir / "repo"
@@ -483,7 +486,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
             (lock_path / "pid").write_text("99999\n", encoding="utf-8")
 
         package_capture = temp_dir / "package-capture.txt"
-        (scripts / "package_app.sh").write_text(
+        write_executable(
+            scripts / "package_app.sh",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -502,15 +506,13 @@ class LocalProductionInstallerTests(unittest.TestCase):
                 EOF
                 """
             ),
-            encoding="utf-8",
         )
-        (scripts / "package_app.sh").chmod(0o755)
 
         bin_dir = temp_dir / "bin"
         bin_dir.mkdir()
         security_log = temp_dir / "security.log"
         import_log = temp_dir / "imported-identity"
-        self.write_stub(
+        write_bash_stub(
             bin_dir,
             "security",
             """\
@@ -526,8 +528,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
             """,
         )
         swift_log = temp_dir / "swift.log"
-        self.write_stub(bin_dir, "swift", 'printf "%s\\n" "$*" >> "$SWIFT_LOG"\nexit 97\n')
-        self.write_stub(
+        write_bash_stub(bin_dir, "swift", 'printf "%s\\n" "$*" >> "$SWIFT_LOG"\nexit 97\n')
+        write_bash_stub(
             bin_dir,
             "xcrun",
             """\
@@ -538,7 +540,7 @@ class LocalProductionInstallerTests(unittest.TestCase):
             exit 1
             """,
         )
-        self.write_stub(
+        write_bash_stub(
             bin_dir,
             "codesign",
             """\
@@ -548,7 +550,7 @@ class LocalProductionInstallerTests(unittest.TestCase):
             exit 0
             """,
         )
-        self.write_stub(
+        write_bash_stub(
             bin_dir,
             "openssl",
             """\
@@ -564,9 +566,9 @@ class LocalProductionInstallerTests(unittest.TestCase):
             exit 0
             """,
         )
-        self.write_stub(bin_dir, "pgrep", "exit 1\n")
-        self.write_stub(bin_dir, "ditto", 'cp -R "$1" "$2"\n')
-        self.write_stub(
+        write_bash_stub(bin_dir, "pgrep", "exit 1\n")
+        write_bash_stub(bin_dir, "ditto", 'cp -R "$1" "$2"\n')
+        write_bash_stub(
             bin_dir,
             "cp",
             """\
@@ -579,7 +581,7 @@ class LocalProductionInstallerTests(unittest.TestCase):
             exec /bin/cp "$@"
             """,
         )
-        self.write_stub(
+        write_bash_stub(
             bin_dir,
             "mv",
             """\
@@ -666,19 +668,12 @@ class LocalProductionInstallerTests(unittest.TestCase):
         return next(line for line in output.splitlines() if line.startswith("Packaged designated requirement:"))
 
     @staticmethod
-    def write_stub(bin_dir: Path, name: str, body: str) -> None:
-        path = bin_dir / name
-        path.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(body), encoding="utf-8")
-        path.chmod(0o755)
-
-    @staticmethod
     def create_fake_xcode(app_path: Path, *, sdk_version: str) -> Path:
         developer_dir = app_path / "Contents" / "Developer"
         (developer_dir / "usr" / "bin").mkdir(parents=True)
         (developer_dir / "Platforms" / "MacOSX.platform").mkdir(parents=True)
         xcodebuild = developer_dir / "usr" / "bin" / "xcodebuild"
-        xcodebuild.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-        xcodebuild.chmod(0o755)
+        write_executable(xcodebuild, "#!/usr/bin/env bash\nexit 0\n")
         (developer_dir / ".fixture-sdk-version").write_text(f"{sdk_version}\n", encoding="utf-8")
         return developer_dir
 
@@ -694,14 +689,14 @@ class LocalProductionInstallerTests(unittest.TestCase):
         bin_dir.mkdir(exist_ok=True)
         selected = str(selected_path or root / "CommandLineTools")
         marker_command = f"printf 'invoked\\n' > {str(marker)!r}\n" if marker else ""
-        cls.write_stub(
+        write_bash_stub(
             bin_dir,
             "xcode-select",
             f"""\
             {marker_command}printf '%s\\n' {selected!r}
             """,
         )
-        cls.write_stub(
+        write_bash_stub(
             bin_dir,
             "xcrun",
             """\
