@@ -253,6 +253,13 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         )
         self.assertIn("expected exactly one integer DomainWorkingJournal.schemaVersion", package_script)
 
+    def test_package_provenance_records_git_status_outcome(self) -> None:
+        package_script = PACKAGE_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('status = git(["status", "--porcelain"], allow_empty=True)', package_script)
+        self.assertIn('"dirty": bool(status) if status is not None else None', package_script)
+        self.assertIn('"git_status": "ok" if status is not None else "unavailable"', package_script)
+
     def test_round_trip_reproduces_app_state_defaults_and_identity(self) -> None:
         self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})
         app_before = tree_snapshot(self.app)
@@ -335,6 +342,27 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(manifest["working_journal_schema_version_status"], "from_commit")
         self.assertEqual(manifest["provenance_commit_working_journal_schema_version"], 1)
         self.assertEqual(manifest["observed_working_journal_versions"], [1, 2])
+
+    def test_excluded_domain_runtime_still_reports_live_observed_journal_versions(self) -> None:
+        self.write_baseline_fixture()
+        journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
+        journals.mkdir(parents=True)
+        (journals / "00000000-0000-0000-0000-000000000001.json").write_text(
+            json.dumps({"version": 2}), encoding="utf-8"
+        )
+
+        self.archive(LOCAL_RELEASE_ARCHIVE_EXCLUDES="DebugApps:Rollbacks:Conductor:DomainRuntime")
+        manifest = self.manifest()
+        listing = subprocess.run(
+            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+
+        top_level = {entry.removeprefix("./").split("/", 1)[0] for entry in listing}
+        self.assertEqual(manifest["observed_working_journal_versions"], [2])
+        self.assertNotIn("DomainRuntime", top_level)
 
     def test_manifest_records_unreadable_journal_without_aborting_archive(self) -> None:
         self.write_baseline_fixture()

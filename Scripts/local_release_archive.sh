@@ -111,19 +111,19 @@ ARCHIVE_TAG="$TAG" \
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import json
 import os
 import plistlib
 import re
 import subprocess
-import tarfile
 import time
 from uuid import UUID
 
 archive_dir = Path(os.environ["ARCHIVE_DIR"])
 app_path = Path(os.environ["ARCHIVE_APP_PATH"])
 repository_path = Path(os.environ["ARCHIVE_REPOSITORY_PATH"])
+state_path = Path(os.environ["ARCHIVE_STATE_PATH"])
 
 
 def info_plist_value(key: str) -> str | None:
@@ -205,42 +205,29 @@ def archived_working_journal_schema_version(commit_version: int | None) -> tuple
 def observed_working_journal_versions() -> tuple[list[int], list[str]]:
     versions: set[int] = set()
     unreadable: list[str] = []
-    with tarfile.open(archive_dir / "application-support.tar.gz", "r:gz") as state_archive:
-        for member in state_archive.getmembers():
-            path = PurePosixPath(member.name.removeprefix("./"))
-            parts = path.parts
-            if not (
-                len(parts) == 5
-                and parts[:2] == ("DomainRuntime", "v1")
-                and parts[3] == "working-journals"
-                and path.suffix == ".json"
-            ):
-                continue
-            # UUID validation prevents tar's macOS AppleDouble sidecars from being
-            # mistaken for journal JSON.
-            try:
-                UUID(path.stem)
-            except ValueError:
-                continue
-            # Snapshot health is diagnostic and must not invalidate an otherwise usable
-            # rollback unit.
-            if not member.isfile():
-                unreadable.append(str(path))
-                continue
-            handle = state_archive.extractfile(member)
-            if handle is None:
-                unreadable.append(str(path))
-                continue
-            try:
-                payload = json.load(handle)
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                unreadable.append(str(path))
-                continue
-            version = payload.get("version") if isinstance(payload, dict) else None
-            if type(version) is not int:
-                unreadable.append(str(path))
-                continue
-            versions.add(version)
+    journals_root = state_path / "DomainRuntime" / "v1"
+    for journal_path in journals_root.glob("*/working-journals/*.json"):
+        relative_path = journal_path.relative_to(state_path)
+        # UUID validation prevents unrelated JSON from being treated as a working journal.
+        try:
+            UUID(journal_path.stem)
+        except ValueError:
+            continue
+        # An unreadable journal cannot establish a version, but it must not invalidate the
+        # rollback unit; the manifest keeps it visible during promotion review.
+        if not journal_path.is_file():
+            unreadable.append(str(relative_path))
+            continue
+        try:
+            payload = json.loads(journal_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            unreadable.append(str(relative_path))
+            continue
+        version = payload.get("version") if isinstance(payload, dict) else None
+        if type(version) is not int:
+            unreadable.append(str(relative_path))
+            continue
+        versions.add(version)
     return sorted(versions), sorted(unreadable)
 
 

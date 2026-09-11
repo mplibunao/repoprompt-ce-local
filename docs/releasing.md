@@ -33,10 +33,10 @@ Before you start:
 
    `provenance_commit_working_journal_schema_version` records the clean commit-derived value.
    This value selects the archived version when the bundle key is absent. When the key is
-   present, the field is an audit value. The currently installed production build resolves as
-   `from_commit` when its provenance is clean, or as `unknown` with automatic rollback-note
-   gating otherwise. The candidate build's supported version is
-   `DomainWorkingJournal.schemaVersion` in
+   present, the field is an audit value. Pre-key bundles packaged before the `git_status`
+   provenance field resolve as `unknown`. This includes the currently installed production
+   build, so its next promotion requires the rollback notes below. The candidate build's
+   supported version is `DomainWorkingJournal.schemaVersion` in
    [`Sources/RepoPromptDomainRuntime/DomainPersistence.swift`](../Sources/RepoPromptDomainRuntime/DomainPersistence.swift).
 
    Working journals don't identify the app build that wrote them, so they never select the
@@ -174,13 +174,15 @@ last, so its absence marks an incomplete archive and the restore refuses one. It
 tag, timestamps, bundle identifier, version, build, signing mode, and the commit read from
 the bundle's provenance file. The archive records `working_journal_schema_version` with
 status `from_bundle` when `RepoPromptWorkingJournalSchemaVersion` is present in the app's
-Info.plist. For older bundles without that key, clean provenance selects the version from the
-archived commit and records `from_commit`. Without either source, the archive records a null
+Info.plist. For older bundles without that key, provenance with `dirty: false` and
+`git_status: "ok"` selects the version from the archived commit and records `from_commit`.
+Without either source, the archive records a null
 version with status `unknown`. `provenance_commit_working_journal_schema_version` records the
 clean commit-derived value whether it selects the version or audits the bundle key. Working
-journals carry no writer identity and never select the archived version. The snapshot versions
-used by the forward
-compatibility gate appear in `observed_working_journal_versions`. Journals that can't supply
+journals carry no writer identity and never select the archived version. The archive scans the
+live Application Support state for the forward compatibility gate, even when exclusions omit
+`DomainRuntime` from the state tarball. The results appear in
+`observed_working_journal_versions`. Journals that can't supply
 an integer version appear by archive-relative path in `unreadable_working_journals` without
 blocking the archive. An empty list in either field means it found none. Re-archiving over a
 completed archive needs
@@ -206,10 +208,11 @@ a rollback path.
 ## Build provenance
 
 Packaging writes `Contents/Resources/RepoPromptProvenance.json` into every bundle, debug and
-release alike. It carries the repository root, worktree path and name, branch, commit, a
-dirty flag, and the build time. `Scripts/conductor.py` reads it to identify a bundle, and the
-archive manifest reads the commit from it. After an install, confirm the file names the
-promoted commit with `dirty: false`.
+release alike. It carries the repository root, `worktreePath`, `worktreeName`, branch, commit,
+the `dirty` flag, `git_status` (`ok` or `unavailable`), and the build time.
+`Scripts/conductor.py` reads it to identify a bundle, and the archive manifest reads the commit
+from it. After an install, confirm the file names the promoted commit with `dirty: false` and
+`git_status: "ok"`.
 
 ## Acceptance matrix
 

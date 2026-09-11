@@ -446,7 +446,7 @@ import time
 root = Path(os.environ["ROOT_DIR_FOR_PROVENANCE"]).resolve()
 bundle = Path(os.environ["APP_BUNDLE_FOR_PROVENANCE"])
 
-def git(args: list[str]) -> str | None:
+def git(args: list[str], *, allow_empty: bool = False) -> str | None:
     try:
         completed = subprocess.run(["git", "-C", str(root), *args], text=True, capture_output=True, timeout=5)
     except Exception:
@@ -454,9 +454,9 @@ def git(args: list[str]) -> str | None:
     if completed.returncode != 0:
         return None
     value = completed.stdout.strip()
-    return value or None
+    return value if value or allow_empty else None
 
-status = git(["status", "--porcelain"])
+status = git(["status", "--porcelain"], allow_empty=True)
 now = time.time()
 payload = {
     "version": 1,
@@ -465,7 +465,8 @@ payload = {
     "worktreeName": root.name,
     "branch": git(["rev-parse", "--abbrev-ref", "HEAD"]),
     "commit": git(["rev-parse", "HEAD"]),
-    "dirty": bool(status),
+    "dirty": bool(status) if status is not None else None,
+    "git_status": "ok" if status is not None else "unavailable",
     "buildTimeEpoch": now,
     "buildTimeISO": datetime.fromtimestamp(now, timezone.utc).astimezone().isoformat(timespec="seconds"),
 }
