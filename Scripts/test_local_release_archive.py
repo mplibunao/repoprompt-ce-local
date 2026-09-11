@@ -25,6 +25,7 @@ ARCHIVE_SCRIPT = SCRIPT_DIR / "local_release_archive.sh"
 RESTORE_SCRIPT = SCRIPT_DIR / "local_release_restore.sh"
 ENV_SCRIPT = SCRIPT_DIR / "local_release_env.sh"
 PACKAGE_SCRIPT = SCRIPT_DIR / "package_app.sh"
+JOURNAL_SCHEMA_TOOL = SCRIPT_DIR / "read_working_journal_schema_version.py"
 INFO_PLIST_TEMPLATE = ROOT_DIR / "AppBundle" / "Info.plist.template"
 DISPLAY_NAME = "RepoPrompt CE"
 TAG = "local/v1.4.0-b99"
@@ -251,7 +252,11 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             "'__WORKING_JOURNAL_SCHEMA_VERSION__':'$WORKING_JOURNAL_SCHEMA_VERSION'",
             package_script,
         )
-        self.assertIn("expected exactly one integer DomainWorkingJournal.schemaVersion", package_script)
+        self.assertIn('read_working_journal_schema_version.py" "$ROOT_DIR"', package_script)
+        self.assertIn(
+            "expected exactly one integer DomainWorkingJournal.schemaVersion",
+            JOURNAL_SCHEMA_TOOL.read_text(encoding="utf-8"),
+        )
 
     def test_round_trip_reproduces_app_state_defaults_and_identity(self) -> None:
         self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})

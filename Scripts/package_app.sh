@@ -342,30 +342,7 @@ run "$CONTROL_PLANE_SCRIPTS_DIR/validate_required_swiftpm_resource_bundles.sh" "
 
 phase "Writing Info.plist"
 WORKING_JOURNAL_SCHEMA_VERSION="$(
-    ROOT_DIR_FOR_JOURNAL_SCHEMA="$ROOT_DIR" python3 - <<'PY'
-from pathlib import Path
-import os
-import re
-import sys
-
-source_path = Path(os.environ["ROOT_DIR_FOR_JOURNAL_SCHEMA"]) / "Sources/RepoPromptDomainRuntime/DomainPersistence.swift"
-source = source_path.read_text(encoding="utf-8")
-declarations = re.findall(
-    r"(?ms)^struct DomainWorkingJournal: Codable \{\n(?P<body>.*?)(?=^\})",
-    source,
-)
-matches = [
-    match
-    for declaration in declarations
-    for match in re.findall(r"(?m)^[ \t]+static let schemaVersion[ \t]*=[ \t]*([0-9]+)[ \t]*$", declaration)
-]
-if len(matches) != 1:
-    sys.exit(
-        f"ERROR: expected exactly one integer DomainWorkingJournal.schemaVersion in {source_path}; "
-        f"found {len(matches)}."
-    )
-print(matches[0])
-PY
+    python3 "$CONTROL_PLANE_SCRIPTS_DIR/read_working_journal_schema_version.py" "$ROOT_DIR"
 )"
 run python3 - <<PY
 from pathlib import Path

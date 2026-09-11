@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import os
+import plistlib
 import shutil
 import stat
 import subprocess
@@ -21,6 +22,47 @@ ROLLOUT_TOOL = SCRIPT_DIR / "stable_rollout.py"
 POLICY = SCRIPT_DIR / "apple_identity_policy.json"
 PROFILE_TOOL = SCRIPT_DIR / "embedded_provisioning_profile.py"
 PROVENANCE_TOOL = SCRIPT_DIR / "write_bundle_provenance.py"
+JOURNAL_SCHEMA_TOOL = SCRIPT_DIR / "read_working_journal_schema_version.py"
+INFO_PLIST_TEMPLATE = ROOT_DIR / "AppBundle" / "Info.plist.template"
+STAGED_RELEASE_VALIDATOR = SCRIPT_DIR / "validate_staged_release.sh"
+
+
+class StagedReleasePlistTests(unittest.TestCase):
+    def test_expected_plist_renders_working_journal_schema_as_integer(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(JOURNAL_SCHEMA_TOOL), str(ROOT_DIR)],
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        schema_version = result.stdout.strip()
+        text = INFO_PLIST_TEMPLATE.read_text(encoding="utf-8")
+        for key, value in {
+            "__APP_NAME__": "RepoPrompt",
+            "__DISPLAY_NAME__": "RepoPrompt CE",
+            "__BUNDLE_ID__": "com.repoprompt.ce",
+            "__MARKETING_VERSION__": "1.0.0",
+            "__BUILD_NUMBER__": "1",
+            "__DEBUG_SECURE_STORAGE_BACKEND__": "alternate-in-memory",
+            "__SIGNING_MODE__": "release-candidate-adhoc",
+            "__LOCAL_SIGNING_CERTIFICATE_SHA256__": "",
+            "__LOCAL_SECURE_STORAGE_GENERATION__": "",
+            "__IDENTITY_MIGRATION_PHASE__": "disabled",
+            "__WORKING_JOURNAL_SCHEMA_VERSION__": schema_version,
+        }.items():
+            text = text.replace(key, value)
+
+        expected_plist = plistlib.loads(text.encode("utf-8"))
+        rendered_version = expected_plist["RepoPromptWorkingJournalSchemaVersion"]
+        self.assertEqual(rendered_version, int(schema_version))
+        self.assertIs(type(rendered_version), int)
+
+        validator = STAGED_RELEASE_VALIDATOR.read_text(encoding="utf-8")
+        self.assertIn(
+            '"__WORKING_JOURNAL_SCHEMA_VERSION__": working_journal_schema_version',
+            validator,
+        )
 
 
 class BundleProvenanceTests(unittest.TestCase):
