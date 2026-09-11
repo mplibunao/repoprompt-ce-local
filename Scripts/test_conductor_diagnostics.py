@@ -30,7 +30,7 @@ class XCTestSandboxTests(unittest.TestCase):
             default_root = Path(tmp) / "ticket.test-sandbox"
             env: dict[str, str] = {}
 
-            sandbox_root = conductor.configure_xctest_sandbox("test", env, default_root)
+            sandbox_root = conductor.configure_xctest_sandbox("test", {}, env, default_root)
 
             self.assertEqual(sandbox_root, str(default_root))
             self.assertEqual(env["REPOPROMPT_TEST_SANDBOX_ROOT"], str(default_root))
@@ -71,13 +71,61 @@ class XCTestSandboxTests(unittest.TestCase):
                 conductor.print_job_result_header(payload, {"headline": "completed successfully"})
             self.assertIn(f"Sandbox:  {sandbox_root}", output.getvalue())
 
+    def test_focused_build_injects_sandbox_only_when_it_runs_tests(self) -> None:
+        cases = (
+            (["focused-build", "--test"], True),
+            (["focused-build", "--filter", "ExampleTests"], True),
+            (["focused-build"], False),
+        )
+        for argv, expects_sandbox in cases:
+            with self.subTest(argv=argv), tempfile.TemporaryDirectory() as tmp:
+                captured_args: dict[str, object] = {}
+
+                def capture_request(
+                    _paths: object,
+                    operation: str,
+                    args: dict[str, object],
+                    _flags: object,
+                ) -> int:
+                    self.assertEqual(operation, "diagnostics")
+                    captured_args.update(args)
+                    return 0
+
+                with mock.patch.object(
+                    conductor,
+                    "enqueue_and_maybe_wait",
+                    side_effect=capture_request,
+                ):
+                    self.assertEqual(
+                        conductor.handle_real_operation(mock.Mock(), "diagnostics", argv),
+                        0,
+                    )
+
+                default_root = Path(tmp) / "ticket.test-sandbox"
+                env: dict[str, str] = {}
+                sandbox_root = conductor.configure_xctest_sandbox(
+                    "diagnostics",
+                    captured_args,
+                    env,
+                    default_root,
+                )
+
+                if expects_sandbox:
+                    self.assertEqual(sandbox_root, str(default_root))
+                    self.assertEqual(env[conductor.TEST_SANDBOX_ENV_KEY], str(default_root))
+                    self.assertTrue(default_root.is_dir())
+                else:
+                    self.assertIsNone(sandbox_root)
+                    self.assertNotIn(conductor.TEST_SANDBOX_ENV_KEY, env)
+                    self.assertFalse(default_root.exists())
+
     def test_explicit_sandbox_override_wins(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             default_root = Path(tmp) / "ticket.test-sandbox"
             explicit_root = str(Path(tmp) / "caller-sandbox")
             env = {"REPOPROMPT_TEST_SANDBOX_ROOT": f"  {explicit_root}\n"}
 
-            sandbox_root = conductor.configure_xctest_sandbox("provider-test", env, default_root)
+            sandbox_root = conductor.configure_xctest_sandbox("provider-test", {}, env, default_root)
 
             self.assertEqual(sandbox_root, explicit_root)
             self.assertEqual(env["REPOPROMPT_TEST_SANDBOX_ROOT"], explicit_root)
@@ -89,6 +137,7 @@ class XCTestSandboxTests(unittest.TestCase):
                 with self.assertRaisesRegex(conductor.ConductorError, "must not be blank"):
                     conductor.configure_xctest_sandbox(
                         "test",
+                        {},
                         {"REPOPROMPT_TEST_SANDBOX_ROOT": value},
                         Path(tmp) / "ticket.test-sandbox",
                     )

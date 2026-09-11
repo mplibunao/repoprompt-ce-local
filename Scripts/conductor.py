@@ -39,7 +39,7 @@ from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
 from debug_app_process import ProcessIdentityError, matching_processes, terminate_matching_processes
 
-PROTOCOL_VERSION = 17
+PROTOCOL_VERSION = 18
 TERMINAL_STATES = {"completed", "failed", "canceled"}
 JOB_PHASES = {
     "queued",
@@ -710,8 +710,23 @@ def ensure_state_dirs(paths: Paths) -> None:
     ensure_private_dir(machine_lock_dir())
 
 
-def configure_xctest_sandbox(operation: str, env: Dict[str, str], default_root: Path) -> Optional[str]:
-    if operation not in XCTEST_OPERATIONS:
+def operation_runs_xctest(operation: str, args: Dict[str, Any]) -> bool:
+    if operation in XCTEST_OPERATIONS:
+        return True
+    return (
+        operation == "diagnostics"
+        and args.get("subcommand") == "focused-build"
+        and bool(args.get("runTests"))
+    )
+
+
+def configure_xctest_sandbox(
+    operation: str,
+    args: Dict[str, Any],
+    env: Dict[str, str],
+    default_root: Path,
+) -> Optional[str]:
+    if not operation_runs_xctest(operation, args):
         return None
     if TEST_SANDBOX_ENV_KEY in env:
         sandbox_root = env[TEST_SANDBOX_ENV_KEY].strip()
@@ -4253,6 +4268,7 @@ class DaemonState:
             # The ticket exists only after enqueue, so the default path is assigned immediately before execution.
             test_sandbox_root = configure_xctest_sandbox(
                 job.operation,
+                job.args,
                 env,
                 job.log_path.with_suffix(".test-sandbox"),
             )
@@ -5469,7 +5485,7 @@ class DaemonState:
                 continue
             detached_paths.append(job.log_path)
             detached_paths.extend(job.diagnostic_paths)
-            if job.operation in XCTEST_OPERATIONS and TEST_SANDBOX_ENV_KEY not in job.env:
+            if operation_runs_xctest(job.operation, job.args) and TEST_SANDBOX_ENV_KEY not in job.env:
                 detached_test_sandboxes.append(job.log_path.with_suffix(".test-sandbox"))
             for key, mapped_ticket in list(self.request_keys.items()):
                 if mapped_ticket == ticket:
@@ -5568,7 +5584,7 @@ class DaemonState:
                     path.unlink()
 
     def _test_sandbox_name_for_job(self, job: Job) -> Optional[str]:
-        if job.operation not in XCTEST_OPERATIONS:
+        if not operation_runs_xctest(job.operation, job.args):
             return None
         raw_path = job.env.get(TEST_SANDBOX_ENV_KEY)
         path = Path(raw_path.strip()) if raw_path is not None else job.log_path.with_suffix(".test-sandbox")
