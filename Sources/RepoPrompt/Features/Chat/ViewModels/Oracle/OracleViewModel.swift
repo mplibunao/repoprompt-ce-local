@@ -1631,9 +1631,7 @@ class OracleViewModel: ObservableObject {
               currentMessages.contains(where: { $0.id == queryID && !$0.isUser && $0.isFinalized }),
               let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID })
         else {
-            if sessions.contains(where: { $0.id == sessionID }) {
-                autosaveChatHistory(for: sessionID, force: true)
-            }
+            try await rewriteTranscriptAfterOwnershipMiss(sessionID: sessionID, saveSession: saveSession)
             throw OracleContextBuilderCompletionError.missingExactQuery
         }
         // Only the fields the save produced are copied back, and the transcript mirror follows
@@ -1657,9 +1655,7 @@ class OracleViewModel: ObservableObject {
               settledMessages.contains(where: { $0.id == queryID && !$0.isUser && $0.isFinalized }),
               let settledIndex = sessions.firstIndex(where: { $0.id == sessionID })
         else {
-            if sessions.contains(where: { $0.id == sessionID }) {
-                autosaveChatHistory(for: sessionID, force: true)
-            }
+            try await rewriteTranscriptAfterOwnershipMiss(sessionID: sessionID, saveSession: saveSession)
             throw OracleContextBuilderCompletionError.missingExactQuery
         }
         sessions[settledIndex].fileURL = correctedURL
@@ -1668,6 +1664,29 @@ class OracleViewModel: ObservableObject {
         if settledMessages.map(\.id) != currentMessages.map(\.id) {
             sessions[settledIndex].messages = Self.storedMessages(from: settledMessages)
             autosaveChatHistory(for: sessionID, force: true)
+        }
+    }
+
+    /// The save that just returned wrote the transcript as it stood when the save began, so a
+    /// chat that still exists is rewritten from the live store and that write is awaited before
+    /// the miss is reported: a scheduled autosave can be lost to a quit or a failed write and
+    /// leave the removed answer on disk.
+    private func rewriteTranscriptAfterOwnershipMiss(
+        sessionID: UUID,
+        saveSession: (@MainActor (ChatSession) async throws -> URL)?
+    ) async throws {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionID }),
+              let liveMessages = messageStore[sessionID]
+        else { return }
+        sessions[index].messages = Self.storedMessages(from: liveMessages)
+        sessions[index].savedAt = Date()
+        let fileURL: URL = if let saveSession {
+            try await saveSession(sessions[index])
+        } else {
+            try await autosaveSession(sessions[index])
+        }
+        if let index = sessions.firstIndex(where: { $0.id == sessionID }) {
+            sessions[index].fileURL = fileURL
         }
     }
 

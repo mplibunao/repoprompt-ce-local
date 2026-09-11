@@ -112,6 +112,7 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
         var resent = seeded.session
         resent.messages = seeded.session.messages.filter(\.isUser)
         let resentURL = try await fixture.oracleViewModel.chatData.saveChatSession(resent, for: fixture.workspace)
+        var resendLanded = false
 
         do {
             try await fixture.oracleViewModel.persistContextBuilderTimeoutResponse(
@@ -119,9 +120,13 @@ final class OracleContextBuilderTimeoutPersistenceTests: XCTestCase {
                 queryID: seeded.answerID,
                 sessionID: seeded.session.id,
                 saveSession: { session in
-                    // The resend lands while the save is suspended; the stale snapshot is then
-                    // written over it, which is the state the guard must detect.
-                    await fixture.oracleViewModel.loadChatSession(from: resentURL)
+                    // The resend lands once, while the first save is suspended; the stale snapshot
+                    // is then written over it, which is the state the guard must detect. The
+                    // awaited repair that follows must not be disturbed again.
+                    if !resendLanded {
+                        resendLanded = true
+                        await fixture.oracleViewModel.loadChatSession(from: resentURL)
+                    }
                     return try await fixture.oracleViewModel.chatData.saveChatSession(session, for: fixture.workspace)
                 }
             )
