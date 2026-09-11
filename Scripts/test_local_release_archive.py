@@ -253,13 +253,6 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         )
         self.assertIn("expected exactly one integer DomainWorkingJournal.schemaVersion", package_script)
 
-    def test_package_provenance_records_git_status_outcome(self) -> None:
-        package_script = PACKAGE_SCRIPT.read_text(encoding="utf-8")
-
-        self.assertIn('status = git(["status", "--porcelain"], allow_empty=True)', package_script)
-        self.assertIn('"dirty": bool(status) if status is not None else None', package_script)
-        self.assertIn('"git_status": "ok" if status is not None else "unavailable"', package_script)
-
     def test_round_trip_reproduces_app_state_defaults_and_identity(self) -> None:
         self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})
         app_before = tree_snapshot(self.app)

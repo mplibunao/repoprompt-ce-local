@@ -146,6 +146,20 @@ require_remote_allowlist() {
   if (( ${#unexpected_remotes[@]} )); then
     fail "unexpected Git remote(s): ${unexpected_remotes[*]}; only 'origin' is allowed"
   fi
+  [[ -z "$remotes" ]] && return
+
+  local origin_url_pattern='^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)mplibunao/repoprompt-ce-local(\.git)?$'
+  local fetch_urls push_urls origin_url
+  fetch_urls="$(git remote get-url --all origin)" || fail "failed to read origin fetch URLs; repair the repository's Git configuration"
+  while IFS= read -r origin_url; do
+    [[ "$origin_url" =~ $origin_url_pattern ]] \
+      || fail "origin fetch URL '$origin_url' must target github.com/mplibunao/repoprompt-ce-local."
+  done <<< "$fetch_urls"
+  push_urls="$(git remote get-url --push --all origin)" || fail "failed to read origin push URLs; repair the repository's Git configuration"
+  while IFS= read -r origin_url; do
+    [[ "$origin_url" =~ $origin_url_pattern ]] \
+      || fail "origin push URL '$origin_url' must target github.com/mplibunao/repoprompt-ce-local."
+  done <<< "$push_urls"
 }
 
 ensure_tmp_root() {
@@ -155,10 +169,11 @@ ensure_tmp_root() {
 }
 
 scan_staged_index_blobs() {
-  local files snapshot
+  local files snapshot config config_source
   ensure_tmp_root
   files="$tmp_root/staged-files.z"
   snapshot="$tmp_root/staged-index"
+  config="$tmp_root/.gitleaks.toml"
   git diff --cached --name-only --diff-filter=d -z -- > "$files"
   if [[ ! -s "$files" ]]; then
     echo "No non-deleted staged index blobs to scan."
@@ -166,7 +181,19 @@ scan_staged_index_blobs() {
   fi
   mkdir -p "$snapshot"
   git checkout-index --stdin -z --prefix="$snapshot/" < "$files"
-  gitleaks dir --no-banner --redact "$snapshot"
+
+  # The staged scan must not inherit unstaged allowlist edits from the worktree.
+  if git diff --cached --quiet -- .gitleaks.toml; then
+    config_source="HEAD:.gitleaks.toml"
+  else
+    config_source=":.gitleaks.toml"
+  fi
+  if git show "$config_source" > "$config" 2>/dev/null; then
+    gitleaks dir --config "$config" --no-banner --redact "$snapshot"
+  else
+    rm -f -- "$config"
+    (cd "$tmp_root" && gitleaks dir --no-banner --redact "$snapshot")
+  fi
 }
 
 require_clean_worktree() {
@@ -210,7 +237,7 @@ run_pr_ready_path_validations() {
   files="$tmp_root/range-files.z"
   write_range_files "$files"
 
-  local control_plane_paths_pattern='^(Scripts/conductor\.py|Scripts/conductor_diagnostics\.py|Scripts/guardrails\.sh|Scripts/test_conductor_(lifecycle|output|diagnostics|high_output)\.py|Scripts/test_contribution_preflight_guard\.py|\.agents/skills/rpce-contribution-check/scripts/preflight(_timing\.py|\.sh)|Makefile)$'
+  local control_plane_paths_pattern='^(Scripts/conductor\.py|Scripts/conductor_diagnostics\.py|Scripts/guardrails\.sh|Scripts/test_codex_app_server_schema\.py|Scripts/test_contribution_preflight_guard\.py|Scripts/test_debug_app_process\.py|Scripts/test_ci_app_test_runner\.py|Scripts/test_conductor_diagnostics\.py|Scripts/test_local_production_installer\.py|Scripts/test_local_release_archive\.py|Scripts/test_security_inventory\.py|\.agents/skills/rpce-contribution-check/scripts/preflight(_timing\.py|\.sh)|Makefile)$'
   local ci_app_test_runner_paths_pattern='^(Scripts/ci_app_test_runner\.py|Scripts/test_ci_app_test_runner\.py|\.github/workflows/ci\.yml)$'
   local swift_paths_pattern='\.swift$'
   local root_test_paths_pattern='^(Sources/RepoPrompt/|Tests/RepoPrompt[^/]*Tests/)'
@@ -388,7 +415,14 @@ fi
 
 timing_phase_start outgoing_range_secret_scan
 log "Scan outgoing commit range for secrets"
-gitleaks git --no-banner --redact --log-opts="$range_spec" .
+outgoing_config="$tmp_root/outgoing-gitleaks.toml"
+range_tip="$(git rev-parse 'HEAD^{commit}')"
+if git show "${range_tip}:.gitleaks.toml" > "$outgoing_config" 2>/dev/null; then
+  gitleaks git --config "$outgoing_config" --no-banner --redact --log-opts="$range_spec" .
+else
+  rm -f -- "$outgoing_config"
+  gitleaks git --no-banner --redact --log-opts="$range_spec" .
+fi
 timing_phase_pass outgoing_range_secret_scan
 
 if [[ "$mode" == "push" ]]; then

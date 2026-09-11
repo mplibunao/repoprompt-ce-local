@@ -1,0 +1,13 @@
+[extend]
+useDefault = true
+
+# Sparkle's EdDSA update-signing public keys are public by design: the current
+# key from AppBundle/Info.plist.template and the earlier key that older
+# revisions of docs/open-source-readiness.md quote.
+[[allowlists]]
+description = "Sparkle public EdDSA keys"
+regexTarget = "secret"
+regexes = [
+  '''^845kp9v5\+kp4U6no85H53cUdnbfN3NmE1PJHKwH8Pd4=$''',
+  '''^KO2Pvcr7ORifYvT7yu2/db48PgzSNN/RG9dk9331iuQ=$''',
+]

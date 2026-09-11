@@ -207,12 +207,15 @@ a rollback path.
 
 ## Build provenance
 
-Packaging writes `Contents/Resources/RepoPromptProvenance.json` into every bundle, debug and
-release alike. It carries the repository root, `worktreePath`, `worktreeName`, branch, commit,
-the `dirty` flag, `git_status` (`ok` or `unavailable`), and the build time.
-`Scripts/conductor.py` reads it to identify a bundle, and the archive manifest reads the commit
-from it. After an install, confirm the file names the promoted commit with `dirty: false` and
-`git_status: "ok"`.
+Packaging writes `Contents/Resources/RepoPromptProvenance.json` into every debug and release
+bundle. The manifest records the repository root, worktree path and name, branch, commit,
+and build time. `dirty` reports staged or modified tracked files. `untracked_files` reports
+non-ignored files outside Git tracking. `git_status` is `ok` when Git supplied both values.
+When Git status fails or times out, `git_status` is `unavailable`, and both dirtiness fields
+are null. `Scripts/conductor.py` reads the manifest to identify a bundle, and the archive
+manifest reads the commit from it. After an install, confirm the file names the promoted
+commit with `dirty: false` and `git_status: "ok"`. The `untracked_files` field may be true when
+the checkout contains local investigation files.
 
 ## Acceptance matrix
 

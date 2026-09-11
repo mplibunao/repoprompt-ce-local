@@ -40,7 +40,7 @@ Use the read-only reference clone at:
    Upstream-Ref: upstream commit <sha>
    ```
 
-8. Run the `pr-ready` lane while the branch still has no configured upstream, so it validates the whole port against `main` (see the comparison-base procedure in `.agents/skills/rpce-contribution-check/SKILL.md`). Then run the push preflight, push the branch, open a pull request against `main`, and merge it with a merge commit once its checks pass:
+8. Run the `pr-ready` lane while the branch still has no configured upstream, so it validates the whole port against `main` (see the comparison-base procedure in `.agents/skills/rpce-contribution-check/SKILL.md`). Then run the push preflight, push the branch, and open a pull request against `main` with the `pr-ready` result recorded in its description; MP merges it with a merge commit after reading it and once its checks pass:
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
@@ -49,7 +49,7 @@ Use the read-only reference clone at:
    gh pr create --base main
    ```
 
-9. Promote a build only after archiving the current install with `Scripts/local_release_archive.sh <tag>` and with MP present. Run this command from the `main` checkout:
+9. The port workflow ends at the open pull request. Promotion is a separate step MP runs after the merge, from the `main` checkout, only after archiving the current install with `Scripts/local_release_archive.sh <tag>`:
 
    ```bash
    CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make install-local-production
