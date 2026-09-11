@@ -161,7 +161,11 @@ def checksum(name: str) -> str | None:
 
 
 def provenance_commit_working_journal_schema_version(provenance: dict | None) -> int | None:
-    commit = (provenance or {}).get("commit")
+    record = provenance or {}
+    if record.get("dirty") is not False or record.get("git_status") != "ok":
+        return None
+
+    commit = record.get("commit")
     if not isinstance(commit, str) or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None:
         return None
 
@@ -189,12 +193,12 @@ def provenance_commit_working_journal_schema_version(provenance: dict | None) ->
     return int(matches[0]) if len(matches) == 1 else None
 
 
-def archived_working_journal_schema_version(observed_versions: list[int]) -> tuple[int | None, str]:
+def archived_working_journal_schema_version(commit_version: int | None) -> tuple[int | None, str]:
     bundled_version = info_plist_integer("RepoPromptWorkingJournalSchemaVersion")
     if bundled_version is not None:
         return bundled_version, "from_bundle"
-    if observed_versions:
-        return max(observed_versions), "from_journals"
+    if commit_version is not None:
+        return commit_version, "from_commit"
     return None, "unknown"
 
 
@@ -246,10 +250,10 @@ if os.environ["ARCHIVE_IDENTITY_PRESENT"] == "1":
 
 provenance = bundle_provenance()
 observed_journal_versions, unreadable_journals = observed_working_journal_versions()
-journal_schema_version, journal_schema_version_status = archived_working_journal_schema_version(
-    observed_journal_versions
-)
 provenance_commit_journal_schema_version = provenance_commit_working_journal_schema_version(provenance)
+journal_schema_version, journal_schema_version_status = archived_working_journal_schema_version(
+    provenance_commit_journal_schema_version
+)
 now = time.time()
 manifest = {
     "schemaVersion": 1,

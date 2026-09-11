@@ -25,23 +25,27 @@ Before you start:
 
    - `from_bundle`: read `RepoPromptWorkingJournalSchemaVersion` from the archived app's
      `Contents/Info.plist`.
-   - `from_journals`: when that key is absent, use the highest version in
-     `observed_working_journal_versions`. Before promotion, the archived production build is
-     the only writer of this snapshot.
+   - `from_commit`: when that key is absent and provenance says `dirty: false` with
+     `git_status: "ok"`, read the version with
+     `git show <commit>:Sources/RepoPromptDomainRuntime/DomainPersistence.swift`.
    - `unknown`: when neither source yields a version, treat the result as a version difference
      and require the rollback notes below.
 
-   `provenance_commit_working_journal_schema_version` records the version read with
-   `git show <commit>:Sources/RepoPromptDomainRuntime/DomainPersistence.swift` when that
-   cross-check is available. The provenance value never selects the archived version or blocks
-   the archive. The candidate build's supported version is `DomainWorkingJournal.schemaVersion`
-   in [`Sources/RepoPromptDomainRuntime/DomainPersistence.swift`](../Sources/RepoPromptDomainRuntime/DomainPersistence.swift).
+   `provenance_commit_working_journal_schema_version` records the clean commit-derived value.
+   This value selects the archived version when the bundle key is absent. When the key is
+   present, the field is an audit value. The currently installed production build resolves as
+   `from_commit` when its provenance is clean, or as `unknown` with automatic rollback-note
+   gating otherwise. The candidate build's supported version is
+   `DomainWorkingJournal.schemaVersion` in
+   [`Sources/RepoPromptDomainRuntime/DomainPersistence.swift`](../Sources/RepoPromptDomainRuntime/DomainPersistence.swift).
 
-   `observed_working_journal_versions` lists the distinct versions found in the shared
-   Application Support snapshot. The candidate's schema version must be greater than or
-   equal to every observed version. If any observed version is higher, promotion is blocked.
-   Rollback notes don't make that candidate safe to launch. Quit RepoPrompt CE and move the
-   journal files to a backup directory using the path in the rollback template below.
+   Working journals don't identify the app build that wrote them, so they never select the
+   archived build's schema version. `observed_working_journal_versions` lists the distinct
+   versions found in the shared Application Support snapshot. The candidate's schema version
+   must be greater than or equal to the highest observed version. A higher observed version
+   blocks promotion. Rollback notes don't make that candidate safe to launch. Quit
+   RepoPrompt CE and move the journal files to a backup directory using the path in the
+   rollback template below.
    Relaunch the currently installed build, then quit it after it writes fresh journals.
    Re-run step 1 with `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`. Continue only when the replacement
    archive contains no observed version higher than the candidate.
@@ -170,10 +174,12 @@ last, so its absence marks an incomplete archive and the restore refuses one. It
 tag, timestamps, bundle identifier, version, build, signing mode, and the commit read from
 the bundle's provenance file. The archive records `working_journal_schema_version` with
 status `from_bundle` when `RepoPromptWorkingJournalSchemaVersion` is present in the app's
-Info.plist. For older bundles without that key, it uses the highest snapshot version and
-records `from_journals`. Without either source, it records a null version with status
-`unknown`. The optional `provenance_commit_working_journal_schema_version` is a non-blocking
-cross-check read from the archived commit. The snapshot versions used by the forward
+Info.plist. For older bundles without that key, clean provenance selects the version from the
+archived commit and records `from_commit`. Without either source, the archive records a null
+version with status `unknown`. `provenance_commit_working_journal_schema_version` records the
+clean commit-derived value whether it selects the version or audits the bundle key. Working
+journals carry no writer identity and never select the archived version. The snapshot versions
+used by the forward
 compatibility gate appear in `observed_working_journal_versions`. Journals that can't supply
 an integer version appear by archive-relative path in `unreadable_working_journals` without
 blocking the archive. An empty list in either field means it found none. Re-archiving over a

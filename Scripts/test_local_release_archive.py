@@ -101,6 +101,8 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         *,
         build: str,
         commit: str | None,
+        dirty: bool | None = False,
+        git_status: str | None = "ok",
         journal_schema_version: int | None = 1,
     ) -> None:
         resources = self.app / "Contents" / "Resources"
@@ -124,8 +126,8 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             payload = {
                 "version": 1,
                 "commit": commit,
-                "dirty": False,
-                "git_status": "ok",
+                "dirty": dirty,
+                "git_status": git_status,
                 "buildTimeISO": "2026-09-10T00:00:00+02:00",
             }
             provenance.write_text(json.dumps(payload), encoding="utf-8")
@@ -166,11 +168,15 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self,
         *,
         defaults: dict[str, str] | None = None,
+        dirty: bool | None = False,
+        git_status: str | None = "ok",
         journal_schema_version: int | None = 1,
     ) -> None:
         self.write_app(
             build="38",
             commit=self.archived_commit,
+            dirty=dirty,
+            git_status=git_status,
             journal_schema_version=journal_schema_version,
         )
         self.write_state("original")
@@ -314,7 +320,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(manifest["provenance_commit_working_journal_schema_version"], 1)
         self.assertEqual(manifest["observed_working_journal_versions"], [2])
 
-    def test_highest_observed_journal_version_supplies_legacy_bundle_schema(self) -> None:
+    def test_clean_provenance_commit_supplies_legacy_bundle_schema(self) -> None:
         self.write_baseline_fixture(journal_schema_version=None)
         journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
         journals.mkdir(parents=True)
@@ -325,8 +331,8 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.archive()
         manifest = self.manifest()
 
-        self.assertEqual(manifest["working_journal_schema_version"], 2)
-        self.assertEqual(manifest["working_journal_schema_version_status"], "from_journals")
+        self.assertEqual(manifest["working_journal_schema_version"], 1)
+        self.assertEqual(manifest["working_journal_schema_version_status"], "from_commit")
         self.assertEqual(manifest["provenance_commit_working_journal_schema_version"], 1)
         self.assertEqual(manifest["observed_working_journal_versions"], [1, 2])
 
@@ -360,26 +366,20 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(manifest["observed_working_journal_versions"], [])
         self.assertEqual(manifest["unreadable_working_journals"], [])
 
-    def test_missing_bundle_schema_and_journals_records_unknown(self) -> None:
-        self.write_baseline_fixture(journal_schema_version=None)
+    def test_missing_bundle_schema_provenance_and_journals_records_unknown(self) -> None:
+        self.write_app(build="37", commit=None, journal_schema_version=None)
+        self.write_state("original")
+        self.write_defaults({"UpdateChannel": "stable"})
 
         self.archive()
         manifest = self.manifest()
 
         self.assertIsNone(manifest["working_journal_schema_version"])
         self.assertEqual(manifest["working_journal_schema_version_status"], "unknown")
-        self.assertEqual(manifest["provenance_commit_working_journal_schema_version"], 1)
+        self.assertIsNone(manifest["provenance_commit_working_journal_schema_version"])
 
-    def test_unreadable_provenance_commit_schema_does_not_gate_journal_fallback(self) -> None:
-        commit = self.commit_journal_source(
-            "struct DomainWorkingJournal: Codable {\n"
-            "    static let schemaVersion = 1\n"
-            "    static let schemaVersion = 2\n"
-            "}\n"
-        )
-        self.write_app(build="37", commit=commit, journal_schema_version=None)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+    def test_dirty_provenance_and_journals_do_not_guess_archived_schema(self) -> None:
+        self.write_baseline_fixture(dirty=True, journal_schema_version=None)
         journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
         journals.mkdir(parents=True)
         (journals / "00000000-0000-0000-0000-000000000001.json").write_text(
@@ -389,9 +389,10 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.archive()
         manifest = self.manifest()
 
-        self.assertEqual(manifest["working_journal_schema_version"], 2)
-        self.assertEqual(manifest["working_journal_schema_version_status"], "from_journals")
+        self.assertIsNone(manifest["working_journal_schema_version"])
+        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown")
         self.assertIsNone(manifest["provenance_commit_working_journal_schema_version"])
+        self.assertEqual(manifest["observed_working_journal_versions"], [2])
 
     def test_archive_excludes_debug_apps_and_rollbacks_from_the_state_tarball(self) -> None:
         self.write_baseline_fixture()
