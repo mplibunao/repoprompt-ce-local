@@ -244,15 +244,20 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
         self.assertIn(
             "<key>RepoPromptWorkingJournalSchemaVersion</key>"
-            "<integer>__WORKING_JOURNAL_SCHEMA_VERSION__</integer>",
+            "<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>",
             template,
         )
         self.assertIn("WORKING_JOURNAL_SCHEMA_VERSION=", package_script)
         self.assertIn(
-            "'__WORKING_JOURNAL_SCHEMA_VERSION__':'$WORKING_JOURNAL_SCHEMA_VERSION'",
+            "'<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>':"
+            "'<integer>$WORKING_JOURNAL_SCHEMA_VERSION</integer>'",
             package_script,
         )
         self.assertIn('read_working_journal_schema_version.py" "$ROOT_DIR"', package_script)
+        self.assertIn(
+            '[[ "$PACKAGED_WORKING_JOURNAL_SCHEMA_VERSION_TYPE" == "integer" ]]',
+            package_script,
+        )
         self.assertIn(
             "expected exactly one integer DomainWorkingJournal.schemaVersion",
             JOURNAL_SCHEMA_TOOL.read_text(encoding="utf-8"),

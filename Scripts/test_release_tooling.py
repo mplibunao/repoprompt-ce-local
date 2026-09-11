@@ -28,6 +28,13 @@ STAGED_RELEASE_VALIDATOR = SCRIPT_DIR / "validate_staged_release.sh"
 
 
 class StagedReleasePlistTests(unittest.TestCase):
+    def test_raw_info_plist_template_is_parseable(self) -> None:
+        template = plistlib.loads(INFO_PLIST_TEMPLATE.read_bytes())
+        self.assertEqual(
+            template["RepoPromptWorkingJournalSchemaVersion"],
+            "__WORKING_JOURNAL_SCHEMA_VERSION__",
+        )
+
     def test_expected_plist_renders_working_journal_schema_as_integer(self) -> None:
         result = subprocess.run(
             [sys.executable, str(JOURNAL_SCHEMA_TOOL), str(ROOT_DIR)],
@@ -49,7 +56,9 @@ class StagedReleasePlistTests(unittest.TestCase):
             "__LOCAL_SIGNING_CERTIFICATE_SHA256__": "",
             "__LOCAL_SECURE_STORAGE_GENERATION__": "",
             "__IDENTITY_MIGRATION_PHASE__": "disabled",
-            "__WORKING_JOURNAL_SCHEMA_VERSION__": schema_version,
+            "<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>": (
+                f"<integer>{schema_version}</integer>"
+            ),
         }.items():
             text = text.replace(key, value)
 
@@ -60,7 +69,7 @@ class StagedReleasePlistTests(unittest.TestCase):
 
         validator = STAGED_RELEASE_VALIDATOR.read_text(encoding="utf-8")
         self.assertIn(
-            '"__WORKING_JOURNAL_SCHEMA_VERSION__": working_journal_schema_version',
+            '"<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>": (',
             validator,
         )
 

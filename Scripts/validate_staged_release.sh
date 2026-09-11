@@ -249,7 +249,9 @@ for key, value in {
     "__LOCAL_SIGNING_CERTIFICATE_SHA256__": "",
     "__LOCAL_SECURE_STORAGE_GENERATION__": "",
     "__IDENTITY_MIGRATION_PHASE__": identity_migration_phase,
-    "__WORKING_JOURNAL_SCHEMA_VERSION__": working_journal_schema_version,
+    "<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>": (
+        f"<integer>{working_journal_schema_version}</integer>"
+    ),
 }.items():
     text = text.replace(key, value)
 expected_plist = plistlib.loads(text.encode("utf-8"))
