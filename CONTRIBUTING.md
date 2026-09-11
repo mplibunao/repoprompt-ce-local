@@ -30,10 +30,7 @@ Work is tracked as issues and pull requests there.
    `main` on `mplibunao/repoprompt-ce-local`, with the `pr-ready` result from
    step 4 recorded in the description, one type label (`bug`, `port`,
    `tooling`, `agent-env`, `documentation`, or `cleanup`), and the `area:`
-   labels for the code it touches. MP reads and approves it; the agent then
-   merges it with a merge commit once its checks pass, after resolving any
-   conflict with `main` on the branch. A stacked pull request merges through
-   `gh stack merge <number> --merge`. Nothing merges into `main` directly.
+   labels for the code it touches.
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
@@ -58,12 +55,31 @@ Work is tracked as issues and pull requests there.
 6. The Codex review bot reviews the pull request when it is ready for review.
    While addressing its findings, convert the pull request to a draft so the
    open, non-draft list stays a list of reviewable work; reply to and resolve
-   each thread, push the fix, and mark the pull request ready again so the bot
+   each thread, commit the fix through the commit preflight, push it through
+   the push preflight, and mark the pull request ready again so the bot
    reviews the fixed code. Repeat until a pass leaves no findings.
 
    ```bash
    gh pr ready <number> --undo   # draft while fixing
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
+   git commit
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh push
+   git push
    gh pr ready <number>          # ready again after the fix is pushed
+   ```
+
+7. MP reads the pull request and approves it. After the approval, with the
+   bot's last pass clean and the checks green, rerun the `pr-ready` lane on
+   the final head, resolve any conflict with `main` on the branch, and merge
+   with a merge commit. A pull request that is part of a stack merges through
+   the stack command; merging a lower layer makes GitHub retarget and rewrite
+   the layers above it, and MP's approval of the lower layer covers that
+   rewrite. Nothing merges into `main` directly.
+
+   ```bash
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
+   gh pr merge <number> --merge
+   gh stack merge <number> --merge --yes   # when the pull request is in a stack
    ```
 
 Ports from upstream follow [`docs/porting.md`](docs/porting.md). Builds are
