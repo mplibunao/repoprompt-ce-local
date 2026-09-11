@@ -5,10 +5,23 @@ import XCTest
 
 @MainActor
 final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
-    func testNestedSetReusesFrozenReviewContextWithoutWatchdogDetachment() async throws {
-        let fixture = try await makeSelectionFixture(name: "frozen-review", gitBacked: true)
+    func testNestedSetReusesAvailableReviewContextWithoutWatchdogDetachment() async throws {
+        try await assertNestedSetReusesFrozenReviewContext(name: "available-review", initiallySelected: true)
+    }
+
+    func testNestedSetReusesDeferredReviewContextWithoutWatchdogDetachment() async throws {
+        try await assertNestedSetReusesFrozenReviewContext(name: "deferred-review", initiallySelected: false)
+    }
+
+    private func assertNestedSetReusesFrozenReviewContext(
+        name: String,
+        initiallySelected: Bool
+    ) async throws {
+        let fixture = try await makeSelectionFixture(name: name, gitBacked: true)
         defer { fixture.cleanup() }
-        let source = StoredSelection(selectedPaths: [fixture.fileA.path])
+        let source = initiallySelected
+            ? StoredSelection(selectedPaths: [fixture.fileA.path])
+            : StoredSelection()
         let discovered = StoredSelection(selectedPaths: [fixture.fileB.path])
         try await fixture.seedCanonical(source)
 
@@ -22,7 +35,14 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
             workspaceDirectoryPath: fixture.window.workspaceManager.workspaceDirectory(for: workspace).path,
             store: fixture.window.promptManager.workspaceFileContextStore
         )
-        let target = try XCTUnwrap(workspaceContext.reviewTargetResolution.availableTarget)
+        switch workspaceContext.reviewTargetResolution {
+        case .available where initiallySelected:
+            break
+        case .deferred where !initiallySelected:
+            break
+        case .available, .deferred, .unavailable:
+            return XCTFail("Unexpected initial review-target resolution")
+        }
         fixture.window.mcpServer.tabContextByConnectionID[fixture.connectionID] =
             workspaceContext.nestedDiscoveryTabContext(runID: fixture.runID)
         fixture.window.mcpServer.setRequestMetadataOverrideForTesting(fixture.metadata)
@@ -66,10 +86,15 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
         let legacyFreezeWasEntered = await legacyFreezeGate.entered
         XCTAssertFalse(legacyFreezeWasEntered)
         XCTAssertEqual(fixture.canonicalSelection, discovered)
-        try await fixture.window.mcpServer.validateContextBuilderGitArtifactSelection(
-            metadata: fixture.metadata,
-            target: target
+        let finalContext = try XCTUnwrap(fixture.boundContext)
+        let authorization = try await workspaceContext.authorizeFinalReviewSelection(
+            finalContext.selection,
+            workspaceID: fixture.workspaceID,
+            tabID: fixture.tabID,
+            selectionRevision: finalContext.selectionRevision,
+            store: fixture.window.promptManager.workspaceFileContextStore
         )
+        XCTAssertEqual(authorization.electionOrigin, initiallySelected ? .initiallyAvailable : .deferred)
         let completion = await fixture.window.mcpServer.commitContextBuilderTabContext(
             connectionID: fixture.connectionID,
             expectedRunID: fixture.runID,
