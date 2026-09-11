@@ -39,7 +39,7 @@ from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
 from debug_app_process import ProcessIdentityError, matching_processes, terminate_matching_processes
 
-PROTOCOL_VERSION = 16
+PROTOCOL_VERSION = 17
 TERMINAL_STATES = {"completed", "failed", "canceled"}
 JOB_PHASES = {
     "queued",
@@ -153,6 +153,11 @@ MEDIUM_TIMEOUT_SECONDS = 60 * 60
 RELEASE_TIMEOUT_SECONDS = 2 * 60 * 60
 RELEASE_ARTIFACT_TIMEOUT_SECONDS = 4 * 60 * 60
 SMOKE_AGENT_WAIT_SECONDS = 120.0
+
+XCTEST_OPERATIONS = frozenset({"test", "provider-test"})
+TEST_SANDBOX_ENV_KEY = "REPOPROMPT_TEST_SANDBOX_ROOT"
+TEST_SANDBOX_MARKER_FILENAME = ".conductor-owned-test-sandbox"
+TEST_SANDBOX_MARKER_CONTENT = "RepoPrompt CE conductor test sandbox v1\n"
 
 IMPLEMENTED_OPERATIONS = {
     "doctor",
@@ -703,6 +708,24 @@ def ensure_state_dirs(paths: Paths) -> None:
     ensure_private_dir(paths.jobs_dir)
     ensure_private_dir(paths.socket_path.parent)
     ensure_private_dir(machine_lock_dir())
+
+
+def configure_xctest_sandbox(operation: str, env: Dict[str, str], default_root: Path) -> Optional[str]:
+    if operation not in XCTEST_OPERATIONS:
+        return None
+    if TEST_SANDBOX_ENV_KEY in env:
+        sandbox_root = env[TEST_SANDBOX_ENV_KEY].strip()
+        if not sandbox_root:
+            raise ConductorError(f"{TEST_SANDBOX_ENV_KEY} must not be blank")
+        env[TEST_SANDBOX_ENV_KEY] = sandbox_root
+        return sandbox_root
+    ensure_private_dir(default_root)
+    marker = default_root / TEST_SANDBOX_MARKER_FILENAME
+    marker.write_text(TEST_SANDBOX_MARKER_CONTENT, encoding="utf-8")
+    marker.chmod(0o600)
+    sandbox_root = str(default_root)
+    env[TEST_SANDBOX_ENV_KEY] = sandbox_root
+    return sandbox_root
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2539,7 +2562,7 @@ class OutputSummarizer:
     TIMEOUT_RE = re.compile(r"(timed out after|terminating process (?:group|tree)|killing process (?:group|tree)|canceled)", re.IGNORECASE)
     PHASE_RE = re.compile(r"^(==>|\$ |\+ )")
     ARTIFACT_RE = re.compile(
-        r"^(Created:|APP_BUNDLE=|COMPAT_APP_BUNDLE=|CLI_PATH=|Output written to:|Agent Mode diagnostics enabled|Resolved rpce-cli-debug:|Build cache diagnostics|Current \.build:|Managed worktree container:|Worktree \.build total:|Top \.build directories:|\s+[0-9.]+ [KMGT]?i?B\s+)"
+        r"^(Created:|APP_BUNDLE=|COMPAT_APP_BUNDLE=|CLI_PATH=|Output written to:|Test sandbox:|Agent Mode diagnostics enabled|Resolved rpce-cli-debug:|Build cache diagnostics|Current \.build:|Managed worktree container:|Worktree \.build total:|Top \.build directories:|\s+[0-9.]+ [KMGT]?i?B\s+)"
     )
     APP_LIFECYCLE_RE = re.compile(
         r"(Stopping existing RepoPrompt|Waiting for existing RepoPrompt|Launching .*RepoPrompt\.app|Confirming launched RepoPrompt|Observed launched RepoPrompt|Guarding against a delayed RepoPrompt|Delayed launch guard confirmed|RepoPrompt(?: CE debug app)? stop confirmed|RepoPrompt was (not running|already stopped))"
@@ -2912,6 +2935,7 @@ class Job:
     env: Dict[str, str]
     created_at: float
     log_path: Path
+    test_sandbox_root: Optional[str] = None
     job_generation: int = 0
     process_generation: int = 0
     phase: str = "queued"
@@ -3008,6 +3032,7 @@ class Job:
             "queueWaitSeconds": queue_wait_seconds,
             "executionSeconds": execution_seconds,
             "logPath": str(self.log_path),
+            "testSandboxRoot": self.test_sandbox_root,
             "processPID": self.process_pid,
             "processPGID": self.process_pgid,
             "globalHeavySlotWaitSeconds": self.global_heavy_slot_wait_seconds,
@@ -3108,7 +3133,7 @@ class OperationRegistry:
         "LC_CTYPE",
         "REPOPROMPT_CODEX_ARCH",
         "REPOPROMPT_CODEX_CACHE_ROOT",
-        "REPOPROMPT_TEST_SANDBOX_ROOT",
+        TEST_SANDBOX_ENV_KEY,
     ]
     STYLE_ENV_KEYS = [
         "GITHUB_ACTIONS",
@@ -4225,6 +4250,16 @@ class DaemonState:
                     return
             argv, _lanes, cwd, env, effective_timeout = self.registry.prepare(request)
             env["REPOPROMPT_CONDUCTOR_JOB_TICKET"] = job.ticket
+            # The ticket exists only after enqueue, so the default path is assigned immediately before execution.
+            test_sandbox_root = configure_xctest_sandbox(
+                job.operation,
+                env,
+                job.log_path.with_suffix(".test-sandbox"),
+            )
+            if test_sandbox_root is not None:
+                with self.condition:
+                    job.test_sandbox_root = test_sandbox_root
+                    self._append_system_line_locked(job, f"Test sandbox: {test_sandbox_root}\n")
             if BuildCacheManager.eligible(job.operation, job.args) and (self.paths.repo_root / "Package.swift").is_file():
                 with self._cache_write_lock:
                     cache_manager = self._build_cache_manager(env)
@@ -5427,12 +5462,15 @@ class DaemonState:
             prune.add(job.ticket)
 
         detached_paths: List[Path] = []
+        detached_test_sandboxes: List[Path] = []
         for ticket in prune:
             job = self.jobs.pop(ticket, None)
             if not job:
                 continue
             detached_paths.append(job.log_path)
             detached_paths.extend(job.diagnostic_paths)
+            if job.operation in XCTEST_OPERATIONS and TEST_SANDBOX_ENV_KEY not in job.env:
+                detached_test_sandboxes.append(job.log_path.with_suffix(".test-sandbox"))
             for key, mapped_ticket in list(self.request_keys.items()):
                 if mapped_ticket == ticket:
                     del self.request_keys[key]
@@ -5445,12 +5483,19 @@ class DaemonState:
             for job in self.jobs.values()
             for diagnostic_path in job.diagnostic_paths
         }
+        retained_test_sandboxes = {
+            sandbox_name
+            for job in self.jobs.values()
+            if (sandbox_name := self._test_sandbox_name_for_job(job)) is not None
+        }
         submitted = self._io_worker.submit(
             self._retention_external,
             generation,
             tuple(detached_paths),
+            tuple(detached_test_sandboxes),
             frozenset(retained_logs),
             frozenset(retained_diagnostics),
+            frozenset(retained_test_sandboxes),
         )
         if not submitted:
             self._daemon_infrastructure_warnings.append(
@@ -5465,12 +5510,17 @@ class DaemonState:
         self,
         generation: int,
         detached_paths: Sequence[Path],
+        detached_test_sandboxes: Sequence[Path],
         retained_logs: frozenset[str],
         retained_diagnostics: frozenset[str],
+        retained_test_sandboxes: frozenset[str],
     ) -> None:
         for path in detached_paths:
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
+        for path in detached_test_sandboxes:
+            if path.name not in retained_test_sandboxes:
+                self._remove_owned_test_sandbox(path)
 
         cutoff = now() - TERMINAL_RETENTION_SECONDS
         candidates: List[Path] = []
@@ -5482,6 +5532,11 @@ class DaemonState:
                 path
                 for path in self.paths.jobs_dir.glob("*.xctest-stall.*")
                 if path.name not in retained_diagnostics
+            )
+            candidates.extend(
+                path
+                for path in self.paths.jobs_dir.glob("*.test-sandbox")
+                if path.name not in retained_test_sandboxes
             )
         for path in candidates:
             try:
@@ -5499,10 +5554,58 @@ class DaemonState:
                     for job in self.jobs.values()
                     for diagnostic_path in job.diagnostic_paths
                 )
+                current_names.update(
+                    sandbox_name
+                    for job in self.jobs.values()
+                    if (sandbox_name := self._test_sandbox_name_for_job(job)) is not None
+                )
                 if path.name in current_names:
                     continue
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
+            if path.name.endswith(".test-sandbox"):
+                self._remove_owned_test_sandbox(path)
+            else:
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+
+    def _test_sandbox_name_for_job(self, job: Job) -> Optional[str]:
+        if job.operation not in XCTEST_OPERATIONS:
+            return None
+        raw_path = job.env.get(TEST_SANDBOX_ENV_KEY)
+        path = Path(raw_path.strip()) if raw_path is not None else job.log_path.with_suffix(".test-sandbox")
+        if path.parent != self.paths.jobs_dir or not path.name.endswith(".test-sandbox"):
+            return None
+        return path.name
+
+    def _remove_owned_test_sandbox(self, path: Path) -> None:
+        if path.parent != self.paths.jobs_dir or not path.name.endswith(".test-sandbox"):
+            return
+        quarantine: Optional[Path] = None
+        with self.condition:
+            if any(self._test_sandbox_name_for_job(job) == path.name for job in self.jobs.values()):
+                return
+            try:
+                info = path.lstat()
+                marker = path / TEST_SANDBOX_MARKER_FILENAME
+                marker_info = marker.lstat()
+            except FileNotFoundError:
+                return
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                return
+            if not stat.S_ISREG(marker_info.st_mode) or stat.S_ISLNK(marker_info.st_mode):
+                return
+            try:
+                marker_content = marker.read_text(encoding="utf-8")
+            except OSError:
+                return
+            if marker_content != TEST_SANDBOX_MARKER_CONTENT:
+                return
+            quarantine = self.paths.jobs_dir / f".{path.name}.deleting-{uuid.uuid4().hex}"
+            try:
+                os.replace(path, quarantine)
+            except OSError:
+                return
+        if quarantine is not None:
+            shutil.rmtree(quarantine, ignore_errors=True)
 
 
 def validate_json_shape(value: Any, depth: int = 0) -> None:
@@ -6402,6 +6505,8 @@ def print_job_result_header(payload: Dict[str, Any], summary: Optional[Dict[str,
     if payload.get("exitCode") is not None:
         print(f"Exit:     {payload.get('exitCode')}")
     print(f"Log:      {payload.get('logPath')}")
+    if payload.get("testSandboxRoot"):
+        print(f"Sandbox:  {payload.get('testSandboxRoot')}")
     timing_parts: List[str] = []
     if payload.get("queueWaitSeconds") is not None:
         timing_parts.append(f"queue={format_duration(float(payload.get('queueWaitSeconds')))}")
