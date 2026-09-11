@@ -37,6 +37,23 @@ final class MCPFilesystemIdentityTests: XCTestCase {
         }
     }
 
+    func testNonXCTestProcessIgnoresExportedSandboxOverride() {
+        MCPFilesystemIdentity.test_setApplicationSupportRootOverride(nil)
+        let exportedRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MCPFilesystemIdentityTests-exported-\(UUID().uuidString)", isDirectory: true)
+        let environment = ["REPOPROMPT_TEST_SANDBOX_ROOT": exportedRoot.path]
+
+        let resolved = MCPFilesystemIdentity.repoPromptCE(.debug).test_applicationSupportRootURL(
+            environment: environment,
+            arguments: ["rpce-cli", "policy", "list"]
+        )
+        let expected = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+
+        XCTAssertEqual(resolved.standardizedFileURL, expected.standardizedFileURL)
+        XCTAssertFalse(resolved.path.hasPrefix(exportedRoot.path + "/"))
+    }
+
     func testExplicitSandboxOverrideWinsDuringXCTest() {
         MCPFilesystemIdentity.test_setApplicationSupportRootOverride(nil)
         let explicitRoot = FileManager.default.temporaryDirectory

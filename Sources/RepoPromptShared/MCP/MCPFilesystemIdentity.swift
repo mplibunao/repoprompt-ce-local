@@ -16,19 +16,19 @@ private enum MCPApplicationSupportRootResolver {
         if let override = lock.withLock({ testOverride }) {
             return override
         }
-        // Deriving the profile from the suite sandbox keeps independently sharded test processes disjoint.
-        if let sandboxRoot = environment["REPOPROMPT_TEST_SANDBOX_ROOT"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !sandboxRoot.isEmpty
-        {
-            return URL(fileURLWithPath: sandboxRoot, isDirectory: true)
-                .appendingPathComponent("profile", isDirectory: true)
-                .appendingPathComponent(directoryName, isDirectory: true)
-        }
         let isXCTestProcess = environment["XCTestConfigurationFilePath"] != nil
             || environment["XCTestBundlePath"] != nil
             || arguments.contains(where: { $0.hasPrefix("-XCTest") })
         if isXCTestProcess {
+            // Deriving the profile from the suite sandbox keeps independently sharded test processes disjoint.
+            if let sandboxRoot = environment["REPOPROMPT_TEST_SANDBOX_ROOT"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !sandboxRoot.isEmpty
+            {
+                return URL(fileURLWithPath: sandboxRoot, isDirectory: true)
+                    .appendingPathComponent("profile", isDirectory: true)
+                    .appendingPathComponent(directoryName, isDirectory: true)
+            }
             // A sandbox creation failure must surface through later file writes rather than expose the live profile.
             try? fileManager.createDirectory(at: xctestSandboxRoot, withIntermediateDirectories: true)
             return xctestSandboxRoot
