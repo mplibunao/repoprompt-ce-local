@@ -68,16 +68,22 @@ Work is tracked as issues and pull requests there.
    gh pr ready <number>          # ready again after the fix is pushed
    ```
 
-7. MP reads the pull request and approves it. After the approval, with the
-   bot's last pass clean and the checks green, rerun the `pr-ready` lane on
-   the final head, resolve any conflict with `main` on the branch, and merge
-   with a merge commit. A pull request that is part of a stack merges through
-   the stack command; merging a lower layer makes GitHub retarget and rewrite
-   the layers above it, and MP's approval of the lower layer covers that
-   rewrite. Nothing merges into `main` directly.
+7. MP reads the pull request and approves it. If the branch conflicts with
+   `main`, resolve that first: merge `origin/main` into the branch, commit the
+   resolution through the commit preflight, push it through the push
+   preflight, and let the review bot and the checks run on the new head as in
+   step 6. Then, with the bot's last pass clean and the checks green, run the
+   `pr-ready` lane on the final head with the upstream unset so it validates
+   `origin/main..HEAD` rather than an empty range, restore the upstream, and
+   merge with a merge commit. A pull request that is part of a stack merges
+   through the stack command; merging a lower layer makes GitHub retarget and
+   rewrite the layers above it, and MP's approval of the lower layer covers
+   that rewrite. Nothing merges into `main` directly.
 
    ```bash
+   git branch --unset-upstream
    .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
+   git branch --set-upstream-to=origin/<branch>
    gh pr merge <number> --merge
    gh stack merge <number> --merge --yes   # when the pull request is in a stack
    ```
