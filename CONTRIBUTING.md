@@ -53,7 +53,8 @@ Work is tracked as issues and pull requests there.
    ```
 
    A change under `Sources/` or `Packages/` opens as a draft whose description
-   says debug-app validation is pending. Build and launch the debug app from
+   says debug-app validation is pending, against `main` or, when stacked, the
+   lower branch as above. Build and launch the debug app from
    the branch, exercise the changed behavior through `rpce-cli-debug` or the
    app itself, and record the commands, what you observed, and the result in
    the description before marking it ready. The debug app cannot run beside
@@ -61,7 +62,7 @@ Work is tracked as issues and pull requests there.
    production for that window is allowed.
 
    ```bash
-   gh pr create --base main --draft --label <type> --label area:<area>
+   gh pr create --base <main-or-lower-branch> --draft --label <type> --label area:<area>
    make dev-smoke-launch          # builds, launches the debug app, runs the smoke flow
    rpce-cli-debug -w 1 -e '<the check for this change>'
    ```
