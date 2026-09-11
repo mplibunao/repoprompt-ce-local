@@ -30,10 +30,10 @@ Work is tracked as issues and pull requests there.
    `main` on `mplibunao/repoprompt-ce-local`, with the `pr-ready` result from
    step 4 recorded in the description, one type label (`bug`, `port`,
    `tooling`, `agent-env`, `documentation`, or `cleanup`), and the `area:`
-   labels for the code it touches. MP merges it with a merge commit after
-   reading it and once its checks pass; the agent's work ends once the review
-   bot's pass in step 6 leaves no findings. Nothing merges into `main`
-   directly.
+   labels for the code it touches. MP reads and approves it; the agent then
+   merges it with a merge commit once its checks pass, after resolving any
+   conflict with `main` on the branch. A stacked pull request merges through
+   `gh stack merge <number> --merge`. Nothing merges into `main` directly.
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
@@ -45,7 +45,9 @@ Work is tracked as issues and pull requests there.
    that branch instead of `main`, open the pull request against it, then link
    the two as a GitHub stack and add the `stacked` label. The stack view shows
    only this layer's diff, and GitHub retargets the branch onto `main` once
-   the lower pull request merges. The `gh stack` extension installs with
+   the lower pull request merges, rewriting the upper branch's commits in the
+   process, so fetch and reset the local branch to `origin` before committing
+   to it again. The `gh stack` extension installs with
    `gh extension install github/gh-stack`.
 
    ```bash
