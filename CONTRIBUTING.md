@@ -52,6 +52,20 @@ Work is tracked as issues and pull requests there.
    gh stack link <lower-pr-number> <this-pr-number>
    ```
 
+   A change under `Sources/` or `Packages/` opens as a draft whose description
+   says debug-app validation is pending. Build and launch the debug app from
+   the branch, exercise the changed behavior through `rpce-cli-debug` or the
+   app itself, and record the commands, what you observed, and the result in
+   the description before marking it ready. The debug app cannot run beside
+   production; the stop rule in [`AGENTS.md`](AGENTS.md) says when stopping
+   production for that window is allowed.
+
+   ```bash
+   gh pr create --base main --draft --label <type> --label area:<area>
+   make dev-smoke-launch          # builds, launches the debug app, runs the smoke flow
+   rpce-cli-debug -w 1 -e '<the check for this change>'
+   ```
+
 6. The Codex review bot reviews the pull request when it is ready for review.
    While addressing its findings, convert the pull request to a draft so the
    open, non-draft list stays a list of reviewable work; reply to and resolve
