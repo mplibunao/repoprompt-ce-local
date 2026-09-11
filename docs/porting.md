@@ -40,16 +40,16 @@ Use the read-only reference clone at:
    Upstream-Ref: upstream commit <sha>
    ```
 
-8. Run the `pr-ready` lane while the branch still has no configured upstream, so it validates the whole port against `main` (see the comparison-base procedure in `.agents/skills/rpce-contribution-check/SKILL.md`). Then run the push preflight, push the branch, and open a pull request against `main` with the `pr-ready` result recorded in its description; MP merges it with a merge commit after reading it and once its checks pass:
+8. Run the `pr-ready` lane while the branch still has no configured upstream, so it validates the whole port against `main` (see the comparison-base procedure in `.agents/skills/rpce-contribution-check/SKILL.md`). Then run the push preflight, push the branch, and open a pull request against `main` with the `pr-ready` result recorded in its description, the `port` label, and the `area:` labels for the code it touches; stacking follows [`CONTRIBUTING.md`](../CONTRIBUTING.md) step 5, the review-bot draft cycle step 6, and MP's approval and the agent's merge step 7:
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
    git push -u origin <branch>
-   gh pr create --base main
+   gh pr create --base main --label port --label area:<area>
    ```
 
-9. The port workflow ends at the open pull request. Promotion is a separate step MP runs after the merge, from the `main` checkout, only after archiving the current install with `Scripts/local_release_archive.sh <tag>`:
+9. The port workflow ends when step 7 of [`CONTRIBUTING.md`](../CONTRIBUTING.md) has merged the pull request: a clean review-bot pass, MP's approval, then the merge. Promotion is a separate step MP runs after the merge, from the `main` checkout, only after archiving the current install with `Scripts/local_release_archive.sh <tag>`:
 
    ```bash
    CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make install-local-production
