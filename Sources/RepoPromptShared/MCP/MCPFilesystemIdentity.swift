@@ -4,17 +4,34 @@ import Foundation
 private enum MCPApplicationSupportRootResolver {
     private static let lock = NSLock()
     private nonisolated(unsafe) static var testOverride: URL?
+    private static let xctestSandboxRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("RepoPromptCE-XCTest-\(getpid())-\(UUID().uuidString)", isDirectory: true)
 
-    static func resolve(directoryName: String, fileManager: FileManager) -> URL {
+    static func resolve(
+        directoryName: String,
+        fileManager: FileManager,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        arguments: [String] = CommandLine.arguments
+    ) -> URL {
         if let override = lock.withLock({ testOverride }) {
             return override
         }
         // Deriving the profile from the suite sandbox keeps independently sharded test processes disjoint.
-        if let sandboxRoot = ProcessInfo.processInfo.environment["REPOPROMPT_TEST_SANDBOX_ROOT"]?
+        if let sandboxRoot = environment["REPOPROMPT_TEST_SANDBOX_ROOT"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !sandboxRoot.isEmpty
         {
             return URL(fileURLWithPath: sandboxRoot, isDirectory: true)
+                .appendingPathComponent("profile", isDirectory: true)
+                .appendingPathComponent(directoryName, isDirectory: true)
+        }
+        let isXCTestProcess = environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestBundlePath"] != nil
+            || arguments.contains(where: { $0.hasPrefix("-XCTest") })
+        if isXCTestProcess {
+            // A sandbox creation failure must surface through later file writes rather than expose the live profile.
+            try? fileManager.createDirectory(at: xctestSandboxRoot, withIntermediateDirectories: true)
+            return xctestSandboxRoot
                 .appendingPathComponent("profile", isDirectory: true)
                 .appendingPathComponent(directoryName, isDirectory: true)
         }
@@ -177,6 +194,20 @@ public struct MCPFilesystemIdentity: Equatable, Sendable {
         @_spi(TestSupport)
         public static func test_setApplicationSupportRootOverride(_ url: URL?) {
             MCPApplicationSupportRootResolver.setTestOverride(url)
+        }
+
+        @_spi(TestSupport)
+        public func test_applicationSupportRootURL(
+            fileManager: FileManager = .default,
+            environment: [String: String],
+            arguments: [String] = CommandLine.arguments
+        ) -> URL {
+            MCPApplicationSupportRootResolver.resolve(
+                directoryName: applicationSupportDirectoryName,
+                fileManager: fileManager,
+                environment: environment,
+                arguments: arguments
+            )
         }
     #endif
 
