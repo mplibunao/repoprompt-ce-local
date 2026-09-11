@@ -155,10 +155,11 @@ ensure_tmp_root() {
 }
 
 scan_staged_index_blobs() {
-  local files snapshot
+  local files snapshot config config_source
   ensure_tmp_root
   files="$tmp_root/staged-files.z"
   snapshot="$tmp_root/staged-index"
+  config="$tmp_root/.gitleaks.toml"
   git diff --cached --name-only --diff-filter=d -z -- > "$files"
   if [[ ! -s "$files" ]]; then
     echo "No non-deleted staged index blobs to scan."
@@ -166,7 +167,19 @@ scan_staged_index_blobs() {
   fi
   mkdir -p "$snapshot"
   git checkout-index --stdin -z --prefix="$snapshot/" < "$files"
-  gitleaks dir --no-banner --redact "$snapshot"
+
+  # The staged scan must not inherit unstaged allowlist edits from the worktree.
+  if git diff --cached --quiet -- .gitleaks.toml; then
+    config_source="HEAD:.gitleaks.toml"
+  else
+    config_source=":.gitleaks.toml"
+  fi
+  if git show "$config_source" > "$config" 2>/dev/null; then
+    gitleaks dir --config "$config" --no-banner --redact "$snapshot"
+  else
+    rm -f -- "$config"
+    (cd "$tmp_root" && gitleaks dir --no-banner --redact "$snapshot")
+  fi
 }
 
 require_clean_worktree() {
@@ -388,7 +401,14 @@ fi
 
 timing_phase_start outgoing_range_secret_scan
 log "Scan outgoing commit range for secrets"
-gitleaks git --no-banner --redact --log-opts="$range_spec" .
+outgoing_config="$tmp_root/outgoing-gitleaks.toml"
+range_tip="$(git rev-parse 'HEAD^{commit}')"
+if git show "${range_tip}:.gitleaks.toml" > "$outgoing_config" 2>/dev/null; then
+  gitleaks git --config "$outgoing_config" --no-banner --redact --log-opts="$range_spec" .
+else
+  rm -f -- "$outgoing_config"
+  gitleaks git --no-banner --redact --log-opts="$range_spec" .
+fi
 timing_phase_pass outgoing_range_secret_scan
 
 if [[ "$mode" == "push" ]]; then
