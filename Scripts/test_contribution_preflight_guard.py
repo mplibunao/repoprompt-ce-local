@@ -55,6 +55,9 @@ class ContributionPreflightPatternTests(unittest.TestCase):
 
         self.assertEqual(listed, expected)
         self.assertEqual(matched, expected)
+        # The shared fixture module drives every suite above, so a change to it alone must
+        # still select the conductor self-test lane.
+        self.assertIsNotNone(re.fullmatch(pattern, "Scripts/script_test_support.py"))
 
 
 class ContributionPreflightRemoteGuardTests(unittest.TestCase):
