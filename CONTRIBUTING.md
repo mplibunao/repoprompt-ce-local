@@ -31,13 +31,14 @@ Work is tracked as issues and pull requests there.
    step 4 recorded in the description, one type label (`bug`, `port`,
    `tooling`, `agent-env`, `documentation`, or `cleanup`), and the `area:`
    labels for the code it touches. MP merges it with a merge commit after
-   reading it and once its checks pass; the agent's work ends at the open pull
-   request. Nothing merges into `main` directly.
+   reading it and once its checks pass; the agent's work ends once the review
+   bot's pass in step 6 leaves no findings. Nothing merges into `main`
+   directly.
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
    git push -u origin <branch>
-   gh pr create --base main --label bug --label area:mcp
+   gh pr create --base main --label <type> --label area:<area>
    ```
 
    When the change depends on a pull request that is still open, branch from
@@ -48,7 +49,7 @@ Work is tracked as issues and pull requests there.
    `gh extension install github/gh-stack`.
 
    ```bash
-   gh pr create --base <lower-branch> --label bug --label area:mcp --label stacked
+   gh pr create --base <lower-branch> --label <type> --label area:<area> --label stacked
    gh stack link <lower-pr-number> <this-pr-number>
    ```
 
