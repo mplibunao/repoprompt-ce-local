@@ -68,8 +68,9 @@ Work is tracked as issues and pull requests there.
    gh pr ready <number>          # ready again after the fix is pushed
    ```
 
-7. MP reads the pull request and approves it. If the branch conflicts with
-   `main`, resolve that first: merge `origin/main` into the branch, commit the
+7. MP reads the pull request and approves it. Fetch `origin` first so `main`
+   is current for everything below. If the branch conflicts with `main`,
+   resolve that first: merge `origin/main` into the branch, commit the
    resolution through the commit preflight, push it through the push
    preflight, and let the review bot and the checks run on the new head as in
    step 6. MP's approval covers that conflict-resolution commit; any other
@@ -85,10 +86,11 @@ Work is tracked as issues and pull requests there.
    the lower layer covers that rewrite. Nothing merges into `main` directly.
 
    ```bash
+   git fetch origin
    git branch --unset-upstream
    .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
    git branch --set-upstream-to=origin/<branch>
-   git fetch origin && test "$(git rev-parse HEAD)" = "$(git rev-parse origin/<branch>)"
+   test "$(git rev-parse HEAD)" = "$(git rev-parse origin/<branch>)"
    gh pr merge <number> --merge --match-head-commit "$(git rev-parse HEAD)"
    gh stack merge <number> --merge --yes   # when the pull request is in a stack
    ```
