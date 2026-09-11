@@ -135,6 +135,15 @@ def info_plist_value(key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def info_plist_integer(key: str) -> int | None:
+    try:
+        with (app_path / "Contents" / "Info.plist").open("rb") as handle:
+            value = plistlib.load(handle).get(key)
+    except (OSError, plistlib.InvalidFileException):
+        return None
+    return value if type(value) is int else None
+
+
 def bundle_provenance() -> dict | None:
     path = app_path / "Contents" / "Resources" / "RepoPromptProvenance.json"
     try:
@@ -151,23 +160,10 @@ def checksum(name: str) -> str | None:
     return sidecar.read_text(encoding="utf-8").split(maxsplit=1)[0]
 
 
-def archived_working_journal_schema_version(provenance: dict | None) -> tuple[int | None, str]:
-    record = provenance or {}
-    if record.get("git_status") != "ok":
-        return None, "unknown_provenance"
-
-    dirty = record.get("dirty")
-    if dirty is True:
-        return None, "dirty_provenance"
-    if dirty is not False:
-        return None, "unknown_provenance"
-
-    commit = record.get("commit")
+def provenance_commit_working_journal_schema_version(provenance: dict | None) -> int | None:
+    commit = (provenance or {}).get("commit")
     if not isinstance(commit, str) or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None:
-        raise SystemExit(
-            "ERROR: archived app provenance has no 40-character commit SHA; "
-            "cannot determine its working-journal schema version."
-        )
+        return None
 
     source_path = "Sources/RepoPromptDomainRuntime/DomainPersistence.swift"
     try:
@@ -176,11 +172,10 @@ def archived_working_journal_schema_version(provenance: dict | None) -> tuple[in
             capture_output=True,
             text=True,
         )
-    except OSError as error:
-        raise SystemExit(f"ERROR: could not run git to read {source_path} at archived commit {commit}: {error}") from error
+    except OSError:
+        return None
     if result.returncode != 0:
-        detail = result.stderr.strip() or "git show failed"
-        raise SystemExit(f"ERROR: could not read {source_path} at archived commit {commit}: {detail}")
+        return None
 
     declarations = re.findall(
         r"(?ms)^struct DomainWorkingJournal: Codable \{\n(?P<body>.*?)(?=^\})",
@@ -191,12 +186,16 @@ def archived_working_journal_schema_version(provenance: dict | None) -> tuple[in
         for declaration in declarations
         for match in re.findall(r"(?m)^[ \t]+static let schemaVersion[ \t]*=[ \t]*([0-9]+)[ \t]*$", declaration)
     ]
-    if len(matches) != 1:
-        raise SystemExit(
-            f"ERROR: expected exactly one integer DomainWorkingJournal.schemaVersion in {source_path} "
-            f"at archived commit {commit}; found {len(matches)}."
-        )
-    return int(matches[0]), "from_commit"
+    return int(matches[0]) if len(matches) == 1 else None
+
+
+def archived_working_journal_schema_version(observed_versions: list[int]) -> tuple[int | None, str]:
+    bundled_version = info_plist_integer("RepoPromptWorkingJournalSchemaVersion")
+    if bundled_version is not None:
+        return bundled_version, "from_bundle"
+    if observed_versions:
+        return max(observed_versions), "from_journals"
+    return None, "unknown"
 
 
 def observed_working_journal_versions() -> tuple[list[int], list[str]]:
@@ -246,14 +245,18 @@ if os.environ["ARCHIVE_IDENTITY_PRESENT"] == "1":
     files.append("local-signing-identity-v1.json")
 
 provenance = bundle_provenance()
-journal_schema_version, journal_schema_version_status = archived_working_journal_schema_version(provenance)
 observed_journal_versions, unreadable_journals = observed_working_journal_versions()
+journal_schema_version, journal_schema_version_status = archived_working_journal_schema_version(
+    observed_journal_versions
+)
+provenance_commit_journal_schema_version = provenance_commit_working_journal_schema_version(provenance)
 now = time.time()
 manifest = {
     "schemaVersion": 1,
     "tag": os.environ["ARCHIVE_TAG"],
     "working_journal_schema_version": journal_schema_version,
     "working_journal_schema_version_status": journal_schema_version_status,
+    "provenance_commit_working_journal_schema_version": provenance_commit_journal_schema_version,
     "observed_working_journal_versions": observed_journal_versions,
     "unreadable_working_journals": unreadable_journals,
     "archivedAtEpoch": now,

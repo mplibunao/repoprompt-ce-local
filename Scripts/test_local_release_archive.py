@@ -24,6 +24,8 @@ ROOT_DIR = SCRIPT_DIR.parent
 ARCHIVE_SCRIPT = SCRIPT_DIR / "local_release_archive.sh"
 RESTORE_SCRIPT = SCRIPT_DIR / "local_release_restore.sh"
 ENV_SCRIPT = SCRIPT_DIR / "local_release_env.sh"
+PACKAGE_SCRIPT = SCRIPT_DIR / "package_app.sh"
+INFO_PLIST_TEMPLATE = ROOT_DIR / "AppBundle" / "Info.plist.template"
 DISPLAY_NAME = "RepoPrompt CE"
 TAG = "local/v1.4.0-b99"
 JOURNAL_SOURCE_PATH = Path("Sources/RepoPromptDomainRuntime/DomainPersistence.swift")
@@ -99,33 +101,33 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         *,
         build: str,
         commit: str | None,
-        dirty: bool | None = False,
-        include_dirty: bool = True,
-        git_status: str | None = "ok",
+        journal_schema_version: int | None = 1,
     ) -> None:
         resources = self.app / "Contents" / "Resources"
         resources.mkdir(parents=True, exist_ok=True)
         (self.app / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
         (self.app / "Contents" / "MacOS" / "RepoPrompt").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        info = {
+            "CFBundleIdentifier": "com.pvncher.repoprompt.ce",
+            "CFBundleShortVersionString": "1.4.0",
+            "CFBundleVersion": build,
+            "RepoPromptSigningMode": "local-self-signed",
+        }
+        if journal_schema_version is not None:
+            info["RepoPromptWorkingJournalSchemaVersion"] = journal_schema_version
         with (self.app / "Contents" / "Info.plist").open("wb") as handle:
-            plistlib.dump(
-                {
-                    "CFBundleIdentifier": "com.pvncher.repoprompt.ce",
-                    "CFBundleShortVersionString": "1.4.0",
-                    "CFBundleVersion": build,
-                    "RepoPromptSigningMode": "local-self-signed",
-                },
-                handle,
-            )
+            plistlib.dump(info, handle)
         provenance = resources / "RepoPromptProvenance.json"
         if commit is None:
             provenance.unlink(missing_ok=True)
         else:
-            payload = {"version": 1, "commit": commit, "buildTimeISO": "2026-09-10T00:00:00+02:00"}
-            if include_dirty:
-                payload["dirty"] = dirty
-            if git_status is not None:
-                payload["git_status"] = git_status
+            payload = {
+                "version": 1,
+                "commit": commit,
+                "dirty": False,
+                "git_status": "ok",
+                "buildTimeISO": "2026-09-10T00:00:00+02:00",
+            }
             provenance.write_text(json.dumps(payload), encoding="utf-8")
 
     def write_state(self, marker: str) -> None:
@@ -164,16 +166,12 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self,
         *,
         defaults: dict[str, str] | None = None,
-        dirty: bool | None = False,
-        include_dirty: bool = True,
-        git_status: str | None = "ok",
+        journal_schema_version: int | None = 1,
     ) -> None:
         self.write_app(
             build="38",
             commit=self.archived_commit,
-            dirty=dirty,
-            include_dirty=include_dirty,
-            git_status=git_status,
+            journal_schema_version=journal_schema_version,
         )
         self.write_state("original")
         effective_defaults = {"UpdateChannel": "stable"} if defaults is None else defaults
@@ -233,6 +231,22 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
     # -- tests ------------------------------------------------------------------
 
+    def test_package_contract_embeds_working_journal_schema_version(self) -> None:
+        template = INFO_PLIST_TEMPLATE.read_text(encoding="utf-8")
+        package_script = PACKAGE_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "<key>RepoPromptWorkingJournalSchemaVersion</key>"
+            "<integer>__WORKING_JOURNAL_SCHEMA_VERSION__</integer>",
+            template,
+        )
+        self.assertIn("WORKING_JOURNAL_SCHEMA_VERSION=", package_script)
+        self.assertIn(
+            "'__WORKING_JOURNAL_SCHEMA_VERSION__':'$WORKING_JOURNAL_SCHEMA_VERSION'",
+            package_script,
+        )
+        self.assertIn("expected exactly one integer DomainWorkingJournal.schemaVersion", package_script)
+
     def test_round_trip_reproduces_app_state_defaults_and_identity(self) -> None:
         self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})
         app_before = tree_snapshot(self.app)
@@ -284,22 +298,37 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         for name in ("app.zip", "application-support.tar.gz", "defaults.plist"):
             self.assertEqual(len(manifest["files"][name]["sha256"]), 64, name)
 
-    def test_manifest_separates_archived_schema_from_observed_journal_versions(self) -> None:
-        self.write_baseline_fixture()
+    def test_bundle_schema_takes_priority_over_observed_journal_versions(self) -> None:
+        self.write_baseline_fixture(journal_schema_version=1)
         journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
         journals.mkdir(parents=True)
-        for name in (
-            "00000000-0000-0000-0000-000000000001.json",
-            "00000000-0000-0000-0000-000000000002.json",
-        ):
-            (journals / name).write_text(json.dumps({"version": 2}), encoding="utf-8")
+        (journals / "00000000-0000-0000-0000-000000000001.json").write_text(
+            json.dumps({"version": 2}), encoding="utf-8"
+        )
 
         self.archive()
         manifest = self.manifest()
 
         self.assertEqual(manifest["working_journal_schema_version"], 1)
-        self.assertEqual(manifest["working_journal_schema_version_status"], "from_commit")
+        self.assertEqual(manifest["working_journal_schema_version_status"], "from_bundle")
+        self.assertEqual(manifest["provenance_commit_working_journal_schema_version"], 1)
         self.assertEqual(manifest["observed_working_journal_versions"], [2])
+
+    def test_highest_observed_journal_version_supplies_legacy_bundle_schema(self) -> None:
+        self.write_baseline_fixture(journal_schema_version=None)
+        journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
+        journals.mkdir(parents=True)
+        for index, version in enumerate((1, 2), start=1):
+            name = f"00000000-0000-0000-0000-{index:012d}.json"
+            (journals / name).write_text(json.dumps({"version": version}), encoding="utf-8")
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertEqual(manifest["working_journal_schema_version"], 2)
+        self.assertEqual(manifest["working_journal_schema_version_status"], "from_journals")
+        self.assertEqual(manifest["provenance_commit_working_journal_schema_version"], 1)
+        self.assertEqual(manifest["observed_working_journal_versions"], [1, 2])
 
     def test_manifest_records_unreadable_journal_without_aborting_archive(self) -> None:
         self.write_baseline_fixture()
@@ -331,84 +360,38 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertEqual(manifest["observed_working_journal_versions"], [])
         self.assertEqual(manifest["unreadable_working_journals"], [])
 
-    def test_dirty_provenance_records_null_schema_without_aborting_archive(self) -> None:
-        self.write_baseline_fixture(dirty=True)
+    def test_missing_bundle_schema_and_journals_records_unknown(self) -> None:
+        self.write_baseline_fixture(journal_schema_version=None)
 
         self.archive()
         manifest = self.manifest()
 
         self.assertIsNone(manifest["working_journal_schema_version"])
-        self.assertEqual(manifest["working_journal_schema_version_status"], "dirty_provenance")
+        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown")
+        self.assertEqual(manifest["provenance_commit_working_journal_schema_version"], 1)
 
-    def test_missing_dirty_field_records_null_schema_without_aborting_archive(self) -> None:
-        self.write_baseline_fixture(include_dirty=False)
-
-        self.archive()
-        manifest = self.manifest()
-
-        self.assertIsNone(manifest["working_journal_schema_version"])
-        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown_provenance")
-
-    def test_null_dirty_and_unavailable_git_status_record_unknown_provenance(self) -> None:
-        self.write_baseline_fixture(dirty=None, git_status="unavailable")
-
-        self.archive()
-        manifest = self.manifest()
-
-        self.assertIsNone(manifest["working_journal_schema_version"])
-        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown_provenance")
-
-    def test_clean_dirty_without_git_status_records_unknown_provenance(self) -> None:
-        self.write_baseline_fixture(dirty=False, git_status=None)
-
-        self.archive()
-        manifest = self.manifest()
-
-        self.assertIsNone(manifest["working_journal_schema_version"])
-        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown_provenance")
-
-    def test_clean_dirty_and_ok_git_status_read_schema_from_commit(self) -> None:
-        self.write_baseline_fixture(dirty=False, git_status="ok")
-
-        self.archive()
-        manifest = self.manifest()
-
-        self.assertEqual(manifest["working_journal_schema_version"], 1)
-        self.assertEqual(manifest["working_journal_schema_version_status"], "from_commit")
-
-    def test_missing_or_ambiguous_archived_schema_version_refuses_archive(self) -> None:
+    def test_unreadable_provenance_commit_schema_does_not_gate_journal_fallback(self) -> None:
+        commit = self.commit_journal_source(
+            "struct DomainWorkingJournal: Codable {\n"
+            "    static let schemaVersion = 1\n"
+            "    static let schemaVersion = 2\n"
+            "}\n"
+        )
+        self.write_app(build="37", commit=commit, journal_schema_version=None)
         self.write_state("original")
         self.write_defaults({"UpdateChannel": "stable"})
-        fixtures = {
-            "missing": "struct DomainWorkingJournal: Codable {\n}\n",
-            "ambiguous": (
-                "struct DomainWorkingJournal: Codable {\n"
-                "    static let schemaVersion = 1\n"
-                "    static let schemaVersion = 2\n"
-                "}\n"
-            ),
-        }
-        for label, source in fixtures.items():
-            with self.subTest(label=label):
-                commit = self.commit_journal_source(source)
-                self.write_app(build="37", commit=commit)
-
-                result = self.run_script(ARCHIVE_SCRIPT)
-
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("expected exactly one integer DomainWorkingJournal.schemaVersion", result.stdout + result.stderr)
-                self.assertFalse((self.archive_root / TAG / "manifest.json").exists())
-
-    def test_missing_bundle_provenance_records_unknown_schema_without_aborting_archive(self) -> None:
-        self.write_app(build="37", commit=None)
-        self.write_state("original")
-        self.write_defaults({"UpdateChannel": "stable"})
+        journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
+        journals.mkdir(parents=True)
+        (journals / "00000000-0000-0000-0000-000000000001.json").write_text(
+            json.dumps({"version": 2}), encoding="utf-8"
+        )
 
         self.archive()
         manifest = self.manifest()
 
-        self.assertIsNone(manifest["working_journal_schema_version"])
-        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown_provenance")
+        self.assertEqual(manifest["working_journal_schema_version"], 2)
+        self.assertEqual(manifest["working_journal_schema_version_status"], "from_journals")
+        self.assertIsNone(manifest["provenance_commit_working_journal_schema_version"])
 
     def test_archive_excludes_debug_apps_and_rollbacks_from_the_state_tarball(self) -> None:
         self.write_baseline_fixture()
