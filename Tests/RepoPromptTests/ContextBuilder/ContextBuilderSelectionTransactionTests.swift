@@ -5,23 +5,38 @@ import XCTest
 
 @MainActor
 final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
+    private enum InitialReviewResolution: Equatable {
+        case available
+        case deferred
+        case unavailable
+    }
+
     func testNestedSetReusesAvailableReviewContextWithoutWatchdogDetachment() async throws {
-        try await assertNestedSetReusesFrozenReviewContext(name: "available-review", initiallySelected: true)
+        try await assertNestedSetReusesFrozenReviewContext(name: "available-review", initialResolution: .available)
     }
 
     func testNestedSetReusesDeferredReviewContextWithoutWatchdogDetachment() async throws {
-        try await assertNestedSetReusesFrozenReviewContext(name: "deferred-review", initiallySelected: false)
+        try await assertNestedSetReusesFrozenReviewContext(name: "deferred-review", initialResolution: .deferred)
+    }
+
+    func testNestedSetReusesUnavailableReviewContextWithoutWatchdogDetachment() async throws {
+        try await assertNestedSetReusesFrozenReviewContext(name: "unavailable-review", initialResolution: .unavailable)
     }
 
     private func assertNestedSetReusesFrozenReviewContext(
         name: String,
-        initiallySelected: Bool
+        initialResolution: InitialReviewResolution
     ) async throws {
         let fixture = try await makeSelectionFixture(name: name, gitBacked: true)
         defer { fixture.cleanup() }
-        let source = initiallySelected
-            ? StoredSelection(selectedPaths: [fixture.fileA.path])
-            : StoredSelection()
+        let source = switch initialResolution {
+        case .available:
+            StoredSelection(selectedPaths: [fixture.fileA.path])
+        case .deferred:
+            StoredSelection()
+        case .unavailable:
+            StoredSelection(selectedPaths: [fixture.root.appendingPathComponent("Missing.swift").path])
+        }
         let discovered = StoredSelection(selectedPaths: [fixture.fileB.path])
         try await fixture.seedCanonical(source)
 
@@ -35,11 +50,14 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
             workspaceDirectoryPath: fixture.window.workspaceManager.workspaceDirectory(for: workspace).path,
             store: fixture.window.promptManager.workspaceFileContextStore
         )
+        let unavailableReason: ContextBuilderReviewTargetUnavailableReason?
         switch workspaceContext.reviewTargetResolution {
-        case .available where initiallySelected:
-            break
-        case .deferred where !initiallySelected:
-            break
+        case .available where initialResolution == .available:
+            unavailableReason = nil
+        case .deferred where initialResolution == .deferred:
+            unavailableReason = nil
+        case let .unavailable(reason) where initialResolution == .unavailable:
+            unavailableReason = reason
         case .available, .deferred, .unavailable:
             return XCTFail("Unexpected initial review-target resolution")
         }
@@ -87,6 +105,21 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
         XCTAssertFalse(legacyFreezeWasEntered)
         XCTAssertEqual(fixture.canonicalSelection, discovered)
         let finalContext = try XCTUnwrap(fixture.boundContext)
+        if let unavailableReason {
+            do {
+                _ = try await workspaceContext.authorizeFinalReviewSelection(
+                    finalContext.selection,
+                    workspaceID: fixture.workspaceID,
+                    tabID: fixture.tabID,
+                    selectionRevision: finalContext.selectionRevision,
+                    store: fixture.window.promptManager.workspaceFileContextStore
+                )
+                return XCTFail("Expected final review authorization to retain the initial rejection")
+            } catch let error as ContextBuilderReviewTargetUnavailableReason {
+                XCTAssertEqual(error, unavailableReason)
+            }
+            return
+        }
         let authorization = try await workspaceContext.authorizeFinalReviewSelection(
             finalContext.selection,
             workspaceID: fixture.workspaceID,
@@ -94,7 +127,10 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
             selectionRevision: finalContext.selectionRevision,
             store: fixture.window.promptManager.workspaceFileContextStore
         )
-        XCTAssertEqual(authorization.electionOrigin, initiallySelected ? .initiallyAvailable : .deferred)
+        let expectedOrigin: ContextBuilderReviewElectionOrigin = initialResolution == .available
+            ? .initiallyAvailable
+            : .deferred
+        XCTAssertEqual(authorization.electionOrigin, expectedOrigin)
         let completion = await fixture.window.mcpServer.commitContextBuilderTabContext(
             connectionID: fixture.connectionID,
             expectedRunID: fixture.runID,

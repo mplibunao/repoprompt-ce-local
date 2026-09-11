@@ -7,6 +7,7 @@ struct ContextBuilderWorkspaceContext {
     let lookupContext: WorkspaceLookupContext
     let providerWorkspacePath: String
     let reviewGitContext: FrozenPromptGitReviewContext
+    let frozenReviewAuthority: ContextBuilderFrozenReviewAuthority
     let reviewTargetResolution: ContextBuilderReviewTargetResolution
     private let reviewDiagnosticSink: ContextBuilderReviewDiagnosticSink?
 
@@ -77,6 +78,11 @@ struct ContextBuilderWorkspaceContext {
             base: "HEAD",
             store: store
         )
+        let frozenReviewAuthority = ContextBuilderFrozenReviewAuthority(
+            workspaceID: workspaceID,
+            tabID: snapshot.tabID,
+            reviewGitContext: reviewGitContext
+        )
         let reviewTargetResolution = try await ContextBuilderReviewTargetResolver(
             diagnosticSink: reviewDiagnosticSink
         ).resolve(
@@ -118,6 +124,7 @@ struct ContextBuilderWorkspaceContext {
             lookupContext: lookupContext,
             providerWorkspacePath: StandardizedPath.absolute(providerWorkspacePath),
             reviewGitContext: reviewGitContext,
+            frozenReviewAuthority: frozenReviewAuthority,
             reviewTargetResolution: reviewTargetResolution,
             reviewDiagnosticSink: reviewDiagnosticSink
         )
@@ -186,6 +193,7 @@ struct ContextBuilderWorkspaceContext {
             activeAgentSessionID: parentAgentSessionID,
             worktreeBindingState: .hydrated(worktreeBindings),
             frozenLookupContext: lookupContext,
+            contextBuilderFrozenReviewAuthority: frozenReviewAuthority,
             contextBuilderReviewTargetResolution: reviewTargetResolution,
             explicitlyBound: source.explicitlyBound,
             readFileAutoSelectionGeneration: source.readFileAutoSelectionGeneration

@@ -258,6 +258,7 @@ extension MCPServerViewModel {
         }
 
         /// Ephemeral Context Builder review repository authority for one exact nested run.
+        var contextBuilderFrozenReviewAuthority: ContextBuilderFrozenReviewAuthority?
         var contextBuilderReviewTargetResolution: ContextBuilderReviewTargetResolution?
         /// True if this snapshot was created via explicit `bind_context` / `_tabID` binding.
         /// Explicit bindings should persist even when the bound tab is not the active tab.
@@ -283,6 +284,7 @@ extension MCPServerViewModel {
             worktreeBindingState: AgentSessionWorktreeBindingState? = nil,
             frozenLookupContext: WorkspaceLookupContext? = nil,
             frozenFileToolAuthority: FrozenFileToolAuthority? = nil,
+            contextBuilderFrozenReviewAuthority: ContextBuilderFrozenReviewAuthority? = nil,
             contextBuilderReviewTargetResolution: ContextBuilderReviewTargetResolution? = nil,
             explicitlyBound: Bool,
             readFileAutoSelectionGeneration: UInt64 = 0
@@ -303,6 +305,7 @@ extension MCPServerViewModel {
                 ?? (activeAgentSessionID == nil ? .notApplicable : .hydrated(worktreeBindings))
             fallbackFrozenLookupContext = frozenLookupContext
             self.frozenFileToolAuthority = frozenFileToolAuthority
+            self.contextBuilderFrozenReviewAuthority = contextBuilderFrozenReviewAuthority
             self.contextBuilderReviewTargetResolution = contextBuilderReviewTargetResolution
             self.explicitlyBound = explicitlyBound
             self.readFileAutoSelectionGeneration = readFileAutoSelectionGeneration
@@ -1647,6 +1650,7 @@ extension MCPServerViewModel {
         merged.worktreeBindingState = context.worktreeBindingState
         merged.frozenLookupContext = context.frozenLookupContext
         merged.frozenFileToolAuthority = context.frozenFileToolAuthority
+        merged.contextBuilderFrozenReviewAuthority = context.contextBuilderFrozenReviewAuthority
         merged.contextBuilderReviewTargetResolution = context.contextBuilderReviewTargetResolution
         merged.readFileAutoSelectionGeneration = context.readFileAutoSelectionGeneration
         return merged

@@ -1663,17 +1663,11 @@ final class MCPServerViewModel: ObservableObject {
         },
         freezePromptGitReviewContext: { [weak self] context in
             guard let self else { return .automaticOnly(base: "HEAD") }
-            if let resolution = context.contextBuilderReviewTargetResolution {
-                switch resolution {
-                case let .available(target)
-                    where context.workspaceID == target.workspaceID && context.tabID == target.tabID:
-                    return Self.contextBuilderReviewGitContext(for: target)
-                case let .deferred(authority)
-                    where context.workspaceID == authority.workspaceID && context.tabID == authority.tabID:
-                    return authority.reviewGitContext
-                case .available, .deferred, .unavailable:
-                    break
-                }
+            if let authority = context.contextBuilderFrozenReviewAuthority,
+               context.workspaceID == authority.workspaceID,
+               context.tabID == authority.tabID
+            {
+                return authority.reviewGitContext
             }
             #if DEBUG
                 await contextBuilderBeforeLegacySelectionReviewFreezeForTesting?()
