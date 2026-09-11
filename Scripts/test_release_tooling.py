@@ -6,6 +6,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -18,6 +20,113 @@ ROOT_DIR = SCRIPT_DIR.parent
 ROLLOUT_TOOL = SCRIPT_DIR / "stable_rollout.py"
 POLICY = SCRIPT_DIR / "apple_identity_policy.json"
 PROFILE_TOOL = SCRIPT_DIR / "embedded_provisioning_profile.py"
+PROVENANCE_TOOL = SCRIPT_DIR / "write_bundle_provenance.py"
+
+
+class BundleProvenanceTests(unittest.TestCase):
+    def git(self, root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+
+    def test_provenance_separates_tracked_changes_from_untracked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repository"
+            bundle = Path(temp) / "RepoPrompt.app"
+            resources = bundle / "Contents" / "Resources"
+            root.mkdir()
+            resources.mkdir(parents=True)
+            self.git(root, "init", "-q")
+            self.git(root, "config", "user.name", "RepoPrompt Test")
+            self.git(root, "config", "user.email", "test@example.invalid")
+            tracked = root / "tracked.txt"
+            tracked.write_text("committed\n", encoding="utf-8")
+            self.git(root, "add", "tracked.txt")
+            self.git(root, "commit", "-q", "-m", "fixture")
+
+            untracked_directory = root / "untracked"
+            untracked_directory.mkdir()
+            (untracked_directory / "local.txt").write_text("local\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(PROVENANCE_TOOL),
+                    "--repo-root",
+                    str(root),
+                    "--bundle",
+                    str(bundle),
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+            provenance_path = resources / "RepoPromptProvenance.json"
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            self.assertFalse(provenance["dirty"])
+            self.assertEqual(provenance["git_status"], "ok")
+            self.assertTrue(provenance["untracked_files"])
+
+            tracked.write_text("modified\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(PROVENANCE_TOOL),
+                    "--repo-root",
+                    str(root),
+                    "--bundle",
+                    str(bundle),
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            self.assertTrue(provenance["dirty"])
+            self.assertEqual(provenance["git_status"], "ok")
+            self.assertTrue(provenance["untracked_files"])
+
+            real_git = shutil.which("git")
+            self.assertIsNotNone(real_git)
+            fake_bin = Path(temp) / "fake-bin"
+            fake_bin.mkdir()
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                "#!/bin/sh\n"
+                'if [ "$3" = "status" ]; then\n'
+                "    exit 1\n"
+                "fi\n"
+                'exec "$REAL_GIT" "$@"\n',
+                encoding="utf-8",
+            )
+            fake_git.chmod(fake_git.stat().st_mode | stat.S_IXUSR)
+            environment = dict(os.environ)
+            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+            environment["REAL_GIT"] = str(real_git)
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(PROVENANCE_TOOL),
+                    "--repo-root",
+                    str(root),
+                    "--bundle",
+                    str(bundle),
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+                env=environment,
+                timeout=10,
+            )
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            self.assertIsNone(provenance["dirty"])
+            self.assertEqual(provenance["git_status"], "unavailable")
+            self.assertIsNone(provenance["untracked_files"])
 
 
 class StableTipFloorTests(unittest.TestCase):

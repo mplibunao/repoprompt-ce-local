@@ -7214,7 +7214,7 @@ def provenance_report_lines(repo_root: Path, bundle: Path) -> List[str]:
     lines.append(f"    worktree: {worktree}")
     lines.append(f"    branch: {branch}")
     lines.append(f"    commit: {commit[:12] if commit != '<unknown>' else commit}")
-    lines.append(f"    dirty at build: {dirty if isinstance(dirty, bool) else '<unknown>'}")
+    lines.append(f"    dirty at build: {dirty if isinstance(dirty, bool) else 'unknown'}")
     lines.append(f"    built: {built_at}")
     flags: List[str] = []
     try:
