@@ -11,10 +11,11 @@ Create concise, actionable issues for `mplibunao/repoprompt-ce-local`. Remove pr
 
 1. Classify the request as a bug, regression, enhancement, task, docs issue, investigation follow-up, or question.
 2. Search open and closed issues in `mplibunao/repoprompt-ce-local` before drafting. Link likely duplicates; if the report is distinct, state the differing symptom, environment, version, or commit. Do not file blindly.
-3. Draft the issue using the content and CE-specific evidence guidance below.
-4. Review the complete draft and remove or redact all private and identifying data.
-5. Show the user the exact final title, body, and proposed labels. Obtain immediate explicit approval to file; approval to investigate or draft is not approval to create the issue.
-6. Only after approval, run `gh issue create --repo mplibunao/repoprompt-ce-local` with the reviewed payload. Report the URL.
+3. Triage against upstream before drafting a bug or regression: search upstream `repoprompt/repoprompt-ce` issues and pull requests (`gh search issues --repo repoprompt/repoprompt-ce <symptom>`), and check whether the affected code path still exists on upstream `main` in the reference clone at `/Users/mp/Projects/personal/repoprompt-ce-upstream-readonly` after `git pull` there. Record the outcome in the draft as plain text (`upstream issue 803`, `upstream PR 957`, or `not reported upstream; unchanged on upstream main at <sha>`). When upstream already fixed it, the fix is a port; follow `docs/porting.md` instead of filing a bare bug.
+4. Draft the issue using the content and CE-specific evidence guidance below.
+5. Review the complete draft and remove or redact all private and identifying data.
+6. Show the user the exact final title, body, and proposed labels. Obtain immediate explicit approval to file; approval to investigate or draft is not approval to create the issue.
+7. Only after approval, run `gh issue create --repo mplibunao/repoprompt-ce-local` with the reviewed payload. Report the URL.
 
 ## Write Actionable Content
 
