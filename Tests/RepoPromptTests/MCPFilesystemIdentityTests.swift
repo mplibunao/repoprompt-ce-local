@@ -9,14 +9,12 @@ final class MCPFilesystemIdentityTests: XCTestCase {
 
     func testXCTestWithoutExplicitSandboxUsesProcessTemporaryRoot() {
         MCPFilesystemIdentity.test_setApplicationSupportRootOverride(nil)
+        XCTAssertTrue(
+            MCPFilesystemIdentity.test_isRunningUnderXCTest,
+            "A live suite must recognize its own XCTest runtime, or it resolves the developer's real profile"
+        )
         var baseEnvironment = ProcessInfo.processInfo.environment
         baseEnvironment.removeValue(forKey: "REPOPROMPT_TEST_SANDBOX_ROOT")
-        let hasEnvironmentMarker = baseEnvironment["XCTestConfigurationFilePath"] != nil
-            || baseEnvironment["XCTestBundlePath"] != nil
-        XCTAssertTrue(
-            hasEnvironmentMarker || CommandLine.arguments.contains(where: { $0.hasPrefix("-XCTest") }),
-            "The test runner must provide a supported XCTest process marker"
-        )
 
         let temporaryRoot = FileManager.default.temporaryDirectory.standardizedFileURL
         let realProfileRoot = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -30,7 +28,10 @@ final class MCPFilesystemIdentityTests: XCTestCase {
             ).standardizedFileURL
             let processSandboxRoot = resolved.deletingLastPathComponent().deletingLastPathComponent()
 
-            XCTAssertTrue(resolved.path.hasPrefix(temporaryRoot.path + "/"))
+            XCTAssertTrue(
+                resolved.path.hasPrefix(temporaryRoot.path + "/"),
+                "Resolved \(resolved.path) outside the process temporary root"
+            )
             XCTAssertTrue(FileManager.default.fileExists(atPath: processSandboxRoot.path))
             XCTAssertFalse(resolved.path == realProfileRoot.path)
             XCTAssertFalse(resolved.path.hasPrefix(realProfileRoot.path + "/"))
@@ -45,7 +46,7 @@ final class MCPFilesystemIdentityTests: XCTestCase {
 
         let resolved = MCPFilesystemIdentity.repoPromptCE(.debug).test_applicationSupportRootURL(
             environment: environment,
-            arguments: ["rpce-cli", "policy", "list"]
+            isXCTestProcess: false
         )
         let expected = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("RepoPrompt CE", isDirectory: true)

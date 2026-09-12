@@ -7,18 +7,21 @@ private enum MCPApplicationSupportRootResolver {
     private static let xctestSandboxRoot = FileManager.default.temporaryDirectory
         .appendingPathComponent("RepoPromptCE-XCTest-\(getpid())-\(UUID().uuidString)", isDirectory: true)
 
+    /// Only a test runner loads XCTest, and the Objective-C runtime reports that
+    /// independently of how the runner was launched. Launch-shaped signals are not
+    /// portable: `swift test` exports none of the `XCTest*` variables Xcode's runner
+    /// sets, and passes `-XCTest` only when the run is filtered.
+    static let isXCTestRuntime = NSClassFromString("XCTestCase") != nil
+
     static func resolve(
         directoryName: String,
         fileManager: FileManager,
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        arguments: [String] = CommandLine.arguments
+        isXCTestProcess: Bool = isXCTestRuntime
     ) -> URL {
         if let override = lock.withLock({ testOverride }) {
             return override
         }
-        let isXCTestProcess = environment["XCTestConfigurationFilePath"] != nil
-            || environment["XCTestBundlePath"] != nil
-            || arguments.contains(where: { $0.hasPrefix("-XCTest") })
         if isXCTestProcess {
             // Deriving the profile from the suite sandbox keeps independently sharded test processes disjoint.
             if let sandboxRoot = environment["REPOPROMPT_TEST_SANDBOX_ROOT"]?
@@ -197,16 +200,21 @@ public struct MCPFilesystemIdentity: Equatable, Sendable {
         }
 
         @_spi(TestSupport)
+        public static var test_isRunningUnderXCTest: Bool {
+            MCPApplicationSupportRootResolver.isXCTestRuntime
+        }
+
+        @_spi(TestSupport)
         public func test_applicationSupportRootURL(
             fileManager: FileManager = .default,
             environment: [String: String],
-            arguments: [String] = CommandLine.arguments
+            isXCTestProcess: Bool = MCPFilesystemIdentity.test_isRunningUnderXCTest
         ) -> URL {
             MCPApplicationSupportRootResolver.resolve(
                 directoryName: applicationSupportDirectoryName,
                 fileManager: fileManager,
                 environment: environment,
-                arguments: arguments
+                isXCTestProcess: isXCTestProcess
             )
         }
     #endif
