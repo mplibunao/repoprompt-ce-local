@@ -21,6 +21,7 @@ Process pull requests for `mplibunao/repoprompt-ce-local` sequentially. Every ve
    - Before each `agent_run start`, repeat that root check.
    - Record every session ID and poll, wait, respond, or cancel until each session is terminal before cleanup.
 6. Use descriptive branch and workspace names without an automatic agent prefix unless requested.
+7. When the batch was validated as a release candidate (`CONTRIBUTING.md`, "Landing a batch"), merge the recorded pull request heads without rebasing them, record the candidate tip, skip per-PR app validation, and after the final merge fetch `origin/main` and require `git diff <candidate tip> origin/main` to be empty before reporting the batch complete.
 
 Maintain a compact ledger for each PR: worktree path, local branch, window/workspace/context IDs, Agent Mode session IDs, base and head SHAs, validations, merge commit, approvals, and cleanup state.
 
@@ -54,6 +55,8 @@ Before executing contributor-controlled code:
 - if those changes could alter validation or execute during build/test, use trusted tooling from `VALIDATED_BASE` in an appropriately isolated environment or stop for maintainer review; never let the PR weaken its own gate
 
 ### 3. Rebase
+
+Skip this step for a release-candidate batch (constraint 7): the validated heads merge as recorded, and a head that no longer merges cleanly voids the candidate instead of being rebased.
 
 Verify that `origin` points to `github.com/mplibunao/repoprompt-ce-local`, fetch `origin/main`, record its SHA as `VALIDATED_BASE`, and rebase the PR head onto it in the disposable worktree.
 
@@ -122,7 +125,7 @@ When a check fails:
 
 Immediately before merging:
 
-- fetch and re-query the canonical base repository/ref; require its SHA to equal `VALIDATED_BASE`, otherwise rebase and revalidate
+- fetch and re-query the canonical base repository/ref; require its SHA to equal `VALIDATED_BASE`, otherwise rebase and revalidate (for a release-candidate batch, the expected base is the previous merge commit in the candidate's order, and no rebase happens)
 - re-query the PR and require its base repository/ref to remain authorized and its head to equal `VALIDATED_HEAD`
 - require clean mergeability, green required checks, no unresolved review threads, and completed pair cleanup
 

@@ -110,6 +110,43 @@ Work is tracked as issues and pull requests there.
    gh stack merge <number> --merge --yes   # when the pull request is in a stack
    ```
 
+## Landing a batch
+
+`main` must stay promotable at every commit, because a hotfix build comes from
+it. Two paths land work there.
+
+**One at a time.** With few open pull requests and no shared files, validate
+each app-code pull request in the debug app on its own branch, then merge it.
+This is the default path and the one the flow above describes. An urgent fix
+takes this path even while a release candidate is open, so `main` never waits
+on a batch.
+
+**Release candidate.** When more than three app-code pull requests are waiting,
+or any two touch the same file, validate them together before anything merges:
+
+1. Cut `release/<version>-rc<N>` from `origin/main` in a dedicated worktree and
+   merge each pull request head into it with `git merge --no-ff`, in dependency
+   order, stacked pull requests through their tip. The candidate carries only
+   those merges; do not rebase or otherwise rewrite the pull request branches,
+   and do not commit fixes on the candidate.
+2. Build the candidate once, launch the debug app, and run each pull request's
+   own scenario plus the acceptance matrix in
+   [`docs/releasing.md`](docs/releasing.md) against that debug app, with the
+   matrix's `$CLI` set to `rpce-cli-debug` so every call reaches the candidate
+   rather than the installed production build.
+3. On failure, fix on the pull request branch and cut the next candidate from
+   `origin/main` plus the current heads. To find the pull request at fault,
+   split the candidate along groups of pull requests that touch the same files
+   and build the halves.
+4. On pass, merge the pull requests into `main` one by one in the same order,
+   each through `pr-ready` and a merge commit, without relaunching the app.
+   After the last merge, run `git fetch origin` and require
+   `git diff <candidate tip> origin/main` to be empty: a non-empty diff means a
+   pull request changed after validation and the candidate is void.
+5. Promote from `main` per [`docs/releasing.md`](docs/releasing.md). The
+   candidate branch is never merged into `main` and may be deleted once the
+   promotion is tagged.
+
 Ports from upstream follow [`docs/porting.md`](docs/porting.md). Builds are
 promoted per [`docs/releasing.md`](docs/releasing.md).
 
