@@ -7,10 +7,7 @@ import contextlib
 import io
 import json
 import os
-import shutil
-import stat
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from typing import Tuple
@@ -22,12 +19,13 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import conductor  # noqa: E402
 import conductor_diagnostics  # noqa: E402
+from script_test_support import enter_context, temporary_directory, write_executable  # noqa: E402
 
 
 class XCTestSandboxTests(unittest.TestCase):
     def test_default_uses_fresh_job_directory_and_is_reported_as_artifact(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            default_root = Path(tmp) / "ticket.test-sandbox"
+        with temporary_directory() as tmp:
+            default_root = tmp / "ticket.test-sandbox"
             env: dict[str, str] = {}
 
             sandbox_root = conductor.configure_xctest_sandbox("test", {}, env, default_root)
@@ -61,7 +59,7 @@ class XCTestSandboxTests(unittest.TestCase):
                 verbose=False,
                 env={},
                 created_at=0,
-                log_path=Path(tmp) / "ticket.log",
+                log_path=tmp / "ticket.log",
                 test_sandbox_root=sandbox_root,
             )
             payload = job.to_payload(include_tail=False, include_summary=False)
@@ -78,7 +76,7 @@ class XCTestSandboxTests(unittest.TestCase):
             (["focused-build"], False),
         )
         for argv, expects_sandbox in cases:
-            with self.subTest(argv=argv), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(argv=argv), temporary_directory() as tmp:
                 captured_args: dict[str, object] = {}
 
                 def capture_request(
@@ -101,7 +99,7 @@ class XCTestSandboxTests(unittest.TestCase):
                         0,
                     )
 
-                default_root = Path(tmp) / "ticket.test-sandbox"
+                default_root = tmp / "ticket.test-sandbox"
                 env: dict[str, str] = {}
                 sandbox_root = conductor.configure_xctest_sandbox(
                     "diagnostics",
@@ -120,9 +118,9 @@ class XCTestSandboxTests(unittest.TestCase):
                     self.assertFalse(default_root.exists())
 
     def test_explicit_sandbox_override_wins(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            default_root = Path(tmp) / "ticket.test-sandbox"
-            explicit_root = str(Path(tmp) / "caller-sandbox")
+        with temporary_directory() as tmp:
+            default_root = tmp / "ticket.test-sandbox"
+            explicit_root = str(tmp / "caller-sandbox")
             env = {"REPOPROMPT_TEST_SANDBOX_ROOT": f"  {explicit_root}\n"}
 
             sandbox_root = conductor.configure_xctest_sandbox("provider-test", {}, env, default_root)
@@ -133,18 +131,18 @@ class XCTestSandboxTests(unittest.TestCase):
 
     def test_blank_explicit_sandbox_is_rejected(self) -> None:
         for value in ("", "  \n"):
-            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(value=value), temporary_directory() as tmp:
                 with self.assertRaisesRegex(conductor.ConductorError, "must not be blank"):
                     conductor.configure_xctest_sandbox(
                         "test",
                         {},
                         {"REPOPROMPT_TEST_SANDBOX_ROOT": value},
-                        Path(tmp) / "ticket.test-sandbox",
+                        tmp / "ticket.test-sandbox",
                     )
 
     def test_retention_removes_only_conductor_owned_sandbox(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            jobs_dir = Path(tmp) / "jobs"
+        with temporary_directory() as tmp:
+            jobs_dir = tmp / "jobs"
             owned = jobs_dir / "ticket.test-sandbox"
             caller_owned = jobs_dir / "caller.test-sandbox"
             owned.mkdir(parents=True)
@@ -193,16 +191,14 @@ class XCTestSandboxTests(unittest.TestCase):
 
 class FocusedBuildDiagnosticTests(unittest.TestCase):
     def _make_fake_swift(self, output: str, exit_code: int = 0) -> Path:
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda p=tmp: shutil.rmtree(p, ignore_errors=True))
+        tmp = enter_context(self, temporary_directory())
         swift = tmp / "swift"
-        swift.write_text(
+        write_executable(
+            swift,
             "#!/usr/bin/env bash\n"
             f"cat <<'EOF'\n{output}EOF\n"
             f"exit {exit_code}\n",
-            encoding="utf-8",
         )
-        swift.chmod(swift.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         return tmp
 
     def _run_with_path(self, path: Path, args: dict) -> Tuple[int, str]:
@@ -223,9 +219,7 @@ class FocusedBuildDiagnosticTests(unittest.TestCase):
                 os.environ["PATH"] = old_path
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.repo_root = Path(self.tmp.name)
+        self.repo_root = enter_context(self, temporary_directory())
 
     def test_focused_build_parses_swift_build_output(self) -> None:
         output = (
@@ -328,12 +322,12 @@ class FocusedBuildDiagnosticTests(unittest.TestCase):
         self.assertEqual(report["timing"]["xctest"]["wallSeconds"], 0.457)
 
     def test_focused_build_missing_swift_returns_one(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+        with temporary_directory() as tmp, mock.patch.object(
             conductor_diagnostics.subprocess,
             "Popen",
             side_effect=FileNotFoundError,
         ):
-            code, _ = self._run_with_path(Path(tmp), {"product": "RepoPrompt"})
+            code, _ = self._run_with_path(tmp, {"product": "RepoPrompt"})
         self.assertEqual(code, 1)
 
     def test_focused_build_reports_scratch_state(self) -> None:

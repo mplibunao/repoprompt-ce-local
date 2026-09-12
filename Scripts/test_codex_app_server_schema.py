@@ -8,7 +8,6 @@ import copy
 import io
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,6 +16,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import check_codex_app_server_schema as gate  # noqa: E402
+from script_test_support import temporary_directory, write_executable  # noqa: E402
 
 
 def method_union(method: str, params: dict | None = None) -> dict:
@@ -135,8 +135,7 @@ class CodexAppServerSchemaGateTests(unittest.TestCase):
         self.assertEqual({(check["union"], check["method"]) for check in checks}, expected)
 
     def test_bundle_validation_accepts_declared_fields_nested_paths_and_enum(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with temporary_directory() as root:
             union = method_union(
                 "thread/example",
                 object_schema(
@@ -178,8 +177,7 @@ class CodexAppServerSchemaGateTests(unittest.TestCase):
             self.assertEqual(counts, {"methods": 1, "parameterPaths": 2, "responsePaths": 1})
 
     def test_response_presence_nullability_and_conditional_drift_are_explicit(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with temporary_directory() as root:
             (root / "ClientRequest.json").write_text(
                 json.dumps(method_union("thread/goal/get")), encoding="utf-8"
             )
@@ -232,8 +230,7 @@ class CodexAppServerSchemaGateTests(unittest.TestCase):
             self.assertTrue(any("nullability changed from True to False" in e for e in errors))
 
     def test_response_enum_only_check_loads_response_schema(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with temporary_directory() as root:
             (root / "ClientRequest.json").write_text(
                 json.dumps(method_union("thread/example")), encoding="utf-8"
             )
@@ -258,8 +255,7 @@ class CodexAppServerSchemaGateTests(unittest.TestCase):
             self.assertTrue(any("sends response enum value 'blocked'" in e for e in errors))
 
     def test_nested_required_response_field_is_detected(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with temporary_directory() as root:
             (root / "ClientRequest.json").write_text(
                 json.dumps(method_union("thread/example")), encoding="utf-8"
             )
@@ -292,8 +288,7 @@ class CodexAppServerSchemaGateTests(unittest.TestCase):
             )
 
     def test_discriminated_nested_sent_and_consumed_shapes_are_mutation_checked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with temporary_directory() as root:
             params = object_schema(
                 required=["eventId"],
                 properties={
@@ -389,8 +384,7 @@ class CodexAppServerSchemaGateTests(unittest.TestCase):
             self.assertIn("consumed path 'command' is no longer declared", rendered)
 
     def test_method_discovery_accepts_ref_allof_and_const_refactors(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with temporary_directory() as root:
             union = {
                 "allOf": [{"$ref": "#/definitions/MethodUnion"}],
                 "definitions": {
@@ -493,8 +487,7 @@ class CodexAppServerSchemaGateTests(unittest.TestCase):
         self.assertFalse(gate.nodes_at_path(document, selected, "text"))
 
     def test_incoming_enum_contract_is_exhaustive(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with temporary_directory() as root:
             (root / "ClientRequest.json").write_text(
                 json.dumps(method_union("thread/goal/get")), encoding="utf-8"
             )
@@ -530,8 +523,7 @@ class CodexAppServerSchemaGateTests(unittest.TestCase):
             self.assertTrue(any("incoming enum 'goal.status' changed" in error for error in errors))
 
     def test_zero_sent_param_method_detects_new_required_param(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with temporary_directory() as root:
             schema_path = root / "ClientNotification.json"
             schema_path.write_text(
                 json.dumps(method_union("initialized")), encoding="utf-8"
@@ -564,8 +556,7 @@ class CodexAppServerSchemaGateTests(unittest.TestCase):
             )
 
     def test_bundle_validation_reports_removed_method_and_new_required_param(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with temporary_directory() as root:
             union = method_union(
                 "thread/present",
                 object_schema(
@@ -644,8 +635,7 @@ class CodexAppServerSchemaGateTests(unittest.TestCase):
                 gate.validate_contract(mutation)
 
     def test_main_invokes_codex_with_experimental_and_enforces_stable_floor(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with temporary_directory() as root:
             marker = root / "args.json"
             fake_codex = root / "fake-codex"
             script_template = """#!/usr/bin/env python3
@@ -668,11 +658,10 @@ out.mkdir(parents=True, exist_ok=True)
     }]
 }), encoding="utf-8")
 """
-            fake_codex.write_text(
+            write_executable(
+                fake_codex,
                 script_template % (repr(str(marker)), repr("codex-cli 0.153.4")),
-                encoding="utf-8",
             )
-            fake_codex.chmod(0o755)
             contract_path = root / "contract.json"
             contract_path.write_text(
                 json.dumps(
@@ -699,11 +688,10 @@ out.mkdir(parents=True, exist_ok=True)
             )
             self.assertIn("--out", generated_args)
 
-            fake_codex.write_text(
+            write_executable(
+                fake_codex,
                 script_template % (repr(str(marker)), repr("codex-cli 0.153.4-rc.1")),
-                encoding="utf-8",
             )
-            fake_codex.chmod(0o755)
             contract_path.write_text(
                 json.dumps(
                     contract(

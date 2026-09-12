@@ -27,13 +27,87 @@ Work is tracked as issues and pull requests there.
    ```
 
 5. Run the push preflight, push the branch, and open a pull request against
-   `main` on `mplibunao/repoprompt-ce-local`; merge it with a merge commit once
-   its checks pass. Nothing merges into `main` directly.
+   `main` on `mplibunao/repoprompt-ce-local`, with the `pr-ready` result from
+   step 4 recorded in the description, one type label (`bug`, `port`,
+   `tooling`, `agent-env`, `documentation`, or `cleanup`), and the `area:`
+   labels for the code it touches.
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
    git push -u origin <branch>
-   gh pr create --base main
+   gh pr create --base main --label <type> --label area:<area>
+   ```
+
+   When the change depends on a pull request that is still open, branch from
+   that branch instead of `main`, open the pull request against it, then link
+   the two as a GitHub stack and add the `stacked` label. The stack view shows
+   only this layer's diff, and GitHub retargets the branch onto `main` once
+   the lower pull request merges, rewriting the upper branch's commits in the
+   process, so fetch and reset the local branch to `origin` before committing
+   to it again. The `gh stack` extension installs with
+   `gh extension install github/gh-stack`.
+
+   ```bash
+   gh pr create --base <lower-branch> --label <type> --label area:<area> --label stacked
+   gh stack link <lower-pr-number> <this-pr-number>
+   ```
+
+   A change under `Sources/` or `Packages/` opens as a draft whose description
+   says debug-app validation is pending, against `main` or, when stacked, the
+   lower branch as above. Build and launch the debug app from
+   the branch, exercise the changed behavior through `rpce-cli-debug` or the
+   app itself, and record the commands, what you observed, and the result in
+   the description before marking it ready. The debug app cannot run beside
+   production; the stop rule in [`AGENTS.md`](AGENTS.md) says when stopping
+   production for that window is allowed.
+
+   ```bash
+   gh pr create --base <main-or-lower-branch> --draft --label <type> --label area:<area>
+   make dev-smoke-launch          # builds, launches the debug app, runs the smoke flow
+   rpce-cli-debug -w 1 -e '<the check for this change>'
+   ```
+
+6. The Codex review bot reviews the pull request when it is ready for review.
+   While addressing its findings, convert the pull request to a draft so the
+   open, non-draft list stays a list of reviewable work; reply to and resolve
+   each thread, commit the fix through the commit preflight, push it through
+   the push preflight, and mark the pull request ready again so the bot
+   reviews the fixed code. Repeat until a pass leaves no findings.
+
+   ```bash
+   gh pr ready <number> --undo   # draft while fixing
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
+   git commit
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh push
+   git push
+   gh pr ready <number>          # ready again after the fix is pushed
+   ```
+
+7. MP reads the pull request and approves it. Fetch `origin` first so `main`
+   is current for everything below. If the branch conflicts with `main`,
+   resolve that first: merge `origin/main` into the branch, commit the
+   resolution through the commit preflight, push it through the push
+   preflight, and let the review bot and the checks run on the new head as in
+   step 6. MP's approval covers that conflict-resolution commit; any other
+   commit pushed after the approval, such as a review-bot fix, needs MP's
+   approval again before the merge. Then, with the bot's last pass clean and
+   the checks green, run the `pr-ready` lane on the final head with the
+   upstream unset so it validates `origin/main..HEAD` rather than an empty
+   range, restore the upstream, confirm the local head is the pushed head, and
+   merge with a merge commit pinned to that commit so a head that moved in the
+   meantime aborts the merge. A pull request that is part of a stack merges
+   through the stack command after the same head check; merging a lower layer
+   makes GitHub retarget and rewrite the layers above it, and MP's approval of
+   the lower layer covers that rewrite. Nothing merges into `main` directly.
+
+   ```bash
+   git fetch origin
+   git branch --unset-upstream
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
+   git branch --set-upstream-to=origin/<branch>
+   test "$(git rev-parse HEAD)" = "$(git rev-parse origin/<branch>)"
+   gh pr merge <number> --merge --match-head-commit "$(git rev-parse HEAD)"
+   gh stack merge <number> --merge --yes   # when the pull request is in a stack
    ```
 
 Ports from upstream follow [`docs/porting.md`](docs/porting.md). Builds are
