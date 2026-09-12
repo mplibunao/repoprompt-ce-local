@@ -29,9 +29,12 @@ ROOT_DIR = SCRIPT_DIR.parent
 ARCHIVE_SCRIPT = SCRIPT_DIR / "local_release_archive.sh"
 RESTORE_SCRIPT = SCRIPT_DIR / "local_release_restore.sh"
 ENV_SCRIPT = SCRIPT_DIR / "local_release_env.sh"
+PACKAGE_SCRIPT = SCRIPT_DIR / "package_app.sh"
+JOURNAL_SCHEMA_TOOL = SCRIPT_DIR / "read_working_journal_schema_version.py"
+INFO_PLIST_TEMPLATE = ROOT_DIR / "AppBundle" / "Info.plist.template"
 DISPLAY_NAME = "RepoPrompt CE"
 TAG = "local/v1.4.0-b99"
-COMMIT = "0123456789abcdef0123456789abcdef01234567"
+JOURNAL_SOURCE_PATH = Path("Sources/RepoPromptDomainRuntime/DomainPersistence.swift")
 
 
 def tree_snapshot(root: Path) -> dict[str, str | None]:
@@ -54,32 +57,85 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.identity_path = self.state / "local-signing-identity-v1.json"
         self.defaults_domain.parent.mkdir(parents=True, exist_ok=True)
         self.process_token = f"repoprompt-ce-guard-{self.tmp.name}"
+        self.source_repository = self.tmp / "source-repository"
+        subprocess.run(["git", "init", "-q", str(self.source_repository)], check=True, capture_output=True)
+        self.archived_commit = self.commit_journal_source(
+            "struct DomainWorkingJournal: Codable {\n"
+            "    static let schemaVersion = 1\n"
+            "}\n"
+        )
 
     # -- fixtures ---------------------------------------------------------------
 
-    def write_app(self, *, build: str, commit: str | None) -> None:
+    def commit_journal_source(self, source: str) -> str:
+        path = self.source_repository / JOURNAL_SOURCE_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(self.source_repository), "add", str(JOURNAL_SOURCE_PATH)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.source_repository),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "journal schema fixture",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(self.source_repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def write_app(
+        self,
+        *,
+        build: str,
+        commit: str | None,
+        dirty: bool | None = False,
+        git_status: str | None = "ok",
+        journal_schema_version: int | None = 1,
+    ) -> None:
         resources = self.app / "Contents" / "Resources"
         resources.mkdir(parents=True, exist_ok=True)
         (self.app / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
         (self.app / "Contents" / "MacOS" / "RepoPrompt").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        info = {
+            "CFBundleIdentifier": "com.pvncher.repoprompt.ce",
+            "CFBundleShortVersionString": "1.4.0",
+            "CFBundleVersion": build,
+            "RepoPromptSigningMode": "local-self-signed",
+        }
+        if journal_schema_version is not None:
+            info["RepoPromptWorkingJournalSchemaVersion"] = journal_schema_version
         with (self.app / "Contents" / "Info.plist").open("wb") as handle:
-            plistlib.dump(
-                {
-                    "CFBundleIdentifier": "com.pvncher.repoprompt.ce",
-                    "CFBundleShortVersionString": "1.4.0",
-                    "CFBundleVersion": build,
-                    "RepoPromptSigningMode": "local-self-signed",
-                },
-                handle,
-            )
+            plistlib.dump(info, handle)
         provenance = resources / "RepoPromptProvenance.json"
         if commit is None:
             provenance.unlink(missing_ok=True)
         else:
-            provenance.write_text(
-                json.dumps({"version": 1, "commit": commit, "dirty": False, "buildTimeISO": "2026-09-10T00:00:00+02:00"}),
-                encoding="utf-8",
-            )
+            payload = {
+                "version": 1,
+                "commit": commit,
+                "dirty": dirty,
+                "git_status": git_status,
+                "buildTimeISO": "2026-09-10T00:00:00+02:00",
+            }
+            provenance.write_text(json.dumps(payload), encoding="utf-8")
 
     def write_state(self, marker: str) -> None:
         for name in ("Settings", "Workspaces", "DebugApps", "Rollbacks"):
@@ -113,8 +169,21 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         for key, value in pairs.items():
             self.run_defaults(["write", str(self.defaults_domain), key, "-string", value])
 
-    def write_baseline_fixture(self, *, defaults: dict[str, str] | None = None) -> None:
-        self.write_app(build="38", commit=COMMIT)
+    def write_baseline_fixture(
+        self,
+        *,
+        defaults: dict[str, str] | None = None,
+        dirty: bool | None = False,
+        git_status: str | None = "ok",
+        journal_schema_version: int | None = 1,
+    ) -> None:
+        self.write_app(
+            build="38",
+            commit=self.archived_commit,
+            dirty=dirty,
+            git_status=git_status,
+            journal_schema_version=journal_schema_version,
+        )
         self.write_state("original")
         effective_defaults = {"UpdateChannel": "stable"} if defaults is None else defaults
         self.write_defaults(effective_defaults)
@@ -140,6 +209,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
                 "LOCAL_DEFAULTS_DOMAIN": str(self.defaults_domain),
                 "LOCAL_RELEASE_ARCHIVE_ROOT": str(self.archive_root),
                 "LOCAL_SIGNING_IDENTITY_REGISTRY_PATH": str(self.identity_path),
+                "LOCAL_RELEASE_SOURCE_REPOSITORY": str(self.source_repository),
                 # A per-test token so the guard runs for real without matching the
                 # operator's live RepoPrompt processes.
                 "LOCAL_RELEASE_RUNNING_PROCESS_PATTERNS": self.process_token,
@@ -171,6 +241,31 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         return json.loads((self.archive_root / TAG / "manifest.json").read_text(encoding="utf-8"))
 
     # -- tests ------------------------------------------------------------------
+
+    def test_package_contract_embeds_working_journal_schema_version(self) -> None:
+        template = INFO_PLIST_TEMPLATE.read_text(encoding="utf-8")
+        package_script = PACKAGE_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "<key>RepoPromptWorkingJournalSchemaVersion</key>"
+            "<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>",
+            template,
+        )
+        self.assertIn("WORKING_JOURNAL_SCHEMA_VERSION=", package_script)
+        self.assertIn(
+            "'<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>':"
+            "'<integer>$WORKING_JOURNAL_SCHEMA_VERSION</integer>'",
+            package_script,
+        )
+        self.assertIn('read_working_journal_schema_version.py" "$ROOT_DIR"', package_script)
+        self.assertIn(
+            '[[ "$PACKAGED_WORKING_JOURNAL_SCHEMA_VERSION_TYPE" == "integer" ]]',
+            package_script,
+        )
+        self.assertIn(
+            "expected exactly one integer DomainWorkingJournal.schemaVersion",
+            JOURNAL_SCHEMA_TOOL.read_text(encoding="utf-8"),
+        )
 
     def test_round_trip_reproduces_app_state_defaults_and_identity(self) -> None:
         self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})
@@ -211,7 +306,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
         self.assertEqual(manifest["tag"], TAG)
         self.assertEqual(manifest["app"]["build"], "38")
-        self.assertEqual(manifest["app"]["commit"], COMMIT)
+        self.assertEqual(manifest["app"]["commit"], self.archived_commit)
         self.assertEqual(manifest["app"]["signingMode"], "local-self-signed")
         self.assertEqual(
             manifest["applicationSupport"]["excludedNames"],
@@ -223,15 +318,116 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         for name in ("app.zip", "application-support.tar.gz", "defaults.plist"):
             self.assertEqual(len(manifest["files"][name]["sha256"]), 64, name)
 
-    def test_missing_bundle_provenance_records_commit_as_null(self) -> None:
-        self.write_app(build="37", commit=None)
+    def test_bundle_schema_takes_priority_over_observed_journal_versions(self) -> None:
+        self.write_baseline_fixture(journal_schema_version=1)
+        journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
+        journals.mkdir(parents=True)
+        (journals / "00000000-0000-0000-0000-000000000001.json").write_text(
+            json.dumps({"version": 2}), encoding="utf-8"
+        )
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertEqual(manifest["working_journal_schema_version"], 1)
+        self.assertEqual(manifest["working_journal_schema_version_status"], "from_bundle")
+        self.assertEqual(manifest["provenance_commit_working_journal_schema_version"], 1)
+        self.assertEqual(manifest["observed_working_journal_versions"], [2])
+
+    def test_clean_provenance_commit_supplies_legacy_bundle_schema(self) -> None:
+        self.write_baseline_fixture(journal_schema_version=None)
+        journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
+        journals.mkdir(parents=True)
+        for index, version in enumerate((1, 2), start=1):
+            name = f"00000000-0000-0000-0000-{index:012d}.json"
+            (journals / name).write_text(json.dumps({"version": version}), encoding="utf-8")
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertEqual(manifest["working_journal_schema_version"], 1)
+        self.assertEqual(manifest["working_journal_schema_version_status"], "from_commit")
+        self.assertEqual(manifest["provenance_commit_working_journal_schema_version"], 1)
+        self.assertEqual(manifest["observed_working_journal_versions"], [1, 2])
+
+    def test_excluded_domain_runtime_still_reports_live_observed_journal_versions(self) -> None:
+        self.write_baseline_fixture()
+        journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
+        journals.mkdir(parents=True)
+        (journals / "00000000-0000-0000-0000-000000000001.json").write_text(
+            json.dumps({"version": 2}), encoding="utf-8"
+        )
+
+        self.archive(LOCAL_RELEASE_ARCHIVE_EXCLUDES="DebugApps:Rollbacks:Conductor:DomainRuntime")
+        manifest = self.manifest()
+        listing = subprocess.run(
+            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+
+        top_level = {entry.removeprefix("./").split("/", 1)[0] for entry in listing}
+        self.assertEqual(manifest["observed_working_journal_versions"], [2])
+        self.assertNotIn("DomainRuntime", top_level)
+
+    def test_manifest_records_unreadable_journal_without_aborting_archive(self) -> None:
+        self.write_baseline_fixture()
+        journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
+        journals.mkdir(parents=True)
+        valid_name = "00000000-0000-0000-0000-000000000001.json"
+        unreadable_name = "00000000-0000-0000-0000-000000000002.json"
+        (journals / valid_name).write_text(json.dumps({"version": 2}), encoding="utf-8")
+        (journals / unreadable_name).write_text('{"version":', encoding="utf-8")
+
+        self.archive()
+        manifest_path = self.archive_root / TAG / "manifest.json"
+        manifest = self.manifest()
+
+        self.assertTrue(manifest_path.is_file())
+        self.assertEqual(manifest["observed_working_journal_versions"], [2])
+        self.assertEqual(
+            manifest["unreadable_working_journals"],
+            [f"DomainRuntime/v1/release-profile/working-journals/{unreadable_name}"],
+        )
+
+    def test_manifest_records_no_observed_versions_when_no_working_journal_exists(self) -> None:
+        self.write_baseline_fixture()
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertEqual(manifest["working_journal_schema_version"], 1)
+        self.assertEqual(manifest["observed_working_journal_versions"], [])
+        self.assertEqual(manifest["unreadable_working_journals"], [])
+
+    def test_missing_bundle_schema_provenance_and_journals_records_unknown(self) -> None:
+        self.write_app(build="37", commit=None, journal_schema_version=None)
         self.write_state("original")
         self.write_defaults({"UpdateChannel": "stable"})
 
         self.archive()
+        manifest = self.manifest()
 
-        self.assertIsNone(self.manifest()["app"]["commit"])
-        self.assertEqual(self.manifest()["app"]["build"], "37")
+        self.assertIsNone(manifest["working_journal_schema_version"])
+        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown")
+        self.assertIsNone(manifest["provenance_commit_working_journal_schema_version"])
+
+    def test_dirty_provenance_and_journals_do_not_guess_archived_schema(self) -> None:
+        self.write_baseline_fixture(dirty=True, journal_schema_version=None)
+        journals = self.state / "DomainRuntime" / "v1" / "release-profile" / "working-journals"
+        journals.mkdir(parents=True)
+        (journals / "00000000-0000-0000-0000-000000000001.json").write_text(
+            json.dumps({"version": 2}), encoding="utf-8"
+        )
+
+        self.archive()
+        manifest = self.manifest()
+
+        self.assertIsNone(manifest["working_journal_schema_version"])
+        self.assertEqual(manifest["working_journal_schema_version_status"], "unknown")
+        self.assertIsNone(manifest["provenance_commit_working_journal_schema_version"])
+        self.assertEqual(manifest["observed_working_journal_versions"], [2])
 
     def test_archive_excludes_debug_apps_and_rollbacks_from_the_state_tarball(self) -> None:
         self.write_baseline_fixture()

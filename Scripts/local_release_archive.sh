@@ -101,6 +101,7 @@ step "Writing checksums and manifest"
 ARCHIVE_TAG="$TAG" \
     ARCHIVE_DIR="$ARCHIVE_DIR" \
     ARCHIVE_APP_PATH="$LOCAL_PRODUCTION_APP" \
+    ARCHIVE_REPOSITORY_PATH="${LOCAL_RELEASE_SOURCE_REPOSITORY:-$LOCAL_RELEASE_ROOT_DIR}" \
     ARCHIVE_STATE_PATH="$LOCAL_APP_SUPPORT_DIR" \
     ARCHIVE_DEFAULTS_DOMAIN="$LOCAL_DEFAULTS_DOMAIN" \
     ARCHIVE_IDENTITY_PATH="$LOCAL_SIGNING_IDENTITY_REGISTRY_PATH" \
@@ -114,10 +115,15 @@ from pathlib import Path
 import json
 import os
 import plistlib
+import re
+import subprocess
 import time
+from uuid import UUID
 
 archive_dir = Path(os.environ["ARCHIVE_DIR"])
 app_path = Path(os.environ["ARCHIVE_APP_PATH"])
+repository_path = Path(os.environ["ARCHIVE_REPOSITORY_PATH"])
+state_path = Path(os.environ["ARCHIVE_STATE_PATH"])
 
 
 def info_plist_value(key: str) -> str | None:
@@ -127,6 +133,15 @@ def info_plist_value(key: str) -> str | None:
     except (OSError, plistlib.InvalidFileException):
         return None
     return value if isinstance(value, str) else None
+
+
+def info_plist_integer(key: str) -> int | None:
+    try:
+        with (app_path / "Contents" / "Info.plist").open("rb") as handle:
+            value = plistlib.load(handle).get(key)
+    except (OSError, plistlib.InvalidFileException):
+        return None
+    return value if type(value) is int else None
 
 
 def bundle_provenance() -> dict | None:
@@ -145,15 +160,96 @@ def checksum(name: str) -> str | None:
     return sidecar.read_text(encoding="utf-8").split(maxsplit=1)[0]
 
 
+def provenance_commit_working_journal_schema_version(provenance: dict | None) -> int | None:
+    record = provenance or {}
+    if record.get("dirty") is not False or record.get("git_status") != "ok":
+        return None
+
+    commit = record.get("commit")
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None:
+        return None
+
+    source_path = "Sources/RepoPromptDomainRuntime/DomainPersistence.swift"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repository_path), "show", "--no-ext-diff", "--no-textconv", f"{commit}:{source_path}"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+
+    declarations = re.findall(
+        r"(?ms)^struct DomainWorkingJournal: Codable \{\n(?P<body>.*?)(?=^\})",
+        result.stdout,
+    )
+    matches = [
+        match
+        for declaration in declarations
+        for match in re.findall(r"(?m)^[ \t]+static let schemaVersion[ \t]*=[ \t]*([0-9]+)[ \t]*$", declaration)
+    ]
+    return int(matches[0]) if len(matches) == 1 else None
+
+
+def archived_working_journal_schema_version(commit_version: int | None) -> tuple[int | None, str]:
+    bundled_version = info_plist_integer("RepoPromptWorkingJournalSchemaVersion")
+    if bundled_version is not None:
+        return bundled_version, "from_bundle"
+    if commit_version is not None:
+        return commit_version, "from_commit"
+    return None, "unknown"
+
+
+def observed_working_journal_versions() -> tuple[list[int], list[str]]:
+    versions: set[int] = set()
+    unreadable: list[str] = []
+    journals_root = state_path / "DomainRuntime" / "v1"
+    for journal_path in journals_root.glob("*/working-journals/*.json"):
+        relative_path = journal_path.relative_to(state_path)
+        # UUID validation prevents unrelated JSON from being treated as a working journal.
+        try:
+            UUID(journal_path.stem)
+        except ValueError:
+            continue
+        # An unreadable journal cannot establish a version, but it must not invalidate the
+        # rollback unit; the manifest keeps it visible during promotion review.
+        if not journal_path.is_file():
+            unreadable.append(str(relative_path))
+            continue
+        try:
+            payload = json.loads(journal_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            unreadable.append(str(relative_path))
+            continue
+        version = payload.get("version") if isinstance(payload, dict) else None
+        if type(version) is not int:
+            unreadable.append(str(relative_path))
+            continue
+        versions.add(version)
+    return sorted(versions), sorted(unreadable)
+
+
 files = ["app.zip", "application-support.tar.gz", "defaults.plist"]
 if os.environ["ARCHIVE_IDENTITY_PRESENT"] == "1":
     files.append("local-signing-identity-v1.json")
 
 provenance = bundle_provenance()
+observed_journal_versions, unreadable_journals = observed_working_journal_versions()
+provenance_commit_journal_schema_version = provenance_commit_working_journal_schema_version(provenance)
+journal_schema_version, journal_schema_version_status = archived_working_journal_schema_version(
+    provenance_commit_journal_schema_version
+)
 now = time.time()
 manifest = {
     "schemaVersion": 1,
     "tag": os.environ["ARCHIVE_TAG"],
+    "working_journal_schema_version": journal_schema_version,
+    "working_journal_schema_version_status": journal_schema_version_status,
+    "provenance_commit_working_journal_schema_version": provenance_commit_journal_schema_version,
+    "observed_working_journal_versions": observed_journal_versions,
+    "unreadable_working_journals": unreadable_journals,
     "archivedAtEpoch": now,
     "archivedAtISO": datetime.fromtimestamp(now, timezone.utc).astimezone().isoformat(timespec="seconds"),
     "app": {
@@ -162,7 +258,6 @@ manifest = {
         "shortVersion": info_plist_value("CFBundleShortVersionString"),
         "build": info_plist_value("CFBundleVersion"),
         "signingMode": info_plist_value("RepoPromptSigningMode"),
-        # An installed bundle may not carry the provenance file; the commit is null then.
         "commit": (provenance or {}).get("commit"),
         "provenanceBuildTimeISO": (provenance or {}).get("buildTimeISO"),
     },

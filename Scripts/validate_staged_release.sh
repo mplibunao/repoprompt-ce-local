@@ -216,14 +216,27 @@ diff -qr "$ROOT_DIR/ThirdPartyLicenses" "$APPROVED_SOURCE_ROOT/ThirdPartyLicense
 REPOPROMPT_RELEASE_SOURCE_ROOT="$APPROVED_SOURCE_ROOT" \
     "$SCRIPT_DIR/validate_packaged_legal.sh" "$APP_BUNDLE"
 
+WORKING_JOURNAL_SCHEMA_VERSION="$(
+    python3 "$SCRIPT_DIR/read_working_journal_schema_version.py" "$APPROVED_SOURCE_ROOT"
+)"
 python3 - "$APPROVED_SOURCE_ROOT/AppBundle/Info.plist.template" "$APP_BUNDLE/Contents/Info.plist" \
     "$APP_NAME" "$DISPLAY_NAME" "$BUNDLE_ID" "$MARKETING_VERSION" "$BUILD_NUMBER" \
-    "${REPOPROMPT_IDENTITY_MIGRATION_PHASE:-disabled}" <<'PYTHON'
+    "${REPOPROMPT_IDENTITY_MIGRATION_PHASE:-disabled}" "$WORKING_JOURNAL_SCHEMA_VERSION" <<'PYTHON'
 import plistlib
 import sys
 from pathlib import Path
 
-template, actual, app_name, display_name, bundle_id, version, build, identity_migration_phase = sys.argv[1:]
+(
+    template,
+    actual,
+    app_name,
+    display_name,
+    bundle_id,
+    version,
+    build,
+    identity_migration_phase,
+    working_journal_schema_version,
+) = sys.argv[1:]
 text = Path(template).read_text(encoding="utf-8")
 for key, value in {
     "__APP_NAME__": app_name,
@@ -236,6 +249,9 @@ for key, value in {
     "__LOCAL_SIGNING_CERTIFICATE_SHA256__": "",
     "__LOCAL_SECURE_STORAGE_GENERATION__": "",
     "__IDENTITY_MIGRATION_PHASE__": identity_migration_phase,
+    "<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>": (
+        f"<integer>{working_journal_schema_version}</integer>"
+    ),
 }.items():
     text = text.replace(key, value)
 expected_plist = plistlib.loads(text.encode("utf-8"))

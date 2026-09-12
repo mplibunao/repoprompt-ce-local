@@ -341,13 +341,26 @@ run "$CONTROL_PLANE_SCRIPTS_DIR/normalize_swiftpm_resource_bundles.sh" "$APP_BUN
 run "$CONTROL_PLANE_SCRIPTS_DIR/validate_required_swiftpm_resource_bundles.sh" "$APP_BUNDLE" "Packaged app SwiftPM resource bundle layout"
 
 phase "Writing Info.plist"
+WORKING_JOURNAL_SCHEMA_VERSION="$(
+    python3 "$CONTROL_PLANE_SCRIPTS_DIR/read_working_journal_schema_version.py" "$ROOT_DIR"
+)"
 run python3 - <<PY
 from pathlib import Path
 s=Path('AppBundle/Info.plist.template').read_text()
-for k,v in {'__APP_NAME__':'$APP_NAME','__DISPLAY_NAME__':'$DISPLAY_NAME','__BUNDLE_ID__':'$BUNDLE_ID','__MARKETING_VERSION__':'$MARKETING_VERSION','__BUILD_NUMBER__':'$BUILD_NUMBER','__DEBUG_SECURE_STORAGE_BACKEND__':'$DEBUG_STORAGE_BACKEND_MARKER','__SIGNING_MODE__':'$SIGNING_MODE_MARKER','__LOCAL_SIGNING_CERTIFICATE_SHA256__':'$LOCAL_SIGNING_CERTIFICATE_SHA256','__LOCAL_SECURE_STORAGE_GENERATION__':'$LOCAL_SIGNING_SERVICE_GENERATION','__IDENTITY_MIGRATION_PHASE__':'$IDENTITY_MIGRATION_PHASE'}.items(): s=s.replace(k,v)
+for k,v in {'__APP_NAME__':'$APP_NAME','__DISPLAY_NAME__':'$DISPLAY_NAME','__BUNDLE_ID__':'$BUNDLE_ID','__MARKETING_VERSION__':'$MARKETING_VERSION','__BUILD_NUMBER__':'$BUILD_NUMBER','__DEBUG_SECURE_STORAGE_BACKEND__':'$DEBUG_STORAGE_BACKEND_MARKER','__SIGNING_MODE__':'$SIGNING_MODE_MARKER','<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>':'<integer>$WORKING_JOURNAL_SCHEMA_VERSION</integer>','__LOCAL_SIGNING_CERTIFICATE_SHA256__':'$LOCAL_SIGNING_CERTIFICATE_SHA256','__LOCAL_SECURE_STORAGE_GENERATION__':'$LOCAL_SIGNING_SERVICE_GENERATION','__IDENTITY_MIGRATION_PHASE__':'$IDENTITY_MIGRATION_PHASE'}.items(): s=s.replace(k,v)
 Path('$APP_BUNDLE/Contents/Info.plist').write_text(s)
 PY
 run plutil -lint "$APP_BUNDLE/Contents/Info.plist"
+PACKAGED_WORKING_JOURNAL_SCHEMA_VERSION_TYPE="$(
+    plutil -type RepoPromptWorkingJournalSchemaVersion "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
+)"
+[[ "$PACKAGED_WORKING_JOURNAL_SCHEMA_VERSION_TYPE" == "integer" ]] ||
+    fail "Packaged working-journal schema version must be an integer, got ${PACKAGED_WORKING_JOURNAL_SCHEMA_VERSION_TYPE:-<missing>}"
+PACKAGED_WORKING_JOURNAL_SCHEMA_VERSION="$(
+    plutil -extract RepoPromptWorkingJournalSchemaVersion raw "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
+)"
+[[ "$PACKAGED_WORKING_JOURNAL_SCHEMA_VERSION" == "$WORKING_JOURNAL_SCHEMA_VERSION" ]] ||
+    fail "Packaged working-journal schema version mismatch: expected $WORKING_JOURNAL_SCHEMA_VERSION, got ${PACKAGED_WORKING_JOURNAL_SCHEMA_VERSION:-<missing>}"
 PACKAGED_IDENTITY_MIGRATION_PHASE="$(
     plutil -extract RepoPromptIdentityMigrationPhase raw "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null ||
         printf 'disabled\n'

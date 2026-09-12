@@ -19,20 +19,62 @@ Before you start:
    ./Scripts/local_release_archive.sh local/v1.4.0-b37
    ```
 
-2. Install the new build from the `main` checkout:
+2. Compare the archived and candidate working-journal schema versions before replacing
+   the app. The archived build's supported version is `working_journal_schema_version` in
+   the new archive's `manifest.json`. The archive determines it automatically in this order:
+
+   - `from_bundle`: read `RepoPromptWorkingJournalSchemaVersion` from the archived app's
+     `Contents/Info.plist`.
+   - `from_commit`: when that key is absent and provenance says `dirty: false` with
+     `git_status: "ok"`, read the version with
+     `git show <commit>:Sources/RepoPromptDomainRuntime/DomainPersistence.swift`.
+   - `unknown`: when neither source yields a version, treat the result as a version difference
+     and require the rollback notes below.
+
+   `provenance_commit_working_journal_schema_version` records the clean commit-derived value.
+   This value selects the archived version when the bundle key is absent. When the key is
+   present, the field is an audit value. Pre-key bundles packaged before the `git_status`
+   provenance field resolve as `unknown`. This includes the currently installed production
+   build, so its next promotion requires the rollback notes below. The candidate build's
+   supported version is `DomainWorkingJournal.schemaVersion` in
+   [`Sources/RepoPromptDomainRuntime/DomainPersistence.swift`](../Sources/RepoPromptDomainRuntime/DomainPersistence.swift).
+
+   Working journals don't identify the app build that wrote them, so they never select the
+   archived build's schema version. `observed_working_journal_versions` lists the distinct
+   versions found in the shared Application Support snapshot. The candidate's schema version
+   must be greater than or equal to the highest observed version. A higher observed version
+   blocks promotion. Rollback notes don't make that candidate safe to launch. Quit
+   RepoPrompt CE and move the journal files to a backup directory using the path in the
+   rollback template below.
+   Relaunch the currently installed build, then quit it after it writes fresh journals.
+   Re-run step 1 with `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`. Continue only when the replacement
+   archive contains no observed version higher than the candidate.
+
+   If the archived and candidate schema versions differ, promotion is blocked until
+   the release notes include usable rollback instructions. Start with this template and
+   replace the placeholders with the release's exact paths or conversion procedure:
+
+   > **Working-journal rollback (`<candidate>` to `<archived>`):** Quit RepoPrompt CE and
+   > restore the archived build without launching it. Move
+   > `~/Library/Application Support/RepoPrompt CE/DomainRuntime/v1/*/working-journals/*.json`
+   > to `<backup directory outside Application Support>`, or convert those files with
+   > `<tested conversion procedure>`. Relaunch the archived build; affected workspaces load
+   > from their saved workspace documents and write fresh journals.
+
+3. Install the new build from the `main` checkout:
 
    ```bash
    CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make install-local-production
    ```
 
-3. Launch production and run the [acceptance matrix](#acceptance-matrix) once from Claude
+4. Launch production and run the [acceptance matrix](#acceptance-matrix) once from Claude
    Code and once from Codex. Confirm the bundle provenance names the promoted commit:
 
    ```bash
    cat "/Applications/RepoPrompt CE.app/Contents/Resources/RepoPromptProvenance.json"
    ```
 
-4. On pass, with `main` pushed at the promoted commit, tag the build and publish the
+5. On pass, with `main` pushed at the promoted commit, tag the build and publish the
    receipt:
 
    ```bash
@@ -130,7 +172,20 @@ The archive lands in `~/Archives/repoprompt-ce/<tag>/` and holds `app.zip`,
 record exists, a `.sha256` sidecar per file, and `manifest.json`. The manifest is written
 last, so its absence marks an incomplete archive and the restore refuses one. It records the
 tag, timestamps, bundle identifier, version, build, signing mode, and the commit read from
-the bundle's provenance file. Re-archiving over a completed archive needs
+the bundle's provenance file. The archive records `working_journal_schema_version` with
+status `from_bundle` when `RepoPromptWorkingJournalSchemaVersion` is present in the app's
+Info.plist. For older bundles without that key, provenance with `dirty: false` and
+`git_status: "ok"` selects the version from the archived commit and records `from_commit`.
+Without either source, the archive records a null
+version with status `unknown`. `provenance_commit_working_journal_schema_version` records the
+clean commit-derived value whether it selects the version or audits the bundle key. Working
+journals carry no writer identity and never select the archived version. The archive scans the
+live Application Support state for the forward compatibility gate, even when exclusions omit
+`DomainRuntime` from the state tarball. The results appear in
+`observed_working_journal_versions`. Journals that can't supply
+an integer version appear by archive-relative path in `unreadable_working_journals` without
+blocking the archive. An empty list in either field means it found none. Re-archiving over a
+completed archive needs
 `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`.
 
 `LOCAL_RELEASE_ARCHIVE_EXCLUDES` is a colon-separated list of top-level exclusion rules
@@ -159,8 +214,8 @@ non-ignored files outside Git tracking. `git_status` is `ok` when Git supplied b
 When Git status fails or times out, `git_status` is `unavailable`, and both dirtiness fields
 are null. `Scripts/conductor.py` reads the manifest to identify a bundle, and the archive
 manifest reads the commit from it. After an install, confirm the file names the promoted
-commit with `dirty: false`. The `untracked_files` field may be true when the checkout contains
-local investigation files.
+commit with `dirty: false` and `git_status: "ok"`. The `untracked_files` field may be true when
+the checkout contains local investigation files.
 
 ## Acceptance matrix
 

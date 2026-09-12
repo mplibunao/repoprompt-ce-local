@@ -140,6 +140,7 @@ run_preflight() {
     require_file "$CONTROL_PLANE_SCRIPTS_DIR/validate_app_architectures.sh"
     require_file "$CONTROL_PLANE_SCRIPTS_DIR/write_app_artifact_manifest.py"
     require_file "$CONTROL_PLANE_SCRIPTS_DIR/write_bundle_provenance.py"
+    require_file "$CONTROL_PLANE_SCRIPTS_DIR/read_working_journal_schema_version.py"
     require_file "$CONTROL_PLANE_SCRIPTS_DIR/codex_runtime_artifact.py"
     require_file "$CODEX_MANIFEST"
     require_file "$ROOT_DIR/ThirdPartyLicenses/codex/LICENSE"
