@@ -131,16 +131,18 @@ or any two touch the same file, validate them together before anything merges:
    and do not commit fixes on the candidate.
 2. Build the candidate once, launch the debug app, and run each pull request's
    own scenario plus the acceptance matrix in
-   [`docs/releasing.md`](docs/releasing.md).
+   [`docs/releasing.md`](docs/releasing.md) against that debug app, with the
+   matrix's `$CLI` set to `rpce-cli-debug` so every call reaches the candidate
+   rather than the installed production build.
 3. On failure, fix on the pull request branch and cut the next candidate from
    `origin/main` plus the current heads. To find the pull request at fault,
    split the candidate along groups of pull requests that touch the same files
    and build the halves.
 4. On pass, merge the pull requests into `main` one by one in the same order,
    each through `pr-ready` and a merge commit, without relaunching the app.
-   After the last merge, `git diff <candidate tip> origin/main` must be empty:
-   a non-empty diff means a pull request changed after validation and the
-   candidate is void.
+   After the last merge, run `git fetch origin` and require
+   `git diff <candidate tip> origin/main` to be empty: a non-empty diff means a
+   pull request changed after validation and the candidate is void.
 5. Promote from `main` per [`docs/releasing.md`](docs/releasing.md). The
    candidate branch is never merged into `main` and may be deleted once the
    promotion is tagged.
