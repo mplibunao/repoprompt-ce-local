@@ -21,6 +21,7 @@ Process pull requests for `mplibunao/repoprompt-ce-local` sequentially. Every ve
    - Before each `agent_run start`, repeat that root check.
    - Record every session ID and poll, wait, respond, or cancel until each session is terminal before cleanup.
 6. Use descriptive branch and workspace names without an automatic agent prefix unless requested.
+7. When the batch was validated as a release candidate (`CONTRIBUTING.md`, "Landing a batch"), merge the recorded pull request heads without rebasing them, record the candidate tip, skip per-PR app validation, and after the final merge require `git diff <candidate tip> origin/main` to be empty before reporting the batch complete.
 
 Maintain a compact ledger for each PR: worktree path, local branch, window/workspace/context IDs, Agent Mode session IDs, base and head SHAs, validations, merge commit, approvals, and cleanup state.
 
