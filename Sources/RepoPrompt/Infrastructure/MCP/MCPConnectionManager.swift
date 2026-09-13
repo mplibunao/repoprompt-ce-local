@@ -13016,10 +13016,14 @@ actor ServerNetworkManager {
                                             uniquingKeysWith: { _, authorityValue in authorityValue }
                                         )
                                     case MCPToolExecutionWatchdogError.executionDetached:
-                                        let mutationOutcomeMayStillReconcile = toolName == MCPWindowToolName.fileActions
+                                        let mutationOutcomeMayStillReconcile = [
+                                            MCPWindowToolName.fileActions,
+                                            MCPWindowToolName.prompt,
+                                            MCPWindowToolName.workspaceContext
+                                        ].contains(toolName)
                                         code = "tool_execution_timeout"
                                         message = mutationOutcomeMayStillReconcile
-                                            ? "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract. Watchdog cancellation did not settle the mutation provider during grace, so it was detached for eventual reconciliation. Inspect the filesystem before issuing another mutation."
+                                            ? "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract. Watchdog cancellation did not settle the mutation provider during grace, so it was detached for eventual reconciliation. Inspect affected state before issuing another mutation."
                                             : "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract. Watchdog cancellation did not settle the read-only provider during grace, so it was detached for eventual cleanup."
                                         outcome = "executionDetached"
                                         shouldForceDisconnect = false

@@ -10,6 +10,158 @@ import XCTest
 #if DEBUG
     @MainActor
     final class MCPExportWatchdogIntegrationTests: XCTestCase {
+        func testPromptSetDoesNotReplaySelectionAfterManageSelectionCompletes() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let gate = MCPExecutionIgnoringCancellationGate()
+                let secondRelativePath = "Sources/PostPromptSelection.swift"
+                let secondURL = context.rootURL.appendingPathComponent(secondRelativePath)
+
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    _ = try await context.window.workspaceFileContextStore.createFile(
+                        rootID: context.rootID,
+                        relativePath: secondRelativePath,
+                        content: SwiftFixtureSource.emptyStruct("PostPromptSelection")
+                    )
+                    let initialSelection = try await endpoint.callTool(
+                        name: MCPWindowToolName.manageSelection,
+                        arguments: ["op": "set", "paths": [context.fileURL.path]]
+                    )
+                    XCTAssertFalse(initialSelection.rawJSON.contains("\"isError\":true"), initialSelection.rawJSON)
+
+                    manager.setComposeTabHeavyFileStateWillApplyHandlerForTesting { tabID in
+                        guard tabID == context.tabID, await gate.enteredCount() == 0 else { return }
+                        await gate.enterAndWait()
+                    }
+                    let promptResponse = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "prompt-only-selection-race"]
+                    )
+                    XCTAssertFalse(promptResponse.rawJSON.contains("\"isError\":true"), promptResponse.rawJSON)
+
+                    let promptReplayEntered = await Self.waitUntil(timeout: .milliseconds(500)) {
+                        await gate.enteredCount() == 1
+                    }
+                    if !promptReplayEntered {
+                        await gate.release()
+                    }
+                    let updatedSelection = try await endpoint.callTool(
+                        name: MCPWindowToolName.manageSelection,
+                        arguments: ["op": "set", "paths": [secondURL.path]]
+                    )
+                    XCTAssertFalse(updatedSelection.rawJSON.contains("\"isError\":true"), updatedSelection.rawJSON)
+                    await gate.release()
+                    await manager.waitForComposeTabStateApplicationForTesting()
+
+                    let storedSelection = try XCTUnwrap(manager.composeTab(with: context.tabID)?.selection)
+                    XCTAssertEqual(Set(storedSelection.selectedPaths), Set([secondURL.path]))
+                    let visibleSelection = Set(context.window.workspaceFilesViewModel.selectedFiles.map(\.fullPath))
+                    XCTAssertEqual(visibleSelection, Set([secondURL.path]))
+                    XCTAssertFalse(promptReplayEntered)
+
+                    manager.setComposeTabHeavyFileStateWillApplyHandlerForTesting(nil)
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await gate.release()
+                    manager.setComposeTabHeavyFileStateWillApplyHandlerForTesting(nil)
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testPromptMutationTimeoutDetachesWithoutTerminatingConnection() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let manager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let gate = MCPExecutionIgnoringCancellationGate()
+                let recorder = MCPExecutionTraceRecorder()
+                var responseTask: Task<PersistentMCPTestRPCResponse, Error>?
+
+                MCPToolExecutionTracer.setTestSink { recorder.append($0) }
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+                    await manager.debugSetResolvedToolOperationOverride(toolName: MCPWindowToolName.prompt) {
+                        await gate.enterAndWait()
+                        return .object(["ok": .bool(true)])
+                    }
+                    let activeResponseTask = Task {
+                        try await endpoint.callTool(
+                            name: MCPWindowToolName.prompt,
+                            arguments: [
+                                "op": "set",
+                                "text": "ignored-until-release",
+                                "_rawJSON": true
+                            ]
+                        )
+                    }
+                    responseTask = activeResponseTask
+                    try await gate.waitUntilEntered(count: 1)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolExecutionDeadline)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolCancellationCleanupGrace)
+
+                    let response = try await activeResponseTask.value
+                    responseTask = nil
+                    let payload = try Self.toolResultObject(response)
+                    XCTAssertEqual(payload["code"] as? String, "tool_execution_timeout")
+                    XCTAssertEqual(payload["settlement"] as? String, "detached")
+                    XCTAssertEqual(payload["retryable"] as? Bool, false)
+                    let isTerminal = await manager.debugIsExecutionWatchdogTerminal(connectionID: endpoint.connectionID)
+                    XCTAssertFalse(isTerminal)
+                    let events = recorder.snapshot().filter {
+                        $0.connectionID == endpoint.connectionID && $0.toolName == MCPWindowToolName.prompt
+                    }
+                    XCTAssertTrue(events.contains { $0.phase == .deadlineExpired })
+                    XCTAssertTrue(events.contains { $0.phase == .cleanupGraceExpired })
+                    XCTAssertFalse(events.contains { $0.phase == .connectionForceDisconnectRequested })
+
+                    await manager.debugSetResolvedToolOperationOverride(
+                        toolName: MCPWindowToolName.prompt,
+                        operation: nil
+                    )
+                    let probe = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "get"]
+                    )
+                    XCTAssertFalse(probe.rawJSON.contains("\"isError\":true"), probe.rawJSON)
+
+                    await gate.release()
+                    MCPToolExecutionTracer.setTestSink(nil)
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    responseTask?.cancel()
+                    await gate.release()
+                    if let responseTask { _ = try? await responseTask.value }
+                    await manager.debugSetResolvedToolOperationOverride(
+                        toolName: MCPWindowToolName.prompt,
+                        operation: nil
+                    )
+                    MCPToolExecutionTracer.setTestSink(nil)
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
         func testExpiredClientEnvelopeRejectsBeforeProviderAndJournalForBothPublicTools() async throws {
             for toolName in ["prompt", "workspace_context"] {
                 try await MCPSharedServerTestLease.shared.withLease { lease in

@@ -4373,7 +4373,29 @@ extension MCPServerViewModel {
             }
         }
         tabContextByConnectionID[connectionID] = context
-        await pushVirtualContextToUI(context)
+        if toolName == MCPWindowToolName.prompt {
+            commitPromptContextToUI(context)
+        } else {
+            await pushVirtualContextToUI(context)
+        }
+    }
+
+    @MainActor
+    private func commitPromptContextToUI(_ context: TabContextSnapshot) {
+        guard let manager = workspaceManager,
+              let workspaceID = context.workspaceID ?? manager.activeWorkspace?.id,
+              let workspaceIndex = manager.workspaces.firstIndex(where: { $0.id == workspaceID }),
+              let tabIndex = manager.workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == context.tabID })
+        else { return }
+
+        var updatedTab = manager.workspaces[workspaceIndex].composeTabs[tabIndex]
+        updatedTab.promptText = context.promptText
+        updatedTab.lastModified = Date()
+        guard manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspaceID) else { return }
+
+        let isActive = manager.workspaces[workspaceIndex].activeComposeTabID == context.tabID
+        guard isActive else { return }
+        promptVM.promptText = context.promptText
     }
 
     private func stripTaskNameTag(from prompt: String) -> (cleanPrompt: String, taskName: String?) {
