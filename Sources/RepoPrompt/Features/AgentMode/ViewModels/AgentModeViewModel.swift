@@ -770,6 +770,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         private var test_afterProvisionalExistingTabBindingInstalled: (@MainActor () async -> Void)?
         private var test_afterDurableExplicitTabSessionBinding: (@MainActor () async -> Void)?
         var test_afterMCPControlActivation: (@MainActor (TabSession) async -> Void)?
+        var test_submitUserTurnResultOverride: ((String, UUID, String?) -> UserTurnSubmissionResult)?
         var test_beforeMCPSelectionCommit: (@MainActor () async -> Void)?
         private var test_composeTabRemovalTeardownObserver: (@MainActor (UUID) async -> Void)?
         private var test_beforeAutomaticMCPSessionTargetDiscardRetry: (@MainActor () async -> Void)?
@@ -5838,9 +5839,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             throw MCPError.invalidParams("The requested agent run is no longer active.")
         }
         do {
-            return try await Self.$mcpRunEpochTransitionToken.withValue(token) {
+            let result = try await Self.$mcpRunEpochTransitionToken.withValue(token) {
                 try await operation()
             }
+            clearStagedMCPRunEpochTransition(sessionID: sessionID, token: token)
+            return result
         } catch {
             clearStagedMCPRunEpochTransition(sessionID: sessionID, token: token)
             throw error
@@ -9811,6 +9814,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 )
             }
             switch submission {
+            case .submittedControlPlaneCommand:
+                if let codexAttemptID {
+                    session.codexSteerAckTracker.authorizeDispatch(attemptID: codexAttemptID)
+                    _ = try await awaitCodexSteerAck(session: session, attemptID: codexAttemptID)
+                }
+                handleObservedMCPStateChange(for: session)
+                return .submittedControlPlaneCommand
             case .submitted:
                 Self.steeringDebugLog("[AgentRunSteeringWake] mcpDispatch submitted sessionID=\(sessionID) delivery=\(delivery.rawValue) runState=\(session.runState.rawValue) isActiveDispatch=\(delivery.isActiveRunDispatch) runID=\(String(describing: session.runID))")
                 if let codexAttemptID {
@@ -14638,7 +14648,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     tabID: target.tabID,
                     rawDraftText: claim.attempt.rawDraftSnapshot
                 )
-                if result == .submitted {
+                if result.isAcceptedSubmission {
                     clearComposerDraftIfUnchanged(for: claim)
                 }
                 return result
@@ -14705,7 +14715,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 tabID: target.tabID,
                 rawDraftText: claim.attempt.rawDraftSnapshot
             )
-            if result == .submitted {
+            if result.isAcceptedSubmission {
                 clearComposerDraftIfUnchanged(for: claim)
             }
             return result
@@ -14838,7 +14848,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 tabID: destinationTabID,
                 rawDraftText: claim.attempt.rawDraftSnapshot
             )
-            guard result == .submitted else {
+            guard result.isAcceptedSubmission else {
                 clearPendingUserTurnState(on: destinationSession)
                 return result
             }
@@ -14933,6 +14943,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         guard !trimmedText.isEmpty || !attachments.isEmpty || !taggedFiles.isEmpty else {
             return .blocked(message: "")
         }
+        #if DEBUG
+            if test_submitUserTurnResultOverride != nil { return nil }
+        #endif
         guard AgentModelCatalog.isAgentAvailable(session.selectedAgent, availability: agentAvailabilityContext) else {
             return .blocked(message: unavailableAgentMessage(for: session.selectedAgent))
         }
@@ -15153,6 +15166,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         rawDraftText: String? = nil
     ) -> UserTurnSubmissionResult {
         let session = session(for: tabID)
+        #if DEBUG
+            if let test_submitUserTurnResultOverride {
+                return test_submitUserTurnResultOverride(text, tabID, rawDraftText)
+            }
+        #endif
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachmentsToSend = session.pendingImageAttachments
         let taggedFilesToSend = session.pendingTaggedFileAttachments
@@ -15220,7 +15238,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     }
                     session.codexSteerAckTracker.resolve(attemptID: codexAttemptID, state: state)
                 }
-                return .submitted
+                return .submittedControlPlaneCommand
             case .userTurnWrapper:
                 nativePreparedTurn = prepareNativeSlashPreparedUserTurn(nativeSlashCommand)
             }

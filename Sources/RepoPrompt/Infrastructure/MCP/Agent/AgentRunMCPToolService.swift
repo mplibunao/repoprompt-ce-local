@@ -1046,6 +1046,11 @@ struct AgentRunMCPToolService {
                         #if DEBUG
                             try await testAfterSteerDispatchBeforeBookkeeping?(resolution.reactivatedTarget)
                         #endif
+                        if confirmedDelivery == .startedRun {
+                            await agentModeVM.prepareMCPWaitTrackingForRunStart(session: resolution.session)
+                        } else if confirmedDelivery == .submittedControlPlaneCommand {
+                            agentModeVM.setMCPFollowUpRunPending(sessionID: sessionID, false)
+                        }
                         return confirmedDelivery
                     }
                 } catch {
@@ -1091,9 +1096,12 @@ struct AgentRunMCPToolService {
             ignoredTimeoutWarning = nil
             steerTimeoutSeconds = nil
         }
-        let shouldBlockForSteeredOutput = delivery.isActiveRunDispatch
-            ? snapshot.interaction == nil
-            : (!snapshot.status.isTerminal && snapshot.interaction == nil)
+        let shouldBlockForSteeredOutput = delivery != .submittedControlPlaneCommand
+            && (
+                delivery.isActiveRunDispatch
+                    ? snapshot.interaction == nil
+                    : (!snapshot.status.isTerminal && snapshot.interaction == nil)
+            )
         if shouldWait, shouldBlockForSteeredOutput {
             let timeout = steerTimeoutSeconds ?? Self.defaultWaitTimeoutSeconds
             if timeout > 0 {
@@ -2227,11 +2235,11 @@ struct AgentRunMCPToolService {
         delivery: AgentModeViewModel.MCPInstructionDispatch?,
         wakeReason: AgentRunSessionStore.WakeReason?
     ) -> [String: Value]? {
-        guard !snapshot.status.isTerminal else { return nil }
+        guard !snapshot.status.isTerminal || delivery == .submittedControlPlaneCommand else { return nil }
         var metadata: [String: Value] = [:]
         if let delivery {
             switch delivery {
-            case .queuedFollowUp, .queuedClaudeInterrupt, .queuedACPInterrupt, .deliveredIntoWaitingContinuation, .dispatchedCodexTurn:
+            case .queuedFollowUp, .queuedClaudeInterrupt, .queuedACPInterrupt, .deliveredIntoWaitingContinuation, .dispatchedCodexTurn, .submittedControlPlaneCommand:
                 metadata["delivery"] = .string(delivery.rawValue)
             case .startedRun:
                 break

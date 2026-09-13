@@ -196,7 +196,7 @@ struct AgentComposerSubmissionLatch {
             && inputRevision == attempt.inputRevision
             && currentRawDraft == attempt.rawDraftSnapshot
         switch result {
-        case .submitted:
+        case .submitted, .submittedControlPlaneCommand:
             return CompletionEffects(
                 matchedAttempt: true,
                 shouldClearInput: inputStillMatches,
