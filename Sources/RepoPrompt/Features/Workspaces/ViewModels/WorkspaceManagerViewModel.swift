@@ -426,14 +426,65 @@ enum AgentAdmissionRecoveryOutcome: Equatable {
     case blockedManual(WorkspacePersistenceFailureCategory)
 }
 
-enum AgentAdmissionCanonicalRefreshError: LocalizedError, Equatable {
-    case duplicateTabID(UUID)
+enum AgentAdmissionRefusalReason: String, Equatable {
+    case workspaceUnavailable = "workspace_unavailable"
+    case canonicalWorkspaceUnavailable = "canonical_workspace_unavailable"
+    case nonCanonicalWorkspaceState = "non_canonical_workspace_state"
+    case unsavedWorkspaceChanges = "unsaved_workspace_changes"
+    case invalidCanonicalWorkspaceDocument = "invalid_canonical_workspace_document"
+    case tabIdentityMismatch = "tab_identity_mismatch"
+    case localTabIdentityConflict = "local_tab_identity_conflict"
+    case workspaceIdentityMismatch = "workspace_identity_mismatch"
 
-    var errorDescription: String? {
+    private var sentence: String {
         switch self {
-        case let .duplicateTabID(tabID):
-            "Canonical workspace state contains duplicate tab ID '\(tabID.uuidString)'."
+        case .workspaceUnavailable:
+            "The target workspace disappeared before Agent admission."
+        case .canonicalWorkspaceUnavailable:
+            "The canonical workspace snapshot is unavailable for Agent admission."
+        case .nonCanonicalWorkspaceState:
+            "The canonical workspace authority is not writable for Agent admission."
+        case .unsavedWorkspaceChanges:
+            "The canonical workspace has unsaved changes that must settle before Agent admission."
+        case .invalidCanonicalWorkspaceDocument:
+            "The canonical workspace document could not be decoded for Agent admission."
+        case .tabIdentityMismatch:
+            "The canonical workspace contains conflicting tab identities."
+        case .localTabIdentityConflict:
+            "The in-memory workspace contains the same tab identity in both compose and stash."
+        case .workspaceIdentityMismatch:
+            "Canonical workspace identity changed before Agent admission."
         }
+    }
+
+    private var errorCode: Int {
+        switch self {
+        case .workspaceUnavailable:
+            1
+        case .workspaceIdentityMismatch:
+            3
+        default:
+            2
+        }
+    }
+
+    private var guidance: String {
+        switch self {
+        case .unsavedWorkspaceChanges:
+            "Retry this call after the workspace finishes saving."
+        default:
+            "Inspect the workspace state or the existing session instead of retrying this call."
+        }
+    }
+
+    var error: NSError {
+        NSError(
+            domain: "RepoPrompt.AgentAdmission",
+            code: errorCode,
+            userInfo: [
+                NSLocalizedDescriptionKey: "\(sentence) (reason: \(rawValue)). \(guidance)"
+            ]
+        )
     }
 }
 
@@ -1041,7 +1092,9 @@ class WorkspaceManagerViewModel: ObservableObject {
 
         static func replacingWorkspaceProjectionForTesting(
             _ workspace: WorkspaceModel,
-            in snapshot: DomainWorkspaceSnapshot
+            in snapshot: DomainWorkspaceSnapshot,
+            revisions: DomainRevisionState? = nil,
+            health: DomainAuthorityHealth? = nil
         ) throws -> DomainWorkspaceSnapshot {
             let documentBytes = try JSONEncoder().encode(workspace)
             let replacement = try DomainWorkspaceSnapshotEncoding(
@@ -1049,8 +1102,8 @@ class WorkspaceManagerViewModel: ObservableObject {
                     documentBytes: documentBytes,
                     fileURL: snapshot.document.fileURL
                 ),
-                revisions: snapshot.revisions,
-                health: snapshot.health,
+                revisions: revisions ?? snapshot.revisions,
+                health: health ?? snapshot.health,
                 contexts: snapshot.contexts
             )
             return try JSONDecoder().decode(
@@ -7801,11 +7854,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     private func refreshCanonicalWorkspaceForAgentAdmission(workspaceID: UUID) async throws {
         guard let initialWorkspace = workspace(withID: workspaceID) else {
-            throw NSError(
-                domain: "RepoPrompt.AgentAdmission",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "The target workspace disappeared before Agent admission."]
-            )
+            throw AgentAdmissionRefusalReason.workspaceUnavailable.error
         }
         guard !initialWorkspace.isEphemeral, let domainWorkspaceAuthorityClient else { return }
         let snapshot: DomainWorkspaceSnapshot?
@@ -7819,46 +7868,47 @@ class WorkspaceManagerViewModel: ObservableObject {
             snapshot = await domainWorkspaceAuthorityClient.canonicalWorkspaceSnapshot(workspaceID)
         #endif
         try Task.checkCancellation()
-        guard let snapshot,
-              snapshot.health.acceptsMutations,
-              snapshot.revisions.dirtyRevision == nil
-        else {
-            throw NSError(
-                domain: "RepoPrompt.AgentAdmission",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Canonical workspace state is not ready for Agent admission."]
-            )
+        guard let snapshot else {
+            throw AgentAdmissionRefusalReason.canonicalWorkspaceUnavailable.error
         }
-        let canonicalIdentityEnvelope = try JSONDecoder().decode(
-            WorkspaceTabIdentityEnvelope.self,
-            from: snapshot.document.documentBytes
-        )
+        guard snapshot.health.acceptsMutations else {
+            throw AgentAdmissionRefusalReason.nonCanonicalWorkspaceState.error
+        }
+        guard snapshot.revisions.dirtyRevision == nil else {
+            throw AgentAdmissionRefusalReason.unsavedWorkspaceChanges.error
+        }
+        let canonicalIdentityEnvelope: WorkspaceTabIdentityEnvelope
+        do {
+            canonicalIdentityEnvelope = try JSONDecoder().decode(
+                WorkspaceTabIdentityEnvelope.self,
+                from: snapshot.document.documentBytes
+            )
+        } catch {
+            throw AgentAdmissionRefusalReason.invalidCanonicalWorkspaceDocument.error
+        }
         var canonicalTabIDs = Set<UUID>()
         for tabID in canonicalIdentityEnvelope.composeTabs.map(\.id)
             + canonicalIdentityEnvelope.stashedTabs.map(\.tab.id)
         {
             guard canonicalTabIDs.insert(tabID).inserted else {
-                throw AgentAdmissionCanonicalRefreshError.duplicateTabID(tabID)
+                throw AgentAdmissionRefusalReason.tabIdentityMismatch.error
             }
         }
-        let canonical = try Self.decodeDomainWorkspaceProjection(
-            documentBytes: snapshot.document.documentBytes,
-            fileURL: snapshot.document.fileURL
-        )
-        guard canonical.id == workspaceID else {
-            throw NSError(
-                domain: "RepoPrompt.AgentAdmission",
-                code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "Canonical workspace identity changed before Agent admission."]
+        let canonical: WorkspaceModel
+        do {
+            canonical = try Self.decodeDomainWorkspaceProjection(
+                documentBytes: snapshot.document.documentBytes,
+                fileURL: snapshot.document.fileURL
             )
+        } catch {
+            throw AgentAdmissionRefusalReason.invalidCanonicalWorkspaceDocument.error
+        }
+        guard canonical.id == workspaceID else {
+            throw AgentAdmissionRefusalReason.workspaceIdentityMismatch.error
         }
 
         guard let currentIndex = workspaceIndex(for: workspaceID) else {
-            throw NSError(
-                domain: "RepoPrompt.AgentAdmission",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "The target workspace disappeared before Agent admission."]
-            )
+            throw AgentAdmissionRefusalReason.workspaceUnavailable.error
         }
         let currentWorkspace = workspaces[currentIndex]
         let refreshedWorkspace = try Self.refreshingAgentSessionIdentities(in: currentWorkspace, from: canonical)
@@ -7898,7 +7948,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         var canonicalTabsByID: [UUID: ComposeTabState] = [:]
         for tab in canonicalTabs {
             guard canonicalTabsByID.updateValue(tab, forKey: tab.id) == nil else {
-                throw AgentAdmissionCanonicalRefreshError.duplicateTabID(tab.id)
+                throw AgentAdmissionRefusalReason.tabIdentityMismatch.error
             }
         }
 
@@ -7945,10 +7995,10 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
 
         let refreshedTabIDs = refreshed.composeTabs.map(\.id) + refreshed.stashedTabs.map(\.tab.id)
-        if let duplicateID = Dictionary(grouping: refreshedTabIDs, by: { $0 })
-            .first(where: { $0.value.count > 1 })?.key
+        if Dictionary(grouping: refreshedTabIDs, by: { $0 })
+            .first(where: { $0.value.count > 1 }) != nil
         {
-            throw AgentAdmissionCanonicalRefreshError.duplicateTabID(duplicateID)
+            throw AgentAdmissionRefusalReason.localTabIdentityConflict.error
         }
         if let localActiveTabID = local.activeComposeTabID,
            refreshed.composeTabs.contains(where: { $0.id == localActiveTabID })

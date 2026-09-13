@@ -678,6 +678,75 @@ import XCTest
             XCTAssertEqual(peerProviderCount, 1)
         }
 
+        func testAgentRunRefusalUsesReasonSpecificRetryGuidance() async throws {
+            let fixture = try await DurableAgentAdmissionFixture.make()
+            trackCleanup { await fixture.cleanup() }
+            let manager = fixture.window.workspaceManager
+            let canonicalValue = await fixture.runtime.workspaceStore
+                .canonicalWorkspaceSnapshot(fixture.workspaceID)
+            let canonical = try XCTUnwrap(canonicalValue)
+            let workspace = try JSONDecoder().decode(
+                WorkspaceModel.self,
+                from: canonical.document.documentBytes
+            )
+            let nonCanonical = try WorkspaceManagerViewModel.replacingWorkspaceProjectionForTesting(
+                workspace,
+                in: canonical,
+                health: .degradedReadOnly(reason: "admission test")
+            )
+            let unsaved = try WorkspaceManagerViewModel.replacingWorkspaceProjectionForTesting(
+                workspace,
+                in: canonical,
+                revisions: DomainRevisionState(
+                    workingRevision: canonical.revisions.workingRevision + 1,
+                    savedRevision: canonical.revisions.savedRevision,
+                    dirtyRevision: canonical.revisions.workingRevision + 1
+                )
+            )
+            let persistentGuidance = "Inspect the workspace state or the existing session instead of retrying this call."
+            let transientGuidance = "Retry this call after the workspace finishes saving."
+            let cases: [(DomainWorkspaceSnapshot?, AgentAdmissionRefusalReason, String)] = [
+                (nil, .canonicalWorkspaceUnavailable, persistentGuidance),
+                (nonCanonical, .nonCanonicalWorkspaceState, persistentGuidance),
+                (unsaved, .unsavedWorkspaceChanges, transientGuidance)
+            ]
+            let recorder = AdmissionProviderRecorder(expectedCount: 1, blockProviders: false)
+            let service = makeAgentRunStartService(window: fixture.window, recorder: recorder)
+            defer { manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting(nil) }
+
+            for (snapshot, reason, expectedGuidance) in cases {
+                manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting { _ in snapshot }
+                do {
+                    _ = try await service.execute(args: [
+                        "op": .string("start"),
+                        "message": .string("canonical health refusal"),
+                        "detach": .bool(true),
+                        "timeout": .int(0)
+                    ])
+                    XCTFail("Canonical health failure must reject Agent admission.")
+                } catch {
+                    XCTAssertTrue(
+                        error.localizedDescription.contains("(reason: \(reason.rawValue))"),
+                        error.localizedDescription
+                    )
+                    XCTAssertTrue(
+                        error.localizedDescription.contains(expectedGuidance),
+                        error.localizedDescription
+                    )
+                    let rejectedGuidance = reason == .unsavedWorkspaceChanges
+                        ? persistentGuidance
+                        : transientGuidance
+                    XCTAssertFalse(
+                        error.localizedDescription.contains(rejectedGuidance),
+                        error.localizedDescription
+                    )
+                }
+            }
+
+            let providerCount = await recorder.count()
+            XCTAssertEqual(providerCount, 0)
+        }
+
         func testCanonicalAdmissionRefreshRejectsDuplicateTabIDWithoutMutationOrDispatch() async throws {
             let fixture = try await DurableAgentAdmissionFixture.make()
             trackCleanup { await fixture.cleanup() }
@@ -709,12 +778,66 @@ import XCTest
                     operationRan = true
                 }
                 XCTFail("Malformed canonical tab identity must reject admission.")
-            } catch let error as AgentAdmissionCanonicalRefreshError {
-                XCTAssertEqual(error, .duplicateTabID(duplicate.id))
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("(reason: tab_identity_mismatch)"))
+                XCTAssertTrue(
+                    error.localizedDescription.contains(
+                        "Inspect the workspace state or the existing session instead of retrying this call."
+                    )
+                )
             }
 
             XCTAssertFalse(operationRan)
             XCTAssertEqual(manager.workspace(withID: fixture.workspaceID), workspaceBefore)
+        }
+
+        func testCanonicalAdmissionRefreshReportsLocalComposeAndStashDuplicateAsLocalState() async throws {
+            let fixture = try await DurableAgentAdmissionFixture.make()
+            trackCleanup { await fixture.cleanup() }
+            let manager = fixture.window.workspaceManager
+            let canonicalValue = await fixture.runtime.workspaceStore
+                .canonicalWorkspaceSnapshot(fixture.workspaceID)
+            let canonicalSnapshot = try XCTUnwrap(canonicalValue)
+            let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex {
+                $0.id == fixture.workspaceID
+            })
+            var local = manager.workspaces[workspaceIndex]
+            let duplicate = ComposeTabState(name: "Local compose-and-stash duplicate")
+            local.composeTabs.append(duplicate)
+            local.stashedTabs.append(StashedTab(tab: duplicate))
+            manager.workspaces[workspaceIndex] = local
+            manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting { _ in canonicalSnapshot }
+            defer { manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting(nil) }
+            var operationRan = false
+
+            do {
+                try await manager.withAgentSessionAdmission(
+                    workspaceID: fixture.workspaceID,
+                    admissionID: UUID(),
+                    refreshCanonicalState: true
+                ) {
+                    operationRan = true
+                }
+                XCTFail("A local compose-and-stash duplicate must reject admission.")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("(reason: local_tab_identity_conflict)"))
+                XCTAssertTrue(
+                    error.localizedDescription.contains(
+                        "The in-memory workspace contains the same tab identity in both compose and stash."
+                    )
+                )
+                XCTAssertFalse(
+                    error.localizedDescription.contains("The canonical workspace contains conflicting tab identities."),
+                    error.localizedDescription
+                )
+                XCTAssertTrue(
+                    error.localizedDescription.contains(
+                        "Inspect the workspace state or the existing session instead of retrying this call."
+                    )
+                )
+            }
+
+            XCTAssertFalse(operationRan)
         }
 
         func testRetainedRecoveryKeepsPeerProvisionalFenceUntilRecoveryTerminates() async throws {
