@@ -1,5 +1,6 @@
 import Foundation
 import RepoPromptDomainRuntime
+import RepoPromptShared
 
 struct WorkspaceFileEditHost: FileEditHost {
     enum Target {
@@ -14,6 +15,7 @@ struct WorkspaceFileEditHost: FileEditHost {
     let createPathResolutionPolicy: WorkspaceFileCreatePathResolutionPolicy
     let selectCreatedFiles: Bool
     let mutationRootMappings: [DomainMutationPhysicalRootMapping]
+    let previewReadTimeout: Duration
 
     init(
         store: WorkspaceFileContextStore,
@@ -22,7 +24,8 @@ struct WorkspaceFileEditHost: FileEditHost {
         lookupRootScope: WorkspaceLookupRootScope = .visibleWorkspace,
         createPathResolutionPolicy: WorkspaceFileCreatePathResolutionPolicy = .literalPreferredIfStronger,
         selectCreatedFiles: Bool = true,
-        mutationRootMappings: [DomainMutationPhysicalRootMapping] = []
+        mutationRootMappings: [DomainMutationPhysicalRootMapping] = [],
+        previewReadTimeout: Duration = MCPTimeoutPolicy.boundedToolExecutionDeadline
     ) {
         mutationService = WorkspaceFileMutationService(store: store)
         self.target = target
@@ -31,6 +34,7 @@ struct WorkspaceFileEditHost: FileEditHost {
         self.createPathResolutionPolicy = createPathResolutionPolicy
         self.selectCreatedFiles = selectCreatedFiles
         self.mutationRootMappings = mutationRootMappings
+        self.previewReadTimeout = previewReadTimeout
     }
 
     func fileExists(path _: String) async -> Bool {
@@ -42,7 +46,19 @@ struct WorkspaceFileEditHost: FileEditHost {
         guard case let .existing(file) = target else {
             throw FileManagerError.fileSystemServiceNotFoundWithContext("Cannot read a missing file before creation.")
         }
-        guard let content = try await mutationService.readText(file: file) else {
+        let content: String?
+        do {
+            content = try await MCPToolExecutionWatchdog.execute(
+                deadline: previewReadTimeout,
+                cancellationGrace: .zero,
+                cleanupDisposition: .detachAndSettle
+            ) {
+                try await mutationService.readText(file: file)
+            }
+        } catch is MCPToolExecutionWatchdogError {
+            throw MCPMutationRetryableFailure.applyEditsReadBusy()
+        }
+        guard let content else {
             throw FileManagerError.fileSystemServiceNotFoundWithContext(
                 "The resolved file is no longer present or readable."
             )

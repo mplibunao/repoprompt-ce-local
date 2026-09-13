@@ -37,6 +37,16 @@ struct MCPMutationRetryableFailure: Error, Equatable {
         )
     }
 
+    static func applyEditsReadBusy() -> MCPMutationRetryableFailure {
+        MCPMutationRetryableFailure(
+            errorCode: "apply_edits_read_busy",
+            errorMessage: "A previous read of the file is still settling, so apply_edits could not read the file before its preview deadline. No filesystem mutation was started.",
+            retryable: true,
+            retryAfterMilliseconds: retryDelayMilliseconds,
+            suggestion: "Retry after the suggested delay. The previous read will release its capacity when it finishes."
+        )
+    }
+
     static func worktreeScopeHydrating() -> MCPMutationRetryableFailure {
         MCPMutationRetryableFailure(
             errorCode: "worktree_scope_hydrating",

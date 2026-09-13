@@ -127,11 +127,13 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
 
     private func executeApplyEdits(args: [String: Value]) async throws -> EditSummary {
         var requestPath: String? = nil
+        var requestForRetryableFailure: ApplyEditsRequest?
         do {
             let request = try EditFlowPerf.measure(EditFlowPerf.Stage.ApplyEdits.requestBuild) {
                 try ApplyEditsRequestBuilder().buildFromNormalizedPayload(args)
             }
             requestPath = request.path
+            requestForRetryableFailure = request
             let suppliedOperationID = args["operation_id"]?.stringValue?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let operationID = suppliedOperationID.flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
@@ -388,6 +390,9 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
             )
         } catch is CancellationError {
             throw CancellationError()
+        } catch let failure as MCPMutationRetryableFailure {
+            guard let requestForRetryableFailure else { throw MCPError.internalError(failure.errorMessage) }
+            return Self.retryableFailureSummary(request: requestForRetryableFailure, failure: failure)
         } catch let error as FileManagerError {
             throw await dependencies.context.mapFileManagerErrorToMCP(error, MCPWindowToolName.applyEdits, requestPath)
         } catch let error as ApplyEditsError {
