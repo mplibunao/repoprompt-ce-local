@@ -112,10 +112,39 @@ enum MCPSelectionConstruction {
             )
         }
 
+        // Operation-specific construction runs in the caller and is attributed from the moment
+        // control returns, so the span opens here rather than at the callsite. The caller closes
+        // it through `completeOperationSpecificConstruction()`.
+        await MCPToolExecutionHandlerPhaseContext.report(
+            .manageSelectionConstructionOperationSpecificConstruction
+        )
+
         return MCPSelectionConstructionOutcome(
             snapshot: snapshot,
             frozenReviewContext: frozenReviewContext,
             artifactResolution: artifactResolution
+        )
+    }
+
+    /// Closes the operation-specific construction span opened for the caller, then closes the
+    /// aggregate construction interval.
+    ///
+    /// An operation that reaches a completion site calls this exactly once, so the transition logic
+    /// is not duplicated across the operation branches. An operation that throws first settles the
+    /// invocation with the span still open, which is harmless because a promptly failed invocation
+    /// produces no watchdog packet to read the phase from.
+    ///
+    /// Cancellation is checked before any completion is reported, so a dependency that returns
+    /// after cancellation cannot overwrite the attribution that names it.
+    static func completeOperationSpecificConstruction() async throws {
+        try Task.checkCancellation()
+        await MCPToolExecutionHandlerPhaseContext.report(
+            .manageSelectionConstructionOperationSpecificConstruction,
+            transition: .completed
+        )
+        await MCPToolExecutionHandlerPhaseContext.report(
+            .manageSelectionConstruction,
+            transition: .completed
         )
     }
 }
