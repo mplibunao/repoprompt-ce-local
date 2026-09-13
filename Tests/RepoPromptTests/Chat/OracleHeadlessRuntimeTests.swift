@@ -50,4 +50,137 @@ final class OracleHeadlessRuntimeTests: XCTestCase {
         XCTAssertEqual(progressText, ["  Hello ", "  Hello world  "])
         XCTAssertFalse(runtime.hasActiveStream(for: tabID))
     }
+
+    @MainActor
+    func testTimeoutWithOnlyAChatNameTagStaysAFailure() async throws {
+        let tabID = UUID()
+        let streamID = UUID()
+        let timeoutGate = OracleHeadlessTimeoutTestGate()
+        let cancellationRecorder = OracleHeadlessStreamCancellationRecorder()
+
+        let runtime = OracleHeadlessRuntime(
+            sendPrompt: { _, _ in
+                let stream = AsyncThrowingStream<ChatStreamOutput, Error> { continuation in
+                    continuation.yield(ChatStreamOutput(text: "<chatName=\"Only a name\"/>\n", reasoning: nil, tokens: ChatTokenInfo(promptTokens: 1)))
+                }
+                return (streamID, stream)
+            },
+            cancelStream: { id in
+                await cancellationRecorder.record(id)
+            },
+            cleanupConversation: { _, _ in },
+            timeout: .seconds(7),
+            sleep: { _ in
+                await timeoutGate.wait()
+            }
+        )
+
+        let execution = Task { @MainActor in
+            try await runtime.execute(
+                message: AIMessage(systemPrompt: "system", userMessage: "prompt"),
+                model: .claude4Sonnet,
+                tabID: tabID,
+                completionPolicy: .contextBuilderStrict
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(50))
+        await timeoutGate.release()
+        do {
+            _ = try await execution.value
+            XCTFail("Expected the empty timeout to fail")
+        } catch let error as OracleContextBuilderCompletionError {
+            XCTAssertEqual(error, .emptyProcessedContent)
+        }
+        let cancelledStreamIDs = await cancellationRecorder.streamIDs()
+        XCTAssertEqual(cancelledStreamIDs, [streamID])
+        XCTAssertFalse(runtime.hasActiveStream(for: tabID))
+    }
+
+    @MainActor
+    func testTimeoutPreservesAccumulatedTextAndAddsMarker() async throws {
+        let tabID = UUID()
+        let streamID = UUID()
+        let progressReceived = expectation(description: "partial response received")
+        let timeoutGate = OracleHeadlessTimeoutTestGate()
+        let cancellationRecorder = OracleHeadlessStreamCancellationRecorder()
+
+        let runtime = OracleHeadlessRuntime(
+            sendPrompt: { _, _ in
+                let stream = AsyncThrowingStream<ChatStreamOutput, Error> { continuation in
+                    continuation.yield(
+                        ChatStreamOutput(
+                            text: "Partial headless answer",
+                            reasoning: nil,
+                            tokens: ChatTokenInfo(promptTokens: 4, completionTokens: 5)
+                        )
+                    )
+                }
+                return (streamID, stream)
+            },
+            cancelStream: { id in
+                await cancellationRecorder.record(id)
+            },
+            cleanupConversation: { _, _ in },
+            timeout: .seconds(7),
+            sleep: { _ in
+                await timeoutGate.wait()
+            }
+        )
+
+        let execution = Task { @MainActor in
+            try await runtime.execute(
+                message: AIMessage(systemPrompt: "system", userMessage: "prompt"),
+                model: .claude4Sonnet,
+                tabID: tabID,
+                completionPolicy: .contextBuilderStrict,
+                onProgress: { _, _ in progressReceived.fulfill() }
+            )
+        }
+
+        await fulfillment(of: [progressReceived], timeout: 1)
+        await timeoutGate.release()
+        let output = try await execution.value
+
+        let expectedMarker =
+            "[RepoPrompt: response ended after 7 s without completion; content above is partial]"
+        XCTAssertEqual(output.text, "Partial headless answer\n\n\(expectedMarker)")
+        XCTAssertEqual(output.timeout?.partialText, "Partial headless answer")
+        XCTAssertEqual(output.timeout?.marker, expectedMarker)
+        XCTAssertEqual(output.tokenInfo.promptTokens, 4)
+        XCTAssertEqual(output.tokenInfo.completionTokens, 5)
+        let cancelledStreamIDs = await cancellationRecorder.streamIDs()
+        XCTAssertEqual(cancelledStreamIDs, [streamID])
+        XCTAssertFalse(runtime.hasActiveStream(for: tabID))
+    }
+}
+
+private actor OracleHeadlessTimeoutTestGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor OracleHeadlessStreamCancellationRecorder {
+    private var recordedStreamIDs: [ChatStreamID] = []
+
+    func record(_ streamID: ChatStreamID) {
+        recordedStreamIDs.append(streamID)
+    }
+
+    func streamIDs() -> [ChatStreamID] {
+        recordedStreamIDs
+    }
 }

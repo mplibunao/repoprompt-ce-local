@@ -1709,7 +1709,7 @@ extension OracleViewModel {
             shortId: shortID,
             mode: mode.mcpModeName,
             response: trimmedResponse,
-            errors: nil
+            errors: runtimeOutput.timeout.map { [$0.errorMessage] }
         )
     }
 

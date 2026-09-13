@@ -115,10 +115,16 @@ actor ContextBuilderFollowUpFinalizationState {
     }
 }
 
+enum ContextBuilderFollowUpFinalizationResult: Equatable {
+    case completed(String)
+    case timedOut(OraclePartialResponseTimeout)
+}
+
 enum ContextBuilderFollowUpFinalizationMonitor {
     typealias Clock = @Sendable () -> TimeInterval
     typealias Sleep = @Sendable (_ seconds: TimeInterval) async throws -> Void
     typealias WaitForFinalization = @Sendable () async throws -> String
+    typealias PartialResponse = @MainActor @Sendable () -> String?
     typealias CancelStreaming = @Sendable () async -> Void
     typealias ReportPhase = @Sendable (_ phase: ContextBuilderMCPProgressPhase) async -> Void
     typealias ReportActivity = @Sendable (
@@ -143,10 +149,11 @@ enum ContextBuilderFollowUpFinalizationMonitor {
             try await Task.sleep(for: .seconds(seconds))
         },
         waitForFinalization: @escaping WaitForFinalization,
+        partialResponse: @escaping PartialResponse,
         cancelStreaming: @escaping CancelStreaming,
         reportPhase: ReportPhase? = nil,
         reportActivity: ReportActivity? = nil
-    ) async throws -> String {
+    ) async throws -> ContextBuilderFollowUpFinalizationResult {
         let state = ContextBuilderFollowUpFinalizationState(startedAt: clock())
         let result = await withTaskGroup(of: MonitorResult.self) { group in
             group.addTask {
@@ -207,11 +214,27 @@ enum ContextBuilderFollowUpFinalizationMonitor {
             if await state.claimFinalizationTransitionOnCompletion() {
                 await reportPhase?(.messageFinalization)
             }
-            return response
+            return .completed(response)
         case let .timedOut(timeout):
             // The timeout outcome is already fixed before cancellation can trigger finalization.
             await cancelStreaming()
-            throw ChatToolError.internalError(timeout.message)
+            let reason: OraclePartialResponseTimeout.Reason = switch timeout.kind {
+            case .inactivity:
+                .inactivity(seconds: configuration.inactivityTimeout)
+            case .overall:
+                .overall(seconds: configuration.overallTimeout)
+            }
+            let partialText = await partialResponse() ?? ""
+            // Cancellation strips control tags from the partial; if nothing substantive remains
+            // there is no partial answer to preserve, and a marker on its own is not a result.
+            guard !partialText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw OracleContextBuilderCompletionError.emptyProcessedContent
+            }
+            return .timedOut(OraclePartialResponseTimeout(
+                partialText: partialText,
+                reason: reason,
+                errorMessage: timeout.message
+            ))
         case let .contextBuilderFailed(error):
             throw error
         case let .failed(message):

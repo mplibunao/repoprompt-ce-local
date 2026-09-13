@@ -4544,9 +4544,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         in oracleViewModel: OracleViewModel,
         queryID: UUID,
         sessionID: UUID,
+        session: TabSession,
         progressReporter: ContextBuilderMCPProgressReporter?,
         activityReporter: ContextBuilderMCPActivityReporter?
-    ) async throws -> String {
+    ) async throws -> ContextBuilderFollowUpFinalizationResult {
         let (activityEvents, activityContinuation) = AsyncStream<OracleMessageLifecycleActivityEvent>.makeStream(
             bufferingPolicy: .bufferingNewest(32)
         )
@@ -4563,8 +4564,16 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             waitForFinalization: {
                 try await oracleViewModel.waitForContextBuilderCompletion(queryID)
             },
+            partialResponse: {
+                // Cancellation has already finalized and processed the message by the time this
+                // runs, so its content (control tags stripped) beats the raw progress buffer.
+                oracleViewModel.finalizedAssistantContent(for: queryID, in: sessionID)
+                    ?? session.backgroundPlanResponseText
+            },
             cancelStreaming: {
-                await oracleViewModel.cancelStreaming(in: sessionID)
+                // A replacement turn can become the session's active query between the monitor
+                // choosing the timeout and this running; only the timed-out query may be stopped.
+                await oracleViewModel.cancelStreaming(in: sessionID, ifActiveQueryIs: queryID)
             },
             reportPhase: { phase in
                 await progressReporter?(phase)
@@ -4573,6 +4582,66 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 await activityReporter?(phase, message)
             }
         )
+    }
+
+    @MainActor
+    func settleFollowUpFinalization(
+        _ finalizationResult: ContextBuilderFollowUpFinalizationResult,
+        oracleViewModel: OracleViewModel,
+        queryID: UUID,
+        oracleSession: ChatSession,
+        originWorkspaceID: UUID,
+        modeName: String,
+        session: TabSession,
+        timeoutSessionSaver: (@MainActor (ChatSession) async throws -> URL)? = nil
+    ) async throws -> ChatSendReply {
+        let responseText: String
+        let errors: [String]?
+        switch finalizationResult {
+        case let .completed(response):
+            responseText = response
+            errors = nil
+        case let .timedOut(timeout):
+            responseText = timeout.responseText
+            errors = [timeout.errorMessage]
+            try await oracleViewModel.persistContextBuilderTimeoutResponse(
+                responseText,
+                queryID: queryID,
+                sessionID: oracleSession.id,
+                saveSession: timeoutSessionSaver
+            )
+            try Task.checkCancellation()
+            guard session.isBackgroundPlanGenerating,
+                  session.followUpOracleSessionID == oracleSession.id
+            else {
+                throw CancellationError()
+            }
+        }
+
+        let reply = ChatSendReply(
+            chatId: oracleSession.id,
+            shortId: oracleSession.shortID,
+            mode: modeName,
+            response: responseText,
+            errors: errors
+        )
+
+        session.isBackgroundPlanGenerating = false
+        session.followUpOracleSessionID = nil
+        session.generatedAnswerRoute = ContextBuilderGeneratedAnswerRoute(
+            workspaceID: originWorkspaceID,
+            tabID: session.tabID,
+            chatID: reply.shortId
+        )
+        if let response = reply.response, !response.isEmpty {
+            session.backgroundPlanResponseText = response
+        }
+        clearPendingBackgroundPlanUIRefresh(for: session.tabID)
+        applyPlanPreview(to: session)
+        updateRuntimeBindings(from: session)
+        workspaceManager?.setActiveChatSessionID(reply.chatId, forTabID: session.tabID)
+
+        return reply
     }
 
     /// Unified follow-up generator that always streams in a real chat session.
@@ -4619,6 +4688,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         let shouldActivate = isFocusedTab && !isUserStreaming
 
         var createdSessionID: UUID?
+
+        var startedQueryID: UUID?
         do {
             try Task.checkCancellation()
             guard session.isBackgroundPlanGenerating else {
@@ -4707,15 +4778,17 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 throw ChatToolError.internalError("Failed to start follow-up stream")
             }
 
+            startedQueryID = queryId
             guard session.isBackgroundPlanGenerating else {
                 throw CancellationError()
             }
             await progressReporter?(.activeQueryAcquisition)
             await progressReporter?(.streaming)
-            let responseText = try await waitForFollowUpFinalization(
+            let finalizationResult = try await waitForFollowUpFinalization(
                 in: oracleViewModel,
                 queryID: queryId,
                 sessionID: createdSession.id,
+                session: session,
                 progressReporter: progressReporter,
                 activityReporter: activityReporter
             )
@@ -4723,33 +4796,24 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 throw CancellationError()
             }
 
-            let reply = ChatSendReply(
-                chatId: createdSession.id,
-                shortId: createdSession.shortID,
-                mode: modeName,
-                response: responseText,
-                errors: nil
+            return try await settleFollowUpFinalization(
+                finalizationResult,
+                oracleViewModel: oracleViewModel,
+                queryID: queryId,
+                oracleSession: createdSession,
+                originWorkspaceID: originWorkspaceID,
+                modeName: modeName,
+                session: session
             )
-
-            session.isBackgroundPlanGenerating = false
-            session.followUpOracleSessionID = nil
-            session.generatedAnswerRoute = ContextBuilderGeneratedAnswerRoute(
-                workspaceID: originWorkspaceID,
-                tabID: tabID,
-                chatID: reply.shortId
-            )
-            if let response = reply.response, !response.isEmpty {
-                session.backgroundPlanResponseText = response
-            }
-            clearPendingBackgroundPlanUIRefresh(for: tabID)
-            applyPlanPreview(to: session)
-            updateRuntimeBindings(from: session)
-            workspaceManager?.setActiveChatSessionID(reply.chatId, forTabID: tabID)
-
-            return reply
         } catch {
             if let createdSessionID {
-                await oracleViewModel.cancelStreaming(in: createdSessionID)
+                // Settlement can fail after the original turn already stopped and the user resent
+                // it; cancelling the whole session then would kill that replacement turn.
+                if let startedQueryID {
+                    await oracleViewModel.cancelStreaming(in: createdSessionID, ifActiveQueryIs: startedQueryID)
+                } else {
+                    await oracleViewModel.cancelStreaming(in: createdSessionID)
+                }
             }
 
             if error is CancellationError {

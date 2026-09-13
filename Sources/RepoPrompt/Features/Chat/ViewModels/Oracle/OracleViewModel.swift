@@ -1579,6 +1579,147 @@ class OracleViewModel: ObservableObject {
 
     // MARK: - Message Finalisation
 
+    @MainActor
+    func persistContextBuilderTimeoutResponse(
+        _ response: String,
+        queryID: UUID,
+        sessionID: UUID,
+        saveSession: (@MainActor (ChatSession) async throws -> URL)? = nil
+    ) async throws {
+        guard sessionIDByMessageId[queryID] == sessionID,
+              let message = messageStore[sessionID]?.first(where: { $0.id == queryID && !$0.isUser }),
+              let workspaceID = sessions.first(where: { $0.id == sessionID })?.workspaceID
+        else {
+            throw OracleContextBuilderCompletionError.missingExactQuery
+        }
+
+        guard message.isFinalized else {
+            throw OracleContextBuilderCompletionError.missingFinalizationOutcome
+        }
+
+        withSessionMessages(sessionID) { messages in
+            if let index = messages.firstIndex(where: { $0.id == queryID && !$0.isUser }) {
+                messages[index].updateContent(response)
+            }
+        }
+
+        await drainTrackedAutosaves(for: workspaceID)
+
+        // Every suspension in this method can interleave with the user deleting or reordering
+        // chats, or resending the turn, so the chat and the answer are re-resolved by id after
+        // each one, never by a remembered position.
+        guard sessionIDByMessageId[queryID] == sessionID,
+              let liveMessages = messageStore[sessionID],
+              liveMessages.contains(where: { $0.id == queryID && !$0.isUser && $0.isFinalized }),
+              var sessionSnapshot = sessions.first(where: { $0.id == sessionID })
+        else {
+            throw OracleContextBuilderCompletionError.missingExactQuery
+        }
+
+        sessionSnapshot.messages = Self.storedMessages(from: liveMessages)
+        sessionSnapshot.savedAt = Date()
+
+        let fileURL: URL = if let saveSession {
+            try await saveSession(sessionSnapshot)
+        } else {
+            try await autosaveSession(sessionSnapshot)
+        }
+        // The save suspended as well. If a resend replaced the answer meanwhile, the file now
+        // holds a stale transcript: refresh it from the current one and report the miss.
+        guard sessionIDByMessageId[queryID] == sessionID,
+              let currentMessages = messageStore[sessionID],
+              currentMessages.contains(where: { $0.id == queryID && !$0.isUser && $0.isFinalized }),
+              let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID })
+        else {
+            try await rewriteTranscriptAfterOwnershipMiss(sessionID: sessionID, saveSession: saveSession)
+            throw OracleContextBuilderCompletionError.missingExactQuery
+        }
+        // Only the fields the save produced are copied back, and the transcript mirror follows
+        // the live store rather than the pre-save snapshot: a turn the user added while the save
+        // was in flight stays, and the file is rewritten (and awaited) so it carries that turn too
+        // before settlement reports success.
+        sessions[sessionIndex].messages = Self.storedMessages(from: currentMessages)
+        sessions[sessionIndex].savedAt = sessionSnapshot.savedAt
+        sessions[sessionIndex].fileURL = fileURL
+        guard currentMessages.map(\.id) != liveMessages.map(\.id) else { return }
+
+        let correctedURL: URL = if let saveSession {
+            try await saveSession(sessions[sessionIndex])
+        } else {
+            try await autosaveSession(sessions[sessionIndex])
+        }
+        // The corrective save suspended too, so ownership is proven once more before settlement
+        // may report success for this chat and this answer.
+        guard sessionIDByMessageId[queryID] == sessionID,
+              let settledMessages = messageStore[sessionID],
+              settledMessages.contains(where: { $0.id == queryID && !$0.isUser && $0.isFinalized }),
+              let settledIndex = sessions.firstIndex(where: { $0.id == sessionID })
+        else {
+            try await rewriteTranscriptAfterOwnershipMiss(sessionID: sessionID, saveSession: saveSession)
+            throw OracleContextBuilderCompletionError.missingExactQuery
+        }
+        sessions[settledIndex].fileURL = correctedURL
+        // A further turn during the corrective save is mirrored and rewritten in the background;
+        // the awaited saves already guarantee the file holds the answer settlement reports.
+        if settledMessages.map(\.id) != currentMessages.map(\.id) {
+            sessions[settledIndex].messages = Self.storedMessages(from: settledMessages)
+            autosaveChatHistory(for: sessionID, force: true)
+        }
+    }
+
+    /// The save that just returned wrote the transcript as it stood when the save began, so a
+    /// chat that still exists is rewritten from the live store and that write is awaited before
+    /// the miss is reported: a scheduled autosave can be lost to a quit or a failed write and
+    /// leave the removed answer on disk.
+    private func rewriteTranscriptAfterOwnershipMiss(
+        sessionID: UUID,
+        saveSession: (@MainActor (ChatSession) async throws -> URL)?
+    ) async throws {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionID }),
+              let liveMessages = messageStore[sessionID]
+        else { return }
+        sessions[index].messages = Self.storedMessages(from: liveMessages)
+        sessions[index].savedAt = Date()
+        let fileURL: URL = if let saveSession {
+            try await saveSession(sessions[index])
+        } else {
+            try await autosaveSession(sessions[index])
+        }
+        if let index = sessions.firstIndex(where: { $0.id == sessionID }) {
+            sessions[index].fileURL = fileURL
+        }
+    }
+
+    private static func storedMessages(from messages: [AIChatMessage]) -> [StoredMessage] {
+        messages.map { message in
+            StoredMessage(
+                id: message.id,
+                isUser: message.isUser,
+                rawText: message.content,
+                timestamp: Date(),
+                sequenceIndex: message.sequenceIndex,
+                allowedFilePaths: message.allowedFilePaths.isEmpty ? nil : message.allowedFilePaths,
+                promptTokens: message.promptTokens,
+                completionTokens: message.completionTokens,
+                cost: message.cost,
+                modelName: message.modelName
+            )
+        }
+    }
+
+    /// The assistant content for `queryID` after finalization has processed it (control tags
+    /// stripped), or `nil` while the message is still streaming or no longer belongs to the chat.
+    @MainActor
+    func finalizedAssistantContent(for queryID: UUID, in sessionID: UUID) -> String? {
+        guard sessionIDByMessageId[queryID] == sessionID,
+              let message = messageStore[sessionID]?.first(where: { $0.id == queryID && !$0.isUser }),
+              message.isFinalized
+        else {
+            return nil
+        }
+        return message.content
+    }
+
     nonisolated func waitForContextBuilderCompletion(_ id: UUID) async throws -> String {
         if await finalisationHub.outcome(for: id) == nil {
             let hasExactMessage = await MainActor.run {
@@ -3646,6 +3787,14 @@ class OracleViewModel: ObservableObject {
     @MainActor
     func cancelHeadlessStream(forTabID tabID: UUID) async {
         await headlessRuntime.cancelStream(for: tabID)
+    }
+
+    /// Cancels the session's stream only while `queryID` is still its active query, so a turn the
+    /// user started afterwards is left alone.
+    @MainActor
+    func cancelStreaming(in sessionID: UUID, ifActiveQueryIs queryID: UUID) async {
+        guard runStateBySession[sessionID]?.activeQueryId == queryID else { return }
+        await cancelStreaming(in: sessionID)
     }
 
     @MainActor
