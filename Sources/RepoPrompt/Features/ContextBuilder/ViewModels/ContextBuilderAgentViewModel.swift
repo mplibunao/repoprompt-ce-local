@@ -425,6 +425,18 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     /// Owns active and terminal-cleanup Context Builder attempts.
     private let runRegistry = ContextBuilderRunRegistry()
+    private var activeRunAdmissionToken: UUID?
+
+    private func claimRunAdmission(_ token: UUID) -> Bool {
+        guard activeRunAdmissionToken == nil else { return false }
+        activeRunAdmissionToken = token
+        return true
+    }
+
+    private func releaseRunAdmission(_ token: UUID) {
+        guard activeRunAdmissionToken == token else { return }
+        activeRunAdmissionToken = nil
+    }
 
     #if DEBUG
         struct RunTestHooks {
@@ -2235,6 +2247,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         session.endRunAttempt(ifCurrent: record.ownership, source: source)
         runRegistry.releaseActiveSlot(for: record)
         tabsWithActiveContextBuilderRun.remove(record.tabID)
+        if record.origin == .ui {
+            releaseRunAdmission(record.runID)
+        }
 
         if saveHistory {
             saveRunToHistory(for: session)
@@ -2290,6 +2305,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         record.session.endRunAttempt(ifCurrent: record.ownership, source: "\(source).staleRetirement")
         if runRegistry.releaseActiveSlot(for: record) {
             tabsWithActiveContextBuilderRun.remove(record.tabID)
+        }
+        if record.origin == .ui {
+            releaseRunAdmission(record.runID)
         }
 
         let continuation = didClaimTerminal ? record.takeContinuation() : nil
@@ -2439,17 +2457,20 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         guard !hasPreparedForWindowClose,
               let tabID = currentTabID else { return }
         let session = session(for: tabID)
+        let runID = UUID()
 
         guard session.mcpControlToken == nil,
               runRegistry.activeRecord(tabID: tabID) == nil,
               !session.agentRunState.isRunning,
-              !session.isAgentBusy
+              !session.isAgentBusy,
+              claimRunAdmission(runID)
         else {
             debugLog("Run ignored (busy or already running)")
             return
         }
 
         guard workspaceManager?.activeWorkspace?.isSystemWorkspace == false else {
+            releaseRunAdmission(runID)
             debugLog("Run blocked: no workspace or system workspace active")
             session.appendLogEntry(
                 AgentLogEntry(
@@ -2477,7 +2498,6 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         session.lastRunAgentKind = runAgent
         session.lastRunModelRaw = runModelRaw
 
-        let runID = UUID()
         let ownership = session.beginRunAttempt(source: "contextBuilder.ui")
         let record = ContextBuilderRunRecord(
             runID: runID,
@@ -2491,6 +2511,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
         guard runRegistry.register(record) else {
             session.endRunAttempt(ifCurrent: ownership, source: "contextBuilder.ui.registrationRejected")
+            releaseRunAdmission(runID)
             clearRunStartState(for: session)
             debugLog("Run registration rejected for tab \(tabID)")
             return
@@ -4410,6 +4431,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             )
         }
         let token = UUID()
+        guard claimRunAdmission(token) else {
+            throw NSError(
+                domain: "DiscoverAgent",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Context Builder is already running in this window."]
+            )
+        }
         session.mcpControlToken = token
         session.mcpWorkspaceID = workspaceID ?? workspaceManager?.activeWorkspaceID
         session.mcpPlanningModelRaw = nil
@@ -4422,6 +4450,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Clears MCP control state only when the caller still owns the current generation.
     @MainActor
     func clearMCPControlledRun(forTabID tabID: UUID, controlToken: UUID) {
+        releaseRunAdmission(controlToken)
         guard let session = sessions[tabID], session.mcpControlToken == controlToken else { return }
         session.mcpControlToken = nil
         session.mcpWorkspaceID = nil
