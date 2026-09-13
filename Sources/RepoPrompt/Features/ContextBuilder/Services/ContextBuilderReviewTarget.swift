@@ -126,6 +126,12 @@ struct ContextBuilderDeferredReviewAuthority: Equatable {
     let reviewGitContext: FrozenPromptGitReviewContext
 }
 
+struct ContextBuilderFrozenReviewAuthority: Equatable {
+    let workspaceID: UUID
+    let tabID: UUID
+    let reviewGitContext: FrozenPromptGitReviewContext
+}
+
 enum ContextBuilderReviewElectionOrigin: Equatable {
     case initiallyAvailable
     case deferred

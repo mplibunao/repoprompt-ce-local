@@ -787,9 +787,9 @@ private actor GatedHeadlessAgentProviderState {
     }
 }
 
-private actor ContextBuilderTestGate {
+actor ContextBuilderTestGate {
     private var isOpen = false
-    private var entered = false
+    private(set) var entered = false
     private var entryWaiters: [CheckedContinuation<Void, Never>] = []
     private var openWaiters: [CheckedContinuation<Void, Never>] = []
 
