@@ -91,7 +91,12 @@ enum WindowStateCompositionFactory {
         let domainWorkspacePresentationBridge = domainWorkspaceClient.map {
             DomainWorkspacePresentationBridge(workspaceManager: workspaceManager, client: $0)
         }
-        domainWorkspacePresentationBridge?.start()
+        if let domainWorkspacePresentationBridge {
+            domainWorkspacePresentationBridge.start()
+            workspaceManager.setInitialDomainWorkspaceProjectionWaiter { [weak domainWorkspacePresentationBridge] in
+                await domainWorkspacePresentationBridge?.awaitInitialProjection()
+            }
+        }
         let selectionCoordinator = WorkspaceSelectionCoordinator(
             workspaceManager: workspaceManager,
             store: workspaceFileContextStore

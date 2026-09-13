@@ -1373,6 +1373,14 @@ class WindowState: ObservableObject {
         return .routed
     }
 
+    #if DEBUG
+        func setDomainWorkspaceDefaultCreationWillBeginHandlerForTesting(
+            _ handler: (@MainActor (UUID) async -> Void)?
+        ) {
+            domainWorkspacePresentationBridge?.setDefaultWorkspaceCreationWillBeginHandlerForTesting(handler)
+        }
+    #endif
+
     @MainActor
     private func waitForWorkspaceInitializationForRouting() async {
         guard !workspaceManager.isInitialized else {

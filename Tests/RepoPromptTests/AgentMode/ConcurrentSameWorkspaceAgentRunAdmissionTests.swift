@@ -27,6 +27,73 @@ import XCTest
             cleanupOperation = operation
         }
 
+        func testInitialDefaultPersistenceCompletesBeforeActivation() async throws {
+            let container = try makeTemporaryDirectory(named: "DefaultPersistenceOrdering")
+            let authorityRoot = container.appendingPathComponent("state", isDirectory: true)
+            try FileManager.default.createDirectory(at: authorityRoot, withIntermediateDirectories: true)
+            let storageOverride = AdmissionWorkspaceStorageOverride(authorityRoot: authorityRoot)
+            let runtime = MCPDomainRuntime(configuration: .init(
+                mode: .app,
+                profileIdentifier: "default-persistence-ordering",
+                storageDirectory: authorityRoot,
+                eventDirectory: authorityRoot.appendingPathComponent("events", isDirectory: true),
+                temporaryDirectory: authorityRoot.appendingPathComponent("tmp", isDirectory: true),
+                externalReloadInterval: nil
+            ))
+            try await runtime.start()
+
+            let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
+            GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
+            let window = WindowState(domainRuntime: runtime)
+            WindowStatesManager.shared.registerWindowState(window)
+            GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
+            let managerPersistenceGate = AdmissionSaveGate()
+            let bridgePersistenceGate = AdmissionSaveGate()
+            window.workspaceManager.setDefaultWorkspaceCreationWillBeginHandlerForTesting { _ in
+                await managerPersistenceGate.enterFirstAndWait()
+            }
+            window.setDomainWorkspaceDefaultCreationWillBeginHandlerForTesting { _ in
+                await bridgePersistenceGate.enterFirstAndWait()
+            }
+            trackCleanup {
+                await managerPersistenceGate.open()
+                await bridgePersistenceGate.open()
+                window.workspaceManager.setDefaultWorkspaceCreationWillBeginHandlerForTesting(nil)
+                window.setDomainWorkspaceDefaultCreationWillBeginHandlerForTesting(nil)
+                window.beginClose()
+                await window.tearDown()
+                WindowStatesManager.shared.unregisterWindowState(window)
+                _ = await runtime.shutdown()
+                storageOverride.restore()
+            }
+
+            try await waitUntil("both Default persistence paths to reach their gates") {
+                let managerEntered = await managerPersistenceGate.hasEntered()
+                let bridgeEntered = await bridgePersistenceGate.hasEntered()
+                return managerEntered && bridgeEntered
+            }
+            let systemWorkspace = try XCTUnwrap(
+                window.workspaceManager.workspaces.first(where: \.isSystemWorkspace)
+            )
+            XCTAssertNil(window.workspaceManager.activeWorkspace)
+            let canonicalBeforeActivation = await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id)
+            XCTAssertNil(canonicalBeforeActivation)
+
+            await managerPersistenceGate.open()
+            try await waitUntil("manager Default persistence to become canonical") {
+                await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id) != nil
+            }
+            XCTAssertNil(window.workspaceManager.activeWorkspace)
+
+            await bridgePersistenceGate.open()
+            await window.workspaceManager.awaitInitialized()
+
+            XCTAssertEqual(window.workspaceManager.activeWorkspace?.id, systemWorkspace.id)
+            let canonicalAfterActivation = await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id)
+            let canonical = try XCTUnwrap(canonicalAfterActivation)
+            XCTAssertEqual(canonical.health, .writable)
+        }
+
         func testSixOverlappingAgentRunStartsPersistUniqueIdentitiesAndDispatchProvidersExactlyOnce() async throws {
             let fixture = try await DurableAgentAdmissionFixture.make()
             trackCleanup {
@@ -1940,8 +2007,6 @@ import XCTest
             do {
                 await firstWindow.workspaceManager.awaitInitialized()
                 await secondWindow.workspaceManager.awaitInitialized()
-                try await settleInitialWorkspaceAuthority(window: firstWindow, runtime: firstRuntime)
-                try await settleInitialWorkspaceAuthority(window: secondWindow, runtime: secondRuntime)
                 let first = try await makeDurableWindow(
                     firstWindow,
                     runtime: firstRuntime,
@@ -2137,7 +2202,6 @@ import XCTest
             GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
             do {
                 await window.workspaceManager.awaitInitialized()
-                try await settleInitialWorkspaceAuthority(window: window, runtime: runtime)
                 let originalTab = ComposeTabState(name: "Durable foreground")
                 let workspace = WorkspaceModel(
                     name: "Concurrent durable admission \(UUID().uuidString.prefix(8))",
@@ -2267,31 +2331,6 @@ import XCTest
             isCleanedUp = true
             await closeWindowAndRuntime()
             storageOverride.restore()
-        }
-    }
-
-    @MainActor
-    private func settleInitialWorkspaceAuthority(
-        window: WindowState,
-        runtime: MCPDomainRuntime
-    ) async throws {
-        // Window initialization commits Default from an untracked task. Waiting for canonical
-        // visibility prevents fixture creation from racing that authority write.
-        let systemWorkspace = try XCTUnwrap(
-            window.workspaceManager.workspaces.first(where: \.isSystemWorkspace)
-        )
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(5))
-        while true {
-            if let canonical = await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id),
-               canonical.health == .writable
-            {
-                return
-            }
-            guard clock.now < deadline else {
-                throw AdmissionTestError.timedOut("runtime-owned system workspace settlement")
-            }
-            await Task.yield()
         }
     }
 
