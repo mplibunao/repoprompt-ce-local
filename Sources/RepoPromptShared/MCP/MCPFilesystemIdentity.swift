@@ -1,6 +1,54 @@
 import Darwin
 import Foundation
 
+private enum MCPApplicationSupportRootResolver {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var testOverride: URL?
+    private static let xctestSandboxRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("RepoPromptCE-XCTest-\(getpid())-\(UUID().uuidString)", isDirectory: true)
+
+    /// Only a test runner loads XCTest, and the Objective-C runtime reports that
+    /// independently of how the runner was launched. Launch-shaped signals are not
+    /// portable: `swift test` exports none of the `XCTest*` variables Xcode's runner
+    /// sets, and passes `-XCTest` only when the run is filtered.
+    static let isXCTestRuntime = NSClassFromString("XCTestCase") != nil
+
+    static func resolve(
+        directoryName: String,
+        fileManager: FileManager,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        isXCTestProcess: Bool = isXCTestRuntime
+    ) -> URL {
+        if let override = lock.withLock({ testOverride }) {
+            return override
+        }
+        if isXCTestProcess {
+            // Deriving the profile from the suite sandbox keeps independently sharded test processes disjoint.
+            if let sandboxRoot = environment["REPOPROMPT_TEST_SANDBOX_ROOT"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !sandboxRoot.isEmpty
+            {
+                return URL(fileURLWithPath: sandboxRoot, isDirectory: true)
+                    .appendingPathComponent("profile", isDirectory: true)
+                    .appendingPathComponent(directoryName, isDirectory: true)
+            }
+            // A sandbox creation failure must surface through later file writes rather than expose the live profile.
+            try? fileManager.createDirectory(at: xctestSandboxRoot, withIntermediateDirectories: true)
+            return xctestSandboxRoot
+                .appendingPathComponent("profile", isDirectory: true)
+                .appendingPathComponent(directoryName, isDirectory: true)
+        }
+        return fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(directoryName, isDirectory: true)
+    }
+
+    static func setTestOverride(_ url: URL?) {
+        lock.withLock {
+            testOverride = url?.standardizedFileURL
+        }
+    }
+}
+
 /// Shared filesystem and stable-name authority for RepoPrompt MCP products.
 ///
 /// Callers select their build flavor locally and pass it explicitly so this
@@ -139,9 +187,37 @@ public struct MCPFilesystemIdentity: Equatable, Sendable {
     }
 
     public func applicationSupportRootURL(fileManager: FileManager = .default) -> URL {
-        fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(applicationSupportDirectoryName, isDirectory: true)
+        MCPApplicationSupportRootResolver.resolve(
+            directoryName: applicationSupportDirectoryName,
+            fileManager: fileManager
+        )
     }
+
+    #if DEBUG
+        @_spi(TestSupport)
+        public static func test_setApplicationSupportRootOverride(_ url: URL?) {
+            MCPApplicationSupportRootResolver.setTestOverride(url)
+        }
+
+        @_spi(TestSupport)
+        public static var test_isRunningUnderXCTest: Bool {
+            MCPApplicationSupportRootResolver.isXCTestRuntime
+        }
+
+        @_spi(TestSupport)
+        public func test_applicationSupportRootURL(
+            fileManager: FileManager = .default,
+            environment: [String: String],
+            isXCTestProcess: Bool = MCPFilesystemIdentity.test_isRunningUnderXCTest
+        ) -> URL {
+            MCPApplicationSupportRootResolver.resolve(
+                directoryName: applicationSupportDirectoryName,
+                fileManager: fileManager,
+                environment: environment,
+                isXCTestProcess: isXCTestProcess
+            )
+        }
+    #endif
 
     public func temporaryRootURL(fileManager: FileManager = .default) -> URL {
         fileManager.temporaryDirectory

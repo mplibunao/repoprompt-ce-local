@@ -160,14 +160,7 @@ final class IdentityTransitionDiagnostics: @unchecked Sendable {
     }
 
     private static func defaultFileURL(fileManager: FileManager = .default) -> URL? {
-        guard let supportURL = fileManager.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else {
-            return nil
-        }
-        return supportURL
-            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        MCPFilesystemConstants.identity.applicationSupportRootURL(fileManager: fileManager)
             .appendingPathComponent("Diagnostics", isDirectory: true)
             .appendingPathComponent("identity-transition-v1.json", isDirectory: false)
     }

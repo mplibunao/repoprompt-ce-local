@@ -160,11 +160,7 @@ enum RuntimePolicyAdministration {
     }
 
     private static func makeRuntime() -> MCPDomainRuntime {
-        let applicationSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.temporaryDirectory
-        let root = applicationSupport.appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        let root = MCPFilesystemConstants.identity.applicationSupportRootURL()
         return MCPDomainRuntime(configuration: DomainRuntimeConfiguration(
             mode: .standalone,
             profileIdentifier: "default",

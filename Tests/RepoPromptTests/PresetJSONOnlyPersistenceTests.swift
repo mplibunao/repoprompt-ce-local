@@ -1,16 +1,27 @@
 import Foundation
 import XCTest
 @_spi(TestSupport) @testable import RepoPromptApp
+@_spi(TestSupport) import RepoPromptShared
 
 final class PresetJSONOnlyPersistenceTests: XCTestCase {
-    func testDefaultPresetPathsUseCESupportRoot() {
-        let workflowPath = PresetFileStore.defaultWorkflowFileURL().path
-        let modelPath = PresetFileStore.defaultModelFileURL().path
+    func testDefaultPresetPathsUseInjectedCESupportRoot() {
+        let profileRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PresetJSONOnlyPersistenceTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        MCPFilesystemIdentity.test_setApplicationSupportRootOverride(profileRoot)
+        defer {
+            MCPFilesystemIdentity.test_setApplicationSupportRootOverride(nil)
+            try? FileManager.default.removeItem(at: profileRoot.deletingLastPathComponent())
+        }
 
-        XCTAssertTrue(workflowPath.contains("/Application Support/RepoPrompt CE/Presets/workflowPresets.json"), workflowPath)
-        XCTAssertTrue(modelPath.contains("/Application Support/RepoPrompt CE/Presets/modelPresets.json"), modelPath)
-        XCTAssertFalse(workflowPath.contains("/Application Support/RepoPrompt/Presets/workflowPresets.json"), workflowPath)
-        XCTAssertFalse(modelPath.contains("/Application Support/RepoPrompt/Presets/modelPresets.json"), modelPath)
+        XCTAssertEqual(
+            PresetFileStore.defaultWorkflowFileURL(),
+            profileRoot.appendingPathComponent("Presets/workflowPresets.json")
+        )
+        XCTAssertEqual(
+            PresetFileStore.defaultModelFileURL(),
+            profileRoot.appendingPathComponent("Presets/modelPresets.json")
+        )
     }
 
     func testMissingPresetJSONCreatesEmptyDocumentsAndIgnoresLegacyDefaults() throws {

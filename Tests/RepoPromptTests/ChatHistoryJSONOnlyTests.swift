@@ -1,7 +1,27 @@
 @testable import RepoPromptApp
+@_spi(TestSupport) import RepoPromptShared
 import XCTest
 
 final class ChatHistoryJSONOnlyTests: XCTestCase {
+    private var profileRoot: URL!
+    private var realProfileRoot: URL!
+
+    override func setUpWithError() throws {
+        realProfileRoot = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        profileRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ChatHistoryJSONOnlyTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        MCPFilesystemIdentity.test_setApplicationSupportRootOverride(profileRoot)
+    }
+
+    override func tearDownWithError() throws {
+        MCPFilesystemIdentity.test_setApplicationSupportRootOverride(nil)
+        if let profileRoot {
+            try? FileManager.default.removeItem(at: profileRoot.deletingLastPathComponent())
+        }
+    }
+
     func testCurrentChatSessionSaveLoadUsesCEWorkspaceRoot() async throws {
         let message = StoredMessage(
             isUser: false,
@@ -15,8 +35,9 @@ final class ChatHistoryJSONOnlyTests: XCTestCase {
         let fileURL = try await service.saveChatSession(session, for: workspace)
         defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent().deletingLastPathComponent()) }
 
-        XCTAssertTrue(fileURL.path.contains("/Application Support/RepoPrompt CE/Workspaces/"), fileURL.path)
-        XCTAssertFalse(fileURL.path.contains("/Application Support/RepoPrompt/Workspaces/"), fileURL.path)
+        let expectedWorkspaceRoot = profileRoot.appendingPathComponent("Workspaces", isDirectory: true).path + "/"
+        XCTAssertTrue(fileURL.path.hasPrefix(expectedWorkspaceRoot), fileURL.path)
+        XCTAssertFalse(fileURL.path.hasPrefix(realProfileRoot.path + "/"))
 
         let loaded = try await service.loadChatSession(from: fileURL)
         XCTAssertEqual(loaded.name, "Current Session")

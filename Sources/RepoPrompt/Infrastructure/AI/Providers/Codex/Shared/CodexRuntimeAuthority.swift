@@ -217,14 +217,15 @@ enum CodexRuntimeAuthority {
     }
 
     static func statePaths(applicationSupportURL: URL? = nil) -> StatePaths {
-        let support = applicationSupportURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let profileRoot = applicationSupportURL.map {
+            $0.appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        } ?? MCPFilesystemConstants.identity.applicationSupportRootURL()
         #if DEBUG
             let buildChannel = "Debug"
         #else
             let buildChannel = "Release"
         #endif
-        let root = support
-            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+        let root = profileRoot
             .appendingPathComponent("Codex", isDirectory: true)
             .appendingPathComponent(buildChannel, isDirectory: true)
         return StatePaths(

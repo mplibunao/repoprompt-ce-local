@@ -45,7 +45,6 @@ enum GlobalSettingsPersistenceBlockReason: Equatable {
 /// Schema identity is `(schemaLineage, schemaVersion)`, not `schemaVersion` alone.
 /// See `docs/architecture/settings-persistence.md` before changing the preservation rules.
 final class GlobalSettingsFileStore: GlobalSettingsFileStoring {
-    static let appSupportDirectoryName = "RepoPrompt CE"
     static let settingsDirectoryName = "Settings"
     static let filename = "globalSettings.json"
 
@@ -87,10 +86,7 @@ final class GlobalSettingsFileStore: GlobalSettingsFileStoring {
     }
 
     static func settingsDirectoryURL(fileManager: FileManager = .default) -> URL {
-        let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-        return supportDirectory
-            .appendingPathComponent(appSupportDirectoryName, isDirectory: true)
+        MCPFilesystemConstants.identity.applicationSupportRootURL(fileManager: fileManager)
             .appendingPathComponent(settingsDirectoryName, isDirectory: true)
     }
 

@@ -17,8 +17,176 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+import conductor  # noqa: E402
 import conductor_diagnostics  # noqa: E402
 from script_test_support import enter_context, temporary_directory, write_executable  # noqa: E402
+
+
+class XCTestSandboxTests(unittest.TestCase):
+    def test_default_uses_fresh_job_directory_and_is_reported_as_artifact(self) -> None:
+        with temporary_directory() as tmp:
+            default_root = tmp / "ticket.test-sandbox"
+            env: dict[str, str] = {}
+
+            sandbox_root = conductor.configure_xctest_sandbox("test", {}, env, default_root)
+
+            self.assertEqual(sandbox_root, str(default_root))
+            self.assertEqual(env["REPOPROMPT_TEST_SANDBOX_ROOT"], str(default_root))
+            self.assertTrue(default_root.is_dir())
+            self.assertEqual(
+                (default_root / conductor.TEST_SANDBOX_MARKER_FILENAME).read_text(encoding="utf-8"),
+                conductor.TEST_SANDBOX_MARKER_CONTENT,
+            )
+            summary = conductor.OutputSummarizer.summarize_lines(
+                "test",
+                {},
+                "completed",
+                0,
+                False,
+                [f"Test sandbox: {sandbox_root}\n"],
+            )
+            self.assertEqual(summary["sections"][0]["title"], "Artifacts")
+            self.assertEqual(summary["sections"][0]["lines"], [f"Test sandbox: {sandbox_root}"])
+
+            job = conductor.Job(
+                ticket="ticket",
+                request_key=None,
+                fingerprint="fingerprint",
+                operation="test",
+                args={},
+                lanes=["build"],
+                timeout=None,
+                verbose=False,
+                env={},
+                created_at=0,
+                log_path=tmp / "ticket.log",
+                test_sandbox_root=sandbox_root,
+            )
+            payload = job.to_payload(include_tail=False, include_summary=False)
+            self.assertEqual(payload["testSandboxRoot"], sandbox_root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                conductor.print_job_result_header(payload, {"headline": "completed successfully"})
+            self.assertIn(f"Sandbox:  {sandbox_root}", output.getvalue())
+
+    def test_focused_build_injects_sandbox_only_when_it_runs_tests(self) -> None:
+        cases = (
+            (["focused-build", "--test"], True),
+            (["focused-build", "--filter", "ExampleTests"], True),
+            (["focused-build"], False),
+        )
+        for argv, expects_sandbox in cases:
+            with self.subTest(argv=argv), temporary_directory() as tmp:
+                captured_args: dict[str, object] = {}
+
+                def capture_request(
+                    _paths: object,
+                    operation: str,
+                    args: dict[str, object],
+                    _flags: object,
+                ) -> int:
+                    self.assertEqual(operation, "diagnostics")
+                    captured_args.update(args)
+                    return 0
+
+                with mock.patch.object(
+                    conductor,
+                    "enqueue_and_maybe_wait",
+                    side_effect=capture_request,
+                ):
+                    self.assertEqual(
+                        conductor.handle_real_operation(mock.Mock(), "diagnostics", argv),
+                        0,
+                    )
+
+                default_root = tmp / "ticket.test-sandbox"
+                env: dict[str, str] = {}
+                sandbox_root = conductor.configure_xctest_sandbox(
+                    "diagnostics",
+                    captured_args,
+                    env,
+                    default_root,
+                )
+
+                if expects_sandbox:
+                    self.assertEqual(sandbox_root, str(default_root))
+                    self.assertEqual(env[conductor.TEST_SANDBOX_ENV_KEY], str(default_root))
+                    self.assertTrue(default_root.is_dir())
+                else:
+                    self.assertIsNone(sandbox_root)
+                    self.assertNotIn(conductor.TEST_SANDBOX_ENV_KEY, env)
+                    self.assertFalse(default_root.exists())
+
+    def test_explicit_sandbox_override_wins(self) -> None:
+        with temporary_directory() as tmp:
+            default_root = tmp / "ticket.test-sandbox"
+            explicit_root = str(tmp / "caller-sandbox")
+            env = {"REPOPROMPT_TEST_SANDBOX_ROOT": f"  {explicit_root}\n"}
+
+            sandbox_root = conductor.configure_xctest_sandbox("provider-test", {}, env, default_root)
+
+            self.assertEqual(sandbox_root, explicit_root)
+            self.assertEqual(env["REPOPROMPT_TEST_SANDBOX_ROOT"], explicit_root)
+            self.assertFalse(default_root.exists())
+
+    def test_blank_explicit_sandbox_is_rejected(self) -> None:
+        for value in ("", "  \n"):
+            with self.subTest(value=value), temporary_directory() as tmp:
+                with self.assertRaisesRegex(conductor.ConductorError, "must not be blank"):
+                    conductor.configure_xctest_sandbox(
+                        "test",
+                        {},
+                        {"REPOPROMPT_TEST_SANDBOX_ROOT": value},
+                        tmp / "ticket.test-sandbox",
+                    )
+
+    def test_retention_removes_only_conductor_owned_sandbox(self) -> None:
+        with temporary_directory() as tmp:
+            jobs_dir = tmp / "jobs"
+            owned = jobs_dir / "ticket.test-sandbox"
+            caller_owned = jobs_dir / "caller.test-sandbox"
+            owned.mkdir(parents=True)
+            caller_owned.mkdir()
+            for sandbox in (owned, caller_owned):
+                (sandbox / conductor.TEST_SANDBOX_MARKER_FILENAME).write_text(
+                    conductor.TEST_SANDBOX_MARKER_CONTENT,
+                    encoding="utf-8",
+                )
+            (owned / "profile.json").write_text("{}", encoding="utf-8")
+            os.utime(owned, (0, 0))
+            os.utime(caller_owned, (0, 0))
+            caller_job = conductor.Job(
+                ticket="caller",
+                request_key=None,
+                fingerprint="fingerprint",
+                operation="test",
+                args={},
+                lanes=["build"],
+                timeout=None,
+                verbose=False,
+                env={conductor.TEST_SANDBOX_ENV_KEY: f"  {caller_owned}\n"},
+                created_at=0,
+                log_path=jobs_dir / "caller.log",
+            )
+            state = object.__new__(conductor.DaemonState)
+            state.paths = mock.Mock(jobs_dir=jobs_dir)
+            state.condition = mock.MagicMock()
+            state._retention_generation = 1
+            state.jobs = {caller_job.ticket: caller_job}
+            retained = state._test_sandbox_name_for_job(caller_job)
+            self.assertEqual(retained, caller_owned.name)
+
+            state._retention_external(
+                1,
+                (),
+                (caller_owned,),
+                frozenset(),
+                frozenset(),
+                frozenset(),
+            )
+
+            self.assertFalse(owned.exists())
+            self.assertTrue(caller_owned.exists())
 
 
 class FocusedBuildDiagnosticTests(unittest.TestCase):

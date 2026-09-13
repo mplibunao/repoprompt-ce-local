@@ -31,6 +31,8 @@ Do not use smoke as the only protection for deterministic logic. Without a prede
 - Keep one coherent contract per method. Labeled tables are appropriate when cases differ only by input, boundary, or expected outcome.
 - Control time, randomness, locale, environment, resources, ordering, and concurrency. Prefer gates, clocks, or continuations over sleeps, and verify meaningful cleanup or ownership.
 
+Each root or provider test job gets a fresh conductor profile sandbox beside its job log, with the path shown in the summary until job retention removes the directory. Export a non-empty `REPOPROMPT_TEST_SANDBOX_ROOT` before invoking conductor to use a caller-owned sandbox instead.
+
 Focused daemon-coordinated examples:
 
 ```bash
