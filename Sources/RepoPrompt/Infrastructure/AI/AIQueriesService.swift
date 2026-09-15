@@ -331,7 +331,8 @@ public class AIQueriesService {
     }
 
     static func transportActivityOutput(for result: AIStreamResult) -> ChatStreamOutput? {
-        guard result.type == AIStreamResult.transportActivityType else { return nil }
+        // Provider status reports transport progress rather than assistant content.
+        guard result.type == AIStreamResult.transportActivityType || result.type == "status" else { return nil }
         return ChatStreamOutput(
             text: "",
             reasoning: nil,

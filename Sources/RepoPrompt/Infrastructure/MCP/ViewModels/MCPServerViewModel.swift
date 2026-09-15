@@ -732,6 +732,10 @@ final class MCPServerViewModel: ObservableObject {
             try await oracleToolService.executeAskOracle(args: args)
         }
 
+        func executeOracleSendForTesting(args: [String: Value]) async throws -> Value {
+            try await oracleToolService.executeOracleSend(args: args)
+        }
+
         func resolveAgentSessionLifecycleMutationTargetForTesting(
             connectionID: UUID?
         ) async throws -> AgentSessionLifecycleAuthority.MutationTarget {
@@ -839,15 +843,16 @@ final class MCPServerViewModel: ObservableObject {
                     operation: operation
                 )
             },
-            sendChat: { [self] args, promptVM, tabContext in
+            sendChat: { [self] args, promptVM, tabContext, completionPolicy in
                 #if DEBUG
                     if let override = oracleChatSendOverrideForTesting {
-                        return try await override(args, promptVM, tabContext)
+                        return try await override(args, promptVM, tabContext, completionPolicy)
                     }
                 #endif
                 return try await oracleVM.tool_chatSend(
                     args: args,
                     promptVM: promptVM,
+                    completionPolicy: completionPolicy,
                     tabContext: tabContext
                 )
             },
