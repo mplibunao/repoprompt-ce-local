@@ -52,6 +52,138 @@ final class OracleHeadlessRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testExecuteKeepsTransportActivityOutOfSemanticContent() async throws {
+        let tabID = UUID()
+        let expected = "Line one\n\n  Indented café 🧪\nLine three reconnecting"
+        var progressText: [String] = []
+
+        let runtime = OracleHeadlessRuntime(
+            sendPrompt: { _, _ in
+                let stream = AsyncThrowingStream<ChatStreamOutput, Error> { continuation in
+                    if let activity = AIQueriesService.transportActivityOutput(
+                        for: AIStreamResult(type: "status", text: "Reconnecting... 1/5")
+                    ) {
+                        continuation.yield(activity)
+                    }
+                    continuation.yield(ChatStreamOutput(
+                        text: "Line one\n\n  Indented café 🧪\n",
+                        reasoning: nil,
+                        tokens: ChatTokenInfo()
+                    ))
+                    if let activity = AIQueriesService.transportActivityOutput(
+                        for: AIStreamResult(type: "status", text: "Retrying request")
+                    ) {
+                        continuation.yield(activity)
+                    }
+                    continuation.yield(ChatStreamOutput(
+                        text: "Line three reconnecting",
+                        reasoning: nil,
+                        tokens: ChatTokenInfo(),
+                        terminalOutcome: .completed
+                    ))
+                    continuation.finish()
+                }
+                return (UUID(), stream)
+            },
+            cancelStream: { _ in },
+            cleanupConversation: { _, _ in }
+        )
+
+        let output = try await runtime.execute(
+            message: AIMessage(systemPrompt: "system", userMessage: "prompt"),
+            model: .claude4Sonnet,
+            tabID: tabID,
+            completionPolicy: .contextBuilderStrict,
+            onProgress: { text, _ in progressText.append(text) }
+        )
+
+        XCTAssertEqual(output.text, expected)
+        XCTAssertEqual(progressText.last, expected)
+        XCTAssertTrue(progressText.allSatisfy { !$0.contains("Reconnecting") && !$0.contains("Retrying") })
+        XCTAssertFalse(runtime.hasActiveStream(for: tabID))
+    }
+
+    @MainActor
+    func testStrictCompletedTransportOnlyStreamIsEmptyContent() async throws {
+        let tabID = UUID()
+        let runtime = OracleHeadlessRuntime(
+            sendPrompt: { _, _ in
+                let stream = AsyncThrowingStream<ChatStreamOutput, Error> { continuation in
+                    if let activity = AIQueriesService.transportActivityOutput(
+                        for: AIStreamResult(type: "status", text: "Reconnecting... 1/5")
+                    ) {
+                        continuation.yield(activity)
+                    }
+                    continuation.yield(ChatStreamOutput(
+                        text: "",
+                        reasoning: nil,
+                        tokens: ChatTokenInfo(),
+                        terminalOutcome: .completed
+                    ))
+                    continuation.finish()
+                }
+                return (UUID(), stream)
+            },
+            cancelStream: { _ in },
+            cleanupConversation: { _, _ in }
+        )
+
+        do {
+            _ = try await runtime.execute(
+                message: AIMessage(systemPrompt: "system", userMessage: "prompt"),
+                model: .claude4Sonnet,
+                tabID: tabID,
+                completionPolicy: .contextBuilderStrict
+            )
+            XCTFail("Expected transport-only completion to have no semantic content")
+        } catch let error as OracleContextBuilderCompletionError {
+            XCTAssertEqual(error, .emptyProcessedContent)
+        }
+        XCTAssertFalse(runtime.hasActiveStream(for: tabID))
+    }
+
+    @MainActor
+    func testStrictTerminalFailuresRemainTyped() async throws {
+        let scenarios: [(ChatStreamTerminalOutcome?, OracleContextBuilderCompletionError)] = [
+            (.incomplete(reason: "provider stopped"), .providerTerminatedIncomplete(reason: "provider stopped")),
+            (nil, .streamEndedWithoutProviderCompletion)
+        ]
+
+        for (terminalOutcome, expectedError) in scenarios {
+            let tabID = UUID()
+            let runtime = OracleHeadlessRuntime(
+                sendPrompt: { _, _ in
+                    let stream = AsyncThrowingStream<ChatStreamOutput, Error> { continuation in
+                        continuation.yield(ChatStreamOutput(
+                            text: "partial",
+                            reasoning: nil,
+                            tokens: ChatTokenInfo(),
+                            terminalOutcome: terminalOutcome
+                        ))
+                        continuation.finish()
+                    }
+                    return (UUID(), stream)
+                },
+                cancelStream: { _ in },
+                cleanupConversation: { _, _ in }
+            )
+
+            do {
+                _ = try await runtime.execute(
+                    message: AIMessage(systemPrompt: "system", userMessage: "prompt"),
+                    model: .claude4Sonnet,
+                    tabID: tabID,
+                    completionPolicy: .contextBuilderStrict
+                )
+                XCTFail("Expected strict terminal failure")
+            } catch let error as OracleContextBuilderCompletionError {
+                XCTAssertEqual(error, expectedError)
+            }
+            XCTAssertFalse(runtime.hasActiveStream(for: tabID))
+        }
+    }
+
+    @MainActor
     func testTimeoutWithOnlyAChatNameTagStaysAFailure() async throws {
         let tabID = UUID()
         let streamID = UUID()
