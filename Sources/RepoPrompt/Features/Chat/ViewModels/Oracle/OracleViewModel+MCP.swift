@@ -1055,6 +1055,7 @@ extension OracleViewModel {
     func tool_chatSend(
         args: [String: Value],
         promptVM: PromptViewModel,
+        completionPolicy: OracleResponseCompletionPolicy,
         tabContext: OracleSendTabContext? = nil
     ) async throws
         -> [String: Value]
@@ -1182,7 +1183,8 @@ extension OracleViewModel {
                 gitBaseOverride: nil,
                 selectionOverride: selectionOverride,
                 lookupContextOverride: lookupContextOverride,
-                reviewGitContextOverride: reviewGitContextOverride
+                reviewGitContextOverride: reviewGitContextOverride,
+                completionPolicy: completionPolicy
             )
         }
         let queryId: UUID?

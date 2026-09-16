@@ -10,7 +10,8 @@ struct MCPOracleToolService {
     typealias SendChat = @MainActor @Sendable (
         _ args: [String: Value],
         _ promptVM: PromptViewModel,
-        _ tabContext: OracleViewModel.OracleSendTabContext?
+        _ tabContext: OracleViewModel.OracleSendTabContext?,
+        _ completionPolicy: OracleResponseCompletionPolicy
     ) async throws -> [String: Value]
     typealias ExportOracleResponse = @MainActor @Sendable (OracleExportRequest) async throws -> OracleExportFile
     typealias StabilizedVirtualContext = @MainActor @Sendable (
@@ -244,7 +245,7 @@ struct MCPOracleToolService {
             "waiting",
             "Waiting for Oracle response..."
         ) {
-            try await sendChat(capturedChatArgs, promptVM, tabContext)
+            try await sendChat(capturedChatArgs, promptVM, tabContext, .interactive)
         }
 
         if exportResponse {
@@ -345,7 +346,7 @@ struct MCPOracleToolService {
             "waiting",
             "Waiting for Oracle response..."
         ) {
-            try await sendChat(capturedChatArgs, promptVM, capturedTabContext)
+            try await sendChat(capturedChatArgs, promptVM, capturedTabContext, .contextBuilderStrict)
         }
 
         if exportResponse {

@@ -406,6 +406,12 @@ actor MessageFinalisationHub {
         completedOutcomes[id]
     }
 
+    #if DEBUG
+        func hasRegisteredWaiter(for id: UUID) -> Bool {
+            waiters[id]?.isEmpty == false
+        }
+    #endif
+
     /// Clean up any orphaned waiters (safety mechanism)
     func cleanup() {
         let allWaiters = waiters.values.flatMap(\.values)
@@ -1277,6 +1283,20 @@ class OracleViewModel: ObservableObject {
         @MainActor
         func lastObservedStreamActivityForTesting(for queryId: UUID) -> Date? {
             lastAnyStreamActivityAt[queryId]
+        }
+
+        @MainActor
+        func hasSeenNonReasoningTextForTesting(for queryId: UUID) -> Bool {
+            hasSeenNonReasoningText.contains(queryId)
+        }
+
+        @MainActor
+        func hasStreamInactivityWatchdogForTesting(for queryId: UUID) -> Bool {
+            streamInactivityWatchdogs[queryId] != nil
+        }
+
+        nonisolated func hasFinalisationWaiterForTesting(for queryId: UUID) async -> Bool {
+            await finalisationHub.hasRegisteredWaiter(for: queryId)
         }
     #endif
 
