@@ -1819,12 +1819,56 @@ class FairHeavyAdmission:
             self._remote_process_snapshot_at = timestamp
         return self._remote_process_snapshot
 
+    @staticmethod
+    def _probe_remote_identity(pid: int, expected_start: str) -> str:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return "stale"
+        except (PermissionError, OSError):
+            return "inconclusive"
+        observed_start = process_start_token(pid)
+        if not observed_start:
+            return "inconclusive"
+        return "live" if observed_start == expected_start else "stale"
+
+    def _owns_waiter(self, waiter: Dict[str, Any]) -> bool:
+        return (
+            waiter.get("waiterID") == self.waiter_id
+            and waiter.get("ownerPID") == self.owner_pid
+            and waiter.get("ownerStartToken") == self.owner_start
+        )
+
+    def _append_own_waiter_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        sequence = int(payload["nextSequence"])
+        payload["nextSequence"] = sequence + 1
+        payload["generation"] += 1
+        waiter = {
+            "waiterID": self.waiter_id,
+            "sequence": sequence,
+            "state": "waiting",
+            "ownerPID": self.owner_pid,
+            "ownerStartToken": self.owner_start,
+            "ticket": self.metadata.get("ticket"),
+            "operation": self.metadata.get("operation"),
+            "operationLabel": self.metadata.get("operationLabel"),
+            "repoRoot": self.metadata.get("repoRoot"),
+            "repoHash": self.metadata.get("repoHash"),
+            "worktree": self.metadata.get("worktree"),
+            "enqueuedAt": now(),
+            "acquiredSlotPath": None,
+            "notifySocketPath": str(self.notify_path),
+        }
+        payload["waiters"].append(waiter)
+        return waiter
+
     def _prune_stale(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         retained: List[Dict[str, Any]] = []
         remote_snapshot: Optional[Dict[int, Tuple[int, str]]] = None
         remote_snapshot_was_cached = False
         remote_snapshot_refreshed_for_negative = False
         remote_snapshot_inconclusive = False
+        targeted_results: Dict[Tuple[int, str], str] = {}
         for waiter in payload["waiters"]:
             if not isinstance(waiter, dict) or not self._notify_path_is_live(waiter):
                 continue
@@ -1868,6 +1912,16 @@ class FairHeavyAdmission:
                 record = remote_snapshot.get(pid)
             if record is not None and record[1] == token:
                 retained.append(waiter)
+                continue
+            # Queue-wide snapshots are a positive shortcut only; a targeted observation
+            # is the authority for removing a specific process identity.
+            identity = (pid, token)
+            result = targeted_results.get(identity)
+            if result is None:
+                result = self._probe_remote_identity(pid, token)
+                targeted_results[identity] = result
+            if result != "stale":
+                retained.append(waiter)
         if len(retained) != len(payload["waiters"]):
             payload["waiters"] = retained
             payload["generation"] += 1
@@ -1877,43 +1931,21 @@ class FairHeavyAdmission:
         with self._queue_lock():
             payload = self._load_queue()
             self._prune_stale(payload)
-            sequence = int(payload["nextSequence"])
-            payload["nextSequence"] = sequence + 1
-            payload["generation"] += 1
-            payload["waiters"].append(
-                {
-                    "waiterID": self.waiter_id,
-                    "sequence": sequence,
-                    "state": "waiting",
-                    "ownerPID": self.owner_pid,
-                    "ownerStartToken": self.owner_start,
-                    "ticket": self.metadata.get("ticket"),
-                    "operation": self.metadata.get("operation"),
-                    "operationLabel": self.metadata.get("operationLabel"),
-                    "repoRoot": self.metadata.get("repoRoot"),
-                    "repoHash": self.metadata.get("repoHash"),
-                    "worktree": self.metadata.get("worktree"),
-                    "enqueuedAt": now(),
-                    "acquiredSlotPath": None,
-                    "notifySocketPath": str(self.notify_path),
-                }
-            )
+            self._append_own_waiter_locked(payload)
             self._write_queue(payload)
 
     def _queue_snapshot(self) -> Tuple[Dict[str, Any], Dict[str, Any], int, List[Dict[str, Any]]]:
         with self._queue_lock():
             payload = self._load_queue()
             before_generation = payload["generation"]
-            waiters = self._prune_stale(payload)
+            self._prune_stale(payload)
+            if not any(self._owns_waiter(waiter) for waiter in payload["waiters"]):
+                self._append_own_waiter_locked(payload)
             if payload["generation"] != before_generation:
                 self._write_queue(payload)
-            ordered = sorted(waiters, key=lambda item: int(item.get("sequence", 0)))
+            ordered = sorted(payload["waiters"], key=lambda item: int(item.get("sequence", 0)))
             for index, waiter in enumerate(ordered):
-                if (
-                    waiter.get("waiterID") == self.waiter_id
-                    and waiter.get("ownerPID") == self.owner_pid
-                    and waiter.get("ownerStartToken") == self.owner_start
-                ):
+                if self._owns_waiter(waiter):
                     return payload, waiter, index + 1, ordered
         raise ConductorError("global-heavy waiter identity disappeared before admission")
 
@@ -1923,14 +1955,7 @@ class FairHeavyAdmission:
             payload = self._load_queue()
             original = list(payload["waiters"])
             payload["waiters"] = [
-                waiter
-                for waiter in original
-                if not (
-                    isinstance(waiter, dict)
-                    and waiter.get("waiterID") == self.waiter_id
-                    and waiter.get("ownerPID") == self.owner_pid
-                    and waiter.get("ownerStartToken") == self.owner_start
-                )
+                waiter for waiter in original if not (isinstance(waiter, dict) and self._owns_waiter(waiter))
             ]
             if len(payload["waiters"]) != len(original):
                 payload["generation"] += 1
@@ -2046,27 +2071,41 @@ class FairHeavyAdmission:
                         if exc.errno == errno.EINTR:
                             continue
                         raise
-                    with self._queue_lock():
-                        payload = self._load_queue()
-                        ordered_now = sorted(payload["waiters"], key=lambda item: int(item.get("sequence", 0)))
-                        matching = [item for item in ordered_now if item.get("waiterID") == self.waiter_id]
-                        eligible = bool(
-                            matching
-                            and matching[0].get("ownerPID") == self.owner_pid
-                            and matching[0].get("ownerStartToken") == self.owner_start
-                            and ordered_now.index(matching[0]) < configured_global_heavy_slots(self.env)
-                        )
-                        if eligible:
-                            matching[0]["state"] = "acquired"
-                            matching[0]["acquiredSlotPath"] = str(slot_path)
-                            payload["generation"] += 1
-                            self._write_queue(payload)
-                            write_display_lock_metadata(lock_file, self.metadata)
-                            self.legacy_slot_holder = None
-                            self._legacy_slot_holder_observed_at = None
-                            return FairHeavyLease(self, lock_file, slot_path, self.waiter_id)
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                    lock_file.close()
+                    descriptor_transferred = False
+                    try:
+                        with self._queue_lock():
+                            payload = self._load_queue()
+                            ordered_now = sorted(payload["waiters"], key=lambda item: int(item.get("sequence", 0)))
+                            matching = next(
+                                (
+                                    (index, item)
+                                    for index, item in enumerate(ordered_now)
+                                    if isinstance(item, dict) and self._owns_waiter(item)
+                                ),
+                                None,
+                            )
+                            eligible = bool(
+                                matching and matching[0] < configured_global_heavy_slots(self.env)
+                            )
+                            if eligible:
+                                matching[1]["state"] = "acquired"
+                                matching[1]["acquiredSlotPath"] = str(slot_path)
+                                payload["generation"] += 1
+                                self._write_queue(payload)
+                                write_display_lock_metadata(lock_file, self.metadata)
+                                self.legacy_slot_holder = None
+                                self._legacy_slot_holder_observed_at = None
+                                lease = FairHeavyLease(self, lock_file, slot_path, self.waiter_id)
+                                descriptor_transferred = True
+                                return lease
+                    finally:
+                        # The lease owns the descriptor only after every durable admission
+                        # step succeeds; all earlier exits must release kernel capacity.
+                        if not descriptor_transferred:
+                            with contextlib.suppress(OSError):
+                                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                            with contextlib.suppress(OSError):
+                                lock_file.close()
                 if observed_unexplained_holder:
                     update(position, earlier)
             self.notify_socket.settimeout(self.current_rescan_seconds)
