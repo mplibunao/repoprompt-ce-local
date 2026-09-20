@@ -1,6 +1,6 @@
 # Settings Persistence
 
-Current as of 2026-08-11. This document is contributor-facing: use it when changing durable settings, workspace overrides, Agent Models settings, or MCP settings surfaces.
+Current as of 2026-09-21. This document is contributor-facing: use it when changing durable settings, workspace overrides, Agent Models settings, or MCP settings surfaces.
 
 ## Durable settings file
 
@@ -27,6 +27,7 @@ same numeric version.
 | --- | --- | --- |
 | `repoprompt-ce.global-settings` | `<= currentSchemaVersion` | Load normally without rewriting merely because the schema is older. |
 | `repoprompt-ce.global-settings` | `> currentSchemaVersion` | Preserve and block saves as a same-lineage future CE file. The UI does not offer compatible import for this lane. |
+| `repoprompt-ce.global-settings` | in `rejectedExperimentalSchemaVersions` (v6) | Preserve and block saves. Explicit compatible import is refused; recovery is the only path. |
 | any other non-empty value | any | Preserve and block saves as an incompatible/foreign schema. |
 | absent | `<= legacyUnlineagedSchemaVersionCeiling` | Accept as legacy OSS CE. |
 | absent | `> legacyUnlineagedSchemaVersionCeiling` | Preserve and block saves as incompatible/foreign, permanently. |
@@ -40,14 +41,65 @@ representing its content. Schema-requiring features have fixed introduction cons
 
 - `baselineSchemaVersion = 2`
 - `workspaceAgentModelsSchemaVersion = 4`
+- `agentModelParameterPinsSchemaVersion = 8`
 
 `requiredSchemaVersion` returns the maximum fixed feature version required by the
 document. It must never use `currentSchemaVersion` as the version of an existing feature:
-when another feature introduces v5, add a fixed constant for that feature and include it
-in the maximum. Baseline CE content is stamped v2. A document is stamped v4 only when
-`agentModelsSettingsByWorkspaceID` is nonempty. Save, compatible import, recovery, and
-default creation all use this content-derived minimum. Lineage is still stamped on every
-CE write, and future-schema and unlineaged preservation guards remain unchanged.
+when another feature introduces v5, add a fixed constant for that feature and include it in
+the maximum. Baseline CE content is stamped v2. A document is stamped v4 only when
+`agentModelsSettingsByWorkspaceID` is nonempty. It is stamped v8 when any global or
+workspace Agent Models profile carries ACP parameter pins (see
+[Parameter pins and unported-content preservation](#parameter-pins-and-unported-content-preservation)).
+Save, compatible import, recovery, and default creation all use this content-derived
+minimum. Lineage is still stamped on every CE write, and future-schema and unlineaged
+preservation guards remain unchanged.
+
+## Parameter pins and unported-content preservation
+
+Schema v8 adds OpenCode-style ACP parameter pins to Agent Models profiles:
+
+```text
+globalDefaults.mcpAgentRoleModelParameters
+globalDefaults.contextBuilderModelParametersByAgent
+agentModelsSettingsByWorkspaceID.<id>.profile.mcpAgentRoleModelParameters
+agentModelsSettingsByWorkspaceID.<id>.profile.contextBuilderModelParametersByAgent
+```
+
+Role buckets are keyed by `TaskLabelKind` raw values; Context Builder buckets by
+`AgentProviderKind` raw values. A nonempty pin persists the displayed compound choice and
+its bucket in one mutation, so a pin never references a model the surrounding selection no
+longer names. Clearing is scoped to the displayed role selection or the Context Builder
+read predicate. Bucket coherence is structural: a role bucket survives only while its role
+override resolves to the same provider and canonical model (availability never
+participates), and a Context Builder bucket survives only while the persisted Context
+Builder model matches and the bucket's agent is the explicitly persisted Context Builder
+agent. Coherence never rewrites unsupported saved values; they remain stored intent that
+the UI can display and a real run rejects.
+
+The v8 fence is the pin constant above; documents without pins keep their lower
+content-derived stamp. Numeric v5 and v7 were never written by this lineage and have no
+rejection fence: same-lineage v5/v7 files load as ordinary older documents. Numeric v6
+(`rejectedExperimentalSchemaVersions = 6...6`) was written only by experimental builds and
+is rejected on load and refused by compatible import.
+
+Alongside the header decision, `GlobalSettingsFileStore` runs a centralized content scan
+before typed decode and before every save. It preserves (blocks) files containing content
+this build cannot fully represent:
+
+- populated unported Oracle-roster fields (global
+  `scalarPreferences.modelSelection.additionalOracleModels` and workspace
+  `profile.additionalOracleModelRaws`); missing, null, or empty arrays carry no roster and
+  pass, while an unrecognized shape for the field is itself a block;
+- parameter structures containing provider or kind enum raw values this build cannot
+  represent, in either pin field at either the global or workspace level.
+
+Effort `valueRaw` strings are deliberately not scanned: an unadvertised saved value is
+valid stored intent, not unrepresentable content. Legacy plain-string maps such as models
+by agent and role overrides predate parameters and keep their existing tolerance. Blocked
+content uses the incompatible-schema preservation path and banner. Compatible import
+remains a user action with a byte-for-byte backup: it decodes CE-known fields (roster
+content survives only in the backup) but still refuses same-lineage v6. No general-purpose
+unknown-field storage backs these rules.
 
 ## False-v4 normalization
 
@@ -99,9 +151,13 @@ the preserved file until the user chooses an action:
 - **Same-lineage future CE**: show the file or reset after backing it up. Compatible import
   is intentionally unavailable because an older build cannot know how to preserve future CE
   fields.
+- **Same-lineage rejected experimental (v6)**: recovery only. Compatible import is refused
+  to mirror the load-time rejection.
 - **Incompatible/foreign JSON**: offer compatible import. Import backs up the original
   byte-for-byte, decodes CE-known fields, writes a current-schema CE file, and leaves
-  unknown fields only in the backup.
+  unknown fields only in the backup. Files blocked by the unported-content scan use this
+  lane; imported pin fields that this build can represent survive, roster content stays in
+  the backup.
 - **Save failure**: offer retry before reset.
 
 Telemetry enablement has a `UserDefaults` mirror so startup can make a safe decision before
@@ -200,6 +256,7 @@ Agent Models settings cover the controls shown on Settings → Agent Models:
 - Context Builder agent/model
 - MCP sub-agent role defaults
 - MCP role-label discovery filtering
+- ACP parameter pins (OpenCode effort) for role defaults and Context Builder agents
 
 These fields are grouped in `AgentModelsSettingsProfile`.
 
@@ -215,6 +272,8 @@ The global Agent Models profile is not a separate JSON blob. It is projected fro
 | `contextBuilderAgentRaw` | `globalDefaults.discoverAgentRaw` |
 | `contextBuilderModelsByAgent` | `globalDefaults.discoverModelsByAgent` |
 | `mcpAgentRoleOverrides` | `globalDefaults.mcpAgentRoleOverrides` |
+| `mcpAgentRoleModelParameters` | `globalDefaults.mcpAgentRoleModelParameters` |
+| `contextBuilderModelParametersByAgent` | `globalDefaults.contextBuilderModelParametersByAgent` |
 | `restrictMCPAgentDiscoveryToRoleLabels` | `scalarPreferences.agentMode.restrictMCPAgentDiscoveryToRoleLabels` |
 
 Use `GlobalSettingsStore.globalAgentModelsProfile()` and `setGlobalAgentModelsProfile(_:contextBuilderWriteIntent:)` for whole-profile reads/writes. The write intent distinguishes user-owned Context Builder changes from automatic seeding while allowing unrelated model changes to preserve the existing ownership marker. User-driven Context Builder edits and workspace-to-global copies mark the selection as user-defined; automatic seeding stores an explicit unmarked state and never demotes an established user choice.

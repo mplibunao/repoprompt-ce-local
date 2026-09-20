@@ -116,6 +116,15 @@ final class GlobalSettingsFileStore: GlobalSettingsFileStoring {
                 throw GlobalSettingsFileStoreError.incompatibleSchema
             }
         }
+        if let detail = Self.unportedContentPreservationDetail(data: data) {
+            // Same-lineage documents whose content this build cannot fully represent (unported
+            // Oracle rosters, parameter pins for providers/kinds absent here) are preserved with
+            // the incompatible-schema banner: a typed re-encode would silently discard them.
+            preservingUnsupportedFutureDocument = true
+            blockReason = .incompatibleSchema
+            print("⚠️ Global settings JSON contains content this build cannot represent (\(detail)); preserving file and using in-memory defaults for this launch.")
+            throw GlobalSettingsFileStoreError.incompatibleSchema
+        }
         let document: GlobalSettingsDocument
         do {
             document = try Self.decoder.decode(GlobalSettingsDocument.self, from: data)
@@ -212,7 +221,16 @@ final class GlobalSettingsFileStore: GlobalSettingsFileStoring {
         do {
             let data = try Data(contentsOf: fileURL)
             let header = try Self.decoder.decode(GlobalSettingsDocumentHeader.self, from: data)
-            guard Self.preservationBlockReason(for: header) == .incompatibleSchema else { return false }
+            let headerBlockedIncompatible = Self.preservationBlockReason(for: header) == .incompatibleSchema
+            // Same-lineage rejected experimental schemas stay refused even as an explicit import,
+            // mirroring the load-time rejection: recovery (fresh defaults) is the only path.
+            let sameLineageRejectedExperimental = (
+                header.schemaLineage?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == GlobalSettingsDocument.schemaLineage
+            )
+                && GlobalSettingsDocument.rejectedExperimentalSchemaVersions.contains(header.schemaVersion)
+            let contentBlocked = Self.unportedContentPreservationDetail(data: data) != nil
+            guard (headerBlockedIncompatible && !sameLineageRejectedExperimental) || contentBlocked else { return false }
             importedDocument = try Self.decoder.decode(GlobalSettingsDocument.self, from: data)
         } catch {
             print("⚠️ Failed to decode compatible global settings import at \(fileURL.path): \(error)")
@@ -652,7 +670,12 @@ final class GlobalSettingsFileStore: GlobalSettingsFileStoring {
         guard let header = try? Self.decoder.decode(GlobalSettingsDocumentHeader.self, from: data) else {
             return Self.isJSONDocument(data) ? .incompatibleSchema : nil
         }
-        return Self.preservationBlockReason(for: header)
+        if let reason = Self.preservationBlockReason(for: header) {
+            return reason
+        }
+        // The unported-content decision must also gate saves: an ordinary typed save would
+        // silently discard roster/pin content this build cannot represent.
+        return Self.unportedContentPreservationDetail(data: data) != nil ? .incompatibleSchema : nil
     }
 
     static func shouldPreserveWithoutLoading(
@@ -674,6 +697,9 @@ final class GlobalSettingsFileStore: GlobalSettingsFileStoring {
     ) -> GlobalSettingsPersistenceBlockReason? {
         let normalizedLineage = schemaLineage?.trimmingCharacters(in: .whitespacesAndNewlines)
         if normalizedLineage == GlobalSettingsDocument.schemaLineage {
+            if GlobalSettingsDocument.rejectedExperimentalSchemaVersions.contains(schemaVersion) {
+                return .incompatibleSchema
+            }
             return schemaVersion > supportedVersion
                 ? .unsupportedFutureSchema(onDiskVersion: schemaVersion, supportedVersion: supportedVersion)
                 : nil
@@ -694,6 +720,162 @@ final class GlobalSettingsFileStore: GlobalSettingsFileStoring {
 
     private static func preservationBlockReason(for header: GlobalSettingsDocumentHeader) -> GlobalSettingsPersistenceBlockReason? {
         preservationBlockReason(schemaVersion: header.schemaVersion, schemaLineage: header.schemaLineage)
+    }
+
+    // MARK: - Unported-content admission (schema v8)
+
+    /// Centralized pre-decode/pre-save scan for same-lineage documents whose content this build
+    /// cannot fully represent. Raising the accepted schema version to v8 must not let the normal
+    /// typed save silently discard features this distribution never ported: upstream's
+    /// Oracle-roster fields, and parameter pins keyed by providers/kinds that do not exist here.
+    /// Effort `valueRaw` strings are deliberately NOT checked — an unadvertised saved value is
+    /// valid stored intent that the UI displays and a real run rejects honestly.
+    ///
+    /// Returns a human-readable block detail, or nil when the content is fully representable.
+    /// Non-JSON input is not this scan's decision (the decode path owns that failure).
+    static func unportedContentPreservationDetail(data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let detail = populatedUnportedOracleRosterDetail(root) {
+            return detail
+        }
+        return unrepresentableParameterEnumDetail(root)
+    }
+
+    /// Populated unported Oracle-roster fields block: a typed re-encode would drop the roster.
+    /// Missing, null, or empty arrays carry no roster and pass; an unrecognized shape for the
+    /// field is itself a preservation block, not something to rewrite.
+    private static func populatedUnportedOracleRosterDetail(_ root: [String: Any]) -> String? {
+        if let scalarPreferences = root["scalarPreferences"] as? [String: Any],
+           let modelSelection = scalarPreferences["modelSelection"] as? [String: Any],
+           let detail = unportedRosterArrayDetail(
+               modelSelection["additionalOracleModels"],
+               fieldPath: "scalarPreferences.modelSelection.additionalOracleModels"
+           )
+        {
+            return detail
+        }
+        if let agentModels = root["agentModelsSettingsByWorkspaceID"] as? [String: Any] {
+            for workspaceID in agentModels.keys.sorted() {
+                guard let workspace = agentModels[workspaceID] as? [String: Any],
+                      let profile = workspace["profile"] as? [String: Any]
+                else { continue }
+                if let detail = unportedRosterArrayDetail(
+                    profile["additionalOracleModelRaws"],
+                    fieldPath: "agentModelsSettingsByWorkspaceID.\(workspaceID).profile.additionalOracleModelRaws"
+                ) {
+                    return detail
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func unportedRosterArrayDetail(_ value: Any?, fieldPath: String) -> String? {
+        switch value {
+        case nil, is NSNull:
+            nil
+        case let array as [Any]:
+            array.isEmpty ? nil : "populated unported Oracle roster at \(fieldPath)"
+        default:
+            "unrecognized shape for unported Oracle roster at \(fieldPath)"
+        }
+    }
+
+    /// Parameter documents containing provider/kind enum raw values this build cannot
+    /// represent block: coherence would silently drop those pin buckets on the next typed save,
+    /// so the file is preserved for a build that can represent them instead. Scoped to the
+    /// schema-v8 parameter structures only — legacy plain-string maps (models by agent, role
+    /// overrides) predate parameters and keep their existing tolerance.
+    private static func unrepresentableParameterEnumDetail(_ root: [String: Any]) -> String? {
+        let globalDefaults = root["globalDefaults"] as? [String: Any] ?? [:]
+        if let detail = unrepresentableParameterBucketDetail(
+            roleModelParameters: globalDefaults["mcpAgentRoleModelParameters"],
+            contextBuilderModelParameters: globalDefaults["contextBuilderModelParametersByAgent"],
+            fieldPath: "globalDefaults"
+        ) {
+            return detail
+        }
+        if let agentModels = root["agentModelsSettingsByWorkspaceID"] as? [String: Any] {
+            for workspaceID in agentModels.keys.sorted() {
+                guard let workspace = agentModels[workspaceID] as? [String: Any],
+                      let profile = workspace["profile"] as? [String: Any]
+                else { continue }
+                if let detail = unrepresentableParameterBucketDetail(
+                    roleModelParameters: profile["mcpAgentRoleModelParameters"],
+                    contextBuilderModelParameters: profile["contextBuilderModelParametersByAgent"],
+                    fieldPath: "agentModelsSettingsByWorkspaceID.\(workspaceID).profile"
+                ) {
+                    return detail
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func unrepresentableParameterBucketDetail(
+        roleModelParameters: Any?,
+        contextBuilderModelParameters: Any?,
+        fieldPath: String
+    ) -> String? {
+        if let buckets = roleModelParameters as? [String: Any] {
+            for roleRaw in buckets.keys.sorted() {
+                guard AgentModelCatalog.TaskLabelKind(rawValue: roleRaw) != nil else {
+                    return "unknown role raw value '\(roleRaw)' in mcpAgentRoleModelParameters at \(fieldPath)"
+                }
+                if let detail = unrepresentableSelectionDetail(
+                    buckets[roleRaw],
+                    fieldPath: "\(fieldPath).mcpAgentRoleModelParameters.\(roleRaw)"
+                ) {
+                    return detail
+                }
+            }
+        } else if let nonNull = roleModelParameters, !(nonNull is NSNull) {
+            return "unrecognized shape for mcpAgentRoleModelParameters at \(fieldPath)"
+        }
+        if let buckets = contextBuilderModelParameters as? [String: Any] {
+            for agentRaw in buckets.keys.sorted() {
+                guard AgentProviderKind(rawValue: agentRaw) != nil else {
+                    return "unknown provider raw value '\(agentRaw)' in contextBuilderModelParametersByAgent at \(fieldPath)"
+                }
+                if let detail = unrepresentableSelectionDetail(
+                    buckets[agentRaw],
+                    fieldPath: "\(fieldPath).contextBuilderModelParametersByAgent.\(agentRaw)"
+                ) {
+                    return detail
+                }
+            }
+        } else if let nonNull = contextBuilderModelParameters, !(nonNull is NSNull) {
+            return "unrecognized shape for contextBuilderModelParametersByAgent at \(fieldPath)"
+        }
+        return nil
+    }
+
+    private static func unrepresentableSelectionDetail(_ value: Any?, fieldPath: String) -> String? {
+        switch value {
+        case nil, is NSNull:
+            return nil
+        case let selections as [Any]:
+            for selection in selections {
+                guard let object = selection as? [String: Any] else {
+                    return "unrecognized parameter selection entry at \(fieldPath)"
+                }
+                guard let providerRaw = object["providerID"] as? String,
+                      ACPProviderID(rawValue: providerRaw) != nil
+                else {
+                    return "unknown provider raw value in parameter selection at \(fieldPath)"
+                }
+                guard let kindRaw = object["kind"] as? String,
+                      ACPModelParameterKind(rawValue: kindRaw) != nil
+                else {
+                    return "unknown parameter kind raw value in parameter selection at \(fieldPath)"
+                }
+            }
+            return nil
+        default:
+            return "unrecognized shape for parameter selections at \(fieldPath)"
+        }
     }
 
     private static func isJSONDocument(_ data: Data) -> Bool {

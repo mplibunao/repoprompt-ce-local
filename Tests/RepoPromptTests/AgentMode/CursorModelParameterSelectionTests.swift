@@ -296,7 +296,7 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         ).isEmpty)
     }
 
-    func testEffectiveSelectionsCanonicalizeLegacyAliasesAndReplaceStaleValuesWithDisplayedDefaults() {
+    func testEffectiveSelectionsForwardStoredIntentWithoutMetadataLookup() {
         let stale = ACPModelParameterSelection(
             providerID: .cursor,
             baseModelRaw: "Grok 4.6",
@@ -311,9 +311,39 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             persistedSelections: [stale]
         )
 
-        XCTAssertEqual(effective.map(\.baseModelRaw), ["grok-4.6", "grok-4.6"])
-        XCTAssertEqual(effective.map(\.configID), ["effort", "fast"])
-        XCTAssertEqual(effective.map(\.valueRaw), ["high", "true"])
+        XCTAssertEqual(effective, [stale])
+    }
+
+    func testEffectiveSelectionsOmitOtherProviderAndBaseModelSelections() {
+        let active = ACPModelParameterSelection(
+            providerID: .cursor,
+            baseModelRaw: "grok-4.6",
+            kind: .thinking,
+            configID: "effort",
+            valueRaw: "high"
+        )
+        let otherModel = ACPModelParameterSelection(
+            providerID: .cursor,
+            baseModelRaw: "composer-2.5",
+            kind: .speed,
+            configID: "fast",
+            valueRaw: "true"
+        )
+        let otherProvider = ACPModelParameterSelection(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking,
+            configID: "effort",
+            valueRaw: "max"
+        )
+
+        let effective = ACPModelParameterResolver.effectiveSelections(
+            providerID: .cursor,
+            selectedModelRaw: "Grok 4.6",
+            persistedSelections: [active, otherModel, otherProvider]
+        )
+
+        XCTAssertEqual(effective, [active])
     }
 
     func testSemanticIdentityCanonicalizesLegacyComposerAlias() {
@@ -442,6 +472,99 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             selectedModelRaw: "future-cursor-model",
             persistedSelections: []
         ).isEmpty)
+    }
+
+    func testContextBuilderPinTargetRejectsStaleCrossSurfaceModelSelection() {
+        XCTAssertNil(ContextBuilderAgentViewModel.test_contextBuilderPinWriteSelection(
+            liveAgent: .cursor,
+            liveModelRaw: "composer-2.5",
+            expectedProviderID: .cursor,
+            expectedModelRaw: "grok-4.6"
+        ))
+
+        let current = ContextBuilderAgentViewModel.test_contextBuilderPinWriteSelection(
+            liveAgent: .cursor,
+            liveModelRaw: "grok-4.6",
+            expectedProviderID: .cursor,
+            expectedModelRaw: "Grok 4.6"
+        )
+        XCTAssertEqual(current?.agent, .cursor)
+        XCTAssertEqual(current?.modelRaw, "grok-4.6")
+    }
+
+    func testPromptViewModelContextBuilderPinRejectsStaleCrossSurfaceModelSelection() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PromptViewModelContextBuilderPinTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let suiteName = "PromptViewModelContextBuilderPinTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = GlobalSettingsStore(
+            defaults: defaults,
+            fileStore: GlobalSettingsFileStore(fileURL: root.appendingPathComponent("globalSettings.json"))
+        )
+        let cursorAgentRaw = AgentProviderKind.cursor.rawValue
+        store.setGlobalAgentModelsProfile(
+            AgentModelsSettingsProfile(
+                contextBuilderAgentRaw: cursorAgentRaw,
+                contextBuilderModelsByAgent: [cursorAgentRaw: "grok-4.6"]
+            ),
+            contextBuilderWriteIntent: .userInitiated
+        )
+
+        let keyManager = KeyManager(
+            secureService: SecureKeysService(secureStorage: TestSecureStorageBackend())
+        )
+        let aiQueriesService = AIQueriesService(keyManager: keyManager)
+        let apiSettings = APISettingsViewModel(
+            aiQueriesService: aiQueriesService,
+            keyManager: keyManager,
+            loadStoredDataOnInit: false
+        )
+        apiSettings.isCursorConnected = true
+        apiSettings.test_completeContextBuilderProviderValidation(verifiedProviders: [.cursor])
+
+        let prompt = PromptViewModel(
+            fileManager: WorkspaceFilesViewModel(),
+            aiQueriesService: aiQueriesService,
+            apiSettingsViewModel: apiSettings,
+            windowID: -1009,
+            settingsManager: store
+        )
+        XCTAssertEqual(prompt.contextBuilderAgent, .cursor)
+        XCTAssertEqual(prompt.contextBuilderAgentModelRaw, "grok-4.6")
+
+        var newerProfile = store.globalAgentModelsProfile()
+        newerProfile = newerProfile.replacingContextBuilderModel("composer-2.5", for: cursorAgentRaw)
+        store.setGlobalAgentModelsProfile(
+            newerProfile,
+            contextBuilderWriteIntent: .userInitiated
+        )
+        XCTAssertEqual(prompt.contextBuilderAgentModelRaw, "grok-4.6", "precondition: published cache remains stale")
+
+        prompt.setContextBuilderModelParameter(
+            [cursorEffortSelection(valueRaw: "high")],
+            expectedProviderID: .cursor,
+            expectedModelRaw: "grok-4.6",
+            expectedScope: .global
+        )
+
+        let finalProfile = store.globalAgentModelsProfile()
+        XCTAssertEqual(finalProfile.contextBuilderModelsByAgent?[cursorAgentRaw], "composer-2.5")
+        XCTAssertNil(finalProfile.contextBuilderModelParametersByAgent?[cursorAgentRaw])
+    }
+
+    private func cursorEffortSelection(valueRaw: String) -> ACPModelParameterSelection {
+        ACPModelParameterSelection(
+            providerID: .cursor,
+            baseModelRaw: "grok-4.6",
+            kind: .thinking,
+            configID: "effort",
+            valueRaw: valueRaw
+        )
     }
 
     private func makeViewModel(workspacePath: String? = nil) -> AgentModeViewModel {

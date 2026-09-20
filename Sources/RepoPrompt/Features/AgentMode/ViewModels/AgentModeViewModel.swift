@@ -1355,7 +1355,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
               let session = activeSession,
               !session.runState.isActive,
               !isMCPControlled(tabID: session.tabID),
-              let parameterSet = ACPModelParameterResolver.cursorParameterSet(selectedModelRaw: selectedModelRaw)
+              let parameterSet = ACPModelParameterResolver.parameterSet(
+                  providerID: .cursor,
+                  selectedModelRaw: selectedModelRaw
+              )
         else { return }
         guard let definition = parameterSet.definition(configID: configID),
               let choice = definition.choice(matching: valueRaw)

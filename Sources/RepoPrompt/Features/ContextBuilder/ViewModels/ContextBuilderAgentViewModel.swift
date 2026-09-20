@@ -1712,6 +1712,98 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         updateDynamicModelPolling(startCursorPolling: false)
     }
 
+    /// The scope a Context Builder pin write lands in. Surfaces capture this at render time and
+    /// hand it back, so a menu opened against one scope cannot write into another after an
+    /// inheritance change — provider/model can stay identical across that switch, because a new
+    /// workspace override profile starts as a copy of the global one.
+    var contextBuilderEditingScope: AgentModelsEditingScope {
+        if let workspaceID = currentWorkspaceID,
+           settingsManager.workspaceAgentModelsSettings(for: workspaceID).inheritanceMode == .useWorkspaceOverrides
+        {
+            .workspace(workspaceID)
+        } else {
+            .global
+        }
+    }
+
+    /// Set or clear the Context Builder agent's ACP parameter pin, persisting the displayed
+    /// agent+model choice atomically so the pin stays eligible. Resolve the write target from the
+    /// current settings authority rather than the cached `@Published` selection. Cross-surface
+    /// notifications arrive on a later runloop turn, so the
+    /// cache can still describe the menu's old model when another surface has already committed a
+    /// newer one. Re-running the normal display resolution also preserves intentional availability
+    /// fallback pinning instead of comparing directly against the persisted raw value.
+    func setContextBuilderModelParameter(
+        _ selections: [ACPModelParameterSelection]?,
+        expectedProviderID: ACPProviderID,
+        expectedModelRaw: String,
+        expectedScope: AgentModelsEditingScope
+    ) {
+        let scope = contextBuilderEditingScope
+        guard scope == expectedScope,
+              let liveSelection = Self.contextBuilderPinWriteSelection(
+                  resolvedPersistedContextBuilderSelection(),
+                  expectedProviderID: expectedProviderID,
+                  expectedModelRaw: expectedModelRaw
+              )
+        else { return }
+        settingsManager.setAgentModelsContextBuilderModelParameter(
+            selections,
+            agentRaw: liveSelection.agent.rawValue,
+            modelRaw: liveSelection.modelRaw,
+            scope: scope
+        )
+    }
+
+    private static func contextBuilderPinWriteSelection(
+        _ liveSelection: AgentModelCatalog.NormalizedAgentSelection?,
+        expectedProviderID: ACPProviderID,
+        expectedModelRaw: String
+    ) -> AgentModelCatalog.NormalizedAgentSelection? {
+        guard let liveSelection,
+              let liveProviderID = liveSelection.agent.acpProviderID,
+              liveProviderID == expectedProviderID,
+              ACPModelParameterIdentity.canonicalBaseModelRaw(
+                  liveSelection.modelRaw,
+                  providerID: liveProviderID
+              ) == ACPModelParameterIdentity.canonicalBaseModelRaw(
+                  expectedModelRaw,
+                  providerID: liveProviderID
+              )
+        else { return nil }
+        return liveSelection
+    }
+
+    #if DEBUG
+        static func test_contextBuilderPinWriteSelection(
+            liveAgent: AgentProviderKind,
+            liveModelRaw: String,
+            expectedProviderID: ACPProviderID,
+            expectedModelRaw: String
+        ) -> AgentModelCatalog.NormalizedAgentSelection? {
+            contextBuilderPinWriteSelection(
+                .init(agent: liveAgent, modelRaw: liveModelRaw),
+                expectedProviderID: expectedProviderID,
+                expectedModelRaw: expectedModelRaw
+            )
+        }
+    #endif
+
+    /// The saved `.thinking` pin value for the current Context Builder selection, if any. The
+    /// chip's saved-state input.
+    var contextBuilderThinkingParameterValueRaw: String? {
+        contextBuilderModelParameters.last { $0.kind == .thinking }?.valueRaw
+    }
+
+    /// The saved OpenCode effort pin for the **displayed** Context Builder selection. Display
+    /// and probe must agree with the model the chip is mounted for (`selectedModelRaw`), which
+    /// availability fallback can make differ from the persisted choice without writing back.
+    var contextBuilderModelParameters: [ACPModelParameterSelection] {
+        settingsManager
+            .effectiveAgentModelsProfile(workspaceID: currentWorkspaceID)
+            .contextBuilderModelParameterSelections(for: selectedAgent, modelRaw: selectedModelRaw)
+    }
+
     /// Update the effective Agent Models profile's Context Builder selection.
     private func persistAgentModelToEffectiveProfile() {
         guard !isRestoringState else { return }
