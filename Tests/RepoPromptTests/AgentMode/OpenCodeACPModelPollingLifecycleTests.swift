@@ -90,13 +90,29 @@ final class OpenCodeACPModelPollingLifecycleTests: XCTestCase {
         let state = await client.waitFor { $0.completions == 1 }
         XCTAssertEqual(state.arrivals, 1)
 
+        // Client-side completion is not job completion: `finishJob` (which drops the unowned
+        // outcome, clears the in-flight entry, and releases the single slot) is a further actor
+        // hop that can lag under load. A same-key one-shot registered before it lands legally
+        // joins the old in-flight job — the documented coalescing policy — and receives its
+        // outcome without a new probe, starving the fresh-probe wait below at any guard length.
+        // The canary probe on another key is the deterministic barrier: the FIFO runner starts
+        // it only after `finishJob` for m1 released the slot, and its completion leaves the
+        // service idle, so the m1 one-shot below provably starts a fresh probe.
+        let canary = Task {
+            try await service.discoverModelParametersOnce(workspacePath: "/ws", modelRaw: "canary")
+        }
+        _ = await client.waitFor { $0.calls.contains { $0.modelRaw == "canary" } }
+        let canaryOutcome = await awaitOutcome(canary)
+        guard case let .snapshot(canarySnapshot) = canaryOutcome, case .available = canarySnapshot.state else {
+            return XCTFail("Canary probe must complete to prove the slot was released, got \(canaryOutcome)")
+        }
+
         // Nothing was retained for the unowned key: a fresh one-shot starts a new probe
         // instead of receiving a stale outcome.
         let second = Task {
             try await service.discoverModelParametersOnce(workspacePath: "/ws", modelRaw: "m1")
         }
-        _ = await client.waitFor { $0.arrivals == 2 }
-        await client.release()
+        _ = await client.waitFor { $0.calls.count(where: { $0.modelRaw == "m1" }) == 2 }
         let secondOutcome = await awaitOutcome(second)
         guard case let .snapshot(snapshot) = secondOutcome, case .available = snapshot.state else {
             return XCTFail("Expected a fresh .available observation, got \(secondOutcome)")
@@ -182,13 +198,24 @@ final class OpenCodeACPModelPollingLifecycleTests: XCTestCase {
         let state = await client.waitFor { $0.completions == 1 }
         XCTAssertEqual(state.arrivals, 1)
 
+        // Same finishJob-vs-registration race as the registration-cancellation test above:
+        // the canary probe proves the slot was released and the service is idle before the
+        // same-key one-shot below, so its fresh probe is deterministic.
+        let canary = Task {
+            try await service.discoverModelParametersOnce(workspacePath: "/ws", modelRaw: "canary")
+        }
+        _ = await client.waitFor { $0.calls.contains { $0.modelRaw == "canary" } }
+        let canaryOutcome = await awaitOutcome(canary)
+        guard case let .snapshot(canarySnapshot) = canaryOutcome, case .available = canarySnapshot.state else {
+            return XCTFail("Canary probe must complete to prove the slot was released, got \(canaryOutcome)")
+        }
+
         // The dropped outcome was not retained: a new owner gets a fresh probe, not the
         // evicted observation's result.
         let second = Task {
             try await service.discoverModelParametersOnce(workspacePath: "/ws", modelRaw: "m1")
         }
-        _ = await client.waitFor { $0.arrivals == 2 }
-        await client.release()
+        _ = await client.waitFor { $0.calls.count(where: { $0.modelRaw == "m1" }) == 2 }
         let secondOutcome = await awaitOutcome(second)
         guard case let .snapshot(snapshot) = secondOutcome, case .available = snapshot.state else {
             return XCTFail("Expected a fresh probe result, got \(secondOutcome)")
@@ -429,15 +456,21 @@ final class OpenCodeACPModelPollingLifecycleTests: XCTestCase {
     func testStalledDiscoveryJobTimesOutAndReleasesSlot() async {
         let client = GatedDiscoveryClient()
         await client.setOutcome(.stall)
-        let service = makeService(client: client, deadlineNanos: 150_000_000)
+        // 500 ms keeps the bounded-deadline semantics small while leaving the loaded
+        // scheduler room to advance the stalled job's post-deadline reap and the queued
+        // job's first hop; 150 ms proved runnable past under adjacent-suite load.
+        let service = makeService(client: client, deadlineNanos: 500_000_000)
 
         let stalled = Task {
             try await service.discoverModelParametersOnce(workspacePath: "/ws", modelRaw: "m1")
         }
+        // The stalled call must be the one holding the single slot before the queued task
+        // even exists; creating both tasks up front let the queued task's body reach the
+        // actor first under load, inverting every subsequent role assumption.
+        _ = await client.waitFor { $0.calls.contains { $0.modelRaw == "m1" } }
         let queued = Task {
             try await service.discoverModelParametersOnce(workspacePath: "/ws", modelRaw: "m2")
         }
-        _ = await client.waitFor { $0.arrivals == 1 }
         await yieldTimes(50) // the queued waiter registers behind the stalled job
 
         let stalledOutcome = await awaitOutcome(stalled)
@@ -445,6 +478,11 @@ final class OpenCodeACPModelPollingLifecycleTests: XCTestCase {
             return XCTFail("A stalled job must settle its owners .failed by value, got \(stalledOutcome)")
         }
 
+        // Flip the script and open the gate before observing the queued arrival: the queued
+        // job's own deadline is already running once the slot reaches it, so its held call
+        // must find the succeed-and-release state the moment it arrives.
+        await client.setOutcome(.succeed)
+        await client.release()
         let state = await client.waitFor { $0.arrivals == 2 }
         XCTAssertEqual(state.cleanups, 1, "the stalled client call must be cancelled and reaped")
         guard
@@ -458,8 +496,6 @@ final class OpenCodeACPModelPollingLifecycleTests: XCTestCase {
         XCTAssertLessThan(cleanupFirst, arriveSecond, "the slot is released only after client cleanup")
 
         // The queued job proceeds normally once the slot is free.
-        await client.setOutcome(.succeed)
-        await client.release()
         let queuedOutcome = await awaitOutcome(queued)
         guard case let .snapshot(queuedSnapshot) = queuedOutcome, case .available = queuedSnapshot.state else {
             return XCTFail("The next queued job must run after the deadline, got \(queuedOutcome)")
@@ -609,10 +645,13 @@ private actor GatedDiscoveryClient: OpenCodeACPModelDiscoveryClient {
     }
 
     /// Bounded condition wait: polls observable state until the condition holds, failing
-    /// loudly at the deadline instead of hanging the suite.
+    /// loudly at the deadline instead of hanging the suite. The 10 s deadline is deliberately
+    /// generous: the gated chain it observes spans several actor hops, and under CI-scale
+    /// scheduler contention those hops can stall for seconds while still making progress;
+    /// a real deadlock still fails the suite loudly instead of hanging it.
     func waitFor(
         _ condition: @Sendable (State) -> Bool,
-        timeoutNanos: UInt64 = 2_000_000_000,
+        timeoutNanos: UInt64 = 10_000_000_000,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async -> State {
