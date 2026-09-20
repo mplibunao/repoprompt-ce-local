@@ -14,6 +14,26 @@ import MCP
 /// 1. **Task label**: `explore`, `engineer`, `pair`, `design` — auto-picks the effective role default
 /// 2. **Compound ID**: `claudeCode:sonnet`, `codexExec:gpt-5.4-high` — explicit selection
 enum AgentMCPSelectionResolver {
+    #if DEBUG
+        /// DEBUG-only isolation for role-pin capture and delivery tests. When set, role-defaults
+        /// resolution reads this store instead of the shared on-disk `GlobalSettingsStore`, so
+        /// tests can stage role pins without writing Agent Models profiles to the user's real
+        /// settings file. Unset — which is every production build — resolves exactly as before.
+        @MainActor
+        static var testRoleDefaultsStore: (any MCPAgentRoleDefaultsStoring)?
+    #endif
+
+    /// The role-defaults store role resolution reads. Production always passes `nil`, which makes
+    /// `MCPAgentRoleDefaultsService` fall back to `GlobalSettingsStore.shared`.
+    @MainActor
+    private static func roleDefaultsStoreForResolution() -> (any MCPAgentRoleDefaultsStoring)? {
+        #if DEBUG
+            testRoleDefaultsStore
+        #else
+            nil
+        #endif
+    }
+
     typealias RoleSelectionProvider = @MainActor (
         _ role: AgentModelCatalog.TaskLabelKind,
         _ availability: AgentModelCatalog.AvailabilityContext
@@ -25,6 +45,17 @@ enum AgentMCPSelectionResolver {
         /// The resolved task label kind, if the selection was role-driven.
         /// `nil` when the model_id was a compound ID or no role was involved.
         let taskLabelKind: AgentModelCatalog.TaskLabelKind?
+        /// The role's stored model-parameter pin (e.g. an OpenCode effort level) captured *with*
+        /// the role resolution, so a caller inherits a baseline without re-reading the profile
+        /// after awaited setup. Empty for compound IDs and non-role selections.
+        ///
+        /// ⚠️ Every launch path that consumes a `ResolvedSelection` must also deliver this to the
+        /// session before the run starts — via `mcpStageModelParameterSelections` (`agent_run`
+        /// start, `agent_explore` start) or `mcpConfigureSession`/`mcpApplyModelParameterSelections`
+        /// (`agent_manage` create/resume). Resolving it and forwarding only agent/model silently
+        /// drops the user's choice and runs at the provider default; `agent_explore` shipped that
+        /// bug. Capture it with the resolution — never re-read role settings after awaited setup.
+        let modelParameterSelections: [ACPModelParameterSelection]
     }
 
     /// Resolves a `model_id` string into agent + model components.
@@ -49,9 +80,14 @@ enum AgentMCPSelectionResolver {
             if let defaultKind = defaultTaskLabel,
                let resolved = resolveRoleSelection(defaultKind, availability: availability, workspaceID: workspaceID, roleSelectionProvider: roleSelectionProvider)
             {
-                return ResolvedSelection(agentRaw: resolved.agent.rawValue, modelRaw: resolved.modelRaw, taskLabelKind: defaultKind)
+                return ResolvedSelection(
+                    agentRaw: resolved.selection.agent.rawValue,
+                    modelRaw: resolved.selection.modelRaw,
+                    taskLabelKind: defaultKind,
+                    modelParameterSelections: resolved.modelParameters
+                )
             }
-            return ResolvedSelection(agentRaw: nil, modelRaw: nil, taskLabelKind: nil)
+            return ResolvedSelection(agentRaw: nil, modelRaw: nil, taskLabelKind: nil, modelParameterSelections: [])
         }
 
         // Try task label first (no colon = not a compound ID)
@@ -61,7 +97,12 @@ enum AgentMCPSelectionResolver {
                 guard let resolved = resolveRoleSelection(entry.kind, availability: availability, workspaceID: workspaceID, roleSelectionProvider: roleSelectionProvider) else {
                     throw MCPError.invalidParams("No available agent/model for task label '\(trimmed)'.")
                 }
-                return ResolvedSelection(agentRaw: resolved.agent.rawValue, modelRaw: resolved.modelRaw, taskLabelKind: entry.kind)
+                return ResolvedSelection(
+                    agentRaw: resolved.selection.agent.rawValue,
+                    modelRaw: resolved.selection.modelRaw,
+                    taskLabelKind: entry.kind,
+                    modelParameterSelections: resolved.modelParameters
+                )
             }
             let knownLabels = AgentModelCatalog.taskLabels.map(\.label).joined(separator: ", ")
             throw MCPError.invalidParams(
@@ -97,7 +138,12 @@ enum AgentMCPSelectionResolver {
             }
         }
 
-        return ResolvedSelection(agentRaw: parsed.agentRaw, modelRaw: parsed.modelRaw, taskLabelKind: nil)
+        return ResolvedSelection(
+            agentRaw: parsed.agentRaw,
+            modelRaw: parsed.modelRaw,
+            taskLabelKind: nil,
+            modelParameterSelections: []
+        )
     }
 
     @MainActor
@@ -106,13 +152,21 @@ enum AgentMCPSelectionResolver {
         availability: AgentModelCatalog.AvailabilityContext,
         workspaceID: UUID?,
         roleSelectionProvider: RoleSelectionProvider?
-    ) -> AgentModelCatalog.NormalizedAgentSelection? {
+    ) -> (selection: AgentModelCatalog.NormalizedAgentSelection, modelParameters: [ACPModelParameterSelection])? {
         if let provided = roleSelectionProvider?(role, availability) {
-            return provided
+            return (provided, [])
         }
-        if let effective = MCPAgentRoleDefaultsService.effectiveNormalizedSelection(for: role, availability: availability, workspaceID: workspaceID) {
-            return effective
+        if let resolution = MCPAgentRoleDefaultsService.effectiveSelection(
+            for: role,
+            availability: availability,
+            workspaceID: workspaceID,
+            settingsStore: roleDefaultsStoreForResolution()
+        ) {
+            return (resolution.effective, resolution.modelParameters)
         }
-        return AgentModelCatalog.resolveTaskLabelKind(role, availability: availability)
+        guard let fallback = AgentModelCatalog.resolveTaskLabelKind(role, availability: availability) else {
+            return nil
+        }
+        return (fallback, [])
     }
 }

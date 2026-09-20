@@ -487,7 +487,7 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
         let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
         GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
         defer { GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false) }
-        return WindowState(contextBuilderProviderFactory: { _, _, _ in
+        return WindowState(contextBuilderProviderFactory: { _, _, _, _ in
             UnsupportedHeadlessAgentProvider(reason: "Unused by synthetic lifecycle tests")
         })
     }
@@ -583,7 +583,7 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
     func testSecondTabIsRefusedUntilFirstRunCompletes() async throws {
         let gate = ContextBuilderTestGate()
         var providers: [GatedHeadlessAgentProvider] = []
-        let (window, tabIDs) = await makeWindow { _, _, _ in
+        let (window, tabIDs) = await makeWindow { _, _, _, _ in
             let provider = GatedHeadlessAgentProvider(streamGate: gate)
             providers.append(provider)
             return provider
@@ -620,7 +620,7 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
 
     func testFailureBeforeProviderCreationReleasesAdmission() async throws {
         var providerCount = 0
-        let (window, tabIDs) = await makeWindow { _, _, _ in
+        let (window, tabIDs) = await makeWindow { _, _, _, _ in
             providerCount += 1
             return GatedHeadlessAgentProvider()
         }
@@ -640,9 +640,43 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         viewModel.clearMCPControlledRun(forTabID: tabIDs[0], controlToken: token)
     }
 
+    /// The frozen model-parameter selections admitted with the run reach the provider factory
+    /// unchanged, and each run carries only its own admitted selections — a second run with
+    /// different authority selections proves nothing stale is reused across runs.
+    func testAdmittedModelParameterSelectionsReachProviderFactoryUnchanged() async throws {
+        let highPin = ACPModelParameterSelection(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking,
+            configID: "effort",
+            valueRaw: "high"
+        )
+        let lowPin = ACPModelParameterSelection(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking,
+            configID: "effort",
+            valueRaw: "low"
+        )
+        var receivedSelections: [[ACPModelParameterSelection]] = []
+        let (window, tabIDs) = await makeWindow { _, _, _, modelParameterSelections in
+            receivedSelections.append(modelParameterSelections)
+            return GatedHeadlessAgentProvider()
+        }
+        addTeardownBlock { @MainActor in
+            _ = await window.mcpServer.setWindowToolsEnabled(false)
+        }
+
+        _ = try await runMCP(window, tabID: tabIDs[0], modelParameterSelections: [highPin])
+        _ = try await runMCP(window, tabID: tabIDs[1], modelParameterSelections: [lowPin])
+
+        XCTAssertEqual(receivedSelections, [[highPin], [lowPin]])
+    }
+
     private func runMCP(
         _ window: WindowState,
-        tabID: UUID
+        tabID: UUID,
+        modelParameterSelections: [ACPModelParameterSelection] = []
     ) async throws -> ContextBuilderAgentViewModel.MCPContextBuilderRunCompletion {
         let viewModel = window.contextBuilderAgentViewModel
         let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
@@ -683,7 +717,8 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
                 authority: ContextBuilderResolvedRunAuthority(
                     configuration: configuration,
                     agentKind: .claudeCode,
-                    modelRaw: AgentModel.defaultModel.rawValue
+                    modelRaw: AgentModel.defaultModel.rawValue,
+                    modelParameterSelections: modelParameterSelections
                 ),
                 mcpControlToken: token
             )

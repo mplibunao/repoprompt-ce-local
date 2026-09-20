@@ -368,112 +368,6 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         XCTAssertTrue(ContextBuilderAgentViewModel.test_shouldAdoptDiscoveredPreferredModel(for: .openCode))
     }
 
-    func testActiveCursorRunLocksParameterControlsAndRejectsDefensiveSelection() {
-        AgentACPModelRegistry.shared.test_reset(providerID: .cursor)
-        defer { AgentACPModelRegistry.shared.test_reset(providerID: .cursor) }
-        let viewModel = makeViewModel()
-        let tabID = UUID()
-        viewModel.test_setCurrentTabIDOverride(tabID)
-        defer { viewModel.test_setCurrentTabIDOverride(nil) }
-
-        let session = AgentModeViewModel.TabSession(tabID: tabID)
-        session.hasLoadedPersistedState = true
-        session.selectedAgent = .cursor
-        session.selectedModelRaw = "grok-4.6"
-        session.runState = .running
-        viewModel.test_installLiveSession(session)
-        viewModel.applySessionToBindings(session)
-
-        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).areModelControlsDisabled)
-        viewModel.selectCursorModelParameter(configID: "effort", valueRaw: "high")
-        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
-
-        session.runState = .idle
-        viewModel.updateBindingsFromSession(session)
-        XCTAssertFalse(viewModel.makeComposerProps(tabID: tabID).areModelControlsDisabled)
-        session.isDirty = false
-        let previousGeneration = session.persistenceMutationGeneration
-        viewModel.selectCursorModelParameter(configID: "effort", valueRaw: "high")
-        XCTAssertEqual(session.acpModelParameterSelections.map(\.valueRaw), ["high"])
-
-        XCTAssertTrue(session.isDirty)
-        XCTAssertGreaterThan(session.persistenceMutationGeneration, previousGeneration)
-
-        viewModel.test_setMCPControlledTabIDs([tabID])
-        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).areModelControlsDisabled)
-        viewModel.selectCursorModelParameter(configID: "fast", valueRaw: "true")
-        XCTAssertEqual(session.acpModelParameterSelections.map(\.valueRaw), ["high"])
-    }
-
-    func testCompactParameterControlExposesAccessibleNameAndSelection() {
-        let control = AgentComposerModelParameterControlProps(
-            kind: .thinking,
-            baseModelRaw: "grok-4.6",
-            configID: "thought_level",
-            displayName: "Effort",
-            selectedValueRaw: "high",
-            selectedDisplayName: "High",
-            choices: [
-                .init(rawValue: "medium", displayName: "Medium"),
-                .init(rawValue: "high", displayName: "High")
-            ]
-        )
-
-        XCTAssertEqual(control.accessibilityLabel, "Effort")
-        XCTAssertEqual(control.accessibilityValue, "High")
-    }
-
-    func testSelectingKnownCursorModelPublishesLocalControlsSynchronously() {
-        let viewModel = makeViewModel(workspacePath: "/workspace-a")
-        let tabID = UUID()
-        viewModel.test_setCurrentTabIDOverride(tabID)
-        defer { viewModel.test_setCurrentTabIDOverride(nil) }
-
-        let session = AgentModeViewModel.TabSession(tabID: tabID)
-        session.hasLoadedPersistedState = true
-        session.selectedAgent = .cursor
-        session.selectedModelRaw = "grok-4.6"
-        viewModel.test_installLiveSession(session)
-        viewModel.applySessionToBindings(session)
-
-        let controls = viewModel.makeComposerProps(tabID: tabID).cursorModelParameterControls
-        XCTAssertEqual(controls.map(\.displayName), ["Effort", "Speed"])
-        XCTAssertEqual(controls.map(\.selectedDisplayName), ["High", "Fast"])
-    }
-
-    func testSwitchingKnownCursorModelsImmediatelyReplacesControls() {
-        let viewModel = makeViewModel(workspacePath: "/workspace-a")
-        let tabID = UUID()
-        viewModel.test_setCurrentTabIDOverride(tabID)
-        defer { viewModel.test_setCurrentTabIDOverride(nil) }
-
-        let session = AgentModeViewModel.TabSession(tabID: tabID)
-        session.hasLoadedPersistedState = true
-        session.selectedAgent = .cursor
-        session.selectedModelRaw = "grok-4.6"
-        viewModel.test_installLiveSession(session)
-        viewModel.applySessionToBindings(session)
-        XCTAssertEqual(
-            viewModel.makeComposerProps(tabID: tabID).cursorModelParameterControls.map(\.displayName),
-            ["Effort", "Speed"]
-        )
-
-        session.selectedModelRaw = "composer-2.5"
-        viewModel.applySessionToBindings(session)
-        XCTAssertEqual(
-            viewModel.makeComposerProps(tabID: tabID).cursorModelParameterControls.map(\.displayName),
-            ["Speed"]
-        )
-    }
-
-    func testUnknownCursorModelHasNoControls() {
-        XCTAssertTrue(ACPModelParameterResolver.resolve(
-            providerID: .cursor,
-            selectedModelRaw: "future-cursor-model",
-            persistedSelections: []
-        ).isEmpty)
-    }
-
     func testContextBuilderPinTargetRejectsStaleCrossSurfaceModelSelection() {
         XCTAssertNil(ContextBuilderAgentViewModel.test_contextBuilderPinWriteSelection(
             liveAgent: .cursor,
@@ -557,6 +451,1261 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         XCTAssertNil(finalProfile.contextBuilderModelParametersByAgent?[cursorAgentRaw])
     }
 
+    func testActiveCursorRunLocksParameterControlsAndRejectsDefensiveSelection() {
+        AgentACPModelRegistry.shared.test_reset(providerID: .cursor)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .cursor) }
+        let viewModel = makeViewModel()
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .cursor
+        session.selectedModelRaw = "grok-4.6"
+        session.runState = .running
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).areModelControlsDisabled)
+        viewModel.selectACPModelParameter(cursorEffortSelection(valueRaw: "high"))
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+
+        session.runState = .idle
+        viewModel.updateBindingsFromSession(session)
+        XCTAssertFalse(viewModel.makeComposerProps(tabID: tabID).areModelControlsDisabled)
+        session.isDirty = false
+        let previousGeneration = session.persistenceMutationGeneration
+        viewModel.selectACPModelParameter(cursorEffortSelection(valueRaw: "high"))
+        XCTAssertEqual(session.acpModelParameterSelections.map(\.valueRaw), ["high"])
+
+        XCTAssertTrue(session.isDirty)
+        XCTAssertGreaterThan(session.persistenceMutationGeneration, previousGeneration)
+
+        viewModel.test_setMCPControlledTabIDs([tabID])
+        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).areModelControlsDisabled)
+        viewModel.selectACPModelParameter(cursorSpeedSelection(valueRaw: "true"))
+        XCTAssertEqual(session.acpModelParameterSelections.map(\.valueRaw), ["high"])
+    }
+
+    func testCompactParameterControlExposesAccessibleNameAndSelection() {
+        let control = AgentComposerModelParameterControlProps(
+            providerID: .cursor,
+            kind: .thinking,
+            baseModelRaw: "grok-4.6",
+            configID: "thought_level",
+            displayName: "Effort",
+            selectedValueRaw: "high",
+            selectedDisplayName: "High",
+            choices: [
+                .init(rawValue: "medium", displayName: "Medium"),
+                .init(rawValue: "high", displayName: "High")
+            ],
+            openCodeDiscoveryKey: nil,
+            hasLiveDefinition: true
+        )
+
+        XCTAssertEqual(control.accessibilityLabel, "Effort")
+        XCTAssertEqual(control.accessibilityValue, "High")
+    }
+
+    func testSelectingKnownCursorModelPublishesLocalControlsSynchronously() {
+        let viewModel = makeViewModel(workspacePath: "/workspace-a")
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .cursor
+        session.selectedModelRaw = "grok-4.6"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        let controls = viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls
+        XCTAssertEqual(controls.map(\.displayName), ["Effort", "Speed"])
+        XCTAssertEqual(controls.map(\.selectedDisplayName), ["High", "Fast"])
+    }
+
+    func testSwitchingKnownCursorModelsImmediatelyReplacesControls() {
+        let viewModel = makeViewModel(workspacePath: "/workspace-a")
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .cursor
+        session.selectedModelRaw = "grok-4.6"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        XCTAssertEqual(
+            viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.map(\.displayName),
+            ["Effort", "Speed"]
+        )
+
+        session.selectedModelRaw = "composer-2.5"
+        viewModel.applySessionToBindings(session)
+        XCTAssertEqual(
+            viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.map(\.displayName),
+            ["Speed"]
+        )
+    }
+
+    func testNonACPComposerHasNoParameterControls() {
+        let viewModel = makeViewModel()
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .codexExec
+        session.selectedModelRaw = "gpt-5"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty)
+    }
+
+    func testOpenCodeComposerPublishesEffortControlWhenMetadataExists() {
+        let workspacePath = "/workspace-a"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        installOpenCodeObservation(viewModel, workspacePath: workspacePath)
+
+        let controls = viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls
+        XCTAssertEqual(controls.map(\.displayName), ["Effort"])
+        XCTAssertEqual(controls.map(\.selectedDisplayName), ["Low"])
+    }
+
+    func testComposerShowsUnsupportedOpenCodeIntentWithoutChangingCursorFallback() throws {
+        for agent: AgentProviderKind in [.openCode, .cursor] {
+            let workspacePath = "/workspace-a"
+            let viewModel = makeViewModel(workspacePath: workspacePath)
+            let tabID = UUID()
+            viewModel.test_setCurrentTabIDOverride(tabID)
+            defer { viewModel.test_setCurrentTabIDOverride(nil) }
+            let session = AgentModeViewModel.TabSession(tabID: tabID)
+            session.hasLoadedPersistedState = true
+            session.selectedAgent = agent
+            session.selectedModelRaw = agent == .openCode ? "ollama-cloud/kimi-k3" : "grok-4.6"
+            viewModel.test_installLiveSession(session)
+            viewModel.applySessionToBindings(session)
+            if agent == .openCode {
+                installOpenCodeObservation(viewModel, workspacePath: workspacePath)
+            }
+            let providerID = try XCTUnwrap(agent.acpProviderID)
+            let defaultControl = try XCTUnwrap(viewModel.makeComposerProps().acpModelParameterControls.first)
+            XCTAssertFalse(defaultControl.isSavedValueUnavailable)
+            XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+
+            let saved = ACPModelParameterSelection(
+                providerID: providerID,
+                baseModelRaw: session.selectedModelRaw,
+                kind: .thinking,
+                configID: "effort",
+                valueRaw: "retired-effort"
+            )
+            session.acpModelParameterSelections = [saved]
+            let control = try XCTUnwrap(viewModel.makeComposerProps().acpModelParameterControls.first)
+            XCTAssertEqual(control.selectedValueRaw, agent == .openCode ? saved.valueRaw : defaultControl.selectedValueRaw)
+            XCTAssertEqual(control.selectedDisplayName, agent == .openCode ? saved.valueRaw : defaultControl.selectedDisplayName)
+            XCTAssertEqual(control.isSavedValueUnavailable, agent == .openCode)
+            XCTAssertEqual(control.choices, defaultControl.choices)
+            if agent == .openCode {
+                XCTAssertTrue(control.tooltip.contains(saved.valueRaw))
+                XCTAssertEqual(control.accessibilityValue, "retired-effort, unavailable")
+            } else {
+                XCTAssertEqual(control.tooltip, defaultControl.tooltip)
+                XCTAssertEqual(control.accessibilityValue, defaultControl.accessibilityValue)
+            }
+            XCTAssertEqual(ACPModelParameterResolver.effectiveSelections(
+                providerID: providerID,
+                selectedModelRaw: session.selectedModelRaw,
+                persistedSelections: session.acpModelParameterSelections
+            ), [saved])
+        }
+    }
+
+    func testOpenCodeComposerHasNoControlsWhenMetadataMissing() {
+        let viewModel = makeViewModel(workspacePath: "/workspace-a")
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "anthropic/claude-sonnet"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty)
+    }
+
+    func testSelectingDisplayedFallbackCreatesExplicitOpenCodeIntent() {
+        let workspacePath = "/workspace-a"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+
+        installOpenCodeObservation(viewModel, workspacePath: workspacePath)
+        let discoveryKey = viewModel.makeComposerProps(tabID: tabID)
+            .acpModelParameterControls.first?.openCodeDiscoveryKey
+        XCTAssertNotNil(discoveryKey)
+
+        viewModel.selectACPModelParameter(
+            ACPModelParameterSelection(
+                providerID: .openCode,
+                baseModelRaw: "ollama-cloud/kimi-k3",
+                kind: .thinking,
+                configID: "effort",
+                valueRaw: "low"
+            ),
+            openCodeDiscoveryKey: discoveryKey
+        )
+
+        XCTAssertEqual(session.acpModelParameterSelections.map(\.valueRaw), ["low"])
+        XCTAssertEqual(
+            ACPModelParameterResolver.effectiveSelections(
+                providerID: .openCode,
+                selectedModelRaw: session.selectedModelRaw,
+                persistedSelections: session.acpModelParameterSelections
+            ).map(\.valueRaw),
+            ["low"]
+        )
+    }
+
+    func testStaleModelParameterSelectionIsRejected() {
+        let workspacePath = "/workspace-a"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        installOpenCodeObservation(viewModel, workspacePath: workspacePath)
+        let discoveryKey = viewModel.makeComposerProps(tabID: tabID)
+            .acpModelParameterControls.first?.openCodeDiscoveryKey
+
+        // The selection targets a different model than the observation authority, so it must be
+        // rejected rather than retargeted to the observed model.
+        viewModel.selectACPModelParameter(
+            ACPModelParameterSelection(
+                providerID: .openCode,
+                baseModelRaw: "anthropic/claude-sonnet",
+                kind: .thinking,
+                configID: "effort",
+                valueRaw: "high"
+            ),
+            openCodeDiscoveryKey: discoveryKey
+        )
+
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+    }
+
+    func testOpenCodeParameterActionWithoutDiscoveryKeyIsRejected() {
+        let workspacePath = "/workspace-a"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        installOpenCodeObservation(viewModel, workspacePath: workspacePath)
+
+        // A click with no key (or a key that does not match the held observation) never creates
+        // intent: metadata arrival alone is not a selection, and a stale menu cannot retarget.
+        viewModel.selectACPModelParameter(
+            ACPModelParameterSelection(
+                providerID: .openCode,
+                baseModelRaw: "ollama-cloud/kimi-k3",
+                kind: .thinking,
+                configID: "effort",
+                valueRaw: "high"
+            ),
+            openCodeDiscoveryKey: nil
+        )
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+
+        let mismatchedKey = OpenCodeACPModelParameterKey(
+            workspacePath: "/other-workspace",
+            modelRaw: "ollama-cloud/kimi-k3"
+        )
+        viewModel.selectACPModelParameter(
+            ACPModelParameterSelection(
+                providerID: .openCode,
+                baseModelRaw: "ollama-cloud/kimi-k3",
+                kind: .thinking,
+                configID: "effort",
+                valueRaw: "high"
+            ),
+            openCodeDiscoveryKey: mismatchedKey
+        )
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+    }
+
+    /// A held `.available` observation with a legitimately NIL-workspace key renders, matching
+    /// the setter's whole-key comparison (a successfully resolved nil-workspace key is valid).
+    func testOpenCodeNilWorkspaceKeyObservationStillRenders() {
+        let viewModel = makeViewModel(workspacePath: nil)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        installOpenCodeObservation(viewModel, workspacePath: nil)
+
+        XCTAssertFalse(viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty)
+    }
+
+    /// Regression: the projection must not collapse "authority resolution failed" (no key)
+    /// into "resolved nil-workspace key" via optional chaining. A broken worktree binding makes
+    /// `effectiveWorkspacePath` throw, so the held available NIL-workspace observation must NOT
+    /// render — the setter would reject the click by whole-key comparison, so rendering would
+    /// show a control that is displayed but not clickable.
+    func testOpenCodeNilWorkspaceObservationIsWithheldWhenWorkspaceResolutionFails() {
+        let viewModel = makeViewModel(workspacePath: nil)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        installOpenCodeObservation(viewModel, workspacePath: nil)
+        XCTAssertFalse(viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty)
+
+        // With no workspace fallback the session binds to its single worktree; a garbage root
+        // makes the binding's validated execution root unresolvable, which throws.
+        let garbage = "/definitely/not/a/real/root-\(UUID().uuidString)"
+        session.worktreeBindings = [
+            AgentSessionWorktreeBinding(
+                id: "binding",
+                repositoryID: "repo",
+                repoKey: "repo-key",
+                logicalRootPath: garbage,
+                logicalRootName: "fixture",
+                worktreeID: "worktree",
+                worktreeRootPath: garbage,
+                source: "test"
+            )
+        ]
+
+        XCTAssertNil(viewModel.openCodeParameterDiscoveryKey(session: session, modelRaw: "ollama-cloud/kimi-k3"))
+        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty)
+    }
+
+    func testOneChoiceOpenCodeObservationRendersSingleMenuOption() {
+        let workspacePath = "/workspace-a"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        installOpenCodeObservation(
+            viewModel,
+            workspacePath: workspacePath,
+            choices: [.init(rawValue: "max", displayName: "Max")],
+            currentValueRaw: "max"
+        )
+
+        let controls = viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls
+        XCTAssertEqual(controls.count, 1)
+        XCTAssertEqual(controls.first?.choices.map(\.displayName), ["Max"])
+        XCTAssertEqual(controls.first?.selectedDisplayName, "Max")
+    }
+
+    func testOpenCodeLoadingObservationOmitsControlsButKeepsSubmissionUsable() {
+        let workspacePath = "/workspace-a"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        viewModel.test_setOpenCodeModelParameterObservation(
+            OpenCodeACPModelParameterSnapshot(
+                key: OpenCodeACPModelParameterKey(workspacePath: workspacePath, modelRaw: "ollama-cloud/kimi-k3"),
+                state: .loading,
+                updatedAt: Date()
+            )
+        )
+
+        let props = viewModel.makeComposerProps(tabID: tabID)
+        XCTAssertTrue(props.acpModelParameterControls.isEmpty)
+        XCTAssertNotNil(props.submitTarget)
+    }
+
+    func testStaleProviderParameterSelectionIsRejected() {
+        let viewModel = makeViewModel()
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .cursor
+        session.selectedModelRaw = "grok-4.6"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        viewModel.selectACPModelParameter(
+            ACPModelParameterSelection(
+                providerID: .openCode,
+                baseModelRaw: "grok-4.6",
+                kind: .thinking,
+                configID: "effort",
+                valueRaw: "high"
+            )
+        )
+
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+    }
+
+    func testOpenCodeSavedIntentSurvivesAbsentCachedMetadataForLiveValidation() {
+        let saved = ACPModelParameterSelection(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking,
+            configID: "effort",
+            valueRaw: "max"
+        )
+
+        // No observation -> no parameter set authority (demand-scoped, not the registry), but
+        // the stored selection still round-trips through effectiveSelections unchanged.
+        XCTAssertNil(
+            ACPModelParameterResolver.parameterSet(
+                providerID: .openCode,
+                selectedModelRaw: "ollama-cloud/kimi-k3"
+            )
+        )
+        XCTAssertEqual(
+            ACPModelParameterResolver.effectiveSelections(
+                providerID: .openCode,
+                selectedModelRaw: "ollama-cloud/kimi-k3",
+                persistedSelections: [saved]
+            ),
+            [saved]
+        )
+    }
+
+    func testActiveOpenCodeRunLocksParameterControls() {
+        let workspacePath = "/workspace-a"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        installOpenCodeObservation(viewModel, workspacePath: workspacePath)
+        session.runState = .running
+
+        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).areModelControlsDisabled)
+        let discoveryKey = viewModel.makeComposerProps(tabID: tabID)
+            .acpModelParameterControls.first?.openCodeDiscoveryKey
+        viewModel.selectACPModelParameter(
+            ACPModelParameterSelection(
+                providerID: .openCode,
+                baseModelRaw: "ollama-cloud/kimi-k3",
+                kind: .thinking,
+                configID: "effort",
+                valueRaw: "high"
+            ),
+            openCodeDiscoveryKey: discoveryKey
+        )
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+    }
+
+    func testActiveOpenCodeRunWithoutParameterMetadataDoesNotLockModelControls() {
+        let viewModel = makeViewModel(workspacePath: "/workspace-a")
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "anthropic/claude-sonnet"
+        session.runState = .running
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        XCTAssertFalse(viewModel.makeComposerProps(tabID: tabID).areModelControlsDisabled)
+    }
+
+    func testUnknownCursorModelHasNoControls() {
+        XCTAssertTrue(ACPModelParameterResolver.resolve(
+            providerID: .cursor,
+            selectedModelRaw: "future-cursor-model",
+            persistedSelections: []
+        ).isEmpty)
+    }
+
+    // MARK: - Distribution composer recovery (narrow issue #81 adaptation)
+
+    /// No usable OpenCode metadata must not hide a saved pin. The composer still projects a
+    /// saved-value control — with no invented choices — so the stored intent stays visible and
+    /// clearable instead of silently blocking the next run before `session/prompt`.
+    func testComposerRetainsSavedOpenCodePinWithoutUsableMetadata() throws {
+        let viewModel = makeViewModel(workspacePath: "/workspace-a")
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        session.acpModelParameterSelections = [openCodeEffortPin(valueRaw: "retired-effort")]
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        let props = viewModel.makeComposerProps(tabID: tabID)
+        XCTAssertFalse(props.areModelControlsDisabled)
+        let controls = props.acpModelParameterControls
+        XCTAssertEqual(controls.count, 1)
+        let control = try XCTUnwrap(controls.first)
+        XCTAssertEqual(control.displayName, "Thinking")
+        XCTAssertEqual(control.selectedValueRaw, "retired-effort")
+        XCTAssertEqual(control.selectedDisplayName, "retired-effort")
+        XCTAssertTrue(control.choices.isEmpty)
+        XCTAssertTrue(control.isSavedValueUnavailable)
+        XCTAssertFalse(control.hasLiveDefinition)
+        XCTAssertNil(control.openCodeDiscoveryKey)
+        XCTAssertTrue(control.tooltip.contains("not currently advertised"))
+        XCTAssertTrue(control.tooltip.contains("Clear it to run with the model's default"))
+        XCTAssertEqual(control.accessibilityValue, "retired-effort, unavailable")
+    }
+
+    /// The clear action never invents choices: without metadata there are zero options, and with
+    /// a live definition only advertised values appear. Clearing removes exactly the captured
+    /// identity; a live definition then falls back to its advertised default control.
+    func testComposerCanClearUnsupportedPinWithoutInventingChoices() async throws {
+        let workspacePath = "/workspace-a"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        session.acpModelParameterSelections = [openCodeEffortPin(valueRaw: "retired-effort")]
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        // No metadata: clear is a local intent removal; afterwards no pin and no metadata means
+        // no effort control at all.
+        await viewModel.clearSavedACPModelParameter(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking
+        )
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+        XCTAssertTrue(session.isDirty)
+        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty)
+
+        // A live definition that excludes the saved value keeps upstream's unavailable rendering
+        // and offers only the advertised choices — no fabricated "retired-effort" entry.
+        session.acpModelParameterSelections = [openCodeEffortPin(valueRaw: "retired-effort")]
+        installOpenCodeObservation(viewModel, workspacePath: workspacePath)
+        let unavailable = try XCTUnwrap(
+            viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.first
+        )
+        XCTAssertTrue(unavailable.isSavedValueUnavailable)
+        XCTAssertTrue(unavailable.hasLiveDefinition)
+        XCTAssertEqual(unavailable.choices.map(\.displayName), ["Low", "High"])
+        XCTAssertFalse(unavailable.choices.contains { $0.rawValue == "retired-effort" })
+        XCTAssertTrue(unavailable.tooltip.contains("Choose a supported value before running"))
+
+        // No live controller exists, so the clear cannot apply a provider default — it still
+        // removes the pin, and the composer returns to the definition's advertised default.
+        await viewModel.clearSavedACPModelParameter(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking
+        )
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+        let restored = try XCTUnwrap(
+            viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.first
+        )
+        XCTAssertEqual(restored.displayName, "Effort")
+        XCTAssertEqual(restored.selectedDisplayName, "Low")
+        XCTAssertFalse(restored.isSavedValueUnavailable)
+    }
+
+    /// Clearing re-checks the live binding exactly like a selection: a changed base model, a
+    /// changed provider, an active run, and an MCP-controlled tab each leave the pin untouched.
+    func testComposerClearRejectsChangedSessionBinding() async {
+        let viewModel = makeViewModel(workspacePath: "/workspace-a")
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        session.acpModelParameterSelections = [openCodeEffortPin(valueRaw: "retired-effort")]
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        // The pin belongs to a different base model than the one now selected.
+        session.selectedModelRaw = "anthropic/claude-sonnet"
+        viewModel.applySessionToBindings(session)
+        await viewModel.clearSavedACPModelParameter(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking
+        )
+        XCTAssertEqual(session.acpModelParameterSelections.map(\.valueRaw), ["retired-effort"])
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.applySessionToBindings(session)
+
+        // The composer no longer targets OpenCode. Driving the provider change through the
+        // session keeps the model binding intact (a direct agent switch normalizes the model).
+        session.selectedAgent = .cursor
+        viewModel.applySessionToBindings(session)
+        await viewModel.clearSavedACPModelParameter(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking
+        )
+        XCTAssertEqual(session.acpModelParameterSelections.map(\.valueRaw), ["retired-effort"])
+        session.selectedAgent = .openCode
+        viewModel.applySessionToBindings(session)
+
+        // An active run locks parameter edits, including clears.
+        session.runState = .running
+        await viewModel.clearSavedACPModelParameter(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking
+        )
+        XCTAssertEqual(session.acpModelParameterSelections.map(\.valueRaw), ["retired-effort"])
+        session.runState = .idle
+
+        // An MCP-controlled tab owns parameter mutation exclusively.
+        viewModel.test_setMCPControlledTabIDs([tabID])
+        await viewModel.clearSavedACPModelParameter(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking
+        )
+        XCTAssertEqual(session.acpModelParameterSelections.map(\.valueRaw), ["retired-effort"])
+        viewModel.test_setMCPControlledTabIDs([])
+
+        // With the binding restored, the same call clears.
+        await viewModel.clearSavedACPModelParameter(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking
+        )
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+    }
+
+    /// A clear advances the identity's write revision, so an older MCP staging rollback — captured
+    /// before the clear — can no longer restore the cleared pin.
+    func testComposerClearAdvancesRevisionAndDefeatsOlderStagingRollback() async throws {
+        let viewModel = makeViewModel(workspacePath: "/workspace-a")
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        session.acpModelParameterSelections = [openCodeEffortPin(valueRaw: "low")]
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        let rollback = try XCTUnwrap(viewModel.mcpStageModelParameterSelections(
+            tabID: tabID,
+            agentRaw: AgentProviderKind.openCode.rawValue,
+            modelRaw: "ollama-cloud/kimi-k3",
+            selections: [openCodeEffortPin(valueRaw: "high")]
+        ))
+        XCTAssertEqual(session.acpModelParameterSelections.map(\.valueRaw), ["high"])
+        let identity = ACPModelParameterIdentity(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking
+        )
+        let stagedRevision = session.acpModelParameterSelectionRevision(for: identity)
+
+        await viewModel.clearSavedACPModelParameter(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking
+        )
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+        XCTAssertGreaterThan(session.acpModelParameterSelectionRevision(for: identity), stagedRevision)
+
+        // The rollback predates the clear: its captured revision no longer matches, and the
+        // cleared identity is absent, so nothing is restored.
+        viewModel.mcpRollbackStagedModelParameterSelections(rollback)
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+    }
+
+    /// Clearing a pin on a session with a live controller applies the definition's advertised
+    /// default through the normal parameter path — the provider does not keep running the cleared
+    /// value while the chip shows the default.
+    func testComposerClearOnLiveSessionRestoresProviderDefault() async throws {
+        let workspacePath = "/workspace-a"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        session.acpModelParameterSelections = [openCodeEffortPin(valueRaw: "high")]
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        // The held observation comes from disposable discovery whose effort was never mutated, so
+        // its advertised current value ("low") is the installation default.
+        installOpenCodeObservation(viewModel, workspacePath: workspacePath)
+
+        let controller = try ACPAgentSessionController(
+            provider: ClearProbeControllerProvider(providerID: .openCode),
+            runRequest: ACPRunRequest(
+                agentKind: .openCode,
+                modelString: "ollama-cloud/kimi-k3",
+                workspacePath: workspacePath,
+                resumeSessionID: nil,
+                attachments: [],
+                taskLabelKind: nil
+            )
+        )
+        session.acpController = controller
+        ACPAgentSessionController.ParameterApplicationTestRecorder.enable()
+        defer { ACPAgentSessionController.ParameterApplicationTestRecorder.disable() }
+
+        await viewModel.clearSavedACPModelParameter(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking
+        )
+
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+        XCTAssertTrue(session.isDirty)
+        let calls = ACPAgentSessionController.ParameterApplicationTestRecorder.recordedCalls()
+        XCTAssertEqual(calls.count, 1)
+        let applied = try XCTUnwrap(calls.first?.first)
+        XCTAssertEqual(applied.providerID, .openCode)
+        XCTAssertEqual(applied.baseModelRaw, "ollama-cloud/kimi-k3")
+        XCTAssertEqual(applied.kind, .thinking)
+        XCTAssertEqual(applied.configID, "effort")
+        XCTAssertEqual(applied.valueRaw, "low")
+    }
+
+    func testPinChipDefaultTooltipNamesResolvedCurrentValue() {
+        let definition = ACPModelParameterDefinition(
+            kind: .thinking,
+            configID: "effort",
+            displayName: "Effort",
+            choices: [
+                .init(rawValue: "low", displayName: "Low"),
+                .init(rawValue: "high", displayName: "High")
+            ],
+            currentValueRaw: "low"
+        )
+        XCTAssertEqual(
+            ACPModelParameterPinChip.defaultTooltip(definition: definition),
+            "Default — OpenCode's current effort for this model: Low"
+        )
+
+        // A current value outside the advertised choices falls back to the raw wire value.
+        let unadvertised = ACPModelParameterDefinition(
+            kind: .thinking,
+            configID: "effort",
+            displayName: "Effort",
+            choices: [.init(rawValue: "low", displayName: "Low")],
+            currentValueRaw: "medium"
+        )
+        XCTAssertEqual(
+            ACPModelParameterPinChip.defaultTooltip(definition: unadvertised),
+            "Default — OpenCode's current effort for this model: medium"
+        )
+    }
+
+    func testPinChipDefaultTooltipReportsUndiscoveredWithoutDefinition() {
+        XCTAssertEqual(
+            ACPModelParameterPinChip.defaultTooltip(definition: nil),
+            "Default — OpenCode's current effort for this model (not yet discovered)"
+        )
+    }
+
+    // MARK: - Demand-scoped observation lifecycle (injected stream)
+
+    /// Explicit per-subscription handles for the injected stream provider. Each resync gets
+    /// its OWN `AsyncStream` and continuation; the test records each registration (its
+    /// bounded barrier) at PROVIDER-CALL time (before the VM awaits the stream), then yields
+    /// onto that specific subscription, so a foreign/late delivery reaches the view model —
+    /// there is no replay/ordering/routing hub to filter it out first.
+    private actor SubscriptionRecorder {
+        struct Registration {
+            let id: UUID
+            let key: OpenCodeACPModelParameterKey
+        }
+
+        private var registrations: [Registration] = []
+        private var continuations: [UUID: AsyncStream<OpenCodeACPModelParameterSnapshot>.Continuation] = [:]
+
+        /// Called by the injected stream provider. Registration happens synchronously on this
+        /// actor (before the returned stream is handed back), so a subsequent
+        /// `waitForSubscription` reliably observes it even if the VM has not started consuming.
+        func register(workspace: String?, model: String) -> (AsyncStream<OpenCodeACPModelParameterSnapshot>, UUID) {
+            let key = OpenCodeACPModelParameterKey(workspacePath: workspace, modelRaw: model)
+            let (stream, continuation) = AsyncStream<OpenCodeACPModelParameterSnapshot>.makeStream(
+                bufferingPolicy: .bufferingNewest(4)
+            )
+            let id = UUID()
+            registrations.append(Registration(id: id, key: key))
+            continuations[id] = continuation
+            return (stream, id)
+        }
+
+        /// Bounded registration barrier: returns the ID of the NEWEST subscription for `model`
+        /// that appeared after `baseline` (a value captured before the resync), so concurrent
+        /// stale and current subscriptions are disambiguated.
+        func waitForSubscription(model: String, seconds: UInt64, after baseline: Int = 0) async throws -> UUID {
+            struct RegistrationTimeout: Error {}
+            let deadline = Date().addingTimeInterval(TimeInterval(seconds))
+            let canonical = ACPModelParameterIdentity.canonicalBaseModelRaw(model, providerID: .openCode)
+            while true {
+                if let match = registrations[baseline...].last(where: { $0.key.canonicalBaseModelRaw == canonical }) {
+                    return match.id
+                }
+                if Date() >= deadline { throw RegistrationTimeout() }
+                try await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+
+        func registrationCount() -> Int {
+            registrations.count
+        }
+
+        func continuation(for id: UUID) -> AsyncStream<OpenCodeACPModelParameterSnapshot>.Continuation? {
+            continuations[id]
+        }
+
+        /// Adapts the injected provider signature: registers and returns the stream.
+        func stream(workspace: String?, model: String) -> AsyncStream<OpenCodeACPModelParameterSnapshot> {
+            let (stream, _) = register(workspace: workspace, model: model)
+            return stream
+        }
+    }
+
+    /// Drives the composer's demand-scoped observation through the INJECTED stream (not the
+    /// direct setter), so target capture, key matching, and acceptance gating are all exercised
+    /// the way production wiring does. This is the [P2-e] regression: the captured workspace
+    /// string is un-normalized (`/a/child/..`) while the observation's key is normalized, and the
+    /// control must still render.
+    @MainActor
+    func testComposerObservationThroughInjectedStreamAcceptsNormalizedKeyEquivalence() async throws {
+        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .openCode) }
+        // `/workspace-root/child/..` and `/workspace-root` are the same logical directory.
+        let rawWorkspacePath = "/workspace-root/child/.."
+        let recorder = SubscriptionRecorder()
+        let viewModel = AgentModeViewModel(
+            testWorkspacePath: rawWorkspacePath,
+            codexControllerFactory: { _, _, _, _, _, _ in
+                preconditionFailure("Picker-only tests must not start a Codex session")
+            },
+            testUsesProductionAgentDefaultsAndModelPolling: true,
+            testOpenCodeModelParameterStreamProvider: { [recorder] workspace, model in
+                await recorder.stream(workspace: workspace, model: model)
+            }
+        )
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .cursor
+        session.selectedModelRaw = "grok-4.6"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        // Drive the production resync path: switching the agent through the VM's public mutable
+        // state fires the didSet hook that subscribes to the injected stream. (The direct-setter
+        // picker tests bypass this subscription entirely; the lifecycle tests must not.)
+        viewModel.selectedAgent = .openCode
+        // The test availability context lacks the demand-scoped catalog model, so the VM's didSet
+        // normalizes to the resolved OpenCode default; model the observation on that resolved
+        // model so the acceptance gate's key match is exercised (not bypassed).
+        let effectiveModelRaw = viewModel.selectedModelRaw
+
+        // No controls render before any observation arrives.
+        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty)
+        XCTAssertNil(viewModel.openCodeModelParameterObservation)
+
+        // Deliver a normalized-key observation onto the registered subscription only after the
+        // resync has registered it; bounded so a broken acceptance gate fails fast.
+        let subscriptionID = try await recorder.waitForSubscription(model: effectiveModelRaw, seconds: 5)
+        let observation = openCodeEffortObservation(
+            workspacePath: "/workspace-root",
+            modelRaw: effectiveModelRaw
+        )
+        await recorder.continuation(for: subscriptionID)?.yield(observation)
+        try await eventually(seconds: 5) {
+            !viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty
+        }
+
+        // The HELD observation (not just the rendered controls) carries the normalized key.
+        XCTAssertEqual(
+            viewModel.openCodeModelParameterObservation?.key.workspacePath,
+            "/workspace-root"
+        )
+        let controls = viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls
+        XCTAssertEqual(controls.count, 1)
+        XCTAssertEqual(controls.first?.configID, "effort")
+        XCTAssertEqual(controls.first?.openCodeDiscoveryKey?.workspacePath, "/workspace-root")
+    }
+
+    func testComposerReconcilesRestoredModelWithoutResubscribingUnchangedTarget() async throws {
+        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .openCode) }
+        let workspacePath = "/workspace-a"
+        let recorder = SubscriptionRecorder()
+        let viewModel = AgentModeViewModel(
+            testWorkspacePath: workspacePath,
+            codexControllerFactory: { _, _, _, _, _, _ in
+                preconditionFailure("Picker-only tests must not start a Codex session")
+            },
+            testUsesProductionAgentDefaultsAndModelPolling: true,
+            testOpenCodeModelParameterStreamProvider: { workspace, model in
+                await recorder.stream(workspace: workspace, model: model)
+            }
+        )
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        let firstSubscription = try await recorder.waitForSubscription(model: session.selectedModelRaw, seconds: 5)
+        let firstObservation = openCodeEffortObservation(workspacePath: workspacePath)
+        await recorder.continuation(for: firstSubscription)?.yield(firstObservation)
+        try await eventually(seconds: 5) { viewModel.openCodeModelParameterObservation == firstObservation }
+
+        // Hydration applies under isRestoringState, bypassing the model property's didSet.
+        session.selectedModelRaw = "anthropic/claude-sonnet"
+        viewModel.applySessionToBindings(session)
+        XCTAssertNil(viewModel.openCodeModelParameterObservation)
+        XCTAssertTrue(viewModel.ui.composer.props.acpModelParameterControls.isEmpty)
+        let secondSubscription = try await recorder.waitForSubscription(model: session.selectedModelRaw, seconds: 5)
+        let secondObservation = openCodeEffortObservation(workspacePath: workspacePath, modelRaw: session.selectedModelRaw)
+        await recorder.continuation(for: secondSubscription)?.yield(secondObservation)
+        try await eventually(seconds: 5) { viewModel.openCodeModelParameterObservation == secondObservation }
+
+        // Reapplying bindings, canonical-equivalent spelling, and ordinary UI publications
+        // must retain both the held result and its subscription (no extra ACP acquisition).
+        session.selectedModelRaw = " ANTHROPIC/CLAUDE-SONNET "
+        viewModel.applySessionToBindings(session)
+        viewModel.applySessionToBindings(session)
+        viewModel.syncComposerUIState()
+        XCTAssertEqual(viewModel.openCodeModelParameterObservation, secondObservation)
+        XCTAssertEqual(viewModel.makeComposerProps().acpModelParameterControls.first?.selectedDisplayName, "Low")
+        let registrations = await recorder.registrationCount()
+        XCTAssertEqual(registrations, 2)
+
+        // A late previous-target delivery cannot replace the restored target's controls.
+        await recorder.continuation(for: firstSubscription)?.yield(firstObservation)
+        await recorder.continuation(for: secondSubscription)?.yield(
+            openCodeEffortObservation(workspacePath: workspacePath, modelRaw: session.selectedModelRaw, currentValueRaw: "high")
+        )
+        try await eventually(seconds: 5) {
+            viewModel.makeComposerProps().acpModelParameterControls.first?.selectedDisplayName == "High"
+        }
+        XCTAssertEqual(viewModel.openCodeModelParameterObservation?.key, secondObservation.key)
+    }
+
+    /// A wrong-key snapshot arriving on the CURRENT subscription is rejected by the view
+    /// model's acceptance gate — the held observation stays nil and no controls render — and
+    /// the same live subscription still renders its own valid result afterward. There is no
+    /// fixture filtering: the foreign snapshot is yielded directly onto the recorded
+    /// continuation, so the rejection proven here is the view model's own, not the fixture's.
+    @MainActor
+    func testComposerObservationRejectsForeignKeyOnCurrentSubscription() async throws {
+        // Two valid OpenCode models so the target switch is a real (accepted) change.
+        let modelA = "ollama-cloud/kimi-k3"
+        let modelB = "anthropic/claude-sonnet"
+        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .openCode) }
+        _ = AgentACPModelRegistry.shared.updateDiscoveredModels(
+            ACPDiscoveredSessionModels(
+                options: [
+                    .init(rawValue: modelA, displayName: "Kimi K3", description: nil, isPlaceholderDefault: false, isProviderDefault: true),
+                    .init(rawValue: modelB, displayName: "Claude Sonnet", description: nil, isPlaceholderDefault: false, isProviderDefault: false)
+                ],
+                currentModelRaw: modelA,
+                modelParameterSets: []
+            ),
+            for: .openCode
+        )
+
+        let workspacePath = "/workspace-a"
+        let recorder = SubscriptionRecorder()
+        let viewModel = AgentModeViewModel(
+            testWorkspacePath: workspacePath,
+            codexControllerFactory: { _, _, _, _, _, _ in
+                preconditionFailure("Picker-only tests must not start a Codex session")
+            },
+            testUsesProductionAgentDefaultsAndModelPolling: true,
+            testOpenCodeModelParameterStreamProvider: { [recorder] workspace, model in
+                await recorder.stream(workspace: workspace, model: model)
+            }
+        )
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .cursor
+        session.selectedModelRaw = "grok-4.6"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        viewModel.selectedAgent = .openCode
+        viewModel.selectedModelRaw = modelA
+
+        // Establish model A's controls via its registered subscription.
+        let subscriptionA = try await recorder.waitForSubscription(model: modelA, seconds: 5)
+        await recorder.continuation(for: subscriptionA)?.yield(
+            openCodeEffortObservation(workspacePath: workspacePath, modelRaw: modelA)
+        )
+        try await eventually(seconds: 5) {
+            viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty == false
+        }
+        XCTAssertNotNil(viewModel.openCodeModelParameterObservation)
+
+        // Switch the composer target to model B; the resync synchronously clears the
+        // observation and B has no metadata yet, so controls are empty.
+        let baseline = await recorder.registrationCount()
+        viewModel.selectModel(rawModel: modelB)
+        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty)
+        XCTAssertNil(viewModel.openCodeModelParameterObservation)
+
+        // Push a FOREIGN snapshot (model A's key) directly onto the CURRENT (B) subscription.
+        // It reaches the view model unfiltered, whose captured target is B, so the gate must
+        // reject it: no controls and no held observation change.
+        let subscriptionB = try await recorder.waitForSubscription(model: modelB, seconds: 5, after: baseline)
+        await recorder.continuation(for: subscriptionB)?.yield(
+            openCodeEffortObservation(workspacePath: workspacePath, modelRaw: modelA)
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty)
+        XCTAssertNil(viewModel.openCodeModelParameterObservation)
+
+        // The same current subscription still receives and renders B's own valid result —
+        // one foreign delivery never killed it.
+        await recorder.continuation(for: subscriptionB)?.yield(
+            openCodeEffortObservation(workspacePath: workspacePath, modelRaw: modelB)
+        )
+        try await eventually(seconds: 5) {
+            !viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty
+        }
+        XCTAssertEqual(
+            viewModel.openCodeModelParameterObservation?.key.canonicalBaseModelRaw,
+            modelB
+        )
+    }
+
+    /// Switching the provider away from OpenCode cancels the observation: the controls drop,
+    /// the held observation clears, and the composer stays submittable. Asserts only that
+    /// clearing and termination.
+    @MainActor
+    func testComposerObservationCancellationClearsOnProviderSwitch() async throws {
+        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .openCode) }
+        let workspacePath = "/workspace-a"
+        let recorder = SubscriptionRecorder()
+        let viewModel = AgentModeViewModel(
+            testWorkspacePath: workspacePath,
+            codexControllerFactory: { _, _, _, _, _, _ in
+                preconditionFailure("Picker-only tests must not start a Codex session")
+            },
+            testUsesProductionAgentDefaultsAndModelPolling: true,
+            testOpenCodeModelParameterStreamProvider: { [recorder] workspace, model in
+                await recorder.stream(workspace: workspace, model: model)
+            }
+        )
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .cursor
+        session.selectedModelRaw = "grok-4.6"
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        viewModel.selectedAgent = .openCode
+        let effectiveModelRaw = viewModel.selectedModelRaw
+
+        let subscriptionID = try await recorder.waitForSubscription(model: effectiveModelRaw, seconds: 5)
+        await recorder.continuation(for: subscriptionID)?.yield(
+            openCodeEffortObservation(workspacePath: workspacePath, modelRaw: effectiveModelRaw)
+        )
+        try await eventually(seconds: 5) {
+            viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty == false
+        }
+
+        // Switch provider away from OpenCode: the observation is cancelled and controls drop,
+        // while submission stays usable.
+        viewModel.selectedAgent = .cursor
+        try await eventually(seconds: 5) {
+            viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.isEmpty
+        }
+        XCTAssertNotNil(viewModel.makeComposerProps(tabID: tabID).submitTarget)
+        XCTAssertNil(viewModel.openCodeModelParameterObservation)
+    }
+
+    /// Bounded polling barrier: fails the test with a useful message if `condition` never
+    /// becomes true, instead of parking the runner forever.
+    @MainActor
+    private func eventually(
+        seconds: UInt64,
+        _ condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        struct ConditionTimeout: Error {}
+        let deadline = Date().addingTimeInterval(TimeInterval(seconds))
+        while Date() < deadline {
+            if condition() { return }
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        if condition() { return }
+        XCTFail("Timed out after \(seconds)s waiting for composer observation condition.")
+        throw ConditionTimeout()
+    }
+
+    private func makeViewModel(workspacePath: String? = nil) -> AgentModeViewModel {
+        AgentModeViewModel(
+            testWorkspacePath: workspacePath,
+            codexControllerFactory: { _, _, _, _, _, _ in
+                preconditionFailure("Picker-only tests must not start a Codex session")
+            }
+        )
+    }
+
+    /// OpenCode effort metadata is demand-scoped, so picker tests install a scripted observation
+    /// directly into the view model (never the provider-global registry, which is no longer the
+    /// OpenCode parameter authority).
+    private func openCodeEffortObservation(
+        workspacePath: String?,
+        modelRaw: String = "ollama-cloud/kimi-k3",
+        choices: [ACPModelParameterChoice] = [
+            .init(rawValue: "low", displayName: "Low"),
+            .init(rawValue: "high", displayName: "High")
+        ],
+        currentValueRaw: String = "low"
+    ) -> OpenCodeACPModelParameterSnapshot {
+        OpenCodeACPModelParameterSnapshot(
+            key: OpenCodeACPModelParameterKey(workspacePath: workspacePath, modelRaw: modelRaw),
+            state: .available(
+                ACPModelParameterSet(
+                    baseModelRaw: modelRaw,
+                    parameters: [
+                        .init(
+                            kind: .thinking,
+                            configID: "effort",
+                            displayName: "Effort",
+                            choices: choices,
+                            currentValueRaw: currentValueRaw
+                        )
+                    ]
+                )
+            ),
+            updatedAt: Date()
+        )
+    }
+
+    private func installOpenCodeObservation(
+        _ viewModel: AgentModeViewModel,
+        workspacePath: String?,
+        modelRaw: String = "ollama-cloud/kimi-k3",
+        choices: [ACPModelParameterChoice]? = nil,
+        currentValueRaw: String = "low"
+    ) {
+        viewModel.test_setOpenCodeModelParameterObservation(
+            openCodeEffortObservation(
+                workspacePath: workspacePath,
+                modelRaw: modelRaw,
+                choices: choices ?? [
+                    .init(rawValue: "low", displayName: "Low"),
+                    .init(rawValue: "high", displayName: "High")
+                ],
+                currentValueRaw: currentValueRaw
+            )
+        )
+    }
+
     private func cursorEffortSelection(valueRaw: String) -> ACPModelParameterSelection {
         ACPModelParameterSelection(
             providerID: .cursor,
@@ -567,12 +1716,72 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         )
     }
 
-    private func makeViewModel(workspacePath: String? = nil) -> AgentModeViewModel {
-        AgentModeViewModel(
-            testWorkspacePath: workspacePath,
-            codexControllerFactory: { _, _, _, _, _, _ in
-                preconditionFailure("Picker-only tests must not start a Codex session")
-            }
+    private func cursorSpeedSelection(valueRaw: String) -> ACPModelParameterSelection {
+        ACPModelParameterSelection(
+            providerID: .cursor,
+            baseModelRaw: "grok-4.6",
+            kind: .speed,
+            configID: "fast",
+            valueRaw: valueRaw
         )
+    }
+
+    private func openCodeEffortPin(valueRaw: String) -> ACPModelParameterSelection {
+        ACPModelParameterSelection(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking,
+            configID: "effort",
+            valueRaw: valueRaw
+        )
+    }
+}
+
+/// Minimal provider double whose configurations satisfy controller construction; nothing is
+/// ever launched because the controller's DEBUG parameter-application recorder intercepts the
+/// only method under test.
+private struct ClearProbeControllerProvider: ACPAgentProvider {
+    let providerID: ACPProviderID
+
+    func support(for request: ACPRunRequest) async throws -> ACPSupportResult {
+        .supported
+    }
+
+    func makeLaunchConfiguration(for request: ACPRunRequest) throws -> ACPLaunchConfiguration {
+        ACPLaunchConfiguration(
+            providerID: providerID,
+            command: "/usr/bin/true",
+            arguments: [],
+            environment: [:],
+            workingDirectory: request.workspacePath,
+            additionalPathHints: [],
+            enableDebugLogging: false
+        )
+    }
+
+    func makeSessionConfiguration(
+        for request: ACPRunRequest,
+        mcpServer: RepoPromptMCPServerConfiguration
+    ) throws -> ACPSessionConfiguration {
+        let workingDirectory = request.workspacePath ?? FileManager.default.temporaryDirectory.path
+        return ACPSessionConfiguration(mode: .new, workingDirectory: workingDirectory, mcpServers: [])
+    }
+
+    func buildPromptBlocks(
+        for message: AgentMessage,
+        request: ACPRunRequest
+    ) throws -> [[String: Any]] {
+        [["type": "text", "text": message.userMessage]]
+    }
+
+    func normalizeSessionUpdate(
+        _ payload: [String: Any],
+        sessionID: String
+    ) -> [NormalizedAgentRuntimeEvent] {
+        []
+    }
+
+    func normalizeError(_ error: Error) -> Error {
+        error
     }
 }

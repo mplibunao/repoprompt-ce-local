@@ -14,6 +14,330 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         XCTAssertNotEqual(first.root, second.root)
     }
 
+    /// [P2-f] A worktree-bound session's resume must acquire OpenCode metadata for the
+    /// session's effective working directory, not the workspace repo root — the two can carry
+    /// different OpenCode configs. The injected provider captures the workspace it was asked
+    /// about, proving resume routes the right path all the way to acquisition.
+    /// One consolidated full resume integration: a worktree-bound resumed session acquires
+    /// OpenCode metadata for the session's EFFECTIVE working directory (not the repo root) AND
+    /// persists the validated selection. The worktree is a REAL git worktree (deterministic,
+    /// not an empty `.git` directory that needs a skip), and the catalog is seeded so the
+    /// validation/serialization gate sees the selected model.
+    func testResumeAcquiresForEffectiveWorktreeAndPersistsSelection() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        // Deterministic real worktree: a genuine repo + `git worktree add`, so the runtime
+        // resolver's on-disk validation of the bound worktree root passes. Identity fields are
+        // opaque fixture IDs — effective-workspace resolution is driven by the path pair.
+        let git = try ReviewGitRepositoryFixture()
+        let logicalRoot = try git.makeRepository(named: "logical", files: ["README.md": "fixture"])
+        let worktree = fixture.root.appendingPathComponent("linked-worktree", isDirectory: true)
+        try git.runGit(["worktree", "add", "--detach", worktree.path, "HEAD"], at: logicalRoot)
+
+        let window = try await makeWindow(name: "OpenCode worktree resume", root: logicalRoot)
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+        let viewModel = window.agentModeViewModel
+        let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
+        let tabID = try XCTUnwrap(workspace.activeComposeTabID)
+        let sessionID = UUID()
+        let session = await viewModel.ensureSessionReady(tabID: tabID)
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+        XCTAssertNotNil(viewModel.test_installPersistentSessionBinding(
+            sessionID: sessionID,
+            on: session,
+            compareAndSetInWorkspaceID: workspace.id
+        ))
+        // Bind the session to the worktree whose logical root is the workspace repo path; the
+        // effective workspace path must then be the worktree root, not `repoPaths.first`.
+        session.worktreeBindings = [
+            AgentSessionWorktreeBinding(
+                id: UUID().uuidString,
+                repositoryID: "fixture-repository",
+                repoKey: workspace.repoPaths.first ?? logicalRoot.path,
+                logicalRootPath: logicalRoot.path,
+                worktreeID: "fixture-worktree",
+                worktreeRootPath: worktree.path,
+                source: "test"
+            )
+        ]
+
+        // Seed the catalog with the OpenCode model so validation/serialization see it.
+        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .openCode) }
+        _ = AgentACPModelRegistry.shared.updateDiscoveredModels(
+            ACPDiscoveredSessionModels(
+                options: [
+                    .init(
+                        rawValue: "ollama-cloud/kimi-k3",
+                        displayName: "Kimi K3",
+                        description: nil,
+                        isPlaceholderDefault: false,
+                        isProviderDefault: true
+                    )
+                ],
+                currentModelRaw: "ollama-cloud/kimi-k3",
+                modelParameterSets: []
+            ),
+            for: .openCode
+        )
+
+        // The injected provider captures the workspace path it was invoked with.
+        actor WorkspaceCapture {
+            var paths: [String?] = []
+
+            func record(_ path: String?) {
+                paths.append(path)
+            }
+        }
+        let capture = WorkspaceCapture()
+        let provider: AgentMCPModelParameterSupport.OneShotObservationProvider = { workspacePath, modelRaw, _ in
+            await capture.record(workspacePath)
+            return OpenCodeACPModelParameterSnapshot(
+                key: OpenCodeACPModelParameterKey(workspacePath: workspacePath, modelRaw: modelRaw),
+                state: .available(ACPModelParameterSet(
+                    baseModelRaw: modelRaw,
+                    parameters: [
+                        .init(
+                            kind: .thinking,
+                            configID: "effort",
+                            displayName: "Effort",
+                            choices: [
+                                .init(rawValue: "low", displayName: "Low"),
+                                .init(rawValue: "high", displayName: "High")
+                            ],
+                            currentValueRaw: "low"
+                        )
+                    ]
+                )),
+                updatedAt: Date()
+            )
+        }
+        let service = makeManageService(
+            window: window,
+            openCodeOneShotObservationProvider: provider
+        )
+
+        _ = try await service.execute(args: [
+            "op": .string("resume_session"),
+            "session_id": .string(sessionID.uuidString),
+            "model_parameters": .array([
+                .object([
+                    "config_id": .string("effort"),
+                    "value": .string("high")
+                ])
+            ])
+        ])
+
+        // (1) The acquired directory: validation-stage acquisition must use the session's
+        //     effective worktree root, never the repo root.
+        let capturedPaths = await capture.paths
+        XCTAssertEqual(
+            capturedPaths.compactMap(\.self),
+            [worktree.standardizedFileURL.path],
+            "resume must acquire OpenCode metadata for the session's effective worktree root"
+        )
+        // (2) The persisted selection: the store gate then accepts and stores it.
+        XCTAssertEqual(
+            session.acpModelParameterSelections,
+            [
+                ACPModelParameterSelection(
+                    providerID: .openCode,
+                    baseModelRaw: "ollama-cloud/kimi-k3",
+                    kind: .thinking,
+                    configID: "effort",
+                    valueRaw: "high"
+                )
+            ]
+        )
+    }
+
+    /// The store-time gate (previously Cursor-only) must accept an OpenCode selection for the
+    /// selected OpenCode model: discovery + the explicit resolver + store now give one coherent
+    /// answer about which providers may carry model parameters.
+    func testOpenCodeSelectionForSelectedModelIsAcceptedAndStored() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let window = try await makeWindow(name: "OpenCode parameter store", root: fixture.root)
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+        let viewModel = window.agentModeViewModel
+        let tabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
+        let session = await viewModel.ensureSessionReady(tabID: tabID)
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+
+        let openCodeSelection = ACPModelParameterSelection(
+            providerID: .openCode,
+            baseModelRaw: "ollama-cloud/kimi-k3",
+            kind: .thinking,
+            configID: "effort",
+            valueRaw: "high"
+        )
+        try viewModel.mcpApplyModelParameterSelections(tabID: tabID, selections: [openCodeSelection])
+
+        XCTAssertEqual(session.acpModelParameterSelections, [openCodeSelection])
+    }
+
+    /// The widened gate still rejects the mismatches it exists to catch: a selection whose
+    /// provider differs from the selected agent, or whose base model differs from the selected
+    /// model, is never stored. Non-ACP agents remain rejected outright.
+    func testOpenCodeSelectionProviderAndModelMismatchesAreRejected() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let window = try await makeWindow(name: "OpenCode parameter store rejects", root: fixture.root)
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+        let viewModel = window.agentModeViewModel
+        let tabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
+        let session = await viewModel.ensureSessionReady(tabID: tabID)
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "ollama-cloud/kimi-k3"
+
+        // Provider mismatch: a Cursor selection on an OpenCode session is rejected.
+        XCTAssertThrowsError(
+            try viewModel.mcpApplyModelParameterSelections(
+                tabID: tabID,
+                selections: [selection(value: "high")]
+            )
+        ) { error in
+            XCTAssertTrue(String(describing: error).contains("base model"))
+        }
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+
+        // Model mismatch: an OpenCode selection for ANOTHER OpenCode model is rejected too.
+        XCTAssertThrowsError(
+            try viewModel.mcpApplyModelParameterSelections(
+                tabID: tabID,
+                selections: [
+                    ACPModelParameterSelection(
+                        providerID: .openCode,
+                        baseModelRaw: "anthropic/claude-sonnet",
+                        kind: .thinking,
+                        configID: "effort",
+                        valueRaw: "high"
+                    )
+                ]
+            )
+        ) { error in
+            XCTAssertTrue(String(describing: error).contains("base model"))
+        }
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+
+        // Non-ACP agent: rejected outright, with wording naming the actual provider.
+        session.selectedAgent = .codexExec
+        session.selectedModelRaw = "gpt-5"
+        XCTAssertThrowsError(
+            try viewModel.mcpApplyModelParameterSelections(
+                tabID: tabID,
+                selections: [
+                    ACPModelParameterSelection(
+                        providerID: .openCode,
+                        baseModelRaw: "ollama-cloud/kimi-k3",
+                        kind: .thinking,
+                        configID: "effort",
+                        valueRaw: "high"
+                    )
+                ]
+            )
+        ) { error in
+            XCTAssertTrue(String(describing: error).contains("ACP providers"))
+            XCTAssertTrue(String(describing: error).contains(AgentProviderKind.codexExec.displayName))
+        }
+        XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
+    }
+
+    /// A failed OpenCode parameter acquisition on a target-creating path must discard the
+    /// target it allocated, not leave it outstanding. The injected provider throws mid-setup,
+    /// AFTER the target exists: asserting the provider ran and the error is the injected one
+    /// proves the throw came from acquisition (not a pre-allocation rejection, which would also
+    /// leave the count at zero without exercising the discard scope).
+    func testCreateDiscardsTargetWhenParameterAcquisitionFails() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let window = try await makeWindow(name: "OpenCode create discard", root: fixture.root)
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+        let viewModel = window.agentModeViewModel
+        // OpenCode must be available for its compound model_id to resolve; the default
+        // availability context has it unavailable.
+        window.apiSettingsViewModel.isOpenCodeConnected = true
+        // Seed the OpenCode catalog so `model_id` validation resolves an OpenCode model rather
+        // than rejecting it before the target is allocated.
+        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .openCode) }
+        _ = AgentACPModelRegistry.shared.updateDiscoveredModels(
+            ACPDiscoveredSessionModels(
+                options: [
+                    .init(
+                        rawValue: "ollama-cloud/kimi-k3",
+                        displayName: "Kimi K3",
+                        description: nil,
+                        isPlaceholderDefault: false,
+                        isProviderDefault: true
+                    )
+                ],
+                currentModelRaw: "ollama-cloud/kimi-k3",
+                modelParameterSets: []
+            ),
+            for: .openCode
+        )
+        actor AcquisitionProbe {
+            var providerRuns = 0
+            var allocations = 0
+
+            func recordProviderRun() {
+                providerRuns += 1
+            }
+
+            func recordAllocation() {
+                allocations += 1
+            }
+        }
+        let acquisitionProbe = AcquisitionProbe()
+        let provider: AgentMCPModelParameterSupport.OneShotObservationProvider = { _, _, _ in
+            await acquisitionProbe.recordProviderRun()
+            throw MCPError.invalidParams("simulated OpenCode acquisition failure")
+        }
+        var service = makeManageService(
+            window: window,
+            openCodeOneShotObservationProvider: provider
+        )
+        // PROOF that a target was allocated before the acquisition threw: this hook fires only
+        // after `mcpResolveOrCreateSessionTarget` creates the provisional target, so observing
+        // it here decouples "allocated" from the trivially-true "count is zero after cleanup".
+        service.testAfterTargetResolution = { _ in
+            await acquisitionProbe.recordAllocation()
+        }
+        do {
+            _ = try await service.execute(args: [
+                "op": .string("create_session"),
+                "model_id": .string(AgentModelSelectionID(
+                    agentRaw: AgentProviderKind.openCode.rawValue,
+                    modelRaw: "ollama-cloud/kimi-k3"
+                ).rawValue),
+                "model_parameters": .array([
+                    .object(["config_id": .string("effort"), "value": .string("high")])
+                ])
+            ])
+            XCTFail("create_session should have thrown")
+        } catch {
+            // The throw is the INJECTED acquisition error (so the failure came from parameter
+            // acquisition, not a pre-allocation rejection)...
+            XCTAssertTrue(
+                error.localizedDescription.contains("simulated OpenCode acquisition failure"),
+                "Expected the injected acquisition error, got \(error)"
+            )
+            // ...the provider actually ran for this request...
+            let runs = await acquisitionProbe.providerRuns
+            XCTAssertEqual(runs, 1, "The injected provider must have run for this create")
+            // ...and a target WAS allocated (the hook fired) before the throw...
+            let allocations = await acquisitionProbe.allocations
+            XCTAssertEqual(allocations, 1, "A provisional target must have been allocated before acquisition")
+            // ...and then discarded by the scope (not a rejection before allocation, which
+            // likewise leaves zero but proves nothing about cleanup).
+            XCTAssertEqual(viewModel.test_outstandingProvisionalMCPSessionTargetCount, 0)
+        }
+    }
+
     func testResumeRejectsModelParameterChangesWhileRunIsActive() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
@@ -563,6 +887,179 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         try await assertFailedStartPreservesNewerSelection("high")
     }
 
+    // MARK: - Distribution role-pin inheritance (issue #81, plan §8.5 entry points)
+
+    /// A task-label `model_id` inherits the role's stored pin as the staged baseline through a
+    /// real `agent_run` start, and explicit `model_parameters` override the inherited identity
+    /// (last-wins per identity). The resolver's DEBUG store seam supplies the isolated role
+    /// bucket; production resolution reads `GlobalSettingsStore.shared`, which tests must not
+    /// write (it persists to the user's real settings file).
+    func testAgentRunStartRoleLabelInheritsStoredPinAndExplicitOverrides() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let window = try await makeWindow(name: "Cursor MCP Role Inherit", root: fixture.root)
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+        AgentMCPSelectionResolver.testRoleDefaultsStore = roleDefaultsStore(
+            engineerValueRaw: "high",
+            exploreValueRaw: "low"
+        )
+        defer { AgentMCPSelectionResolver.testRoleDefaultsStore = nil }
+
+        var stagedWithoutExplicit: [ACPModelParameterSelection] = []
+        var inheritedAgentRaw: String?
+        var inheritedModelRaw: String?
+        let inheritService = makeRunService(
+            window: window,
+            successfulStart: true,
+            observeSuccessfulStart: { selections in
+                stagedWithoutExplicit = selections
+            },
+            observeResolvedSelection: { agentRaw, modelRaw in
+                inheritedAgentRaw = agentRaw
+                inheritedModelRaw = modelRaw
+            }
+        )
+
+        _ = try await inheritService.execute(args: [
+            "op": .string("start"),
+            "message": .string("Run with the engineer role's stored pin."),
+            "model_id": .string("engineer"),
+            "detach": .bool(true)
+        ])
+
+        XCTAssertEqual(inheritedAgentRaw, AgentProviderKind.cursor.rawValue)
+        XCTAssertEqual(inheritedModelRaw, "grok-4.6")
+        XCTAssertEqual(stagedWithoutExplicit, [selection(value: "high")])
+
+        // The same role-label start with an explicit value replaces the inherited identity.
+        var stagedWithExplicit: [ACPModelParameterSelection] = []
+        let overrideService = makeRunService(
+            window: window,
+            successfulStart: true,
+            observeSuccessfulStart: { selections in
+                stagedWithExplicit = selections
+            }
+        )
+
+        _ = try await overrideService.execute(args: [
+            "op": .string("start"),
+            "message": .string("Explicit effort overrides the inherited engineer pin."),
+            "model_id": .string("engineer"),
+            "model_parameters": request([("effort", "low")]),
+            "detach": .bool(true)
+        ])
+
+        XCTAssertEqual(stagedWithExplicit, [selection(value: "low")])
+    }
+
+    /// A compound `model_id` inherits no role pin even while the same agent/model carries a
+    /// stored role bucket: the resolver returns no baseline for compounds, so nothing is staged
+    /// when the caller supplies no explicit parameters.
+    func testAgentRunStartCompoundModelIDInheritsNoRolePin() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let window = try await makeWindow(name: "Cursor MCP Compound No Inherit", root: fixture.root)
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+        AgentMCPSelectionResolver.testRoleDefaultsStore = roleDefaultsStore(
+            engineerValueRaw: "high",
+            exploreValueRaw: "low"
+        )
+        defer { AgentMCPSelectionResolver.testRoleDefaultsStore = nil }
+
+        var stagedSelections: [ACPModelParameterSelection] = [selection(value: "should-be-replaced")]
+        let service = makeRunService(
+            window: window,
+            successfulStart: true,
+            observeSuccessfulStart: { selections in
+                stagedSelections = selections
+            }
+        )
+
+        _ = try await service.execute(args: [
+            "op": .string("start"),
+            "message": .string("Compound selections start from a clean parameter baseline."),
+            "model_id": .string(cursorModelID),
+            "detach": .bool(true)
+        ])
+
+        XCTAssertTrue(stagedSelections.isEmpty)
+    }
+
+    /// `agent_explore` delivers the captured explore-role selections onto its fresh target before
+    /// the run starts. The caller session is a real MCP-controlled non-explore session; the DEBUG
+    /// store seam gives the explore role a distinct stored pin so the delivery is observable.
+    func testAgentExploreStartDeliversCapturedExploreRoleSelections() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let window = try await makeWindow(name: "Cursor MCP Explore Delivery", root: fixture.root)
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+        let agentModeVM = window.agentModeViewModel
+        let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
+        let callerTabID = try XCTUnwrap(workspace.activeComposeTabID)
+        let callerSessionID = UUID()
+        let callerSession = await agentModeVM.ensureSessionReady(tabID: callerTabID)
+        // The persistent binding assigns the session's active ID (get-only otherwise), which
+        // control-context activation requires.
+        XCTAssertNotNil(agentModeVM.test_installPersistentSessionBinding(
+            sessionID: callerSessionID,
+            on: callerSession,
+            compareAndSetInWorkspaceID: workspace.id
+        ))
+        _ = try await agentModeVM.mcpActivateControlContext(
+            forTabID: callerTabID,
+            sessionID: callerSessionID,
+            originatingConnectionID: nil,
+            taskLabelKind: .engineer,
+            markSessionAsMCPOriginated: true
+        )
+        defer { await agentModeVM.mcpDeactivateControlContext(sessionID: callerSessionID, cleanupSessionStore: true) }
+        AgentMCPSelectionResolver.testRoleDefaultsStore = roleDefaultsStore(
+            engineerValueRaw: "high",
+            exploreValueRaw: "low"
+        )
+        defer { AgentMCPSelectionResolver.testRoleDefaultsStore = nil }
+
+        var stagedSelections: [ACPModelParameterSelection] = [selection(value: "should-be-replaced")]
+        var exploreTaskLabel: AgentModelCatalog.TaskLabelKind?
+        let service = makeExploreService(
+            window: window,
+            sourceTabID: callerTabID,
+            observeStagedSelections: { selections in
+                stagedSelections = selections
+            },
+            observeTaskLabel: { exploreTaskLabel = $0 }
+        )
+
+        _ = try await service.execute(args: [
+            "op": .string("start"),
+            "message": .string("Explore with the stored explore pin."),
+            "detach": .bool(true)
+        ])
+
+        XCTAssertEqual(exploreTaskLabel, .explore)
+        // The staged baseline is the explore role's own pin, not the engineer caller's.
+        XCTAssertEqual(stagedSelections, [selection(value: "low")])
+    }
+
+    /// Isolated role-defaults store for the resolver's DEBUG seam. The engineer and explore roles
+    /// carry distinct stored pins over the same cursor model, so per-role bucket identity and
+    /// canonical-model filtering are both exercised.
+    private func roleDefaultsStore(
+        engineerValueRaw: String,
+        exploreValueRaw: String
+    ) -> AgentModelsProfileRoleDefaultsStore {
+        AgentModelsProfileRoleDefaultsStore(
+            overrides: [
+                AgentModelCatalog.TaskLabelKind.engineer.rawValue: cursorModelID,
+                AgentModelCatalog.TaskLabelKind.explore.rawValue: cursorModelID
+            ],
+            roleModelParameters: [
+                AgentModelCatalog.TaskLabelKind.engineer.rawValue: [selection(value: engineerValueRaw)],
+                AgentModelCatalog.TaskLabelKind.explore.rawValue: [selection(value: exploreValueRaw)]
+            ]
+        )
+    }
+
     private func assertFailedStartPreservesNewerSelection(_ newerValue: String) async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
@@ -641,7 +1138,10 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         return window
     }
 
-    private func makeManageService(window: WindowState) -> AgentManageMCPToolService {
+    private func makeManageService(
+        window: WindowState,
+        openCodeOneShotObservationProvider: AgentMCPModelParameterSupport.OneShotObservationProvider? = nil
+    ) -> AgentManageMCPToolService {
         AgentManageMCPToolService(
             toolName: MCPWindowToolName.agentManage,
             captureRequestMetadata: {
@@ -655,7 +1155,9 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
             resolveSpawnSourceTabID: { _ in nil },
             resolveSpawnParentSessionID: { _, _ in nil },
             bindCurrentRequestToTab: { _, _ in },
-            restrictDiscoveryToRoleLabels: { _ in false }
+            restrictDiscoveryToRoleLabels: { _ in false },
+            openCodeOneShotObservationProvider: openCodeOneShotObservationProvider
+                ?? AgentMCPModelParameterSupport.liveOneShotObservationProvider
         )
     }
 
@@ -665,7 +1167,8 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         beforeStartFailure: ((AgentModeViewModel, UUID) throws -> Void)? = nil,
         resumeValueBeforeStartFailure: String? = nil,
         successfulStart: Bool = false,
-        observeSuccessfulStart: (([ACPModelParameterSelection]) -> Void)? = nil
+        observeSuccessfulStart: (([ACPModelParameterSelection]) -> Void)? = nil,
+        observeResolvedSelection: ((String?, String?) -> Void)? = nil
     ) -> AgentRunMCPToolService {
         var service = AgentRunMCPToolService(
             toolName: MCPWindowToolName.agentRun,
@@ -682,6 +1185,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
             resolveSpawnParentSessionID: { _, _ in nil },
             withHeartbeat: { _, _, _, _, operation in try await operation() },
             startRun: { target, message, metadata, agentModeVM, agentRaw, modelRaw, reasoningEffortRaw, _, _, _, _ in
+                observeResolvedSelection?(agentRaw, modelRaw)
                 if let resumeValueBeforeStartFailure {
                     // Exercise the production control activation/configuration path. A newer
                     // resume is accepted while the old start is waiting to dispatch its prompt.
@@ -767,6 +1271,65 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
             )
         }
         return service
+    }
+
+    /// Mirrors `makeRunService` for `agent_explore.start`: the caller resolves through the
+    /// injected spawn-source tab, and the injected `startRun` observes the staged selections and
+    /// task label the explore path delivered before the run starts.
+    private func makeExploreService(
+        window: WindowState,
+        sourceTabID: UUID,
+        observeStagedSelections: @escaping ([ACPModelParameterSelection]) -> Void,
+        observeTaskLabel: @escaping (AgentModelCatalog.TaskLabelKind?) -> Void
+    ) -> AgentExploreMCPToolService {
+        AgentExploreMCPToolService(
+            toolName: MCPWindowToolName.agentExplore,
+            captureRequestMetadata: {
+                MCPServerViewModel.RequestMetadata(
+                    connectionID: UUID(),
+                    clientName: "release-gated-cursor-model-parameters",
+                    windowID: window.windowID
+                )
+            },
+            requireTargetWindow: { window },
+            resolveSpawnSourceTabID: { _ in sourceTabID },
+            resolveSpawnParentSessionID: { _, _ in nil },
+            withHeartbeat: { _, _, _, _, operation in try await operation() },
+            startRun: { target, _, _, agentModeVM, agentRaw, modelRaw, _, taskLabelKind, _, _, _ in
+                observeTaskLabel(taskLabelKind)
+                let session = agentModeVM.session(for: target.tabID)
+                observeStagedSelections(session.acpModelParameterSelections)
+                let snapshot = AgentRunMCPSnapshot(
+                    sessionID: target.sessionID ?? UUID(),
+                    tabID: target.tabID,
+                    sessionName: "Cursor MCP Explore Run",
+                    agentRaw: agentRaw,
+                    agentDisplayName: agentRaw.flatMap { AgentProviderKind(rawValue: $0)?.displayName },
+                    modelRaw: modelRaw,
+                    reasoningEffortRaw: nil,
+                    modelParameterSelections: session.acpModelParameterSelections.map {
+                        .init(
+                            providerID: $0.providerID.rawValue,
+                            baseModelRaw: $0.baseModelRaw,
+                            kind: $0.kind.rawValue,
+                            configID: $0.configID,
+                            valueRaw: $0.valueRaw
+                        )
+                    },
+                    status: .running,
+                    statusText: "Test harness running",
+                    latestAssistantPreview: nil,
+                    interaction: nil,
+                    transcriptItemCount: 0,
+                    updatedAt: Date(),
+                    parentSessionID: session.parentSessionID,
+                    failureReason: nil,
+                    worktreeBindings: [],
+                    activeWorktreeMerges: []
+                )
+                return AgentExternalMCPRunStarter.StartOutcome(snapshot: snapshot, delivery: .startedRun)
+            }
+        )
     }
 
     private func request(_ pairs: [(String, String)]) -> Value {

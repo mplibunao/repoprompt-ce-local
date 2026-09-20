@@ -780,6 +780,13 @@ class PromptViewModel: ObservableObject {
         fileManager.currentWorkspaceID
     }
 
+    /// The active workspace's execution root, used by demand-scoped OpenCode effort probes on
+    /// the Settings/popover surfaces (the composer's fallback tier). No worktree binding: these
+    /// surfaces edit future configuration and only preview metadata.
+    var activeWorkspaceRootPath: String? {
+        workspaceManager?.activeWorkspace?.repoPaths.first
+    }
+
     private var currentAgentModelsEditingScope: AgentModelsEditingScope {
         guard let workspaceID = currentWorkspaceID,
               settingsManager.workspaceAgentModelsSettings(for: workspaceID).inheritanceMode == .useWorkspaceOverrides

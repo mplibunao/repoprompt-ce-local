@@ -19,8 +19,8 @@ extension AgentModeViewModel {
             return makeRunCancelTarget(tabID: tabID, session: session)
         }()
         let submitTarget = makeComposerSubmitTarget(tabID: tabID, session: session)
-        let cursorRunLocksModelControls = selectedAgent == .cursor
-            && session?.runState.isActive == true
+        let acpControls = acpModelParameterControls(session: session)
+        let acpRunLocksModelControls = session?.runState.isActive == true && !acpControls.isEmpty
         return AgentComposerProps(
             currentTabID: tabID,
             submitTarget: submitTarget,
@@ -35,7 +35,7 @@ extension AgentModeViewModel {
             isWaitingForInstruction: isWaitingForInstruction,
             canUseLinkedAgentSession: hasLinkedAgentSession(for: tabID),
             isCurrentTabMCPControlled: isMCPControlled,
-            areModelControlsDisabled: isMCPControlled || cursorRunLocksModelControls,
+            areModelControlsDisabled: isMCPControlled || acpRunLocksModelControls,
             providerControls: activeProviderControlsBinding,
             isCodexRunActive: isCodexRunActive,
             hasAvailableAgentProviders: hasAvailableAgentProviders,
@@ -46,7 +46,7 @@ extension AgentModeViewModel {
             selectedModelDisplayName: selectedModelDisplayName,
             selectedReasoningEffortRaw: selectedReasoningEffortRaw,
             selectedReasoningEffortDisplayName: selectedReasoningEffortDisplayName,
-            cursorModelParameterControls: cursorModelParameterControls(session: session),
+            acpModelParameterControls: acpControls,
             availableAgents: availableAgents,
             isProviderPickerLockedForCurrentTab: isProviderPickerLocked(tabID: tabID),
             lockedAgentSelectionMessage: lockedAgentSelectionMessage(tabID: tabID),
@@ -57,21 +57,85 @@ extension AgentModeViewModel {
         )
     }
 
-    private func cursorModelParameterControls(session: TabSession?) -> [AgentComposerModelParameterControlProps] {
+    private func acpModelParameterControls(session: TabSession?) -> [AgentComposerModelParameterControlProps] {
+        guard let providerID = selectedAgent.acpProviderID else { return [] }
+        // Pure projection over the held demand-scoped observation (OpenCode) or the static
+        // catalogue (Cursor). Never launch discovery from here. While the OpenCode observation
+        // is loading/failed/has no usable parameters, this yields no parameter set, so the
+        // effort control is omitted while model selection, permissions, and submission stay
+        // usable. Every returned choice renders, including a one-option menu.
+        // Unwrap the KEY itself and pass its possibly-nil workspacePath separately: optional
+        // chaining (`key?.workspacePath`) would collapse "resolution failed" (no key) into
+        // "resolved nil-workspace" (key with workspacePath: nil). A held nil-workspace
+        // observation resolves only via a constructed nil-workspace key, while a failed
+        // authority resolution withholds the control entirely.
+        let workspacePath: String?
+        if providerID == .openCode {
+            guard let key = openCodeParameterDiscoveryKey(session: session, modelRaw: selectedModelRaw) else {
+                return savedIntentOnlyControls(providerID: providerID, session: session)
+            }
+            workspacePath = key.workspacePath
+        } else if let session {
+            workspacePath = try? effectiveWorkspacePath(for: session)
+        } else {
+            workspacePath = workspacePathProvider()
+        }
         let resolved = ACPModelParameterResolver.resolve(
-            providerID: selectedAgent.acpProviderID ?? .openCode,
+            providerID: providerID,
             selectedModelRaw: selectedModelRaw,
-            persistedSelections: session?.acpModelParameterSelections ?? []
+            persistedSelections: session?.acpModelParameterSelections ?? [],
+            workspacePath: workspacePath,
+            openCodeParameters: providerID == .openCode ? openCodeModelParameterObservation : nil
         )
-        return resolved.map { parameter in
-            .init(
+        let controls = resolved.map { parameter in
+            AgentComposerModelParameterControlProps(
+                providerID: providerID,
                 kind: parameter.definition.kind,
                 baseModelRaw: parameter.baseModelRaw,
                 configID: parameter.definition.configID,
                 displayName: parameter.definition.displayName,
                 selectedValueRaw: parameter.selectedChoice.rawValue,
                 selectedDisplayName: parameter.selectedChoice.displayName,
-                choices: parameter.definition.choices
+                choices: parameter.definition.choices,
+                openCodeDiscoveryKey: providerID == .openCode ? openCodeModelParameterObservation?.key : nil,
+                hasLiveDefinition: true
+            )
+        }
+        // Saved OpenCode intent must stay visible even while its metadata is loading, failed,
+        // or reports no usable parameters: it still blocks the next run, so omitting the
+        // control would strand the pin with no way to clear or replace it.
+        if controls.isEmpty {
+            return savedIntentOnlyControls(providerID: providerID, session: session)
+        }
+        return controls
+    }
+
+    /// Composer recovery projection from saved intent alone: no live definition, no invented
+    /// choices, and the saved raw value verbatim. The only honest actions are clearing the pin
+    /// or waiting for discovery to succeed. Cursor never needs this — its static catalogue
+    /// always resolves for a known model.
+    private func savedIntentOnlyControls(
+        providerID: ACPProviderID,
+        session: TabSession?
+    ) -> [AgentComposerModelParameterControlProps] {
+        guard providerID == .openCode, let session else { return [] }
+        let saved = ACPModelParameterSelection.selections(
+            for: providerID,
+            activeBaseModelRaw: selectedModelRaw,
+            from: session.acpModelParameterSelections
+        )
+        return saved.map { selection in
+            AgentComposerModelParameterControlProps(
+                providerID: providerID,
+                kind: selection.kind,
+                baseModelRaw: selection.baseModelRaw,
+                configID: selection.configID,
+                displayName: selection.kind.recoveryDisplayName,
+                selectedValueRaw: selection.valueRaw,
+                selectedDisplayName: selection.valueRaw,
+                choices: [],
+                openCodeDiscoveryKey: openCodeModelParameterObservation?.key,
+                hasLiveDefinition: false
             )
         }
     }
@@ -125,6 +189,7 @@ extension AgentModeViewModel {
         #if DEBUG
             test_syncComposerCallCount += 1
         #endif
+        reconcileOpenCodeModelParameterObservation()
         ui.composer.update(makeComposerProps(tabID: tabID))
     }
 

@@ -119,7 +119,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     typealias ProviderFactory = (
         _ agent: AgentProviderKind,
         _ modelString: String?,
-        _ workspacePath: String?
+        _ workspacePath: String?,
+        _ modelParameterSelections: [ACPModelParameterSelection]
     ) -> HeadlessAgentProvider
 
     private func debugLog(_ message: @autoclosure () -> String) {
@@ -963,6 +964,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         workspaceManager?.activeWorkspace?.repoPaths.first
     }
 
+    /// Execution root for the Context Builder effort chooser's demand-scoped probe.
+    /// Worktree-aware only during a run; the chooser edits future configuration, so the active
+    /// workspace root is the honest preview context (the composer's fallback tier).
+    var chooserProbeWorkspacePath: String? {
+        currentWorkspacePath
+    }
+
     /// Track which agents are running (for cleanup)
     private var activeAgentRuns: Set<UUID> = []
 
@@ -995,11 +1003,12 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         self.oracleViewModel = oracleViewModel
         self.settingsManager = settingsManager
         self.codexModelPollingService = codexModelPollingService
-        self.providerFactory = providerFactory ?? { agent, modelString, workspacePath in
+        self.providerFactory = providerFactory ?? { agent, modelString, workspacePath, modelParameterSelections in
             AgentRuntimeProviderService.shared.makeProvider(
                 for: agent,
                 modelString: modelString,
-                workspacePath: workspacePath
+                workspacePath: workspacePath,
+                modelParameterSelections: modelParameterSelections
             )
         }
         refreshAvailableAgents()
@@ -1932,7 +1941,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         return ContextBuilderResolvedRunAuthority(
             configuration: configuration,
             agentKind: selection.agent,
-            modelRaw: selection.modelRaw
+            modelRaw: selection.modelRaw,
+            modelParameterSelections: profile.contextBuilderModelParameterSelections(
+                for: selection.agent,
+                modelRaw: selection.modelRaw
+            )
         )
     }
 
@@ -2061,6 +2074,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                     origin: .mcp(controlToken: mcpControlToken),
                     agentKind: runAgent,
                     modelRaw: runModelRaw,
+                    modelParameterSelections: authority.modelParameterSelections,
                     workspaceContext: workspaceContext,
                     mcpConfiguration: configuration,
                     continuation: continuation,
@@ -2173,11 +2187,25 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 planningModelRaw: base.planningModelRaw,
                 isSystemWorkspace: base.isSystemWorkspace
             )
+            // An explicit agent/model override changes the pin eligibility target, so only a run
+            // without overrides keeps the resolved authority's pins; overridden runs re-read the
+            // pin for the overridden selection from the effective profile.
+            let overrideAgentKind = agentOverride ?? resolved.agentKind
+            let overrideModelRaw = modelOverrideRaw ?? resolved.modelRaw
+            let overrideSelections = (agentOverride == nil && modelOverrideRaw == nil)
+                ? resolved.modelParameterSelections
+                : settingsManager
+                .effectiveAgentModelsProfile(workspaceID: identity.workspaceID)
+                .contextBuilderModelParameterSelections(
+                    for: overrideAgentKind,
+                    modelRaw: overrideModelRaw
+                )
             return try await runContextBuilderForMCP(
                 authority: ContextBuilderResolvedRunAuthority(
                     configuration: configuration,
-                    agentKind: agentOverride ?? resolved.agentKind,
-                    modelRaw: modelOverrideRaw ?? resolved.modelRaw
+                    agentKind: overrideAgentKind,
+                    modelRaw: overrideModelRaw,
+                    modelParameterSelections: overrideSelections
                 ),
                 instructionsOverride: instructionsOverride,
                 planModelName: planModelName,
@@ -2613,7 +2641,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             ownership: ownership,
             origin: .ui,
             agentKind: runAgent,
-            modelRaw: runModelRaw
+            modelRaw: runModelRaw,
+            modelParameterSelections: settingsManager
+                .effectiveAgentModelsProfile(workspaceID: currentWorkspaceID)
+                .contextBuilderModelParameterSelections(
+                    for: runAgent,
+                    modelRaw: runModelRaw
+                )
         )
 
         guard runRegistry.register(record) else {
@@ -2752,7 +2786,12 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             let providerWorkspacePath = record.mcpConfiguration?.providerWorkspacePath
                 ?? record.workspaceContext?.providerWorkspacePath
                 ?? currentWorkspacePath
-            let provider = providerFactory(record.agentKind, modelString, providerWorkspacePath)
+            let provider = providerFactory(
+                record.agentKind,
+                modelString,
+                providerWorkspacePath,
+                record.modelParameterSelections
+            )
             guard record.installProvider(provider) else {
                 await provider.dispose()
                 await lease.failAndCleanup()

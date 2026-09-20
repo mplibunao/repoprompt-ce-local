@@ -214,6 +214,7 @@ struct AgentComposerSubmissionLatch {
 }
 
 struct AgentComposerModelParameterControlProps: Equatable, Identifiable {
+    let providerID: ACPProviderID
     let kind: ACPModelParameterKind
     let baseModelRaw: String
     let configID: String
@@ -221,6 +222,16 @@ struct AgentComposerModelParameterControlProps: Equatable, Identifiable {
     let selectedValueRaw: String
     let selectedDisplayName: String
     let choices: [ACPModelParameterChoice]
+    /// OpenCode only: the demand-scoped discovery key this control's metadata came from. The
+    /// setter rejects a click whose key is missing or no longer matches the current target, so a
+    /// stale menu can never retarget a selection to a different workspace/model. Cursor leaves
+    /// this nil (its catalogue is static and needs no demand-scoped authority).
+    let openCodeDiscoveryKey: OpenCodeACPModelParameterKey?
+    /// Distribution recovery: true when this control was projected from a live definition
+    /// (discovery metadata exists for the target). False when it was synthesized from saved
+    /// intent alone — nothing is advertised, so the only honest actions are clearing the pin or
+    /// waiting for discovery to succeed. Cursor controls are always live (static catalogue).
+    let hasLiveDefinition: Bool
 
     var id: String {
         "\(kind.rawValue):\(configID)"
@@ -230,8 +241,21 @@ struct AgentComposerModelParameterControlProps: Equatable, Identifiable {
         displayName
     }
 
+    var isSavedValueUnavailable: Bool {
+        providerID == .openCode && !choices.contains { $0.rawValue == selectedValueRaw }
+    }
+
+    var tooltip: String {
+        if isSavedValueUnavailable {
+            return hasLiveDefinition
+                ? "Saved \(displayName) value ‘\(selectedValueRaw)’ is not currently advertised. Choose a supported value before running."
+                : "Saved \(displayName) value ‘\(selectedValueRaw)’ is not currently advertised. Clear it to run with the model's default."
+        }
+        return displayName
+    }
+
     var accessibilityValue: String {
-        selectedDisplayName
+        isSavedValueUnavailable ? "\(selectedDisplayName), unavailable" : selectedDisplayName
     }
 }
 
@@ -256,7 +280,7 @@ struct AgentComposerProps: Equatable {
     let selectedModelDisplayName: String
     let selectedReasoningEffortRaw: String?
     let selectedReasoningEffortDisplayName: String
-    let cursorModelParameterControls: [AgentComposerModelParameterControlProps]
+    let acpModelParameterControls: [AgentComposerModelParameterControlProps]
     let availableAgents: [AgentProviderKind]
     let isProviderPickerLockedForCurrentTab: Bool
     let lockedAgentSelectionMessage: String?
@@ -289,7 +313,7 @@ struct AgentComposerProps: Equatable {
         selectedModelDisplayName: AgentModel.defaultModel.displayName,
         selectedReasoningEffortRaw: nil,
         selectedReasoningEffortDisplayName: "",
-        cursorModelParameterControls: [],
+        acpModelParameterControls: [],
         availableAgents: [],
         isProviderPickerLockedForCurrentTab: false,
         lockedAgentSelectionMessage: nil,

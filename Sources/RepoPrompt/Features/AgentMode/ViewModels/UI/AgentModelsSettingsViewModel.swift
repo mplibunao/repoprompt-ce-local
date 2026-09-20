@@ -239,7 +239,10 @@ final class AgentModelsSettingsViewModel: ObservableObject {
     }
 
     var roleDefaultsResolutions: [MCPAgentRoleDefaultsService.RoleDefaultResolution] {
-        let profileStore = AgentModelsProfileRoleDefaultsStore(overrides: profileSnapshot.mcpAgentRoleOverrides)
+        let profileStore = AgentModelsProfileRoleDefaultsStore(
+            overrides: profileSnapshot.mcpAgentRoleOverrides,
+            roleModelParameters: profileSnapshot.mcpAgentRoleModelParameters
+        )
         return MCPAgentRoleDefaultsService.resolutions(
             availability: availability,
             recommendedAvailability: availability.filteredForRecommendationProviders(settingsManager.globalRecommendationProviderFilter()),

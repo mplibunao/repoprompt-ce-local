@@ -10,6 +10,15 @@ enum ACPModelParameterKind: String, Codable, Hashable, CaseIterable {
         case .speed: 1
         }
     }
+
+    /// Display name for a control synthesized from saved intent alone, with no live
+    /// definition to supply the provider's own wording.
+    var recoveryDisplayName: String {
+        switch self {
+        case .thinking: "Thinking"
+        case .speed: "Speed"
+        }
+    }
 }
 
 struct ACPModelParameterChoice: Codable, Hashable {

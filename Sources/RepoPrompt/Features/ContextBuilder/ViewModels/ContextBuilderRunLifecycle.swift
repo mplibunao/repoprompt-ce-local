@@ -130,6 +130,23 @@ struct ContextBuilderResolvedRunAuthority {
     let configuration: ContextBuilderMCPRunConfiguration
     let agentKind: AgentProviderKind
     let modelRaw: String
+
+    /// The frozen model-parameter pin (e.g. an OpenCode effort level) for the run's resolved
+    /// agent+model, captured at run admission. The run never re-reads the chooser or profile
+    /// after awaited startup work.
+    let modelParameterSelections: [ACPModelParameterSelection]
+
+    init(
+        configuration: ContextBuilderMCPRunConfiguration,
+        agentKind: AgentProviderKind,
+        modelRaw: String,
+        modelParameterSelections: [ACPModelParameterSelection] = []
+    ) {
+        self.configuration = configuration
+        self.agentKind = agentKind
+        self.modelRaw = modelRaw
+        self.modelParameterSelections = modelParameterSelections
+    }
 }
 
 struct ContextBuilderRunBehavior: Equatable {
@@ -214,6 +231,7 @@ final class ContextBuilderRunRecord {
     let origin: ContextBuilderRunOrigin
     let agentKind: AgentProviderKind
     let modelRaw: String
+    let modelParameterSelections: [ACPModelParameterSelection]
     let progressReporter: ContextBuilderMCPProgressReporter?
     let activityReporter: ContextBuilderMCPActivityReporter?
     let workspaceContext: ContextBuilderWorkspaceContext?
@@ -251,6 +269,7 @@ final class ContextBuilderRunRecord {
         origin: ContextBuilderRunOrigin,
         agentKind: AgentProviderKind,
         modelRaw: String,
+        modelParameterSelections: [ACPModelParameterSelection] = [],
         workspaceContext: ContextBuilderWorkspaceContext? = nil,
         mcpConfiguration: ContextBuilderMCPRunConfiguration? = nil,
         continuation: CheckedContinuation<ContextBuilderAgentViewModel.MCPContextBuilderRunCompletion, Error>? = nil,
@@ -265,6 +284,7 @@ final class ContextBuilderRunRecord {
         self.origin = origin
         self.agentKind = agentKind
         self.modelRaw = modelRaw
+        self.modelParameterSelections = modelParameterSelections
         self.workspaceContext = workspaceContext
         self.mcpConfiguration = mcpConfiguration
         self.continuation = continuation

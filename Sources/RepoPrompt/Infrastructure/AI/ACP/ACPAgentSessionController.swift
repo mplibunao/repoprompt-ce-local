@@ -1023,7 +1023,12 @@ actor ACPAgentSessionController {
     func applySessionModelParameterSelections(
         _ selections: [ACPModelParameterSelection]
     ) async throws -> ACPModelParameterApplicationReport {
-        try await configurationMutationMutex.withLock { [weak self] in
+        #if DEBUG
+            if Self.ParameterApplicationTestRecorder.recordIfEnabled(selections) {
+                return .init(applied: [], skipped: [])
+            }
+        #endif
+        return try await configurationMutationMutex.withLock { [weak self] in
             guard let self else { throw CancellationError() }
             return try await applySessionModelParameterSelectionsSerialized(selections)
         }
@@ -4166,3 +4171,45 @@ actor ACPAgentSessionController {
         diagnosticSink?(event)
     }
 }
+
+#if DEBUG
+    extension ACPAgentSessionController {
+        /// DEBUG-only observation point for parameter application. While enabled, every call to
+        /// `applySessionModelParameterSelections` records its selections and short-circuits with an
+        /// empty report, so tests can assert exactly what a caller attempted to apply without a live
+        /// ACP session. Production builds compile this away entirely.
+        enum ParameterApplicationTestRecorder {
+            private static let lock = NSLock()
+            private static var enabled = false
+            private static var records: [[ACPModelParameterSelection]] = []
+
+            static func enable() {
+                lock.lock()
+                defer { lock.unlock() }
+                enabled = true
+                records.removeAll()
+            }
+
+            static func disable() {
+                lock.lock()
+                defer { lock.unlock() }
+                enabled = false
+                records.removeAll()
+            }
+
+            static func recordIfEnabled(_ selections: [ACPModelParameterSelection]) -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                guard enabled else { return false }
+                records.append(selections)
+                return true
+            }
+
+            static func recordedCalls() -> [[ACPModelParameterSelection]] {
+                lock.lock()
+                defer { lock.unlock() }
+                return records
+            }
+        }
+    }
+#endif
