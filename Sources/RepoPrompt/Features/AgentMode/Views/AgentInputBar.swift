@@ -1003,64 +1003,69 @@ struct AgentComposerView: View, Equatable {
 
     private var acpModelParameterPickers: some View {
         ForEach(props.acpModelParameterControls) { control in
-            Menu {
-                ForEach(control.choices, id: \.rawValue) { choice in
-                    Button {
-                        actions.selectACPModelParameter(
-                            ACPModelParameterSelection(
-                                providerID: control.providerID,
-                                baseModelRaw: control.baseModelRaw,
-                                kind: control.kind,
-                                configID: control.configID,
-                                valueRaw: choice.rawValue
-                            ),
-                            control.openCodeDiscoveryKey
-                        )
-                    } label: {
-                        HStack {
-                            Text(choice.displayName)
-                            if choice.rawValue == control.selectedValueRaw {
-                                Spacer()
-                                Image(systemName: "checkmark")
+            HStack(spacing: 4) {
+                Menu {
+                    ForEach(control.choices, id: \.rawValue) { choice in
+                        Button {
+                            actions.selectACPModelParameter(
+                                ACPModelParameterSelection(
+                                    providerID: control.providerID,
+                                    baseModelRaw: control.baseModelRaw,
+                                    kind: control.kind,
+                                    configID: control.configID,
+                                    valueRaw: choice.rawValue
+                                ),
+                                control.openCodeDiscoveryKey
+                            )
+                        } label: {
+                            HStack {
+                                Text(choice.displayName)
+                                if choice.rawValue == control.selectedValueRaw {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                }
                             }
                         }
                     }
-                }
-                // A saved value the live definition excludes (or that has no usable definition
-                // at all) must be recoverable: advertised choices replace it, and this action
-                // clears it. Without this the pin could be replaced but never removed.
-                if control.isSavedValueUnavailable {
-                    Button {
-                        actions.clearSavedACPModelParameter(
-                            control.providerID,
-                            control.baseModelRaw,
-                            control.kind
-                        )
-                    } label: {
-                        Text("Clear saved value")
+                    // A saved value the live definition excludes (or that has no usable definition
+                    // at all) must be recoverable: advertised choices replace it, and this action
+                    // clears it. Without this the pin could be replaced but never removed.
+                    if control.isSavedValueUnavailable {
+                        Button {
+                            actions.clearSavedACPModelParameter(
+                                control.providerID,
+                                control.baseModelRaw,
+                                control.kind
+                            )
+                        } label: {
+                            Text("Clear saved value")
+                        }
                     }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(control.selectedDisplayName)
+                            .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
+                    }
+                    .foregroundColor(control.chipEmphasis == .standard ? .secondary : .orange)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(pickerChipColor)
+                    .cornerRadius(4)
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(control.selectedDisplayName)
-                        .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
+                .menuStyle(.borderlessButton)
+                .accessibilityLabel(Text(control.accessibilityLabel))
+                .accessibilityValue(Text(control.accessibilityValue))
+
+                if control.showsUnavailableWarningIndicator {
+                    // Native borderless menus own their label rendering, so the warning glyph
+                    // remains a sibling that cannot be neutralized with the menu's label style.
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(fontPreset.swiftUIFont(sizeAtNormal: 10, weight: .semibold))
+                        .foregroundColor(.orange)
+                        .accessibilityHidden(true)
+                        .allowsHitTesting(false)
                 }
-                .foregroundColor(
-                    control.isSavedValueUnavailable || (
-                        control.kind == .speed
-                            && control.selectedDisplayName.caseInsensitiveCompare("fast") == .orderedSame
-                    )
-                        ? .orange
-                        : .secondary
-                )
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(pickerChipColor)
-                .cornerRadius(4)
             }
-            .menuStyle(.borderlessButton)
-            .accessibilityLabel(Text(control.accessibilityLabel))
-            .accessibilityValue(Text(control.accessibilityValue))
             // A recovery control (no usable definition) carries no choices, yet its clear
             // action must stay reachable — only a control that has a live definition but no
             // choices would be genuinely inert.

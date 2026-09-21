@@ -213,6 +213,12 @@ struct AgentComposerSubmissionLatch {
     }
 }
 
+enum AgentComposerModelParameterChipEmphasis: Equatable {
+    case standard
+    case accent
+    case warning
+}
+
 struct AgentComposerModelParameterControlProps: Equatable, Identifiable {
     let providerID: ACPProviderID
     let kind: ACPModelParameterKind
@@ -245,10 +251,24 @@ struct AgentComposerModelParameterControlProps: Equatable, Identifiable {
         providerID == .openCode && !choices.contains { $0.rawValue == selectedValueRaw }
     }
 
+    var chipEmphasis: AgentComposerModelParameterChipEmphasis {
+        if isSavedValueUnavailable {
+            return .warning
+        }
+        if kind == .speed, selectedDisplayName.caseInsensitiveCompare("fast") == .orderedSame {
+            return .accent
+        }
+        return .standard
+    }
+
+    var showsUnavailableWarningIndicator: Bool {
+        chipEmphasis == .warning
+    }
+
     /// Hover guidance only when it carries information the control itself doesn't already
     /// show. A normal control repeats nothing (its label already names the parameter), so it
-    /// gets no tooltip; a saved-but-unadvertised value explains itself because the orange text
-    /// alone doesn't say what to do about it.
+    /// gets no tooltip; a saved-but-unadvertised value explains itself because the orange warning
+    /// indicator alone doesn't say what to do about it.
     var tooltip: String? {
         guard isSavedValueUnavailable else { return nil }
         return hasLiveDefinition

@@ -507,6 +507,8 @@ final class CursorModelParameterSelectionTests: XCTestCase {
 
         XCTAssertEqual(control.accessibilityLabel, "Effort")
         XCTAssertEqual(control.accessibilityValue, "High")
+        XCTAssertEqual(control.chipEmphasis, .standard)
+        XCTAssertFalse(control.showsUnavailableWarningIndicator)
     }
 
     func testSelectingKnownCursorModelPublishesLocalControlsSynchronously() {
@@ -525,6 +527,8 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         let controls = viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls
         XCTAssertEqual(controls.map(\.displayName), ["Effort", "Speed"])
         XCTAssertEqual(controls.map(\.selectedDisplayName), ["High", "Fast"])
+        XCTAssertEqual(controls.map(\.chipEmphasis), [.standard, .accent])
+        XCTAssertEqual(controls.map(\.showsUnavailableWarningIndicator), [false, false])
     }
 
     func testSwitchingKnownCursorModelsImmediatelyReplacesControls() {
@@ -588,6 +592,44 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         XCTAssertEqual(controls.map(\.selectedDisplayName), ["Low"])
     }
 
+    func testDeepSeekSavedUnavailableEffortUsesWarningChipPresentation() throws {
+        let workspacePath = "/workspace-a"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = "deepseek/deepseek-flash"
+        session.acpModelParameterSelections = [openCodeEffortPin(
+            modelRaw: session.selectedModelRaw,
+            valueRaw: "max"
+        )]
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+        installOpenCodeObservation(
+            viewModel,
+            workspacePath: workspacePath,
+            modelRaw: session.selectedModelRaw,
+            choices: [
+                .init(rawValue: "low", displayName: "Low"),
+                .init(rawValue: "high", displayName: "High")
+            ],
+            currentValueRaw: "high"
+        )
+
+        let control = try XCTUnwrap(viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls.first)
+        XCTAssertEqual(control.selectedDisplayName, "max")
+        XCTAssertEqual(control.choices.map(\.displayName), ["Low", "High"])
+        XCTAssertEqual(control.chipEmphasis, .warning)
+        XCTAssertTrue(control.showsUnavailableWarningIndicator)
+        XCTAssertTrue(control.isSavedValueUnavailable)
+        XCTAssertTrue(control.hasLiveDefinition)
+        XCTAssertEqual(control.accessibilityValue, "max, unavailable")
+    }
+
     func testComposerShowsUnsupportedOpenCodeIntentWithoutChangingCursorFallback() throws {
         for agent: AgentProviderKind in [.openCode, .cursor] {
             let workspacePath = "/workspace-a"
@@ -607,6 +649,8 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             let providerID = try XCTUnwrap(agent.acpProviderID)
             let defaultControl = try XCTUnwrap(viewModel.makeComposerProps().acpModelParameterControls.first)
             XCTAssertFalse(defaultControl.isSavedValueUnavailable)
+            XCTAssertEqual(defaultControl.chipEmphasis, .standard)
+            XCTAssertFalse(defaultControl.showsUnavailableWarningIndicator)
             // A normal control repeats nothing the label doesn't already say, so it carries no hover tooltip.
             XCTAssertNil(defaultControl.tooltip)
             XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
@@ -623,6 +667,8 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             XCTAssertEqual(control.selectedValueRaw, agent == .openCode ? saved.valueRaw : defaultControl.selectedValueRaw)
             XCTAssertEqual(control.selectedDisplayName, agent == .openCode ? saved.valueRaw : defaultControl.selectedDisplayName)
             XCTAssertEqual(control.isSavedValueUnavailable, agent == .openCode)
+            XCTAssertEqual(control.chipEmphasis, agent == .openCode ? .warning : .standard)
+            XCTAssertEqual(control.showsUnavailableWarningIndicator, agent == .openCode)
             XCTAssertEqual(control.choices, defaultControl.choices)
             if agent == .openCode {
                 XCTAssertTrue(control.tooltip?.contains(saved.valueRaw) == true)
@@ -1729,10 +1775,13 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         )
     }
 
-    private func openCodeEffortPin(valueRaw: String) -> ACPModelParameterSelection {
+    private func openCodeEffortPin(
+        modelRaw: String = "ollama-cloud/kimi-k3",
+        valueRaw: String
+    ) -> ACPModelParameterSelection {
         ACPModelParameterSelection(
             providerID: .openCode,
-            baseModelRaw: "ollama-cloud/kimi-k3",
+            baseModelRaw: modelRaw,
             kind: .thinking,
             configID: "effort",
             valueRaw: valueRaw
