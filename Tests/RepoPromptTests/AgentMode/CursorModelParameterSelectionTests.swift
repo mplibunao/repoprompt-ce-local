@@ -607,6 +607,8 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             let providerID = try XCTUnwrap(agent.acpProviderID)
             let defaultControl = try XCTUnwrap(viewModel.makeComposerProps().acpModelParameterControls.first)
             XCTAssertFalse(defaultControl.isSavedValueUnavailable)
+            // A normal control repeats nothing the label doesn't already say, so it carries no hover tooltip.
+            XCTAssertNil(defaultControl.tooltip)
             XCTAssertTrue(session.acpModelParameterSelections.isEmpty)
 
             let saved = ACPModelParameterSelection(
@@ -623,7 +625,7 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             XCTAssertEqual(control.isSavedValueUnavailable, agent == .openCode)
             XCTAssertEqual(control.choices, defaultControl.choices)
             if agent == .openCode {
-                XCTAssertTrue(control.tooltip.contains(saved.valueRaw))
+                XCTAssertTrue(control.tooltip?.contains(saved.valueRaw) == true)
                 XCTAssertEqual(control.accessibilityValue, "retired-effort, unavailable")
             } else {
                 XCTAssertEqual(control.tooltip, defaultControl.tooltip)
@@ -1027,8 +1029,8 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         XCTAssertTrue(control.isSavedValueUnavailable)
         XCTAssertFalse(control.hasLiveDefinition)
         XCTAssertNil(control.openCodeDiscoveryKey)
-        XCTAssertTrue(control.tooltip.contains("not currently advertised"))
-        XCTAssertTrue(control.tooltip.contains("Clear it to run with the model's default"))
+        XCTAssertTrue(control.tooltip?.contains("not currently advertised") == true)
+        XCTAssertTrue(control.tooltip?.contains("Clear it to run with the model's default") == true)
         XCTAssertEqual(control.accessibilityValue, "retired-effort, unavailable")
     }
 
@@ -1072,7 +1074,7 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         XCTAssertTrue(unavailable.hasLiveDefinition)
         XCTAssertEqual(unavailable.choices.map(\.displayName), ["Low", "High"])
         XCTAssertFalse(unavailable.choices.contains { $0.rawValue == "retired-effort" })
-        XCTAssertTrue(unavailable.tooltip.contains("Choose a supported value before running"))
+        XCTAssertTrue(unavailable.tooltip?.contains("Choose a supported value before running") == true)
 
         // No live controller exists, so the clear cannot apply a provider default — it still
         // removes the pin, and the composer returns to the definition's advertised default.
@@ -1088,6 +1090,7 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         XCTAssertEqual(restored.displayName, "Effort")
         XCTAssertEqual(restored.selectedDisplayName, "Low")
         XCTAssertFalse(restored.isSavedValueUnavailable)
+        XCTAssertNil(restored.tooltip)
     }
 
     /// Clearing re-checks the live binding exactly like a selection: a changed base model, a

@@ -123,7 +123,13 @@ struct ACPModelParameterPinChip: View {
         .menuStyle(.borderlessButton)
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1.0 : 0.55)
-        .hoverTooltip(tooltip)
+        // Native AppKit-anchored help, not the custom hoverTooltip bubble: the custom
+        // overlay window mispositions after its hosting view relayouts (it balloons in
+        // height and drops to the bottom of the screen, worst for this chip's long Default
+        // text), while native help is anchored by AppKit next to the control. Content and
+        // accessibility mirror the previous behavior unchanged.
+        // swiftlint:disable:next no_swiftui_help_modifier
+        .help(tooltip)
         .accessibilityValue(Text(accessibilityValueText))
         .fixedSize()
     }

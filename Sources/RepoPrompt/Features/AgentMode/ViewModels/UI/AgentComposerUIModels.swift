@@ -245,13 +245,15 @@ struct AgentComposerModelParameterControlProps: Equatable, Identifiable {
         providerID == .openCode && !choices.contains { $0.rawValue == selectedValueRaw }
     }
 
-    var tooltip: String {
-        if isSavedValueUnavailable {
-            return hasLiveDefinition
-                ? "Saved \(displayName) value ‘\(selectedValueRaw)’ is not currently advertised. Choose a supported value before running."
-                : "Saved \(displayName) value ‘\(selectedValueRaw)’ is not currently advertised. Clear it to run with the model's default."
-        }
-        return displayName
+    /// Hover guidance only when it carries information the control itself doesn't already
+    /// show. A normal control repeats nothing (its label already names the parameter), so it
+    /// gets no tooltip; a saved-but-unadvertised value explains itself because the orange text
+    /// alone doesn't say what to do about it.
+    var tooltip: String? {
+        guard isSavedValueUnavailable else { return nil }
+        return hasLiveDefinition
+            ? "Saved \(displayName) value ‘\(selectedValueRaw)’ is not currently advertised. Choose a supported value before running."
+            : "Saved \(displayName) value ‘\(selectedValueRaw)’ is not currently advertised. Clear it to run with the model's default."
     }
 
     var accessibilityValue: String {
