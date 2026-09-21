@@ -4,6 +4,7 @@ import MCP
 @MainActor
 struct AgentManageMCPToolService {
     typealias RequestMetadata = MCPServerViewModel.RequestMetadata
+    typealias OpenCodeCatalogSnapshotProvider = @MainActor (_ workspacePath: String?) async throws -> OpenCodeACPModelPollingService.Snapshot?
 
     static let maxCleanupSessionIDs = 256
 
@@ -66,6 +67,9 @@ struct AgentManageMCPToolService {
     /// initializer to capture the resolved workspace directly (no live ACP process, no mutable
     /// global).
     let openCodeOneShotObservationProvider: AgentMCPModelParameterSupport.OneShotObservationProvider
+    /// Workspace-scoped catalog source for `list_agents`. The live source performs a foreground
+    /// refresh so a snapshot published by another window cannot choose the enrichment target.
+    let openCodeCatalogSnapshotProvider: OpenCodeCatalogSnapshotProvider
     #if DEBUG
         var test_resumeSetupBoundary: (@MainActor (_ afterActivation: Bool) async -> Void)?
         var testAfterTargetResolution: ((AgentModeViewModel.MCPSessionTarget) async -> Void)?
@@ -82,7 +86,10 @@ struct AgentManageMCPToolService {
             GlobalSettingsStore.shared.effectiveAgentModelsProfile(workspaceID: workspaceID).restrictMCPAgentDiscoveryToRoleLabels
         },
         cleanupDependencies: CleanupDependencies = .live,
-        openCodeOneShotObservationProvider: @escaping AgentMCPModelParameterSupport.OneShotObservationProvider = AgentMCPModelParameterSupport.liveOneShotObservationProvider
+        openCodeOneShotObservationProvider: @escaping AgentMCPModelParameterSupport.OneShotObservationProvider = AgentMCPModelParameterSupport.liveOneShotObservationProvider,
+        openCodeCatalogSnapshotProvider: @escaping OpenCodeCatalogSnapshotProvider = { workspacePath in
+            try await OpenCodeACPModelPollingService.shared.discoverOnce(workspacePath: workspacePath)
+        }
     ) {
         self.toolName = toolName
         self.captureRequestMetadata = captureRequestMetadata
@@ -93,6 +100,7 @@ struct AgentManageMCPToolService {
         self.restrictDiscoveryToRoleLabels = restrictDiscoveryToRoleLabels
         self.cleanupDependencies = cleanupDependencies
         self.openCodeOneShotObservationProvider = openCodeOneShotObservationProvider
+        self.openCodeCatalogSnapshotProvider = openCodeCatalogSnapshotProvider
     }
 
     private struct HandoffSessionInfo {
@@ -150,16 +158,24 @@ struct AgentManageMCPToolService {
         let rolesOnly = try parseBool(args["roles_only"], name: "roles_only", defaultValue: false)
         let restrictedDiscovery = restrictDiscoveryToRoleLabels(workspaceID)
         let omitAgentCatalog = rolesOnly || restrictedDiscovery
+        var openCodeCatalogSnapshot: OpenCodeACPModelPollingService.Snapshot?
+        if !omitAgentCatalog {
+            do {
+                openCodeCatalogSnapshot = try await openCodeCatalogSnapshotProvider(openCodeWorkspacePath)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                openCodeCatalogSnapshot = nil
+            }
+        }
         // Demand-scoped OpenCode enrichment is expensive: each uncached entry can drive a
         // serialized disposable-controller probe. Restrict OpenCode enrichment to the
-        // advertised current/default model and dedupe canonical models so one enumeration
-        // performs at most one probe. Cursor is synchronous and cheap.
+        // active workspace's freshly advertised current model and dedupe canonical models so
+        // one enumeration performs at most one probe. If workspace discovery failed, omit
+        // enrichment instead of borrowing another window's global catalog. Cursor is
+        // synchronous and cheap.
         var probedOpenCodeCanonicals = Set<String>()
-        let openCodeCurrentModelRaw: String? = await OpenCodeACPModelPollingService.shared
-            .latestSnapshot()?.models.currentModelRaw
-        let openCodeEnrichmentTargetRaw = openCodeCurrentModelRaw
-            ?? AgentModelCatalog.discoveryAgents(availability: availability)
-            .first(where: { $0.agent.acpProviderID == .openCode })?.defaults.modelRaw
+        let openCodeEnrichmentTargetRaw = openCodeCatalogSnapshot?.models.currentModelRaw
         /// Returns whether an OpenCode enumeration for `agent`/`modelRaw` should acquire
         /// metadata now: deduped per canonical model, and targeted at the advertised
         /// current/default model only so list_agents never starts N serialized controllers.

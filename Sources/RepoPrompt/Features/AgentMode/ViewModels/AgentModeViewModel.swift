@@ -2510,6 +2510,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         cancellables.removeAll()
         uiRefreshTask?.cancel()
         openCodeModelsSubscriptionTask?.cancel()
+        openCodeModelParameterObservationTask?.cancel()
         cursorModelsSubscriptionTask?.cancel()
         skillCatalogDeltaObservationTask?.cancel()
         skillCatalogRefreshDebounceTask?.cancel()

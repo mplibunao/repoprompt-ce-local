@@ -1359,6 +1359,7 @@ final class CursorModelParameterSelectionTests: XCTestCase {
 
         private var registrations: [Registration] = []
         private var continuations: [UUID: AsyncStream<OpenCodeACPModelParameterSnapshot>.Continuation] = [:]
+        private var terminatedSubscriptionIDs = Set<UUID>()
 
         /// Called by the injected stream provider. Registration happens synchronously on this
         /// actor (before the returned stream is handed back), so a subsequent
@@ -1371,7 +1372,14 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             let id = UUID()
             registrations.append(Registration(id: id, key: key))
             continuations[id] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.recordTermination(id) }
+            }
             return (stream, id)
+        }
+
+        private func recordTermination(_ id: UUID) {
+            terminatedSubscriptionIDs.insert(id)
         }
 
         /// Bounded registration barrier: returns the ID of the NEWEST subscription for `model`
@@ -1396,6 +1404,15 @@ final class CursorModelParameterSelectionTests: XCTestCase {
 
         func continuation(for id: UUID) -> AsyncStream<OpenCodeACPModelParameterSnapshot>.Continuation? {
             continuations[id]
+        }
+
+        func waitForTermination(_ id: UUID, seconds: UInt64) async throws {
+            struct TerminationTimeout: Error {}
+            let deadline = Date().addingTimeInterval(TimeInterval(seconds))
+            while !terminatedSubscriptionIDs.contains(id) {
+                if Date() >= deadline { throw TerminationTimeout() }
+                try await Task.sleep(nanoseconds: 5_000_000)
+            }
         }
 
         /// Adapts the injected provider signature: registers and returns the stream.
@@ -1673,6 +1690,40 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         }
         XCTAssertNotNil(viewModel.makeComposerProps(tabID: tabID).submitTarget)
         XCTAssertNil(viewModel.openCodeModelParameterObservation)
+    }
+
+    @MainActor
+    func testComposerObservationTaskCancelsWhenViewModelDeinitializes() async throws {
+        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .openCode) }
+        let recorder = SubscriptionRecorder()
+        var viewModel: AgentModeViewModel? = AgentModeViewModel(
+            testWorkspacePath: "/workspace-a",
+            codexControllerFactory: { _, _, _, _, _, _ in
+                preconditionFailure("Picker-only tests must not start a Codex session")
+            },
+            testUsesProductionAgentDefaultsAndModelPolling: true,
+            testOpenCodeModelParameterStreamProvider: { [recorder] workspace, model in
+                await recorder.stream(workspace: workspace, model: model)
+            }
+        )
+        weak var releasedViewModel = viewModel
+        let tabID = UUID()
+        viewModel?.test_setCurrentTabIDOverride(tabID)
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .cursor
+        session.selectedModelRaw = "grok-4.6"
+        viewModel?.test_installLiveSession(session)
+        viewModel?.applySessionToBindings(session)
+        viewModel?.selectedAgent = .openCode
+        let effectiveModelRaw = try XCTUnwrap(viewModel?.selectedModelRaw)
+        let subscriptionID = try await recorder.waitForSubscription(model: effectiveModelRaw, seconds: 5)
+
+        // Exercise the fallback path directly: no `prepareForWindowClose()` call precedes ARC.
+        viewModel = nil
+        XCTAssertNil(releasedViewModel)
+        try await recorder.waitForTermination(subscriptionID, seconds: 5)
     }
 
     /// Bounded polling barrier: fails the test with a useful message if `condition` never

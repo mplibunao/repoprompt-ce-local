@@ -755,6 +755,116 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         XCTAssertEqual(resumedParameters.compactMap { $0.objectValue?["base_model"]?.stringValue }, ["grok-4.6", "grok-4.6"])
     }
 
+    func testAgentManageListAgentsRefreshesOpenCodeCatalogForActiveWorkspaceBeforeEnrichment() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let window = try await makeWindow(name: "OpenCode workspace catalog", root: fixture.root)
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+        window.apiSettingsViewModel.isOpenCodeConnected = true
+
+        let staleModel = "opencode-go/glm-5.3"
+        let activeWorkspaceModel = "deepseek/deepseek-flash"
+        let options: [AgentModelOption] = [
+            AgentModelOption(
+                rawValue: staleModel,
+                displayName: "GLM 5.3",
+                description: nil,
+                isPlaceholderDefault: false,
+                isProviderDefault: true
+            ),
+            AgentModelOption(
+                rawValue: activeWorkspaceModel,
+                displayName: "DeepSeek Flash",
+                description: nil,
+                isPlaceholderDefault: false,
+                isProviderDefault: false
+            )
+        ]
+        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .openCode) }
+        _ = AgentACPModelRegistry.shared.updateDiscoveredModels(
+            ACPDiscoveredSessionModels(
+                options: options,
+                currentModelRaw: staleModel,
+                modelParameterSets: []
+            ),
+            for: .openCode
+        )
+
+        actor AcquisitionCapture {
+            var catalogWorkspaces: [String?] = []
+            var parameterRequests: [(String?, String)] = []
+
+            func recordCatalog(workspace: String?) {
+                catalogWorkspaces.append(workspace)
+            }
+
+            func recordParameter(workspace: String?, model: String) {
+                parameterRequests.append((workspace, model))
+            }
+
+            func recordedCatalogWorkspaces() -> [String?] {
+                catalogWorkspaces
+            }
+
+            func recordedParameterRequests() -> [(String?, String)] {
+                parameterRequests
+            }
+        }
+        let capture = AcquisitionCapture()
+        let freshCatalog = ACPDiscoveredSessionModels(
+            options: options,
+            currentModelRaw: activeWorkspaceModel,
+            modelParameterSets: []
+        )
+        let service = makeManageService(
+            window: window,
+            openCodeOneShotObservationProvider: { workspacePath, modelRaw, _ in
+                await capture.recordParameter(workspace: workspacePath, model: modelRaw)
+                return OpenCodeACPModelParameterSnapshot(
+                    key: OpenCodeACPModelParameterKey(workspacePath: workspacePath, modelRaw: modelRaw),
+                    state: .available(ACPModelParameterSet(
+                        baseModelRaw: modelRaw,
+                        parameters: [
+                            .init(
+                                kind: .thinking,
+                                configID: "effort",
+                                displayName: "Effort",
+                                choices: [
+                                    .init(rawValue: "low", displayName: "Low"),
+                                    .init(rawValue: "high", displayName: "High")
+                                ],
+                                currentValueRaw: "low"
+                            )
+                        ]
+                    )),
+                    updatedAt: Date()
+                )
+            },
+            openCodeCatalogSnapshotProvider: { workspacePath in
+                await capture.recordCatalog(workspace: workspacePath)
+                return OpenCodeACPModelPollingService.Snapshot(
+                    models: freshCatalog,
+                    fetchedAt: Date(),
+                    isLiveDiscovery: true
+                )
+            }
+        )
+
+        let listed = try await service.execute(args: ["op": .string("list_agents")])
+        let expectedWorkspace = fixture.root.standardizedFileURL.path
+        let catalogWorkspaces = await capture.recordedCatalogWorkspaces()
+        XCTAssertEqual(catalogWorkspaces.compactMap(\.self), [expectedWorkspace])
+        let parameterRequests = await capture.recordedParameterRequests()
+        XCTAssertEqual(parameterRequests.map(\.0), [expectedWorkspace])
+        XCTAssertEqual(parameterRequests.map(\.1), [activeWorkspaceModel])
+        XCTAssertEqual(
+            listedParameterConfigIDs(listed, agent: .openCode, modelRaw: activeWorkspaceModel),
+            ["effort"]
+        )
+        XCTAssertTrue(listedParameterConfigIDs(listed, agent: .openCode, modelRaw: staleModel).isEmpty)
+    }
+
     func testAgentRunStartRejectsUnknownReleaseCatalogParameter() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
@@ -1142,7 +1252,8 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     private func makeManageService(
         window: WindowState,
-        openCodeOneShotObservationProvider: AgentMCPModelParameterSupport.OneShotObservationProvider? = nil
+        openCodeOneShotObservationProvider: AgentMCPModelParameterSupport.OneShotObservationProvider? = nil,
+        openCodeCatalogSnapshotProvider: AgentManageMCPToolService.OpenCodeCatalogSnapshotProvider? = nil
     ) -> AgentManageMCPToolService {
         AgentManageMCPToolService(
             toolName: MCPWindowToolName.agentManage,
@@ -1159,7 +1270,10 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
             bindCurrentRequestToTab: { _, _ in },
             restrictDiscoveryToRoleLabels: { _ in false },
             openCodeOneShotObservationProvider: openCodeOneShotObservationProvider
-                ?? AgentMCPModelParameterSupport.liveOneShotObservationProvider
+                ?? AgentMCPModelParameterSupport.liveOneShotObservationProvider,
+            openCodeCatalogSnapshotProvider: openCodeCatalogSnapshotProvider ?? { workspacePath in
+                try await OpenCodeACPModelPollingService.shared.discoverOnce(workspacePath: workspacePath)
+            }
         )
     }
 
@@ -1350,13 +1464,17 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         )
     }
 
-    private func listedParameterConfigIDs(_ value: Value, modelRaw: String) -> [String] {
-        let cursor = value.objectValue?["agents"]?.arrayValue?.first {
-            $0.objectValue?["name"]?.stringValue == AgentProviderKind.cursor.displayName
+    private func listedParameterConfigIDs(
+        _ value: Value,
+        agent: AgentProviderKind = .cursor,
+        modelRaw: String
+    ) -> [String] {
+        let listedAgent = value.objectValue?["agents"]?.arrayValue?.first {
+            $0.objectValue?["name"]?.stringValue == agent.displayName
         }
-        let model = cursor?.objectValue?["models"]?.arrayValue?.first {
+        let model = listedAgent?.objectValue?["models"]?.arrayValue?.first {
             $0.objectValue?["model_id"]?.stringValue == AgentModelSelectionID(
-                agentRaw: AgentProviderKind.cursor.rawValue,
+                agentRaw: agent.rawValue,
                 modelRaw: modelRaw
             ).rawValue
         }
