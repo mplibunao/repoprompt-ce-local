@@ -1012,7 +1012,9 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
             taskLabelKind: .engineer,
             markSessionAsMCPOriginated: true
         )
-        defer { await agentModeVM.mcpDeactivateControlContext(sessionID: callerSessionID, cleanupSessionStore: true) }
+        addTeardownBlock {
+            await agentModeVM.mcpDeactivateControlContext(sessionID: callerSessionID, cleanupSessionStore: true)
+        }
         AgentMCPSelectionResolver.testRoleDefaultsStore = roleDefaultsStore(
             engineerValueRaw: "high",
             exploreValueRaw: "low"
