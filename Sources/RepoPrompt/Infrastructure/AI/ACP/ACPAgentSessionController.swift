@@ -2939,11 +2939,7 @@ actor ACPAgentSessionController {
     }
 
     private func normalizedCursorModelAlias(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard let bracketIndex = trimmed.firstIndex(of: "[") else {
-            return trimmed.replacingOccurrences(of: " ", with: "-")
-        }
-        return String(trimmed[..<bracketIndex]).replacingOccurrences(of: " ", with: "-")
+        ACPModelParameterIdentity.canonicalBaseModelRaw(value, providerID: .cursor)
     }
 
     private static func responseErrorMessage(from error: [String: Any]) -> String {

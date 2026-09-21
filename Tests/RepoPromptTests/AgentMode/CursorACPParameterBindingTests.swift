@@ -113,6 +113,53 @@ final class CursorACPParameterBindingTests: XCTestCase {
         XCTAssertEqual(mutation.params["value"] as? String, "true")
     }
 
+    func testCursorLegacyWireModelAliasMapsAndValidatesCanonicalSelectionThroughPrompt() async throws {
+        let fixture = try makeFixture(
+            shape: "modern",
+            extraEnvironment: [
+                "ACP_INCLUDE_MODEL": "1",
+                "ACP_INCLUDE_PARAMETERS": "1",
+                "ACP_OBSERVED_FAST_SELECTOR": "1",
+                "ACP_INITIAL_MODEL": "composer-2",
+                "ACP_INITIAL_MODEL_DISPLAY": "Composer 2"
+            ],
+            providerID: .cursor
+        )
+        _ = try await fixture.controller.bootstrap()
+
+        try await fixture.controller.setSessionModel("composer-2.5")
+        let selection = ACPModelParameterSelection(
+            providerID: .cursor,
+            baseModelRaw: "composer-2.5",
+            kind: .speed,
+            configID: "fast",
+            valueRaw: "true"
+        )
+        let report = try await fixture.controller.applySessionModelParameterSelections([selection])
+        let request = ACPRunRequest(
+            agentKind: .cursor,
+            modelString: "composer-2.5",
+            workspacePath: nil,
+            resumeSessionID: nil,
+            attachments: [],
+            taskLabelKind: nil,
+            modelParameterSelections: [selection]
+        )
+        try await fixture.controller.prompt(
+            AgentMessage(userMessage: "Verify legacy Cursor model alias"),
+            request: request
+        )
+        await fixture.controller.shutdown()
+
+        XCTAssertEqual(report.applied.map(\.identity), [selection.identity])
+        XCTAssertEqual(report.applied.map(\.baseModelRaw), ["composer-2"])
+        XCTAssertTrue(report.skipped.isEmpty)
+        let mutations = recordedMutationRequests(at: fixture.recordURL)
+        XCTAssertEqual(mutations.map { $0.params["configId"] as? String }, ["fast"])
+        XCTAssertEqual(mutations.map { $0.params["value"] as? String }, ["true"])
+        XCTAssertEqual(recordedRequests(at: fixture.recordURL, method: "session/prompt").count, 1)
+    }
+
     func testCursorSemanticEffortSelectionResolvesLegacyPersistedIDToLiveEffortSelector() async throws {
         let fixture = try makeFixture(
             shape: "modern",
@@ -398,7 +445,8 @@ final class CursorACPParameterBindingTests: XCTestCase {
     import os
     import sys
 
-    model = "model-a"
+    model = os.environ.get("ACP_INITIAL_MODEL", "model-a")
+    model_display = os.environ.get("ACP_INITIAL_MODEL_DISPLAY", "Model A")
     effort = "medium"
     fast = "false"
     mode = "ask"
@@ -412,7 +460,7 @@ final class CursorACPParameterBindingTests: XCTestCase {
     def options():
         result = [selector("mode", "Mode", "mode", mode, [("ask", "Ask"), ("plan", "Plan")])]
         if os.environ.get("ACP_INCLUDE_MODEL"):
-            result.append(selector("model", "Model", "model", model, [("model-a", "Model A"), ("model-b", "Model B")]))
+            result.append(selector("model", "Model", "model", model, [(model, model_display), ("model-b", "Model B")]))
         if os.environ.get("ACP_INCLUDE_PARAMETERS"):
             result.append(selector(effort_id, "Effort", "thought_level", effort, [("medium", "Medium"), ("High", "High")]))
             result.append(selector(fast_id, "Speed", "model_config", fast, [("false", "Standard"), ("true", "Fast")]))
