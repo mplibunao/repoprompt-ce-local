@@ -27,7 +27,8 @@ struct AgentComposerActions {
     let selectAgentModel: (_ agent: AgentProviderKind, _ rawModel: String) -> Void
     let reasoningEffortOptionsForCurrentSelection: () -> [CodexReasoningEffort]
     let selectReasoningEffort: (_ effort: CodexReasoningEffort?) -> Void
-    let selectCursorModelParameter: (_ configID: String, _ valueRaw: String) -> Void
+    let selectACPModelParameter: (_ target: ACPModelParameterSelection, _ openCodeDiscoveryKey: OpenCodeACPModelParameterKey?) -> Void
+    let clearSavedACPModelParameter: (_ providerID: ACPProviderID, _ baseModelRaw: String, _ kind: ACPModelParameterKind) -> Void
     let setAutoEditEnabled: (_ enabled: Bool) -> Void
     let setProviderPermissionLevel: (_ id: AgentProviderPermissionLevelID) -> Void
     let applyCodexToolSettingMutation: (_ mutation: CodexToolSettingMutation) -> Void
@@ -139,8 +140,17 @@ struct AgentInputBar: View {
             },
             reasoningEffortOptionsForCurrentSelection: { agentModeVM.reasoningEffortOptionsForCurrentSelection() },
             selectReasoningEffort: { effort in agentModeVM.selectReasoningEffort(effort) },
-            selectCursorModelParameter: { configID, valueRaw in
-                agentModeVM.selectCursorModelParameter(configID: configID, valueRaw: valueRaw)
+            selectACPModelParameter: { target, openCodeDiscoveryKey in
+                agentModeVM.selectACPModelParameter(target, openCodeDiscoveryKey: openCodeDiscoveryKey)
+            },
+            clearSavedACPModelParameter: { providerID, baseModelRaw, kind in
+                Task {
+                    await agentModeVM.clearSavedACPModelParameter(
+                        providerID: providerID,
+                        baseModelRaw: baseModelRaw,
+                        kind: kind
+                    )
+                }
             },
             setAutoEditEnabled: { enabled in agentModeVM.setAutoEditEnabled(enabled) },
             setProviderPermissionLevel: { id in agentModeVM.setProviderPermissionLevel(id) },
@@ -653,7 +663,7 @@ struct AgentComposerView: View, Equatable {
                     }
                     if props.hasAvailableAgentProviders {
                         agentProviderModelPicker
-                        cursorModelParameterPickers
+                        acpModelParameterPickers
                         reasoningEffortPicker
                         claudeEffortPicker
                         codexToolsButton
@@ -991,14 +1001,22 @@ struct AgentComposerView: View, Equatable {
         }
     }
 
-    @ViewBuilder
-    private var cursorModelParameterPickers: some View {
-        if props.selectedAgent == .cursor {
-            ForEach(props.cursorModelParameterControls) { control in
+    private var acpModelParameterPickers: some View {
+        ForEach(props.acpModelParameterControls) { control in
+            HStack(spacing: 4) {
                 Menu {
                     ForEach(control.choices, id: \.rawValue) { choice in
                         Button {
-                            actions.selectCursorModelParameter(control.configID, choice.rawValue)
+                            actions.selectACPModelParameter(
+                                ACPModelParameterSelection(
+                                    providerID: control.providerID,
+                                    baseModelRaw: control.baseModelRaw,
+                                    kind: control.kind,
+                                    configID: control.configID,
+                                    valueRaw: choice.rawValue
+                                ),
+                                control.openCodeDiscoveryKey
+                            )
                         } label: {
                             HStack {
                                 Text(choice.displayName)
@@ -1009,17 +1027,26 @@ struct AgentComposerView: View, Equatable {
                             }
                         }
                     }
+                    // A saved value the live definition excludes (or that has no usable definition
+                    // at all) must be recoverable: advertised choices replace it, and this action
+                    // clears it. Without this the pin could be replaced but never removed.
+                    if control.isSavedValueUnavailable {
+                        Button {
+                            actions.clearSavedACPModelParameter(
+                                control.providerID,
+                                control.baseModelRaw,
+                                control.kind
+                            )
+                        } label: {
+                            Text("Clear saved value")
+                        }
+                    }
                 } label: {
                     HStack(spacing: 4) {
                         Text(control.selectedDisplayName)
                             .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
                     }
-                    .foregroundColor(
-                        control.kind == .speed
-                            && control.selectedDisplayName.caseInsensitiveCompare("fast") == .orderedSame
-                            ? .orange
-                            : .secondary
-                    )
+                    .foregroundColor(control.chipEmphasis == .standard ? .secondary : .orange)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(pickerChipColor)
@@ -1028,11 +1055,24 @@ struct AgentComposerView: View, Equatable {
                 .menuStyle(.borderlessButton)
                 .accessibilityLabel(Text(control.accessibilityLabel))
                 .accessibilityValue(Text(control.accessibilityValue))
-                .disabled(modelControlsDisabled || control.choices.isEmpty)
-                .opacity(modelControlsDisabled ? 0.55 : 1.0)
-                .hoverTooltip(modelControlsDisabled ? modelControlsDisabledTooltip : "Cursor \(control.displayName)")
-                .fixedSize()
+
+                if control.showsUnavailableWarningIndicator {
+                    // Native borderless menus own their label rendering, so the warning glyph
+                    // remains a sibling that cannot be neutralized with the menu's label style.
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(fontPreset.swiftUIFont(sizeAtNormal: 10, weight: .semibold))
+                        .foregroundColor(.orange)
+                        .accessibilityHidden(true)
+                        .allowsHitTesting(false)
+                }
             }
+            // A recovery control (no usable definition) carries no choices, yet its clear
+            // action must stay reachable — only a control that has a live definition but no
+            // choices would be genuinely inert.
+            .disabled(modelControlsDisabled || (control.choices.isEmpty && control.hasLiveDefinition))
+            .opacity(modelControlsDisabled ? 0.55 : 1.0)
+            .hoverTooltip(modelControlsDisabled ? modelControlsDisabledTooltip : control.tooltip)
+            .fixedSize()
         }
     }
 
