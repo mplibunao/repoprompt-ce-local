@@ -40,8 +40,11 @@ struct AgentModelsPopoverView: View {
         fontScale.preset
     }
 
+    /// Wide enough for a role row with two parameter pins on one line at the normal font: a
+    /// Cursor row (icon, 64pt label, "Cursor CLI Grok 4.6" picker, "Effort: High" and
+    /// "Speed: Default" chips) measures about 430pt, and the content inset is 32pt.
     private var popoverWidth: CGFloat {
-        fontPreset.scaledClamped(400, max: 520)
+        fontPreset.scaledClamped(500, max: 720)
     }
 
     private var popoverMaxHeight: CGFloat {
@@ -358,98 +361,80 @@ struct AgentModelsPopoverView: View {
         _ resolution: MCPAgentRoleDefaultsService.RoleDefaultResolution
     ) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            AgentModelsRoleRowLayout(showsParameterPins: resolution.effective.agent.acpProviderID != nil) {
-                roleDefaultLabel(resolution)
-            } modelPicker: {
-                roleDefaultModelPicker(resolution)
-            } parameterPins: {
-                roleDefaultParameterPins(resolution)
+            HStack(spacing: 8) {
+                Image(systemName: iconForRole(resolution.role))
+                    .font(fontPreset.swiftUIFont(sizeAtNormal: 10, weight: .semibold))
+                    .foregroundColor(colorForRole(resolution.role))
+                    .frame(width: fontPreset.scaledClamped(14, max: 20))
+
+                Text(resolution.roleLabel)
+                    .font(fontPreset.swiftUIFont(sizeAtNormal: 11, weight: .medium))
+                    .frame(width: roleLabelWidth, alignment: .leading)
+
+                Spacer(minLength: 4)
+
+                StableMenuButton(
+                    items: { roleDefaultMenuItems(for: resolution) },
+                    triggerStyle: .plain
+                ) {
+                    HStack(spacing: 4) {
+                        Image(systemName: resolution.effective.agent.iconName)
+                            .font(fontPreset.swiftUIFont(sizeAtNormal: 10))
+                        // No `.fixedSize()` on the row — long model display names
+                        // truncate instead of overflowing the popover.
+                        AgentModelSelectionSummaryLabel(
+                            agentKind: resolution.effective.agent,
+                            rawModel: resolution.effective.modelRaw,
+                            title: resolution.effectiveDisplayName,
+                            iconFont: fontPreset.swiftUIFont(sizeAtNormal: 9, weight: .semibold)
+                        )
+                        .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(fontPreset.swiftUIFont(sizeAtNormal: 8, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, fontPreset.scaledClamped(6, max: 9))
+                    .padding(.vertical, fontPreset.scaledClamped(3, max: 5))
+                    .background(
+                        RoundedRectangle(cornerRadius: fontPreset.scaledClamped(4, max: 6))
+                            .fill(Color.secondary.opacity(0.1))
+                    )
+                }
+                .layoutPriority(1)
+
+                if let providerID = resolution.effective.agent.acpProviderID {
+                    // Capture the write target at render time; the closure re-checks it against
+                    // LIVE host state before writing, so a stale menu (e.g. a scope switch while
+                    // it was open) cannot write to the old scope or a changed model.
+                    let expectedScope = editingScope
+                    let expectedModelRaw = resolution.effective.modelRaw
+                    ACPModelParameterProbeView(
+                        modelRaw: expectedModelRaw,
+                        providerID: providerID,
+                        providerDisplayName: resolution.effective.agent.displayName,
+                        probeContext: .resolved(promptViewModel.activeWorkspaceRootPath),
+                        savedSelections: resolution.modelParameters
+                    ) { change in
+                        guard change.targets(providerID: providerID, modelRaw: expectedModelRaw),
+                              editingScope == expectedScope,
+                              let live = roleResolutions.first(where: { $0.role == resolution.role }),
+                              live.effective.isPinTarget(providerID: providerID, modelRaw: expectedModelRaw)
+                        else { return }
+                        guard MCPAgentRoleDefaultsService.setModelParameter(
+                            change,
+                            for: live.role,
+                            displayed: live.effective,
+                            scope: editingScope
+                        ) else { return }
+                        bumpRoleDefaults()
+                    }
+                }
             }
 
             roleDefaultPinState(for: resolution)
-        }
-    }
-
-    @ViewBuilder
-    private func roleDefaultLabel(
-        _ resolution: MCPAgentRoleDefaultsService.RoleDefaultResolution
-    ) -> some View {
-        Image(systemName: iconForRole(resolution.role))
-            .font(fontPreset.swiftUIFont(sizeAtNormal: 10, weight: .semibold))
-            .foregroundColor(colorForRole(resolution.role))
-            .frame(width: fontPreset.scaledClamped(14, max: 20))
-
-        Text(resolution.roleLabel)
-            .font(fontPreset.swiftUIFont(sizeAtNormal: 11, weight: .medium))
-            .frame(width: roleLabelWidth, alignment: .leading)
-    }
-
-    private func roleDefaultModelPicker(
-        _ resolution: MCPAgentRoleDefaultsService.RoleDefaultResolution
-    ) -> some View {
-        StableMenuButton(
-            items: { roleDefaultMenuItems(for: resolution) },
-            triggerStyle: .plain
-        ) {
-            HStack(spacing: 4) {
-                Image(systemName: resolution.effective.agent.iconName)
-                    .font(fontPreset.swiftUIFont(sizeAtNormal: 10))
-                // No `.fixedSize()` on the row — long model display names
-                // truncate instead of overflowing the popover.
-                AgentModelSelectionSummaryLabel(
-                    agentKind: resolution.effective.agent,
-                    rawModel: resolution.effective.modelRaw,
-                    title: resolution.effectiveDisplayName,
-                    iconFont: fontPreset.swiftUIFont(sizeAtNormal: 9, weight: .semibold)
-                )
-                .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(fontPreset.swiftUIFont(sizeAtNormal: 8, weight: .semibold))
-                    .foregroundColor(.secondary)
-            }
-            .foregroundColor(.secondary)
-            .padding(.horizontal, fontPreset.scaledClamped(6, max: 9))
-            .padding(.vertical, fontPreset.scaledClamped(3, max: 5))
-            .background(
-                RoundedRectangle(cornerRadius: fontPreset.scaledClamped(4, max: 6))
-                    .fill(Color.secondary.opacity(0.1))
-            )
-        }
-        .layoutPriority(1)
-    }
-
-    @ViewBuilder
-    private func roleDefaultParameterPins(
-        _ resolution: MCPAgentRoleDefaultsService.RoleDefaultResolution
-    ) -> some View {
-        if let providerID = resolution.effective.agent.acpProviderID {
-            // Capture the write target at render time; the closure re-checks it against
-            // LIVE host state before writing, so a stale menu (e.g. a scope switch while
-            // it was open) cannot write to the old scope or a changed model.
-            let expectedScope = editingScope
-            let expectedModelRaw = resolution.effective.modelRaw
-            ACPModelParameterProbeView(
-                modelRaw: expectedModelRaw,
-                providerID: providerID,
-                providerDisplayName: resolution.effective.agent.displayName,
-                probeContext: .resolved(promptViewModel.activeWorkspaceRootPath),
-                savedSelections: resolution.modelParameters
-            ) { change in
-                guard change.targets(providerID: providerID, modelRaw: expectedModelRaw),
-                      editingScope == expectedScope,
-                      let live = roleResolutions.first(where: { $0.role == resolution.role }),
-                      live.effective.isPinTarget(providerID: providerID, modelRaw: expectedModelRaw)
-                else { return }
-                guard MCPAgentRoleDefaultsService.setModelParameter(
-                    change,
-                    for: live.role,
-                    displayed: live.effective,
-                    scope: editingScope
-                ) else { return }
-                bumpRoleDefaults()
-            }
         }
     }
 
@@ -625,36 +610,5 @@ struct AgentModelsPopoverView: View {
             )
         }
         .buttonStyle(.plain)
-    }
-}
-
-/// One role row of the models popover. A row that can show parameter pins always puts them on a
-/// line of their own under the model picker: pins keep their natural width, so sharing a line
-/// with them would truncate the model name. The layout depends only on whether pins can appear,
-/// never on how many are showing, so the pin row keeps one identity while metadata arrives and
-/// its discovery subscription is never restarted by a layout change.
-struct AgentModelsRoleRowLayout<Label: View, ModelPicker: View, ParameterPins: View>: View {
-    let showsParameterPins: Bool
-    @ViewBuilder let label: () -> Label
-    @ViewBuilder let modelPicker: () -> ModelPicker
-    @ViewBuilder let parameterPins: () -> ParameterPins
-
-    var body: some View {
-        if showsParameterPins {
-            VStack(alignment: .trailing, spacing: 3) {
-                pickerLine
-                parameterPins()
-            }
-        } else {
-            pickerLine
-        }
-    }
-
-    private var pickerLine: some View {
-        HStack(spacing: 8) {
-            label()
-            Spacer(minLength: 4)
-            modelPicker()
-        }
     }
 }

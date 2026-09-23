@@ -34,10 +34,6 @@ final class ACPModelParameterProbeViewTests: XCTestCase {
         func finishAll() {
             continuations.forEach { $0.finish() }
         }
-
-        func yieldToLatest(_ snapshot: OpenCodeACPModelParameterSnapshot) {
-            continuations.last?.yield(snapshot)
-        }
     }
 
     func testCursorRowResolvesStaticControlsWithoutSubscribing() async throws {
@@ -123,47 +119,6 @@ final class ACPModelParameterProbeViewTests: XCTestCase {
         XCTAssertTrue(ACPModelParameterProbeView.showsParameterNames(controls(.cursor, [.speed])))
     }
 
-    /// The models popover's role row for an OpenCode model starts with no chips and gains two once
-    /// metadata arrives. The row's layout must not depend on the chips it shows: a layout switch
-    /// would give the pin row a new identity, restarting discovery with no snapshot, which
-    /// removes the chips and switches back, over and over.
-    func testPopoverRoleRowKeepsOneSubscriptionWhenChipsAppear() async throws {
-        let recorder = StreamRecorder()
-        let row = AgentModelsRoleRowLayout(showsParameterPins: true) {
-            Text("Engineer").frame(width: 64, alignment: .leading)
-        } modelPicker: {
-            Text("OpenCode · Kimi K3 with a long display name").lineLimit(1)
-        } parameterPins: {
-            self.probeView(providerID: .openCode, modelRaw: Self.openCodeModelRaw, recorder: recorder)
-        }
-        let host = try makeHost(row, width: 300)
-        defer {
-            host.tearDown()
-            recorder.finishAll()
-        }
-        try await waitUntil { recorder.subscribedKeys.count == 1 }
-        let heightWithoutChips = host.hostingView.fittingSize.height
-
-        let key = try XCTUnwrap(recorder.subscribedKeys.first)
-        recorder.yieldToLatest(OpenCodeACPModelParameterSnapshot(
-            key: key,
-            state: .available(ACPModelParameterSet(
-                baseModelRaw: Self.openCodeModelRaw,
-                parameters: [
-                    ACPModelParameterTestSupport.definition(kind: .thinking, configID: "effort", values: ["low", "high"]),
-                    ACPModelParameterTestSupport.definition(kind: .speed, configID: "fast", values: ["false", "true"])
-                ]
-            )),
-            updatedAt: Date()
-        ))
-        try await waitUntil { host.hostingView.fittingSize.height > heightWithoutChips }
-        try await Task.sleep(for: .seconds(1))
-
-        XCTAssertEqual(recorder.subscribedKeys.count, 1, "Chips appearing must not restart discovery.")
-        XCTAssertEqual(recorder.terminatedCount, 0)
-        XCTAssertGreaterThan(host.hostingView.fittingSize.height, heightWithoutChips, "The chips stay shown.")
-    }
-
     func testSubscriptionEndsOnTargetChangeAndTeardown() async throws {
         let recorder = StreamRecorder()
         let host = try makeHost(probeView(providerID: .openCode, modelRaw: Self.openCodeModelRaw, recorder: recorder))
@@ -231,10 +186,10 @@ final class ACPModelParameterProbeViewTests: XCTestCase {
         }
     }
 
-    private func makeHost(_ view: some View, width: CGFloat = 400) throws -> Host {
+    private func makeHost(_ view: some View) throws -> Host {
         let hostingView = NSHostingView(rootView: AnyView(view))
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: width, height: 60),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 60),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
