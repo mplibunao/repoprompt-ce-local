@@ -237,7 +237,7 @@ run_pr_ready_path_validations() {
   files="$tmp_root/range-files.z"
   write_range_files "$files"
 
-  local control_plane_paths_pattern='^(Scripts/conductor\.py|Scripts/conductor_diagnostics\.py|Scripts/guardrails\.sh|Scripts/test_codex_app_server_schema\.py|Scripts/test_contribution_preflight_guard\.py|Scripts/test_debug_app_process\.py|Scripts/test_ci_app_test_runner\.py|Scripts/test_conductor_diagnostics\.py|Scripts/test_conductor_fair_heavy\.py|Scripts/test_local_production_installer\.py|Scripts/test_local_release_archive\.py|Scripts/test_security_inventory\.py|Scripts/script_test_support\.py|\.agents/skills/rpce-contribution-check/scripts/preflight(_timing\.py|\.sh)|Makefile)$'
+  local control_plane_paths_pattern='^(Scripts/conductor\.py|Scripts/conductor_diagnostics\.py|Scripts/debug_app_process\.py|Scripts/guardrails\.sh|Scripts/install_local_production\.sh|Scripts/load_release_metadata\.sh|Scripts/local_release_(archive|env|restore)\.sh|Scripts/test_codex_app_server_schema\.py|Scripts/test_contribution_preflight_guard\.py|Scripts/test_debug_app_process\.py|Scripts/test_ci_app_test_runner\.py|Scripts/test_conductor_diagnostics\.py|Scripts/test_conductor_fair_heavy\.py|Scripts/test_local_production_installer\.py|Scripts/test_local_release_archive\.py|Scripts/test_security_inventory\.py|Scripts/script_test_support\.py|\.agents/skills/rpce-contribution-check/scripts/preflight(_timing\.py|\.sh)|Makefile)$'
   local ci_app_test_runner_paths_pattern='^(Scripts/ci_app_test_runner\.py|Scripts/test_ci_app_test_runner\.py|\.github/workflows/ci\.yml)$'
   local swift_paths_pattern='\.swift$'
   local root_test_paths_pattern='^(Sources/RepoPrompt/|Tests/RepoPrompt[^/]*Tests/)'

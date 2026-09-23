@@ -108,8 +108,9 @@ terminal window open so certificate approval prompts and build results stay visi
 Local production packaging requires a full Xcode installation. The installer preserves an
 explicit compatible `DEVELOPER_DIR`; otherwise it uses the selected full Xcode or discovers
 a compatible Xcode app for that process without changing the system-wide `xcode-select`
-setting. It inventories or mints the signing identity and packages the app first, then
-refuses to replace the installed app while that app is running.
+setting. It first confirms that the installed app isn't running, before any signing or
+packaging work. It checks again before staging the new bundle and before replacing the
+installed app.
 
 The installer uses the exact identity name `RepoPrompt CE Local Self-Signed Code Signing`,
 but continuity is anchored to the selected certificate's SHA-256 fingerprint rather than to

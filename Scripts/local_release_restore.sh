@@ -118,6 +118,9 @@ step "Exporting current preferences into the rescue directory"
 defaults export "$LOCAL_DEFAULTS_DOMAIN" "$RESCUE_DIR/defaults-before-restore.plist" || true
 
 step "Restoring app bundle to $LOCAL_PRODUCTION_APP"
+# Checked again because the preferences export above separates the first check from the
+# first move of live state.
+require_no_running_repoprompt_processes "restoring"
 APP_PARENT="$(dirname "$LOCAL_PRODUCTION_APP")"
 APP_BASENAME="$(basename "$LOCAL_PRODUCTION_APP")"
 mkdir -p "$APP_PARENT"

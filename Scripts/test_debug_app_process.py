@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import shutil
 import signal
@@ -11,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -20,9 +23,18 @@ import debug_app_process  # noqa: E402
 
 
 class FakeInspector:
-    def __init__(self, names: dict[int, str], paths: dict[int, Path | list[Path] | Exception]) -> None:
-        self.names = names
+    def __init__(
+        self,
+        names: dict[int, str],
+        paths: dict[int, Path | list[Path] | Exception],
+        *,
+        exited: set[int] | None = None,
+    ) -> None:
+        self.names = dict(names)
         self.paths = paths
+        # PIDs whose process has exited by the time its path is read, so its name lookup
+        # fails afterwards the way libproc's does.
+        self.exited = exited or set()
 
     def list_pids(self) -> list[int]:
         return list(self.names)
@@ -32,6 +44,8 @@ class FakeInspector:
 
     def process_path(self, pid: int) -> Path:
         value = self.paths[pid]
+        if pid in self.exited:
+            self.names.pop(pid, None)
         if isinstance(value, Exception):
             raise value
         if isinstance(value, list):
@@ -159,6 +173,200 @@ class LifecycleSurfaceTests(unittest.TestCase):
 
 
 
+class ProcessGuardTests(unittest.TestCase):
+    APP = "RepoPrompt"
+    DISPLAY = "RepoPrompt CE"
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        self.support = self.root / "Library/Application Support/RepoPrompt CE"
+        self.production = self.executable("Applications/RepoPrompt CE.app/Contents/MacOS/RepoPrompt")
+
+    def executable(self, relative_path: str) -> Path:
+        path = self.root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("binary", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def alias(self, relative_path: str, target: Path) -> Path:
+        path = self.root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(target)
+        return path
+
+    def release_state(self) -> debug_app_process.GuardPolicy:
+        return debug_app_process.release_state_guard_policy(self.production, self.APP, self.DISPLAY, self.support)
+
+    def blocking_pids(self, policy: debug_app_process.GuardPolicy, names: dict[int, str], paths: dict) -> list[int]:
+        return [process.pid for process in debug_app_process.blocking_processes(policy, FakeInspector(names, paths))]
+
+    def test_production_policy_blocks_only_the_configured_executable(self) -> None:
+        elsewhere = self.executable("Elsewhere/RepoPrompt CE.app/Contents/MacOS/RepoPrompt")
+        lookalike = self.executable("Applications/RepoPrompt CE.app.old/Contents/MacOS/RepoPrompt")
+        helper = self.executable("Applications/RepoPrompt CE.app/Contents/Resources/codex/RepoPrompt")
+        mcp = self.executable("Applications/RepoPrompt CE.app/Contents/MacOS/repoprompt-mcp")
+        policy = debug_app_process.production_guard_policy(self.production)
+        # The name prefilter comes from the executable path itself, so it cannot disagree with it.
+        self.assertEqual(policy.names, frozenset({"RepoPrompt"}))
+
+        blocking = self.blocking_pids(
+            policy,
+            {1: "RepoPrompt", 2: "RepoPrompt", 3: "RepoPrompt", 4: "RepoPrompt", 5: "repoprompt-mcp"},
+            {1: self.production, 2: elsewhere, 3: lookalike, 4: helper, 5: mcp},
+        )
+
+        self.assertEqual(blocking, [1])
+
+    def test_guard_fails_closed_for_a_running_process_whose_executable_was_deleted(self) -> None:
+        # libproc answers ENOENT for the path of a running process whose executable was
+        # unlinked, which the inspector reports as ProcessGone, while its name still reads.
+        for policy in (
+            debug_app_process.production_guard_policy(self.production),
+            self.release_state(),
+        ):
+            inspector = FakeInspector({1: "RepoPrompt"}, {1: debug_app_process.ProcessGone("ENOENT")})
+            with self.assertRaisesRegex(debug_app_process.ProcessIdentityError, "may have been deleted"):
+                debug_app_process.blocking_processes(policy, inspector)
+
+    def test_release_state_policy_blocks_production_debug_and_mcp_identities(self) -> None:
+        other_install = self.executable("Users/me/Applications/RepoPrompt CE.app/Contents/MacOS/RepoPrompt")
+        debug = self.executable("Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app/Contents/MacOS/RepoPrompt")
+        worktree_debug = self.executable(
+            "Library/Application Support/RepoPrompt CE/DebugApps-wt1/RepoPrompt.app/Contents/MacOS/RepoPrompt"
+        )
+        production_mcp = self.executable("Applications/RepoPrompt CE.app/Contents/MacOS/repoprompt-mcp")
+        debug_mcp = self.executable("Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app/Contents/MacOS/repoprompt-mcp")
+        cli_link = self.alias("RepoPrompt/repoprompt_ce_cli", production_mcp)
+        rpce_link = self.alias("bin/rpce-cli", cli_link)
+
+        blocking = self.blocking_pids(
+            self.release_state(),
+            {
+                1: "RepoPrompt",
+                2: "RepoPrompt",
+                3: "RepoPrompt",
+                4: "RepoPrompt",
+                5: "repoprompt-mcp",
+                6: "repoprompt-mcp",
+                7: "rpce-cli",
+            },
+            {1: self.production, 2: other_install, 3: debug, 4: worktree_debug, 5: production_mcp, 6: debug_mcp, 7: rpce_link},
+        )
+
+        self.assertEqual(blocking, [1, 2, 3, 4, 5, 6, 7])
+
+    def test_release_state_policy_ignores_lookalikes_and_unrelated_bundles(self) -> None:
+        lookalike_debug = self.executable(
+            "Library/Application Support/RepoPrompt CE/DebugAppsX/RepoPrompt.app/Contents/MacOS/RepoPrompt"
+        )
+        other_support = self.executable("Library/Application Support/Other/DebugApps/RepoPrompt.app/Contents/MacOS/RepoPrompt")
+        suffix_lookalike = self.executable("Applications/NotRepoPrompt CE.app/Contents/MacOS/RepoPrompt")
+        other_product_mcp = self.executable("Applications/RepoPrompt.app/Contents/MacOS/repoprompt-mcp")
+        helper = self.executable("Applications/RepoPrompt CE.app/Contents/MacOS/codex")
+
+        blocking = self.blocking_pids(
+            self.release_state(),
+            {1: "RepoPrompt", 2: "RepoPrompt", 3: "RepoPrompt", 4: "repoprompt-mcp", 5: "RepoPrompt"},
+            {1: lookalike_debug, 2: other_support, 3: suffix_lookalike, 4: other_product_mcp, 5: helper},
+        )
+
+        self.assertEqual(blocking, [])
+
+    def test_guard_ignores_exited_and_uninspectable_foreign_processes(self) -> None:
+        inspector = FakeInspector(
+            {1: "RepoPrompt", 2: "launchd", 3: "RepoPrompt"},
+            {
+                1: debug_app_process.ProcessGone("exited"),
+                2: debug_app_process.ProcessIdentityError("Operation not permitted"),
+                3: self.production,
+            },
+            exited={1},
+        )
+
+        blocking = debug_app_process.blocking_processes(self.release_state(), inspector)
+
+        self.assertEqual([process.pid for process in blocking], [3])
+
+    def test_guard_fails_closed_when_a_named_candidate_cannot_be_inspected(self) -> None:
+        for name in ("RepoPrompt", "repoprompt-mcp", "repoprompt_ce_cli_debug"):
+            with self.subTest(name=name):
+                inspector = FakeInspector({1: name}, {1: debug_app_process.ProcessIdentityError("identity unavailable")})
+                with self.assertRaisesRegex(debug_app_process.ProcessIdentityError, "identity unavailable"):
+                    debug_app_process.blocking_processes(self.release_state(), inspector)
+
+    def test_exact_executable_list_replaces_the_shape_rules(self) -> None:
+        owned = self.executable("fixture/owned-tool")
+        alias = self.alias("fixture/repoprompt-mcp", owned)
+        policy = debug_app_process.exact_executables_guard_policy([alias])
+
+        blocking = self.blocking_pids(
+            policy,
+            {1: "RepoPrompt", 2: "owned-tool", 3: "repoprompt-mcp"},
+            {1: self.production, 2: owned, 3: owned},
+        )
+
+        self.assertEqual(blocking, [2, 3])
+
+    def test_exact_executable_list_is_validated(self) -> None:
+        for raw in ("not json", "[]", "{}", '["relative/path"]', "[1]"):
+            with self.subTest(raw=raw), self.assertRaises(debug_app_process.ProcessIdentityError):
+                debug_app_process.parse_exact_executables(raw)
+
+    def run_guard_cli(self, argv: list[str], inspector: FakeInspector) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = debug_app_process.main(argv, inspector=inspector)
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_guard_cli_distinguishes_clear_blocked_and_inspection_failure(self) -> None:
+        argv = ["guard", "production", "--production-executable", str(self.production)]
+
+        clear = self.run_guard_cli(argv, FakeInspector({}, {}))
+        blocked = self.run_guard_cli(argv, FakeInspector({77: "RepoPrompt"}, {77: self.production}))
+        failed = self.run_guard_cli(
+            argv, FakeInspector({78: "RepoPrompt"}, {78: debug_app_process.ProcessIdentityError("denied")})
+        )
+
+        self.assertEqual(clear, (debug_app_process.GUARD_EXIT_CLEAR, "", ""))
+        self.assertEqual(blocked[0], debug_app_process.GUARD_EXIT_BLOCKED)
+        self.assertEqual(blocked[1], f"  77  {self.production}\n")
+        self.assertEqual(failed[0], debug_app_process.EXIT_INSPECTION_FAILED)
+        self.assertIn("denied", failed[2])
+
+    def test_guard_never_signals_a_blocking_process(self) -> None:
+        argv = ["guard", "production", "--production-executable", str(self.production)]
+        refuse = mock.Mock(side_effect=AssertionError("guard must not signal"))
+
+        with mock.patch.object(debug_app_process.os, "kill", refuse), mock.patch.object(
+            debug_app_process.os, "killpg", refuse
+        ), mock.patch.object(debug_app_process.signal, "pthread_kill", refuse):
+            status, stdout, _ = self.run_guard_cli(argv, FakeInspector({77: "RepoPrompt"}, {77: self.production}))
+
+        self.assertEqual(status, debug_app_process.GUARD_EXIT_BLOCKED)
+        self.assertIn("77", stdout)
+        refuse.assert_not_called()
+
+    def test_cli_keeps_pid_operations_and_requires_each_policy_argument(self) -> None:
+        for operation in ("list", "terminate"):
+            args = debug_app_process.parse_args([operation, "--executable", str(self.production)])
+            self.assertEqual((args.operation, args.executable), (operation, self.production))
+        exact = debug_app_process.parse_args(["guard", "exact", "--executables-json", '["/a/RepoPrompt"]'])
+        self.assertEqual((exact.policy, exact.executables_json), ("exact", '["/a/RepoPrompt"]'))
+        incomplete = [
+            ["list"],
+            ["guard"],
+            ["guard", "production"],
+            ["guard", "production", "--production-executable", str(self.production), "--app-name", self.APP],
+            ["guard", "release-state", "--production-executable", str(self.production), "--app-name", self.APP],
+            ["guard", "exact"],
+        ]
+        for argv in incomplete:
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                debug_app_process.parse_args(argv)
+            self.assertEqual(raised.exception.code, 2)
 
 
 if __name__ == "__main__":
