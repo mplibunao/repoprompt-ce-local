@@ -215,6 +215,168 @@ import XCTest
         }
 
         @MainActor
+        func testOneShotHintOnUnboundConnectionResolvesAuthority() async throws {
+            let fixture = try await makeFixture(rootPaths: [makeTemporaryRoot().path])
+            let expected = try await fixture.window.mcpServer.resolveFileToolAuthority(
+                tabID: fixture.contextID,
+                workspaceID: fixture.workspace.id
+            )
+
+            let consumed = try await fixture.window.mcpServer.requiredFileToolLookupContext(
+                from: hintMetadata(for: fixture)
+            )
+
+            XCTAssertEqual(consumed.lookupContext, expected.lookupContext)
+            XCTAssertNil(fixture.window.mcpServer.boundTabID(forConnection: fixture.connectionID))
+        }
+
+        @MainActor
+        func testOneShotHintOnUnboundConnectionHydratesAgentSessionAuthority() async throws {
+            let fixture = try await makeFixture(
+                rootPaths: [makeTemporaryRoot().path],
+                activeAgentSessionID: UUID()
+            )
+            installWorktreeBindingHydration(on: fixture.window.mcpServer)
+
+            let consumed = try await fixture.window.mcpServer.requiredFileToolLookupContext(
+                from: hintMetadata(for: fixture)
+            )
+
+            XCTAssertNil(consumed.lookupContext.bindingProjection)
+            XCTAssertNil(fixture.window.mcpServer.boundTabID(forConnection: fixture.connectionID))
+        }
+
+        @MainActor
+        func testBoundRouteReplacedDuringHydrationIsSuperseded() async throws {
+            let replacementTabID = UUID()
+            let fixture = try await makeFixture(
+                rootPaths: [makeTemporaryRoot().path],
+                activeAgentSessionID: UUID(),
+                additionalTabIDs: [replacementTabID]
+            )
+            let server = fixture.window.mcpServer
+            try server.bindTabForConnection(
+                connectionID: fixture.connectionID,
+                clientName: nil,
+                tabID: fixture.contextID,
+                workspaceID: fixture.workspace.id,
+                windowID: fixture.window.windowID
+            )
+            installWorktreeBindingHydration(on: server) {
+                try? server.bindTabForConnection(
+                    connectionID: fixture.connectionID,
+                    clientName: nil,
+                    tabID: replacementTabID,
+                    workspaceID: fixture.workspace.id,
+                    windowID: fixture.window.windowID
+                )
+            }
+            let staleCompletionsBefore = server.fileToolLookupContextStaleCompletionCount
+
+            await assertSuperseded {
+                _ = try await server.requiredFileToolLookupContext(from: metadata(for: fixture))
+            }
+            XCTAssertEqual(server.boundTabID(forConnection: fixture.connectionID), replacementTabID)
+            // Pins the failure to the post-hydration binding check, the only stale completion on this path.
+            XCTAssertEqual(server.fileToolLookupContextStaleCompletionCount, staleCompletionsBefore + 1)
+        }
+
+        @MainActor
+        func testBoundRouteWithoutFrozenAuthorityResolvesAuthority() async throws {
+            let fixture = try await makeFixture(rootPaths: [makeTemporaryRoot().path])
+            let server = fixture.window.mcpServer
+            try server.bindTabForConnection(
+                connectionID: fixture.connectionID,
+                clientName: nil,
+                tabID: fixture.contextID,
+                workspaceID: fixture.workspace.id,
+                windowID: fixture.window.windowID
+            )
+            installRootCatalogCaptureHook(on: fixture) {}
+
+            let consumed = try await server.requiredFileToolLookupContext(from: metadata(for: fixture))
+
+            XCTAssertEqual(server.boundTabID(forConnection: fixture.connectionID), fixture.contextID)
+            XCTAssertNil(consumed.lookupContext.bindingProjection)
+        }
+
+        @MainActor
+        func testOneShotHintWhoseTabChangesDuringHydrationIsSuperseded() async throws {
+            let fixture = try await makeFixture(
+                rootPaths: [makeTemporaryRoot().path],
+                activeAgentSessionID: UUID()
+            )
+            installWorktreeBindingHydration(on: fixture.window.mcpServer) {
+                Self.reassignAgentSession(of: fixture)
+            }
+
+            await assertSuperseded {
+                _ = try await fixture.window.mcpServer.requiredFileToolLookupContext(
+                    from: hintMetadata(for: fixture)
+                )
+            }
+        }
+
+        @MainActor
+        func testOneShotHintWhoseTabChangesDuringRootCatalogWaitIsSuperseded() async throws {
+            let fixture = try await makeFixture(rootPaths: [makeTemporaryRoot().path])
+            installRootCatalogCaptureHook(on: fixture) {
+                Self.reassignAgentSession(of: fixture)
+            }
+
+            await assertSuperseded {
+                _ = try await fixture.window.mcpServer.requiredFileToolLookupContext(
+                    from: hintMetadata(for: fixture)
+                )
+            }
+        }
+
+        @MainActor
+        func testRunCarryingHintOnUnboundConnectionIsSuperseded() async throws {
+            let fixture = try await makeFixture(rootPaths: [makeTemporaryRoot().path])
+            let server = fixture.window.mcpServer
+            server.connectionIDToRunID[fixture.connectionID] = UUID()
+            addTeardownBlock { @MainActor in
+                server.connectionIDToRunID.removeValue(forKey: fixture.connectionID)
+            }
+
+            await assertSuperseded {
+                _ = try await server.requiredFileToolLookupContext(from: hintMetadata(for: fixture))
+            }
+        }
+
+        @MainActor
+        func testBoundRouteReplacedDuringRootCatalogWaitIsSuperseded() async throws {
+            let replacementTabID = UUID()
+            let fixture = try await makeFixture(
+                rootPaths: [makeTemporaryRoot().path],
+                additionalTabIDs: [replacementTabID]
+            )
+            let server = fixture.window.mcpServer
+            try server.bindTabForConnection(
+                connectionID: fixture.connectionID,
+                clientName: nil,
+                tabID: fixture.contextID,
+                workspaceID: fixture.workspace.id,
+                windowID: fixture.window.windowID
+            )
+            installRootCatalogCaptureHook(on: fixture) {
+                try? server.bindTabForConnection(
+                    connectionID: fixture.connectionID,
+                    clientName: nil,
+                    tabID: replacementTabID,
+                    workspaceID: fixture.workspace.id,
+                    windowID: fixture.window.windowID
+                )
+            }
+
+            await assertSuperseded {
+                _ = try await server.requiredFileToolLookupContext(from: metadata(for: fixture))
+            }
+            XCTAssertEqual(server.boundTabID(forConnection: fixture.connectionID), replacementTabID)
+        }
+
+        @MainActor
         func testBindSerializesHeldHydrationAsRetryableAuthorityFailure() async throws {
             let root = try makeTemporaryRoot()
             let targetWindow = WindowState()
@@ -333,8 +495,72 @@ import XCTest
             )
         }
 
+        /// Reports the tab's agent-session worktree binding as unhydrated until the resolver runs,
+        /// and runs `duringHydration` inside that await, the window in which a route can be replaced.
         @MainActor
-        private func makeFixture(rootPaths: [String]) async throws -> Fixture {
+        private func installWorktreeBindingHydration(
+            on server: MCPServerViewModel,
+            duringHydration: @escaping @MainActor () -> Void = {}
+        ) {
+            let state = WorktreeBindingStateBox()
+            let previousProvider = server.agentWorktreeBindingStateProvider
+            let previousResolver = server.agentWorktreeBindingStateResolver
+            server.agentWorktreeBindingStateProvider = { _, _ in state.value }
+            server.agentWorktreeBindingStateResolver = { _, _ in
+                duringHydration()
+                state.value = .hydrated([])
+                return state.value
+            }
+            addTeardownBlock { @MainActor in
+                server.agentWorktreeBindingStateProvider = previousProvider
+                server.agentWorktreeBindingStateResolver = previousResolver
+            }
+        }
+
+        @MainActor
+        private func installRootCatalogCaptureHook(
+            on fixture: Fixture,
+            _ action: @escaping @MainActor () -> Void
+        ) {
+            let manager = fixture.window.workspaceManager
+            manager.setWorkspaceRootCatalogDidCaptureRootsHandlerForTesting { action() }
+            addTeardownBlock { @MainActor in
+                manager.setWorkspaceRootCatalogDidCaptureRootsHandlerForTesting(nil)
+            }
+        }
+
+        @MainActor
+        private static func reassignAgentSession(of fixture: Fixture) {
+            let manager = fixture.window.workspaceManager
+            guard let workspaceIndex = manager.workspaces.firstIndex(where: { $0.id == fixture.workspace.id }),
+                  let tabIndex = manager.workspaces[workspaceIndex].composeTabs
+                  .firstIndex(where: { $0.id == fixture.contextID })
+            else { return XCTFail("Hinted tab must exist before it is reassigned") }
+            manager.workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = UUID()
+        }
+
+        @MainActor
+        private func assertSuperseded(
+            _ operation: @MainActor () async throws -> Void,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async {
+            do {
+                try await operation()
+                XCTFail("Expected superseded file-tool authority", file: file, line: line)
+            } catch let failure as MCPServerViewModel.FileToolAuthorityFailure {
+                XCTAssertEqual(failure, .superseded, file: file, line: line)
+            } catch {
+                XCTFail("Unexpected error: \(error)", file: file, line: line)
+            }
+        }
+
+        @MainActor
+        private func makeFixture(
+            rootPaths: [String],
+            activeAgentSessionID: UUID? = nil,
+            additionalTabIDs: [UUID] = []
+        ) async throws -> Fixture {
             let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
             GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
             defer { GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false) }
@@ -344,7 +570,11 @@ import XCTest
             let workspace = WorkspaceModel(
                 name: "Authority",
                 repoPaths: rootPaths,
-                composeTabs: [ComposeTabState(id: contextID, name: "Context")],
+                composeTabs: [ComposeTabState(
+                    id: contextID,
+                    name: "Context",
+                    activeAgentSessionID: activeAgentSessionID
+                )] + additionalTabIDs.map { ComposeTabState(id: $0, name: "Other") },
                 activeComposeTabID: contextID
             )
             window.workspaceManager.workspaces = [workspace]
@@ -376,6 +606,20 @@ import XCTest
                 connectionID: fixture.connectionID,
                 clientName: "BindContextFileAuthorityTests",
                 windowID: fixture.window.windowID
+            )
+        }
+
+        @MainActor
+        private func hintMetadata(for fixture: Fixture) -> MCPServerViewModel.RequestMetadata {
+            MCPServerViewModel.RequestMetadata(
+                connectionID: fixture.connectionID,
+                clientName: "BindContextFileAuthorityTests",
+                windowID: fixture.window.windowID,
+                tabContextHint: MCPServerViewModel.TabContextHint(
+                    tabID: fixture.contextID,
+                    workspaceID: fixture.workspace.id,
+                    windowID: fixture.window.windowID
+                )
             )
         }
 
@@ -458,6 +702,11 @@ import XCTest
 
     private enum AffinityFailure: Error {
         case injected
+    }
+
+    @MainActor
+    private final class WorktreeBindingStateBox {
+        var value: AgentSessionWorktreeBindingState = .unhydrated
     }
 
     private actor RootHydrationSuspensionGate {

@@ -1607,6 +1607,18 @@ extension MCPServerViewModel {
             self.snapshot = snapshot
             self.source = source
         }
+
+        /// A one-shot hint whose snapshot carries no run. It has no stored connection binding to
+        /// supersede, so live tab and root-catalog state alone decide its currency. A hint carrying
+        /// a run keeps the connection check, because the live tab check does not apply to run snapshots.
+        var isRunFreeHint: Bool {
+            source == .explicitHint && snapshot.runID == nil
+        }
+
+        /// The connection whose stored binding must still match; `nil` for an `isRunFreeHint` route.
+        func bindingCurrencyConnectionID(from metadata: RequestMetadata) -> UUID? {
+            isRunFreeHint ? nil : metadata.connectionID
+        }
     }
 
     @MainActor
@@ -2225,10 +2237,11 @@ extension MCPServerViewModel {
             )
             return frozenAuthority
         }
+        let bindingConnectionID = routed.bindingCurrencyConnectionID(from: metadata)
         var authoritySnapshot = routed.snapshot
         guard await hydrateFileToolLookupSnapshotIfNeeded(
             &authoritySnapshot,
-            connectionID: metadata.connectionID
+            connectionID: bindingConnectionID
         ) else {
             throw FileToolAuthorityFailure.superseded
         }
@@ -2260,7 +2273,7 @@ extension MCPServerViewModel {
 
         guard fileToolLookupSnapshotIsCurrent(
             authoritySnapshot,
-            connectionID: metadata.connectionID
+            connectionID: bindingConnectionID
         ), fileToolBindingSourceIsCurrent(authoritySource, for: authoritySnapshot)
         else {
             throw FileToolAuthorityFailure.superseded
@@ -2285,7 +2298,7 @@ extension MCPServerViewModel {
             )
             guard fileToolLookupSnapshotIsCurrent(
                 authoritySnapshot,
-                connectionID: metadata.connectionID
+                connectionID: bindingConnectionID
             ), fileToolBindingSourceIsCurrent(authoritySource, for: authoritySnapshot),
             fileToolRootCatalogSnapshotIsCurrent(rootCatalogSnapshot)
             else {
@@ -2302,7 +2315,7 @@ extension MCPServerViewModel {
             if error == .unavailable,
                !fileToolLookupSnapshotIsCurrent(
                    authoritySnapshot,
-                   connectionID: metadata.connectionID
+                   connectionID: bindingConnectionID
                ) || !fileToolBindingSourceIsCurrent(authoritySource, for: authoritySnapshot)
             {
                 throw FileToolAuthorityFailure.superseded
@@ -2373,7 +2386,7 @@ extension MCPServerViewModel {
 
             guard await hydrateFileToolLookupSnapshotIfNeeded(
                 &snapshot,
-                connectionID: metadata.connectionID
+                connectionID: resolved?.bindingCurrencyConnectionID(from: metadata)
             ) else {
                 return try unavailableFileToolLookupContext(rootCatalogSnapshot: rootCatalogSnapshot)
             }
