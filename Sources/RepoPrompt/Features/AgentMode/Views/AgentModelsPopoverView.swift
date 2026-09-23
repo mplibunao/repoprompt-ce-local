@@ -40,11 +40,13 @@ struct AgentModelsPopoverView: View {
         fontScale.preset
     }
 
-    /// Wide enough for a role row with two parameter pins on one line at the normal font: a
-    /// Cursor row (icon, 64pt label, "Cursor CLI Grok 4.6" picker, "Effort: High" and
-    /// "Speed: Default" chips) measures about 430pt, and the content inset is 32pt.
+    /// Wide enough that a role row's right-aligned model picker and parameter pins start past the
+    /// end of the left-aligned "Recommended: … Apply" line beneath it, so the two never stagger.
+    /// At the normal font the longest recommendation line ends about 259pt in, a Cursor row's
+    /// picker plus effort and speed pins is about 330pt wide, and they need a 16pt gap: about
+    /// 605pt of content plus the 32pt content inset.
     private var popoverWidth: CGFloat {
-        fontPreset.scaledClamped(500, max: 720)
+        fontPreset.scaledClamped(640, max: 920)
     }
 
     private var popoverMaxHeight: CGFloat {
