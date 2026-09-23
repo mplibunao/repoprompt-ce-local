@@ -236,7 +236,37 @@ CLI="$HOME/RepoPrompt/repoprompt_ce_cli"
 same executable; prefer the path above.
 
 Use a two-root workspace with a distinct marker file per root and an existing linked
-worktree. `$W1` and `$W2` are the two window IDs from the first arm. Every arm must pass:
+worktree. `$W1` and `$W2` are the two window IDs from the first arm.
+
+After the first line gives you `$W1` and before the Codex and Claude Code arms:
+
+1. Open **Settings → Agent Models** from the acceptance workspace's window. Leave
+   the scope selector unchanged throughout. Note whether **Hide non-role models
+   from MCP agents** is on; if it is, turn it off in that same pane.
+2. Run:
+
+   ```bash
+   "$CLI" -w "$W1" -c agent_manage -j '{"op":"list_agents","roles_only":false}'
+   ```
+
+   Copy identifiers from `agents[].models[].model_id`, not from `task_labels`,
+   `default_model_id`, or `recommended_model_id`. Note every returned
+   `codexExec:` identifier, not just one (the hide setting is restored before
+   the run). If the response has no `agents` array, the hide setting is still
+   on for this workspace (`"roles_only":false` doesn't override it).
+3. If a Codex family is shown as a brace pattern such as
+   `codexExec:gpt-5.6-sol-{low|medium|high}`, pick one alternative, for example
+   `codexExec:gpt-5.6-sol-low`. Codex identifiers aren't checked up front, so
+   an unexpanded pattern is expected to fail only when Codex runs.
+4. Choose a Codex model the account can run; avoid `-fast` identifiers.
+5. Restore the original hide-setting value in the same pane. Restoring it does
+   not invalidate a manually supplied compound identifier.
+
+Replace the whole `model_id` value in the Codex and Claude Code start lines below
+with the corresponding returned identifier, keeping the provider capitalization
+and the entire model suffix, including any further colons.
+
+Every arm must pass:
 
 ```bash
 "$CLI" -e 'windows'                                                              # two distinct window IDs
@@ -246,15 +276,22 @@ worktree. `$W1` and `$W2` are the two window IDs from the first arm. Every arm m
 "$CLI" -w "$W2" -c manage_selection -j '{"op":"get","view":"files"}'              # B only
 "$CLI" -w "$W1" -c context_builder -j '{"instructions":"Reply with the selected marker and root.","response_type":"question"}' # answers A/RootA, never B
 "$CLI" -w "$W1" -c oracle_send -j '{"message":"Reply ORACLE_OK and identify the selected root."}' # terminal ORACLE_OK, reusable chat_id
-"$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"codexExec","message":"Reply CODEX_OK.","detach":true}'
+"$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"<codexExec-id-from-list_agents>","message":"Reply CODEX_OK.","detach":true}'
 "$CLI" -w "$W1" -c agent_run -j '{"op":"wait","session_id":"<codex session>","timeout":180}' # terminal state carrying CODEX_OK
-"$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"claudeCode","message":"Wait for steering.","detach":true}' # returns session_id
+"$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"<claudeCode-id-from-list_agents>","message":"Wait for steering.","detach":true}' # returns session_id
 "$CLI" -w "$W1" -c agent_run -j '{"op":"steer","session_id":"<claude session>","message":"Reply CLAUDE_STEER_OK."}'
 "$CLI" -w "$W1" -c agent_run -j '{"op":"wait","session_id":"<claude session>","timeout":180}' # terminal state carrying CLAUDE_STEER_OK
 "$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"explore","worktree":"@current","message":"Report pwd and worktree marker.","detach":true}'
 "$CLI" -w "$W1" -c agent_run -j '{"op":"wait","session_id":"<explore session>","timeout":180}' # exact linked-worktree root and marker
 "$CLI" -w "$W1" -c agent_manage -j '{"op":"list_sessions"}'                      # child binding and provenance exact, no orphan active run
 ```
+
+If the Codex wait ends with the provider refusing the model or a usage-limit
+message, that is an account problem only when the refused model is the chosen
+identifier without its effort suffix (e.g. `gpt-5.4-mini` for
+`codexExec:gpt-5.4-mini-low`) or the message is a usage limit — then choose
+another noted identifier or retry later. It is never a pass. A refusal naming
+any other model is a RepoPrompt failure to investigate.
 
 One arm stays outside the script: quit production and relaunch it, then confirm the
 long-running agent processes and their MCP descendants are gone and a new run starts.
