@@ -45,7 +45,7 @@ def object_schema(*, required: list[str], properties: dict[str, object]) -> dict
     return {"type": "object", "required": required, "properties": properties}
 
 
-def contract(checks: list[dict], *, floor: str = "0.153.4") -> dict:
+def contract(checks: list[dict], *, floor: str = "0.156.1") -> dict:
     return {
         "schemaVersion": 1,
         "minimumCodexVersion": floor,
@@ -61,20 +61,20 @@ def response_path(path: str, presence: str, nullable: bool) -> dict:
 class CodexAppServerSchemaGateTests(unittest.TestCase):
     def test_version_parser_accepts_cli_output_and_orders_prereleases(self) -> None:
         self.assertEqual(
-            gate.parse_version("codex-cli 0.153.4\n", label="test"),
-            gate.SemanticVersion(0, 153, 4),
+            gate.parse_version("codex-cli 0.156.1\n", label="test"),
+            gate.SemanticVersion(0, 156, 1),
         )
         self.assertEqual(
-            gate.parse_version("0.153.4-rc.2+build.7", label="test"),
-            gate.SemanticVersion(0, 153, 4, ("rc", "2")),
+            gate.parse_version("0.156.1-rc.2+build.7", label="test"),
+            gate.SemanticVersion(0, 156, 1, ("rc", "2")),
         )
         self.assertLess(
-            gate.parse_version("0.153.4-rc.2", label="test"),
-            gate.parse_version("0.153.4", label="test"),
+            gate.parse_version("0.156.1-rc.2", label="test"),
+            gate.parse_version("0.156.1", label="test"),
         )
         self.assertLess(
-            gate.parse_version("0.153.4-2", label="test"),
-            gate.parse_version("0.153.4-rc", label="test"),
+            gate.parse_version("0.156.1-2", label="test"),
+            gate.parse_version("0.156.1-rc", label="test"),
         )
         with self.assertRaisesRegex(gate.GateError, "could not parse"):
             gate.parse_version("Codex unknown", label="test")
@@ -660,7 +660,7 @@ out.mkdir(parents=True, exist_ok=True)
 """
             write_executable(
                 fake_codex,
-                script_template % (repr(str(marker)), repr("codex-cli 0.153.4")),
+                script_template % (repr(str(marker)), repr("codex-cli 0.156.1")),
             )
             contract_path = root / "contract.json"
             contract_path.write_text(
@@ -680,7 +680,7 @@ out.mkdir(parents=True, exist_ok=True)
                 )
 
             self.assertEqual(result, 0, stderr.getvalue())
-            self.assertIn("Codex CLI: 0.153.4", stdout.getvalue())
+            self.assertIn("Codex CLI: 0.156.1", stdout.getvalue())
             generated_args = json.loads(marker.read_text(encoding="utf-8"))
             self.assertEqual(
                 generated_args[:3],
@@ -690,13 +690,13 @@ out.mkdir(parents=True, exist_ok=True)
 
             write_executable(
                 fake_codex,
-                script_template % (repr(str(marker)), repr("codex-cli 0.153.4-rc.1")),
+                script_template % (repr(str(marker)), repr("codex-cli 0.156.1-rc.1")),
             )
             contract_path.write_text(
                 json.dumps(
                     contract(
                         [{"union": "ClientNotification.json", "method": "initialized"}],
-                        floor="0.153.4",
+                        floor="0.156.1",
                     )
                 ),
                 encoding="utf-8",
@@ -708,7 +708,7 @@ out.mkdir(parents=True, exist_ok=True)
                 )
             self.assertEqual(result, 1)
             self.assertIn(
-                "installed Codex CLI 0.153.4-rc.1 is below the contract floor 0.153.4",
+                "installed Codex CLI 0.156.1-rc.1 is below the contract floor 0.156.1",
                 stderr.getvalue(),
             )
 

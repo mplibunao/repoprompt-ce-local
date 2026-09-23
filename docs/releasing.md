@@ -305,11 +305,11 @@ package.
 
 ## Bundled Codex artifact
 
-Debug and release packaging include the complete official OpenAI Codex 0.153.4 standalone
+Debug and release packaging include the complete official OpenAI Codex 0.156.1 standalone
 package. The authority is the repository-owned
 [`Vendor/Codex/manifest.json`](../Vendor/Codex/manifest.json), which pins the official
-[`rust-v0.153.4` release](https://github.com/openai/codex/releases/tag/rust-v0.153.4), the
-official [`codex-package_SHA256SUMS`](https://github.com/openai/codex/releases/download/rust-v0.153.4/codex-package_SHA256SUMS),
+[`rust-v0.156.1` release](https://github.com/openai/codex/releases/tag/rust-v0.156.1), the
+official [`codex-package_SHA256SUMS`](https://github.com/openai/codex/releases/download/rust-v0.156.1/codex-package_SHA256SUMS),
 both macOS package assets, their complete extracted layouts, file hashes, architectures, and
 primary executable signing identities. The upstream release publishes SHA-256 sums but does
 not document a public GPG, minisign, or SLSA verification procedure, so acquisition requires
@@ -339,19 +339,33 @@ artifacts contain both `aarch64-apple-darwin/` and `x86_64-apple-darwin/`. Runti
 fails closed unless the package matching the running app architecture is present. Each target
 subtree preserves `codex-package.json`, `bin/codex`, `bin/codex-code-mode-host`,
 `codex-resources/`, `codex-path/`, and all additional package resources; the binaries inside
-remain thin and must match the directory's target architecture. The two primary macOS
-executables are Developer ID signed by `OpenAI OpCo, LLC` (team `2DC432GLL2`) with hardened
-runtime and timestamps. RepoPrompt's signing scripts do **not** thin, mutate, or re-sign
-anything in this subtree. The outer app signature seals the resource tree, after which the
-artifact verifier rechecks every byte, architecture, and upstream signature. This
-mixed-authority layout passes macOS strict deep code signature verification without changing
-the upstream binary hashes.
+remain thin and must match the directory's target architecture. Each package also carries a
+native voice runtime under `codex-resources/voice/`. Its `bin/codex-voice-host` executable and
+its libraries and plugins are manifest-owned Mach-Os like the rest of the package, and their
+third-party components are listed in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
+
+The two signing paths treat this subtree differently. Debug and local self-signed packaging
+through `Scripts/package_app.sh` does **not** thin, mutate, or re-sign anything in it: the
+outer app signature seals the resource tree, and the exact-byte pin preserves the upstream
+signatures. The artifact verifier then rechecks every byte and architecture, plus the OpenAI
+signing identity and V8 entitlements pinned for `bin/codex` and `bin/codex-code-mode-host`.
+This mixed-authority layout passes macOS strict deep code signature verification without
+changing the upstream binary hashes. The voice host's shipped entitlements are not part of
+that vendor-preserved contract, and the outer app gains no microphone entitlement from
+carrying the voice runtime. The parked Developer ID path in
+`Scripts/sign_staged_release.sh` instead re-signs every manifest-owned Mach-O at its final
+bundle path from the manifest's closed-world entitlement profile: V8 JIT only for `bin/codex`
+and `bin/codex-code-mode-host`, audio input only for the voice host, and no entitlements for
+the remaining Mach-Os. It reads those grants from the repository-owned
+`AppBundle/CodexV8JIT.entitlements` and `AppBundle/CodexAudioInput.entitlements` plists rather
+than preserving vendor metadata, then verifies the exact payloads, architectures, RepoPrompt
+signing team, and per-path entitlements.
 
 The bundled package is RepoPrompt's default Codex runtime authority; runtime selection never
 falls through to the user's shell `PATH`. Advanced users may set one explicit absolute external
 override with `REPOPROMPT_CODEX_EXECUTABLE`. RepoPrompt rejects overrides older than 0.149.0,
 the external admission minimum, which stays deliberately below the exact bundled and
-schema-gate pin at 0.153.4 because no outgoing request needs the newer version.
+schema-gate pin at 0.156.1 because no outgoing request needs the newer version.
 [`docs/architecture/codex-app-server-schema-gate.md`](architecture/codex-app-server-schema-gate.md)
 owns the per-rotation schema findings behind both numbers and the limits of what admission at
 the floor proves. Bundled and external runtimes both use RepoPrompt-owned `CODEX_HOME`
@@ -369,7 +383,9 @@ definitions that would redefine the owned table/keys, or uses `non_prefixed_mcp_
 The standalone package also contains the upstream Zsh executable at
 `codex-resources/zsh/bin/zsh`. Its exact Zsh 5.9 licence is included as
 [`ThirdPartyLicenses/codex/ZSH-LICENCE`](../ThirdPartyLicenses/codex/ZSH-LICENCE) and is
-covered by the packaged legal inventory checksum contract.
+covered by the packaged legal inventory checksum contract. The voice runtime's packaged
+notice, source manifest, and licences are copied as the `VOICE-*` files in
+[`ThirdPartyLicenses/codex/`](../ThirdPartyLicenses/codex/) under the same contract.
 
 To diagnose acquisition independently of a build, run:
 
@@ -377,7 +393,7 @@ To diagnose acquisition independently of a build, run:
 python3 Scripts/codex_runtime_artifact.py acquire --arch all
 python3 Scripts/codex_runtime_artifact.py verify \
   --arch aarch64-apple-darwin \
-  --package .build/codex-runtime/0.153.4/aarch64-apple-darwin
+  --package .build/codex-runtime/0.156.1/aarch64-apple-darwin
 python3 Scripts/codex_runtime_artifact.py stage-bundle \
   --arch all \
   --cache-root .build/codex-runtime \
@@ -399,8 +415,8 @@ or replace `Vendor/Codex/manifest.json`. Select exactly one explicit stable vers
 in explicitly to GitHub's latest stable release:
 
 ```bash
-make codex-update-candidate CODEX_CANDIDATE_VERSION=0.154.0
-make codex-update-candidate CODEX_CANDIDATE_TAG=rust-v0.154.0
+make codex-update-candidate CODEX_CANDIDATE_VERSION=0.157.0
+make codex-update-candidate CODEX_CANDIDATE_TAG=rust-v0.157.0
 make codex-update-candidate CODEX_CANDIDATE_LATEST=1
 ```
 
@@ -419,15 +435,22 @@ uses the same artifact verifier as packaging to reject extracted-layout, Mach-O
 inventory/architecture, normalized-payload, and OpenAI signing-identity drift. The official
 output directory contains a proposed `candidate-manifest.json`, `candidate-provenance.json`,
 sanitized `release-metadata.json`, the upstream checksum file, self-checksums, and a
-deterministic `candidate-report.md`. The live 0.153.4 pin remains authoritative until a
+deterministic `candidate-report.md`. The live 0.156.1 pin remains authoritative until a
 complete rotation change is reviewed and deliberately applied.
 
-The known-good rollback for the 0.153.4 rotation is verified Codex 0.149.0 (`rust-v0.149.0`;
-arm64 package archive SHA-256
+The known-good rollback for the 0.156.1 rotation is the previously bundled Codex 0.153.4
+(`rust-v0.153.4`; manifest SHA-256
+`3205371fce2b00104b875dad11a3f178f8d8c2f4d220e3dae970908053659f7f`, arm64 package archive
+SHA-256 `35438da1fbf7a6db7ddb3bcec84448fa6015ba188461472a97d9d1da7d9c4353`, x86_64 package
+archive SHA-256 `3ee638d7155c856ef31f3f4a85cb2195de1939962d3924c935b24f0514564a3d`). The
+older verified fallback is Codex 0.149.0 (`rust-v0.149.0`; arm64 package archive SHA-256
 `6c7589a52fe90e3742e35662115a4c55c39715601df0d41345ba8ec8f4221d4e`, x86_64 package archive
-SHA-256 `ba332e647cc898e3b4e86a3bc6e8db414a124eb88d8480f4707bbc66b0432f9d`). After a reviewed
-rotation, roll back by reverting the complete rotation change and rebuilding from the restored
-manifest rather than mixing old and new authority files.
+SHA-256 `ba332e647cc898e3b4e86a3bc6e8db414a124eb88d8480f4707bbc66b0432f9d`). Roll back by
+reverting the complete rotation change and rebuilding from the restored manifest rather than
+mixing old and new authority files. A source revert does not undo saved model selections that
+only the newer runtime advertises, or any state the newer runtime wrote under the
+RepoPrompt-owned Codex home; restore those from the [rollback unit](#rollback-unit) archive
+when needed.
 
 The manual **Codex Runtime Update Candidate** workflow runs only from `main`, has
 `contents: read`, uploads those evidence files, and cannot commit, open a pull request, or

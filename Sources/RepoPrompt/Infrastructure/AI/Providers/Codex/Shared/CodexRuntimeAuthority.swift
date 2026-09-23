@@ -6,7 +6,7 @@ import Foundation
 /// only user-configurable external fallback is an absolute path supplied through
 /// `REPOPROMPT_CODEX_EXECUTABLE`; ordinary PATH lookup is intentionally not consulted.
 enum CodexRuntimeAuthority {
-    static let bundledVersion = Version(major: 0, minor: 153, patch: 4)
+    static let bundledVersion = Version(major: 0, minor: 156, patch: 1)
     static let minimumExternalVersion = Version(major: 0, minor: 149, patch: 0)
     static let externalExecutableOverrideEnvironmentKey = "REPOPROMPT_CODEX_EXECUTABLE"
 
