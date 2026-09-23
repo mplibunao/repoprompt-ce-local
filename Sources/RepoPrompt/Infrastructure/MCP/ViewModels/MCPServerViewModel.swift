@@ -4708,6 +4708,9 @@ final class MCPServerViewModel: ObservableObject {
             from: metadata,
             toolName: "enqueueReadFileAutoSelection"
         )
+        // Auto-selection batches persist through the connection's stored binding. A run-free
+        // hint has none, so the read succeeds without mutating the hinted tab's selection.
+        guard !currentResolvedContext.isRunFreeHint else { return false }
         let key = try readFileAutoSelectionContextKey(resolvedContext: currentResolvedContext, metadata: metadata)
         guard readFileAutoSelectionCoordinator.enqueue(
             intent: intent,
