@@ -57,18 +57,22 @@ protocol SettingsManaging {
     func setWorkspaceAgentModelsProfile(workspaceID: UUID, profile: AgentModelsSettingsProfile)
     func effectiveAgentModelsProfile(workspaceID: UUID?) -> AgentModelsSettingsProfile
     func setAgentModelsMCPAgentRoleOverrides(_ overrides: [String: String]?, scope: AgentModelsEditingScope)
+    /// Returns whether the profile changed; a no-op edit writes and posts nothing.
+    @discardableResult
     func setAgentModelsRoleModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+        _ change: ACPModelParameterPinChange,
         roleRawValue: String,
         displayedSelectionID: AgentModelSelectionID,
         scope: AgentModelsEditingScope
-    )
+    ) -> Bool
+    /// Returns whether the profile changed; a no-op edit writes and posts nothing.
+    @discardableResult
     func setAgentModelsContextBuilderModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+        _ change: ACPModelParameterPinChange,
         agentRaw: String?,
         modelRaw: String,
         scope: AgentModelsEditingScope
-    )
+    ) -> Bool
     func copyAgentModelsProfile(from source: AgentModelsEditingScope, to destination: AgentModelsEditingScope)
     func commitWorkspace(_ workspaceID: UUID)
     func discardWindowOverrides(for workspaceID: UUID)
@@ -379,28 +383,30 @@ final class WindowSettingsManager: ObservableObject, SettingsManaging {
         store.setAgentModelsMCPAgentRoleOverrides(overrides, scope: scope)
     }
 
+    @discardableResult
     func setAgentModelsRoleModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+        _ change: ACPModelParameterPinChange,
         roleRawValue: String,
         displayedSelectionID: AgentModelSelectionID,
         scope: AgentModelsEditingScope
-    ) {
+    ) -> Bool {
         store.setAgentModelsRoleModelParameter(
-            selections,
+            change,
             roleRawValue: roleRawValue,
             displayedSelectionID: displayedSelectionID,
             scope: scope
         )
     }
 
+    @discardableResult
     func setAgentModelsContextBuilderModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+        _ change: ACPModelParameterPinChange,
         agentRaw: String?,
         modelRaw: String,
         scope: AgentModelsEditingScope
-    ) {
+    ) -> Bool {
         store.setAgentModelsContextBuilderModelParameter(
-            selections,
+            change,
             agentRaw: agentRaw,
             modelRaw: modelRaw,
             scope: scope

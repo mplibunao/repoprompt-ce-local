@@ -157,11 +157,6 @@ enum MCPAgentRoleDefaultsService {
             AgentModelSelectionID(agentRaw: effective.agent.rawValue, modelRaw: effective.modelRaw)
         }
 
-        /// The stored `.thinking` pin value for this role, if any. The chip's saved-state input.
-        var thinkingParameterValueRaw: String? {
-            modelParameters.last { $0.kind == .thinking }?.valueRaw
-        }
-
         var pinState: PinState {
             guard hasStoredOverride else { return .none }
             if overrideUnavailable {
@@ -291,23 +286,24 @@ enum MCPAgentRoleDefaultsService {
         settingsStore.updateMCPAgentRoleOverrides(nil, scope: scope, commit: true)
     }
 
-    /// Write a role pin atomically with its displayed model choice.
+    /// Apply one role pin edit atomically with its displayed model choice.
     ///
-    /// `displayed` is the selection the surface is showing. Persisting it as the override
-    /// together with the pin is what keeps the pin eligible: a pin written against a merely
+    /// `displayed` is the selection the surface is showing. A set persists it as the override
+    /// together with the pin, which keeps the pin eligible: a pin written against a merely
     /// recommended (not overridden) model would be dropped by profile normalization the moment
-    /// it is saved. `selections == nil` clears only the pin, and only when the stored bucket
-    /// belongs to `displayed` — it never writes the override, so re-picking the already-checked
-    /// "Default" cannot make a recommendation-tracking role durable, nor delete a pin retained
-    /// for a different model.
+    /// it is saved. A clear removes only its identity and never writes the override, so
+    /// re-picking the already-checked "Default" cannot make a recommendation-tracking role
+    /// durable, nor delete a pin retained for a different model. Returns whether the profile
+    /// changed, so callers refresh only after a real edit.
+    @discardableResult
     static func setModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+        _ change: ACPModelParameterPinChange,
         for role: AgentModelCatalog.TaskLabelKind,
         displayed: AgentModelCatalog.NormalizedAgentSelection,
         scope: AgentModelsEditingScope
-    ) {
+    ) -> Bool {
         GlobalSettingsStore.shared.setAgentModelsRoleModelParameter(
-            selections,
+            change,
             roleRawValue: role.rawValue,
             displayedSelectionID: AgentModelSelectionID(
                 agentRaw: displayed.agent.rawValue,

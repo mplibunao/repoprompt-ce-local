@@ -2,95 +2,144 @@ import SwiftUI
 
 /// The probe context a chip host resolves for its target. `.resolved(nil)` builds the
 /// legitimate nil-workspace key; `.unavailable` yields no key — no subscription and no
-/// actionable chip. A throwing resolution would collapse these two, so hosts pass the value
-/// instead of a closure.
+/// workspace-dependent metadata. A throwing resolution would collapse these two, so hosts pass
+/// the value instead of a closure.
 enum ACPModelParameterProbeContext: Equatable {
     case resolved(String?)
     case unavailable
 }
 
-/// Owns the demand-scoped discovery lifetime for one OpenCode effort chip and renders
-/// `ACPModelParameterPinChip`. It owns *nothing else*: saved state and write authority stay with
-/// the host, which supplies the saved pin, the probe context, and a guarded write closure.
+/// Lists every parameter pin for one ACP provider/model row and renders one
+/// `ACPModelParameterPinChip` per kind. It owns only metadata acquisition: saved state and
+/// write authority stay with the host, which supplies the saved selections, the probe context,
+/// and a guarded change handler.
 ///
-/// Discovery uses `.task(id:)`, which SwiftUI cancels on view teardown **and** on identity
-/// change. Because the identity is the canonical key — which contains the workspace — a
-/// workspace switch restarts the probe structurally instead of needing a separate observer or a
-/// path provider. Ordinary re-renders don't restart it (same key).
+/// Metadata comes from `ACPModelParameterResolver.parameterSet`: Cursor's static catalog
+/// resolves synchronously, and OpenCode needs one demand-scoped subscription per row, however
+/// many chips the row shows. The subscription uses `.task(id:)`, which SwiftUI cancels on view
+/// teardown **and** on identity change. Because the identity is the canonical key — which
+/// contains the workspace — a workspace switch restarts the probe structurally. Ordinary
+/// re-renders don't restart it (same key).
 struct ACPModelParameterProbeView: View {
-    /// The displayed model this chip probes and writes against.
+    typealias OpenCodeParameterStreamProvider = @MainActor (
+        _ workspacePath: String?,
+        _ modelRaw: String
+    ) async -> AsyncStream<OpenCodeACPModelParameterSnapshot>
+
+    /// The displayed model this row probes and writes against.
     let modelRaw: String
     let providerID: ACPProviderID
+    let providerDisplayName: String
     let probeContext: ACPModelParameterProbeContext
-    /// The saved pin value, read from the same profile snapshot the host renders.
-    let pinnedValueRaw: String?
+    /// The saved pins, read from the same profile snapshot the host renders.
+    let savedSelections: [ACPModelParameterSelection]
     let isEnabled: Bool
-    /// Re-checks live host state and performs the atomic write. Receives the advertised
-    /// `configID` (never assumed to be `"effort"`) and the chosen value, or nil to clear.
-    let onSelect: (_ configID: String, _ valueRaw: String?) -> Void
+    /// Re-checks live host state and applies the edit atomically to the live profile.
+    let onChange: (ACPModelParameterPinChange) -> Void
+    private let openCodeStreamProvider: OpenCodeParameterStreamProvider
 
     @State private var snapshot: OpenCodeACPModelParameterSnapshot?
 
     init(
         modelRaw: String,
         providerID: ACPProviderID,
+        providerDisplayName: String,
         probeContext: ACPModelParameterProbeContext,
-        pinnedValueRaw: String?,
+        savedSelections: [ACPModelParameterSelection],
         isEnabled: Bool = true,
-        onSelect: @escaping (_ configID: String, _ valueRaw: String?) -> Void
+        openCodeStreamProvider: @escaping OpenCodeParameterStreamProvider = { workspacePath, modelRaw in
+            await OpenCodeACPModelPollingService.shared.subscribeModelParameters(
+                workspacePath: workspacePath,
+                modelRaw: modelRaw
+            )
+        },
+        onChange: @escaping (ACPModelParameterPinChange) -> Void
     ) {
         self.modelRaw = modelRaw
         self.providerID = providerID
+        self.providerDisplayName = providerDisplayName
         self.probeContext = probeContext
-        self.pinnedValueRaw = pinnedValueRaw
+        self.savedSelections = savedSelections
         self.isEnabled = isEnabled
-        self.onSelect = onSelect
+        self.openCodeStreamProvider = openCodeStreamProvider
+        self.onChange = onChange
     }
 
-    /// The model actually probed: trimmed, or nil when there is nothing to acquire.
-    private var probedModelRaw: String? {
-        guard providerID == .openCode else { return nil }
-        let trimmed = modelRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    /// The canonical discovery key for the current target, or nil when there is nothing to
-    /// acquire (non-OpenCode provider, empty model, or an unresolved workspace).
+    /// The OpenCode discovery key for the current target, or nil when there is nothing to
+    /// acquire (another provider, an empty model, or an unresolved workspace).
     private var probeKey: OpenCodeACPModelParameterKey? {
-        guard let probedModelRaw else { return nil }
-        switch probeContext {
-        case .unavailable:
-            return nil
-        case let .resolved(workspacePath):
-            return OpenCodeACPModelParameterKey(workspacePath: workspacePath, modelRaw: probedModelRaw)
-        }
+        Self.openCodeProbeKey(providerID: providerID, modelRaw: modelRaw, probeContext: probeContext)
     }
 
-    private var definition: ACPModelParameterDefinition? {
-        guard let snapshot, snapshot.key == probeKey,
-              case let .available(parameterSet) = snapshot.state
+    private var controls: [ACPModelParameterPinControl] {
+        Self.pinControls(
+            providerID: providerID,
+            modelRaw: modelRaw,
+            probeContext: probeContext,
+            openCodeSnapshot: snapshot,
+            savedSelections: savedSelections
+        )
+    }
+
+    static func openCodeProbeKey(
+        providerID: ACPProviderID,
+        modelRaw: String,
+        probeContext: ACPModelParameterProbeContext
+    ) -> OpenCodeACPModelParameterKey? {
+        let trimmed = modelRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard providerID == .openCode, !trimmed.isEmpty,
+              case let .resolved(workspacePath) = probeContext
         else { return nil }
-        return parameterSet.definition(kind: .thinking)
+        return OpenCodeACPModelParameterKey(workspacePath: workspacePath, modelRaw: trimmed)
+    }
+
+    /// The row's controls for the held OpenCode observation, or the static metadata other
+    /// providers resolve without a session. An unavailable probe context never becomes a
+    /// nil-workspace OpenCode observation.
+    static func pinControls(
+        providerID: ACPProviderID,
+        modelRaw: String,
+        probeContext: ACPModelParameterProbeContext,
+        openCodeSnapshot: OpenCodeACPModelParameterSnapshot?,
+        savedSelections: [ACPModelParameterSelection]
+    ) -> [ACPModelParameterPinControl] {
+        let parameterSet = ACPModelParameterResolver.parameterSet(
+            providerID: providerID,
+            selectedModelRaw: modelRaw,
+            openCodeKey: openCodeProbeKey(providerID: providerID, modelRaw: modelRaw, probeContext: probeContext),
+            openCodeParameters: openCodeSnapshot
+        )
+        return ACPModelParameterResolver.pinControls(
+            providerID: providerID,
+            selectedModelRaw: modelRaw,
+            parameterSet: parameterSet,
+            persistedSelections: savedSelections
+        )
+    }
+
+    /// A lone OpenCode thinking chip keeps its established unprefixed label; any other row names
+    /// each parameter so a bare "Default" is never ambiguous.
+    static func showsParameterNames(_ controls: [ACPModelParameterPinControl]) -> Bool {
+        !(controls.count == 1 && controls[0].providerID == .openCode && controls[0].kind == .thinking)
     }
 
     var body: some View {
+        let controls = controls
+        let showsParameterNames = Self.showsParameterNames(controls)
         HStack(spacing: 0) {
             // Always-present zero-size host for the discovery task.
             //
-            // The task CANNOT hang off the chip's own conditional. With no saved pin and no
+            // The task CANNOT hang off a chip's own conditional. With no saved pin and no
             // metadata yet, that conditional collapses to nil content, which SwiftUI gives no
-            // render node — `.task` is then never scheduled, so the chip can never acquire the
-            // metadata that would make it appear. Verified in isolation: `.task` on a `Group`
+            // render node — `.task` is then never scheduled, so the row could never acquire the
+            // metadata that would make a chip appear. Verified in isolation: `.task` on a `Group`
             // wrapping nil content does not fire, while this zero-size host does.
             Color.clear
                 .frame(width: 0, height: 0)
                 .task(id: probeKey) {
                     snapshot = nil
-                    guard let probeKey, let probedModelRaw else { return }
-                    let stream = await OpenCodeACPModelPollingService.shared.subscribeModelParameters(
-                        workspacePath: probeKey.workspacePath,
-                        modelRaw: probedModelRaw
-                    )
+                    guard let probeKey else { return }
+                    let stream = await openCodeStreamProvider(probeKey.workspacePath, probeKey.wireModelRaw)
                     for await delivered in stream {
                         // Cancellation is checked explicitly: a cancelled task's body still runs
                         // to its next suspension, so an in-flight delivery could otherwise land
@@ -104,13 +153,18 @@ struct ACPModelParameterProbeView: View {
                     }
                 }
 
-            if definition != nil || pinnedValueRaw != nil {
-                ACPModelParameterPinChip(
-                    definition: definition,
-                    pinnedValueRaw: pinnedValueRaw,
-                    isEnabled: isEnabled,
-                    onSelect: onSelect
-                )
+            if !controls.isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(controls, id: \.kind) { control in
+                        ACPModelParameterPinChip(
+                            control: control,
+                            providerDisplayName: providerDisplayName,
+                            showsParameterName: showsParameterNames,
+                            isEnabled: isEnabled,
+                            onChange: onChange
+                        )
+                    }
+                }
             }
         }
     }

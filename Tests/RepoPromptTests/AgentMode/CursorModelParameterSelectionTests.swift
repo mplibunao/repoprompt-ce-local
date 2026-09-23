@@ -282,14 +282,14 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             valueRaw: "medium"
         )
 
-        let resolved = ACPModelParameterResolver.resolve(
+        let resolved = ACPModelParameterTestSupport.composerChoices(
             providerID: .cursor,
             selectedModelRaw: "Grok 4.6",
             persistedSelections: [persisted]
         )
-        XCTAssertEqual(resolved.map(\.definition.kind), [.thinking, .speed])
-        XCTAssertEqual(resolved.map(\.selectedChoice.rawValue), ["medium", "true"])
-        XCTAssertTrue(ACPModelParameterResolver.resolve(
+        XCTAssertEqual(resolved.map(\.kind), [.thinking, .speed])
+        XCTAssertEqual(resolved.map(\.choice.rawValue), ["medium", "true"])
+        XCTAssertTrue(ACPModelParameterTestSupport.composerChoices(
             providerID: .openCode,
             selectedModelRaw: "grok-4.6",
             persistedSelections: [persisted]
@@ -440,7 +440,7 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         XCTAssertEqual(prompt.contextBuilderAgentModelRaw, "grok-4.6", "precondition: published cache remains stale")
 
         prompt.setContextBuilderModelParameter(
-            [cursorEffortSelection(valueRaw: "high")],
+            .set(cursorEffortSelection(valueRaw: "high")),
             expectedProviderID: .cursor,
             expectedModelRaw: "grok-4.6",
             expectedScope: .global
@@ -1037,7 +1037,7 @@ final class CursorModelParameterSelectionTests: XCTestCase {
     }
 
     func testUnknownCursorModelHasNoControls() {
-        XCTAssertTrue(ACPModelParameterResolver.resolve(
+        XCTAssertTrue(ACPModelParameterTestSupport.composerChoices(
             providerID: .cursor,
             selectedModelRaw: "future-cursor-model",
             persistedSelections: []
@@ -1078,6 +1078,61 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         XCTAssertTrue(control.tooltip?.contains("not currently advertised") == true)
         XCTAssertTrue(control.tooltip?.contains("Clear it to run with the model's default") == true)
         XCTAssertEqual(control.accessibilityValue, "retired-effort, unavailable")
+    }
+
+    /// A saved OpenCode pin whose kind has no usable definition keeps a saved-intent control next
+    /// to the live controls, whether the live set advertises that kind twice (ambiguous) or not
+    /// at all. Otherwise only the speed chip would show while the run fails closed on the pin.
+    func testComposerKeepsSavedPinBesideLiveControlsWhenItsKindIsUnresolvable() throws {
+        let workspacePath = "/workspace-a"
+        let modelRaw = "ollama-cloud/kimi-k3"
+        let viewModel = makeViewModel(workspacePath: workspacePath)
+        let tabID = UUID()
+        viewModel.test_setCurrentTabIDOverride(tabID)
+        defer { viewModel.test_setCurrentTabIDOverride(nil) }
+
+        let session = AgentModeViewModel.TabSession(tabID: tabID)
+        session.hasLoadedPersistedState = true
+        session.selectedAgent = .openCode
+        session.selectedModelRaw = modelRaw
+        session.acpModelParameterSelections = [openCodeEffortPin(valueRaw: "high")]
+        viewModel.test_installLiveSession(session)
+        viewModel.applySessionToBindings(session)
+
+        let speed = ACPModelParameterDefinition(
+            kind: .speed,
+            configID: "fast",
+            displayName: "Speed",
+            choices: [.init(rawValue: "false", displayName: "Standard"), .init(rawValue: "true", displayName: "Fast")],
+            currentValueRaw: "false"
+        )
+        let effortChoices: [ACPModelParameterChoice] = [.init(rawValue: "low", displayName: "Low"), .init(rawValue: "high", displayName: "High")]
+        let advertisedSets: [(String, [ACPModelParameterDefinition])] = [
+            ("ambiguous thinking", [
+                .init(kind: .thinking, configID: "effort", displayName: "Effort", choices: effortChoices, currentValueRaw: "low"),
+                .init(kind: .thinking, configID: "reasoning", displayName: "Reasoning", choices: effortChoices, currentValueRaw: "low"),
+                speed
+            ]),
+            ("unadvertised thinking", [speed])
+        ]
+        for (label, parameters) in advertisedSets {
+            viewModel.test_setOpenCodeModelParameterObservation(OpenCodeACPModelParameterSnapshot(
+                key: OpenCodeACPModelParameterKey(workspacePath: workspacePath, modelRaw: modelRaw),
+                state: .available(ACPModelParameterSet(baseModelRaw: modelRaw, parameters: parameters)),
+                updatedAt: Date()
+            ))
+
+            let controls = viewModel.makeComposerProps(tabID: tabID).acpModelParameterControls
+            XCTAssertEqual(controls.map(\.kind), [.thinking, .speed], label)
+            let thinking = try XCTUnwrap(controls.first, label)
+            XCTAssertFalse(thinking.hasLiveDefinition, label)
+            XCTAssertEqual(thinking.selectedValueRaw, "high", label)
+            XCTAssertTrue(thinking.choices.isEmpty, label)
+            XCTAssertTrue(thinking.isSavedValueUnavailable, label)
+            let speedControl = try XCTUnwrap(controls.last, label)
+            XCTAssertTrue(speedControl.hasLiveDefinition, label)
+            XCTAssertEqual(speedControl.choices.map(\.rawValue), ["false", "true"], label)
+        }
     }
 
     /// The clear action never invents choices: without metadata there are zero options, and with
@@ -1319,7 +1374,7 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             currentValueRaw: "low"
         )
         XCTAssertEqual(
-            ACPModelParameterPinChip.defaultTooltip(definition: definition),
+            ACPModelParameterPinChip.defaultTooltip(definition: definition, kind: .thinking, providerDisplayName: AgentProviderKind.openCode.displayName),
             "Default — OpenCode's current effort for this model: Low"
         )
 
@@ -1332,14 +1387,14 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             currentValueRaw: "medium"
         )
         XCTAssertEqual(
-            ACPModelParameterPinChip.defaultTooltip(definition: unadvertised),
+            ACPModelParameterPinChip.defaultTooltip(definition: unadvertised, kind: .thinking, providerDisplayName: AgentProviderKind.openCode.displayName),
             "Default — OpenCode's current effort for this model: medium"
         )
     }
 
     func testPinChipDefaultTooltipReportsUndiscoveredWithoutDefinition() {
         XCTAssertEqual(
-            ACPModelParameterPinChip.defaultTooltip(definition: nil),
+            ACPModelParameterPinChip.defaultTooltip(definition: nil, kind: .thinking, providerDisplayName: AgentProviderKind.openCode.displayName),
             "Default — OpenCode's current effort for this model (not yet discovered)"
         )
     }

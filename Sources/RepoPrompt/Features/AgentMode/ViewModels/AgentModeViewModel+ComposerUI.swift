@@ -61,83 +61,73 @@ extension AgentModeViewModel {
         guard let providerID = selectedAgent.acpProviderID else { return [] }
         // Pure projection over the held demand-scoped observation (OpenCode) or the static
         // catalogue (Cursor). Never launch discovery from here. While the OpenCode observation
-        // is loading/failed/has no usable parameters, this yields no parameter set, so the
-        // effort control is omitted while model selection, permissions, and submission stay
-        // usable. Every returned choice renders, including a one-option menu.
-        // Unwrap the KEY itself and pass its possibly-nil workspacePath separately: optional
-        // chaining (`key?.workspacePath`) would collapse "resolution failed" (no key) into
-        // "resolved nil-workspace" (key with workspacePath: nil). A held nil-workspace
-        // observation resolves only via a constructed nil-workspace key, while a failed
-        // authority resolution withholds the control entirely.
-        let workspacePath: String?
-        if providerID == .openCode {
-            guard let key = openCodeParameterDiscoveryKey(session: session, modelRaw: selectedModelRaw) else {
-                return savedIntentOnlyControls(providerID: providerID, session: session)
-            }
-            workspacePath = key.workspacePath
-        } else if let session {
-            workspacePath = try? effectiveWorkspacePath(for: session)
-        } else {
-            workspacePath = workspacePathProvider()
-        }
-        let resolved = ACPModelParameterResolver.resolve(
+        // is loading/failed/has no usable parameters, or its discovery authority does not
+        // resolve (no key), there is no parameter set: live controls are omitted, saved pins
+        // stay visible as saved-intent controls, and model selection, permissions, and
+        // submission stay usable. Every returned choice renders, including a one-option menu.
+        let parameterSet = ACPModelParameterResolver.parameterSet(
             providerID: providerID,
             selectedModelRaw: selectedModelRaw,
-            persistedSelections: session?.acpModelParameterSelections ?? [],
-            workspacePath: workspacePath,
-            openCodeParameters: providerID == .openCode ? openCodeModelParameterObservation : nil
+            openCodeKey: providerID == .openCode
+                ? openCodeParameterDiscoveryKey(session: session, modelRaw: selectedModelRaw)
+                : nil,
+            openCodeParameters: openCodeModelParameterObservation
         )
-        let controls = resolved.map { parameter in
-            AgentComposerModelParameterControlProps(
+        let persistedSelections = session?.acpModelParameterSelections ?? []
+        let pinControls = ACPModelParameterResolver.pinControls(
+            providerID: providerID,
+            selectedModelRaw: selectedModelRaw,
+            parameterSet: parameterSet,
+            persistedSelections: persistedSelections
+        )
+        // Saved OpenCode intent must stay visible whenever its kind has no usable definition:
+        // metadata loading, failed, or reporting no parameters, a kind the live set does not
+        // advertise, or an ambiguous kind. The pin still blocks the next run, so omitting its
+        // control would strand it with no way to clear or replace it.
+        return pinControls.compactMap { control -> AgentComposerModelParameterControlProps? in
+            guard let definition = control.definition else {
+                guard providerID == .openCode, let saved = control.saved else { return nil }
+                return savedIntentOnlyControl(for: saved)
+            }
+            guard let selectedChoice = ACPModelParameterResolver.composerSelectedChoice(
+                definition: definition,
+                saved: control.saved,
+                providerID: providerID
+            ) else { return nil }
+            return AgentComposerModelParameterControlProps(
                 providerID: providerID,
-                kind: parameter.definition.kind,
-                baseModelRaw: parameter.baseModelRaw,
-                configID: parameter.definition.configID,
-                displayName: parameter.definition.displayName,
-                selectedValueRaw: parameter.selectedChoice.rawValue,
-                selectedDisplayName: parameter.selectedChoice.displayName,
-                choices: parameter.definition.choices,
+                kind: definition.kind,
+                baseModelRaw: control.baseModelRaw,
+                configID: definition.configID,
+                displayName: definition.displayName,
+                selectedValueRaw: selectedChoice.rawValue,
+                selectedDisplayName: selectedChoice.displayName,
+                choices: definition.choices,
                 openCodeDiscoveryKey: providerID == .openCode ? openCodeModelParameterObservation?.key : nil,
                 hasLiveDefinition: true
             )
         }
-        // Saved OpenCode intent must stay visible even while its metadata is loading, failed,
-        // or reports no usable parameters: it still blocks the next run, so omitting the
-        // control would strand the pin with no way to clear or replace it.
-        if controls.isEmpty {
-            return savedIntentOnlyControls(providerID: providerID, session: session)
-        }
-        return controls
     }
 
-    /// Composer recovery projection from saved intent alone: no live definition, no invented
-    /// choices, and the saved raw value verbatim. The only honest actions are clearing the pin
-    /// or waiting for discovery to succeed. Cursor never needs this — its static catalogue
-    /// always resolves for a known model.
-    private func savedIntentOnlyControls(
-        providerID: ACPProviderID,
-        session: TabSession?
-    ) -> [AgentComposerModelParameterControlProps] {
-        guard providerID == .openCode, let session else { return [] }
-        let saved = ACPModelParameterSelection.selections(
-            for: providerID,
-            activeBaseModelRaw: selectedModelRaw,
-            from: session.acpModelParameterSelections
+    /// Composer recovery control from saved OpenCode intent alone: no live definition, no
+    /// invented choices, and the saved raw value verbatim. The only honest actions are clearing
+    /// the pin or waiting for discovery to succeed. Cursor never needs this — its static
+    /// catalogue always resolves for a known model.
+    private func savedIntentOnlyControl(
+        for selection: ACPModelParameterSelection
+    ) -> AgentComposerModelParameterControlProps {
+        AgentComposerModelParameterControlProps(
+            providerID: .openCode,
+            kind: selection.kind,
+            baseModelRaw: selection.baseModelRaw,
+            configID: selection.configID,
+            displayName: selection.kind.recoveryDisplayName,
+            selectedValueRaw: selection.valueRaw,
+            selectedDisplayName: selection.valueRaw,
+            choices: [],
+            openCodeDiscoveryKey: openCodeModelParameterObservation?.key,
+            hasLiveDefinition: false
         )
-        return saved.map { selection in
-            AgentComposerModelParameterControlProps(
-                providerID: providerID,
-                kind: selection.kind,
-                baseModelRaw: selection.baseModelRaw,
-                configID: selection.configID,
-                displayName: selection.kind.recoveryDisplayName,
-                selectedValueRaw: selection.valueRaw,
-                selectedDisplayName: selection.valueRaw,
-                choices: [],
-                openCodeDiscoveryKey: openCodeModelParameterObservation?.key,
-                hasLiveDefinition: false
-            )
-        }
     }
 
     func makeComposerSubmitTarget(tabID: UUID?, session: TabSession?) -> AgentComposerSubmitTarget? {

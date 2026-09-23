@@ -449,17 +449,13 @@ struct AgentModelsSettingsView: View {
                         ACPModelParameterProbeView(
                             modelRaw: expectedModelRaw,
                             providerID: providerID,
+                            providerDisplayName: viewModel.selectedContextBuilderAgent.displayName,
                             probeContext: .resolved(promptVM.activeWorkspaceRootPath),
-                            pinnedValueRaw: viewModel.contextBuilderThinkingParameterValueRaw,
+                            savedSelections: viewModel.contextBuilderModelParameters,
                             isEnabled: true
-                        ) { configID, value in
+                        ) { change in
                             viewModel.setContextBuilderModelParameter(
-                                ACPModelParameterSelection.thinkingPin(
-                                    configID: configID,
-                                    valueRaw: value,
-                                    providerID: providerID,
-                                    modelRaw: expectedModelRaw
-                                ),
+                                change,
                                 expectedProviderID: providerID,
                                 expectedModelRaw: expectedModelRaw,
                                 expectedScope: expectedScope
@@ -618,16 +614,12 @@ struct AgentModelsSettingsView: View {
                     ACPModelParameterProbeView(
                         modelRaw: expectedModelRaw,
                         providerID: providerID,
+                        providerDisplayName: resolution.effective.agent.displayName,
                         probeContext: .resolved(promptVM.activeWorkspaceRootPath),
-                        pinnedValueRaw: resolution.thinkingParameterValueRaw
-                    ) { configID, value in
+                        savedSelections: resolution.modelParameters
+                    ) { change in
                         viewModel.setRoleModelParameter(
-                            ACPModelParameterSelection.thinkingPin(
-                                configID: configID,
-                                valueRaw: value,
-                                providerID: providerID,
-                                modelRaw: expectedModelRaw
-                            ),
+                            change,
                             for: resolution.role,
                             expectedProviderID: providerID,
                             expectedModelRaw: expectedModelRaw,

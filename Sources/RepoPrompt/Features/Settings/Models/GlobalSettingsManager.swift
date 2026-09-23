@@ -704,14 +704,16 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
         }
     }
 
-    /// Atomic Context Builder pin write: persist the displayed agent+model choice and
-    /// set/clear that agent's parameter bucket in one profile mutation.
+    /// Atomic Context Builder pin edit: merge one identity's change into the live profile and,
+    /// for a set, persist the displayed agent+model choice in the same mutation. The live
+    /// profile is read and replaced synchronously, so a concurrent sibling edit is never lost.
+    @discardableResult
     func setAgentModelsContextBuilderModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+        _ change: ACPModelParameterPinChange,
         agentRaw: String?,
         modelRaw: String,
         scope: AgentModelsEditingScope
-    ) {
+    ) -> Bool {
         // The write durably commits the displayed Context Builder agent+model alongside the pin,
         // so it must claim user ownership exactly as the existing Context Builder model setters
         // do. With `.preserveExistingOwnership` the global ownership flag stays false, automatic
@@ -721,38 +723,42 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
         // so writing it for a click that changes nothing would silently revoke automatic
         // recommendation eligibility.
         let current = agentModelsProfile(for: scope)
-        let next = current.replacingContextBuilderModelParameter(
-            selections,
+        let next = current.applyingContextBuilderModelParameterChange(
+            change,
             for: agentRaw,
             modelRaw: modelRaw
         )
-        guard next != current else { return }
+        guard next != current else { return false }
         updateAgentModelsProfile(scope: scope, contextBuilderWriteIntent: .userInitiated) { profile in
             profile = next
         }
+        return true
     }
 
-    /// Atomic role-pin write: persist the displayed model choice as the role override and
-    /// set/clear the role's parameter bucket in one profile mutation, so the two never diverge.
+    /// Atomic role-pin edit: merge one identity's change into the live role bucket and, for a
+    /// set, persist the displayed model choice as the role override in the same mutation, so
+    /// the two never diverge.
+    @discardableResult
     func setAgentModelsRoleModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+        _ change: ACPModelParameterPinChange,
         roleRawValue: String,
         displayedSelectionID: AgentModelSelectionID,
         scope: AgentModelsEditingScope
-    ) {
+    ) -> Bool {
         // Skip a no-op, matching the Context Builder setter. Now that clearing is scoped to the
         // displayed model, re-picking an already-checked "Default" on a recommendation-tracking
         // role produces an identical profile — writing and broadcasting it would be pure churn.
         let current = agentModelsProfile(for: scope)
-        let next = current.replacingRoleModelParameter(
-            selections,
+        let next = current.applyingRoleModelParameterChange(
+            change,
             for: roleRawValue,
             displayedSelectionID: displayedSelectionID
         )
-        guard next != current else { return }
+        guard next != current else { return false }
         updateAgentModelsProfile(scope: scope) { profile in
             profile = next
         }
+        return true
     }
 
     func copyAgentModelsProfile(

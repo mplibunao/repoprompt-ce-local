@@ -85,6 +85,65 @@ final class CursorACPParameterBindingTests: XCTestCase {
         ])
     }
 
+    /// Effort and speed pinned from the Settings projection (static catalog metadata, no live
+    /// session) and saved through the role profile edit reach the wire as their live selectors
+    /// and values before the prompt is sent.
+    func testSettingsPinnedCursorEffortAndSpeedApplyBeforePrompt() async throws {
+        let modelRaw = "grok-4.6"
+        let controls = ACPModelParameterResolver.pinControls(
+            providerID: .cursor,
+            selectedModelRaw: modelRaw,
+            parameterSet: ACPModelParameterResolver.parameterSet(providerID: .cursor, selectedModelRaw: modelRaw),
+            persistedSelections: []
+        )
+        let displayed = AgentModelSelectionID(agentRaw: AgentProviderKind.cursor.rawValue, modelRaw: modelRaw)
+        var profile = AgentModelsSettingsProfile()
+        for (kind, valueRaw) in [(ACPModelParameterKind.thinking, "high"), (.speed, "true")] {
+            let control = try XCTUnwrap(controls.first { $0.kind == kind })
+            let definition = try XCTUnwrap(control.definition)
+            let choice = try XCTUnwrap(definition.choices.first { $0.rawValue == valueRaw })
+            profile = profile.applyingRoleModelParameterChange(
+                .pinning(choice, of: definition, providerID: .cursor, baseModelRaw: control.baseModelRaw),
+                for: AgentModelCatalog.TaskLabelKind.engineer.rawValue,
+                displayedSelectionID: displayed
+            )
+        }
+        let saved = try XCTUnwrap(profile.mcpAgentRoleModelParameters?["engineer"])
+        XCTAssertEqual(saved.map(\.configID), ["effort", "fast"])
+
+        let fixture = try makeFixture(
+            shape: "modern",
+            extraEnvironment: [
+                "ACP_INCLUDE_MODEL": "1",
+                "ACP_INCLUDE_PARAMETERS": "1",
+                "ACP_INITIAL_MODEL": modelRaw,
+                "ACP_OBSERVED_EFFORT_SELECTOR": "1",
+                "ACP_OBSERVED_FAST_SELECTOR": "1"
+            ],
+            providerID: .cursor
+        )
+        _ = try await fixture.controller.bootstrap()
+        let report = try await fixture.controller.applySessionModelParameterSelections(
+            ACPModelParameterResolver.effectiveSelections(
+                providerID: .cursor,
+                selectedModelRaw: modelRaw,
+                persistedSelections: saved
+            )
+        )
+        try await fixture.controller.prompt(AgentMessage(userMessage: "Run with Settings pins"))
+        await fixture.controller.shutdown()
+
+        XCTAssertEqual(report.applied.map(\.kind), [.thinking, .speed])
+        XCTAssertTrue(report.skipped.isEmpty)
+        let mutations = recordedMutationRequests(at: fixture.recordURL)
+        XCTAssertEqual(mutations.map { $0.params["configId"] as? String }, ["effort", "fast"])
+        XCTAssertEqual(mutations.map { $0.params["value"] as? String }, ["High", "true"])
+        let orderedMethods = recordedRequests(at: fixture.recordURL)
+            .map(\.method)
+            .filter { $0 == "session/set_config_option" || $0 == "session/prompt" }
+        XCTAssertEqual(orderedMethods, ["session/set_config_option", "session/set_config_option", "session/prompt"])
+    }
+
     func testCursorObservedFastSelectorAppliesExactConfigIDAndBooleanStringValue() async throws {
         let fixture = try makeFixture(
             shape: "modern",
@@ -276,11 +335,11 @@ final class CursorACPParameterBindingTests: XCTestCase {
 
     func testUntouchedCursorCatalogFallbackPreservesLiveEffortThroughPromptDispatch() async throws {
         XCTAssertEqual(
-            ACPModelParameterResolver.resolve(
+            ACPModelParameterTestSupport.composerChoices(
                 providerID: .cursor,
                 selectedModelRaw: "grok-4.6",
                 persistedSelections: []
-            ).first(where: { $0.definition.kind == .thinking })?.selectedChoice.rawValue,
+            ).first(where: { $0.kind == .thinking })?.choice.rawValue,
             "high"
         )
 

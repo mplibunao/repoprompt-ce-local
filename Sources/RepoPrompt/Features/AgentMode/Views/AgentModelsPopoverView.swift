@@ -213,16 +213,12 @@ struct AgentModelsPopoverView: View {
                 ACPModelParameterProbeView(
                     modelRaw: expectedModelRaw,
                     providerID: providerID,
+                    providerDisplayName: promptViewModel.contextBuilderAgent.displayName,
                     probeContext: .resolved(promptViewModel.activeWorkspaceRootPath),
-                    pinnedValueRaw: promptViewModel.contextBuilderThinkingParameterValueRaw
-                ) { configID, value in
+                    savedSelections: promptViewModel.contextBuilderModelParameters
+                ) { change in
                     promptViewModel.setContextBuilderModelParameter(
-                        ACPModelParameterSelection.thinkingPin(
-                            configID: configID,
-                            valueRaw: value,
-                            providerID: providerID,
-                            modelRaw: expectedModelRaw
-                        ),
+                        change,
                         expectedProviderID: providerID,
                         expectedModelRaw: expectedModelRaw,
                         expectedScope: expectedScope
@@ -415,31 +411,21 @@ struct AgentModelsPopoverView: View {
                     ACPModelParameterProbeView(
                         modelRaw: expectedModelRaw,
                         providerID: providerID,
+                        providerDisplayName: resolution.effective.agent.displayName,
                         probeContext: .resolved(promptViewModel.activeWorkspaceRootPath),
-                        pinnedValueRaw: resolution.thinkingParameterValueRaw
-                    ) { configID, value in
-                        guard editingScope == expectedScope,
+                        savedSelections: resolution.modelParameters
+                    ) { change in
+                        guard change.targets(providerID: providerID, modelRaw: expectedModelRaw),
+                              editingScope == expectedScope,
                               let live = roleResolutions.first(where: { $0.role == resolution.role }),
-                              live.effective.agent.acpProviderID == providerID,
-                              ACPModelParameterIdentity.canonicalBaseModelRaw(
-                                  live.effective.modelRaw,
-                                  providerID: providerID
-                              ) == ACPModelParameterIdentity.canonicalBaseModelRaw(
-                                  expectedModelRaw,
-                                  providerID: providerID
-                              )
+                              live.effective.isPinTarget(providerID: providerID, modelRaw: expectedModelRaw)
                         else { return }
-                        MCPAgentRoleDefaultsService.setModelParameter(
-                            ACPModelParameterSelection.thinkingPin(
-                                configID: configID,
-                                valueRaw: value,
-                                providerID: providerID,
-                                modelRaw: live.effective.modelRaw
-                            ),
+                        guard MCPAgentRoleDefaultsService.setModelParameter(
+                            change,
                             for: live.role,
                             displayed: live.effective,
                             scope: editingScope
-                        )
+                        ) else { return }
                         bumpRoleDefaults()
                     }
                 }
