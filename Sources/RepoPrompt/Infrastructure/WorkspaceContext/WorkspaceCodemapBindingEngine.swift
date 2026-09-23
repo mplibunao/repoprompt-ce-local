@@ -392,13 +392,39 @@ actor WorkspaceCodemapBindingEngine {
         case discarded
     }
 
-    private struct GraphIndexAdmissionWaiter {
+    /// Identity of one admission wait. Cancellation and settlement address a wait by this token, so
+    /// a delivery that outlives its wait cannot settle a later wait of the same job or worker.
+    struct GraphIndexAdmissionToken: Equatable {
+        let waitID: UUID
         let jobID: UUID
+        let workerID: UUID
         let rootEpoch: WorkspaceCodemapRootEpoch
+    }
+
+    enum GraphIndexAdmissionSettlementReason: Equatable {
+        case admitted
+        case taskCancelled
+        case jobCancelled
+        case superseded
+        case stale
+        case workerFinished
+        case shutdown
+    }
+
+    private struct GraphIndexAdmissionWaiter {
+        let token: GraphIndexAdmissionToken
         var enqueueOrdinal: UInt64
         var rootOvertakeRecorded: Bool
         var explicitOvertakeRecorded: Bool
         let continuation: CheckedContinuation<Bool, Never>
+
+        var jobID: UUID {
+            token.jobID
+        }
+
+        var rootEpoch: WorkspaceCodemapRootEpoch {
+            token.rootEpoch
+        }
     }
 
     /// Root-local warm index state and progress accounting. Graph publication is
@@ -437,7 +463,7 @@ actor WorkspaceCodemapBindingEngine {
         var lastWorkerCompletionReason: WorkspaceCodemapGraphIndexWorkerCompletionReason?
         var workerRestartRequestedReason: WorkspaceCodemapGraphIndexWorkerCompletionReason?
         var isPriorityPromoted: Bool
-        var isQueuedForAdmission: Bool
+        var queuedAdmissionToken: GraphIndexAdmissionToken?
         var isActiveBatch: Bool
         var scheduledUptimeNanoseconds: UInt64
         var admissionWaitStartUptimeNanoseconds: UInt64?
@@ -447,6 +473,10 @@ actor WorkspaceCodemapBindingEngine {
         var workerFinishedUptimeNanoseconds: UInt64?
         var lastProjectedSupportedCandidateTotal: UInt64?
         var manifestMeasurements: WorkspaceCodemapManifestMeasurementAggregate
+
+        var isQueuedForAdmission: Bool {
+            queuedAdmissionToken != nil
+        }
     }
 
     private enum GraphIndexCandidateResolution {
@@ -645,12 +675,72 @@ actor WorkspaceCodemapBindingEngine {
             }
         }
 
+        /// Parks graph-index admission cancellation delivery before it enters the engine actor, so a
+        /// test can establish a replacement wait before the delayed delivery arrives.
+        actor DebugGraphIndexCancellationDeliveryGate {
+            private var isArmed = false
+            private var parked: [CheckedContinuation<Void, Never>] = []
+            private(set) var enteredCount = 0
+            private(set) var deliveredCount = 0
+
+            func arm() {
+                isArmed = true
+            }
+
+            func enter() async {
+                enteredCount += 1
+                guard isArmed else { return }
+                await withCheckedContinuation { continuation in
+                    parked.append(continuation)
+                }
+            }
+
+            func markDelivered() {
+                deliveredCount += 1
+            }
+
+            func release() {
+                isArmed = false
+                let continuations = parked
+                parked.removeAll()
+                for continuation in continuations {
+                    continuation.resume()
+                }
+            }
+        }
+
+        let debugGraphIndexCancellationDeliveryGate = DebugGraphIndexCancellationDeliveryGate()
         private var debugGraphIndexAdmissionHolds: [UUID: DebugGraphIndexAdmissionHold] = [:]
         private var debugGraphIndexNonCooperativeWorkerGates: [
             UUID: DebugGraphIndexNonCooperativeWorkerGate
         ] = [:]
         private var debugGraphIndexEventRing = WorkspaceCodemapGraphIndexDebugEventRing()
+        /// Keyed by `GraphIndexAdmissionToken.waitID`.
         private var debugGraphIndexAdmissionEnqueuedAtNanoseconds: [UUID: UInt64] = [:]
+
+        struct DebugGraphIndexAdmissionSettlement: Equatable {
+            let token: GraphIndexAdmissionToken
+            let reason: GraphIndexAdmissionSettlementReason
+        }
+
+        struct DebugGraphIndexAdmissionOwnership {
+            let jobID: UUID
+            let workerID: UUID?
+            let queuedAdmissionToken: GraphIndexAdmissionToken?
+            let queuedTokens: [GraphIndexAdmissionToken]
+            let isActiveBatch: Bool
+        }
+
+        struct DebugGraphIndexWorkerFinish: Equatable {
+            let jobID: UUID
+            let workerID: UUID
+            /// Whether the finishing worker was still the job's current incarnation.
+            let ownedJob: Bool
+        }
+
+        private static let debugGraphIndexBookkeepingCapacity = 1024
+        private var debugGraphIndexAdmissionSettlements: [DebugGraphIndexAdmissionSettlement] = []
+        private var debugGraphIndexWorkerFinishes: [DebugGraphIndexWorkerFinish] = []
         private var debugGraphIndexQueueWaitMillisecondsByRootEpoch: [
             WorkspaceCodemapRootEpoch: [UInt64]
         ] = [:]
@@ -1102,7 +1192,7 @@ actor WorkspaceCodemapBindingEngine {
             lastWorkerCompletionReason: nil,
             workerRestartRequestedReason: nil,
             isPriorityPromoted: false,
-            isQueuedForAdmission: false,
+            queuedAdmissionToken: nil,
             isActiveBatch: false,
             scheduledUptimeNanoseconds: scheduledUptimeNanoseconds,
             admissionWaitStartUptimeNanoseconds: nil,
@@ -1611,7 +1701,14 @@ actor WorkspaceCodemapBindingEngine {
         drainingGraphIndexTasks.removeAll()
         drainingGraphIndexResources.removeAll()
         drainingGraphIndexRootEpochs.removeAll()
-        graphIndexAdmissionQueue.removeAll()
+        // Revoking every root's job above settled every queued wait, and registration rejects a
+        // shutting-down engine. Anything left is settled rather than discarded, so no suspended
+        // worker is stranded on an unresumed continuation.
+        assert(
+            graphIndexAdmissionQueue.isEmpty,
+            "Shutdown must settle queued graph-index admission waits before awaiting workers"
+        )
+        settleGraphIndexAdmissionWaiters(reason: .shutdown) { _ in true }
         activeGraphIndexJobIDs.removeAll()
         graphIndexRootLastAdmission.removeAll()
         pruneAdmissionHistory()
@@ -1932,13 +2029,14 @@ actor WorkspaceCodemapBindingEngine {
             let task = job.task
             graphIndexWatchdogTasks.removeValue(forKey: job.id)?.cancel()
             activeGraphIndexJobIDs.remove(job.id)
-            cancelGraphIndexAdmission(jobID: job.id)
+            if let workerID = job.workerID {
+                settleGraphIndexWorkerAdmission(&job, workerID: workerID, reason: .workerFinished)
+            }
             job.workerID = nil
             job.task = nil
             job.lastWorkerCompletionReason = reason
             job.workerRestartRequestedReason = nil
             job.workerFinishedUptimeNanoseconds = uptimeNanoseconds()
-            job.isQueuedForAdmission = false
             job.isActiveBatch = false
             job.resources = .zero
             graphIndexJobs[rootEpoch] = job
@@ -1999,6 +2097,80 @@ actor WorkspaceCodemapBindingEngine {
             else { return false }
             await gate.release()
             return true
+        }
+
+        /// Awaits admission as the job's current worker incarnation from the caller's task, so a test
+        /// can exercise registration with a task that is already cancelled.
+        func debugAwaitGraphIndexAdmissionForTesting(
+            rootEpoch: WorkspaceCodemapRootEpoch
+        ) async -> Bool {
+            guard let job = graphIndexJobs[rootEpoch], let workerID = job.workerID else { return false }
+            return await awaitGraphIndexAdmission(jobID: job.id, workerID: workerID, rootEpoch: rootEpoch)
+        }
+
+        /// Cancels the current worker's task without touching engine state, modelling a task
+        /// cancellation delivered from outside the engine.
+        func debugCancelGraphIndexWorkerTaskForTesting(rootEpoch: WorkspaceCodemapRootEpoch) -> Bool {
+            guard let task = graphIndexJobs[rootEpoch]?.task else { return false }
+            task.cancel()
+            return true
+        }
+
+        func debugGraphIndexAdmissionOwnershipForTesting(
+            rootEpoch: WorkspaceCodemapRootEpoch
+        ) -> DebugGraphIndexAdmissionOwnership? {
+            guard let job = graphIndexJobs[rootEpoch] else { return nil }
+            return DebugGraphIndexAdmissionOwnership(
+                jobID: job.id,
+                workerID: job.workerID,
+                queuedAdmissionToken: job.queuedAdmissionToken,
+                queuedTokens: graphIndexAdmissionQueue.map(\.token).filter { $0.rootEpoch == rootEpoch },
+                isActiveBatch: job.isActiveBatch
+            )
+        }
+
+        func debugGraphIndexAdmissionSettlementsForTesting() -> [DebugGraphIndexAdmissionSettlement] {
+            debugGraphIndexAdmissionSettlements
+        }
+
+        /// Worker finishes in arrival order, including obsolete incarnations, which return without
+        /// any other observable effect.
+        func debugGraphIndexWorkerFinishesForTesting() -> [DebugGraphIndexWorkerFinish] {
+            debugGraphIndexWorkerFinishes
+        }
+
+        private func recordDebugGraphIndexWorkerFinish(jobID: UUID, workerID: UUID, ownedJob: Bool) {
+            Self.appendDebugBookkeeping(
+                DebugGraphIndexWorkerFinish(jobID: jobID, workerID: workerID, ownedJob: ownedJob),
+                to: &debugGraphIndexWorkerFinishes
+            )
+        }
+
+        private func recordDebugGraphIndexAdmissionSettlement(
+            _ token: GraphIndexAdmissionToken,
+            reason: GraphIndexAdmissionSettlementReason
+        ) {
+            let enqueued = debugGraphIndexAdmissionEnqueuedAtNanoseconds.removeValue(forKey: token.waitID)
+            if reason == .admitted, let enqueued {
+                let elapsed = DispatchTime.now().uptimeNanoseconds &- enqueued
+                Self.appendDebugBookkeeping(
+                    elapsed / 1_000_000,
+                    to: &debugGraphIndexQueueWaitMillisecondsByRootEpoch[token.rootEpoch, default: []]
+                )
+                debugGraphIndexQueueWaitSampleOrdinalByRootEpoch[token.rootEpoch, default: 0] &+= 1
+            }
+            Self.appendDebugBookkeeping(
+                DebugGraphIndexAdmissionSettlement(token: token, reason: reason),
+                to: &debugGraphIndexAdmissionSettlements
+            )
+        }
+
+        /// Appends to a DEBUG diagnostic log, dropping the oldest entries beyond the shared bound.
+        private static func appendDebugBookkeeping<Element>(_ element: Element, to log: inout [Element]) {
+            log.append(element)
+            if log.count > debugGraphIndexBookkeepingCapacity {
+                log.removeFirst(log.count - debugGraphIndexBookkeepingCapacity)
+            }
         }
 
         func debugGraphIndexWorkerRecoveryStateForTesting(
@@ -2272,7 +2444,11 @@ actor WorkspaceCodemapBindingEngine {
         emit(.graphIndexRunStarted, rootEpoch: rootEpoch, graphIndexPhase: .waitingForAdmission)
 
         while !Task.isCancelled {
-            guard await awaitGraphIndexAdmission(jobID: jobID, rootEpoch: rootEpoch) else {
+            guard await awaitGraphIndexAdmission(
+                jobID: jobID,
+                workerID: workerID,
+                rootEpoch: rootEpoch
+            ) else {
                 completionReason = Task.isCancelled
                     ? .cancelled
                     : (
@@ -2283,7 +2459,7 @@ actor WorkspaceCodemapBindingEngine {
                 return
             }
             let result = await processGraphIndexBatch(jobID: jobID, rootEpoch: rootEpoch)
-            releaseGraphIndexAdmission(jobID: jobID, rootEpoch: rootEpoch)
+            releaseGraphIndexAdmission(jobID: jobID, workerID: workerID, rootEpoch: rootEpoch)
             switch result {
             case .checkpointed:
                 guard updateGraphIndexPhase(
@@ -2357,25 +2533,38 @@ actor WorkspaceCodemapBindingEngine {
 
     private func awaitGraphIndexAdmission(
         jobID: UUID,
+        workerID: UUID,
         rootEpoch: WorkspaceCodemapRootEpoch
     ) async -> Bool {
-        guard let job = graphIndexJobs[rootEpoch], job.id == jobID, graphIndexJobIsCurrent(job) else {
+        guard let job = graphIndexJobs[rootEpoch],
+              job.id == jobID,
+              job.workerID == workerID,
+              graphIndexJobIsCurrent(job)
+        else {
             return false
         }
         if job.isActiveBatch {
             return true
         }
+        // The token exists before the handler is registered: Swift may run `onCancel` immediately
+        // (already-cancelled task) or concurrently with registration, and it must still name only
+        // this wait.
+        let token = GraphIndexAdmissionToken(
+            waitID: UUID(),
+            jobID: jobID,
+            workerID: workerID,
+            rootEpoch: rootEpoch
+        )
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 guard !Task.isCancelled,
+                      !isShuttingDown,
                       var current = graphIndexJobs[rootEpoch],
                       current.id == jobID,
+                      current.workerID == workerID,
+                      current.queuedAdmissionToken == nil,
                       graphIndexJobIsCurrent(current)
                 else {
-                    continuation.resume(returning: false)
-                    return
-                }
-                if current.isQueuedForAdmission {
                     continuation.resume(returning: false)
                     return
                 }
@@ -2385,28 +2574,36 @@ actor WorkspaceCodemapBindingEngine {
                 let ordinal = nextGraphIndexQueueOrdinal
                 nextGraphIndexQueueOrdinal = addingChecked(nextGraphIndexQueueOrdinal, 1) ?? .max
                 let queuedUptimeNanoseconds = uptimeNanoseconds()
-                current.isQueuedForAdmission = true
+                current.queuedAdmissionToken = token
                 current.phase = .waitingForAdmission
                 current.admissionWaitStartUptimeNanoseconds = queuedUptimeNanoseconds
                 current.phaseEnteredUptimeNanoseconds = queuedUptimeNanoseconds
                 graphIndexJobs[rootEpoch] = current
                 graphIndexAdmissionQueue.append(GraphIndexAdmissionWaiter(
-                    jobID: jobID,
-                    rootEpoch: rootEpoch,
+                    token: token,
                     enqueueOrdinal: ordinal,
                     rootOvertakeRecorded: false,
                     explicitOvertakeRecorded: false,
                     continuation: continuation
                 ))
                 #if DEBUG
-                    debugGraphIndexAdmissionEnqueuedAtNanoseconds[jobID] = DispatchTime.now().uptimeNanoseconds
+                    debugGraphIndexAdmissionEnqueuedAtNanoseconds[token.waitID] =
+                        DispatchTime.now().uptimeNanoseconds
                 #endif
                 incrementCounter(\.graphIndexBatchesQueued)
                 emit(.graphIndexBatchQueued, rootEpoch: rootEpoch, graphIndexPhase: .waitingForAdmission)
                 scheduleGraphIndexAdmissions()
             }
         } onCancel: {
-            Task { await self.cancelGraphIndexAdmission(jobID: jobID) }
+            Task {
+                #if DEBUG
+                    await self.debugGraphIndexCancellationDeliveryGate.enter()
+                #endif
+                await self.settleGraphIndexAdmissionWaiter(token, reason: .taskCancelled)
+                #if DEBUG
+                    await self.debugGraphIndexCancellationDeliveryGate.markDelivered()
+                #endif
+            }
         }
     }
 
@@ -2473,38 +2670,16 @@ actor WorkspaceCodemapBindingEngine {
                     return rootEpochPrecedes(left.rootEpoch, right.rootEpoch)
                 }!
             }
-            let waiter = graphIndexAdmissionQueue.remove(at: selectedIndex)
+            let waiter = graphIndexAdmissionQueue[selectedIndex]
             guard var job = graphIndexJobs[waiter.rootEpoch],
                   job.id == waiter.jobID,
+                  job.workerID == waiter.token.workerID,
                   graphIndexJobIsCurrent(job)
             else {
-                #if DEBUG
-                    debugGraphIndexAdmissionEnqueuedAtNanoseconds.removeValue(forKey: waiter.jobID)
-                #endif
-                waiter.continuation.resume(returning: false)
+                settleGraphIndexAdmissionWaiter(waiter.token, reason: .stale)
                 continue
             }
-            #if DEBUG
-                if let enqueued = debugGraphIndexAdmissionEnqueuedAtNanoseconds.removeValue(
-                    forKey: waiter.jobID
-                ) {
-                    let elapsed = DispatchTime.now().uptimeNanoseconds &- enqueued
-                    var samples = debugGraphIndexQueueWaitMillisecondsByRootEpoch[
-                        waiter.rootEpoch,
-                        default: []
-                    ]
-                    samples.append(elapsed / 1_000_000)
-                    if samples.count > 1024 {
-                        samples.removeFirst(
-                            samples.count - 1024
-                        )
-                    }
-                    debugGraphIndexQueueWaitMillisecondsByRootEpoch[waiter.rootEpoch] = samples
-                    debugGraphIndexQueueWaitSampleOrdinalByRootEpoch[waiter.rootEpoch, default: 0] &+= 1
-                }
-            #endif
             let admittedUptimeNanoseconds = uptimeNanoseconds()
-            job.isQueuedForAdmission = false
             job.isActiveBatch = true
             job.phase = .readingCatalogPage
             job.admittedUptimeNanoseconds = admittedUptimeNanoseconds
@@ -2523,7 +2698,7 @@ actor WorkspaceCodemapBindingEngine {
             consecutiveDemandAdmissions = 0
             incrementCounter(\.graphIndexBatchesStarted)
             emit(.graphIndexBatchStarted, rootEpoch: waiter.rootEpoch, graphIndexPhase: .readingCatalogPage)
-            waiter.continuation.resume(returning: true)
+            settleGraphIndexAdmissionWaiter(waiter.token, reason: .admitted)
         }
     }
 
@@ -2536,8 +2711,14 @@ actor WorkspaceCodemapBindingEngine {
         }
     }
 
-    private func releaseGraphIndexAdmission(jobID: UUID, rootEpoch: WorkspaceCodemapRootEpoch) {
-        guard var job = graphIndexJobs[rootEpoch], job.id == jobID else { return }
+    private func releaseGraphIndexAdmission(
+        jobID: UUID,
+        workerID: UUID,
+        rootEpoch: WorkspaceCodemapRootEpoch
+    ) {
+        // The job-level active batch belongs to one worker incarnation; an obsolete worker must not
+        // release a successor's admitted batch.
+        guard var job = graphIndexJobs[rootEpoch], job.id == jobID, job.workerID == workerID else { return }
         activeGraphIndexJobIDs.remove(jobID)
         job.isActiveBatch = false
         graphIndexJobs[rootEpoch] = job
@@ -2547,14 +2728,56 @@ actor WorkspaceCodemapBindingEngine {
         scheduleGraphIndexAdmissions()
     }
 
-    private func cancelGraphIndexAdmission(jobID: UUID) {
-        let detached = graphIndexAdmissionQueue.filter { $0.jobID == jobID }
-        graphIndexAdmissionQueue.removeAll { $0.jobID == jobID }
+    /// The only operation that resumes a stored admission continuation. Removing the waiter from the
+    /// queue in the same synchronous actor turn as its resume is what makes each wait settle once;
+    /// a token that is no longer queued has already been settled and is a no-op.
+    private func settleGraphIndexAdmissionWaiter(
+        _ token: GraphIndexAdmissionToken,
+        reason: GraphIndexAdmissionSettlementReason
+    ) {
+        guard let index = graphIndexAdmissionQueue.firstIndex(where: { $0.token == token }) else {
+            return
+        }
+        let waiter = graphIndexAdmissionQueue.remove(at: index)
+        if var job = graphIndexJobs[token.rootEpoch], job.queuedAdmissionToken == token {
+            job.queuedAdmissionToken = nil
+            graphIndexJobs[token.rootEpoch] = job
+        }
         #if DEBUG
-            debugGraphIndexAdmissionEnqueuedAtNanoseconds.removeValue(forKey: jobID)
+            recordDebugGraphIndexAdmissionSettlement(token, reason: reason)
         #endif
-        for waiter in detached {
-            waiter.continuation.resume(returning: false)
+        waiter.continuation.resume(returning: reason == .admitted)
+    }
+
+    private func settleGraphIndexAdmissionWaiters(
+        reason: GraphIndexAdmissionSettlementReason,
+        where matches: (GraphIndexAdmissionToken) -> Bool
+    ) {
+        for token in graphIndexAdmissionQueue.map(\.token) where matches(token) {
+            settleGraphIndexAdmissionWaiter(token, reason: reason)
+        }
+    }
+
+    private func settleGraphIndexWorkerAdmission(
+        jobID: UUID,
+        workerID: UUID,
+        reason: GraphIndexAdmissionSettlementReason
+    ) {
+        settleGraphIndexAdmissionWaiters(reason: reason) {
+            $0.jobID == jobID && $0.workerID == workerID
+        }
+    }
+
+    /// Settles the worker's waits, then replaces the caller's copy of `job` with the stored job, whose
+    /// queued token settlement may have cleared. Callers must not hold unsaved edits in `job`.
+    private func settleGraphIndexWorkerAdmission(
+        _ job: inout GraphIndexJob,
+        workerID: UUID,
+        reason: GraphIndexAdmissionSettlementReason
+    ) {
+        settleGraphIndexWorkerAdmission(jobID: job.id, workerID: workerID, reason: reason)
+        if let stored = graphIndexJobs[job.rootEpoch], stored.id == job.id {
+            job = stored
         }
     }
 
@@ -4579,7 +4802,6 @@ actor WorkspaceCodemapBindingEngine {
         job.retry = nil
         job.budget = nil
         job.checkpoint = nil
-        job.isQueuedForAdmission = false
         job.isActiveBatch = false
         graphIndexJobs[rootEpoch] = job
         if recordSupersession {
@@ -5173,8 +5395,8 @@ actor WorkspaceCodemapBindingEngine {
         }
         let task = job.task
         graphIndexJobs[rootEpoch] = job
-        if !job.isActiveBatch {
-            cancelGraphIndexAdmission(jobID: jobID)
+        if !job.isActiveBatch, let workerID = job.workerID {
+            settleGraphIndexWorkerAdmission(jobID: jobID, workerID: workerID, reason: .superseded)
         }
         task?.cancel()
     }
@@ -5185,18 +5407,37 @@ actor WorkspaceCodemapBindingEngine {
         rootEpoch: WorkspaceCodemapRootEpoch,
         reason: WorkspaceCodemapGraphIndexWorkerCompletionReason
     ) {
+        #if DEBUG
+            recordDebugGraphIndexWorkerFinish(
+                jobID: jobID,
+                workerID: workerID,
+                ownedJob: graphIndexJobs[rootEpoch].map { $0.id == jobID && $0.workerID == workerID } ?? false
+            )
+            defer {
+                assert(
+                    graphIndexJobs[rootEpoch]?.queuedAdmissionToken.map { token in
+                        graphIndexAdmissionQueue.contains { $0.token == token }
+                    } ?? true,
+                    "A job's queued admission token must name a wait that is still queued"
+                )
+            }
+        #endif
         guard var job = graphIndexJobs[rootEpoch], job.id == jobID else {
             activeGraphIndexJobIDs.remove(jobID)
-            cancelGraphIndexAdmission(jobID: jobID)
+            settleGraphIndexWorkerAdmission(jobID: jobID, workerID: workerID, reason: .workerFinished)
             drainingGraphIndexTasks.removeValue(forKey: jobID)
             drainingGraphIndexResources.removeValue(forKey: jobID)
             drainingGraphIndexRootEpochs.removeValue(forKey: jobID)
+            // A revoked batch holds its root's admission slot until it drains here; a successor
+            // job for the same root is queued behind it and has nothing else to wake it.
+            scheduleQueuedRequests()
+            scheduleGraphIndexAdmissions()
             return
         }
         guard job.workerID == workerID else { return }
         graphIndexWatchdogTasks.removeValue(forKey: jobID)?.cancel()
         activeGraphIndexJobIDs.remove(jobID)
-        cancelGraphIndexAdmission(jobID: jobID)
+        settleGraphIndexWorkerAdmission(&job, workerID: workerID, reason: .workerFinished)
         drainingGraphIndexTasks.removeValue(forKey: jobID)
         drainingGraphIndexResources.removeValue(forKey: jobID)
         drainingGraphIndexRootEpochs.removeValue(forKey: jobID)
@@ -5217,7 +5458,6 @@ actor WorkspaceCodemapBindingEngine {
             : restartReason ?? reason
         job.workerRestartRequestedReason = nil
         job.workerFinishedUptimeNanoseconds = uptimeNanoseconds()
-        job.isQueuedForAdmission = false
         job.isActiveBatch = false
         job.resources = .zero
         job.checkpoint = makeGraphIndexCheckpoint(job)
@@ -5328,11 +5568,10 @@ actor WorkspaceCodemapBindingEngine {
         if !wasActive, job.resources.retainedSourceBytes == 0 {
             job.task?.cancel()
         }
-        let detached = graphIndexAdmissionQueue.filter { $0.jobID == job.id }
-        graphIndexAdmissionQueue.removeAll { $0.jobID == job.id }
-        for waiter in detached {
-            waiter.continuation.resume(returning: false)
-        }
+        let revokedJobID = job.id
+        settleGraphIndexAdmissionWaiters(
+            reason: terminalPhase == .superseded ? .superseded : .jobCancelled
+        ) { $0.jobID == revokedJobID }
         if wasActive {
             incrementCounter(\.graphIndexCancelledBatches)
             emit(.graphIndexBatchCancelled, rootEpoch: rootEpoch, graphIndexPhase: terminalPhase)

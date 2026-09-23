@@ -29,6 +29,25 @@ final class CodemapLockedValues<Value: Sendable>: @unchecked Sendable {
     }
 }
 
+extension WorkspaceCodemapBindingCatalogClient {
+    /// A copy that runs `before` ahead of each graph-index catalog page read. Every other member is
+    /// carried over explicitly, so no member falls back to an initializer default.
+    func interceptingCatalogPageRead(
+        _ before: @escaping @Sendable (WorkspaceCodemapGraphIndexCatalogPageRequest) async -> Void
+    ) -> WorkspaceCodemapBindingCatalogClient {
+        let readGraphIndexCatalogPage = readGraphIndexCatalogPage
+        return WorkspaceCodemapBindingCatalogClient(
+            resolveManifestBinding,
+            readGraphIndexCatalogPage: { request in
+                await before(request)
+                return await readGraphIndexCatalogPage(request)
+            },
+            revalidateGraphIndexCatalogToken: revalidateGraphIndexCatalogToken,
+            publishMarkerReadiness: publishMarkerReadiness
+        )
+    }
+}
+
 final class CodemapStoreFixture: @unchecked Sendable {
     let registry: WorkspaceCodemapBindingIntegrationRegistry
     let builtSourceTexts: CodemapLockedValues<String>
@@ -39,7 +58,8 @@ final class CodemapStoreFixture: @unchecked Sendable {
 
     init(
         name: String,
-        capabilityHooks: WorkspaceCodemapGitCapabilityServiceHooks = .none
+        capabilityHooks: WorkspaceCodemapGitCapabilityServiceHooks = .none,
+        beforeCatalogPageRead: (@Sendable (WorkspaceCodemapGraphIndexCatalogPageRequest) async -> Void)? = nil
     ) throws {
         let registry = WorkspaceCodemapBindingIntegrationRegistry()
         let builtSourceTexts = CodemapLockedValues<String>()
@@ -86,7 +106,9 @@ final class CodemapStoreFixture: @unchecked Sendable {
                             hooks: capabilityHooks
                         ),
                         sourceReader: registry.makeValidatedSourceReaderClient(),
-                        catalogClient: registry.makeBindingCatalogClient()
+                        catalogClient: beforeCatalogPageRead.map {
+                            registry.makeBindingCatalogClient().interceptingCatalogPageRead($0)
+                        } ?? registry.makeBindingCatalogClient()
                     )
                 }
             ))
