@@ -41,8 +41,20 @@ struct ACPModelParameterPinChip: View {
     /// The pinned choice's display name when available, else the saved raw value verbatim.
     /// Never substituted with the advertised current value.
     private var valueLabel: String {
-        guard let pinnedValueRaw else { return "Default" }
-        return pinnedChoice?.displayName ?? pinnedValueRaw
+        guard let pinnedValueRaw else { return Self.unpinnedLabel }
+        return Self.choiceLabel(pinnedChoice?.displayName ?? pinnedValueRaw, providerDisplayName: providerDisplayName)
+    }
+
+    /// The label for "no saved value": the chip's unpinned state and the menu entry that clears.
+    nonisolated static let unpinnedLabel = "Default"
+
+    /// How a pinned value reads in the menu and on the chip. A provider may advertise its own
+    /// value named "default" (OpenCode does), which is an explicit pin distinct from clearing;
+    /// naming the provider keeps it from reading as the unpinned state.
+    nonisolated static func choiceLabel(_ displayName: String, providerDisplayName: String) -> String {
+        let collides = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare(unpinnedLabel) == .orderedSame
+        return collides ? "\(unpinnedLabel) (\(providerDisplayName))" : displayName
     }
 
     private var label: String {
@@ -107,7 +119,7 @@ struct ACPModelParameterPinChip: View {
                 onChange(.clear(control.identity))
             } label: {
                 HStack {
-                    Text("Default")
+                    Text(Self.unpinnedLabel)
                     if pinnedValueRaw == nil {
                         Spacer()
                         Image(systemName: "checkmark")
@@ -127,7 +139,7 @@ struct ACPModelParameterPinChip: View {
                         ))
                     } label: {
                         HStack {
-                            Text(choice.displayName)
+                            Text(Self.choiceLabel(choice.displayName, providerDisplayName: providerDisplayName))
                             if pinnedChoice?.rawValue == choice.rawValue {
                                 Spacer()
                                 Image(systemName: "checkmark")

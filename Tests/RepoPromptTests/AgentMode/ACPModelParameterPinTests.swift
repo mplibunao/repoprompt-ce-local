@@ -156,6 +156,31 @@ final class ACPModelParameterPinTests: XCTestCase {
         XCTAssertEqual(profile.mcpAgentRoleModelParameters?["engineer"]?.map(\.valueRaw), ["default"])
     }
 
+    /// OpenCode can advertise its own value named "default". Pinned, it must not read like the
+    /// unpinned "Default" in the menu or on the chip; the wire value stays "default".
+    func testPinnedValueNamedDefaultGetsAProviderQualifiedLabel() {
+        let provider = AgentProviderKind.openCode.displayName
+        XCTAssertEqual(ACPModelParameterPinChip.unpinnedLabel, "Default")
+        XCTAssertEqual(ACPModelParameterPinChip.choiceLabel("Default", providerDisplayName: provider), "Default (OpenCode)")
+        XCTAssertEqual(
+            ACPModelParameterPinChip.choiceLabel("default", providerDisplayName: provider),
+            "Default (OpenCode)",
+            "A saved raw value shown without metadata collides too."
+        )
+        XCTAssertEqual(ACPModelParameterPinChip.choiceLabel(" DEFAULT ", providerDisplayName: provider), "Default (OpenCode)")
+        XCTAssertEqual(ACPModelParameterPinChip.choiceLabel("High", providerDisplayName: provider), "High")
+        XCTAssertEqual(ACPModelParameterPinChip.choiceLabel("Default Plus", providerDisplayName: provider), "Default Plus")
+
+        let definition = ACPModelParameterTestSupport.definition(kind: .thinking, configID: "effort", values: ["default", "high"])
+        guard case let .set(selection) = ACPModelParameterPinChange.pinning(
+            definition.choices[0],
+            of: definition,
+            providerID: .openCode,
+            baseModelRaw: Self.openCodeModelRaw
+        ) else { return XCTFail("Choosing the provider's default value must set a pin.") }
+        XCTAssertEqual(selection.valueRaw, "default")
+    }
+
     // MARK: - Profile edits
 
     func testSettingOneKindKeepsTheOtherKind() {
