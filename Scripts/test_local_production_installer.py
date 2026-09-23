@@ -21,7 +21,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from script_test_support import enter_context, temporary_directory, write_bash_stub, write_executable  # noqa: E402
+from script_test_support import (  # noqa: E402
+    FakeProcessGuard,
+    directory_snapshot,
+    enter_context,
+    temporary_directory,
+    write_bash_stub,
+    write_executable,
+)
 
 ROOT_DIR = SCRIPT_DIR.parent
 PINNED_CERTIFICATE_NAME = "RepoPrompt CE Local Self-Signed Code Signing"
@@ -379,6 +386,120 @@ class LocalProductionInstallerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_running_production_app_stops_install_before_any_mutation(self) -> None:
+        result, context = self.run_installer(
+            [],
+            after_mint=[certificate(SHA1_C, SHA256_C)],
+            expected_sha1=SHA1_C,
+            processes=[{"pid": 4242, "name": "RepoPrompt", "path": "{production_executable}"}],
+            record_pgrep_calls=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Quit RepoPrompt CE before building a replacement", result.stderr)
+        self.assertIn("4242", result.stderr)
+        self.assertIn(str(context["production_executable"].resolve()), result.stderr)
+        self.assert_no_install_mutation(context, packaged=False)
+        self.assertFalse(context["registry"].parent.exists())
+        self.assertEqual(list(context["tmp_root"].iterdir()), [])
+        self.assertFalse(context["pgrep_log"].exists())
+
+    def test_rollback_guard_override_does_not_redirect_the_production_guard(self) -> None:
+        result, context = self.run_installer(
+            [certificate(SHA1_A, SHA256_A)],
+            expected_sha1=SHA1_A,
+            processes=[{"pid": 4343, "name": "RepoPrompt", "path": "{production_executable}"}],
+            extra_env={"LOCAL_RELEASE_GUARD_EXECUTABLES_JSON": '["/nonexistent/repoprompt-ce-guard-sentinel"]'},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Quit RepoPrompt CE before building a replacement", result.stderr)
+        self.assertIn("4343", result.stderr)
+        self.assert_no_install_mutation(context, packaged=False)
+
+    def test_other_installs_and_bundled_helpers_do_not_block_replacement(self) -> None:
+        result, context = self.run_installer(
+            [certificate(SHA1_A, SHA256_A)],
+            expected_sha1=SHA1_A,
+            processes=[
+                {"pid": 501, "name": "RepoPrompt", "path": "{temp}/Elsewhere/RepoPrompt CE.app/Contents/MacOS/RepoPrompt"},
+                {"pid": 502, "name": "RepoPrompt", "path": "{temp}/Applications/RepoPrompt CE.app.old/Contents/MacOS/RepoPrompt"},
+                {"pid": 503, "name": "codex", "path": "{installed_app}/Contents/Resources/codex/codex"},
+                {"pid": 504, "name": "repoprompt-mcp", "path": "{installed_app}/Contents/MacOS/repoprompt-mcp"},
+            ],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "new\n")
+        self.assertEqual(context["process_guard"].calls, 3)
+
+    def test_native_inspection_failure_stops_before_packaging(self) -> None:
+        for scenario, kwargs in [
+            ("enumeration", {"fail_process_enumeration": True}),
+            ("named candidate", {"processes": [{"pid": 601, "name": "RepoPrompt", "path": "{production_executable}", "error": "identity"}]}),
+            ("deleted executable", {"processes": [{"pid": 602, "name": "RepoPrompt", "path": "{production_executable}", "error": "unlinked"}]}),
+        ]:
+            with self.subTest(scenario=scenario):
+                result, context = self.run_installer([certificate(SHA1_A, SHA256_A)], expected_sha1=SHA1_A, **kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("process identity inspection failed", result.stderr)
+                self.assert_no_install_mutation(context, packaged=False)
+
+    def test_production_opened_during_build_stops_before_staging(self) -> None:
+        result, context = self.run_installer(
+            [certificate(SHA1_A, SHA256_A)],
+            registry={"fingerprint": SHA256_A, "generation": 3},
+            expected_sha1=SHA1_A,
+            processes=[{"pid": 701, "name": "RepoPrompt", "path": "{production_executable}", "from_call": 2}],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Quit RepoPrompt CE before staging", result.stderr)
+        self.assert_no_install_mutation(context, packaged=True)
+        self.assertEqual(self.registry(context)["serviceGeneration"], 3)
+
+    def test_production_opened_during_staging_stops_before_replacement(self) -> None:
+        result, context = self.run_installer(
+            [certificate(SHA1_A, SHA256_A), certificate(SHA1_B, SHA256_B)],
+            registry={"fingerprint": SHA256_A, "generation": 4},
+            selected=SHA256_B,
+            rotate=True,
+            expected_sha1=SHA1_B,
+            processes=[{"pid": 801, "name": "RepoPrompt", "path": "{production_executable}", "from_call": 3}],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Quit RepoPrompt CE before replacing", result.stderr)
+        self.assert_no_install_mutation(context, packaged=True)
+        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_A)
+        self.assertEqual(self.registry(context)["serviceGeneration"], 4)
+
+    def test_absent_installation_installs_through_all_checkpoints(self) -> None:
+        result, context = self.run_installer(
+            [certificate(SHA1_A, SHA256_A)],
+            expected_sha1=SHA1_A,
+            installed=False,
+            processes=[
+                {
+                    "pid": 901,
+                    "name": "RepoPrompt",
+                    "path": "{temp}/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app/Contents/MacOS/RepoPrompt",
+                }
+            ],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "new\n")
+        self.assertEqual(context["process_guard"].calls, 3)
+
+    def test_installer_and_shared_guard_do_not_match_command_lines(self) -> None:
+        for name in ("install_local_production.sh", "local_release_env.sh"):
+            source = (SCRIPT_DIR / name).read_text(encoding="utf-8")
+            self.assertNotIn("pgrep", source, name)
+            self.assertNotIn("ps -o command", source, name)
+
+    def assert_no_install_mutation(self, context: dict[str, Any], *, packaged: bool) -> None:
+        self.assertEqual(directory_snapshot(context["installed_app"]), context["installed_app_before"])
+        self.assertEqual(context["package_capture"].exists(), packaged)
+        self.assertEqual(list(context["install_dir"].glob(".RepoPrompt CE.app.installing.*")), [])
+        self.assertEqual(list(context["install_dir"].glob(".RepoPrompt CE.app.backup.*")), [])
+        self.assertFalse(context["import_log"].exists())
+        self.assertFalse(Path(f"{context['registry']}.lock").exists())
+
     def run_installer(
         self,
         certificates: list[dict[str, Any]],
@@ -397,21 +518,25 @@ class LocalProductionInstallerTests(unittest.TestCase):
         preexisting_lock: bool = False,
         fail_registry_verification: bool = False,
         split_release_source_root: bool = False,
+        processes: list[dict[str, Any]] | None = None,
+        fail_process_enumeration: bool = False,
+        installed: bool = True,
+        record_pgrep_calls: bool = False,
+        extra_env: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         temp_dir = enter_context(self, temporary_directory())
         installer_tmp = temp_dir / "tmp"
         installer_tmp.mkdir()
         root = temp_dir / "repo"
-        scripts = root / "Scripts"
-        scripts.mkdir(parents=True)
-        shutil.copy2(SCRIPT_DIR / "install_local_production.sh", scripts / "install_local_production.sh")
-        shutil.copy2(SCRIPT_DIR / "local_release_env.sh", scripts / "local_release_env.sh")
-        shutil.copy2(SCRIPT_DIR / "load_release_metadata.sh", scripts / "load_release_metadata.sh")
-        shutil.copy2(SCRIPT_DIR / "local_signing_identity.py", scripts / "local_signing_identity.py")
-        shutil.copy2(
-            SCRIPT_DIR / "resolve_full_xcode_developer_dir.sh",
-            scripts / "resolve_full_xcode_developer_dir.sh",
+        process_guard = FakeProcessGuard(
+            root,
+            extra_scripts=(
+                "install_local_production.sh",
+                "local_signing_identity.py",
+                "resolve_full_xcode_developer_dir.sh",
+            ),
         )
+        scripts = process_guard.scripts_dir
         if fail_registry_verification or fail_registry_write:
             real_tool = scripts / "local_signing_identity_real.py"
             shutil.move(scripts / "local_signing_identity.py", real_tool)
@@ -456,8 +581,21 @@ class LocalProductionInstallerTests(unittest.TestCase):
         build_dir = release_source_root / ".build" / "release"
         install_dir = temp_dir / "Applications"
         installed_app = install_dir / "RepoPrompt CE.app"
-        installed_app.mkdir(parents=True)
-        (installed_app / "payload.txt").write_text("old\n", encoding="utf-8")
+        production_executable = installed_app / "Contents" / "MacOS" / "RepoPrompt"
+        install_dir.mkdir(parents=True)
+        if installed:
+            (installed_app / "payload.txt").parent.mkdir(parents=True)
+            (installed_app / "payload.txt").write_text("old\n", encoding="utf-8")
+            write_executable(production_executable, "#!/bin/sh\nexit 0\n")
+        placeholders = {
+            "temp": str(temp_dir),
+            "installed_app": str(installed_app),
+            "production_executable": str(production_executable),
+        }
+        process_guard.set_processes(
+            [{**entry, "path": entry["path"].format(**placeholders)} for entry in processes or []],
+            fail_enumeration=fail_process_enumeration,
+        )
         keychain = temp_dir / "Library" / "Keychains" / "login keychain-db"
         keychain.parent.mkdir(parents=True)
         keychain.touch()
@@ -566,7 +704,9 @@ class LocalProductionInstallerTests(unittest.TestCase):
             exit 0
             """,
         )
-        write_bash_stub(bin_dir, "pgrep", "exit 1\n")
+        pgrep_log = temp_dir / "pgrep.log"
+        if record_pgrep_calls:
+            write_bash_stub(bin_dir, "pgrep", 'printf "%s\\n" "$*" >> "$PGREP_LOG"\nexit 1\n')
         write_bash_stub(bin_dir, "ditto", 'cp -R "$1" "$2"\n')
         write_bash_stub(
             bin_dir,
@@ -626,6 +766,7 @@ class LocalProductionInstallerTests(unittest.TestCase):
                 "FAKE_REGISTRY_PATH": str(registry_path),
                 "FAKE_INSTALLED_APP": str(installed_app),
                 "DEVELOPER_DIR": str(fake_developer_dir),
+                "PGREP_LOG": str(pgrep_log),
             }
         )
         if selected:
@@ -634,6 +775,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
             env["ROTATE_LOCAL_SIGNING_IDENTITY"] = "1"
         if split_release_source_root:
             env["REPOPROMPT_RELEASE_SOURCE_ROOT"] = str(release_source_root)
+        env.update(process_guard.env)
+        env.update(extra_env or {})
 
         context = {
             "command": ["bash", str(scripts / "install_local_production.sh")],
@@ -646,6 +789,11 @@ class LocalProductionInstallerTests(unittest.TestCase):
             "swift_log": swift_log,
             "tmp_root": installer_tmp,
             "tooling_root": root,
+            "installed_app": installed_app,
+            "installed_app_before": directory_snapshot(installed_app),
+            "production_executable": production_executable,
+            "process_guard": process_guard,
+            "pgrep_log": pgrep_log,
         }
         return self.invoke(context), context
 

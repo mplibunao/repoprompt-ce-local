@@ -279,6 +279,44 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, self.output(result))
         self.assertIn("Scan outgoing commit range for secrets", self.output(result))
 
+    def run_pr_ready_for_change(self, relative_path: str) -> subprocess.CompletedProcess[str]:
+        (self.repo / "Makefile").write_text(
+            "guardrails:\n\t@:\n\nconductor-selftest:\n\t@echo CONDUCTOR_SELFTEST_SELECTED\n",
+            encoding="utf-8",
+        )
+        self.git("add", "Makefile")
+        self.git("commit", "-q", "-m", "fixture make targets")
+        self.prepare_push_branch()
+        changed = self.repo / relative_path
+        changed.parent.mkdir(parents=True, exist_ok=True)
+        changed.write_text("changed\n", encoding="utf-8")
+        self.git("add", relative_path)
+        self.git("commit", "-q", "-m", f"change {relative_path}")
+        return self.run_preflight("pr-ready")
+
+    def test_pr_ready_selects_conductor_selftest_for_each_process_guard_script(self) -> None:
+        for relative_path in (
+            "Scripts/debug_app_process.py",
+            "Scripts/install_local_production.sh",
+            "Scripts/load_release_metadata.sh",
+            "Scripts/local_release_env.sh",
+            "Scripts/local_release_archive.sh",
+            "Scripts/local_release_restore.sh",
+        ):
+            with self.subTest(path=relative_path):
+                # Each path needs its own repository so only that change is outgoing.
+                self.setUp()
+                result = self.run_pr_ready_for_change(relative_path)
+                self.assertEqual(result.returncode, 0, self.output(result))
+                self.assertIn("CONDUCTOR_SELFTEST_SELECTED", self.output(result))
+
+    def test_pr_ready_does_not_select_conductor_selftest_for_docs_only_change(self) -> None:
+        result = self.run_pr_ready_for_change("docs/releasing.md")
+
+        self.assertEqual(result.returncode, 0, self.output(result))
+        self.assertIn("Computed outgoing range", self.output(result))
+        self.assertNotIn("CONDUCTOR_SELFTEST_SELECTED", self.output(result))
+
     def test_push_rejects_and_names_non_origin_remote(self) -> None:
         self.prepare_push_branch()
         self.git("remote", "add", "upstream", "https://example.invalid/upstream.git")

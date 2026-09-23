@@ -204,6 +204,11 @@ done
 [[ -f "$LOCAL_SIGNING_IDENTITY_TOOL" ]] || fail "Missing local signing identity tool: $LOCAL_SIGNING_IDENTITY_TOOL"
 [[ -x "$FULL_XCODE_RESOLVER" ]] || fail "Missing full-Xcode resolver: $FULL_XCODE_RESOLVER"
 
+# The running-app check repeats at each boundary a long build or staging copy could let
+# production reopen across. Each is a point-in-time observation, not a lock: production
+# must stay quit for the whole install.
+require_production_app_stopped "building a replacement for $LOCAL_PRODUCTION_APP"
+
 DEVELOPER_DIR="$("$FULL_XCODE_RESOLVER")"
 export DEVELOPER_DIR
 printf 'Local production Xcode developer directory: %s\n' "$DEVELOPER_DIR"
@@ -298,10 +303,7 @@ grep -F -i -- "$SIGN_IDENTITY" <<< "$DESIGNATED_REQUIREMENT" >/dev/null ||
     fail "Packaged app designated requirement is not pinned to the selected certificate."
 printf 'Packaged designated requirement: %s\n' "$DESIGNATED_REQUIREMENT"
 
-if pgrep -f "$LOCAL_PRODUCTION_APP/Contents/MacOS/$APP_NAME" >/dev/null 2>&1; then
-    fail "Quit $DISPLAY_NAME before replacing $LOCAL_PRODUCTION_APP."
-fi
-
+require_production_app_stopped "staging the replacement for $LOCAL_PRODUCTION_APP"
 mkdir -p "$LOCAL_PRODUCTION_INSTALL_DIR"
 STAGED_DIR="$(mktemp -d "$LOCAL_PRODUCTION_INSTALL_DIR/.$DISPLAY_NAME.app.installing.XXXXXX")"
 STAGED_APP="$STAGED_DIR/$DISPLAY_NAME.app"
@@ -315,6 +317,7 @@ if [[ "$REGISTRY_NEEDS_WRITE" == "1" ]]; then
         REGISTRY_EXISTED=1
     fi
 fi
+require_production_app_stopped "replacing $LOCAL_PRODUCTION_APP"
 TRANSACTION_ACTIVE=1
 if [[ -e "$LOCAL_PRODUCTION_APP" ]]; then
     BACKUP_DIR="$(mktemp -d "$LOCAL_PRODUCTION_INSTALL_DIR/.$DISPLAY_NAME.app.backup.XXXXXX")"

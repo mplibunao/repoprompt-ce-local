@@ -23,7 +23,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from script_test_support import enter_context, temporary_directory, write_executable  # noqa: E402
+from script_test_support import (  # noqa: E402
+    FakeProcessGuard,
+    directory_snapshot,
+    enter_context,
+    temporary_directory,
+    write_executable,
+)
 
 ROOT_DIR = SCRIPT_DIR.parent
 ARCHIVE_SCRIPT = SCRIPT_DIR / "local_release_archive.sh"
@@ -37,15 +43,6 @@ TAG = "local/v1.4.0-b99"
 JOURNAL_SOURCE_PATH = Path("Sources/RepoPromptDomainRuntime/DomainPersistence.swift")
 
 
-def tree_snapshot(root: Path) -> dict[str, str | None]:
-    """Relative path -> file contents (None for directories), for exact-tree comparison."""
-    snapshot: dict[str, str | None] = {}
-    for path in sorted(root.rglob("*")):
-        key = str(path.relative_to(root))
-        snapshot[key] = None if path.is_dir() and not path.is_symlink() else path.read_text(encoding="utf-8")
-    return snapshot
-
-
 class LocalReleaseRollbackUnitTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = enter_context(self, temporary_directory(prefix="repoprompt-ce-rollback-test."))
@@ -56,7 +53,9 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.defaults_domain = self.tmp / "prefs" / "com.example.repoprompt.ce.test"
         self.identity_path = self.state / "local-signing-identity-v1.json"
         self.defaults_domain.parent.mkdir(parents=True, exist_ok=True)
-        self.process_token = f"repoprompt-ce-guard-{self.tmp.name}"
+        # An executable no process runs, under a name no process has, so the guard's name
+        # prefilter never inspects the operator's live RepoPrompt processes.
+        self.guard_executables = json.dumps([str(self.tmp / "guard-sentinel" / "repoprompt-ce-guard-sentinel")])
         self.source_repository = self.tmp / "source-repository"
         subprocess.run(["git", "init", "-q", str(self.source_repository)], check=True, capture_output=True)
         self.archived_commit = self.commit_journal_source(
@@ -210,9 +209,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
                 "LOCAL_RELEASE_ARCHIVE_ROOT": str(self.archive_root),
                 "LOCAL_SIGNING_IDENTITY_REGISTRY_PATH": str(self.identity_path),
                 "LOCAL_RELEASE_SOURCE_REPOSITORY": str(self.source_repository),
-                # A per-test token so the guard runs for real without matching the
-                # operator's live RepoPrompt processes.
-                "LOCAL_RELEASE_RUNNING_PROCESS_PATTERNS": self.process_token,
+                "LOCAL_RELEASE_GUARD_EXECUTABLES_JSON": self.guard_executables,
             }
         )
         env.update(overrides)
@@ -269,8 +266,8 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
     def test_round_trip_reproduces_app_state_defaults_and_identity(self) -> None:
         self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})
-        app_before = tree_snapshot(self.app)
-        state_before = tree_snapshot(self.state)
+        app_before = directory_snapshot(self.app)
+        state_before = directory_snapshot(self.state)
 
         self.archive()
 
@@ -287,15 +284,15 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
         self.restore()
 
-        self.assertEqual(tree_snapshot(self.app), app_before)
-        restored_state = tree_snapshot(self.state)
+        self.assertEqual(directory_snapshot(self.app), app_before)
+        restored_state = directory_snapshot(self.state)
         for name, expected in state_before.items():
             if name.startswith(("DebugApps", "Rollbacks")):
                 continue
             self.assertEqual(restored_state.get(name), expected, name)
         self.assertNotIn("Workspaces/added-later.json", restored_state)
-        self.assertEqual(restored_state["DebugApps/marker.txt"], "debug-after\n")
-        self.assertEqual(restored_state["Rollbacks/marker.txt"], "rollback-after\n")
+        self.assertEqual(restored_state["DebugApps/marker.txt"], b"debug-after\n")
+        self.assertEqual(restored_state["Rollbacks/marker.txt"], b"rollback-after\n")
         self.assertEqual(self.read_defaults(), {"UpdateChannel": "stable", "RemovedLater": "yes"})
 
     def test_manifest_records_tag_build_commit_and_timestamps(self) -> None:
@@ -471,7 +468,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
     def test_restore_succeeds_when_current_state_directory_is_absent(self) -> None:
         self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})
-        app_before = tree_snapshot(self.app)
+        app_before = directory_snapshot(self.app)
         identity_before = self.identity_path.read_text(encoding="utf-8")
         self.archive()
 
@@ -482,7 +479,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         result = self.restore()
 
         self.assertNotIn("Enumerating excluded Application Support entries", result.stdout)
-        self.assertEqual(tree_snapshot(self.app), app_before)
+        self.assertEqual(directory_snapshot(self.app), app_before)
         self.assertEqual(
             (self.state / "Settings" / "globalSettings.json").read_text(encoding="utf-8"),
             '{"marker":"original"}\n',
@@ -524,13 +521,13 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.archive()
         app_zip = self.archive_root / TAG / "app.zip"
         app_zip.write_bytes(app_zip.read_bytes() + b"corrupt")
-        state_before = tree_snapshot(self.state)
+        state_before = directory_snapshot(self.state)
 
         result = self.run_script(RESTORE_SCRIPT)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("checksum", result.stdout + result.stderr)
-        self.assertEqual(tree_snapshot(self.state), state_before)
+        self.assertEqual(directory_snapshot(self.state), state_before)
 
     def test_restore_refuses_an_incomplete_archive(self) -> None:
         self.write_baseline_fixture()
@@ -596,16 +593,16 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
     def test_unreadable_manifest_refuses_before_changing_anything(self) -> None:
         self.write_baseline_fixture()
         self.archive()
-        app_before = tree_snapshot(self.app)
-        state_before = tree_snapshot(self.state)
+        app_before = directory_snapshot(self.app)
+        state_before = directory_snapshot(self.state)
         defaults_before = self.read_defaults()
 
         for corruption in ("{ not json", "{}", '{"schemaVersion": 1, "tag": "other"}'):
             (self.archive_root / TAG / "manifest.json").write_text(corruption, encoding="utf-8")
             result = self.run_script(RESTORE_SCRIPT)
             self.assertNotEqual(result.returncode, 0, corruption)
-            self.assertEqual(tree_snapshot(self.app), app_before, corruption)
-            self.assertEqual(tree_snapshot(self.state), state_before, corruption)
+            self.assertEqual(directory_snapshot(self.app), app_before, corruption)
+            self.assertEqual(directory_snapshot(self.state), state_before, corruption)
             self.assertEqual(self.read_defaults(), defaults_before, corruption)
             self.assertEqual(list(self.archive_root.glob("**/*.rescue-*")), [], corruption)
 
@@ -631,7 +628,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
     def test_restore_keeps_a_rescue_directory_and_survives_an_interrupted_run(self) -> None:
         self.write_baseline_fixture()
         self.archive()
-        original_app = tree_snapshot(self.app)
+        original_app = directory_snapshot(self.app)
 
         interrupted = self.run_script(RESTORE_SCRIPT, LOCAL_RELEASE_ABORT_AT_STEP="Restoring application support")
         self.assertNotEqual(interrupted.returncode, 0)
@@ -642,7 +639,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         # replaced and the pre-clear preferences export.
         self.assertTrue((rescues[0] / f"{DISPLAY_NAME}.app").is_dir())
         self.assertTrue((rescues[0] / "defaults-before-restore.plist").is_file())
-        self.assertEqual(tree_snapshot(rescues[0] / f"{DISPLAY_NAME}.app"), original_app)
+        self.assertEqual(directory_snapshot(rescues[0] / f"{DISPLAY_NAME}.app"), original_app)
 
         succeeded = self.restore()
         rescues = sorted(self.archive_root.glob("**/*.rescue-*"))
@@ -650,12 +647,13 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertIn("rescue-", succeeded.stdout)
         self.assertTrue(any((rescue / "application-support").is_dir() for rescue in rescues))
 
-    def test_both_scripts_refuse_while_a_repoprompt_process_is_running(self) -> None:
+    def test_both_scripts_refuse_while_an_owned_process_runs_the_guarded_executable(self) -> None:
         self.write_baseline_fixture()
         self.archive()
 
         # A symlink, not a copy: copying a signed system binary invalidates its signature
-        # and macOS kills the process immediately.
+        # and macOS kills the process immediately. The guard resolves the link, so this
+        # exercises the native detector against a real process this test owns.
         fake = self.tmp / "repoprompt-mcp"
         os.symlink("/bin/sleep", fake)
         process = subprocess.Popen([str(fake), "45"])
@@ -665,25 +663,134 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         for script in (ARCHIVE_SCRIPT, RESTORE_SCRIPT):
             result = self.run_script(
                 script,
-                LOCAL_RELEASE_RUNNING_PROCESS_PATTERNS=f"{self.tmp}/repoprompt-mcp",
+                LOCAL_RELEASE_GUARD_EXECUTABLES_JSON=json.dumps([str(fake)]),
                 LOCAL_RELEASE_ARCHIVE_OVERWRITE="1",
             )
             output = result.stdout + result.stderr
             self.assertNotEqual(result.returncode, 0, script.name)
-            self.assertIn("Quit RepoPrompt before", output, script.name)
+            self.assertIn("Quit RepoPrompt CE before", output, script.name)
             self.assertIn(str(process.pid), output, script.name)
         self.assertEqual(list(self.archive_root.glob("**/*.rescue-*")), [])
 
-    def test_default_process_guard_patterns_cover_production_debug_mcp_and_cli(self) -> None:
-        defaults = ENV_SCRIPT.read_text(encoding="utf-8")
-        for fragment in (
-            "/$DISPLAY_NAME.app/Contents/MacOS/$APP_NAME",
-            "DebugApps/$APP_NAME.app/Contents/MacOS/$APP_NAME",
-            "repoprompt-mcp",
-            "repoprompt_ce_cli",
-        ):
-            self.assertIn(fragment, defaults, fragment)
+    def test_legacy_pattern_override_and_invalid_executable_lists_are_refused(self) -> None:
+        self.write_baseline_fixture()
+        cases = [
+            ({"LOCAL_RELEASE_RUNNING_PROCESS_PATTERNS": "repoprompt-mcp"}, "no longer supported"),
+            ({"LOCAL_RELEASE_GUARD_EXECUTABLES_JSON": "[]"}, "nonempty JSON array"),
+            ({"LOCAL_RELEASE_GUARD_EXECUTABLES_JSON": '["relative/RepoPrompt"]'}, "non-absolute"),
+        ]
+        for overrides, message in cases:
+            with self.subTest(overrides=overrides):
+                result = self.run_script(ARCHIVE_SCRIPT, **overrides)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stdout + result.stderr)
+                self.assertFalse((self.archive_root / TAG).exists())
 
+    # -- native identity guard ---------------------------------------------------
+
+    def archive_isolated_baseline(self) -> None:
+        """Writes the baseline fixture and archives it through a fake process guard with nothing running."""
+        self.process_guard = FakeProcessGuard(
+            self.tmp / "isolated-repo",
+            extra_scripts=("local_release_archive.sh", "local_release_restore.sh"),
+        )
+        self.write_baseline_fixture()
+        result = self.run_isolated(ARCHIVE_SCRIPT.name)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def run_isolated(
+        self,
+        script_name: str,
+        processes: list[dict[str, object]] | None = None,
+        *,
+        fail_enumeration: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        self.process_guard.set_processes(processes or [], fail_enumeration=fail_enumeration)
+        return self.run_script(
+            self.process_guard.scripts_dir / script_name,
+            LOCAL_RELEASE_ARCHIVE_OVERWRITE="1",
+            **self.process_guard.env,
+        )
+
+    def identity_fixtures(self) -> dict[str, list[dict[str, object]]]:
+        production_mcp = self.app / "Contents" / "MacOS" / "repoprompt-mcp"
+        write_executable(production_mcp, "#!/bin/sh\nexit 0\n")
+        cli_link = self.tmp / "RepoPrompt" / "repoprompt_ce_cli"
+        cli_link.parent.mkdir(parents=True, exist_ok=True)
+        cli_link.symlink_to(production_mcp)
+        debug = self.state / "DebugApps-wt1" / "RepoPrompt.app" / "Contents" / "MacOS" / "RepoPrompt"
+        write_executable(debug, "#!/bin/sh\nexit 0\n")
+        other_install = self.tmp / "Elsewhere" / f"{DISPLAY_NAME}.app" / "Contents" / "MacOS" / "RepoPrompt"
+        write_executable(other_install, "#!/bin/sh\nexit 0\n")
+        return {
+            "production": [{"pid": 1101, "name": "RepoPrompt", "path": str(self.app / "Contents" / "MacOS" / "RepoPrompt")}],
+            "production elsewhere": [{"pid": 1102, "name": "RepoPrompt", "path": str(other_install)}],
+            "debug": [{"pid": 1103, "name": "RepoPrompt", "path": str(debug)}],
+            "mcp": [{"pid": 1104, "name": "repoprompt-mcp", "path": str(production_mcp)}],
+            "cli alias": [{"pid": 1105, "name": "repoprompt_ce_cli", "path": str(cli_link)}],
+        }
+
+    def rollback_surfaces(self) -> tuple[object, ...]:
+        manifest = self.archive_root / TAG / "manifest.json"
+        return (
+            directory_snapshot(self.app),
+            directory_snapshot(self.state),
+            self.read_defaults(),
+            self.identity_path.read_bytes(),
+            manifest.read_bytes() if manifest.exists() else None,
+            sorted(self.archive_root.glob("**/*.rescue-*")),
+        )
+
+    def test_each_running_identity_blocks_archive_and_restore_without_mutation(self) -> None:
+        self.archive_isolated_baseline()
+        fixtures = self.identity_fixtures()
+        # Diverge live state so a restore that got past the guard would be visible.
+        (self.state / "Settings" / "globalSettings.json").write_text('{"marker":"live"}\n', encoding="utf-8")
+
+        for identity, processes in fixtures.items():
+            for script in (ARCHIVE_SCRIPT, RESTORE_SCRIPT):
+                with self.subTest(identity=identity, script=script.name):
+                    before = self.rollback_surfaces()
+                    result = self.run_isolated(script.name, processes)
+                    output = result.stdout + result.stderr
+                    self.assertNotEqual(result.returncode, 0, output)
+                    self.assertIn("Quit RepoPrompt CE before", output)
+                    self.assertIn(str(processes[0]["pid"]), output)
+                    self.assertEqual(self.rollback_surfaces(), before)
+
+    def test_restore_rechecks_before_moving_the_installed_app(self) -> None:
+        self.archive_isolated_baseline()
+        app_before = directory_snapshot(self.app)
+        state_before = directory_snapshot(self.state)
+        identity_before = self.identity_path.read_bytes()
+
+        result = self.run_isolated(
+            RESTORE_SCRIPT.name,
+            [{"pid": 1201, "name": "RepoPrompt", "path": str(self.app / "Contents" / "MacOS" / "RepoPrompt"), "from_call": 2}],
+        )
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("1201", output)
+        self.assertEqual(self.process_guard.calls, 2)
+        self.assertEqual(directory_snapshot(self.app), app_before)
+        self.assertEqual(directory_snapshot(self.state), state_before)
+        self.assertEqual(self.identity_path.read_bytes(), identity_before)
+        rescues = sorted(self.archive_root.glob("**/*.rescue-*"))
+        self.assertEqual(len(rescues), 1)
+        self.assertFalse((rescues[0] / f"{DISPLAY_NAME}.app").exists())
+        self.assertFalse((rescues[0] / "application-support").exists())
+
+    def test_inspection_failure_blocks_archive_and_restore(self) -> None:
+        self.archive_isolated_baseline()
+
+        for script in (ARCHIVE_SCRIPT, RESTORE_SCRIPT):
+            with self.subTest(script=script.name):
+                before = self.rollback_surfaces()
+                result = self.run_isolated(script.name, fail_enumeration=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("process identity inspection failed", result.stdout + result.stderr)
+                self.assertEqual(self.rollback_surfaces(), before)
 
 if __name__ == "__main__":
     unittest.main()
