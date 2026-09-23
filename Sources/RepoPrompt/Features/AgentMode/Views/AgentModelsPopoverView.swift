@@ -40,8 +40,13 @@ struct AgentModelsPopoverView: View {
         fontScale.preset
     }
 
+    /// Wide enough that a role row's right-aligned model picker and parameter pins start past the
+    /// end of the left-aligned "Recommended: … Apply" line beneath it, so the two never stagger.
+    /// At the normal font the longest recommendation line ends about 259pt in, a Cursor row's
+    /// picker plus effort and speed pins is about 330pt wide, and they need a 16pt gap: about
+    /// 605pt of content plus the 32pt content inset.
     private var popoverWidth: CGFloat {
-        fontPreset.scaledClamped(360, max: 520)
+        fontPreset.scaledClamped(640, max: 920)
     }
 
     private var popoverMaxHeight: CGFloat {
@@ -213,16 +218,12 @@ struct AgentModelsPopoverView: View {
                 ACPModelParameterProbeView(
                     modelRaw: expectedModelRaw,
                     providerID: providerID,
+                    providerDisplayName: promptViewModel.contextBuilderAgent.displayName,
                     probeContext: .resolved(promptViewModel.activeWorkspaceRootPath),
-                    pinnedValueRaw: promptViewModel.contextBuilderThinkingParameterValueRaw
-                ) { configID, value in
+                    savedSelections: promptViewModel.contextBuilderModelParameters
+                ) { change in
                     promptViewModel.setContextBuilderModelParameter(
-                        ACPModelParameterSelection.thinkingPin(
-                            configID: configID,
-                            valueRaw: value,
-                            providerID: providerID,
-                            modelRaw: expectedModelRaw
-                        ),
+                        change,
                         expectedProviderID: providerID,
                         expectedModelRaw: expectedModelRaw,
                         expectedScope: expectedScope
@@ -382,7 +383,7 @@ struct AgentModelsPopoverView: View {
                         Image(systemName: resolution.effective.agent.iconName)
                             .font(fontPreset.swiftUIFont(sizeAtNormal: 10))
                         // No `.fixedSize()` on the row — long model display names
-                        // truncate instead of overflowing the 340pt popover.
+                        // truncate instead of overflowing the popover.
                         AgentModelSelectionSummaryLabel(
                             agentKind: resolution.effective.agent,
                             rawModel: resolution.effective.modelRaw,
@@ -415,31 +416,21 @@ struct AgentModelsPopoverView: View {
                     ACPModelParameterProbeView(
                         modelRaw: expectedModelRaw,
                         providerID: providerID,
+                        providerDisplayName: resolution.effective.agent.displayName,
                         probeContext: .resolved(promptViewModel.activeWorkspaceRootPath),
-                        pinnedValueRaw: resolution.thinkingParameterValueRaw
-                    ) { configID, value in
-                        guard editingScope == expectedScope,
+                        savedSelections: resolution.modelParameters
+                    ) { change in
+                        guard change.targets(providerID: providerID, modelRaw: expectedModelRaw),
+                              editingScope == expectedScope,
                               let live = roleResolutions.first(where: { $0.role == resolution.role }),
-                              live.effective.agent.acpProviderID == providerID,
-                              ACPModelParameterIdentity.canonicalBaseModelRaw(
-                                  live.effective.modelRaw,
-                                  providerID: providerID
-                              ) == ACPModelParameterIdentity.canonicalBaseModelRaw(
-                                  expectedModelRaw,
-                                  providerID: providerID
-                              )
+                              live.effective.isPinTarget(providerID: providerID, modelRaw: expectedModelRaw)
                         else { return }
-                        MCPAgentRoleDefaultsService.setModelParameter(
-                            ACPModelParameterSelection.thinkingPin(
-                                configID: configID,
-                                valueRaw: value,
-                                providerID: providerID,
-                                modelRaw: live.effective.modelRaw
-                            ),
+                        guard MCPAgentRoleDefaultsService.setModelParameter(
+                            change,
                             for: live.role,
                             displayed: live.effective,
                             scope: editingScope
-                        )
+                        ) else { return }
                         bumpRoleDefaults()
                     }
                 }

@@ -1735,21 +1735,22 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
     }
 
-    /// Set or clear the Context Builder agent's ACP parameter pin, persisting the displayed
-    /// agent+model choice atomically so the pin stays eligible. Resolve the write target from the
+    /// Apply one Context Builder parameter-pin edit, persisting the displayed agent+model choice
+    /// atomically when it sets a pin so the pin stays eligible. Resolve the write target from the
     /// current settings authority rather than the cached `@Published` selection. Cross-surface
     /// notifications arrive on a later runloop turn, so the
     /// cache can still describe the menu's old model when another surface has already committed a
     /// newer one. Re-running the normal display resolution also preserves intentional availability
     /// fallback pinning instead of comparing directly against the persisted raw value.
     func setContextBuilderModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+        _ change: ACPModelParameterPinChange,
         expectedProviderID: ACPProviderID,
         expectedModelRaw: String,
         expectedScope: AgentModelsEditingScope
     ) {
         let scope = contextBuilderEditingScope
-        guard scope == expectedScope,
+        guard change.targets(providerID: expectedProviderID, modelRaw: expectedModelRaw),
+              scope == expectedScope,
               let liveSelection = Self.contextBuilderPinWriteSelection(
                   resolvedPersistedContextBuilderSelection(),
                   expectedProviderID: expectedProviderID,
@@ -1757,7 +1758,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
               )
         else { return }
         settingsManager.setAgentModelsContextBuilderModelParameter(
-            selections,
+            change,
             agentRaw: liveSelection.agent.rawValue,
             modelRaw: liveSelection.modelRaw,
             scope: scope
@@ -1770,15 +1771,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         expectedModelRaw: String
     ) -> AgentModelCatalog.NormalizedAgentSelection? {
         guard let liveSelection,
-              let liveProviderID = liveSelection.agent.acpProviderID,
-              liveProviderID == expectedProviderID,
-              ACPModelParameterIdentity.canonicalBaseModelRaw(
-                  liveSelection.modelRaw,
-                  providerID: liveProviderID
-              ) == ACPModelParameterIdentity.canonicalBaseModelRaw(
-                  expectedModelRaw,
-                  providerID: liveProviderID
-              )
+              liveSelection.isPinTarget(providerID: expectedProviderID, modelRaw: expectedModelRaw)
         else { return nil }
         return liveSelection
     }
@@ -1798,13 +1791,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
     #endif
 
-    /// The saved `.thinking` pin value for the current Context Builder selection, if any. The
-    /// chip's saved-state input.
-    var contextBuilderThinkingParameterValueRaw: String? {
-        contextBuilderModelParameters.last { $0.kind == .thinking }?.valueRaw
-    }
-
-    /// The saved OpenCode effort pin for the **displayed** Context Builder selection. Display
+    /// The saved parameter pins for the **displayed** Context Builder selection. Display
     /// and probe must agree with the model the chip is mounted for (`selectedModelRaw`), which
     /// availability fallback can make differ from the persisted choice without writing back.
     var contextBuilderModelParameters: [ACPModelParameterSelection] {

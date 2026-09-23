@@ -1,23 +1,19 @@
 import SwiftUI
 
-/// Passive OpenCode effort-pin renderer shared by the Settings, popover and Context Builder
-/// surfaces.
+/// Passive renderer for one parameter pin (one kind) on the Settings, popover and Context
+/// Builder surfaces, for any ACP provider.
 ///
-/// It renders whenever there is something honest to show: usable discovery metadata
-/// (`definition != nil`) **or** a saved pin (`pinnedValueRaw != nil`). It never invents
-/// choices, never presents a provider default as if it were a saved pin, and never hides a
-/// saved pin just because its metadata is currently unavailable.
+/// It renders whenever there is something honest to show: an unambiguous advertised definition
+/// **or** a saved pin. It never invents choices, never presents a provider default as if it
+/// were a saved pin, and never hides a saved pin just because its metadata is currently
+/// unavailable. Metadata arrival never writes settings; only a menu action emits a change.
 struct ACPModelParameterPinChip: View {
-    /// The `.thinking` definition from a live observation, or nil when metadata is loading,
-    /// failed, unusable, or the target does not resolve.
-    let definition: ACPModelParameterDefinition?
-    /// The saved pin value verbatim, or nil for "not pinned".
-    let pinnedValueRaw: String?
+    let control: ACPModelParameterPinControl
+    let providerDisplayName: String
+    /// Prefix the value with the parameter name, for rows that could otherwise be ambiguous.
+    let showsParameterName: Bool
     let isEnabled: Bool
-    /// Receives the advertised `configID` and the chosen raw value, or nil to clear the pin.
-    /// The configID comes from the live definition — never assumed to be `"effort"` — so a
-    /// saved pin round-trips the provider's actual selector key.
-    let onSelect: (_ configID: String, _ valueRaw: String?) -> Void
+    let onChange: (ACPModelParameterPinChange) -> Void
 
     @ObservedObject private var fontScale = FontScaleManager.shared
 
@@ -25,50 +21,81 @@ struct ACPModelParameterPinChip: View {
         fontScale.preset
     }
 
+    private var definition: ACPModelParameterDefinition? {
+        control.definition
+    }
+
+    private var pinnedValueRaw: String? {
+        control.saved?.valueRaw
+    }
+
+    private var parameterName: String {
+        definition?.displayName ?? control.kind.recoveryDisplayName
+    }
+
+    /// The advertised choice the saved value resolves to, matched as the provider matches it.
     private var pinnedChoice: ACPModelParameterChoice? {
-        guard let pinnedValueRaw else { return nil }
-        return definition?.choice(matching: pinnedValueRaw)
+        pinnedValueRaw.flatMap { definition?.choice(matching: $0) }
     }
 
-    /// The label is the pinned choice's display name when available, else the saved raw value
-    /// verbatim. Never substituted with the advertised current value.
+    /// The pinned choice's display name when available, else the saved raw value verbatim.
+    /// Never substituted with the advertised current value.
+    private var valueLabel: String {
+        guard let pinnedValueRaw else { return Self.unpinnedLabel }
+        return Self.choiceLabel(pinnedChoice?.displayName ?? pinnedValueRaw, providerDisplayName: providerDisplayName)
+    }
+
+    /// The label for "no saved value": the chip's unpinned state and the menu entry that clears.
+    nonisolated static let unpinnedLabel = "Default"
+
+    /// How a pinned value reads in the menu and on the chip. A provider may advertise its own
+    /// value named "default" (OpenCode does), which is an explicit pin distinct from clearing;
+    /// naming the provider keeps it from reading as the unpinned state.
+    nonisolated static func choiceLabel(_ displayName: String, providerDisplayName: String) -> String {
+        let collides = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare(unpinnedLabel) == .orderedSame
+        return collides ? "\(unpinnedLabel) (\(providerDisplayName))" : displayName
+    }
+
     private var label: String {
-        guard let pinnedValueRaw else { return "Default" }
-        return pinnedChoice?.displayName ?? pinnedValueRaw
+        showsParameterName ? "\(parameterName): \(valueLabel)" : valueLabel
     }
 
-    /// Honest rule: warn only when we have a live definition and the saved value is absent from
-    /// its choices (a level later disabled in `opencode.json`). While metadata is loading or
-    /// unavailable (`definition == nil`) the saved pin is shown plainly — never a false warning.
     private var isSavedPinUnavailable: Bool {
-        guard let pinnedValueRaw, let definition else { return false }
-        return definition.choice(matching: pinnedValueRaw) == nil
+        control.isSavedValueUnavailable
     }
 
-    /// Hover text for the chip's unpinned ("Default") state, resolved from the live definition
-    /// the host already passes. The word "Default" is already overloaded elsewhere in this UI
-    /// ("no model specified", base-variant submenus), so this state must say what it resolves
-    /// to: with a definition it names the provider's current advertised effort; without one it
-    /// says that value is not yet discovered. Pure and static so it is unit-testable without a
-    /// view host; no new discovery and no new state. The chip is OpenCode-only (the probe view
-    /// renders no chip for other providers), so the hard-coded provider wording is safe.
-    static func defaultTooltip(definition: ACPModelParameterDefinition?) -> String {
+    /// Hover text for the unpinned ("Default") state. "Default" is already overloaded elsewhere
+    /// in this UI ("no model specified", base-variant submenus), so this state says what it
+    /// resolves to: with a definition, the provider's current advertised value; without one,
+    /// that the value is not yet discovered. Pure and static so it is unit-testable without a
+    /// view host.
+    static func defaultTooltip(
+        definition: ACPModelParameterDefinition?,
+        kind: ACPModelParameterKind,
+        providerDisplayName: String
+    ) -> String {
+        let subject = "Default — \(providerDisplayName)'s current \(kind.tooltipNoun) for this model"
         guard let definition else {
-            return "Default — OpenCode's current effort for this model (not yet discovered)"
+            return "\(subject) (not yet discovered)"
         }
         let currentValue = definition.choice(matching: definition.currentValueRaw)?.displayName
             ?? definition.currentValueRaw
-        return "Default — OpenCode's current effort for this model: \(currentValue)"
+        return "\(subject): \(currentValue)"
     }
 
     private var tooltip: String {
         if isSavedPinUnavailable {
-            return "Saved thinking level \"\(label)\" is not currently advertised for this model."
+            return "Saved \(control.kind.savedValueNoun) \"\(valueLabel)\" is not currently advertised for this model."
         }
         guard pinnedValueRaw == nil else {
-            return definition?.displayName ?? "Thinking level"
+            return definition?.displayName ?? control.kind.savedValueTitle
         }
-        return Self.defaultTooltip(definition: definition)
+        return Self.defaultTooltip(
+            definition: definition,
+            kind: control.kind,
+            providerDisplayName: providerDisplayName
+        )
     }
 
     /// Mirrors the hover text: the unpinned state announces what Default resolves to, and a
@@ -78,17 +105,21 @@ struct ACPModelParameterPinChip: View {
             return "\(label), unavailable"
         }
         guard pinnedValueRaw == nil else { return label }
-        return Self.defaultTooltip(definition: definition)
+        return Self.defaultTooltip(
+            definition: definition,
+            kind: control.kind,
+            providerDisplayName: providerDisplayName
+        )
     }
 
     var body: some View {
         Menu {
-            // "Not pinned" is a first-class state: choosing it clears the pin.
+            // "Not pinned" is a first-class state: choosing it clears this kind's pin only.
             Button {
-                onSelect(definition?.configID ?? "", nil)
+                onChange(.clear(control.identity))
             } label: {
                 HStack {
-                    Text("Default")
+                    Text(Self.unpinnedLabel)
                     if pinnedValueRaw == nil {
                         Spacer()
                         Image(systemName: "checkmark")
@@ -96,14 +127,20 @@ struct ACPModelParameterPinChip: View {
                 }
             }
             if let definition {
-                // Every advertised choice renders, including a single-choice menu.
+                // Every advertised choice renders, including a single-choice menu and a provider
+                // wire value named "default", which is an explicit pin distinct from clearing.
                 ForEach(definition.choices, id: \.rawValue) { choice in
                     Button {
-                        onSelect(definition.configID, choice.rawValue)
+                        onChange(.pinning(
+                            choice,
+                            of: definition,
+                            providerID: control.providerID,
+                            baseModelRaw: control.baseModelRaw
+                        ))
                     } label: {
                         HStack {
-                            Text(choice.displayName)
-                            if choice.rawValue == pinnedValueRaw {
+                            Text(Self.choiceLabel(choice.displayName, providerDisplayName: providerDisplayName))
+                            if pinnedChoice?.rawValue == choice.rawValue {
                                 Spacer()
                                 Image(systemName: "checkmark")
                             }
@@ -126,8 +163,7 @@ struct ACPModelParameterPinChip: View {
         // Native AppKit-anchored help, not the custom hoverTooltip bubble: the custom
         // overlay window mispositions after its hosting view relayouts (it balloons in
         // height and drops to the bottom of the screen, worst for this chip's long Default
-        // text), while native help is anchored by AppKit next to the control. Content and
-        // accessibility mirror the previous behavior unchanged.
+        // text), while native help is anchored by AppKit next to the control.
         // swiftlint:disable:next no_swiftui_help_modifier
         .help(tooltip)
         .accessibilityValue(Text(accessibilityValueText))

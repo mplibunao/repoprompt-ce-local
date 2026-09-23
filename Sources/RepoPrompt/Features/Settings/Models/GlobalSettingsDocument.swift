@@ -372,97 +372,95 @@ struct AgentModelsSettingsProfile: Codable, Equatable {
         )
     }
 
-    /// Whether a stored **role** bucket belongs to the selection currently on screen. Clearing a
-    /// role pin uses the same model-scoped rule as reading one, so a displayed availability
-    /// fallback can never delete intent retained for a different model. Context Builder has a
-    /// stricter rule and clears through `contextBuilderModelParameterSelections` instead.
-    private static func bucketBelongsToDisplayedSelection(
-        _ bucket: [ACPModelParameterSelection]?,
-        agentRaw: String,
-        modelRaw: String
-    ) -> Bool {
-        guard let bucket, !bucket.isEmpty else { return false }
-        guard let providerID = AgentProviderKind(rawValue: agentRaw)?.acpProviderID else { return false }
-        return !ACPModelParameterSelection.selections(
-            for: providerID,
-            activeBaseModelRaw: modelRaw,
-            from: bucket
-        ).isEmpty
-    }
-
-    /// Atomic role-pin write: persist the displayed selection as the role override and
-    /// set/clear the pin bucket in one profile mutation. The two must move together — a pin
-    /// written against a merely-recommended (not overridden) model would be dropped as
-    /// ineligible the instant it is saved. Coherence re-runs at the persistence boundary, so
-    /// the displayed override and the bucket cannot disagree once saved.
-    func replacingRoleModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+    /// Apply one pin edit to a role's bucket, leaving every other identity in it untouched.
+    ///
+    /// Set keeps sibling kinds for the displayed model, drops pins left over for any other
+    /// model, and commits the displayed selection as the role override in the same mutation: a
+    /// pin written against a merely recommended model would be dropped as ineligible the moment
+    /// it is saved. A displayed availability fallback is therefore adopted. Clear removes only
+    /// its identity and never writes the override: the chip offers "Default" to a role still
+    /// tracking its recommendation, and a clear must not make that role's model durable. An edit
+    /// whose identity is not the displayed provider and model, or a set that cannot reach the
+    /// wire, returns the profile unchanged.
+    func applyingRoleModelParameterChange(
+        _ change: ACPModelParameterPinChange,
         for roleRawValue: String,
         displayedSelectionID: AgentModelSelectionID
     ) -> AgentModelsSettingsProfile {
+        guard change.isApplicable,
+              let providerID = AgentProviderKind(rawValue: displayedSelectionID.agentRaw)?.acpProviderID,
+              change.targets(providerID: providerID, modelRaw: displayedSelectionID.modelRaw)
+        else { return self }
+        let bucket = mcpAgentRoleModelParameters?[roleRawValue] ?? []
+        // Identity includes the canonical model, so pins retained for an unavailable stored model
+        // are never eligible while its fallback is displayed.
+        let eligible = ACPModelParameterSelection.selections(
+            for: providerID,
+            activeBaseModelRaw: displayedSelectionID.modelRaw,
+            from: bucket
+        )
+        guard let edited = Self.editedBucket(bucket, eligible: eligible, applying: change) else { return self }
         var next = self
-        // Only a real pin commits the displayed model choice. Clearing must not: the chip offers
-        // "Default" even for a role that is still tracking its recommendation, and writing the
-        // override there would silently stop that role tracking because the user opened a menu
-        // and re-picked the item already selected.
-        if let selections, !selections.isEmpty {
+        if case .set = change {
             var overrides = next.mcpAgentRoleOverrides ?? [:]
             overrides[roleRawValue] = displayedSelectionID.rawValue
-            next.mcpAgentRoleOverrides = overrides.isEmpty ? nil : overrides
+            next.mcpAgentRoleOverrides = overrides
         }
         var pins = next.mcpAgentRoleModelParameters ?? [:]
-        if let selections, !selections.isEmpty {
-            pins[roleRawValue] = ACPModelParameterSelection.normalized(selections)
-        } else if Self.bucketBelongsToDisplayedSelection(
-            pins[roleRawValue],
-            agentRaw: displayedSelectionID.agentRaw,
-            modelRaw: displayedSelectionID.modelRaw
-        ) {
-            // Clearing is scoped to the displayed model, exactly as reading is. A role whose
-            // stored model is currently unavailable displays a recommended fallback, so
-            // "Default" is already checked there — selecting it must not delete the pin that is
-            // still retained for the model the user actually chose.
-            pins[roleRawValue] = nil
-        }
+        pins[roleRawValue] = edited.isEmpty ? nil : edited
         next.mcpAgentRoleModelParameters = pins.isEmpty ? nil : pins
         return next
     }
 
-    /// Atomic Context Builder pin write: persist the displayed agent+model choice and
-    /// set/clear that agent's pin bucket in one profile mutation. Mirrors
-    /// `replacingRoleModelParameter` for the Context Builder surface.
-    func replacingContextBuilderModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+    /// `applyingRoleModelParameterChange` for the Context Builder bucket of `agentRaw`.
+    ///
+    /// Set commits the displayed agent and model as the Context Builder choice. Set and Clear
+    /// both work from the Context Builder read predicate, which counts a bucket only while
+    /// `agentRaw` is the persisted Context Builder agent: buckets for other agents are per-agent
+    /// memory the surface does not show, so a set must not carry them into the new choice.
+    func applyingContextBuilderModelParameterChange(
+        _ change: ACPModelParameterPinChange,
         for agentRaw: String?,
         modelRaw: String
     ) -> AgentModelsSettingsProfile {
-        let resolvedAgentRaw = Self.normalizedAgentRaw(agentRaw) ?? contextBuilderAgentRaw
-        guard let resolvedAgentRaw else { return self }
-
-        // Same rule as the role bucket: only a real pin commits the displayed agent+model choice,
-        // so clearing cannot quietly adopt a runtime fallback as the persisted selection.
+        guard change.isApplicable,
+              let resolvedAgentRaw = Self.normalizedAgentRaw(agentRaw) ?? contextBuilderAgentRaw,
+              let agent = AgentProviderKind(rawValue: resolvedAgentRaw),
+              let providerID = agent.acpProviderID,
+              change.targets(providerID: providerID, modelRaw: modelRaw)
+        else { return self }
+        guard let edited = Self.editedBucket(
+            contextBuilderModelParametersByAgent?[resolvedAgentRaw] ?? [],
+            eligible: contextBuilderModelParameterSelections(for: agent, modelRaw: modelRaw),
+            applying: change
+        ) else { return self }
         var next = self
-        if let selections, !selections.isEmpty {
+        if case .set = change {
             next = replacingContextBuilderModel(modelRaw, for: resolvedAgentRaw)
             next.contextBuilderAgentRaw = resolvedAgentRaw
         }
         var pins = next.contextBuilderModelParametersByAgent ?? [:]
-        if let selections, !selections.isEmpty {
-            pins[resolvedAgentRaw] = ACPModelParameterSelection.normalized(selections)
-        } else if let resolvedAgent = AgentProviderKind(rawValue: resolvedAgentRaw),
-                  !contextBuilderModelParameterSelections(
-                      for: resolvedAgent,
-                      modelRaw: modelRaw
-                  ).isEmpty
-        {
-            // Clear through the *read* predicate, not a parallel copy of it. Context Builder
-            // eligibility is stricter than the role rule: it also requires the bucket's agent to
-            // be the persisted Context Builder agent, because buckets for other agents are
-            // deliberately retained as per-agent memory.
-            pins[resolvedAgentRaw] = nil
-        }
+        pins[resolvedAgentRaw] = edited.isEmpty ? nil : edited
         next.contextBuilderModelParametersByAgent = pins.isEmpty ? nil : pins
         return next
+    }
+
+    /// One pin edit applied to a stored bucket, where `eligible` is the part of it the surface
+    /// displays. Set keeps the eligible siblings, replacing only the edited identity; clear
+    /// removes the identity from the bucket. Returns nil when the edit changes nothing, and an
+    /// empty array when the bucket should be removed.
+    private static func editedBucket(
+        _ bucket: [ACPModelParameterSelection],
+        eligible: [ACPModelParameterSelection],
+        applying change: ACPModelParameterPinChange
+    ) -> [ACPModelParameterSelection]? {
+        switch change {
+        case let .set(selection):
+            return ACPModelParameterSelection.normalized(eligible + [selection])
+        case let .clear(identity):
+            guard eligible.contains(where: { $0.identity == identity }) else { return nil }
+            return bucket.filter { $0.identity != identity }
+        }
     }
 
     private static func normalizedChatModelRaw(_ raw: String?) -> String? {

@@ -10,12 +10,38 @@ enum ACPModelParameterKind: String, Codable, Hashable, CaseIterable {
         case .speed: 1
         }
     }
+}
 
-    /// Display name for a control synthesized from saved intent alone, with no live
-    /// definition to supply the provider's own wording.
+/// Per-kind wording for pin controls when no live definition supplies the provider's own.
+extension ACPModelParameterKind {
+    /// Display name for a control synthesized from saved intent alone.
     var recoveryDisplayName: String {
         switch self {
         case .thinking: "Thinking"
+        case .speed: "Speed"
+        }
+    }
+
+    /// The noun a Default tooltip uses for the provider's current value.
+    var tooltipNoun: String {
+        switch self {
+        case .thinking: "effort"
+        case .speed: "speed"
+        }
+    }
+
+    /// The noun for a saved pin in unavailable-value tooltips.
+    var savedValueNoun: String {
+        switch self {
+        case .thinking: "thinking level"
+        case .speed: "speed"
+        }
+    }
+
+    /// Title for a saved pin's tooltip when no definition names the parameter.
+    var savedValueTitle: String {
+        switch self {
+        case .thinking: "Thinking level"
         case .speed: "Speed"
         }
     }
@@ -80,28 +106,6 @@ struct ACPModelParameterSelection: Codable, Hashable {
         )
     }
 
-    /// Build the single `.thinking` pin for an OpenCode-style effort chip selection. `configID`
-    /// comes from the live advertised definition (never assumed to be `"effort"`); `valueRaw == nil`
-    /// clears. Returns nil when there is nothing to store.
-    static func thinkingPin(
-        configID: String,
-        valueRaw: String?,
-        providerID: ACPProviderID,
-        modelRaw: String
-    ) -> [Self]? {
-        let trimmedConfigID = configID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let valueRaw, !trimmedConfigID.isEmpty else { return nil }
-        return [
-            ACPModelParameterSelection(
-                providerID: providerID,
-                baseModelRaw: modelRaw,
-                kind: .thinking,
-                configID: trimmedConfigID,
-                valueRaw: valueRaw
-            )
-        ]
-    }
-
     static func normalized(_ selections: [Self]) -> [Self] {
         var valueByIdentity: [ACPModelParameterIdentity: Self] = [:]
         var orderedIdentities: [ACPModelParameterIdentity] = []
@@ -120,17 +124,64 @@ struct ACPModelParameterSelection: Codable, Hashable {
         activeBaseModelRaw: String,
         from selections: [Self]
     ) -> [Self] {
-        let activeIdentity = ACPModelParameterIdentity.canonicalBaseModelRaw(
-            activeBaseModelRaw,
-            providerID: providerID
-        )
-        return normalized(selections).filter {
+        normalized(selections).filter {
             $0.providerID == providerID
-                && ACPModelParameterIdentity.canonicalBaseModelRaw(
-                    $0.baseModelRaw,
-                    providerID: providerID
-                ) == activeIdentity
+                && ACPModelParameterIdentity.sameModel($0.baseModelRaw, activeBaseModelRaw, providerID: providerID)
         }
+    }
+}
+
+/// One edit to a saved parameter pin, addressed to a single provider/model/kind identity.
+///
+/// Pin surfaces send an operation rather than a replacement bucket, and storage merges it into
+/// its latest state. A menu opened before another surface pinned a sibling kind therefore can
+/// never write a stale bucket over that newer sibling.
+enum ACPModelParameterPinChange: Hashable {
+    /// Pin an advertised value. The selector and value are the provider's wire strings.
+    case set(ACPModelParameterSelection)
+    /// Remove the pin for one identity. Needs no discovered selector.
+    case clear(ACPModelParameterIdentity)
+
+    var identity: ACPModelParameterIdentity {
+        switch self {
+        case let .set(selection): selection.identity
+        case let .clear(identity): identity
+        }
+    }
+
+    /// A set with a blank selector or value cannot reach the wire. Callers treat it as a no-op,
+    /// never as a clear.
+    var isApplicable: Bool {
+        guard case let .set(selection) = self else { return true }
+        return !selection.configID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !selection.valueRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Whether this edit addresses `modelRaw` for `providerID` under canonical model identity.
+    func targets(providerID: ACPProviderID, modelRaw: String) -> Bool {
+        identity.providerID == providerID
+            && ACPModelParameterIdentity.sameModel(
+                identity.canonicalBaseModelRaw,
+                modelRaw,
+                providerID: providerID
+            )
+    }
+
+    /// The pin for choosing `choice` from an advertised definition, keeping its exact selector
+    /// and wire value.
+    static func pinning(
+        _ choice: ACPModelParameterChoice,
+        of definition: ACPModelParameterDefinition,
+        providerID: ACPProviderID,
+        baseModelRaw: String
+    ) -> Self {
+        .set(ACPModelParameterSelection(
+            providerID: providerID,
+            baseModelRaw: baseModelRaw,
+            kind: definition.kind,
+            configID: definition.configID,
+            valueRaw: choice.rawValue
+        ))
     }
 }
 
@@ -156,65 +207,105 @@ struct ACPModelParameterIdentity: Hashable {
         }
         return raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
+
+    /// Whether two model strings name the same model for `providerID`. Canonicalization is
+    /// idempotent, so either side may already be canonical.
+    static func sameModel(_ lhs: String, _ rhs: String, providerID: ACPProviderID) -> Bool {
+        canonicalBaseModelRaw(lhs, providerID: providerID) == canonicalBaseModelRaw(rhs, providerID: providerID)
+    }
 }
 
-struct ACPResolvedModelParameter: Equatable {
+extension AgentModelCatalog.NormalizedAgentSelection {
+    /// Whether a parameter pin captured for `providerID`'s `modelRaw` still addresses this
+    /// selection. Always false for an agent with no ACP provider.
+    func isPinTarget(providerID: ACPProviderID, modelRaw: String) -> Bool {
+        agent.acpProviderID == providerID
+            && ACPModelParameterIdentity.sameModel(self.modelRaw, modelRaw, providerID: providerID)
+    }
+}
+
+/// One parameter kind for a selected provider and model, as every pin surface lists it: the
+/// advertised definition when exactly one exists, and the saved pin when there is one. Surfaces
+/// apply their own display policies on top; nothing here is persisted.
+struct ACPModelParameterPinControl: Hashable {
+    let providerID: ACPProviderID
+    /// The advertised set's base model when a definition exists, else the saved pin's.
     let baseModelRaw: String
-    let definition: ACPModelParameterDefinition
-    let selectedChoice: ACPModelParameterChoice
+    let kind: ACPModelParameterKind
+    /// Nil while metadata is missing, loading, or failed, and when the kind is advertised more
+    /// than once (the runtime cannot pick between ambiguous selectors either).
+    let definition: ACPModelParameterDefinition?
+    let saved: ACPModelParameterSelection?
+    /// Whether the provider's parameter set for this model resolved. With a set but no usable
+    /// definition, the model does not offer this kind unambiguously, so a saved value cannot
+    /// apply; without a set, metadata is simply unknown.
+    let hasParameterSet: Bool
+
+    var identity: ACPModelParameterIdentity {
+        ACPModelParameterIdentity(providerID: providerID, baseModelRaw: baseModelRaw, kind: kind)
+    }
+
+    /// Whether the provider's metadata resolved and cannot apply the saved value: the value is
+    /// absent from the definition's choices (for example a level later disabled in
+    /// `opencode.json`), or the model offers no unambiguous definition for the kind. While
+    /// metadata is missing, loading, or failed, a saved value is not reported unavailable.
+    var isSavedValueUnavailable: Bool {
+        guard let savedValueRaw = saved?.valueRaw else { return false }
+        guard let definition else { return hasParameterSet }
+        return definition.choice(matching: savedValueRaw) == nil
+    }
 }
 
 enum ACPModelParameterResolver {
-    static func resolve(
-        providerID: ACPProviderID,
-        selectedModelRaw: String,
-        persistedSelections: [ACPModelParameterSelection],
-        workspacePath: String? = nil,
-        openCodeParameters: OpenCodeACPModelParameterSnapshot? = nil
-    ) -> [ACPResolvedModelParameter] {
-        guard let parameterSet = parameterSet(
-            providerID: providerID,
-            selectedModelRaw: selectedModelRaw,
-            workspacePath: workspacePath,
-            openCodeParameters: openCodeParameters
-        ) else { return [] }
-        return resolve(
-            parameterSet: parameterSet,
-            providerID: providerID,
-            persistedSelections: persistedSelections
-        )
+    /// The composer's displayed choice for one definition. OpenCode must show unsupported saved
+    /// intent, not a default that the next run will never use. Cursor deliberately retains its
+    /// display fallback to the advertised current value.
+    static func composerSelectedChoice(
+        definition: ACPModelParameterDefinition,
+        saved: ACPModelParameterSelection?,
+        providerID: ACPProviderID
+    ) -> ACPModelParameterChoice? {
+        let savedChoice = saved.flatMap { selection in
+            definition.choice(matching: selection.valueRaw)
+                ?? (
+                    providerID == .openCode
+                        ? ACPModelParameterChoice(rawValue: selection.valueRaw, displayName: selection.valueRaw)
+                        : nil
+                )
+        }
+        return savedChoice ?? definition.choice(matching: definition.currentValueRaw)
     }
 
-    private static func resolve(
-        parameterSet: ACPModelParameterSet,
+    /// Every parameter kind to list for `selectedModelRaw`: the union of advertised kinds and
+    /// saved kinds, in `sortOrder`, one control per kind that has an unambiguous definition or a
+    /// saved pin. `parameterSet` comes from `parameterSet(...)`; nil means no usable metadata.
+    static func pinControls(
         providerID: ACPProviderID,
+        selectedModelRaw: String,
+        parameterSet: ACPModelParameterSet?,
         persistedSelections: [ACPModelParameterSelection]
-    ) -> [ACPResolvedModelParameter] {
-        parameterSet.parameters.sorted { $0.kind.sortOrder < $1.kind.sortOrder }.compactMap { definition in
-            let definitionIdentity = ACPModelParameterIdentity(
+    ) -> [ACPModelParameterPinControl] {
+        let savedByKind = Dictionary(
+            ACPModelParameterSelection.selections(
+                for: providerID,
+                activeBaseModelRaw: selectedModelRaw,
+                from: persistedSelections
+            ).map { ($0.kind, $0) },
+            uniquingKeysWith: { _, last in last }
+        )
+        let kinds = Set((parameterSet?.parameters ?? []).map(\.kind)).union(savedByKind.keys)
+        return kinds.sorted { $0.sortOrder < $1.sortOrder }.compactMap { kind in
+            let definition = parameterSet?.definition(kind: kind)
+            let saved = savedByKind[kind]
+            guard definition != nil || saved != nil else { return nil }
+            let baseModelRaw = definition != nil ? parameterSet?.baseModelRaw : saved?.baseModelRaw
+            return ACPModelParameterPinControl(
                 providerID: providerID,
-                baseModelRaw: parameterSet.baseModelRaw,
-                kind: definition.kind
-            )
-            let saved = persistedSelections.last { selection in
-                selection.identity == definitionIdentity
-            }
-            // OpenCode must show unsupported saved intent, not a default that the next run
-            // will never use. Cursor deliberately retains its existing display fallback.
-            let savedChoice = saved.flatMap { selection in
-                definition.choice(matching: selection.valueRaw)
-                    ?? (
-                        providerID == .openCode
-                            ? ACPModelParameterChoice(rawValue: selection.valueRaw, displayName: selection.valueRaw)
-                            : nil
-                    )
-            }
-            guard let selectedChoice = savedChoice ?? definition.choice(matching: definition.currentValueRaw)
-            else { return nil }
-            return .init(
-                baseModelRaw: parameterSet.baseModelRaw,
+                baseModelRaw: baseModelRaw ?? selectedModelRaw,
+                kind: kind,
                 definition: definition,
-                selectedChoice: selectedChoice
+                saved: saved,
+                hasParameterSet: parameterSet != nil
             )
         }
     }
@@ -237,6 +328,27 @@ enum ACPModelParameterResolver {
         default:
             nil
         }
+    }
+
+    /// The parameter set a pin surface lists for `selectedModelRaw`. OpenCode metadata needs the
+    /// surface's resolved discovery key: no key means no OpenCode set, never a nil-workspace
+    /// lookup. Other providers ignore the key and resolve without a session.
+    static func parameterSet(
+        providerID: ACPProviderID,
+        selectedModelRaw: String,
+        openCodeKey: OpenCodeACPModelParameterKey?,
+        openCodeParameters: OpenCodeACPModelParameterSnapshot?
+    ) -> ACPModelParameterSet? {
+        guard providerID == .openCode else {
+            return parameterSet(providerID: providerID, selectedModelRaw: selectedModelRaw)
+        }
+        guard let openCodeKey else { return nil }
+        return parameterSet(
+            providerID: providerID,
+            selectedModelRaw: selectedModelRaw,
+            workspacePath: openCodeKey.workspacePath,
+            openCodeParameters: openCodeParameters
+        )
     }
 
     /// Accept OpenCode metadata only when the observation is `.available`, its key matches the

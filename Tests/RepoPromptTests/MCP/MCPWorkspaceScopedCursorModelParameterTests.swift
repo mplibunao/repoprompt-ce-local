@@ -1153,6 +1153,99 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         XCTAssertEqual(stagedSelections, [selection(value: "low")])
     }
 
+    /// Cursor effort and speed pinned through the Settings mutation path persist, reload, and
+    /// both reach a role-label run, through workspace inheritance and a workspace override. An
+    /// explicit one-kind value replaces only that kind, and a compound ID inherits neither pin.
+    func testSettingsPinnedCursorEffortAndSpeedReachRoleLabelRun() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let window = try await makeWindow(
+            name: "Cursor MCP Settings Pins",
+            root: fixture.root,
+            isolatesProviderCatalogs: true
+        )
+        defer { WindowStatesManager.shared.unregisterWindowState(window) }
+        let workspaceID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.id)
+        let settingsURL = fixture.root.appendingPathComponent("Settings/globalSettings.json")
+        let effort = selection(value: "xhigh")
+        let speed = speedSelection(value: "false")
+
+        let writer = try isolatedSettingsStore(fileURL: settingsURL)
+        for pin in [effort, speed] {
+            try writer.setAgentModelsRoleModelParameter(
+                .set(pin),
+                roleRawValue: AgentModelCatalog.TaskLabelKind.engineer.rawValue,
+                displayedSelectionID: XCTUnwrap(AgentModelSelectionID.parse(cursorModelID)),
+                scope: .global
+            )
+        }
+        let reloaded = try isolatedSettingsStore(fileURL: settingsURL)
+        XCTAssertEqual(reloaded.globalAgentModelsProfile().mcpAgentRoleModelParameters?["engineer"], [effort, speed])
+        reloaded.setWorkspaceAgentModelsInheritanceMode(workspaceID: workspaceID, mode: .useGlobalSettings)
+        AgentMCPSelectionResolver.testRoleDefaultsStore = reloaded
+        defer { AgentMCPSelectionResolver.testRoleDefaultsStore = nil }
+
+        func stagedSelections(_ args: [String: Value]) async throws -> [ACPModelParameterSelection] {
+            var staged: [ACPModelParameterSelection] = [selection(value: "should-be-replaced")]
+            let service = makeRunService(
+                window: window,
+                successfulStart: true,
+                observeSuccessfulStart: { staged = $0 }
+            )
+            _ = try await service.execute(args: args.merging([
+                "op": .string("start"),
+                "message": .string("Run with Settings-pinned Cursor parameters."),
+                "detach": .bool(true)
+            ]) { explicit, _ in explicit })
+            return staged
+        }
+
+        let inherited = try await stagedSelections(["model_id": .string("engineer")])
+        XCTAssertEqual(Set(inherited), [effort, speed], "The inheriting workspace receives both global pins.")
+
+        let explicitEffort = try await stagedSelections([
+            "model_id": .string("engineer"),
+            "model_parameters": request([("effort", "low")])
+        ])
+        XCTAssertEqual(Set(explicitEffort), [selection(value: "low"), speed], "An explicit effort keeps the speed pin.")
+
+        let compound = try await stagedSelections(["model_id": .string(cursorModelID)])
+        XCTAssertTrue(compound.isEmpty, "A compound model_id inherits no role pin.")
+
+        reloaded.setWorkspaceAgentModelsInheritanceMode(workspaceID: workspaceID, mode: .useWorkspaceOverrides)
+        let workspaceSpeed = speedSelection(value: "true")
+        try reloaded.setAgentModelsRoleModelParameter(
+            .set(workspaceSpeed),
+            roleRawValue: AgentModelCatalog.TaskLabelKind.engineer.rawValue,
+            displayedSelectionID: XCTUnwrap(AgentModelSelectionID.parse(cursorModelID)),
+            scope: .workspace(workspaceID)
+        )
+        let overridden = try await stagedSelections(["model_id": .string("engineer")])
+        XCTAssertEqual(Set(overridden), [effort, workspaceSpeed], "The workspace override keeps its copied effort.")
+        XCTAssertEqual(
+            reloaded.globalAgentModelsProfile().mcpAgentRoleModelParameters?["engineer"],
+            [effort, speed],
+            "A workspace edit leaves the global pins alone."
+        )
+    }
+
+    private func isolatedSettingsStore(fileURL: URL) throws -> GlobalSettingsStore {
+        let suiteName = "MCPWorkspaceScopedCursorModelParameterTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+        return GlobalSettingsStore(defaults: defaults, fileStore: GlobalSettingsFileStore(fileURL: fileURL))
+    }
+
+    private func speedSelection(value: String) -> ACPModelParameterSelection {
+        ACPModelParameterSelection(
+            providerID: .cursor,
+            baseModelRaw: "grok-4.6",
+            kind: .speed,
+            configID: "fast",
+            valueRaw: value
+        )
+    }
+
     /// Isolated role-defaults store for the resolver's DEBUG seam. The engineer and explore roles
     /// carry distinct stored pins over the same cursor model, so per-role bucket identity and
     /// canonical-model filtering are both exercised.
@@ -1228,10 +1321,18 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         return Fixture(root: root)
     }
 
-    private func makeWindow(name: String, root: URL) async throws -> WindowState {
+    /// `isolatesProviderCatalogs: true` builds the window through
+    /// `ACPModelParameterTestSupport.makeWindowWithoutLiveProviderCatalogs()`.
+    private func makeWindow(
+        name: String,
+        root: URL,
+        isolatesProviderCatalogs: Bool = false
+    ) async throws -> WindowState {
         let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
         GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-        let window = WindowState()
+        let window = isolatesProviderCatalogs
+            ? ACPModelParameterTestSupport.makeWindowWithoutLiveProviderCatalogs()
+            : WindowState()
         WindowStatesManager.shared.registerWindowState(window)
         GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
         window.apiSettingsViewModel.isCursorConnected = true

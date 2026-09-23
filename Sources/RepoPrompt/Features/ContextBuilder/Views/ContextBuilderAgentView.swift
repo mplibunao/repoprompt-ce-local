@@ -848,20 +848,16 @@ struct ContextBuilderAgentView: View {
                     ACPModelParameterProbeView(
                         modelRaw: expectedModelRaw,
                         providerID: providerID,
+                        providerDisplayName: viewModel.selectedAgent.displayName,
                         probeContext: .resolved(viewModel.chooserProbeWorkspacePath),
-                        pinnedValueRaw: viewModel.contextBuilderThinkingParameterValueRaw,
+                        savedSelections: viewModel.contextBuilderModelParameters,
                         isEnabled: !isContextBuilderRunningForTab
-                    ) { configID, value in
+                    ) { change in
                         // Guarded write: re-check the live run permission, then re-check the
                         // captured provider/model against live state inside the setter.
                         guard !isContextBuilderRunningForTab else { return }
                         viewModel.setContextBuilderModelParameter(
-                            ACPModelParameterSelection.thinkingPin(
-                                configID: configID,
-                                valueRaw: value,
-                                providerID: providerID,
-                                modelRaw: expectedModelRaw
-                            ),
+                            change,
                             expectedProviderID: providerID,
                             expectedModelRaw: expectedModelRaw,
                             expectedScope: expectedScope

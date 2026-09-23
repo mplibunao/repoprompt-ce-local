@@ -70,7 +70,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
 
         store.setWorkspaceAgentModelsInheritanceMode(workspaceID: workspaceID, mode: .useWorkspaceOverrides)
         store.setAgentModelsContextBuilderModelParameter(
-            [cbPin],
+            .set(cbPin),
             agentRaw: "openCode",
             modelRaw: Self.modelRaw,
             scope: .workspace(workspaceID)
@@ -105,7 +105,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
     func testRolePinBucketDropsWhenOverrideMovesToAnotherModel() throws {
         let store = try makeStore()
         store.setAgentModelsRoleModelParameter(
-            [makePin(valueRaw: "high")],
+            .set(makePin(valueRaw: "high")),
             roleRawValue: "engineer",
             displayedSelectionID: AgentModelSelectionID(agentRaw: "openCode", modelRaw: Self.modelRaw),
             scope: .global
@@ -152,13 +152,13 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
         let store = try makeStore()
         let roleSelection = AgentModelSelectionID(agentRaw: "openCode", modelRaw: Self.modelRaw)
         store.setAgentModelsRoleModelParameter(
-            [makePin(valueRaw: "high")],
+            .set(makePin(valueRaw: "high")),
             roleRawValue: "engineer",
             displayedSelectionID: roleSelection,
             scope: .global
         )
         store.setAgentModelsContextBuilderModelParameter(
-            [makePin(valueRaw: "low")],
+            .set(makePin(valueRaw: "low")),
             agentRaw: "openCode",
             modelRaw: Self.modelRaw,
             scope: .global
@@ -169,13 +169,13 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
         XCTAssertNotNil(savedGlobalDefaults["contextBuilderModelParametersByAgent"])
 
         store.setAgentModelsRoleModelParameter(
-            nil,
+            .clear(makePin(valueRaw: "high").identity),
             roleRawValue: "engineer",
             displayedSelectionID: roleSelection,
             scope: .global
         )
         store.setAgentModelsContextBuilderModelParameter(
-            nil,
+            .clear(makePin(valueRaw: "low").identity),
             agentRaw: "openCode",
             modelRaw: Self.modelRaw,
             scope: .global
@@ -195,13 +195,13 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
     func testNoOpPinWriteLeavesFileBytesUntouched() throws {
         let store = try makeStore()
         store.setAgentModelsRoleModelParameter(
-            [makePin(valueRaw: "high")],
+            .set(makePin(valueRaw: "high")),
             roleRawValue: "engineer",
             displayedSelectionID: AgentModelSelectionID(agentRaw: "openCode", modelRaw: Self.modelRaw),
             scope: .global
         )
         store.setAgentModelsContextBuilderModelParameter(
-            [makePin(valueRaw: "low")],
+            .set(makePin(valueRaw: "low")),
             agentRaw: "openCode",
             modelRaw: Self.modelRaw,
             scope: .global
@@ -209,13 +209,13 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
         let bytesAfterWrites = try Data(contentsOf: fileURL)
 
         store.setAgentModelsRoleModelParameter(
-            [makePin(valueRaw: "high")],
+            .set(makePin(valueRaw: "high")),
             roleRawValue: "engineer",
             displayedSelectionID: AgentModelSelectionID(agentRaw: "openCode", modelRaw: Self.modelRaw),
             scope: .global
         )
         store.setAgentModelsContextBuilderModelParameter(
-            [makePin(valueRaw: "low")],
+            .set(makePin(valueRaw: "low")),
             agentRaw: "openCode",
             modelRaw: Self.modelRaw,
             scope: .global
@@ -261,7 +261,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
 
         let store = try makeStore()
         store.setAgentModelsRoleModelParameter(
-            [makePin(valueRaw: "high")],
+            .set(makePin(valueRaw: "high")),
             roleRawValue: "engineer",
             displayedSelectionID: AgentModelSelectionID(agentRaw: "openCode", modelRaw: Self.modelRaw),
             scope: .global
@@ -284,7 +284,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
     func testSameLineageV6IsRejectedOnLoadAndRefusedByCompatibleImport() throws {
         let store = try makeStore()
         store.setAgentModelsRoleModelParameter(
-            [makePin(valueRaw: "high")],
+            .set(makePin(valueRaw: "high")),
             roleRawValue: "engineer",
             displayedSelectionID: AgentModelSelectionID(agentRaw: "openCode", modelRaw: Self.modelRaw),
             scope: .global
@@ -317,7 +317,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
     func testOldWriterV2FileWithGlobalPinsRestampsV8OnCurrentSave() throws {
         let store = try makeStore()
         store.setAgentModelsRoleModelParameter(
-            [makePin(valueRaw: "high")],
+            .set(makePin(valueRaw: "high")),
             roleRawValue: "engineer",
             displayedSelectionID: AgentModelSelectionID(agentRaw: "openCode", modelRaw: Self.modelRaw),
             scope: .global
@@ -379,7 +379,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
         try? FileManager.default.removeItem(at: fileURL)
         let store = try makeStore()
         store.setAgentModelsRoleModelParameter(
-            [makePin(valueRaw: "high")],
+            .set(makePin(valueRaw: "high")),
             roleRawValue: "engineer",
             displayedSelectionID: AgentModelSelectionID(agentRaw: "openCode", modelRaw: Self.modelRaw),
             scope: .global
@@ -436,7 +436,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
         try? FileManager.default.removeItem(at: fileURL)
         let store = try makeStore()
         store.setAgentModelsRoleModelParameter(
-            [makePin(valueRaw: "ultra")],
+            .set(makePin(valueRaw: "ultra")),
             roleRawValue: "engineer",
             displayedSelectionID: AgentModelSelectionID(agentRaw: "openCode", modelRaw: Self.modelRaw),
             scope: .global
@@ -494,7 +494,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
         let store = try makeStore()
         store.setWorkspaceAgentModelsInheritanceMode(workspaceID: workspaceID, mode: .useWorkspaceOverrides)
         store.setAgentModelsRoleModelParameter(
-            [makePin(valueRaw: "high")],
+            .set(makePin(valueRaw: "high")),
             roleRawValue: "engineer",
             displayedSelectionID: AgentModelSelectionID(agentRaw: "openCode", modelRaw: Self.modelRaw),
             scope: .global

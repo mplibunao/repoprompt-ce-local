@@ -14,14 +14,15 @@ final class OpenCodeRunRequestPinPropagationTests: XCTestCase {
         let session = AgentModeViewModel.TabSession(tabID: UUID())
         session.selectedAgent = .openCode
         session.selectedModelRaw = modelRaw
-        session.acpModelParameterSelections = try XCTUnwrap(
-            ACPModelParameterSelection.thinkingPin(
-                configID: "effort",
-                valueRaw: "max",
+        session.acpModelParameterSelections = [
+            ACPModelParameterSelection(
                 providerID: .openCode,
-                modelRaw: modelRaw
+                baseModelRaw: modelRaw,
+                kind: .thinking,
+                configID: "effort",
+                valueRaw: "max"
             )
-        )
+        ]
 
         let request = try XCTUnwrap(AgentModeRunService.makeACPRunRequest(
             session: session,
@@ -46,14 +47,15 @@ final class OpenCodeRunRequestPinPropagationTests: XCTestCase {
         let session = AgentModeViewModel.TabSession(tabID: UUID())
         session.selectedAgent = .openCode
         session.selectedModelRaw = "ollama-cloud/glm-5.3"
-        session.acpModelParameterSelections = try XCTUnwrap(
-            ACPModelParameterSelection.thinkingPin(
-                configID: "effort",
-                valueRaw: "max",
+        session.acpModelParameterSelections = [
+            ACPModelParameterSelection(
                 providerID: .openCode,
-                modelRaw: "ollama-cloud/deepseek-4.1-flash"
+                baseModelRaw: "ollama-cloud/deepseek-4.1-flash",
+                kind: .thinking,
+                configID: "effort",
+                valueRaw: "max"
             )
-        )
+        ]
 
         let request = try XCTUnwrap(AgentModeRunService.makeACPRunRequest(
             session: session,

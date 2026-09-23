@@ -415,11 +415,12 @@ final class AgentModelsSettingsViewModel: ObservableObject {
         }
     }
 
-    /// Set or clear one role's OpenCode effort pin, persisting the displayed role model choice
-    /// atomically.
+    /// Apply one role parameter-pin edit, persisting the displayed role model choice atomically
+    /// when it sets a pin.
     ///
     /// Guarded write: the captured target (`expectedProviderID`/`expectedModelRaw`/`expectedScope`)
-    /// is re-checked against live host state before writing. The discovery key alone is
+    /// is re-checked against live host state before writing, and the edit's own identity must
+    /// address that target. The discovery key alone is
     /// insufficient — switching Settings global↔workspace leaves the key identical — so a stale
     /// menu click is dropped rather than written to the old scope or a changed model.
     ///
@@ -431,47 +432,42 @@ final class AgentModelsSettingsViewModel: ObservableObject {
     /// `inheritanceMode = .useWorkspaceOverrides`, so a stale click would silently re-enable
     /// workspace overrides and undo the newer inheritance choice.
     func setRoleModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+        _ change: ACPModelParameterPinChange,
         for role: AgentModelCatalog.TaskLabelKind,
         expectedProviderID: ACPProviderID,
         expectedModelRaw: String,
         expectedScope: AgentModelsEditingScope
     ) {
+        guard change.targets(providerID: expectedProviderID, modelRaw: expectedModelRaw) else { return }
         reloadScopedState()
         guard editingScope == expectedScope,
               let resolution = roleDefaultsResolutions.first(where: { $0.role == role }),
-              resolution.effective.agent.acpProviderID == expectedProviderID,
-              ACPModelParameterIdentity.canonicalBaseModelRaw(
-                  resolution.effective.modelRaw,
-                  providerID: expectedProviderID
-              ) == ACPModelParameterIdentity.canonicalBaseModelRaw(
-                  expectedModelRaw,
-                  providerID: expectedProviderID
-              )
+              resolution.effective.isPinTarget(providerID: expectedProviderID, modelRaw: expectedModelRaw)
         else { return }
-        settingsManager.setAgentModelsRoleModelParameter(
-            selections,
+        guard settingsManager.setAgentModelsRoleModelParameter(
+            change,
             roleRawValue: role.rawValue,
             displayedSelectionID: AgentModelSelectionID(
                 agentRaw: resolution.effective.agent.rawValue,
                 modelRaw: resolution.effective.modelRaw
             ),
             scope: editingScope
-        )
+        ) else { return }
         reloadScopedState()
         // `postAgentRoleDefaultsChanged()` already refreshes; calling it here too is dead weight.
         postAgentRoleDefaultsChanged()
     }
 
-    /// Set or clear the Context Builder agent's OpenCode effort pin, persisting the displayed
-    /// CB agent+model choice atomically. Guarded like `setRoleModelParameter`: the captured
+    /// Apply one Context Builder parameter-pin edit, persisting the displayed CB agent+model
+    /// choice atomically when it sets a pin. Guarded like `setRoleModelParameter`: the captured
     /// scope/provider/model must still match live host state.
     func setContextBuilderModelParameter(
-        _ selections: [ACPModelParameterSelection]?,
+        _ change: ACPModelParameterPinChange,
         expectedProviderID: ACPProviderID,
         expectedModelRaw: String,
         expectedScope: AgentModelsEditingScope
     ) {
+        guard change.targets(providerID: expectedProviderID, modelRaw: expectedModelRaw) else { return }
         // Validate against — and write — the live DISPLAYED selection, which is what the chip is
         // mounted for. The write persists that displayed choice atomically with the pin, so
         // persisted and displayed agree after one click.
@@ -481,33 +477,20 @@ final class AgentModelsSettingsViewModel: ObservableObject {
         reloadScopedState()
         let displayed = selectedContextBuilderSelection
         guard editingScope == expectedScope,
-              let providerID = displayed.agent.acpProviderID,
-              providerID == expectedProviderID,
-              ACPModelParameterIdentity.canonicalBaseModelRaw(
-                  displayed.modelRaw,
-                  providerID: providerID
-              ) == ACPModelParameterIdentity.canonicalBaseModelRaw(
-                  expectedModelRaw,
-                  providerID: providerID
-              )
+              displayed.isPinTarget(providerID: expectedProviderID, modelRaw: expectedModelRaw)
         else { return }
-        settingsManager.setAgentModelsContextBuilderModelParameter(
-            selections,
+        guard settingsManager.setAgentModelsContextBuilderModelParameter(
+            change,
             agentRaw: displayed.agent.rawValue,
             modelRaw: displayed.modelRaw,
             scope: editingScope
-        )
+        ) else { return }
         reloadScopedState()
         refresh()
         postShouldRefresh(reason: "agent_models.context_builder_model_parameter")
     }
 
-    /// The saved `.thinking` pin value for the current Context Builder selection, if any.
-    var contextBuilderThinkingParameterValueRaw: String? {
-        contextBuilderModelParameters.last { $0.kind == .thinking }?.valueRaw
-    }
-
-    /// The saved Context Builder effort pin for the **displayed** CB selection. Display and probe
+    /// The saved Context Builder parameter pins for the **displayed** CB selection. Display and probe
     /// must agree with the model the chip is mounted for (availability fallback can make the
     /// displayed choice differ from the persisted one without writing back).
     var contextBuilderModelParameters: [ACPModelParameterSelection] {
