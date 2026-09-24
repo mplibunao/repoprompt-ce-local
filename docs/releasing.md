@@ -246,10 +246,11 @@ Claude Code, or Codex.
 Run against what production already has open; don't create workspaces, windows, or
 worktrees for acceptance. `$W1` is a window from the first arm. `$FILE` is a file in that
 window's workspace, and `$WT` is the path of any existing linked worktree of it. Select in a
-tab you can change, not one in active use. The two `$W2` lines run only when a second window
-is already open; otherwise the receipt records them as not run.
+tab you can change, not one in active use; `$T1` is that tab's `context_id` from
+`"$CLI" -w "$W1" -c bind_context -j '{"op":"list"}'`. The two `$W2` lines run only when a
+second window is already open; otherwise the receipt records them as not run.
 
-The Codex and Claude Code arms use `codexExec:gpt-5.6-sol-low` and
+The Codex and Claude Code arms use `codexExec:gpt-6-luna-low` and
 `claudeCode:haiku:low`. Update these when a provider retires a model. If
 Claude Code rejects its ID as an unknown `model_id`, or Codex reports that the
 model doesn't exist, look up a current one:
@@ -259,7 +260,7 @@ model doesn't exist, look up a current one:
 2. Run
    `"$CLI" -w "$W1" -c agent_manage -j '{"op":"list_agents","roles_only":false}'`
    and copy an identifier from `agents[].models[].model_id`. Expand a Codex
-   brace pattern such as `codexExec:gpt-5.6-sol-{low|medium|high}` to one
+   brace pattern such as `codexExec:gpt-6-luna-{low|medium|high}` to one
    alternative, and avoid `-fast` identifiers.
 3. Turn the setting back on. A typed-in identifier keeps working while it is on.
 
@@ -267,13 +268,13 @@ Every arm must pass:
 
 ```bash
 "$CLI" -e 'windows'                                                              # window IDs
-"$CLI" -w "$W1" -c manage_selection -j '{"op":"set","paths":["'"$FILE"'"]}'
+"$CLI" -w "$W1" -t "$T1" -c manage_selection -j '{"op":"set","paths":["'"$FILE"'"]}'
 "$CLI" -w "$W2" -c manage_selection -j '{"op":"set","paths":["<another file>"]}'
-"$CLI" -w "$W1" -c manage_selection -j '{"op":"get","view":"files"}'              # still $FILE only
+"$CLI" -w "$W1" -t "$T1" -c manage_selection -j '{"op":"get","view":"files"}'     # still $FILE only
 "$CLI" -w "$W2" -c manage_selection -j '{"op":"get","view":"files"}'              # only the $W2 file
-"$CLI" -w "$W1" -c context_builder -j '{"instructions":"Reply with the selected file and its root.","response_type":"question"}' # names $FILE, never the $W2 file
-"$CLI" -w "$W1" -c oracle_send -j '{"message":"Reply ORACLE_OK and identify the selected root."}' # terminal ORACLE_OK, reusable chat_id
-"$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"codexExec:gpt-5.6-sol-low","message":"Reply CODEX_OK.","detach":true}'
+"$CLI" -w "$W1" -t "$T1" -c context_builder -j '{"instructions":"Reply with the selected file and its root.","response_type":"question"}' # names $FILE, never the $W2 file
+"$CLI" -w "$W1" -t "$T1" -c oracle_send -j '{"message":"Reply ORACLE_OK and identify the selected root."}' # terminal ORACLE_OK, reusable chat_id
+"$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"codexExec:gpt-6-luna-low","message":"Reply CODEX_OK.","detach":true}'
 "$CLI" -w "$W1" -c agent_run -j '{"op":"wait","session_id":"<codex session>","timeout":180}' # terminal state carrying CODEX_OK
 "$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"claudeCode:haiku:low","message":"Wait for steering.","detach":true}' # returns session_id
 "$CLI" -w "$W1" -c agent_run -j '{"op":"steer","session_id":"<claude session>","message":"Reply CLAUDE_STEER_OK."}'
@@ -285,8 +286,8 @@ Every arm must pass:
 
 If the Codex wait ends with the provider refusing the model or a usage-limit
 message, that is an account problem only when the refused model is the chosen
-identifier without its effort suffix (`gpt-5.6-sol` for
-`codexExec:gpt-5.6-sol-low`) or the message is a usage limit. Then choose
+identifier without its effort suffix (`gpt-6-luna` for
+`codexExec:gpt-6-luna-low`) or the message is a usage limit. Then choose
 another Codex identifier or retry later. It is never a pass. A refusal naming
 any other model is a RepoPrompt failure to investigate.
 
