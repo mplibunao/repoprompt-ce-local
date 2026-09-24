@@ -66,7 +66,7 @@ The dependency order is:
 5. target-local Swift 6 language-mode adoption in the same leaf-to-root order;
 6. per-target Swift 6.2 execution/isolation decisions.
 
-The mixed `RepoPromptApp` target should continue to use explicit `@MainActor` declarations; target-wide default MainActor isolation is appropriate only for a target proven to be wholly UI/entry owned. No phase may launch or relaunch the visible app without separate approval.
+The mixed `RepoPromptApp` target should continue to use explicit `@MainActor` declarations; target-wide default MainActor isolation is appropriate only for a target proven to be wholly UI/entry owned. No phase may launch or relaunch the production app without separate approval.
 
 ## Work Items
 
@@ -104,7 +104,7 @@ The mixed `RepoPromptApp` target should continue to use explicit `@MainActor` de
 - **Outcome:** Enable complete checking for `RepoPromptMCP` and affected root tests while it remains in Swift 5 mode.
 - **Invariants:** Long-lived task ownership, cancellation, exactly-once continuation completion, bounded progress/backpressure, transport ordering, routing authority, process lifetime, and shutdown remain observable and deterministic.
 - **Exit gate:** No leaked tasks, lost cancellation, reordered progress, unbounded buffering, or undocumented unsafe sendability.
-- **Validation:** `make dev-swift-build PRODUCT=repoprompt-mcp`; focused `AgentRunSessionStore`, wait/drain, bootstrap/socket, parser/process, and transport suites. Use only non-disruptive `make dev-smoke` against an already-running approved app when runtime behavior changed.
+- **Validation:** `make dev-swift-build PRODUCT=repoprompt-mcp`; focused `AgentRunSessionStore`, wait/drain, bootstrap/socket, parser/process, and transport suites. Use only non-disruptive `make dev-smoke` against an already-running debug app when runtime behavior changed.
 
 ### 6. Remediate `RepoPromptApp` infrastructure and feature runtimes
 
@@ -133,7 +133,7 @@ The mixed `RepoPromptApp` target should continue to use explicit `@MainActor` de
 - **Outcome:** After Swift 6 mode is stable, evaluate four independent settings/contracts per target: SE-0466 default actor isolation; `NonisolatedNonsendingByDefault`; explicit or inferred isolated conformances; and `@concurrent`. Adoption is evidence-led, and explicit non-adoption is a valid result.
 - **Order within each target:** Decide default isolation first; enable caller-actor semantics and audit nonisolated async work; review isolated conformances; then profile whether any work needs explicit `@concurrent`. Keep headless/core/shared/provider/MCP targets non-default-isolated unless evidence proves otherwise; keep mixed `RepoPromptApp` explicit.
 - **Exit gate:** No inferred isolation changes an external conformance or forces background infrastructure onto MainActor; no blocking/CPU work is stranded on a caller actor; every isolated conformance is usable from its required domains; every `@concurrent` addition has safe crossings, cancellation ownership, and profiling evidence. Zero feature adoptions or zero `@concurrent` additions is acceptable.
-- **Validation and closure:** Use the smallest affected async, cancellation, conformance, delegate, serialization, and performance suites plus the owning product build for each adopted setting. Finish with `make dev-format`, `make dev-lint`, both product builds, `make dev-test`, `make dev-provider-test`, `make guardrails`, and `make dev-build`. Close every ledger row as fixed, explicitly deferred with an owner, or blocked with evidence; do not launch the visible app.
+- **Validation and closure:** Use the smallest affected async, cancellation, conformance, delegate, serialization, and performance suites plus the owning product build for each adopted setting. Finish with `make dev-format`, `make dev-lint`, both product builds, `make dev-test`, `make dev-provider-test`, `make guardrails`, and `make dev-build`. Close every ledger row as fixed, explicitly deferred with an owner, or blocked with evidence; do not launch the production app.
 
 ## Maintainer-Guidance Check
 

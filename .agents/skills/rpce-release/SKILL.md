@@ -20,7 +20,7 @@ Ask MP for any missing or ambiguous input instead of inferring it.
 
 ## Invocation boundary
 
-MP must be present throughout the promotion. Obtain immediate approval at every repository-required approval boundary, including visible-app lifecycle changes and GitHub-visible mutations. Follow `$rpce-contribution-check` before any commit or push.
+MP must be present throughout the promotion. Obtain immediate approval at every repository-required approval boundary, including production-app lifecycle changes and GitHub-visible mutations. Follow `$rpce-contribution-check` before any commit or push.
 
 The promoted artifact is the local self-signed production app. Do not distribute or upload the app artifact.
 

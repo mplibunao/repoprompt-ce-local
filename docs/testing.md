@@ -89,7 +89,7 @@ The Codex Desktop pre-start app-CLI isolation fallback remains in place through 
 large-root and linked-worktree startup. It drives `rpce-cli-debug` and the
 DEBUG-only `worktree_startup_benchmark` diagnostics. It never builds, installs,
 launches, stops, or relaunches RepoPrompt. A fresh-process (cold) run therefore
-requires a separately approved relaunch before invoking the script; label a run
+requires relaunching the debug app before invoking the script; label a run
 `cold` only when that boundary is true. An aged run requires the configured
 minimum existing Agent Mode session count and keeps aged and warm samples in
 separate distributions.
@@ -540,8 +540,8 @@ evidence.
 `codemap-gate` is the packaged-app release authority for live codemap demand.
 It uses the already-running current DEBUG app, `rpce-cli-debug`, the exact
 dedicated workspace plan above, and real `agent_run` sessions. It never builds,
-launches, stops, or relaunches the app. Prepare lifecycle state separately with
-the approval required by `AGENTS.md`. The planned root must be an owned,
+launches, stops, or relaunches the app. Prepare its lifecycle state separately.
+The planned root must be an owned,
 synthetic or explicitly source-allowlisted Git workspace with at least 5,000
 supported code files; the existing `plan` command's 100,000-file minimum is a
 valid stronger fixture. Each measured directory fixture must remain within the

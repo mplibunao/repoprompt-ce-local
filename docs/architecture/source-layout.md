@@ -204,4 +204,4 @@ make dev-build
 make dev-test
 ```
 
-Use `make run` only when it is safe to stop any existing RepoPrompt instance and launch the debug app.
+Use `make run` only when it is safe to stop the existing debug app instance and launch the debug app.

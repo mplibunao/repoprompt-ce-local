@@ -21,9 +21,9 @@ consumes at its current integration boundary.
 
 ## Version contract
 
-- The contract floor is **Codex CLI 0.153.4**.
-- Local validation accepts 0.153.4 or newer so a developer can detect drift before CI moves.
-- CI installs exactly `@openai/codex@0.153.4`, making the required check deterministic.
+- The contract floor is **Codex CLI 0.156.1**.
+- Local validation accepts 0.156.1 or newer so a developer can detect drift before CI moves.
+- CI installs exactly `@openai/codex@0.156.1`, making the required check deterministic.
 - The gate fails before generation when the installed CLI is older than the floor.
 
 This schema baseline and exact CI pin are distinct from
@@ -65,7 +65,7 @@ hook-key → `{trusted_hash}` object shape cannot be expressed by the current ch
 After a trust write, the post-write `hooks/list` result is the semantic success authority;
 `config/batchWrite.status` alone is not.
 
-The hardened 0.153.4 baseline checks 45 methods, 193 parameter paths, and 93 response paths. A failure names
+The hardened 0.156.1 baseline checks 45 methods, 193 parameter paths, and 93 response paths. A failure names
 the union, method, and exact missing field, required field, response path, or enum value.
 
 This is intentionally not a complete protocol mirror. New upstream methods do not fail the gate
@@ -182,6 +182,29 @@ The verified candidate retains the normalized Zsh 5.9 and `rg` payloads. Upstrea
 with the existing explicit `REPOPROMPT_CODEX_EXECUTABLE` override. No new outgoing request requires
 0.153.4, so the external admission minimum remains 0.149.0. Admission at that version does not prove
 Astra availability or full cross-version protocol compatibility.
+
+## 0.156.1 rotation findings (2026-09-23)
+
+This rotation moves the bundled runtime from 0.153.4 directly to `rust-v0.156.1`. The candidate
+flow rejected the official packages for one intentional package-policy change: both macOS packages
+add a native voice runtime under `codex-resources/voice/`. The reviewed manifest pins each
+target's complete 52-entry tree and all 30 thin Mach-Os per target; in the official packages,
+all 30 were observed to be Developer ID signed by `OpenAI OpCo, LLC` (team `2DC432GLL2`) with
+hardened runtime and timestamps. [`docs/releasing.md`](../releasing.md) owns how each signing
+path treats them, and [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md) lists the voice
+runtime's third-party components. The manifest and voice legal inventory are exact copies of the
+reviewed upstream 0.156.1 rotation, re-proven by the artifact verifier against the official
+release assets.
+
+The exact 0.156.1 CLI passes the bounded experimental projection unchanged at 45 methods,
+193 parameter paths, and 93 response paths. The deprecated `thread/rollback` method is no longer
+generated; RepoPrompt never calls it, so no client change follows. No new outgoing request requires
+0.156.1, so the external admission minimum remains 0.149.0. The schema contract and CI pin move to
+0.156.1 to keep deterministic validation aligned with the bundled runtime.
+
+Codex 0.156.1 is the first release whose model catalog advertises GPT-6 Sol and Luna, which is why
+this rotation skips 0.156.0. Model availability remains runtime-discovered through `model/list`;
+the rotation adds no static model identifier.
 
 ## Files and tests
 
