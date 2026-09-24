@@ -237,10 +237,11 @@ CLI="$HOME/RepoPrompt/repoprompt_ce_cli"
 same executable; prefer the path above.
 
 A release candidate runs this matrix against the debug app instead, as described in "Landing
-a batch" in [`CONTRIBUTING.md`](../CONTRIBUTING.md): set `CLI=rpce-cli-debug`, read
-"production" in this section as the debug app, and confirm each client's RepoPrompt MCP
-calls reach the debug app by matching the `windows` output from inside each client session
-against `rpce-cli-debug -e 'windows'`.
+a batch" in [`CONTRIBUTING.md`](../CONTRIBUTING.md): set `CLI=rpce-cli-debug` and read
+"production" in this section as the debug app. Run the client arms as Claude Code and Codex
+sessions started with `rpce-cli-debug … agent_run`, each making at least one matrix call as
+a RepoPrompt tool call, whether the agent running the checklist is in RepoPrompt Agent Mode,
+Claude Code, or Codex.
 
 Run against what production already has open; don't create workspaces, windows, or
 worktrees for acceptance. `$W1` is a window from the first arm. `$FILE` is a file in that
