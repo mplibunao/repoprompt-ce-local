@@ -25,9 +25,9 @@ After timing initialization, `pr-ready` makes a best-effort attempt to write a l
 | `Sources/RepoPrompt/**` | `make dev-swift-build PRODUCT=RepoPrompt`; included in `pr-ready` for these paths. |
 | `Sources/RepoPromptMCP/**` or `Sources/RepoPromptShared/**` | `make dev-swift-build PRODUCT=repoprompt-mcp`; included in `pr-ready` for these paths. |
 | Generated Xcode workspace boundary (`Package.swift`, `Package.resolved`, `Makefile`, `Scripts/generate_xcode_workspace.py`, `Scripts/xcode_developer_workflow.sh`, `.github/workflows/xcode-workspace.yml`) | `make xcode-validate`; included in `pr-ready` for these executable/workflow paths. The dedicated hosted `Xcode Workspace Validation` workflow also runs for PR/main path-filtered changes to this boundary plus `docs/architecture/xcode-workspace.md`; docs-only Xcode architecture changes remain guardrails-only locally unless explicit validation is requested. |
-| Packaging, MCP CLI/server, Agent Mode, or running-app-sensitive paths | Record non-disruptive `make dev-smoke` when an already-running CE debug app and installed debug CLI are available; request approval before `make dev-smoke-launch`, `make dev-run`, or relaunching the visible app. |
+| Packaging, MCP CLI/server, Agent Mode, or running-app-sensitive paths | Record non-disruptive `make dev-smoke` when an already-running CE debug app and installed debug CLI are available; `make dev-smoke-launch` and `make dev-run` launch the debug app beside production and need no approval. |
 | Release-sensitive changes | Run explicit release validation such as `make dev-release-preflight`; use `make dev-release-artifact` only when artifact evidence is required. Release lanes are not part of default `push` or `pr-ready`. |
-| History rewrite, branch deletion, fork deletion, force-push, credential rotation, other GitHub-visible destructive mutation, visible app launch/relaunch, or visible app stop | Obtain explicit user approval immediately before the destructive command; redact secret values from output. |
+| History rewrite, branch deletion, fork deletion, force-push, credential rotation, other GitHub-visible destructive mutation, production app launch/relaunch, or production app stop | Obtain explicit user approval immediately before the destructive command; redact secret values from output. |
 
 ## Secret hygiene
 

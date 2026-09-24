@@ -43,7 +43,7 @@ Route the affected surface without guessing a fix:
 - Prefer coordinated, boundary-specific evidence: focused `make dev-test FILTER=<Suite>` for root logic, `make dev-provider-test` for provider-package behavior, `make dev-swift-build PRODUCT=RepoPrompt|repoprompt-mcp` for build boundaries, and `make dev-smoke` only for live CE app/MCP wiring when an appropriate debug app is already running.
 - Use the minimum bounded evidence needed: command plus result, a short redacted excerpt, counts, timings, or hashes. Never paste entire daemon logs, crash dumps, generated diagnostics, or raw command output.
 - Treat DEBUG-only MCP diagnostics such as `__repoprompt_debug_diagnostics` and diagnostic `app_settings` as sensitive. Prefer structured bounded snapshots, and do not assume built-in redaction makes raw output publishable.
-- Do not enable raw provider logging or launch, relaunch, or stop a visible app merely to draft an issue. If local raw capture is genuinely necessary, require separate approval where repository rules demand it, keep it bounded and owner-only, redact the distilled evidence, and clean up the capture.
+- Do not enable raw provider logging or launch, relaunch, or stop the production app merely to draft an issue. If local raw capture is genuinely necessary, require separate approval where repository rules demand it, keep it bounded and owner-only, redact the distilled evidence, and clean up the capture.
 
 ## Reference Upstream Only as Plain Text
 

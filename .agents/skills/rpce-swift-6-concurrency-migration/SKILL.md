@@ -113,7 +113,7 @@ Run broader validation only at phase boundaries or when the changed boundary req
 - Do not replace established locks, queues, or primitives without a demonstrated defect.
 - Do not mix a target or package language-mode switch with unrelated refactoring.
 - Keep raw compiler logs in conductor storage or local investigation artifacts; keep only summarized evidence in the migration inventory.
-- Never launch or stop the visible app without explicit user approval.
+- Never launch or stop the production app without explicit user approval.
 
 ## Handoff
 

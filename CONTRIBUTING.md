@@ -57,9 +57,8 @@ Work is tracked as issues and pull requests there.
    lower branch as above. Build and launch the debug app from
    the branch, exercise the changed behavior through `rpce-cli-debug` or the
    app itself, and record the commands, what you observed, and the result in
-   the description before marking it ready. The debug app cannot run beside
-   production; the stop rule in [`AGENTS.md`](AGENTS.md) says when stopping
-   production for that window is allowed.
+   the description before marking it ready. The debug app runs beside
+   production and needs no approval to launch or relaunch.
 
    ```bash
    gh pr create --base <main-or-lower-branch> --draft --label <type> --label area:<area>
@@ -131,9 +130,9 @@ or any two touch the same file, validate them together before anything merges:
    and do not commit fixes on the candidate.
 2. Build the candidate once, launch the debug app, and run each pull request's
    own scenario plus the acceptance matrix in
-   [`docs/releasing.md`](docs/releasing.md) against that debug app, with the
-   matrix's `$CLI` set to `rpce-cli-debug` so every call reaches the candidate
-   rather than the installed production build.
+   [`docs/releasing.md`](docs/releasing.md) against that debug app, following
+   the matrix's release-candidate instructions so every call reaches the
+   candidate rather than the installed production build.
 3. On failure, fix on the pull request branch and cut the next candidate from
    `origin/main` plus the current heads. To find the pull request at fault,
    split the candidate along groups of pull requests that touch the same files

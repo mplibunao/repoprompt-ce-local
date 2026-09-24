@@ -236,6 +236,12 @@ CLI="$HOME/RepoPrompt/repoprompt_ce_cli"
 `~/Library/Application Support/RepoPrompt CE/repoprompt_ce_cli` is a legacy link to the
 same executable; prefer the path above.
 
+A release candidate runs this matrix against the debug app instead, as described in "Landing
+a batch" in [`CONTRIBUTING.md`](../CONTRIBUTING.md): set `CLI=rpce-cli-debug`, read
+"production" in this section as the debug app, and confirm each client's RepoPrompt MCP
+calls reach the debug app by matching the `windows` output from inside each client session
+against `rpce-cli-debug -e 'windows'`.
+
 Run against what production already has open; don't create workspaces, windows, or
 worktrees for acceptance. `$W1` is a window from the first arm. `$FILE` is a file in that
 window's workspace, and `$WT` is the path of any existing linked worktree of it. Select in a
@@ -285,8 +291,8 @@ any other model is a RepoPrompt failure to investigate.
 
 One arm stays outside the script: quit production and relaunch it, then confirm the
 long-running agent processes and their MCP descendants are gone and a new run starts.
-Quitting a visible app needs MP's explicit approval immediately before it, so run this arm
-last and only once approved.
+Quitting production needs MP's explicit approval immediately before it, so run this arm last
+and only once approved; a release candidate quits the debug app, which needs no approval.
 
 ## KeyboardShortcuts resource lookup workaround
 

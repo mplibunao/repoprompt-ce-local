@@ -25,7 +25,7 @@ The skill has three lanes:
 .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
 ```
 
-Focused validation and release validation remain explicit; use the validation matrix plus commands such as `make dev-release-preflight` / `make dev-release-artifact` when the changed boundary requires them. Obtain explicit user approval immediately before any force-push, history rewrite, branch deletion, fork deletion, credential rotation, or other GitHub-visible destructive mutation. Stopping, launching, or relaunching the visible RepoPrompt CE app also needs MP's approval, and the reason is the work inside it: an agent session or a Context Builder run that the stop would kill. When MP has said he is away or asleep, that nobody is using the app, or that a validation window is pre-approved, and the app is idle, meaning no agent session is running and no Context Builder run is active, stopping production for that window and relaunching it before MP returns to it is within that approval; record the stop and relaunch times in the run's note.
+Focused validation and release validation remain explicit; use the validation matrix plus commands such as `make dev-release-preflight` / `make dev-release-artifact` when the changed boundary requires them. Obtain explicit user approval immediately before any force-push, history rewrite, branch deletion, fork deletion, credential rotation, or other GitHub-visible destructive mutation. Stopping, launching, or relaunching the production RepoPrompt CE app also needs MP's approval, and the reason is the work inside it: an agent session or a Context Builder run that the stop would kill. When MP has said he is away or asleep, that nobody is using the app, or that a validation window is pre-approved, and the app is idle, meaning no agent session is running and no Context Builder run is active, stopping production for that window and relaunching it before MP returns to it is within that approval; record the stop and relaunch times in the run's note. The debug app runs beside production and holds none of that work, so launching, stopping, and relaunching it needs no approval.
 
 Local `docs/investigations/*.md` reports are intentionally left unignored so RepoPrompt tooling can read them. Do not stage or merge these local investigation artifacts unless intentionally requested.
 
@@ -45,7 +45,7 @@ Upstream RepoPrompt CE is readable through the reference clone at `/Users/mp/Pro
 
 ```bash
 make doctor     # verify Swift/Xcode command line tool setup, SDK, signing diagnostics, SwiftUI probe, and debug CLI status
-make dev-run    # coordinated build, package, stop existing RepoPrompt, and launch the debug app
+make dev-run    # coordinated build, package, stop the existing debug app, and launch the new build
 ```
 
 `make dev-run` routes through the developer daemon (see "Developer daemon / coordinated validation") and remains the ordinary FIFO coordinated launch path. For a user-directed newest lifecycle action, use `./conductor app relaunch`; the Finder launcher uses that operation when `python3` is available. The uncoordinated equivalents are `make run` or `./Scripts/run.sh`.
@@ -212,7 +212,7 @@ Behavior notes:
 
 - `make dev-run` (daemon `run`) builds/packages a unique staged app under heavy admission, releases that heavy slot, then takes the live-app lock for stop/staged-bundle activation/open/confirm against the shared `DebugApps/RepoPrompt.app` bundle. A build/package failure performs no lifecycle action and does not mutate the live bundle.
 - `./conductor app launch-existing` / `make dev-launch-existing` requires the shared debug app bundle to already exist, reports bundle provenance, never waits for heavy admission, and never falls back to building.
-- `./conductor app relaunch` is the overriding interactive relaunch used by the Finder launcher; like `app stop`, it can cancel older active or queued `liveApp` work. It builds/packages before replacing the visible app, so a failure before lifecycle work begins does not itself stop or reopen an already-running app.
+- `./conductor app relaunch` is the overriding interactive relaunch used by the Finder launcher; like `app stop`, it can cancel older active or queued `liveApp` work. It builds/packages before replacing the debug app, so a failure before lifecycle work begins does not itself stop or reopen an already-running app.
 - Do not assume an in-flight `run`, `smoke`, or diagnostics job will complete if another operator issues `app stop` or interactive `app relaunch`.
 - `make dev-smoke` is the non-disruptive live-only check: it assumes the CE debug app is already running and the debug CLI is installed/resolvable.
 - `make dev-smoke-launch` (or `./conductor smoke --launch`) builds/packages and launches the debug app before smoke validation.
@@ -310,7 +310,7 @@ Run the smallest relevant daemon build/test command above to validate a change. 
 
 Direct `swift test --filter <name>` and `swift build --product <name>` still work and produce the same result, but they are uncoordinated — use them only when the daemon is unavailable (for example, no `python3`), and avoid them when other agents may be building.
 
-Use `make dev-run` (or `make run`) only when it is safe to stop any existing RepoPrompt instance and launch the local debug app.
+Use `make dev-run` (or `make run`) only when it is safe to stop the existing debug app instance and launch the local debug app.
 
 ### XCTest optimization inventory and timing
 
