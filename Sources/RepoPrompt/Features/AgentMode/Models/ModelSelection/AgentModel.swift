@@ -647,9 +647,9 @@ enum AgentModel: String, CaseIterable, Codable {
     var discoveryTags: [AgentModelDiscoveryTag] {
         switch self {
         case .gpt6LunaHigh:
-            [.exploration, .engineering, .extendedContext]
+            [.exploration, .engineering]
         case .gpt6SolHigh:
-            [.complex, .engineering, .pair, .extendedContext]
+            [.complex, .engineering, .pair]
         case .gpt56SolLow:
             [.fast, .exploration, .engineering]
         case .gpt56SolHigh:

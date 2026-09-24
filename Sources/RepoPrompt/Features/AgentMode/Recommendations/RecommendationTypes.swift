@@ -340,7 +340,6 @@ enum BestPracticeProfiles {
         strengths: [
             "Default for explore and repeated discovery",
             "Deep Luna reasoning at an economical usage burn",
-            "1.05M-token context for large codebase mapping",
             "Uses Codex CLI's live advertised model catalog"
         ]
     )
@@ -386,7 +385,7 @@ enum BestPracticeProfiles {
         agentKind: .codexExec,
         agentModel: .gpt6SolLow,
         strengths: [
-            "Strong codebase understanding with a 1.05M-token context window",
+            "Strong codebase understanding",
             "Efficient file exploration and selection",
             "Lower usage burn than higher GPT-6 Sol efforts",
             "Practical default for repeated Context Builder runs"
@@ -429,7 +428,7 @@ enum BestPracticeProfiles {
     GPT‑6 Sol Medium for Engineer/default implementation, and GPT‑6 Sol High for Oracle, review, and pair-agent work. Use effort-neutral GPT‑6 Sol for ChatGPT Pro export/planning.
     """
 
-    static let contextBuilderRationale = "Codex with GPT-6 Sol Low provides the best Context Builder default – strong codebase understanding and a large context window with practical usage burn."
+    static let contextBuilderRationale = "Codex with GPT-6 Sol Low provides the best Context Builder default – strong codebase understanding with practical usage burn."
 
     static let contextWindowNote = """
     You can use xhigh for context building, but context windows are finite, \

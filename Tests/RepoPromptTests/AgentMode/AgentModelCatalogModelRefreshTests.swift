@@ -232,8 +232,8 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
             XCTAssertTrue(model.isExtendedContext, model.rawValue)
             XCTAssertTrue(model.displayName.hasPrefix("GPT-6 "), model.rawValue)
         }
-        XCTAssertEqual(AgentModel.gpt6LunaHigh.discoveryTags, [.exploration, .engineering, .extendedContext])
-        XCTAssertEqual(AgentModel.gpt6SolHigh.discoveryTags, [.complex, .engineering, .pair, .extendedContext])
+        XCTAssertEqual(AgentModel.gpt6LunaHigh.discoveryTags, [.exploration, .engineering])
+        XCTAssertEqual(AgentModel.gpt6SolHigh.discoveryTags, [.complex, .engineering, .pair])
         XCTAssertEqual(AgentModel.gpt6LunaLow.discoveryTags, [])
         XCTAssertEqual(AgentModel.gpt56SolLow.discoveryTags, [.fast, .exploration, .engineering])
         XCTAssertEqual(AgentModel.claudeOpus55.contextWindowTokens, 1_000_000)
