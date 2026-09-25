@@ -129,14 +129,14 @@ import XCTest
             let firstTicket = try fixture.submit("first")
             try await eventually { fixture.controller.startUserTurnTexts == ["first"] }
             try await startupTestJoin(firstTicket.task)
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             XCTAssertEqual(fixture.session.runState, .cancelled)
             XCTAssertNotNil(fixture.session.lastTerminalCommitRevision)
 
             let secondTicket = try fixture.submit("second")
             // A new submission does not inherit the previous run's terminal state.
             XCTAssertEqual(fixture.session.runState, .idle)
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             try await startupTestJoin(secondTicket.task)
 
             XCTAssertEqual(secondTicket.phase, .cancelled)
@@ -149,7 +149,7 @@ import XCTest
             let ticket = try fixture.submit("cancelled during readiness")
             try await eventually { fixture.readiness.isWaiting(1) }
 
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             fixture.readiness.release(1, ready: true)
             try await startupTestJoin(ticket.task)
 
@@ -164,7 +164,7 @@ import XCTest
             let ticket = try fixture.submit("cancelled during routing")
             try await eventually { fixture.controller.isStartupWaiting }
 
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             fixture.controller.releaseStartup()
             try await startupTestJoin(ticket.task)
 
@@ -177,7 +177,7 @@ import XCTest
             let fixture = makeFixture(gatedReadinessCalls: [1, 2])
             let staleTicket = try fixture.submit("stale start")
             try await eventually { fixture.readiness.isWaiting(1) }
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
 
             // A replacement start that is not serialized behind the stale one, as follow-up
             // runs are, raises its own pending-start flag and installs its own task.
@@ -243,7 +243,7 @@ import XCTest
             let followerGateTicket = try XCTUnwrap(head.followerDispatchGateTickets.first)
             try await eventually { fixture.session.codexDispatchSerialGate.test_hasWaiter(for: followerGateTicket) }
 
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             fixture.readiness.release(1, ready: true)
             try await startupTestJoin(head.task)
             try await settle(followers)
@@ -282,7 +282,7 @@ import XCTest
             XCTAssertFalse(promoted === first)
             XCTAssertNotNil(promoted.task, "the promoted head does not own its dispatch task")
 
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             try await startupTestJoin(unauthorizedTask)
 
             XCTAssertEqual(promoted.phase, .cancelled)
@@ -445,7 +445,7 @@ import XCTest
             let ticket = try fixture.submit("cancelled during hydration")
             try await eventually { fixture.hydration.isWaiting }
 
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             XCTAssertEqual(fixture.session.runState, .cancelled)
             fixture.hydration.release()
             try await startupTestJoin(ticket.task)
@@ -466,7 +466,7 @@ import XCTest
             let followers = head.followerTasks
             XCTAssertEqual(followers.count, 1)
 
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             fixture.hydration.release()
             try await startupTestJoin(head.task)
             try await settle(followers)
@@ -494,7 +494,7 @@ import XCTest
 
             let ticket = try fixture.submit("mcp start")
             try await eventually { epochGate.isWaiting }
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             epochGate.release()
             try await startupTestJoin(ticket.task)
 
@@ -554,7 +554,7 @@ import XCTest
             let storeEpochAtHold = await AgentRunSessionStore.currentEpoch(for: registration)
             let staleEpoch = try XCTUnwrap(storeEpochAtHold)
             XCTAssertNotEqual(staleEpoch, priorEpoch)
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
 
             let successor = try fixture.submit("successor")
             // The successor either parks behind the held preparation or, if nothing orders them,
@@ -577,7 +577,7 @@ import XCTest
             let storeEpoch = await AgentRunSessionStore.currentEpoch(for: registration)
             XCTAssertEqual(storeEpoch, successorEpoch, "the successor's epoch disagrees with the store")
 
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             fixture.readiness.release(1, ready: true)
             try await startupTestJoin(successor.task)
 
@@ -719,13 +719,13 @@ import XCTest
         /// Awaits `operation` with a deadline, so a start that never settles fails at the calling
         /// line instead of hanging the suite.
         private func settle(
+            on fixture: StartupTestSessionFixture,
             seconds: TimeInterval = 5,
             file: StaticString = #filePath,
             line: UInt = #line,
             _ operation: @escaping @MainActor () async -> Void
         ) async throws {
-            let finished = startupTestRunTracked(operation)
-            try await eventually(seconds: seconds, file: file, line: line) { finished.value }
+            try await startupTestSettle(on: fixture, seconds: seconds, file: file, line: line, operation)
         }
 
         private func eventually(

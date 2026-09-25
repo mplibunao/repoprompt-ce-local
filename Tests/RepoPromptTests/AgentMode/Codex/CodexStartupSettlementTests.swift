@@ -215,7 +215,7 @@ import XCTest
             let ticket = try fixture.submit("cancelled")
             try await eventually { fixture.readiness.isWaiting(1) }
 
-            try await settle { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             fixture.readiness.release(1, failingWith: MCPBootstrapReadinessError.windowDisabledDuringReadiness)
             try await startupTestJoin(ticket.task)
 
@@ -304,7 +304,7 @@ import XCTest
         /// Adds publication recording and the coordinator's startup gates to the shared fixture.
         @MainActor
         private final class Fixture: StartupTestSessionFixture {
-            let publishedRevisions = PublishedRevisionRecorder()
+            let publishedRevisions = StartupTestPublicationRecorder()
 
             /// Terminal revisions handed to publication, whatever each publication's result.
             var terminalPublicationAttempts: Int {
@@ -323,22 +323,6 @@ import XCTest
                 cleanup.releases.append {
                     coordinator.test_setWorkspaceResolutionFailurePublicationGate(nil)
                     coordinator.test_setReadySessionToolTrackingGate(nil)
-                }
-            }
-        }
-
-        /// Records every terminal revision handed to publication, then publishes it normally.
-        @MainActor
-        private final class PublishedRevisionRecorder {
-            private(set) var revisions: [AgentRunTerminalCommitRevision] = []
-
-            func install(on viewModel: AgentModeViewModel) {
-                viewModel.test_setTerminalPublicationOverride { [weak self, weak viewModel] revision, successorKind, session in
-                    guard let self, let viewModel else { return .rejected(reason: "fixture released") }
-                    revisions.append(revision)
-                    viewModel.test_setTerminalPublicationOverride(nil)
-                    defer { install(on: viewModel) }
-                    return await viewModel.test_publishTerminalCommit(revision, successorKind: successorKind, for: session)
                 }
             }
         }
@@ -367,13 +351,13 @@ import XCTest
         }
 
         private func settle(
+            on fixture: StartupTestSessionFixture,
             seconds: TimeInterval = 5,
             file: StaticString = #filePath,
             line: UInt = #line,
             _ operation: @escaping @MainActor () async -> Void
         ) async throws {
-            let finished = startupTestRunTracked(operation)
-            try await eventually(seconds: seconds, file: file, line: line) { finished.value }
+            try await startupTestSettle(on: fixture, seconds: seconds, file: file, line: line, operation)
         }
 
         private func eventually(

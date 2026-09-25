@@ -134,7 +134,7 @@ import XCTest
             let fixture = makeFixture()
             let registration = try await fixture.beginHeldFailingCompaction()
 
-            try await settleWithin { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settleWithin(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
             XCTAssertEqual(fixture.session.runState, .cancelled)
             let storedAtCancellation = await AgentRunSessionStore.snapshot(for: registration)
             try await fixture.releaseCompactionFailure()
@@ -152,7 +152,7 @@ import XCTest
         func testCompactionFailureAfterASuccessorStartedLeavesTheSuccessorAlone() async throws {
             let fixture = makeFixture(gatedReadinessCalls: [1])
             _ = try await fixture.beginHeldFailingCompaction()
-            try await settleWithin { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            try await settleWithin(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
 
             let successor = Task { await fixture.viewModel.startAgentRun(tabID: fixture.tabID, initialMessage: "successor") }
             fixture.cleanup.join(successor)
@@ -519,7 +519,6 @@ import XCTest
                 }
                 let context = context
                 await startupTestAwaitBounded("the window did not tear down") { await context.cleanup() }
-                StartupTestTrackedOperations.cancelUnfinished()
             }
         }
 
@@ -595,12 +594,12 @@ import XCTest
         }
 
         private func settleWithin(
+            on fixture: StartupTestSessionFixture,
             file: StaticString = #filePath,
             line: UInt = #line,
             _ operation: @escaping @MainActor () async -> Void
         ) async throws {
-            let finished = startupTestRunTracked(operation)
-            try await eventually(file: file, line: line) { finished.value }
+            try await startupTestSettle(on: fixture, file: file, line: line, operation)
         }
 
         private func eventually(

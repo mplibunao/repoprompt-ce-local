@@ -325,13 +325,39 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             }
         }
 
+        /// A saved thread without an ID fails as a resume however the resume target was judged, and
+        /// a binding response without a thread ID fails at thread identity, not at transport start.
         @MainActor
         static func nativeSession(_ error: Error, attemptedResume: Bool) -> CodexStartupFailure {
-            CodexStartupFailure(
-                phase: attemptedResume ? .nativeResume : .nativeStart,
-                message: "\(attemptedResume ? "Codex native resume failed:" : "Codex native start failed:") \(error.localizedDescription)",
-                failureReason: CodexAppServerClient.isTimeoutError(error) ? .timeout : .agentError
-            )
+            switch error as? CodexSessionControllerError {
+            case .invalidResumeReferenceMissingThreadID:
+                CodexStartupFailure(
+                    phase: .nativeResume,
+                    message: "Codex native resume failed: the saved thread ID is missing.",
+                    failureReason: .agentError
+                )
+            case let .threadBindingResponseMissingThreadID(request):
+                CodexStartupFailure(
+                    phase: .threadIdentity,
+                    message: "Codex startup failed during thread binding: the \(request.rawValue) response named no thread.",
+                    failureReason: .agentError
+                )
+            default:
+                CodexStartupFailure(
+                    phase: attemptedResume ? .nativeResume : .nativeStart,
+                    message: "\(attemptedResume ? "Codex native resume failed:" : "Codex native start failed:") \(error.localizedDescription)",
+                    failureReason: CodexAppServerClient.isTimeoutError(error) ? .timeout : .agentError
+                )
+            }
+        }
+
+        /// A binding response that named no thread came from an app-server process this controller
+        /// started, so that controller is retired rather than reused for the next attempt.
+        static func retiresFailedController(_ error: Error) -> Bool {
+            if case .threadBindingResponseMissingThreadID = error as? CodexSessionControllerError {
+                return true
+            }
+            return false
         }
     }
 
@@ -6379,6 +6405,47 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             logCodex("[AgentModeVM][CodexReconnect] skipping repeated timed-out resume target for tab \(session.tabID) and starting a fresh thread")
         }
         let existingRef = shouldSkipTimedOutResumeTarget ? nil : resumeCandidate
+        // The controller whose start produced the error the catch below reports.
+        var failedCandidateController = session.codexController
+        /// A start's failure belongs to the controller and attempt it began under. Once either was
+        /// replaced while the start was suspended, the failure is obsolete: it reports superseded
+        /// and neither retires nor marks for reconnect the controller that replaced it. A candidate
+        /// that was only cleared has no replacement to protect, so its failure is still reported.
+        func failedCandidateIsCurrent(_ candidate: (any CodexSessionControlling)?) -> Bool {
+            guard session.activeRunAttemptID == runAttemptIDAtEntry else { return false }
+            guard let installed = session.codexController else { return true }
+            guard let candidate else { return false }
+            return Self.sameCodexControllerInstance(installed, candidate)
+        }
+        /// A timed-out start retires the installed controller; a binding response that named no
+        /// thread retires the controller that produced it. Anything else, or a controller that is
+        /// no longer installed, leaves the session to reconnect on its next start.
+        func retireOrMarkFailedStartup(
+            error: Error,
+            candidate: (any CodexSessionControlling)?,
+            timeoutSource: String
+        ) {
+            let invalidatedFailedController = if CodexAppServerClient.isTimeoutError(error) {
+                invalidateCodexControllerForReconnect(
+                    session: session,
+                    expectedController: session.codexController,
+                    source: timeoutSource,
+                    preserveRunID: preserveExistingRunID
+                )
+            } else if CodexStartupFailure.retiresFailedController(error) {
+                invalidateCodexControllerForReconnect(
+                    session: session,
+                    expectedController: candidate,
+                    source: "thread-binding-response",
+                    preserveRunID: true
+                )
+            } else {
+                false
+            }
+            if !invalidatedFailedController {
+                markCodexReconnectNeeded(for: session, source: "ensure-error")
+            }
+        }
         do {
             var startResult = try await startCodexNativeSession(
                 controller: session.codexController,
@@ -6404,6 +6471,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             await ensureCodexToolTrackingForReadySessionIfNeeded(for: session, runID: runID)
             return codexReadinessOutcomeAfterStartup(session: session, runAttemptID: runAttemptIDAtEntry)
         } catch {
+            guard failedCandidateIsCurrent(failedCandidateController) else { return .superseded }
             var effectiveError: Error = error
             if session.runState.isActive,
                let runID = session.runID,
@@ -6412,17 +6480,20 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             {
                 setRunningStatus("Refreshing Codex authentication…", source: .reconnect, session: session, urgent: true)
                 viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
-                switch await authRecovery.refreshManagedAccount() {
+                let refresh = await authRecovery.refreshManagedAccount()
+                // The refresh suspends; a controller or attempt installed meanwhile is not this
+                // start's to reconnect or retire.
+                guard failedCandidateIsCurrent(failedCandidateController) else { return .superseded }
+                switch refresh {
                 case let .requiresUserLogin(guidance):
                     _ = markCodexReconnectNeeded(for: session, source: "managed-auth-recovery-required-during-start")
                     effectiveError = AIProviderError.invalidConfiguration(detail: guidance)
                 case let .executableUnavailable(message):
                     effectiveError = AIProviderError.invalidConfiguration(detail: message)
                 case .recovered:
-                    let expectedController = session.codexController
                     _ = invalidateCodexControllerForReconnect(
                         session: session,
-                        expectedController: expectedController,
+                        expectedController: failedCandidateController,
                         source: "managed-auth-recovery-during-start",
                         preserveRunID: true
                     )
@@ -6435,6 +6506,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                         // run or attempt moved on. That is stale recovery, not an auth failure.
                         return stop.readinessOutcome
                     }
+                    failedCandidateController = recoveredController
                     do {
                         var recoveredStartResult = try await startCodexNativeSession(
                             controller: recoveredController,
@@ -6464,8 +6536,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     }
                 }
             }
+            // Auth recovery suspends and may have started a recovered controller of its own.
+            guard failedCandidateIsCurrent(failedCandidateController) else { return .superseded }
             let attemptedResume = Self.isCodexResumeAttempt(existingRef)
-            let isControlPlaneTimeout = CodexAppServerClient.isTimeoutError(effectiveError)
             let resumeTimeoutCount: Int? = {
                 guard attemptedResume, let existingRef else { return nil }
                 return recordCodexResumeTimeoutIfNeeded(
@@ -6518,17 +6591,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     await ensureCodexToolTrackingForReadySessionIfNeeded(for: session, runID: runID)
                     return codexReadinessOutcomeAfterStartup(session: session, runAttemptID: runAttemptIDAtEntry)
                 } catch {
-                    let invalidatedTimedOutController = CodexAppServerClient.isTimeoutError(error)
-                        ? invalidateCodexControllerForReconnect(
-                            session: session,
-                            expectedController: session.codexController,
-                            source: "fresh-start-timeout",
-                            preserveRunID: preserveExistingRunID
-                        )
-                        : false
-                    if !invalidatedTimedOutController {
-                        markCodexReconnectNeeded(for: session, source: "ensure-error")
-                    }
+                    guard failedCandidateIsCurrent(freshController) else { return .superseded }
+                    retireOrMarkFailedStartup(error: error, candidate: freshController, timeoutSource: "fresh-start-timeout")
                     if error is CancellationError { return .cancelled }
                     return .failed(.nativeSession(error, attemptedResume: false))
                 }
@@ -6536,17 +6600,11 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             if !shouldSkipTimedOutResumeTarget, resumeTimeoutCount == nil {
                 resetCodexResumeTimeoutState(for: session)
             }
-            let invalidatedTimedOutController = isControlPlaneTimeout
-                ? invalidateCodexControllerForReconnect(
-                    session: session,
-                    expectedController: session.codexController,
-                    source: attemptedResume ? "resume-timeout" : "start-timeout",
-                    preserveRunID: preserveExistingRunID
-                )
-                : false
-            if !invalidatedTimedOutController {
-                markCodexReconnectNeeded(for: session, source: "ensure-error")
-            }
+            retireOrMarkFailedStartup(
+                error: effectiveError,
+                candidate: failedCandidateController,
+                timeoutSource: attemptedResume ? "resume-timeout" : "start-timeout"
+            )
             if effectiveError is CancellationError { return .cancelled }
             return .failed(.nativeSession(effectiveError, attemptedResume: attemptedResume))
         }

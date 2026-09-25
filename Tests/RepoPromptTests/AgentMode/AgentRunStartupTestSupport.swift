@@ -18,33 +18,39 @@ import XCTest
     }
 
     /// Runs `operation` in its own task and returns a flag set when it finishes, so the caller can
-    /// bound its wait for work that may never finish. The operation stays registered until it
-    /// finishes, so teardown can cancel one a timed-out wait left behind.
+    /// bound its wait for work that may never finish. The operation stays registered with
+    /// `tracking` until it finishes, so that owner's teardown can cancel one a timed-out wait left
+    /// behind.
     @MainActor
-    func startupTestRunTracked(_ operation: @escaping @MainActor () async -> Void) -> StartupTestCompletionFlag {
-        startupTestRunTracked(operation, alsoCancelling: nil)
+    func startupTestRunTracked(
+        _ operation: @escaping @MainActor () async -> Void,
+        in tracking: StartupTestTrackedOperations
+    ) -> StartupTestCompletionFlag {
+        startupTestRunTracked(operation, in: tracking, alsoCancelling: nil)
     }
 
     /// `alsoCancelling` runs wherever the tracked task is cancelled, so a join can cancel the task
-    /// it joins, not just the task doing the joining.
+    /// it joins, not just the task doing the joining. Without `tracking`, the caller's own bounded
+    /// wait is what cancels an operation that does not finish.
     @MainActor
     private func startupTestRunTracked(
         _ operation: @escaping @MainActor () async -> Void,
+        in tracking: StartupTestTrackedOperations?,
         alsoCancelling cancelJoined: (() -> Void)?
     ) -> StartupTestCompletionFlag {
         let finished = StartupTestCompletionFlag()
         let id = UUID()
-        let task = Task { @MainActor in
+        let task = Task { @MainActor [weak tracking] in
             await operation()
             finished.value = true
-            StartupTestTrackedOperations.unfinished[id] = nil
+            tracking?.unfinished[id] = nil
         }
         finished.cancel = {
             task.cancel()
             cancelJoined?()
         }
         if !finished.value {
-            StartupTestTrackedOperations.unfinished[id] = finished.cancel
+            tracking?.unfinished[id] = finished.cancel
         }
         return finished
     }
@@ -55,13 +61,14 @@ import XCTest
         fileprivate(set) var cancel: () -> Void = {}
     }
 
-    /// Tracked operations that have not finished yet, by how to cancel them.
+    /// One owner's tracked operations that have not finished yet, by how to cancel them. Each
+    /// fixture owns its own, so one teardown never cancels work another owner registered.
     @MainActor
-    enum StartupTestTrackedOperations {
-        fileprivate static var unfinished: [UUID: () -> Void] = [:]
+    final class StartupTestTrackedOperations {
+        fileprivate var unfinished: [UUID: () -> Void] = [:]
 
-        /// Cancels every tracked operation still running; suites call this last in teardown.
-        static func cancelUnfinished() {
+        /// Cancels every operation this owner tracks that is still running.
+        func cancelUnfinished() {
             let cancellations = unfinished.values
             unfinished.removeAll()
             cancellations.forEach { $0() }
@@ -78,7 +85,7 @@ import XCTest
         line: UInt = #line,
         _ operation: @escaping @MainActor () async -> Void
     ) async {
-        let finished = startupTestRunTracked(operation)
+        let finished = startupTestRunTracked(operation, in: nil, alsoCancelling: nil)
         let didFinish = await startupTestWaitBounded(seconds: seconds) { finished.value }
         if !didFinish {
             finished.cancel()
@@ -98,11 +105,11 @@ import XCTest
         file: StaticString = #filePath,
         line: UInt = #line
     ) async -> Bool {
-        let finished = startupTestRunTracked {
+        let finished = startupTestRunTracked({
             _ = await task.value
-        } alsoCancelling: {
+        }, in: nil, alsoCancelling: {
             task.cancel()
-        }
+        })
         let didFinish = await startupTestWaitBounded(seconds: seconds) { finished.value }
         if !didFinish {
             finished.cancel()
@@ -131,6 +138,24 @@ import XCTest
 
     struct StartupTestJoinTimeout: Error {}
 
+    /// Runs `operation` against `fixture` and waits at most `seconds` for it, failing at the caller
+    /// when it does not finish. An operation that times out stays tracked by the fixture, whose
+    /// teardown cancels it.
+    @MainActor
+    func startupTestSettle(
+        on fixture: StartupTestSessionFixture,
+        seconds: TimeInterval = 5,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ operation: @escaping @MainActor () async -> Void
+    ) async throws {
+        struct SettleTimeout: Error {}
+        let finished = startupTestRunTracked(operation, in: fixture.cleanup.trackedOperations)
+        if await startupTestWaitBounded(seconds: seconds, until: { finished.value }) { return }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
+        throw SettleTimeout()
+    }
+
     /// A Codex session that has loaded its persisted state, ready to take a submission.
     @MainActor
     func startupTestCodexSession(tabID: UUID = UUID()) -> AgentModeViewModel.TabSession {
@@ -149,6 +174,8 @@ import XCTest
         var heldGates: [StartupTestHeldGate] = []
         var tickets: [AgentRunStartupTicket] = []
         var afterStartsSettle: [@MainActor () async -> Void] = []
+        /// Operations a test runs against this fixture that may outlive a timed-out wait.
+        let trackedOperations = StartupTestTrackedOperations()
         fileprivate private(set) var taskJoins: [@MainActor () async -> Void] = []
 
         /// Joins `task` at teardown after the releases and ticket joins, cancelling it if the
@@ -256,8 +283,46 @@ import XCTest
             for step in cleanup.afterStartsSettle {
                 await startupTestAwaitBounded("a cleanup step did not finish during teardown", step)
             }
-            StartupTestTrackedOperations.cancelUnfinished()
+            cleanup.trackedOperations.cancelUnfinished()
         }
+    }
+
+    /// Records every terminal revision handed to publication, then publishes it normally. Opt-in:
+    /// a suite that asserts on publications installs one on its view model.
+    @MainActor
+    final class StartupTestPublicationRecorder {
+        private(set) var revisions: [AgentRunTerminalCommitRevision] = []
+
+        func install(on viewModel: AgentModeViewModel) {
+            viewModel.test_setTerminalPublicationOverride { [weak self, weak viewModel] revision, successorKind, session in
+                guard let self, let viewModel else { return .rejected(reason: "fixture released") }
+                revisions.append(revision)
+                viewModel.test_setTerminalPublicationOverride(nil)
+                defer { install(on: viewModel) }
+                return await viewModel.test_publishTerminalCommit(revision, successorKind: successorKind, for: session)
+            }
+        }
+    }
+
+    /// Gives `session` prior Codex history whose saved thread needs a reconnect, as a restored or
+    /// previously used session has; `nil` identifiers model a saved thread missing them.
+    @MainActor
+    func startupTestInstallSavedCodexHistory(
+        on session: AgentModeViewModel.TabSession,
+        conversationID: String?,
+        rolloutPath: String?
+    ) {
+        session.setItemsSilently(
+            [
+                .user("earlier", sequenceIndex: 0),
+                .assistant("earlier reply", sequenceIndex: 1)
+            ],
+            reason: .persistedSessionHydration
+        )
+        session.nextSequenceIndex = 2
+        session.codexConversationID = conversationID
+        session.codexRolloutPath = rolloutPath
+        session.codexNeedsReconnect = true
     }
 
     /// Installs what a cold restore of a saved session installs: the persisted run state after
@@ -394,12 +459,16 @@ import XCTest
 
     /// Codex controller that records native startup and first-turn dispatch, optionally holding
     /// startup (which stands in for native start plus routing) until the test releases it, or
-    /// failing it with `startupError`; `compactError` fails a compaction request, after
-    /// `compactHold` releases it when one is set.
+    /// failing it with `startupError` or with what `startupHook` throws for the start's resume
+    /// target; `compactError` fails a compaction request, after `compactHold` releases it when one
+    /// is set.
     @MainActor
     final class StartupTestCodexController: @preconcurrency CodexSessionControlling {
         private(set) var hasActiveThread = false
         private(set) var startOrResumeCount = 0
+        /// The resume target of each start, `nil` for a fresh thread.
+        private(set) var startOrResumeTargets: [CodexNativeSessionController.SessionRef?] = []
+        var startupHook: ((CodexNativeSessionController.SessionRef?) async throws -> Void)?
         private(set) var startUserTurnTexts: [String] = []
         private(set) var steerUserTurnTexts: [String] = []
         var startupError: Error?
@@ -458,13 +527,15 @@ import XCTest
         }
 
         func startOrResume(
-            existing _: CodexNativeSessionController.SessionRef?,
+            existing: CodexNativeSessionController.SessionRef?,
             baseInstructions _: String,
             model: String?,
             reasoningEffort: String?,
             serviceTier _: String?
         ) async throws -> CodexNativeSessionController.SessionRef {
             startOrResumeCount += 1
+            startOrResumeTargets.append(existing)
+            try await startupHook?(existing)
             if gatesStartup {
                 await withCheckedContinuation { continuation in
                     startupWaiters.append(continuation)
@@ -580,6 +651,7 @@ import XCTest
 
         func cancelCurrentTurn() async {}
         func shutdown() async {}
+
         func respondToServerRequest(id _: CodexAppServerRequestID, result _: [String: Any]) async {}
     }
 #endif
