@@ -1326,11 +1326,33 @@ final class MCPServerViewModel: ObservableObject {
         windowToolsRequested
     }
 
+    private typealias WindowToolsTransitionResult = Result<Void, MCPBootstrapReadinessError>
+
+    private enum WindowToolRegistrationPhase: String {
+        case applicationCatalog = "application_catalog"
+        case windowCatalog = "window_catalog"
+    }
+
     private var toolRegistrationIntentGeneration: UInt64 = 0
-    private var windowToolTransitionTail: Task<Bool, Never>?
+    private var windowToolTransitionTail: Task<WindowToolsTransitionResult, Never>?
+    /// The enable transition serving the current intent. Bootstrap ensures join it instead of
+    /// minting a new intent, so one child's start cannot supersede another's under the same intent.
+    private var inFlightEnableTransition: (generation: UInt64, task: Task<WindowToolsTransitionResult, Never>)?
     private var activeWindowToolRegistrationHandle: MCPDomainToolRegistrationHandle?
     #if DEBUG
         private var afterWindowToolRegistrationBeforeRetentionForTesting: (@MainActor @Sendable () async -> Void)?
+        private var beforeWindowToolRegistrationForTesting: (@MainActor @Sendable () async throws -> Void)?
+        private var windowToolTransitionStartsByGeneration: [UInt64: Int] = [:]
+        private var windowToolTransitionJoinsByGeneration: [UInt64: Int] = [:]
+        private var bootstrapReadinessCheckpointForTesting: (@MainActor @Sendable (BootstrapReadinessCheckpoint) async -> Void)?
+
+        /// Suspension points inside a bootstrap ensure that tests can hold.
+        enum BootstrapReadinessCheckpoint: Equatable {
+            /// Before an already enabled window confirms the application catalog.
+            case applicationCatalogConfirmation
+            /// After a caller receives its joined or started transition's result, before delivery.
+            case transitionResultReceived
+        }
     #endif
 
     /// Controls whether the approval overlay is visible
@@ -2966,9 +2988,37 @@ final class MCPServerViewModel: ObservableObject {
             afterWindowToolRegistrationBeforeRetentionForTesting = handler
         }
 
+        /// Runs inside the window-catalog registration phase, before registration; a thrown error
+        /// takes the same failure path as a registry error.
+        @MainActor
+        func setBeforeWindowToolRegistrationForTesting(
+            _ handler: (@MainActor @Sendable () async throws -> Void)?
+        ) {
+            beforeWindowToolRegistrationForTesting = handler
+        }
+
         @MainActor
         func windowToolRegistrationIntentGenerationForTesting() -> UInt64 {
             toolRegistrationIntentGeneration
+        }
+
+        /// Physical window-tools transitions started, keyed by the intent generation they serve.
+        @MainActor
+        func windowToolTransitionStartsByGenerationForTesting() -> [UInt64: Int] {
+            windowToolTransitionStartsByGeneration
+        }
+
+        @MainActor
+        func setBootstrapReadinessCheckpointForTesting(
+            _ handler: (@MainActor @Sendable (BootstrapReadinessCheckpoint) async -> Void)?
+        ) {
+            bootstrapReadinessCheckpointForTesting = handler
+        }
+
+        /// Bootstrap ensures that joined an in-flight enable transition, keyed by its intent generation.
+        @MainActor
+        func windowToolTransitionJoinsByGenerationForTesting() -> [UInt64: Int] {
+            windowToolTransitionJoinsByGeneration
         }
     #endif
 
@@ -3188,24 +3238,107 @@ final class MCPServerViewModel: ObservableObject {
     /// Ensures tools are registered before this window becomes eligible for routing.
     @discardableResult
     func ensureServerReadyForAgentBootstrap() async -> Bool {
-        let catalogIsRegistered = await AppDomainRuntimeComposition.shared.isRegistered(windowToolCatalogService)
-        let invalidateCatalogBeforeUpdate = !windowToolsEnabled || !catalogIsRegistered
+        do {
+            try await requireServerReadyForAgentBootstrap()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Throwing core of ``ensureServerReadyForAgentBootstrap()``.
+    ///
+    /// Takes one of three branches:
+    /// - joins the in-flight enable transition, so overlapping callers under one intent share its
+    ///   work and result;
+    /// - confirms an already ready window (requested, enabled and registered) without a transition;
+    /// - otherwise starts a new enable transition, which mints a new intent. That includes recovery
+    ///   after a failed registration, while tools stay requested.
+    ///
+    /// - Throws: `CancellationError` when the caller is cancelled, otherwise the
+    ///   ``MCPBootstrapReadinessError`` naming the failed phase or the superseding transition.
+    func requireServerReadyForAgentBootstrap() async throws {
+        try Task.checkCancellation()
         #if DEBUG || EDIT_FLOW_PERF
             let registrationUpdateAgentBootstrapState = EditFlowPerf.begin(
                 EditFlowPerf.Stage.MCPWindowToolCatalog.registrationUpdateAgentBootstrap
             )
+            defer {
+                EditFlowPerf.end(
+                    EditFlowPerf.Stage.MCPWindowToolCatalog.registrationUpdateAgentBootstrap,
+                    registrationUpdateAgentBootstrapState
+                )
+            }
         #endif
-        let ready = await setWindowToolsEnabled(
-            true,
-            invalidateCatalogBeforeUpdate: invalidateCatalogBeforeUpdate
-        )
-        #if DEBUG || EDIT_FLOW_PERF
-            EditFlowPerf.end(
-                EditFlowPerf.Stage.MCPWindowToolCatalog.registrationUpdateAgentBootstrap,
-                registrationUpdateAgentBootstrapState
+        let catalogIsRegistered = await AppDomainRuntimeComposition.shared.isRegistered(windowToolCatalogService)
+        try Task.checkCancellation()
+
+        // These checks follow the suspension above, so a caller that computed a stale
+        // invalidation flag still joins the transition another caller started meanwhile.
+        let transition: Task<WindowToolsTransitionResult, Never>
+        let intentGeneration: UInt64
+        if windowToolsRequested, let inFlight = inFlightEnableTransition {
+            #if DEBUG
+                windowToolTransitionJoinsByGeneration[inFlight.generation, default: 0] += 1
+            #endif
+            transition = inFlight.task
+            intentGeneration = inFlight.generation
+        } else if windowToolsRequested, windowToolsEnabled, catalogIsRegistered {
+            try await confirmApplicationCatalogForEnabledWindow()
+            return
+        } else {
+            transition = beginWindowToolsTransition(
+                enabled: true,
+                invalidateCatalogBeforeUpdate: !windowToolsEnabled || !catalogIsRegistered
             )
+            intentGeneration = toolRegistrationIntentGeneration
+        }
+        let result = await transition.value
+        #if DEBUG
+            await bootstrapReadinessCheckpointForTesting?(.transitionResultReceived)
         #endif
-        return ready
+        // The shared transition observes neither caller cancellation nor intents minted after it
+        // finished. Check both at delivery: a cancelled caller, or one resuming after an explicit
+        // transition replaced its intent, must not report readiness.
+        try Task.checkCancellation()
+        try result.get()
+        if let failure = transitionIntentFailure(intentGeneration) {
+            throw failure
+        }
+    }
+
+    /// Readiness for a window whose own catalog is already registered under the current intent
+    /// still requires the application catalog, which a window transition would otherwise ensure.
+    private func confirmApplicationCatalogForEnabledWindow() async throws {
+        let intentGeneration = toolRegistrationIntentGeneration
+        #if DEBUG
+            await bootstrapReadinessCheckpointForTesting?(.applicationCatalogConfirmation)
+        #endif
+        do {
+            try await AppGlobalMCPServiceComposition.shared.ensureRegistered()
+        } catch {
+            // Cancellation is never a registration failure, so it must not publish one.
+            try Task.checkCancellation()
+            if error is CancellationError {
+                throw error
+            }
+            throw recordWindowToolRegistrationFailure(
+                phase: .applicationCatalog,
+                error: error,
+                intentGeneration: intentGeneration
+            )
+        }
+        try Task.checkCancellation()
+        if let failure = transitionIntentFailure(intentGeneration) {
+            throw failure
+        }
+    }
+
+    /// Returns `nil` while `intentGeneration` is still the current intent; otherwise classifies
+    /// the newer intent that replaced it.
+    private func transitionIntentFailure(_ intentGeneration: UInt64) -> MCPBootstrapReadinessError? {
+        guard intentGeneration != toolRegistrationIntentGeneration else { return nil }
+        return windowToolsRequested ? .supersededByExplicitWindowTransition : .windowDisabledDuringReadiness
     }
 
     /// Disables tools for this window.
@@ -3224,12 +3357,29 @@ final class MCPServerViewModel: ObservableObject {
         await service.refreshState()
     }
 
+    /// Explicit enable, disable or refresh. Always mints a new intent, which fences every older
+    /// transition and fails callers still waiting on one.
     @MainActor
     @discardableResult
     func setWindowToolsEnabled(
         _ enabled: Bool,
         invalidateCatalogBeforeUpdate: Bool = true
     ) async -> Bool {
+        let transition = beginWindowToolsTransition(
+            enabled: enabled,
+            invalidateCatalogBeforeUpdate: invalidateCatalogBeforeUpdate
+        )
+        if case .success = await transition.value {
+            return true
+        }
+        return false
+    }
+
+    @MainActor
+    private func beginWindowToolsTransition(
+        enabled: Bool,
+        invalidateCatalogBeforeUpdate: Bool
+    ) -> Task<WindowToolsTransitionResult, Never> {
         toolRegistrationIntentGeneration &+= 1
         let intentGeneration = toolRegistrationIntentGeneration
         windowToolsRequested = enabled
@@ -3237,22 +3387,30 @@ final class MCPServerViewModel: ObservableObject {
         if !enabled {
             windowToolsEnabled = false
         }
+        #if DEBUG
+            windowToolTransitionStartsByGeneration[intentGeneration, default: 0] += 1
+        #endif
 
         // MainActor methods are reentrant at every await. Chain transitions so an
         // older enable/disable/refresh cannot mutate registration or membership
         // after a newer request has started.
         let predecessor = windowToolTransitionTail
-        let transition = Task { @MainActor [weak self] in
+        let transition = Task { @MainActor [weak self] () -> WindowToolsTransitionResult in
             _ = await predecessor?.value
-            guard let self else { return false }
-            return await performWindowToolsTransition(
+            guard let self else { return .failure(.readinessHostUnavailable) }
+            let result = await performWindowToolsTransition(
                 enabled: enabled,
                 intentGeneration: intentGeneration,
                 invalidateCatalogBeforeUpdate: invalidateCatalogBeforeUpdate
             )
+            if inFlightEnableTransition?.generation == intentGeneration {
+                inFlightEnableTransition = nil
+            }
+            return result
         }
         windowToolTransitionTail = transition
-        return await transition.value
+        inFlightEnableTransition = enabled ? (intentGeneration, transition) : nil
+        return transition
     }
 
     @MainActor
@@ -3260,9 +3418,9 @@ final class MCPServerViewModel: ObservableObject {
         enabled: Bool,
         intentGeneration: UInt64,
         invalidateCatalogBeforeUpdate: Bool
-    ) async -> Bool {
-        guard intentGeneration == toolRegistrationIntentGeneration else {
-            return windowToolsEnabled
+    ) async -> WindowToolsTransitionResult {
+        if let failure = transitionIntentFailure(intentGeneration) {
+            return .failure(failure)
         }
 
         guard enabled else {
@@ -3273,22 +3431,24 @@ final class MCPServerViewModel: ObservableObject {
             }
             await service.leave(windowID: windowID)
             await service.refreshState()
-            return intentGeneration == toolRegistrationIntentGeneration && !windowToolsRequested
+            if let failure = transitionIntentFailure(intentGeneration) {
+                return .failure(failure)
+            }
+            return .success(())
         }
 
         do {
             try await AppGlobalMCPServiceComposition.shared.ensureRegistered()
         } catch {
-            recordWindowToolRegistrationFailure(
-                phase: "application_catalog",
+            return .failure(recordWindowToolRegistrationFailure(
+                phase: .applicationCatalog,
                 error: error,
                 intentGeneration: intentGeneration
-            )
-            return false
+            ))
         }
 
-        guard intentGeneration == toolRegistrationIntentGeneration, windowToolsRequested else {
-            return false
+        if let failure = transitionIntentFailure(intentGeneration) {
+            return .failure(failure)
         }
 
         if invalidateCatalogBeforeUpdate {
@@ -3307,6 +3467,9 @@ final class MCPServerViewModel: ObservableObject {
         }
 
         do {
+            #if DEBUG
+                try await beforeWindowToolRegistrationForTesting?()
+            #endif
             let registration = try await AppDomainRuntimeComposition.shared.register(windowToolCatalogService)
             #if DEBUG
                 await afterWindowToolRegistrationBeforeRetentionForTesting?()
@@ -3314,55 +3477,70 @@ final class MCPServerViewModel: ObservableObject {
             // Retain every successful generation before checking for supersession. A queued disable
             // can then reclaim it by exact handle, while stale handles remain registry-fenced.
             activeWindowToolRegistrationHandle = registration.handle
-            guard intentGeneration == toolRegistrationIntentGeneration else {
+            if let failure = transitionIntentFailure(intentGeneration) {
                 if !windowToolsRequested {
                     await unregisterWindowToolRegistration(registration.handle)
                 }
-                return false
+                return .failure(failure)
             }
             await service.join(windowID: windowID)
-            guard intentGeneration == toolRegistrationIntentGeneration else {
+            if let failure = transitionIntentFailure(intentGeneration) {
                 if !windowToolsRequested {
-                    windowToolsEnabled = false
-                    await unregisterWindowToolRegistration(registration.handle)
-                    await service.leave(windowID: windowID)
+                    await withdrawJoinedWindowToolRegistration(registration.handle)
                 }
-                return false
+                return .failure(failure)
             }
 
             windowToolsEnabled = true
             windowToolRegistrationFailureDescription = nil
             await service.refreshState()
-            guard intentGeneration == toolRegistrationIntentGeneration else {
+            if let failure = transitionIntentFailure(intentGeneration) {
                 if !windowToolsRequested {
-                    windowToolsEnabled = false
-                    await unregisterWindowToolRegistration(registration.handle)
-                    await service.leave(windowID: windowID)
+                    await withdrawJoinedWindowToolRegistration(registration.handle)
                 }
-                return false
+                return .failure(failure)
             }
-            return true
+            return .success(())
         } catch {
-            recordWindowToolRegistrationFailure(
-                phase: "window_catalog",
+            return .failure(recordWindowToolRegistrationFailure(
+                phase: .windowCatalog,
                 error: error,
                 intentGeneration: intentGeneration
-            )
-            return false
+            ))
         }
     }
 
+    /// Publishes the failure only while its intent is current, so an older failed transition cannot
+    /// overwrite a successor's state or diagnostic. The typed error reaches every caller regardless.
     @MainActor
     private func recordWindowToolRegistrationFailure(
-        phase: String,
+        phase: WindowToolRegistrationPhase,
         error: Error,
         intentGeneration: UInt64
-    ) {
-        guard intentGeneration == toolRegistrationIntentGeneration, windowToolsRequested else { return }
+    ) -> MCPBootstrapReadinessError {
+        let diagnostic = String(reflecting: error)
+        if intentGeneration == toolRegistrationIntentGeneration, windowToolsRequested {
+            windowToolsEnabled = false
+            windowToolRegistrationFailureDescription = "\(phase.rawValue): \(diagnostic)"
+            logger.error("MCP window registration failed window=\(windowID) phase=\(phase.rawValue) error=\(diagnostic)")
+        }
+        return switch phase {
+        case .applicationCatalog:
+            .applicationCatalogRegistrationFailed(diagnostic: diagnostic)
+        case .windowCatalog:
+            .windowCatalogRegistrationFailed(diagnostic: diagnostic)
+        }
+    }
+
+    /// Reclaims a registration that a disable superseded after this transition joined the window:
+    /// clears readiness, removes exactly `handle`, and leaves the service.
+    @MainActor
+    private func withdrawJoinedWindowToolRegistration(
+        _ handle: MCPDomainToolRegistrationHandle
+    ) async {
         windowToolsEnabled = false
-        let description = "\(phase): \(String(reflecting: error))"
-        windowToolRegistrationFailureDescription = description
-        logger.error("MCP window registration failed window=\(windowID) phase=\(phase) error=\(String(reflecting: error))")
+        await unregisterWindowToolRegistration(handle)
+        await service.leave(windowID: windowID)
     }
 
     @MainActor

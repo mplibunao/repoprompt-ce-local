@@ -119,17 +119,37 @@ struct MCPBootstrapLeaseSpec {
 
 /// Typed readiness failures for the MCP bootstrap path.
 ///
-/// ``routingUnavailable`` reports that a run's routing wait ended without a confirmed MCP
-/// connection (timeout or routing failure). ``provisioningUnavailable`` is reserved for
-/// provisioning validation (MCP server start / config bootstrap) and carries no behavioral
-/// guarantees on its own.
+/// Each case names the phase that failed so a rejected start can report its precise cause.
+/// Cancellation is never represented here; it stays `CancellationError`.
 enum MCPBootstrapReadinessError: Error, Equatable {
     /// MCP provisioning validation (server start / config bootstrap) could not be completed for the
     /// run. Used by provisioning validation; no behavioral guarantees are attached here.
     case provisioningUnavailable
-    /// The run's routing wait ended without a confirmed MCP connection — a timeout, a routing
-    /// failure, or a lease that was already released or consumed (its routing signal already taken).
+    /// The run's routing wait ended without a confirmed MCP connection for a reason other than a
+    /// timeout: a routing failure, or a lease that was already released or consumed.
     case routingUnavailable
+    /// The routing wait timed out before any matching child connection was observed.
+    case routingTimeoutBeforeConnection
+    /// A matching child connection was observed, but routing was not confirmed before the deadline.
+    case routingTimeoutAfterConnection
+    /// The application-scoped MCP tool catalog could not be registered.
+    case applicationCatalogRegistrationFailed(diagnostic: String)
+    /// The window-scoped MCP tool catalog could not be registered or joined.
+    case windowCatalogRegistrationFailed(diagnostic: String)
+    /// A legacy Boolean readiness dependency reported `false` without a cause.
+    case catalogReadinessRejected
+    /// The window's tools were disabled while readiness was pending.
+    case windowDisabledDuringReadiness
+    /// An explicit window-tools transition replaced the intent this readiness belonged to.
+    case supersededByExplicitWindowTransition
+    /// The window that hosts MCP readiness no longer exists.
+    case readinessHostUnavailable
+    /// The bootstrap lease was already released or cleaned up and cannot be acquired.
+    case leaseNoLongerUsable
+    /// The process-wide bootstrap connection gate could not be acquired.
+    case bootstrapGateUnavailable
+    /// The run's pending MCP policy could not be bound to the expected agent process.
+    case expectedPIDPolicyArmingFailed
 }
 
 extension MCPBootstrapReadinessError: LocalizedError {
@@ -138,7 +158,29 @@ extension MCPBootstrapReadinessError: LocalizedError {
         case .provisioningUnavailable:
             "RepoPrompt MCP provisioning could not be completed: the RepoPrompt MCP server entry could not be created or updated in the Codex configuration, so the agent cannot start with RepoPrompt tools."
         case .routingUnavailable:
-            "RepoPrompt MCP routing was not confirmed: the run's routing wait ended without an established MCP connection (timeout or routing failure)."
+            "RepoPrompt MCP routing was not confirmed: the run's routing wait ended without an established MCP connection (routing failure)."
+        case .routingTimeoutBeforeConnection:
+            "RepoPrompt MCP routing timed out before a child connection was observed."
+        case .routingTimeoutAfterConnection:
+            "RepoPrompt MCP routing timed out after a child connection was observed but before routing was confirmed."
+        case let .applicationCatalogRegistrationFailed(diagnostic):
+            "RepoPrompt MCP application catalog registration failed: \(diagnostic)"
+        case let .windowCatalogRegistrationFailed(diagnostic):
+            "RepoPrompt MCP window catalog registration failed: \(diagnostic)"
+        case .catalogReadinessRejected:
+            "RepoPrompt MCP catalog readiness was rejected before the run could install its routing policy."
+        case .windowDisabledDuringReadiness:
+            "RepoPrompt MCP tools were disabled for this window while readiness was pending."
+        case .supersededByExplicitWindowTransition:
+            "RepoPrompt MCP readiness was superseded by an explicit change to this window's tools."
+        case .readinessHostUnavailable:
+            "RepoPrompt MCP readiness is unavailable because its window no longer exists."
+        case .leaseNoLongerUsable:
+            "RepoPrompt MCP bootstrap lease was already released and cannot be acquired."
+        case .bootstrapGateUnavailable:
+            "RepoPrompt MCP bootstrap connection gate could not be acquired."
+        case .expectedPIDPolicyArmingFailed:
+            "RepoPrompt MCP expected-PID routing policy could not be armed."
         }
     }
 }
@@ -163,7 +205,7 @@ actor MCPBootstrapLease {
     private let log = Logger(subsystem: "com.repoprompt.mcp", category: "BootstrapLease")
 
     private var spec: MCPBootstrapLeaseSpec
-    private let mcpServerEnabler: (() async -> Bool)?
+    private let readinessRequirement: (() async throws -> Void)?
     private let policyInstaller: (MCPBootstrapLeaseSpec) async -> Void
     private let expectedPIDPolicyArmer: (MCPBootstrapLeaseSpec) async -> Bool
     private let policyClearer: (MCPBootstrapLeaseSpec) async -> Void
@@ -185,6 +227,7 @@ actor MCPBootstrapLease {
     private var policyClearOperation: Task<Void, Never>?
     private var routingCleanupOperation: Task<Void, Never>?
     #if DEBUG
+        private var debugAfterExpectedPIDGateReleaseHook: (@Sendable () async -> Void)?
         // Test-only observability for the join probe (see debugWaitForPolicyClearJoiner()).
         private var debugPolicyClearJoinerCount = 0
         private var debugPolicyClearJoinWaiters: [CheckedContinuation<Void, Never>] = []
@@ -194,8 +237,10 @@ actor MCPBootstrapLease {
     ///
     /// - Parameters:
     ///   - spec: The run specification (run ID, gate ID, policy parameters, etc.)
-    ///   - mcpServerEnabler: Optional hook to ensure the MCP server is started before acquisition.
-    ///     Agent-mode provides this; headless flows typically don't need it.
+    ///   - mcpServerEnabler: Optional Boolean hook to ensure the MCP server is started before acquisition.
+    ///     A `false` result fails acquisition with ``MCPBootstrapReadinessError/catalogReadinessRejected``.
+    ///   - readinessRequirement: Optional throwing readiness requirement that reports its own cause.
+    ///     Takes precedence over `mcpServerEnabler` when both are supplied.
     ///   - policyInstaller: Installs the per-run connection policy. Defaults to calling
     ///     `ServerNetworkManager.shared.installClientConnectionPolicy(...)`.
     ///   - expectedPIDPolicyArmer: Confirms the intended pending policy is uniquely PID-owned.
@@ -204,13 +249,20 @@ actor MCPBootstrapLease {
     init(
         spec: MCPBootstrapLeaseSpec,
         mcpServerEnabler: (() async -> Bool)? = nil,
+        readinessRequirement: (() async throws -> Void)? = nil,
         policyInstaller: ((MCPBootstrapLeaseSpec) async -> Void)? = nil,
         expectedPIDPolicyArmer: ((MCPBootstrapLeaseSpec) async -> Bool)? = nil,
         policyClearer: ((MCPBootstrapLeaseSpec) async -> Void)? = nil,
         routeAuthorityResolver: ((MCPBootstrapLeaseSpec) async -> MCPRunRouteAuthorityDecision)? = nil
     ) {
         self.spec = spec
-        self.mcpServerEnabler = mcpServerEnabler
+        self.readinessRequirement = readinessRequirement ?? mcpServerEnabler.map { enabler in
+            {
+                guard await enabler() else {
+                    throw MCPBootstrapReadinessError.catalogReadinessRejected
+                }
+            }
+        }
         self.policyInstaller = policyInstaller ?? Self.defaultPolicyInstaller
         self.expectedPIDPolicyArmer = expectedPIDPolicyArmer ?? Self.defaultExpectedPIDPolicyArmer
         self.policyClearer = policyClearer ?? Self.defaultPolicyClearer
@@ -221,15 +273,37 @@ actor MCPBootstrapLease {
 
     /// Atomically acquires the global gate, registers routing, and installs connection policy.
     /// PID-owned policies release the gate after their unique pending policy is confirmed armed.
-    /// Returns `false` if cancelled, the gate could not be acquired, or PID ownership could not be armed.
+    /// Returns `false` for any failure ``requireAcquired()`` would throw, including cancellation.
     func acquire() async -> Bool {
+        do {
+            try await requireAcquired()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Throwing core of ``acquire()``. Every failure runs the lease's joinable cleanup before it
+    /// throws: gate ownership is released, an installed policy is cleared, and routing is cleaned.
+    ///
+    /// - Throws: `CancellationError` when the calling task is cancelled; otherwise a
+    ///   ``MCPBootstrapReadinessError`` naming the failed phase, or the readiness requirement's error.
+    func requireAcquired() async throws {
+        if Task.isCancelled {
+            // A cancelled caller never reports success, including a cached one. An unacquired lease
+            // is cleaned up like any other cancelled acquisition.
+            if !hasAcquired, !hasReleased {
+                await cancelAndCleanup()
+            }
+            throw CancellationError()
+        }
         if hasReleased {
             acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) acquire() ignored because lease already released")
-            return false
+            throw MCPBootstrapReadinessError.leaseNoLongerUsable
         }
         if hasAcquired {
             acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) acquire() returning cached success")
-            return true
+            return
         }
 
         let runID = spec.runID
@@ -237,28 +311,23 @@ actor MCPBootstrapLease {
         acpLeaseLog("[ACP-Runner] lease run=\(runID) gate=\(gateID) acquire() begin client=\(spec.clientName ?? "<none>") window=\(spec.windowID) purpose=\(spec.purpose.rawValue)")
 
         // Ensure MCP server is started (agent-mode hook)
-        if let enabler = mcpServerEnabler {
+        if let readinessRequirement {
             acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) enabling MCP server before gate acquire")
-            guard await enabler() else {
-                acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) MCP server enabler failed")
-                await cancelAndCleanup()
-                return false
+            do {
+                try await readinessRequirement()
+            } catch {
+                acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) MCP server readiness failed: \(error)")
+                try await failAcquisition(error)
             }
             acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) MCP server enabler completed")
-            if shouldAbortAcquire {
-                await cancelAndCleanup()
-                return false
-            }
+            try await abortAcquireIfNeeded()
         }
 
         // Register routing state before gate acquisition
         acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) registering routing waiter")
         await MCPRoutingWaiter.register(runID: spec.runID)
         routingRegistered = true
-        if shouldAbortAcquire {
-            await cancelAndCleanup()
-            return false
-        }
+        try await abortAcquireIfNeeded()
         #if DEBUG
             await ServerNetworkManager.shared.debugRecordRunRoutingEvent(
                 runID: spec.runID,
@@ -273,7 +342,7 @@ actor MCPBootstrapLease {
         #endif
         acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) routing waiter registered")
 
-        return await withTaskCancellationHandler {
+        try await withTaskCancellationHandler {
             // Atomically wait + acquire the global gate.
             let gateSnapshot = await HeadlessAgentConnectionGate.snapshot()
             await recordDiagnosticEvent(
@@ -300,18 +369,14 @@ actor MCPBootstrapLease {
             acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) global MCP gate acquired=\(gateAcquisition.acquired)")
             if !gateAcquisition.acquired || shouldAbortAcquire {
                 acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) acquire() failed, was released, or task cancelled")
-                await cancelAndCleanup()
-                return false
+                try await failAcquisition(acquireAbortError(gateUnavailable: !gateAcquisition.acquired))
             }
 
             // Install per-run connection policy
             acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) installing connection policy for client=\(spec.clientName ?? "<none>")")
             await policyInstaller(spec)
             policyInstalled = true
-            if shouldAbortAcquire {
-                await cancelAndCleanup()
-                return false
-            }
+            try await abortAcquireIfNeeded()
             if spec.requiresExpectedAgentPID {
                 let policyArmed = await expectedPIDPolicyArmer(spec)
                 await recordDiagnosticEvent(
@@ -320,13 +385,9 @@ actor MCPBootstrapLease {
                 )
                 guard policyArmed else {
                     acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) expected-PID policy could not be armed")
-                    await cancelAndCleanup()
-                    return false
+                    try await failAcquisition(MCPBootstrapReadinessError.expectedPIDPolicyArmingFailed)
                 }
-                if shouldAbortAcquire {
-                    await cancelAndCleanup()
-                    return false
-                }
+                try await abortAcquireIfNeeded()
             }
             #if DEBUG
                 await ServerNetworkManager.shared.debugRecordRunRoutingEvent(
@@ -343,23 +404,57 @@ actor MCPBootstrapLease {
             acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) connection policy installed")
             if shouldAbortAcquire {
                 acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) task cancelled or lease released after policy install")
-                await cancelAndCleanup()
-                return false
             }
+            try await abortAcquireIfNeeded()
 
-            hasAcquired = true
             if spec.requiresExpectedAgentPID {
                 // The pending policy is now uniquely run-scoped and PID-owned. Release the
                 // process-global gate before spawning so independent sessions may initialize
                 // concurrently; the routing waiter and policy remain owned by this lease.
                 await releaseOwnedGate(reason: "expected_pid_policy_armed")
+                #if DEBUG
+                    await debugAfterExpectedPIDGateReleaseHook?()
+                #endif
+                // Cancellation during the release triggers cleanup, so it must fail the acquisition.
+                try await abortAcquireIfNeeded()
             }
+            hasAcquired = true
             acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) acquire() completed")
-            return true
         } onCancel: {
             acpLeaseLog("[ACP-Runner] lease run=\(runID) gate=\(gateID) acquire() cancellation handler invoked")
             Task { await self.cancelAndCleanup() }
         }
+    }
+
+    /// Runs cleanup and throws when acquisition must stop between phases.
+    private func abortAcquireIfNeeded() async throws {
+        guard shouldAbortAcquire else { return }
+        try await failAcquisition(acquireAbortError(gateUnavailable: false))
+    }
+
+    /// Cleans up a failed acquisition, then throws `failure`. Callers choose `failure` before
+    /// cleanup because cleanup marks the lease released, which would otherwise hide the failed
+    /// phase behind leaseNoLongerUsable. This is the single cancellation authority for failed
+    /// acquisitions: cancellation before or during cleanup wins over the phase error, including a
+    /// legacy Boolean refusal, so a cancelled start is never reported as a readiness failure.
+    private func failAcquisition(_ failure: Error) async throws -> Never {
+        await cancelAndCleanup()
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+        throw failure
+    }
+
+    /// Task cancellation wins over lease state so a cancelled start is never reported as a
+    /// readiness failure.
+    private func acquireAbortError(gateUnavailable: Bool) -> Error {
+        if Task.isCancelled {
+            return CancellationError()
+        }
+        if gateUnavailable, !cleanupRequested, !hasReleased {
+            return MCPBootstrapReadinessError.bootstrapGateUnavailable
+        }
+        return MCPBootstrapReadinessError.leaseNoLongerUsable
     }
 
     // MARK: - Release Strategies
@@ -552,7 +647,11 @@ actor MCPBootstrapLease {
             return
         case .cancelled:
             throw CancellationError()
-        case .failed, .timedOutBeforeConnection, .timedOutAfterConnection:
+        case .timedOutBeforeConnection:
+            throw MCPBootstrapReadinessError.routingTimeoutBeforeConnection
+        case .timedOutAfterConnection:
+            throw MCPBootstrapReadinessError.routingTimeoutAfterConnection
+        case .failed:
             throw MCPBootstrapReadinessError.routingUnavailable
         }
     }
@@ -593,6 +692,11 @@ actor MCPBootstrapLease {
     }
 
     #if DEBUG
+        /// Runs after a PID-owned acquisition releases the gate and before it reports success.
+        func debugSetAfterExpectedPIDGateReleaseHook(_ hook: (@Sendable () async -> Void)?) {
+            debugAfterExpectedPIDGateReleaseHook = hook
+        }
+
         /// Awaits the next caller joining an in-flight ``clearPolicyOnce()`` operation and returns the
         /// observed joiner count, so tests can deterministically prove a second caller entered the
         /// existing-operation branch while the primary clear is still parked.
