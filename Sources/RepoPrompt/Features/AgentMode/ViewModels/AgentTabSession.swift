@@ -157,6 +157,21 @@ final class AgentTabSession: ObservableObject {
     var mcpStateObservationCancellable: AnyCancellable?
     var mcpControlCleanupTask: Task<Void, Never>?
     var mcpControlActivationGeneration: UInt64 = 0
+    /// The MCP epoch preparation in flight for this session. Preparations run one at a time, so
+    /// a start never prepares against a context the store has already moved past.
+    var mcpEpochPreparation: Task<Void, Never>?
+    #if DEBUG
+        var test_mcpEpochPreparationWaiterCount = 0
+    #endif
+
+    /// Frees the preparation slot only while it still holds `preparation`, so a finished
+    /// preparation never clears the slot of the one that replaced it.
+    func clearMCPEpochPreparation(ifCurrent preparation: Task<Void, Never>) {
+        if mcpEpochPreparation == preparation {
+            mcpEpochPreparation = nil
+        }
+    }
+
     var mcpFollowUpRunPendingUpdatedAt: Date?
     var mcpFollowUpRunPending: Bool = false {
         didSet {
@@ -309,6 +324,13 @@ final class AgentTabSession: ObservableObject {
         }
     }
 
+    /// FIFO turn-taking for one session's Codex sends. A granted turn ends with `finish`; a
+    /// cancelled ticket never needs one, because the serving cursor skips it.
+    ///
+    /// A cancellation stays recorded until the cursor passes the ticket, so it holds whether the
+    /// ticket's task reaches `awaitTurn` before or after the cancel. A ticket the cursor already
+    /// passed was cancelled while serving and is refused rather than left waiting for a turn that
+    /// will never come.
     @MainActor
     final class CodexDispatchSerialGate {
         private var nextTicket: UInt64 = 0
@@ -322,8 +344,7 @@ final class AgentTabSession: ObservableObject {
         }
 
         func awaitTurn(_ ticket: UInt64) async -> Bool {
-            if cancelledTickets.remove(ticket) != nil {
-                advancePastCancelledTickets()
+            if ticket < servingTicket || cancelledTickets.contains(ticket) {
                 return false
             }
             if ticket == servingTicket {
@@ -336,25 +357,37 @@ final class AgentTabSession: ObservableObject {
 
         func finish(_ ticket: UInt64) {
             guard ticket == servingTicket else { return }
-            servingTicket &+= 1
-            advancePastCancelledTickets()
-            waiters.removeValue(forKey: servingTicket)?.resume(returning: true)
+            advanceServingTicket()
         }
 
         func cancel(_ ticket: UInt64) {
-            if let waiter = waiters.removeValue(forKey: ticket) {
-                waiter.resume(returning: false)
-            }
+            guard ticket >= servingTicket else { return }
             cancelledTickets.insert(ticket)
-            guard ticket == servingTicket else { return }
-            advancePastCancelledTickets()
-            waiters.removeValue(forKey: servingTicket)?.resume(returning: true)
+            waiters.removeValue(forKey: ticket)?.resume(returning: false)
+            if ticket == servingTicket {
+                advanceServingTicket()
+            }
         }
 
-        private func advancePastCancelledTickets() {
+        #if DEBUG
+            func test_hasWaiter(for ticket: UInt64) -> Bool {
+                waiters[ticket] != nil
+            }
+
+            var test_cancellationMarkerCount: Int {
+                cancelledTickets.count
+            }
+        #endif
+
+        private func advanceServingTicket() {
+            // Once passed, a ticket is refused by the `ticket < servingTicket` check, so its marker
+            // is no longer needed.
+            cancelledTickets.remove(servingTicket)
+            servingTicket &+= 1
             while cancelledTickets.remove(servingTicket) != nil {
                 servingTicket &+= 1
             }
+            waiters.removeValue(forKey: servingTicket)?.resume(returning: true)
         }
     }
 
@@ -489,7 +522,33 @@ final class AgentTabSession: ObservableObject {
     }
 
     var provider: HeadlessAgentProvider?
-    var agentTask: Task<Void, Never>?
+    var agentTask: Task<Void, Never>? {
+        didSet { agentTaskOwnerToken = nil }
+    }
+
+    /// Identifies the runner that installed `agentTask` through `installAgentTask`, so that
+    /// runner's cleanup cannot clear a task a successor installed after it.
+    private(set) var agentTaskOwnerToken: UUID?
+
+    func installAgentTask(_ task: Task<Void, Never>, ownerToken: UUID) {
+        agentTask = task
+        agentTaskOwnerToken = ownerToken
+    }
+
+    func clearAgentTask(ownedBy ownerToken: UUID) {
+        guard agentTaskOwnerToken == ownerToken else { return }
+        agentTask = nil
+    }
+
+    /// The latest head-of-line startup ticket. It is kept after resolution so work bound to it
+    /// can still recognize that it was cancelled or superseded; only an unresolved ticket counts
+    /// as pending startup.
+    private(set) var startupTicket: AgentRunStartupTicket?
+
+    var unresolvedStartupTicket: AgentRunStartupTicket? {
+        guard let startupTicket, startupTicket.isUnresolved else { return nil }
+        return startupTicket
+    }
 
     // Settings (per-tab)
     var selectedAgent: AgentProviderKind = .claudeCode
@@ -757,6 +816,7 @@ final class AgentTabSession: ObservableObject {
         assistantDeltaFlushTask?.cancel()
         assistantDeltaFlushTask = nil
         pendingAssistantDelta = ""
+        invalidatePendingStartup(.superseded)
         agentTask?.cancel()
         agentTask = nil
         if hasActiveCodexHookGateOperation {
@@ -831,6 +891,99 @@ final class AgentTabSession: ObservableObject {
         codexHookGateActiveBinding = nil
         codexHookGateBindingMemo = nil
         codexHookGateAudit = nil
+    }
+
+    // MARK: Startup ticket
+
+    /// Installs the head-of-line ticket for an inactive submission. Returns `nil` while another
+    /// start is unresolved: that start stays the head, and the new submission keeps its FIFO
+    /// behavior instead of replacing it.
+    func installStartupTicketIfAbsent() -> AgentRunStartupTicket? {
+        guard unresolvedStartupTicket == nil else { return nil }
+        let ticket = AgentRunStartupTicket(capture: .init(
+            binding: persistentSessionBindingIdentity,
+            bindingTransitionGeneration: bindingTransitionGeneration,
+            mcpActivationID: mcpControlContext?.activationID,
+            mcpActivationGeneration: mcpControlActivationGeneration
+        ))
+        startupTicket = ticket
+        return ticket
+    }
+
+    /// Whether `ticket` may still advance toward provider dispatch: it is this session's
+    /// unresolved ticket and the session still presents the binding, MCP activation, and (once
+    /// bound) the run attempt the ticket captured.
+    func isStartupTicketCurrent(_ ticket: AgentRunStartupTicket) -> Bool {
+        guard ticket.isUnresolved, startupTicket === ticket else { return false }
+        let capture = ticket.capture
+        guard capture.binding == persistentSessionBindingIdentity,
+              capture.bindingTransitionGeneration == bindingTransitionGeneration
+        else { return false }
+        if let activationID = capture.mcpActivationID {
+            guard mcpControlContext?.activationID == activationID,
+                  mcpControlActivationGeneration == capture.mcpActivationGeneration
+            else { return false }
+        }
+        if let ownership = ticket.ownership, activeRunOwnership != ownership {
+            return false
+        }
+        return true
+    }
+
+    /// Invalidates the unresolved startup and withdraws its queued work. The Codex dispatch gate
+    /// ignores task cancellation, so the gate tickets of the head and its registered followers are
+    /// cancelled explicitly. Followers go first: cancelling the head's serving ticket advances the
+    /// gate and would otherwise hand the turn to a follower that is about to be cancelled.
+    ///
+    /// The MCP pending-start flag is cleared only while the MCP activation the ticket captured is
+    /// still current, because then the flag was raised for this start, which will now not run. A
+    /// newer activation raises its own flag, and that flag survives.
+    @discardableResult
+    func invalidatePendingStartup(_ resolution: AgentRunStartupTicket.Phase) -> AgentRunStartupTicket? {
+        guard let ticket = unresolvedStartupTicket, ticket.resolve(resolution) else { return nil }
+        if ticket.capture.mcpActivationGeneration == mcpControlActivationGeneration {
+            mcpFollowUpRunPending = false
+        }
+        ticket.task?.cancel()
+        ticket.followerTasks.forEach { $0.cancel() }
+        for followerTicket in ticket.followerDispatchGateTickets {
+            codexDispatchSerialGate.cancel(followerTicket)
+        }
+        if let headTicket = ticket.dispatchGateTicket {
+            codexDispatchSerialGate.cancel(headTicket)
+        }
+        return ticket
+    }
+
+    /// The run ID reserved by the unresolved start bound to the current attempt, if any.
+    var reservedRunIDForCurrentStartupAttempt: UUID? {
+        guard let ticket = unresolvedStartupTicket,
+              let ownership = ticket.ownership,
+              ownership == activeRunOwnership
+        else { return nil }
+        return ticket.reservedRunID
+    }
+
+    /// Claims ownership for a cancelled start that never reached a runner, under the start's own
+    /// run identity rather than the previous run's.
+    func beginRunAttemptForCancelledStartup(_ ticket: AgentRunStartupTicket) -> AgentRunOwnership {
+        let runID = claimStartupRunID(for: ticket)
+        let ownership = beginRunAttempt(source: "runService.cancelPendingStartup")
+        ticket.bindOwnership(ownership, runID: runID)
+        return ownership
+    }
+
+    /// Installs the start's reserved run ID unless a live runtime already runs under an installed
+    /// ID. A warm Codex controller's MCP policy, routed connection, and live-turn correlation are
+    /// keyed by its ID, and other providers' runners install their fresh ID before beginning the
+    /// attempt, so in those cases the start adopts the installed ID.
+    private func claimStartupRunID(for ticket: AgentRunStartupTicket) -> UUID? {
+        if ticket.ownership == nil,
+           runID == nil || (selectedAgent == .codexExec && codexController == nil)
+        {
+            installRunID(ticket.reservedRunID)
+        }
+        return runID
     }
 
     @discardableResult
@@ -944,6 +1097,12 @@ final class AgentTabSession: ObservableObject {
             ),
             attemptID: attemptID
         )
+        if let ticket = unresolvedStartupTicket,
+           ticket.phase == .dispatching,
+           ticket.ownership == nil
+        {
+            ticket.bindOwnership(ownership, runID: claimStartupRunID(for: ticket))
+        }
         #if DEBUG
             AgentModePerfDiagnostics.increment("run.lifecycle.attempt.started")
             AgentModePerfDiagnostics.increment("run.lifecycle.attempt.started.source.\(source)")

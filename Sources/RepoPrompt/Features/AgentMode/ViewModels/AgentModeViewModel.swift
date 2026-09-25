@@ -312,6 +312,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             if let session = activeSession {
                 let previousAgent = session.selectedAgent
                 if previousAgent != selectedAgent {
+                    session.invalidatePendingStartup(.superseded)
                     codexCoordinator.handleProviderSwitch(from: previousAgent, to: selectedAgent, session: session)
                     claudeCoordinator.handleProviderIdentityTransitionSync(
                         session: session,
@@ -782,6 +783,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         private var test_afterDurableExplicitTabSessionBinding: (@MainActor () async -> Void)?
         var test_afterMCPControlActivation: (@MainActor (TabSession) async -> Void)?
         var test_submitUserTurnResultOverride: ((String, UUID, String?) -> UserTurnSubmissionResult)?
+        var test_startAgentRunObserver: (@MainActor (TabSession) -> Void)?
         var test_beforeMCPSelectionCommit: (@MainActor () async -> Void)?
         private var test_composeTabRemovalTeardownObserver: (@MainActor (UUID) async -> Void)?
         private var test_beforeAutomaticMCPSessionTargetDiscardRetry: (@MainActor () async -> Void)?
@@ -6160,10 +6162,45 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         }
     }
 
-    func prepareMCPWaitTrackingForRunStart(session: TabSession) async {
+    /// - Parameter startupTicket: the accepted start this epoch is prepared for. An epoch the
+    ///   store accepts after that start was cancelled or superseded is settled rather than handed
+    ///   to a run.
+    func prepareMCPWaitTrackingForRunStart(
+        session: TabSession,
+        startupTicket: AgentRunStartupTicket? = nil
+    ) async {
+        // The store advances its epoch before the context learns of it, so a second preparation
+        // started meanwhile would find the store ahead and bind its run to an outdated epoch.
+        while let inFlight = session.mcpEpochPreparation {
+            #if DEBUG
+                session.test_mcpEpochPreparationWaiterCount += 1
+            #endif
+            await inFlight.value
+            #if DEBUG
+                session.test_mcpEpochPreparationWaiterCount -= 1
+            #endif
+            // Awaiting a finished preparation does not suspend, so whichever caller observes it
+            // first releases the slot; otherwise this loop could spin ahead of its owner.
+            session.clearMCPEpochPreparation(ifCurrent: inFlight)
+        }
+        let preparation = Task<Void, Never> { @MainActor [weak self] in
+            await self?.performMCPWaitTrackingPreparation(session: session, startupTicket: startupTicket)
+        }
+        session.mcpEpochPreparation = preparation
+        await preparation.value
+        session.clearMCPEpochPreparation(ifCurrent: preparation)
+    }
+
+    private func performMCPWaitTrackingPreparation(
+        session: TabSession,
+        startupTicket: AgentRunStartupTicket?
+    ) async {
         guard !session.runState.isActive,
               let originalContext = session.mcpControlContext
         else { return }
+        if let startupTicket, !startupTicketOwnsSession(startupTicket, session: session) {
+            return
+        }
         if originalContext.preparedEpoch != nil {
             return
         }
@@ -6238,9 +6275,24 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
             return
         }
+        let startupStillOwnsSession = startupTicket.map {
+            startupTicketOwnsSession($0, session: session)
+        } ?? true
+        // Preparations are serialized, so a successor start has not prepared yet and follows the
+        // store from here. Only a run that began without preparing may hold an attempt bound to
+        // the context's epoch; the stale epoch must not be installed underneath it.
+        let successorOwnsSession = session.runState.isActive || session.activeRunOwnership != nil
+        guard startupStillOwnsSession || !successorOwnsSession else {
+            if registration != originalContext.registration {
+                await AgentRunSessionStore.cleanup(registration: registration)
+            }
+            return
+        }
+        // Otherwise the context follows the store, which has already advanced to this epoch; the
+        // guard above guarantees no successor epoch was installed meanwhile.
         context = context.replacingRegistration(registration)
         context.currentEpoch = epoch
-        context.preparedEpoch = epoch
+        context.preparedEpoch = startupStillOwnsSession ? epoch : nil
         let pendingTransitionToken = context.pendingEpochTransition?.token
         let shouldClearPendingTransition = pendingTransitionToken == scopedTransitionIntent?.token
             || pendingTransitionToken == Self.mcpRunEpochTransitionToken
@@ -6248,10 +6300,38 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             context.pendingEpochTransition = nil
         }
         session.mcpControlContext = context
+        guard startupStillOwnsSession else {
+            await settleEpochAcceptedAfterStartupEnded(epoch, registration: registration, session: session)
+            return
+        }
         if !session.mcpFollowUpRunPending {
             session.mcpFollowUpRunPending = true
             handleObservedMCPStateChange(for: session)
         }
+    }
+
+    /// An epoch accepted for a start that was cancelled in the meantime would otherwise stay
+    /// open with no run behind it, so MCP waiters on it would see a run that never comes. It
+    /// takes the session's cancellation as its terminal result. A start superseded by a session
+    /// change publishes nothing here; its epoch is consumed by the next run.
+    private func settleEpochAcceptedAfterStartupEnded(
+        _ epoch: AgentRunTurnEpoch,
+        registration: AgentRunSessionStore.Registration,
+        session: TabSession
+    ) async {
+        guard session.runState == .cancelled,
+              let snapshot = mcpSnapshot(for: session, canonicalTerminalState: .cancelled)
+        else { return }
+        _ = await AgentRunSessionStore.publishTerminal(
+            AgentRunTerminalPublicationEnvelope(epoch: epoch, snapshot: snapshot),
+            registration: registration,
+            commitID: UUID(),
+            successorKind: nil
+        )
+    }
+
+    private func startupTicketOwnsSession(_ ticket: AgentRunStartupTicket, session: TabSession) -> Bool {
+        sessions[session.tabID] === session && session.isStartupTicketCurrent(ticket)
     }
 
     func mcpSnapshot(sessionID: UUID) -> AgentRunMCPSnapshot? {
@@ -8672,6 +8752,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         )
         let previousAgent = session.selectedAgent
         if previousAgent != normalized.agent {
+            session.invalidatePendingStartup(.superseded)
             codexCoordinator.handleProviderSwitch(from: previousAgent, to: normalized.agent, session: session)
             await claudeCoordinator.handleProviderIdentityTransition(
                 session: session,
@@ -15646,7 +15727,15 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     workflow: activeWorkflow
                 )
                 Task { [weak self] in
-                    guard let self else { return }
+                    guard let self else {
+                        if let codexAttemptID {
+                            session.codexSteerAckTracker.markStale(
+                                attemptID: codexAttemptID,
+                                reason: "The command was not sent because its window closed before dispatch."
+                            )
+                        }
+                        return
+                    }
                     if let codexAttemptID {
                         guard await session.codexSteerAckTracker.awaitDispatchAuthorization(
                             attemptID: codexAttemptID
@@ -15693,6 +15782,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return invocation.definition.asBubbleWorkflowDefinition()
         }()
 
+        // The submission is accepted from here on. An inactive session records it as pending
+        // startup before any asynchronous work, so cancellation and teardown can find it.
+        let startupTicket = session.runState.isActive ? nil : session.installStartupTicketIfAbsent()
+
         // Capture and clear workflow before sending
         session.selectedWorkflow = nil
         selectedWorkflow = nil
@@ -15701,10 +15794,31 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         if session.activeAgentSessionID != nil, !session.hasLoadedPersistedState {
             Self.logCodexDebug("[AgentModeVM][RunID] deferring send until hydration completes for tab \(tabID)")
-            Task { [weak self] in
-                guard let self else { return }
+            // A submission deferred behind another pending start stays associated with that
+            // head start, so cancelling the head also withdraws it.
+            let headStartupTicket = startupTicket ?? session.unresolvedStartupTicket
+            let followerID = UUID()
+            let hydrationTask = Task { [weak self] in
+                defer {
+                    if startupTicket == nil {
+                        headStartupTicket?.followerFinished(id: followerID)
+                    }
+                }
+                guard let self else {
+                    startupTicket?.resolve(.superseded)
+                    if let codexAttemptID {
+                        session.codexSteerAckTracker.markStale(
+                            attemptID: codexAttemptID,
+                            reason: "The message was not sent because its window closed before the run started."
+                        )
+                    }
+                    return
+                }
                 await submitUserTurnAfterHydration(
                     tabID: tabID,
+                    session: session,
+                    startupTicket: startupTicket,
+                    headStartupTicket: headStartupTicket,
                     trimmedText: trimmedText,
                     attachmentsToSend: attachmentsToSend,
                     taggedFilesToSend: taggedFilesToSend,
@@ -15716,12 +15830,18 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     restorationSelectedWorkflowMutationGeneration: restorationSelectedWorkflowMutationGeneration
                 )
             }
+            if let startupTicket {
+                startupTicket.attachTask(hydrationTask)
+            } else {
+                headStartupTicket?.registerFollower(task: hydrationTask, id: followerID)
+            }
             return .submitted
         }
 
         return submitPreparedUserTurn(
             tabID: tabID,
             session: session,
+            startupTicket: startupTicket,
             trimmedText: trimmedText,
             attachmentsToSend: attachmentsToSend,
             taggedFilesToSend: taggedFilesToSend,
@@ -15736,6 +15856,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
     private func submitUserTurnAfterHydration(
         tabID: UUID,
+        session: TabSession,
+        startupTicket: AgentRunStartupTicket?,
+        headStartupTicket: AgentRunStartupTicket?,
         trimmedText: String,
         attachmentsToSend: [AgentImageAttachment],
         taggedFilesToSend: [AgentTaggedFileAttachment],
@@ -15746,8 +15869,31 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         restorationSelectedWorkflow: AgentWorkflowDefinition? = nil,
         restorationSelectedWorkflowMutationGeneration: UInt64? = nil
     ) async {
-        guard let session = sessions[tabID] else { return }
+        let deferredSubmission = DeferredSubmissionRestoration(
+            draftText: rawDraftText ?? trimmedText,
+            images: attachmentsToSend,
+            taggedFiles: taggedFilesToSend,
+            selectedWorkflow: restorationSelectedWorkflow,
+            selectedWorkflowMutationGeneration: restorationSelectedWorkflowMutationGeneration,
+            codexAttemptID: codexAttemptID
+        )
+        if dropStaleDeferredSubmission(
+            deferredSubmission,
+            tabID: tabID,
+            session: session,
+            startupTicket: startupTicket,
+            headStartupTicket: headStartupTicket
+        ) {
+            return
+        }
         if session.selectedAgent == .codexExec, CodexManagedSessionFence.shared.isFenced {
+            startupTicket?.resolve(.rejected)
+            if let codexAttemptID {
+                session.codexSteerAckTracker.resolve(
+                    attemptID: codexAttemptID,
+                    state: .failed(message: CodexManagedSessionFence.blockedMessage)
+                )
+            }
             restoreRejectedManualSubmissionComposerState(
                 tabID: tabID,
                 session: session,
@@ -15761,10 +15907,21 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return
         }
         await prepareSessionForRunStart(tabID: tabID, session: session)
-        guard let hydratedSession = sessions[tabID] else { return }
+        // Cancellation, teardown, or replacement can land while hydration is suspended; each is
+        // honored here, before the submission touches the transcript or the run state.
+        if dropStaleDeferredSubmission(
+            deferredSubmission,
+            tabID: tabID,
+            session: session,
+            startupTicket: startupTicket,
+            headStartupTicket: headStartupTicket
+        ) {
+            return
+        }
         _ = submitPreparedUserTurn(
             tabID: tabID,
-            session: hydratedSession,
+            session: session,
+            startupTicket: startupTicket,
             trimmedText: trimmedText,
             attachmentsToSend: attachmentsToSend,
             taggedFilesToSend: taggedFilesToSend,
@@ -15775,6 +15932,104 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             restorationSelectedWorkflow: restorationSelectedWorkflow,
             restorationSelectedWorkflowMutationGeneration: restorationSelectedWorkflowMutationGeneration
         )
+    }
+
+    private struct DeferredSubmissionRestoration {
+        let draftText: String
+        let images: [AgentImageAttachment]
+        let taggedFiles: [AgentTaggedFileAttachment]
+        let selectedWorkflow: AgentWorkflowDefinition?
+        let selectedWorkflowMutationGeneration: UInt64?
+        let codexAttemptID: UUID?
+    }
+
+    /// The checkpoint a hydration-deferred submission passes before and after hydration. Returns
+    /// true when the submission was dropped.
+    ///
+    /// A deferred submission belongs to the session object that accepted it and never moves to a
+    /// replacement session: the replaced session's start expires with it, and nothing is restored
+    /// to the composer, which now belongs to the replacement. On the live session, a submission
+    /// whose own start, or the head start it followed, was cancelled or superseded is withdrawn.
+    private func dropStaleDeferredSubmission(
+        _ submission: DeferredSubmissionRestoration,
+        tabID: UUID,
+        session: TabSession,
+        startupTicket: AgentRunStartupTicket?,
+        headStartupTicket: AgentRunStartupTicket?
+    ) -> Bool {
+        guard sessions[tabID] === session else {
+            abandonDeferredSubmissionOfReplacedSession(submission, session: session, startupTicket: startupTicket)
+            return true
+        }
+        return rejectInvalidatedDeferredSubmission(
+            submission,
+            tabID: tabID,
+            session: session,
+            startupTicket: startupTicket,
+            headStartupTicket: headStartupTicket
+        )
+    }
+
+    /// Drops a deferred submission whose session object was replaced. Only the originating
+    /// session is touched: its start is superseded and an MCP steering attempt learns it went
+    /// stale, so its caller stops waiting.
+    private func abandonDeferredSubmissionOfReplacedSession(
+        _ submission: DeferredSubmissionRestoration,
+        session: TabSession,
+        startupTicket: AgentRunStartupTicket?
+    ) {
+        startupTicket?.resolve(.superseded)
+        if let codexAttemptID = submission.codexAttemptID {
+            session.codexSteerAckTracker.markStale(
+                attemptID: codexAttemptID,
+                reason: "The message was not sent because its session was replaced before the run started."
+            )
+        }
+    }
+
+    /// Withdraws a hydration-deferred submission whose own start, or the head start it was
+    /// queued behind, was cancelled or superseded. A manual draft goes back to the composer; an
+    /// MCP steering attempt is resolved so its caller stops waiting.
+    private func rejectInvalidatedDeferredSubmission(
+        _ submission: DeferredSubmissionRestoration,
+        tabID: UUID,
+        session: TabSession,
+        startupTicket: AgentRunStartupTicket?,
+        headStartupTicket: AgentRunStartupTicket?
+    ) -> Bool {
+        let invalidation: AgentRunStartupTicket.Phase? = if let startupTicket {
+            startupTicket.isUnresolved ? nil : startupTicket.phase
+        } else if let head = headStartupTicket?.currentHead,
+                  head.phase == .cancelled || head.phase == .superseded
+        {
+            head.phase
+        } else {
+            nil
+        }
+        guard let invalidation else { return false }
+        let wasCancelled = invalidation == .cancelled
+        if let codexAttemptID = submission.codexAttemptID {
+            session.codexSteerAckTracker.resolve(
+                attemptID: codexAttemptID,
+                state: wasCancelled
+                    ? .cancelled
+                    : .stale(reason: "The message was not sent because the session changed before the run started.")
+            )
+            return true
+        }
+        restoreRejectedManualSubmissionComposerState(
+            tabID: tabID,
+            session: session,
+            draftText: submission.draftText,
+            images: submission.images,
+            taggedFiles: submission.taggedFiles,
+            selectedWorkflow: submission.selectedWorkflow,
+            selectedWorkflowMutationGeneration: submission.selectedWorkflowMutationGeneration,
+            message: wasCancelled
+                ? "The message was not sent because the run was cancelled before it started."
+                : "The message was not sent because the session changed before the run started."
+        )
+        return true
     }
 
     private static func validatedSteeringOriginRunID(
@@ -15831,10 +16086,103 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         scheduleSave(for: tabID)
     }
 
+    // MARK: Startup tickets
+
+    /// Revalidates a pending start after a suspension. Returns the outcome to report when the
+    /// start must stop before provider dispatch; a ticket that lost its session is resolved as
+    /// superseded so nothing can restart it.
+    private func startupTicketStopOutcome(
+        _ ticket: AgentRunStartupTicket,
+        session: TabSession
+    ) -> CodexAgentModeCoordinator.NativeSendOutcome? {
+        if startupTicketOwnsSession(ticket, session: session) {
+            return nil
+        }
+        ticket.resolve(.superseded)
+        if ticket.phase == .cancelled {
+            return .cancelled
+        }
+        return .preDispatchRejected(
+            message: "The run did not start because the session changed before provider dispatch."
+        )
+    }
+
+    private func resolveStartupTicketAfterRunServiceReturn(
+        _ ticket: AgentRunStartupTicket,
+        outcome: CodexAgentModeCoordinator.NativeSendOutcome?
+    ) {
+        let resolution: AgentRunStartupTicket.Phase = switch outcome {
+        case .sent?, .queuedFallback?:
+            .accepted
+        // Non-Codex runners report no dispatch outcome. Once the run service returns, their
+        // runner, or the startup-failure settlement, owns the run's lifecycle.
+        case nil:
+            .accepted
+        case .cancelled?:
+            .cancelled
+        case .stale?:
+            .superseded
+        case .preDispatchRejected?, .failed?:
+            .rejected
+        }
+        ticket.resolve(resolution)
+    }
+
+    /// A queued Codex submission whose gate turn arrives while its session is inactive starts a
+    /// fresh run, as it would without tickets, so it becomes the head-of-line start. Its dispatch
+    /// task becomes the head's task, and submissions still queued behind it become its followers.
+    private func promoteQueuedCodexSubmissionToStartup(
+        session: TabSession,
+        tabID: UUID,
+        optimisticUserItemID: UUID,
+        dispatchGateTicket: UInt64,
+        dispatchTask: Task<Void, Never>?,
+        followerID: UUID,
+        followedStartupTicket: AgentRunStartupTicket?
+    ) -> AgentRunStartupTicket? {
+        guard sessions[tabID] === session, !session.runState.isActive else { return nil }
+        let previousTicket = session.startupTicket
+        guard let ticket = session.installStartupTicketIfAbsent() else { return nil }
+        ticket.bindOptimisticUserItem(optimisticUserItemID)
+        if let dispatchTask {
+            ticket.attachTask(dispatchTask, dispatchGateTicket: dispatchGateTicket)
+        } else {
+            ticket.attachDispatchGateTicket(dispatchGateTicket)
+        }
+        // The promoted submission's peers are registered with the head it followed; the last
+        // head on the session may be a later one that queued more work behind it.
+        var sources = followedStartupTicket.map { [$0] } ?? []
+        if let previousTicket, previousTicket !== followedStartupTicket {
+            sources.append(previousTicket)
+        }
+        for source in sources {
+            source.transferQueuedWork(
+                to: ticket,
+                promotedFollowerID: followerID,
+                promotedDispatchGateTicket: dispatchGateTicket
+            )
+        }
+        if resetPreRunStateForAcceptedStartup(session) {
+            updateBindingsFromSession(session)
+        }
+        return ticket
+    }
+
+    /// A newly accepted start begins from `.idle`, so its saved optimistic prompt does not inherit
+    /// the previous run's terminal state. `.running` is not claimed here: Codex reads the prior
+    /// active state to choose between starting and steering.
+    @discardableResult
+    private func resetPreRunStateForAcceptedStartup(_ session: TabSession) -> Bool {
+        guard session.runState.isTerminalForCommit else { return false }
+        session.runState = .idle
+        return true
+    }
+
     @discardableResult
     private func submitPreparedUserTurn(
         tabID: UUID,
         session: TabSession,
+        startupTicket providedStartupTicket: AgentRunStartupTicket? = nil,
         trimmedText: String,
         attachmentsToSend: [AgentImageAttachment],
         taggedFilesToSend: [AgentTaggedFileAttachment],
@@ -15846,6 +16194,19 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         restorationSelectedWorkflowMutationGeneration: UInt64? = nil
     ) -> UserTurnSubmissionResult {
         Self.logCodexDebug("[AgentModeVM] submitUserTurn: tabID=\(tabID), selectedAgent=\(session.selectedAgent), attachments=\(attachmentsToSend.count), taggedFiles=\(taggedFilesToSend.count), workflow=\(activeWorkflow?.displayName ?? "none")")
+        // Callers that reach this point directly (MCP native slash turns) have no ticket yet.
+        let startupTicket: AgentRunStartupTicket? = {
+            guard let ticket = providedStartupTicket
+                ?? (session.runState.isActive ? nil : session.installStartupTicketIfAbsent())
+            else { return nil }
+            guard !session.runState.isActive else {
+                // The session became active while a hydration-deferred submission waited, so
+                // the submission joins the active run instead of starting one.
+                ticket.resolve(.superseded)
+                return nil
+            }
+            return ticket
+        }()
         // Composer claims preserve the exact raw snapshot separately from provider-normalized text.
         let restorationDraftText = rawDraftText ?? trimmedText
 
@@ -15931,6 +16292,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             sequenceIndex: session.nextSequenceIndex,
             workflow: activeWorkflow
         )
+        if let startupTicket {
+            startupTicket.bindOptimisticUserItem(userItem.id)
+            resetPreRunStateForAcceptedStartup(session)
+        }
         let turnRuntimeAnchorRollback = recordAgentTurnUserAnchor(for: session, userItem: userItem)
         session.appendItem(userItem)
         updateBindingsFromSession(session)
@@ -15981,6 +16346,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         if session.selectedAgent == .codexExec {
             let dispatchTicket = session.codexDispatchSerialGate.issueTicket()
+            let followedStartupTicket = startupTicket == nil ? session.unresolvedStartupTicket : nil
+            let followerID = UUID()
+            let dispatchTaskHandle = AgentRunStartupTicket.DispatchTaskHandle()
+            followedStartupTicket?.registerFollower(dispatchGateTicket: dispatchTicket)
             let fallbackContext = TabSession.CodexFallbackSubmissionContext(
                 queueID: UUID(),
                 providerText: wrappedText,
@@ -15991,7 +16360,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 origin: codexAttemptID.map(TabSession.CodexFallbackOrigin.mcp) ?? .manual,
                 dispatchTicket: dispatchTicket
             )
-            Task {
+            let dispatchTask = Task {
+                defer { followedStartupTicket?.followerFinished(id: followerID) }
                 var handedOffToSerialDispatch = false
                 defer {
                     if !handedOffToSerialDispatch {
@@ -16002,6 +16372,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     guard await session.codexSteerAckTracker.awaitDispatchAuthorization(
                         attemptID: codexAttemptID
                     ) else {
+                        startupTicket?.resolve(.rejected)
                         self.removeUnconfirmedOptimisticCodexUserItem(
                             session: session,
                             tabID: tabID,
@@ -16012,24 +16383,61 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     }
                 }
                 handedOffToSerialDispatch = true
-                guard await session.codexDispatchSerialGate.awaitTurn(dispatchTicket) else {
-                    return
-                }
+                // A cancelled gate ticket means the startup this submission belonged to was
+                // cancelled; it falls through to the cancelled-send cleanup below.
+                let gateTurnGranted = await session.codexDispatchSerialGate.awaitTurn(dispatchTicket)
                 defer {
-                    session.codexDispatchSerialGate.finish(dispatchTicket)
+                    if gateTurnGranted {
+                        session.codexDispatchSerialGate.finish(dispatchTicket)
+                    }
                 }
-                let sendOutcome: CodexAgentModeCoordinator.NativeSendOutcome? = if self.sessions[tabID] === session {
+                let dispatchStartupTicket = gateTurnGranted
+                    ? startupTicket ?? self.promoteQueuedCodexSubmissionToStartup(
+                        session: session,
+                        tabID: tabID,
+                        optimisticUserItemID: userItem.id,
+                        dispatchGateTicket: dispatchTicket,
+                        dispatchTask: dispatchTaskHandle.task,
+                        followerID: followerID,
+                        followedStartupTicket: followedStartupTicket
+                    )
+                    : startupTicket
+                let sendOutcome: CodexAgentModeCoordinator.NativeSendOutcome? = if !gateTurnGranted {
+                    .cancelled
+                } else if self.sessions[tabID] !== session {
+                    .preDispatchRejected(
+                        message: "Codex did not send because the tab session changed before provider dispatch."
+                    )
+                } else {
                     await self.startAgentRun(
                         tabID: tabID,
                         initialMessage: wrappedText,
                         attachments: attachmentsToSend,
                         taggedFileAttachments: taggedFilesToSend,
-                        codexFallbackContext: fallbackContext
+                        codexFallbackContext: fallbackContext,
+                        startupTicket: dispatchStartupTicket
                     )
-                } else {
-                    .preDispatchRejected(
-                        message: "Codex did not send because the tab session changed before provider dispatch."
+                }
+                // A send that never reached the provider from a session that has since been
+                // replaced has nothing left to restore, and the rollback below is tab-scoped, so
+                // it would land in the replacement. An MCP caller still learns its instruction
+                // went stale.
+                if sendOutcome?.didSend != true, self.sessions[tabID] !== session {
+                    dispatchStartupTicket?.resolve(.superseded)
+                    self.clearPendingCodexComputerUseActivationIfMatched(
+                        session: session,
+                        activationID: stagedCodexComputerUseActivationID
                     )
+                    if let codexAttemptID {
+                        session.codexSteerAckTracker.markStale(
+                            attemptID: codexAttemptID,
+                            reason: "Codex did not send because the tab session was replaced before provider dispatch."
+                        )
+                    }
+                    return
+                }
+                if let dispatchStartupTicket {
+                    self.resolveStartupTicketAfterRunServiceReturn(dispatchStartupTicket, outcome: sendOutcome)
                 }
                 if sendOutcome?.didSend != true {
                     self.clearPendingCodexComputerUseActivationIfMatched(
@@ -16066,18 +16474,16 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                         reason: "manual send was rejected before provider dispatch"
                     )
                     self.rollbackAgentTurnUserAnchor(turnRuntimeAnchorRollback, session: session)
-                    if let authoritativeSession = self.sessions[tabID] {
-                        self.restoreRejectedManualSubmissionComposerState(
-                            tabID: tabID,
-                            session: authoritativeSession,
-                            draftText: fallbackContext.draftText,
-                            images: attachmentsToSend,
-                            taggedFiles: taggedFilesToSend,
-                            selectedWorkflow: restorationSelectedWorkflow,
-                            selectedWorkflowMutationGeneration: restorationSelectedWorkflowMutationGeneration,
-                            message: rejectedManualSubmissionMessage
-                        )
-                    }
+                    self.restoreRejectedManualSubmissionComposerState(
+                        tabID: tabID,
+                        session: session,
+                        draftText: fallbackContext.draftText,
+                        images: attachmentsToSend,
+                        taggedFiles: taggedFilesToSend,
+                        selectedWorkflow: restorationSelectedWorkflow,
+                        selectedWorkflowMutationGeneration: restorationSelectedWorkflowMutationGeneration,
+                        message: rejectedManualSubmissionMessage
+                    )
                 } else {
                     // Any retained or durably accepted optimistic submission is
                     // the new timer baseline for later rollback.
@@ -16105,6 +16511,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     state: terminalState
                 )
             }
+            dispatchTaskHandle.task = dispatchTask
+            startupTicket?.attachTask(dispatchTask, dispatchGateTicket: dispatchTicket)
+            followedStartupTicket?.registerFollower(task: dispatchTask, id: followerID)
             return UserTurnSubmissionResult.submitted
         }
 
@@ -16170,14 +16579,19 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         // If agent is not running, start it
         if !session.runState.isActive {
-            Task {
-                await startAgentRun(
+            let startTask = Task {
+                let outcome = await startAgentRun(
                     tabID: tabID,
                     initialMessage: wrappedText,
                     attachments: attachmentsToSend,
-                    taggedFileAttachments: taggedFilesToSend
+                    taggedFileAttachments: taggedFilesToSend,
+                    startupTicket: startupTicket
                 )
+                if let startupTicket {
+                    resolveStartupTicketAfterRunServiceReturn(startupTicket, outcome: outcome)
+                }
             }
+            startupTicket?.attachTask(startTask)
         } else if let route = activeProviderSteeringRoute(for: session, attachments: attachmentsToSend) {
             submitActiveProviderSteering(
                 route,
@@ -17426,27 +17840,58 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         initialMessage: String,
         attachments: [AgentImageAttachment] = [],
         taggedFileAttachments: [AgentTaggedFileAttachment] = [],
-        codexFallbackContext: TabSession.CodexFallbackSubmissionContext? = nil
+        codexFallbackContext: TabSession.CodexFallbackSubmissionContext? = nil,
+        startupTicket: AgentRunStartupTicket? = nil
     ) async -> CodexAgentModeCoordinator.NativeSendOutcome? {
         let session = session(for: tabID)
-        guard AgentModelCatalog.isAgentAvailable(session.selectedAgent, availability: agentAvailabilityContext) else {
-            if session.mcpFollowUpRunPending {
-                session.mcpFollowUpRunPending = false
-                handleObservedMCPStateChange(for: session)
+        #if DEBUG
+            test_startAgentRunObserver?(session)
+        #endif
+        let mcpActivationGenerationAtEntry = session.mcpControlActivationGeneration
+        // The pending-start flag is session-wide, so only the start it was raised for may clear
+        // it: a cancelled or superseded start, a newer accepted start, or a newer MCP activation
+        // leaves it to its current owner.
+        let clearPendingStartFlagIfOwned = { [weak self] in
+            guard let self,
+                  session.mcpFollowUpRunPending,
+                  session.mcpControlActivationGeneration == mcpActivationGenerationAtEntry
+            else { return }
+            if let startupTicket {
+                guard session.startupTicket === startupTicket, startupTicket.isUnresolved else { return }
+            } else if session.unresolvedStartupTicket != nil {
+                return
             }
+            session.mcpFollowUpRunPending = false
+            handleObservedMCPStateChange(for: session)
+        }
+        guard AgentModelCatalog.isAgentAvailable(session.selectedAgent, availability: agentAvailabilityContext) else {
+            clearPendingStartFlagIfOwned()
             return .failed(message: unavailableAgentMessage(for: session.selectedAgent))
         }
-        defer {
-            if session.mcpFollowUpRunPending {
-                session.mcpFollowUpRunPending = false
-                handleObservedMCPStateChange(for: session)
+        defer { clearPendingStartFlagIfOwned() }
+        if let startupTicket {
+            if let outcome = startupTicketStopOutcome(startupTicket, session: session) {
+                return outcome
             }
+            startupTicket.markPreparing()
         }
+        let hadPersistentBinding = session.persistentSessionBindingIdentity != nil
         guard ensureSessionBoundToTab(session) != nil else {
             return .failed(message: "The tab could not be bound to an agent session.")
         }
+        if !hadPersistentBinding {
+            startupTicket?.adoptBindingInstalledByStartup(
+                binding: session.persistentSessionBindingIdentity,
+                bindingTransitionGeneration: session.bindingTransitionGeneration
+            )
+        }
         await prepareSessionForRunStart(tabID: tabID, session: session)
-        await prepareMCPWaitTrackingForRunStart(session: session)
+        if let startupTicket,
+           let outcome = startupTicketStopOutcome(startupTicket, session: session)
+        {
+            return outcome
+        }
+        await prepareMCPWaitTrackingForRunStart(session: session, startupTicket: startupTicket)
         let augmentedInitialMessage = await augmentUserMessageForProviderSend(
             initialMessage,
             attachments: attachments,
@@ -17460,6 +17905,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             session: session,
             initialMessage: augmentedInitialMessage
         )
+        if let startupTicket {
+            if let outcome = startupTicketStopOutcome(startupTicket, session: session) {
+                return outcome
+            }
+            startupTicket.markDispatching()
+        }
         let preparedCodexFallbackContext = codexFallbackContext.map { context in
             TabSession.CodexFallbackSubmissionContext(
                 queueID: context.queueID,

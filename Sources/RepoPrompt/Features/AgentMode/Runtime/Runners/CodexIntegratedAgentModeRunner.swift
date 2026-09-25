@@ -34,12 +34,16 @@ final class CodexIntegratedAgentModeRunner {
             session.recordRunProgress(ownership: ownership, kind: .stageTransition, stage: .preparingRuntime)
         }
         let attachmentReservationID = hooks.attachments.reserveAttachmentsForTurn(attachments, session)
+        let startupTicket = createdOwnership ? session.unresolvedStartupTicket.flatMap { ticket in
+            ticket.ownership == ownership ? ticket : nil
+        } : nil
+        let agentTaskOwnerToken = UUID()
 
         let sendTask = Task<CodexAgentModeCoordinator.NativeSendOutcome, Never> { [weak self, weak session] in
             guard let self, let session else {
                 return .cancelled
             }
-            defer { session.agentTask = nil }
+            defer { session.clearAgentTask(ownedBy: agentTaskOwnerToken) }
             #if DEBUG || EDIT_FLOW_PERF
                 let codexTurnMCPServerEnableState = EditFlowPerf.begin(EditFlowPerf.Stage.MCPWindowToolCatalog.codexTurnMCPServerEnable)
             #endif
@@ -48,6 +52,12 @@ final class CodexIntegratedAgentModeRunner {
                 EditFlowPerf.end(EditFlowPerf.Stage.MCPWindowToolCatalog.codexTurnMCPServerEnable, codexTurnMCPServerEnableState)
             #endif
             let execution = await CodexIntegratedRunExecutionAdapter.execute {
+                // Readiness is shared and may outlive this start's cancellation or supersession;
+                // a start that no longer owns the session must not begin native setup.
+                if Task.isCancelled || startupTicket.map({ !session.isStartupTicketCurrent($0) }) == true {
+                    self.hooks.attachments.finalizeAttachmentsForTurn(session, attachmentReservationID, .restoreToPending)
+                    return .cancelled
+                }
                 guard mcpServerReady else {
                     return .failed(message: "MCP catalog registration failed before Agent launch.")
                 }
@@ -77,13 +87,13 @@ final class CodexIntegratedAgentModeRunner {
             }
             return outcome
         }
-        session.agentTask = Task {
+        session.installAgentTask(Task {
             await withTaskCancellationHandler {
                 _ = await sendTask.value
             } onCancel: {
                 sendTask.cancel()
             }
-        }
+        }, ownerToken: agentTaskOwnerToken)
         return await sendTask.value
     }
 }

@@ -929,7 +929,12 @@ final class AgentModeRunService {
         intent: CancellationIntent = .userStop,
         completion: CancellationCompletion = .terminalPublished
     ) async {
-        if session.runState.isTerminalForCommit,
+        // A newly accepted start outranks the previous run's terminal revision: invalidating it
+        // before any suspension blocks its dispatch and withdraws its queued work, and the
+        // cancellation then settles that start rather than returning early.
+        let cancelledStartup = session.invalidatePendingStartup(.cancelled)
+        if cancelledStartup == nil,
+           session.runState.isTerminalForCommit,
            let revision = session.lastTerminalCommitRevision
         {
             await terminalCommitBarrier.awaitTerminalPublication(
@@ -990,7 +995,13 @@ final class AgentModeRunService {
             reason: intent.cancellationReason
         )
 
-        let ownership = session.activeRunOwnership ?? session.beginRunAttempt(source: "runService.cancel")
+        let ownership: AgentRunOwnership = if let activeOwnership = session.activeRunOwnership {
+            activeOwnership
+        } else if let cancelledStartup {
+            session.beginRunAttemptForCancelledStartup(cancelledStartup)
+        } else {
+            session.beginRunAttempt(source: "runService.cancel")
+        }
         let expectedRunID = session.runID
         let provider = session.provider
         let acpController = session.acpController

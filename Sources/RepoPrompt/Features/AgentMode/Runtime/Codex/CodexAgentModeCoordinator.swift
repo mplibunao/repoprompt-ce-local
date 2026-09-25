@@ -5865,6 +5865,16 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     return existingRunID
                 }
             }
+            // An accepted start reserved its run ID so cancellation before this point settles
+            // under the start's own identity; the fresh process run must use that same ID.
+            if let reservedRunID = session.reservedRunIDForCurrentStartupAttempt,
+               session.runID == nil || session.runID == reservedRunID
+            {
+                if session.runID == nil {
+                    session.installRunID(reservedRunID)
+                }
+                return reservedRunID
+            }
             return AgentModeProcessRunIdentity.startFreshProcessRun(for: session)
         }()
 
