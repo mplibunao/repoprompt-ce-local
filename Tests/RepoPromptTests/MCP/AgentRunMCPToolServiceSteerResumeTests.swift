@@ -63,6 +63,9 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
             requireInactiveRunState: true
         )
         await viewModel.prepareMCPWaitTrackingForRunStart(session: session)
+        // The pending-start flag drops once a runner has taken the run, so the run is already
+        // running; dropping it on an idle session would publish that no result was recorded.
+        session.runState = .running
         viewModel.setMCPFollowUpRunPending(sessionID: sessionID, false)
         var completedContext = try XCTUnwrap(session.mcpControlContext)
         completedContext.preparedEpoch = nil

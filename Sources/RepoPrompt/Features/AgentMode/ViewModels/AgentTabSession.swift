@@ -964,11 +964,11 @@ final class AgentTabSession: ObservableObject {
         return ticket.reservedRunID
     }
 
-    /// Claims ownership for a cancelled start that never reached a runner, under the start's own
-    /// run identity rather than the previous run's.
-    func beginRunAttemptForCancelledStartup(_ ticket: AgentRunStartupTicket) -> AgentRunOwnership {
+    /// Claims ownership for a start that is being settled before any runner claimed it, whether
+    /// cancelled or rejected, under the start's own run identity rather than the previous run's.
+    func beginRunAttemptForUnclaimedStartup(_ ticket: AgentRunStartupTicket, source: String) -> AgentRunOwnership {
         let runID = claimStartupRunID(for: ticket)
-        let ownership = beginRunAttempt(source: "runService.cancelPendingStartup")
+        let ownership = beginRunAttempt(source: source)
         ticket.bindOwnership(ownership, runID: runID)
         return ownership
     }

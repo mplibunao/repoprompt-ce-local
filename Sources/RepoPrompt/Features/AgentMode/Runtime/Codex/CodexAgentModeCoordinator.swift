@@ -188,6 +188,30 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
 
     typealias CodexTurnFallbackDecision = AgentTabSession.CodexFallbackReason
 
+    /// What preparing a native controller produced: the controller to start the session on, which
+    /// is not yet a ready session, or why preparation stopped.
+    enum CodexControllerPreparation {
+        case prepared(any CodexSessionControlling)
+        case stopped(Stop)
+
+        enum Stop {
+            /// The run, attempt, or controller changed while preparation was suspended.
+            case superseded
+            /// A managed sign-out invalidated the session installation token.
+            case managedSessionFenced
+            /// The runtime workspace could not be resolved; the failing path already settled it.
+            case workspaceResolutionFailed(CodexStartupFailure)
+
+            @MainActor var readinessOutcome: CodexNativeReadinessOutcome {
+                switch self {
+                case .superseded: .superseded
+                case .managedSessionFenced: .failed(CodexAgentModeCoordinator.managedSessionFencedStartupFailure)
+                case let .workspaceResolutionFailed(failure): .failed(failure)
+                }
+            }
+        }
+    }
+
     enum NativeSendOutcome: Equatable {
         case sent
         case queuedFallback(queueID: UUID, reason: CodexTurnFallbackDecision)
@@ -203,6 +227,135 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             case .preDispatchRejected, .stale, .cancelled, .failed:
                 false
             }
+        }
+    }
+
+    /// Why a Codex native session could not be made ready, with the phase that failed and the
+    /// user-visible message that becomes the run's one transcript error.
+    struct CodexStartupFailure: Equatable {
+        enum Phase: String, Equatable {
+            case preparation
+            case windowCatalog
+            case leaseAcquisition
+            case nativeStart
+            case nativeResume
+            case threadIdentity
+            case routingConfirmation
+            case firstTurnDispatch
+
+            var readinessDescription: String {
+                switch self {
+                case .preparation: "startup preparation"
+                case .windowCatalog: "MCP window catalog readiness"
+                case .leaseAcquisition: "MCP bootstrap lease acquisition"
+                case .nativeStart: "native session start"
+                case .nativeResume: "native session resume"
+                case .threadIdentity: "thread binding"
+                case .routingConfirmation: "MCP routing confirmation"
+                case .firstTurnDispatch: "first-turn dispatch"
+                }
+            }
+        }
+
+        let phase: Phase
+        let message: String
+        /// Settled here so it is not re-derived from the message text; `nil` lets the terminal
+        /// barrier classify it.
+        let failureReason: AgentRunMCPSnapshot.FailureReason?
+        /// The failing path already committed the run's failed terminal result, so a caller
+        /// must add neither a second error nor a second settlement.
+        var isSettled = false
+
+        /// Maps a typed readiness failure onto the startup phase it interrupted. Known typed
+        /// timeouts classify as `.timeout`; every other readiness failure is `.agentError`.
+        @MainActor
+        static func readiness(_ error: Error, phase: Phase) -> CodexStartupFailure {
+            guard let readinessError = error as? MCPBootstrapReadinessError else {
+                return CodexStartupFailure(
+                    phase: phase,
+                    message: "Codex startup failed during \(phase.readinessDescription): \(CodexAgentModeCoordinator.providerStartupFailureMessage(for: error))",
+                    failureReason: .agentError
+                )
+            }
+            switch readinessError {
+            case let .windowCatalogRegistrationFailed(diagnostic):
+                return CodexStartupFailure(
+                    phase: phase,
+                    message: "Codex startup failed during MCP window catalog registration: \(diagnostic)",
+                    failureReason: .agentError
+                )
+            case let .applicationCatalogRegistrationFailed(diagnostic):
+                return CodexStartupFailure(
+                    phase: phase,
+                    message: "Codex startup failed during MCP application catalog registration: \(diagnostic)",
+                    failureReason: .agentError
+                )
+            case .expectedPIDPolicyArmingFailed:
+                return CodexStartupFailure(
+                    phase: phase,
+                    message: "Codex startup failed: expected-PID routing policy could not be armed.",
+                    failureReason: .agentError
+                )
+            case .routingTimeoutBeforeConnection:
+                return CodexStartupFailure(
+                    phase: .routingConfirmation,
+                    message: "Codex startup failed: MCP routing timed out before a child connection was observed.",
+                    failureReason: .timeout
+                )
+            case .routingTimeoutAfterConnection:
+                return CodexStartupFailure(
+                    phase: .routingConfirmation,
+                    message: "Codex startup failed: MCP routing timed out after a child connection was observed but before routing was confirmed.",
+                    failureReason: .timeout
+                )
+            case .routingUnavailable:
+                return CodexStartupFailure(
+                    phase: .routingConfirmation,
+                    message: "Codex startup failed: MCP routing was not confirmed for this run.",
+                    failureReason: .agentError
+                )
+            case .provisioningUnavailable, .catalogReadinessRejected, .windowDisabledDuringReadiness,
+                 .supersededByExplicitWindowTransition, .readinessHostUnavailable, .leaseNoLongerUsable,
+                 .bootstrapGateUnavailable:
+                return CodexStartupFailure(
+                    phase: phase,
+                    message: "Codex startup failed during \(phase.readinessDescription): \(CodexAgentModeCoordinator.providerStartupFailureMessage(for: readinessError))",
+                    failureReason: .agentError
+                )
+            }
+        }
+
+        @MainActor
+        static func nativeSession(_ error: Error, attemptedResume: Bool) -> CodexStartupFailure {
+            CodexStartupFailure(
+                phase: attemptedResume ? .nativeResume : .nativeStart,
+                message: "\(attemptedResume ? "Codex native resume failed:" : "Codex native start failed:") \(error.localizedDescription)",
+                failureReason: CodexAppServerClient.isTimeoutError(error) ? .timeout : .agentError
+            )
+        }
+    }
+
+    /// The result of making a tab's Codex native session ready for dispatch.
+    enum CodexNativeReadinessOutcome {
+        struct Ready {
+            let controller: any CodexSessionControlling
+            let controllerGeneration: UUID
+            let processRunID: UUID?
+            let threadID: String?
+            let runAttemptID: UUID?
+        }
+
+        case ready(Ready)
+        case failed(CodexStartupFailure)
+        /// Startup was cancelled. It never implies that anything was dispatched.
+        case cancelled
+        /// The captured attempt, controller, or run changed underneath startup, so its result
+        /// belongs to nobody still waiting on it.
+        case superseded
+
+        var failure: CodexStartupFailure? {
+            if case let .failed(failure) = self { return failure }
+            return nil
         }
     }
 
@@ -253,6 +406,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     private var terminalSessionBinder: (@MainActor (AgentTabSession) -> AgentRunTerminalSessionBinding)?
     #if DEBUG
         private var testWorkspaceResolutionFailurePublicationGate: (@Sendable () async -> Void)?
+        private var testReadySessionToolTrackingGate: (@Sendable () async -> Void)?
     #endif
     private var toolTrackingByTabID: [UUID: AgentToolTrackingController] = [:]
     private let windowID: Int
@@ -2392,20 +2546,36 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         if session.codexController == nil, hasPersistedCodexThreadMetadata(session) {
             session.codexNeedsReconnect = true
         }
-        await ensureCodexNativeSession(
-            session: session,
-            allowResumeTimeoutFallback: false
-        )
-        guard let controller = session.codexController,
-              controller.hasActiveThread
-        else {
+        let controller: any CodexSessionControlling
+        switch await ensureCodexNativeSession(session: session, allowResumeTimeoutFallback: false) {
+        case let .ready(ready):
+            controller = ready.controller
+        case let .failed(failure):
+            return .failed("Codex context compaction failed: \(failure.message)")
+        case .cancelled:
+            return .failed("Codex context compaction was cancelled before the Codex session was ready.")
+        case .superseded:
+            return .failed("Codex context compaction failed because the Codex session changed before it was ready.")
+        }
+        guard controller.hasActiveThread else {
             return .failed("Start a Codex conversation before using /compact.")
         }
-        beginCodexCompaction(session)
+        // Availability requires an inactive session, so this is the previous run's result.
+        let runStateBeforeCompaction = session.runState
+        let compactionOwnership = beginCodexCompaction(session)
         do {
             try await controller.compactThread()
             return .succeeded("Requested Codex context compaction.")
         } catch {
+            let message = "Codex context compaction failed: \(error.localizedDescription)"
+            // The request can fail after the compaction was cancelled or replaced; the attempt that
+            // now owns the session, and the result a cancellation committed, are not ours to undo.
+            guard session.isCurrentRunAttemptForCurrentBinding(compactionOwnership),
+                  let currentController = session.codexController,
+                  Self.sameCodexControllerInstance(currentController, controller)
+            else {
+                return .failed(message)
+            }
             resetTrackedCodexTurns(session)
             if !session.codexFallbackQueue.isEmpty || session.codexFallbackDispatchInFlight != nil {
                 abandonCodexFallbackQueue(
@@ -2413,15 +2583,14 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     reason: "Codex queued follow-ups were cancelled because context compaction failed to start."
                 )
             }
-            if let ownership = session.activeRunOwnership {
-                _ = session.endRunAttempt(ifCurrent: ownership, source: "codex.compaction.startFailed")
-            }
+            _ = session.endRunAttempt(ifCurrent: compactionOwnership, source: "codex.compaction.startFailed")
             viewModel?.setAgentRunActive(session.tabID, isActive: false)
-            session.runState = .idle
+            // A compaction that never started is not a run, so the previous run's result stands.
+            session.runState = runStateBeforeCompaction
             setRunningStatus(nil, source: nil, session: session)
             viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
             viewModel?.scheduleSave(for: session.tabID)
-            return .failed("Codex context compaction failed: \(error.localizedDescription)")
+            return .failed(message)
         }
     }
 
@@ -2443,7 +2612,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         if session.codexController == nil, hasPersistedCodexThreadMetadata(session) {
             session.codexNeedsReconnect = true
         }
-        await ensureCodexNativeSession(
+        let readiness = await ensureCodexNativeSession(
             session: session,
             allowResumeTimeoutFallback: false,
             deferReconnectForCurrentActiveTurn: effectiveRunState.isActive,
@@ -2456,10 +2625,16 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 effectiveRunState: effectiveRunState
             )
         }
-        guard let controller = session.codexController,
-              controller.hasActiveThread
-        else {
-            return .failed("Codex goal command failed: session not ready.")
+        let controller: any CodexSessionControlling
+        switch readiness {
+        case let .ready(ready):
+            controller = ready.controller
+        case let .failed(failure):
+            return .failed("Codex goal command failed: \(failure.message)")
+        case .cancelled:
+            return .failed("Codex goal command was cancelled before the Codex session was ready.")
+        case .superseded:
+            return .failed("Codex goal command failed because the Codex session changed before it was ready.")
         }
 
         let action = Self.goalSlashAction(from: argumentsText)
@@ -2570,16 +2745,16 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         )
     }
 
-    private func beginCodexCompaction(_ session: AgentTabSession) {
-        if session.activeRunOwnership == nil {
-            _ = session.beginRunAttempt(source: "codex.compaction")
-        }
+    /// Returns the attempt the compaction runs under.
+    private func beginCodexCompaction(_ session: AgentTabSession) -> AgentRunOwnership {
+        let ownership = session.activeRunOwnership ?? session.beginRunAttempt(source: "codex.compaction")
         session.codexPendingTurnKind = .compact
         session.runState = .running
         setRunningStatus("Compacting context…", source: .transport, session: session, urgent: true)
         viewModel?.setAgentRunActive(session.tabID, isActive: true)
         viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
         viewModel?.scheduleSave(for: session.tabID)
+        return ownership
     }
 
     private func beginTrackedCodexUserTurn(_ session: AgentTabSession) {
@@ -4119,37 +4294,6 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         )
     }
 
-    private static func codexNativeSessionFailurePrefix(attemptedResume: Bool) -> String {
-        attemptedResume ? "Codex native resume failed:" : "Codex native start failed:"
-    }
-
-    private static func codexNativeSessionFailurePrefix(
-        disposition: AgentModeViewModel.CodexNativeStartupDisposition
-    ) -> String {
-        disposition == .resumed ? "Codex native resume failed:" : "Codex native start failed:"
-    }
-
-    private static func isCodexNativeSessionFailureText(
-        _ text: String,
-        disposition: AgentModeViewModel.CodexNativeStartupDisposition? = nil
-    ) -> Bool {
-        let matchesDisposition = disposition.map {
-            text.hasPrefix(codexNativeSessionFailurePrefix(disposition: $0))
-        } ?? false
-        return matchesDisposition
-            || text.hasPrefix(codexNativeSessionFailurePrefix(attemptedResume: false))
-            || text.hasPrefix(codexNativeSessionFailurePrefix(attemptedResume: true))
-    }
-
-    #if DEBUG
-        static func debugIsCodexNativeSessionFailureText(
-            _ text: String,
-            disposition: AgentModeViewModel.CodexNativeStartupDisposition?
-        ) -> Bool {
-            isCodexNativeSessionFailureText(text, disposition: disposition)
-        }
-    #endif
-
     private func resetCodexResumeTimeoutState(for session: AgentTabSession) {
         session.codexResumeTimeoutState = .init()
     }
@@ -4249,8 +4393,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         )
         return MCPBootstrapLease(
             spec: leaseSpec,
-            mcpServerEnabler: { [weak viewModel] in
-                await viewModel?.ensureMCPServerEnabledForThreadStart() ?? false
+            readinessRequirement: { [weak viewModel] in
+                guard let viewModel else { throw MCPBootstrapReadinessError.readinessHostUnavailable }
+                try await viewModel.requireMCPServerEnabledForThreadStart()
             },
             policyInstaller: MCPBootstrapLease.agentModePolicyInstaller(connectionPolicyInstaller)
         )
@@ -5079,7 +5224,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             _ = markCodexReconnectNeeded(for: session, source: trigger.reconnectSource)
         }
 
-        await ensureCodexNativeSession(
+        let readiness = await ensureCodexNativeSession(
             session: session,
             policyAlreadyInstalled: false,
             allowMissingRolloutFallback: false,
@@ -5103,10 +5248,14 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
               let recoveredController = session.codexController,
               recoveredController.hasActiveThread
         else {
-            let alreadyReportedStartFailure = session.items.last.map {
-                $0.kind == .error && Self.isCodexNativeSessionFailureText($0.text)
-            } ?? false
-            return .unrecoverable(alreadyReportedStartFailure ? nil : recoveryFailureMessage(for: trigger))
+            switch readiness {
+            case let .failed(failure):
+                return .unrecoverable(failure.isSettled ? nil : failure.message)
+            case .cancelled, .superseded:
+                return .skipped
+            case .ready:
+                return .unrecoverable(recoveryFailureMessage(for: trigger))
+            }
         }
 
         let recoveredAt = Date()
@@ -5277,12 +5426,19 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             expectedController: sourceController,
             source: "managed-auth-recovery"
         )
-        await ensureCodexNativeSession(
+        let readiness = await ensureCodexNativeSession(
             session: session,
             policyAlreadyInstalled: false,
             allowMissingRolloutFallback: false,
             allowResumeTimeoutFallback: false
         )
+        switch readiness {
+        case .cancelled, .superseded:
+            // Cancellation and supersession own the run's result; recovery adds no failure.
+            return true
+        case .ready, .failed:
+            break
+        }
         guard session.runState.isActive,
               let controller = session.codexController,
               controller.hasActiveThread,
@@ -5613,14 +5769,16 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     private func failCodexStartupForWorkspaceResolution(
         session: AgentTabSession,
         error: Error
-    ) async {
+    ) async -> CodexStartupFailure {
         let message = Self.providerStartupFailureMessage(for: error)
+        var failure = CodexStartupFailure(phase: .preparation, message: message, failureReason: .agentError)
         if session.activeRunOwnership != nil, terminalCommitBarrier != nil {
             await finalizeCodexRun(
                 session,
                 turnStatus: .failed,
                 reason: "workspace-resolution",
                 errorMessage: message,
+                failureReason: failure.failureReason,
                 notifyOnCompleted: false,
                 deleteDeferredFilesWhenFailureHasNoInFlight: true
             )
@@ -5635,11 +5793,13 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
             viewModel?.scheduleSave(for: session.tabID)
         }
+        failure.isSettled = true
         #if DEBUG
             if let testWorkspaceResolutionFailurePublicationGate {
                 await testWorkspaceResolutionFailurePublicationGate()
             }
         #endif
+        return failure
     }
 
     private static func providerStartupFailureMessage(for error: Error) -> String {
@@ -5654,18 +5814,17 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     }
 
     /// Fail-closed teardown for a Codex child whose RepoPrompt MCP routing never confirmed before its
-    /// first turn (issue #514). The app-server thread has already started, so the live controller is
-    /// torn down — leaving no active thread — and the readiness failure is published as the run's
-    /// terminal outcome. The message carries the native-start failure prefix so that when control
-    /// returns to the send path, its no-active-thread guard treats the failure as already reported and
-    /// finalizes without dispatching a first turn or appending a second error.
+    /// first turn (upstream issue 514). The app-server thread has already started, so the live
+    /// controller is torn down — leaving no active thread — and the readiness failure is published as
+    /// the run's terminal outcome. The returned failure is marked settled, so the send path neither
+    /// dispatches a first turn nor appends a second error.
     private func failCodexStartupForRoutingReadiness(
         session: AgentTabSession,
         error: Error,
-        startupDisposition: AgentModeViewModel.CodexNativeStartupDisposition
-    ) async {
-        let failurePrefix = Self.codexNativeSessionFailurePrefix(disposition: startupDisposition)
-        let message = "\(failurePrefix) \(Self.providerStartupFailureMessage(for: error))"
+        ownership: AgentRunOwnership?
+    ) async -> CodexStartupFailure {
+        var failure = CodexStartupFailure.readiness(error, phase: .routingConfirmation)
+        let message = failure.message
         _ = invalidateCodexControllerForReconnect(
             session: session,
             expectedController: session.codexController,
@@ -5678,25 +5837,21 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 turnStatus: .failed,
                 reason: "mcp-routing-readiness",
                 errorMessage: message,
+                failureReason: failure.failureReason,
                 notifyOnCompleted: false,
-                deleteDeferredFilesWhenFailureHasNoInFlight: true
+                deleteDeferredFilesWhenFailureHasNoInFlight: true,
+                expectedOwnership: ownership
             )
         } else {
-            let alreadyReported = session.items.last.map {
-                $0.kind == .error && Self.isCodexNativeSessionFailureText(
-                    $0.text,
-                    disposition: startupDisposition
-                )
-            } ?? false
-            if !alreadyReported {
-                session.appendItem(AgentChatItem.error(message, sequenceIndex: session.nextSequenceIndex))
-            }
+            session.appendItem(AgentChatItem.error(message, sequenceIndex: session.nextSequenceIndex))
             session.runState = .failed
             setRunningStatus(nil, source: nil, session: session)
             viewModel?.setAgentRunActive(session.tabID, isActive: false)
         }
         viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
         viewModel?.scheduleSave(for: session.tabID)
+        failure.isSettled = true
+        return failure
     }
 
     private func retireCodexControllerAfterWorkspaceResolutionFailure(
@@ -5739,6 +5894,14 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         await awaitCodexControllerRetirement(for: session.tabID)
     }
 
+    /// Makes the tab's Codex native session ready and reports why it could not be. Failures are
+    /// returned rather than appended to the transcript: the caller that owns the run decides how
+    /// the failure settles, except where `CodexStartupFailure.isSettled` says this path already
+    /// committed it.
+    ///
+    /// `@discardableResult` keeps source compatibility only; a caller the user can see must
+    /// consume the outcome.
+    @discardableResult
     func ensureCodexNativeSession(
         session: AgentTabSession,
         policyAlreadyInstalled: Bool = false,
@@ -5748,13 +5911,15 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         preserveExistingRunID: Bool = false,
         skipResumeWhenNoPriorCodexHistory: Bool = false,
         semanticRunState: AgentSessionRunState? = nil
-    ) async {
+    ) async -> CodexNativeReadinessOutcome {
         let managedSessionFence = CodexManagedSessionFence.shared
         let sessionInstallationToken = managedSessionFence.capturePublicationToken()
-        guard session.selectedAgent == .codexExec,
-              managedSessionFence.allowsCodexSessionInstallation(sessionInstallationToken)
-        else { return }
+        guard session.selectedAgent == .codexExec else { return .superseded }
+        guard managedSessionFence.allowsCodexSessionInstallation(sessionInstallationToken) else {
+            return .failed(Self.managedSessionFencedStartupFailure)
+        }
         let runAttemptIDAtEntry = session.activeRunAttemptID
+        let runOwnershipAtEntry = session.activeRunOwnership
         let effectiveRunState = semanticRunState ?? session.runState
         cancelCodexIdleShutdown(for: session.tabID)
 
@@ -5767,14 +5932,14 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 if let runID = session.runID {
                     await ensureCodexToolTrackingForReadySessionIfNeeded(for: session, runID: runID)
                 }
-                return
+                return codexReadinessOutcomeAfterStartup(session: session, runAttemptID: runAttemptIDAtEntry)
             }
             if invalidateCodexControllerForReconnect(
                 session: session,
                 expectedController: activeController,
                 source: "idle-controller-reconnect"
             ) {
-                await ensureCodexNativeSession(
+                return await ensureCodexNativeSession(
                     session: session,
                     policyAlreadyInstalled: false,
                     allowMissingRolloutFallback: allowMissingRolloutFallback,
@@ -5782,7 +5947,6 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     skipResumeWhenNoPriorCodexHistory: false,
                     semanticRunState: semanticRunState
                 )
-                return
             }
         }
 
@@ -5793,14 +5957,14 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             runtimeWorkspacePaths = try runtimeWorkspacePathsProvider(session)
         } catch {
             let controllerToShutdown = session.codexController
-            await failCodexStartupForWorkspaceResolution(session: session, error: error)
+            let failure = await failCodexStartupForWorkspaceResolution(session: session, error: error)
             if let controllerToShutdown {
                 await retireCodexControllerAfterWorkspaceResolutionFailure(
                     session: session,
                     controller: controllerToShutdown
                 )
             }
-            return
+            return .failed(failure)
         }
         let wantsGoalSupport = CodexGoalSupport.isEnabled
         let wantsReasoningSummaries = CodexReasoningSummaries.isEnabled
@@ -5878,15 +6042,17 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             return AgentModeProcessRunIdentity.startFreshProcessRun(for: session)
         }()
 
-        func prepareCodexController() async -> (any CodexSessionControlling)? {
+        func prepareCodexController() async -> CodexControllerPreparation {
             await awaitCodexControllerRetirement(for: session.tabID)
             guard session.selectedAgent == .codexExec,
                   session.runID == runID,
-                  session.activeRunAttemptID == runAttemptIDAtEntry,
-                  managedSessionFence.allowsCodexSessionInstallation(sessionInstallationToken)
+                  session.activeRunAttemptID == runAttemptIDAtEntry
             else {
                 logCodex("[AgentModeVM][CodexRetirement] replacement abandoned after state changed tab=\(session.tabID) run=\(runID)")
-                return nil
+                return .stopped(.superseded)
+            }
+            guard managedSessionFence.allowsCodexSessionInstallation(sessionInstallationToken) else {
+                return .stopped(.managedSessionFenced)
             }
 
             let refreshedWorkspacePaths: CodexRuntimeWorkspacePaths
@@ -5894,14 +6060,14 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 refreshedWorkspacePaths = try runtimeWorkspacePathsProvider(session)
             } catch {
                 let controllerToShutdown = session.codexController
-                await failCodexStartupForWorkspaceResolution(session: session, error: error)
+                let failure = await failCodexStartupForWorkspaceResolution(session: session, error: error)
                 if let controllerToShutdown {
                     await retireCodexControllerAfterWorkspaceResolutionFailure(
                         session: session,
                         controller: controllerToShutdown
                     )
                 }
-                return nil
+                return .stopped(.workspaceResolutionFailed(failure))
             }
             let refreshedTaskLabelKind = session.mcpControlContext?.taskLabelKind
             let refreshedPermissionProfile = session.permissionProfile
@@ -5931,7 +6097,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     source: "state-change-during-controller-retirement",
                     preserveRunID: true
                 ) else {
-                    return nil
+                    return .stopped(.superseded)
                 }
                 return await prepareCodexController()
             }
@@ -5956,7 +6122,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 guard managedSessionFence.allowsCodexSessionInstallation(sessionInstallationToken) else {
                     logCodex("[AgentModeVM][CodexLogout] retiring controller created after managed sign-out invalidated its session token tab=\(session.tabID)")
                     await controller.shutdown()
-                    return nil
+                    return .stopped(.managedSessionFenced)
                 }
                 session.codexController = controller
                 session.codexControllerPermissionProfile = controllerPermissionProfile
@@ -5966,7 +6132,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             }
             guard let controller = session.codexController,
                   managedSessionFence.allowsCodexSessionInstallation(sessionInstallationToken)
-            else { return nil }
+            else {
+                return .stopped(session.codexController == nil ? .superseded : .managedSessionFenced)
+            }
             controller.ensureEventsStreamReady()
             if session.codexEventTask == nil || session.codexEventTaskRunID != runID {
                 session.codexEventTask?.cancel()
@@ -6020,11 +6188,17 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                         viewModel?.reconcileInteractiveRunState(session)
                         viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
                         viewModel?.publishMCPStateChange(for: session)
-                        await ensureCodexNativeSession(
+                        // The pending interaction keeps the run; a failed restart is shown
+                        // without settling it, and the interaction's own recovery decides.
+                        let restart = await ensureCodexNativeSession(
                             session: session,
                             policyAlreadyInstalled: true,
                             preserveExistingRunID: true
                         )
+                        if let failure = restart.failure, !failure.isSettled {
+                            session.appendItem(AgentChatItem.error(failure.message, sequenceIndex: session.nextSequenceIndex))
+                            viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
+                        }
                         return
                     }
 
@@ -6056,9 +6230,11 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     }
                 }
             }
-            return controller
+            return .prepared(controller)
         }
-        guard await prepareCodexController() != nil else { return }
+        if case let .stopped(stop) = await prepareCodexController() {
+            return stop.readinessOutcome
+        }
 
         let hasActiveThread = session.codexController?.hasActiveThread == true
 
@@ -6080,7 +6256,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 expectedController: expectedController,
                 source: "missing-live-route"
             )
-            await ensureCodexNativeSession(
+            return await ensureCodexNativeSession(
                 session: session,
                 policyAlreadyInstalled: false,
                 allowMissingRolloutFallback: allowMissingRolloutFallback,
@@ -6088,7 +6264,6 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 skipResumeWhenNoPriorCodexHistory: skipResumeWhenNoPriorCodexHistory,
                 semanticRunState: semanticRunState
             )
-            return
         }
         let shouldInstallPolicy = shouldManageCodexTooling
             && shouldBootstrapSessionInitialization
@@ -6102,23 +6277,25 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 runID: runID,
                 taskLabelKind: session.mcpControlContext?.taskLabelKind,
                 allowsAgentExternalControlTools: allowsAgentExternalControlTools
-            ) else { return }
-            let acquired = await lease.acquire()
-            guard acquired else { return }
+            ) else {
+                return .failed(CodexStartupFailure(
+                    phase: .leaseAcquisition,
+                    message: "Codex startup failed: no MCP bootstrap lease could be created for this run.",
+                    failureReason: .agentError
+                ))
+            }
+            do {
+                try await lease.requireAcquired()
+            } catch is CancellationError {
+                return .cancelled
+            } catch {
+                logCodex("[AgentModeVM][CodexBootstrap] lease acquisition failed for tab \(session.tabID) run \(runID): \(error)")
+                return .failed(.readiness(error, phase: .leaseAcquisition))
+            }
 
             await lease.providerInitializationStarted(provider: AgentProviderKind.codexExec.rawValue)
-            let routingReadinessResumeCandidate = Self.codexResumeCandidate(
-                for: session,
-                skipResumeWhenNoPriorCodexHistory: skipResumeWhenNoPriorCodexHistory
-            )
-            let routingReadinessAttemptedResume = Self.isCodexResumeAttempt(routingReadinessResumeCandidate)
-                && !shouldSkipResumeAfterRepeatedTimeouts(
-                    session: session,
-                    existingRef: routingReadinessResumeCandidate,
-                    allowResumeTimeoutFallback: allowResumeTimeoutFallback
-                )
             session.codexNativeStartupDisposition = nil
-            await ensureCodexNativeSession(
+            let nativeStartup = await ensureCodexNativeSession(
                 session: session,
                 policyAlreadyInstalled: true,
                 allowMissingRolloutFallback: allowMissingRolloutFallback,
@@ -6127,21 +6304,20 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 semanticRunState: semanticRunState
             )
 
-            let routingReadinessStartupDisposition = session.codexNativeStartupDisposition
-                ?? (routingReadinessAttemptedResume ? .resumed : .fresh)
             let providerReady = effectiveRunState.isActive
                 && session.codexController?.hasActiveThread == true
             await lease.providerInitializationCompleted(
                 provider: AgentProviderKind.codexExec.rawValue,
                 outcome: providerReady ? "ready" : (Task.isCancelled ? "cancelled" : "failed")
             )
-            guard effectiveRunState.isActive,
+            guard case .ready = nativeStartup,
+                  effectiveRunState.isActive,
                   session.codexController?.hasActiveThread == true
             else {
                 // Startup failure path: avoid holding the global gate waiting for
                 // routing, which can add visible latency before the next user send.
                 await lease.failAndRelease()
-                return
+                return nativeStartup
             }
 
             if shouldWaitForRouting {
@@ -6152,6 +6328,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     // readiness failure; the run's cancellation machinery owns teardown. requireRouting
                     // has already released the gate, one-shot policy, and routing waiter.
                     logCodex("[AgentModeVM][CodexBootstrap] routing wait cancelled for tab \(session.tabID) run \(runID)")
+                    return .cancelled
                 } catch {
                     // Fail closed: RepoPrompt MCP routing was never confirmed for this run, so the
                     // child cannot be trusted to hold RepoPrompt tools and must not reach its first
@@ -6160,20 +6337,26 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     // run's terminal outcome so the parent sees a failed start instead of a tool-less
                     // child.
                     logCodex("[AgentModeVM][CodexBootstrap] routing wait failed for tab \(session.tabID) run \(runID): \(error)")
-                    await failCodexStartupForRoutingReadiness(
+                    guard session.activeRunOwnership == runOwnershipAtEntry else { return .superseded }
+                    return await .failed(failCodexStartupForRoutingReadiness(
                         session: session,
                         error: error,
-                        startupDisposition: routingReadinessStartupDisposition
-                    )
+                        ownership: runOwnershipAtEntry
+                    ))
                 }
             } else {
                 await lease.releaseWithoutRoutingWait()
             }
-            return
+            return codexReadinessOutcomeAfterStartup(session: session, runAttemptID: runAttemptIDAtEntry)
         }
         guard requiresTransportStart else {
             await ensureCodexToolTrackingForReadySessionIfNeeded(for: session, runID: runID)
-            return
+            #if DEBUG
+                if let testReadySessionToolTrackingGate {
+                    await testReadySessionToolTrackingGate()
+                }
+            #endif
+            return codexReadinessOutcomeAfterStartup(session: session, runAttemptID: runAttemptIDAtEntry)
         }
 
         let preferenceGenerationAtStart = session.codexToolPreferencesGeneration
@@ -6219,6 +6402,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 preferenceGenerationAtStart: preferenceGenerationAtStart
             )
             await ensureCodexToolTrackingForReadySessionIfNeeded(for: session, runID: runID)
+            return codexReadinessOutcomeAfterStartup(session: session, runAttemptID: runAttemptIDAtEntry)
         } catch {
             var effectiveError: Error = error
             if session.runState.isActive,
@@ -6242,10 +6426,14 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                         source: "managed-auth-recovery-during-start",
                         preserveRunID: true
                     )
-                    guard let recoveredController = await prepareCodexController() else {
-                        // Controller preparation can now abandon after its retirement await when
-                        // the run or attempt moved on. That is stale recovery, not an auth failure.
-                        return
+                    let recoveredController: any CodexSessionControlling
+                    switch await prepareCodexController() {
+                    case let .prepared(controller):
+                        recoveredController = controller
+                    case let .stopped(stop):
+                        // Controller preparation can abandon after its retirement await when the
+                        // run or attempt moved on. That is stale recovery, not an auth failure.
+                        return stop.readinessOutcome
                     }
                     do {
                         var recoveredStartResult = try await startCodexNativeSession(
@@ -6270,7 +6458,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                             preferenceGenerationAtStart: preferenceGenerationAtStart
                         )
                         await ensureCodexToolTrackingForReadySessionIfNeeded(for: session, runID: runID)
-                        return
+                        return codexReadinessOutcomeAfterStartup(session: session, runAttemptID: runAttemptIDAtEntry)
                     } catch {
                         effectiveError = error
                     }
@@ -6298,7 +6486,13 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     source: "resume-timeout-fallback",
                     preserveRunID: true
                 )
-                guard let freshController = await prepareCodexController() else { return }
+                let freshController: any CodexSessionControlling
+                switch await prepareCodexController() {
+                case let .prepared(controller):
+                    freshController = controller
+                case let .stopped(stop):
+                    return stop.readinessOutcome
+                }
                 do {
                     var retryResult = try await startCodexNativeSession(
                         controller: freshController,
@@ -6322,7 +6516,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                         preferenceGenerationAtStart: preferenceGenerationAtStart
                     )
                     await ensureCodexToolTrackingForReadySessionIfNeeded(for: session, runID: runID)
-                    return
+                    return codexReadinessOutcomeAfterStartup(session: session, runAttemptID: runAttemptIDAtEntry)
                 } catch {
                     let invalidatedTimedOutController = CodexAppServerClient.isTimeoutError(error)
                         ? invalidateCodexControllerForReconnect(
@@ -6335,13 +6529,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     if !invalidatedTimedOutController {
                         markCodexReconnectNeeded(for: session, source: "ensure-error")
                     }
-                    let errorItem = AgentChatItem.error(
-                        "\(Self.codexNativeSessionFailurePrefix(attemptedResume: false)) \(error.localizedDescription)",
-                        sequenceIndex: session.nextSequenceIndex
-                    )
-                    session.appendItem(errorItem)
-                    viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
-                    return
+                    if error is CancellationError { return .cancelled }
+                    return .failed(.nativeSession(error, attemptedResume: false))
                 }
             }
             if !shouldSkipTimedOutResumeTarget, resumeTimeoutCount == nil {
@@ -6358,13 +6547,130 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             if !invalidatedTimedOutController {
                 markCodexReconnectNeeded(for: session, source: "ensure-error")
             }
-            let errorItem = AgentChatItem.error(
-                "\(Self.codexNativeSessionFailurePrefix(attemptedResume: attemptedResume)) \(effectiveError.localizedDescription)",
-                sequenceIndex: session.nextSequenceIndex
-            )
-            session.appendItem(errorItem)
-            viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
+            if effectiveError is CancellationError { return .cancelled }
+            return .failed(.nativeSession(effectiveError, attemptedResume: attemptedResume))
         }
+    }
+
+    static let managedSessionFencedStartupFailure = CodexStartupFailure(
+        phase: .preparation,
+        message: CodexManagedSessionFence.blockedMessage,
+        failureReason: .agentError
+    )
+
+    /// The outcome for a startup path that finished without an error. A usable controller must
+    /// report an active thread; one that does not is a thread-identity failure rather than a
+    /// silent return the send path would later misreport.
+    private func codexReadinessOutcomeAfterStartup(
+        session: AgentTabSession,
+        runAttemptID: UUID?
+    ) -> CodexNativeReadinessOutcome {
+        // Startup suspends, and the run it began under can end and a successor take the session;
+        // the controller installed now belongs to whichever attempt is current.
+        guard session.activeRunAttemptID == runAttemptID else { return .superseded }
+        guard let controller = session.codexController else {
+            return .failed(CodexStartupFailure(
+                phase: .nativeStart,
+                message: "Codex startup failed: no native session controller was available after startup.",
+                failureReason: .agentError
+            ))
+        }
+        guard controller.hasActiveThread else {
+            return .failed(CodexStartupFailure(
+                phase: .threadIdentity,
+                message: "Codex startup failed: the native session did not report an active thread after startup.",
+                failureReason: .agentError
+            ))
+        }
+        return .ready(.init(
+            controller: controller,
+            controllerGeneration: session.codexControllerGeneration,
+            processRunID: session.runID,
+            threadID: controller.currentSessionReference?.conversationID,
+            runAttemptID: runAttemptID
+        ))
+    }
+
+    /// Settles a new initial attempt whose startup failed before native setup began, such as the
+    /// runner's own readiness check. Only the exact attempt the caller owns is settled, so a late
+    /// failure cannot land on a successor.
+    func failCodexStartupBeforeNativeSetup(
+        _ failure: CodexStartupFailure,
+        session: AgentTabSession,
+        ownership: AgentRunOwnership,
+        attachmentReservationID: UUID?
+    ) async {
+        await commitStartupFailure(
+            failure,
+            session: session,
+            ownership: ownership,
+            attachmentReservationID: attachmentReservationID
+        )
+    }
+
+    /// Settles the attempt `ownership` names as failed with the startup's own cause. A failure
+    /// its failing path already settled, or an attempt a successor has replaced, is left alone.
+    private func commitStartupFailure(
+        _ failure: CodexStartupFailure,
+        session: AgentTabSession,
+        ownership: AgentRunOwnership,
+        attachmentReservationID: UUID?
+    ) async {
+        guard !failure.isSettled, session.activeRunOwnership == ownership else { return }
+        await finalizeCodexRun(
+            session,
+            turnStatus: .failed,
+            reason: "startup-\(failure.phase.rawValue)",
+            errorMessage: failure.message,
+            failureReason: failure.failureReason,
+            notifyOnCompleted: false,
+            attachmentReservationID: attachmentReservationID,
+            expectedOwnership: ownership
+        )
+    }
+
+    /// Rejects a send whose native session could not be made ready. A new initial attempt settles
+    /// as failed with the startup's own cause; a submission into an already active run only
+    /// reports the rejection and leaves that run alone.
+    private func rejectCodexStartup(
+        _ failure: CodexStartupFailure,
+        session: AgentTabSession,
+        ownership: AgentRunOwnership?,
+        attachmentReservationID: UUID?,
+        terminalizeRejectedSend: Bool
+    ) async -> NativeSendOutcome {
+        logCodex("[AgentModeVM] sendCodexNativeMessage: startup failed phase=\(failure.phase.rawValue) settled=\(failure.isSettled)")
+        // The failing path already settled and reported this attempt, and its settlement can
+        // suspend long enough for a successor to own the session; nothing here is ours to change.
+        guard !failure.isSettled else { return .failed(message: failure.message) }
+        // Every step below acts on the attempt this send started under; a successor that took
+        // the session meanwhile keeps its own recovery state, attachments, and result.
+        guard session.activeRunOwnership == ownership else { return .failed(message: failure.message) }
+        markCodexReconnectNeeded(for: session, source: "send-startup-\(failure.phase.rawValue)")
+        clearCodexAuthRecoveryAttempt(for: session.runID)
+        clearCodexPendingAuthRetryTurn(session)
+        if terminalizeRejectedSend {
+            // A send with no attempt of its own has nothing to settle.
+            if let ownership {
+                await commitStartupFailure(
+                    failure,
+                    session: session,
+                    ownership: ownership,
+                    attachmentReservationID: attachmentReservationID
+                )
+            }
+        } else {
+            viewModel?.finalizeAttachmentsForTurn(
+                for: session,
+                reservationID: attachmentReservationID,
+                disposition: .restoreToPending
+            )
+            session.appendItem(AgentChatItem.error(failure.message, sequenceIndex: session.nextSequenceIndex))
+            setRunningStatus(nil, source: nil, session: session)
+            viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
+            viewModel?.scheduleSave(for: session.tabID)
+        }
+        return .failed(message: failure.message)
     }
 
     private enum CodexTurnDispatchPlan {
@@ -6408,6 +6714,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     ) async -> NativeSendOutcome {
         logCodex("[AgentModeVM] sendCodexNativeMessage called for tab \(session.tabID)")
         let wasRunAlreadyActive = session.runState.isActive
+        let runAttemptIDAtSendEntry = session.activeRunAttemptID
+        let ownershipAtSendEntry = session.activeRunOwnership
         let activeSendRunID = wasRunAlreadyActive ? session.runID : nil
         let activeSendRunAttemptID = wasRunAlreadyActive ? session.activeRunAttemptID : nil
         let shouldDrainActiveAgentRunWaits = fallbackContext?.origin.isMCP != true
@@ -6478,14 +6786,27 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 ? session.codexAuthoritativeActiveTurn?.turnID
                 : nil
         )
+        let installedAuthRetryTurn = session.codexPendingAuthRetryTurn
+        // Returns this send's attachments and drops the auth retry it installed, unless a later
+        // send replaced it; nothing else is this send's to change once another attempt owns the run.
+        let releaseStaleSend = { [weak self] in
+            self?.viewModel?.finalizeAttachmentsForTurn(
+                for: session,
+                reservationID: attachmentReservationID,
+                disposition: .restoreToPending
+            )
+            if session.codexPendingAuthRetryTurn == installedAuthRetryTurn {
+                session.codexPendingAuthRetryTurn = nil
+            }
+        }
 
-        await ensureCodexNativeSession(
+        let readiness = await ensureCodexNativeSession(
             session: session,
             policyAlreadyInstalled: policyAlreadyInstalled,
             deferReconnectForCurrentActiveTurn: wasRunAlreadyActive,
             skipResumeWhenNoPriorCodexHistory: !wasRunAlreadyActive && !hadResumeEligibleCodexHistoryBeforeSend
         )
-        if Task.isCancelled {
+        if Task.isCancelled || { if case .cancelled = readiness { true } else { false } }() {
             // The run was cancelled during startup — e.g. while the MCP routing wait was suspended. The
             // controller may still report an active thread before the run's cancellation machinery
             // invalidates it, so re-check cancellation here rather than trusting the controller guard,
@@ -6498,43 +6819,63 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             )
             return .cancelled
         }
-        guard let controller = session.codexController,
-              controller.hasActiveThread
-        else {
-            logCodex("[AgentModeVM] sendCodexNativeMessage: no active thread after ensure, failing run")
-            markCodexReconnectNeeded(for: session, source: "send-no-active-thread")
-            clearCodexAuthRecoveryAttempt(for: session.runID)
-            clearCodexPendingAuthRetryTurn(session)
-            let message = "Codex native send failed: session not ready"
-            let alreadyReportedStartFailure = session.items.last.map {
-                $0.kind == .error && Self.isCodexNativeSessionFailureText(
-                    $0.text,
-                    disposition: session.codexNativeStartupDisposition
-                )
-            } ?? false
-            if terminalizeRejectedSend {
-                await finalizeCodexRun(
-                    session,
-                    turnStatus: .failed,
-                    reason: "send-no-active-thread",
-                    errorMessage: alreadyReportedStartFailure ? nil : message,
-                    notifyOnCompleted: false,
-                    deleteDeferredFilesWhenFailureHasNoInFlight: false
-                )
-            } else {
-                viewModel?.finalizeAttachmentsForTurn(
-                    for: session,
-                    reservationID: attachmentReservationID,
-                    disposition: .restoreToPending
-                )
-                if !alreadyReportedStartFailure {
-                    session.appendItem(AgentChatItem.error(message, sequenceIndex: session.nextSequenceIndex))
-                }
-                setRunningStatus(nil, source: nil, session: session)
-                viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
-                viewModel?.scheduleSave(for: session.tabID)
+        let controller: any CodexSessionControlling
+        switch readiness {
+        case let .ready(ready):
+            if let ownershipAtSendEntry, !session.isCurrentRunAttemptForCurrentBinding(ownershipAtSendEntry) {
+                releaseStaleSend()
+                return .stale(reason: "The run changed before the native session was ready.")
             }
-            return .failed(message: message)
+            guard let activeController = session.codexController,
+                  Self.sameCodexControllerInstance(activeController, ready.controller),
+                  activeController.hasActiveThread
+            else {
+                // Readiness is reported by the path that just installed the controller, so losing
+                // it before this synchronous check is a coordinator invariant violation.
+                return await rejectCodexStartup(
+                    CodexStartupFailure(
+                        phase: .threadIdentity,
+                        message: "Codex startup failed: the native session reported ready but its controller no longer has an active thread.",
+                        failureReason: .agentError
+                    ),
+                    session: session,
+                    ownership: ownershipAtSendEntry,
+                    attachmentReservationID: attachmentReservationID,
+                    terminalizeRejectedSend: terminalizeRejectedSend
+                )
+            }
+            controller = activeController
+        case let .failed(failure):
+            return await rejectCodexStartup(
+                failure,
+                session: session,
+                ownership: ownershipAtSendEntry,
+                attachmentReservationID: attachmentReservationID,
+                terminalizeRejectedSend: terminalizeRejectedSend
+            )
+        case .superseded:
+            // A start that still owns its attempt has nobody else to settle it; otherwise the
+            // superseded work leaves the successor alone.
+            let stillOwnsAttempt = runAttemptIDAtSendEntry != nil
+                && runAttemptIDAtSendEntry == session.activeRunAttemptID
+                && session.runState.isActive
+            guard stillOwnsAttempt, session.selectedAgent == .codexExec else {
+                releaseStaleSend()
+                return .stale(reason: "Codex startup was superseded before the native session was ready.")
+            }
+            return await rejectCodexStartup(
+                CodexStartupFailure(
+                    phase: .preparation,
+                    message: "Codex startup failed: the session changed before the native session was ready.",
+                    failureReason: .agentError
+                ),
+                session: session,
+                ownership: ownershipAtSendEntry,
+                attachmentReservationID: attachmentReservationID,
+                terminalizeRejectedSend: terminalizeRejectedSend
+            )
+        case .cancelled:
+            preconditionFailure("Cancelled readiness returns before controller selection")
         }
 
         guard let sendRunID = session.runID else {
@@ -7631,10 +7972,18 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         turnStatus: CodexNativeSessionController.TurnStatus,
         reason: String,
         errorMessage: String? = nil,
+        failureReason: AgentRunMCPSnapshot.FailureReason? = nil,
         notifyOnCompleted: Bool = true,
         deleteDeferredFilesWhenFailureHasNoInFlight: Bool = false,
+        attachmentReservationID: UUID? = nil,
+        expectedOwnership: AgentRunOwnership? = nil,
         providerSuccessor: AgentRunTerminalCommitBarrier.ProviderSuccessor? = nil
     ) async {
+        // A caller settling a specific attempt must not settle whichever attempt owns the
+        // session by the time it gets here.
+        if let expectedOwnership, session.activeRunOwnership != expectedOwnership {
+            return
+        }
         guard let ownership = session.activeRunOwnership,
               let terminalCommitBarrier,
               let terminalSessionBinder
@@ -7694,6 +8043,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             terminalState: terminalState,
             source: "codex.finalize.\(reason)",
             errorText: errorMessage,
+            failureReason: turnStatus == .failed ? failureReason : nil,
+            attachmentReservationID: attachmentReservationID,
             attachmentDisposition: attachmentDisposition,
             finalizeNonCodexUsage: false,
             supportsFollowUp: false,
@@ -9261,6 +9612,12 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             _ gate: (@Sendable () async -> Void)?
         ) {
             testWorkspaceResolutionFailurePublicationGate = gate
+        }
+
+        /// Holds readiness of an already-started native session after its tool-tracking step.
+        @_spi(TestSupport)
+        public func test_setReadySessionToolTrackingGate(_ gate: (@Sendable () async -> Void)?) {
+            testReadySessionToolTrackingGate = gate
         }
 
         @_spi(TestSupport)

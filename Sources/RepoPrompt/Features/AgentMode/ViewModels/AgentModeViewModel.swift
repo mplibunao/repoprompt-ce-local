@@ -66,6 +66,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         _ requiresExpectedAgentPID: Bool
     ) async -> Void
     typealias MCPServerEnabler = () async -> Bool
+    /// Throwing form of ``MCPServerEnabler`` that names the readiness phase that failed.
+    typealias MCPServerReadinessRequirement = () async throws -> Void
     typealias MCPRunRoutingCleaner = (_ runID: UUID, _ windowID: Int, _ reason: String) async -> Void
     typealias MCPRunToolCanceller = (_ runID: UUID, _ reason: String?) -> Int
     typealias ProviderConversationCleaner = ProviderConversationCleanupRegistry.Cleaner
@@ -590,6 +592,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private let acpControllerFactory: ACPControllerFactory
     private let connectionPolicyInstaller: ConnectionPolicyInstaller
     private let mcpServerEnabler: MCPServerEnabler
+    private let mcpServerReadinessRequirement: MCPServerReadinessRequirement
     private let mcpRunRoutingCleaner: MCPRunRoutingCleaner
     private let mcpRunToolCanceller: MCPRunToolCanceller
     private var providerConversationCleanupRegistry: ProviderConversationCleanupRegistry
@@ -785,6 +788,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         var test_submitUserTurnResultOverride: ((String, UUID, String?) -> UserTurnSubmissionResult)?
         var test_startAgentRunObserver: (@MainActor (TabSession) -> Void)?
         var test_beforeMCPSelectionCommit: (@MainActor () async -> Void)?
+        /// Holds deactivation at its restore of the approval store's auto-edit override.
+        var test_beforeMCPDeactivationAutoEditRestore: (@MainActor () async -> Void)?
+        /// Overrides provider availability for submissions and run starts.
+        var test_agentAvailabilityForRunOverride: ((AgentProviderKind) -> Bool)?
         private var test_composeTabRemovalTeardownObserver: (@MainActor (UUID) async -> Void)?
         private var test_beforeAutomaticMCPSessionTargetDiscardRetry: (@MainActor () async -> Void)?
         private var test_beforeMCPSessionTargetDiscardAuthorityEstablishment: (@MainActor (UUID) async -> Void)?
@@ -1661,6 +1668,16 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         promptManager?.apiSettingsViewModel?.agentModeAvailabilityContext ?? .current
     }
 
+    /// Whether a submission or run start may use `agent`.
+    private func isAgentAvailableForRun(_ agent: AgentProviderKind) -> Bool {
+        #if DEBUG
+            if let test_agentAvailabilityForRunOverride {
+                return test_agentAvailabilityForRunOverride(agent)
+            }
+        #endif
+        return AgentModelCatalog.isAgentAvailable(agent, availability: agentAvailabilityContext)
+    }
+
     var hasAvailableAgentProviders: Bool {
         !availableAgents.isEmpty
     }
@@ -2191,6 +2208,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             guard let mcpServer else { return false }
             return await mcpServer.ensureServerReadyForAgentBootstrap()
         }
+        mcpServerReadinessRequirement = { [weak mcpServer] in
+            guard let mcpServer else { throw MCPBootstrapReadinessError.readinessHostUnavailable }
+            try await mcpServer.requireServerReadyForAgentBootstrap()
+        }
         mcpRunRoutingCleaner = { runID, windowID, reason in
             await Self.defaultMCPRunRoutingCleaner(
                 runID: runID,
@@ -2346,6 +2367,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             mcpRunToolCanceller: MCPRunToolCanceller? = nil,
             providerConversationCleanupRegistry: ProviderConversationCleanupRegistry = ProviderConversationCleanupRegistry(),
             mcpServerEnabler: @escaping MCPServerEnabler = { true },
+            mcpServerReadinessRequirement: MCPServerReadinessRequirement? = nil,
             testMCPServer: MCPServerViewModel? = nil,
             testWorkspaceFileContextStore: WorkspaceFileContextStore? = nil,
             testCodexActiveToolQuery: CodexActiveToolQuery? = nil,
@@ -2396,6 +2418,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             self.acpControllerFactory = acpControllerFactory
             self.connectionPolicyInstaller = connectionPolicyInstaller
             self.mcpServerEnabler = mcpServerEnabler
+            self.mcpServerReadinessRequirement = mcpServerReadinessRequirement
+                ?? Self.readinessRequirement(adapting: mcpServerEnabler)
             self.mcpRunRoutingCleaner = mcpRunRoutingCleaner
             self.mcpRunToolCanceller = mcpRunToolCanceller
                 ?? { [weak testMCPServer] runID, reason in
@@ -2789,6 +2813,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 )
             },
             mcpServerEnabler: mcpServerEnabler,
+            codexReadinessRequirement: mcpServerReadinessRequirement,
             workspacePathProvider: { [weak self] session in
                 guard let self else { return nil }
                 return try effectiveWorkspacePath(for: session)
@@ -4039,7 +4064,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             applySessionToBindings(session)
             activeSessionLoadInProgressTabID = nil
             if session.selectedAgent == .codexExec, session.runState.isActive {
-                await codexCoordinator.ensureCodexNativeSession(session: session)
+                await reconnectActiveCodexSession(session)
             }
             if session.selectedAgent.usesClaudeNativeRuntime, session.runState.isActive {
                 await reconnectClaudeNativeSessionIfNeeded(session)
@@ -5506,6 +5531,23 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         publishMCPStateChange(for: session)
     }
 
+    /// Reconnects the native session of an active Codex run. A failure the startup path did not
+    /// already report is shown on that run, and only while the run is still the one reconnected;
+    /// the run keeps its owner and result, and cancellation or supersession adds nothing.
+    private func reconnectActiveCodexSession(_ session: TabSession) async {
+        let ownership = session.activeRunOwnership
+        let outcome = await codexCoordinator.ensureCodexNativeSession(session: session)
+        guard let failure = outcome.failure,
+              !failure.isSettled,
+              sessions[session.tabID] === session,
+              session.runState.isActive,
+              session.activeRunOwnership == ownership
+        else { return }
+        session.appendItem(AgentChatItem.error(failure.message, sequenceIndex: session.nextSequenceIndex))
+        requestUIRefresh(tabID: session.tabID, urgent: true)
+        scheduleSave(for: session.tabID)
+    }
+
     /// Ensures a session exists for the given tab ID and loads any persisted state.
     /// Used by MCP tool handlers to ensure session is ready before accessing it.
     func ensureSessionReady(tabID: UUID, reconnectActiveProviders: Bool = false) async -> TabSession {
@@ -5522,7 +5564,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         }
 
         if reconnectActiveProviders, session.selectedAgent == .codexExec, session.runState.isActive {
-            await codexCoordinator.ensureCodexNativeSession(session: session)
+            await reconnectActiveCodexSession(session)
         }
         if reconnectActiveProviders, session.selectedAgent.usesClaudeNativeRuntime, session.runState.isActive {
             await reconnectClaudeNativeSessionIfNeeded(session)
@@ -6378,94 +6420,33 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     ) -> AgentRunMCPSnapshot? {
         guard let context = session.mcpControlContext else { return nil }
         let interaction = canonicalTerminalState == nil ? mcpPendingInteraction(for: session) : nil
-        let status: AgentRunMCPSnapshot.Status = {
-            if let canonicalTerminalState {
-                switch canonicalTerminalState {
-                case .completed:
-                    return .completed
-                case .failed:
-                    return .failed
-                case .cancelled:
-                    return .cancelled
-                case .idle, .running, .waitingForUser, .waitingForQuestion, .waitingForApproval:
-                    return .completed
-                }
-            }
-            if interaction != nil {
-                return .waitingForInput
-            }
-            let terminalStatus: AgentRunMCPSnapshot.Status? = {
-                switch session.runState {
-                case .completed:
-                    return .completed
-                case .failed:
-                    return .failed
-                case .cancelled:
-                    return .cancelled
-                case .idle:
-                    if let terminalState = session.transcript.turns.last?.terminalState {
-                        switch terminalState {
-                        case .completed:
-                            return .completed
-                        case .failed:
-                            return .failed
-                        case .cancelled:
-                            return .cancelled
-                        case .idle, .running, .waitingForUser, .waitingForQuestion, .waitingForApproval:
-                            break
-                        }
-                    }
-                    return .completed
-                case .running, .waitingForUser, .waitingForQuestion, .waitingForApproval:
-                    return nil
-                }
-            }()
-            let now = Date()
-            let followUpMaskIsStale = session.mcpFollowUpRunPending
-                && session.mcpFollowUpRunPendingUpdatedAt.map { now.timeIntervalSince($0) > 15 } == true
-            let supersedingMaskIsStale = session.pendingSupersedingTurnCompletions > 0
-                && session.pendingSupersedingTurnCompletionsUpdatedAt.map { now.timeIntervalSince($0) > 15 } == true
-            if let terminalStatus,
-               followUpMaskIsStale || supersedingMaskIsStale,
-               session.agentTask == nil,
-               session.pendingInstructions.isEmpty,
-               session.claudeSteeringFlushTask == nil,
-               session.acpSteeringFlushTask == nil
-            {
-                Self.steeringDebugLog("[AgentRunSteeringWake] clearing stale MCP running mask sessionID=\(context.sessionID) tab=\(session.tabID) runState=\(session.runState.rawValue) terminal=\(terminalStatus.rawValue) followUp=\(session.mcpFollowUpRunPending) superseding=\(session.pendingSupersedingTurnCompletions)")
-                session.mcpFollowUpRunPending = false
-                session.pendingSupersedingTurnCompletions = 0
-            }
-            if session.mcpFollowUpRunPending || session.pendingSupersedingTurnCompletions > 0 {
-                if let terminalStatus {
-                    Self.steeringDebugLog("[AgentRunSteeringWake] MCP snapshot preserving active running mask over terminal state sessionID=\(context.sessionID) terminal=\(terminalStatus.rawValue) followUp=\(session.mcpFollowUpRunPending) superseding=\(session.pendingSupersedingTurnCompletions)")
-                }
-                return .running
-            }
-            if let terminalStatus {
-                return terminalStatus
-            }
-            switch session.runState {
-            case .running:
-                return .running
-            case .waitingForUser, .waitingForQuestion, .waitingForApproval:
-                return .waitingForInput
-            case .completed, .failed, .cancelled, .idle:
-                return .completed
-            }
-        }()
+        let resolution: MCPStatusResolution = if let canonicalTerminalState {
+            Self.mcpCanonicalStatusResolution(canonicalTerminalState)
+        } else {
+            mcpLiveStatusResolution(
+                for: session,
+                hasPendingInteraction: interaction != nil,
+                sessionID: context.sessionID
+            )
+        }
+        let status = resolution.status
         let transcriptItemCount = max(
             session.transcriptProjectionCounts.canonicalVisibleRowCount,
             session.items.count
         )
         let resolvedStatusText: String? = {
+            if let diagnostic = resolution.evidence.diagnosticStatusText {
+                return diagnostic
+            }
             if canonicalTerminalState == nil,
                let existing = session.runningStatusText?.trimmingCharacters(in: .whitespacesAndNewlines),
                !existing.isEmpty
             {
                 return existing
             }
-            if canonicalTerminalState == nil, session.mcpFollowUpRunPending {
+            if canonicalTerminalState == nil,
+               session.mcpFollowUpRunPending || resolution.evidence == .queuedStartup
+            {
                 return AgentRunMCPSnapshot.startupPendingStatusText
             }
             switch status {
@@ -6493,6 +6474,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             session.runID
         }
         let failureReason: AgentRunMCPSnapshot.FailureReason? = {
+            if let diagnostic = resolution.evidence.diagnosticFailureReason {
+                return diagnostic
+            }
             if let canonicalFailureReason {
                 return canonicalFailureReason
             }
@@ -6545,6 +6529,151 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             worktreeBindings: session.worktreeBindings.map { AgentRunMCPSnapshot.WorktreeBinding(binding: $0) },
             appActiveWorktreeMerges: session.worktreeMergeOperations.activeWorktreeMergeSummaries
         )
+    }
+
+    /// How an MCP snapshot's status was established.
+    struct MCPStatusResolution: Equatable {
+        enum Evidence: Equatable {
+            /// Live state, a recorded terminal state, or a canonical terminal publication.
+            case recorded
+            /// Accepted startup still owned by its ticket and not yet active.
+            case queuedStartup
+            /// Idle with no terminal result recorded for the latest submission.
+            case unrecordedTerminal
+            /// A terminal publication carried a nonterminal state.
+            case nonterminalCanonicalPublication
+
+            /// The status text for evidence that is itself the diagnosis, in place of any live or
+            /// transcript text.
+            var diagnosticStatusText: String? {
+                switch self {
+                case .unrecordedTerminal: AgentModeViewModel.mcpUnrecordedTerminalStatusText
+                case .nonterminalCanonicalPublication: AgentModeViewModel.mcpNonterminalPublicationStatusText
+                case .recorded, .queuedStartup: nil
+                }
+            }
+
+            /// Neither diagnostic is a provider failure text, and the unrecorded-terminal one
+            /// mentions interruption, which text classification would misread as a cancellation.
+            var diagnosticFailureReason: AgentRunMCPSnapshot.FailureReason? {
+                switch self {
+                case .unrecordedTerminal, .nonterminalCanonicalPublication: .agentError
+                case .recorded, .queuedStartup: nil
+                }
+            }
+        }
+
+        let status: AgentRunMCPSnapshot.Status
+        var evidence: Evidence = .recorded
+    }
+
+    nonisolated static let mcpUnrecordedTerminalStatusText = "No terminal result was recorded for this run. It may have been interrupted during startup or execution. Send a new instruction to continue."
+    nonisolated static let mcpNonterminalPublicationStatusText = "Internal error: a terminal publication carried a nonterminal run state."
+
+    /// Terminal publications come only from the terminal barrier, which accepts terminal states
+    /// alone, so a nonterminal one is a programming error and fails closed.
+    private static func mcpCanonicalStatusResolution(_ state: AgentSessionRunState) -> MCPStatusResolution {
+        if let status = state.mcpTerminalSnapshotStatus {
+            return MCPStatusResolution(status: status)
+        }
+        assertionFailure("MCP terminal publication requires a terminal run state, got \(state.rawValue)")
+        return MCPStatusResolution(status: .failed, evidence: .nonterminalCanonicalPublication)
+    }
+
+    /// Live MCP status, in precedence order: a pending interaction, the current accepted
+    /// startup, legacy running masks, recorded terminal evidence, then live run state. Neither
+    /// idleness nor elapsed startup time is evidence of completion: idle with no recorded
+    /// terminal result reports failed.
+    private func mcpLiveStatusResolution(
+        for session: TabSession,
+        hasPendingInteraction: Bool,
+        sessionID: UUID
+    ) -> MCPStatusResolution {
+        if hasPendingInteraction {
+            return MCPStatusResolution(status: .waitingForInput)
+        }
+        // An accepted start stays running however long it takes, until its own attempt has a
+        // terminal settlement; a previous run's result cannot stand in for it.
+        if let ticket = session.unresolvedStartupTicket,
+           !startupHasTerminalSettlement(ticket, session: session)
+        {
+            return MCPStatusResolution(
+                status: .running,
+                evidence: session.runState.isActive ? .recorded : .queuedStartup
+            )
+        }
+        let settled: MCPStatusResolution? = switch session.runState {
+        case .completed, .failed, .cancelled:
+            session.runState.mcpTerminalSnapshotStatus.map { MCPStatusResolution(status: $0) }
+        case .idle:
+            mcpLatestSubmissionTerminalStatus(for: session).map { MCPStatusResolution(status: $0) }
+                ?? MCPStatusResolution(status: .failed, evidence: .unrecordedTerminal)
+        case .running, .waitingForUser, .waitingForQuestion, .waitingForApproval:
+            nil
+        }
+        // A startup that owns a ticket returned above, so its masks never expire here.
+        if let settled {
+            clearStaleMCPRunningMasks(for: session, settled: settled, sessionID: sessionID)
+        }
+        if session.mcpFollowUpRunPending || session.pendingSupersedingTurnCompletions > 0 {
+            if let settled {
+                Self.steeringDebugLog("[AgentRunSteeringWake] MCP snapshot preserving active running mask over settled state sessionID=\(sessionID) settled=\(settled.status.rawValue) followUp=\(session.mcpFollowUpRunPending) superseding=\(session.pendingSupersedingTurnCompletions)")
+            }
+            return MCPStatusResolution(status: .running)
+        }
+        if let settled {
+            return settled
+        }
+        switch session.runState {
+        case .waitingForUser, .waitingForQuestion, .waitingForApproval:
+            return MCPStatusResolution(status: .waitingForInput)
+        case .running, .idle, .completed, .failed, .cancelled:
+            return MCPStatusResolution(status: .running)
+        }
+    }
+
+    /// The masks are legacy bookkeeping for the gap before a run starts. Clearing a stale one only
+    /// drops the mask; the status still comes from the settled evidence.
+    private func clearStaleMCPRunningMasks(
+        for session: TabSession,
+        settled: MCPStatusResolution,
+        sessionID: UUID
+    ) {
+        let now = Date()
+        let followUpMaskIsStale = session.mcpFollowUpRunPending
+            && session.mcpFollowUpRunPendingUpdatedAt.map { now.timeIntervalSince($0) > 15 } == true
+        let supersedingMaskIsStale = session.pendingSupersedingTurnCompletions > 0
+            && session.pendingSupersedingTurnCompletionsUpdatedAt.map { now.timeIntervalSince($0) > 15 } == true
+        guard followUpMaskIsStale || supersedingMaskIsStale,
+              session.agentTask == nil,
+              session.pendingInstructions.isEmpty,
+              session.claudeSteeringFlushTask == nil,
+              session.acpSteeringFlushTask == nil
+        else { return }
+        Self.steeringDebugLog("[AgentRunSteeringWake] clearing stale MCP running mask sessionID=\(sessionID) tab=\(session.tabID) runState=\(session.runState.rawValue) settled=\(settled.status.rawValue) followUp=\(session.mcpFollowUpRunPending) superseding=\(session.pendingSupersedingTurnCompletions)")
+        session.mcpFollowUpRunPending = false
+        session.pendingSupersedingTurnCompletions = 0
+    }
+
+    private func startupHasTerminalSettlement(_ ticket: AgentRunStartupTicket, session: TabSession) -> Bool {
+        guard let ownership = ticket.ownership else { return false }
+        return session.lastTerminalCommitRevision?.ownership == ownership
+    }
+
+    /// The latest run turn's terminal state, only when that turn answers the latest submission.
+    /// A newer optimistic user item still in the working suffix, not yet reflected in the derived
+    /// transcript, has no terminal result yet. Local control-plane echoes (a `/goal` objective
+    /// bubble) are not run submissions, so they neither answer nor displace the latest run.
+    private func mcpLatestSubmissionTerminalStatus(for session: TabSession) -> AgentRunMCPSnapshot.Status? {
+        guard let turn = session.transcript.turns.last(where: { $0.request?.isLocalControlPlaneEcho != true }),
+              let status = turn.terminalState?.mcpTerminalSnapshotStatus
+        else { return nil }
+        if let latestSubmission = session.items.last(where: { $0.kind == .user && !$0.isLocalControlPlaneEcho }),
+           latestSubmission.id != turn.request?.id
+        {
+            return nil
+        }
+        return status
     }
 
     private func mcpApprovalDecisionOptions(for approval: AgentApprovalRequest) -> [AgentRunMCPSnapshot.Interaction.Option] {
@@ -9117,6 +9246,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             autoEditEnabledBeforeOverride: priorAutoEditEnabled,
             taskLabelKind: taskLabelKind
         )
+        // The context is observable from here on, and an idle session under control with neither
+        // a recorded result nor a queued start publishes that no result was recorded; the queued
+        // start therefore has to be visible before the context is.
+        let followUpRunPendingBeforeActivation = session.mcpFollowUpRunPending
+        session.mcpFollowUpRunPending = startPending
         session.mcpControlContext = activatedContext
         let cancellationInstalled = await AgentRunSessionStore.installCancellationHandler(
             registration: registration
@@ -9133,17 +9267,20 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
               session.mcpControlContext?.activationID == activationID,
               session.mcpControlContext?.registration == registration
         else {
+            if session.mcpControlActivationGeneration == activationGeneration {
+                session.mcpFollowUpRunPending = followUpRunPendingBeforeActivation
+            }
             await AgentRunSessionStore.cleanup(registration: registration)
             throw MCPError.invalidParams("The MCP control activation was superseded during setup.")
         }
         guard cancellationInstalled else {
+            session.mcpFollowUpRunPending = followUpRunPendingBeforeActivation
             session.mcpControlContext = nil
             await AgentRunSessionStore.cleanup(registration: registration)
             throw MCPError.internalError(
                 "The Agent session runtime stopped before its cancellation handler could be installed."
             )
         }
-        session.mcpFollowUpRunPending = startPending
         mcpControlledTabIDs.insert(tabID)
         if markSessionAsMCPOriginated {
             // Mark session as MCP-originated so cleanup can scope to MCP sessions only.
@@ -9855,9 +9992,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         session.mcpControlActivationGeneration &+= 1
         session.mcpControlCleanupTask?.cancel()
         session.mcpControlCleanupTask = nil
-        session.mcpFollowUpRunPending = false
         if context.forceAutoEditEnabled {
             session.autoEditEnabled = context.autoEditEnabledBeforeOverride
+            #if DEBUG
+                await test_beforeMCPDeactivationAutoEditRestore?()
+            #endif
             await applyEditsApprovalStore.setAutoEditEnabled(
                 context.autoEditEnabledBeforeOverride,
                 for: applyEditsScope(for: session.tabID),
@@ -9867,6 +10006,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         await AgentRunSessionStore.removeCancellationHandler(
             registration: context.registration
         )
+        // Cleared with the context, never across the suspensions above: a context still under
+        // control without its queued start would publish that no result was recorded.
+        session.mcpFollowUpRunPending = false
         session.mcpControlContext = nil
         mcpControlledTabIDs.remove(session.tabID)
         if cleanupSessionStore {
@@ -15029,8 +15171,19 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
     // MARK: - User Interaction
 
-    func ensureMCPServerEnabledForThreadStart() async -> Bool {
-        await mcpServerEnabler()
+    func requireMCPServerEnabledForThreadStart() async throws {
+        try await mcpServerReadinessRequirement()
+    }
+
+    /// A Boolean enabler reports no cause, so its `false` becomes an explicit catalog-readiness
+    /// rejection rather than a missing-thread symptom later in startup.
+    static func readinessRequirement(adapting enabler: @escaping MCPServerEnabler) -> MCPServerReadinessRequirement {
+        {
+            guard await enabler() else {
+                try Task.checkCancellation()
+                throw MCPBootstrapReadinessError.catalogReadinessRejected
+            }
+        }
     }
 
     func hasLiveRunRouteInCurrentMCPServer(_ runID: UUID) -> Bool {
@@ -15458,7 +15611,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         #if DEBUG
             if test_submitUserTurnResultOverride != nil { return nil }
         #endif
-        guard AgentModelCatalog.isAgentAvailable(session.selectedAgent, availability: agentAvailabilityContext) else {
+        guard isAgentAvailableForRun(session.selectedAgent) else {
             return .blocked(message: unavailableAgentMessage(for: session.selectedAgent))
         }
         let workflow = session.selectedWorkflow
@@ -15689,7 +15842,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         guard !trimmedText.isEmpty || !attachmentsToSend.isEmpty || !taggedFilesToSend.isEmpty else {
             return .blocked(message: "")
         }
-        guard AgentModelCatalog.isAgentAvailable(session.selectedAgent, availability: agentAvailabilityContext) else {
+        guard isAgentAvailableForRun(session.selectedAgent) else {
             return .blocked(message: unavailableAgentMessage(for: session.selectedAgent))
         }
         if session.selectedAgent == .codexExec, CodexManagedSessionFence.shared.isFenced {
@@ -17864,9 +18017,16 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             session.mcpFollowUpRunPending = false
             handleObservedMCPStateChange(for: session)
         }
-        guard AgentModelCatalog.isAgentAvailable(session.selectedAgent, availability: agentAvailabilityContext) else {
+        guard isAgentAvailableForRun(session.selectedAgent) else {
+            let message = unavailableAgentMessage(for: session.selectedAgent)
+            await settleStartRejectedBeforeProvider(
+                session: session,
+                startupTicket: startupTicket,
+                message: message,
+                attachments: attachments
+            )
             clearPendingStartFlagIfOwned()
-            return .failed(message: unavailableAgentMessage(for: session.selectedAgent))
+            return .failed(message: message)
         }
         defer { clearPendingStartFlagIfOwned() }
         if let startupTicket {
@@ -17877,7 +18037,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         }
         let hadPersistentBinding = session.persistentSessionBindingIdentity != nil
         guard ensureSessionBoundToTab(session) != nil else {
-            return .failed(message: "The tab could not be bound to an agent session.")
+            let message = "The tab could not be bound to an agent session."
+            await settleStartRejectedBeforeProvider(
+                session: session,
+                startupTicket: startupTicket,
+                message: message,
+                attachments: attachments
+            )
+            return .failed(message: message)
         }
         if !hadPersistentBinding {
             startupTicket?.adoptBindingInstalledByStartup(
@@ -17931,6 +18098,39 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             initialMessageForRun: initialMessageForRun,
             attachments: attachments,
             codexFallbackContext: preparedCodexFallbackContext
+        )
+    }
+
+    /// Settles a start rejected before the run service handed it to a provider runner, so the
+    /// rejection is the run's failed result rather than a value only the caller sees. Only a start
+    /// this call owns is settled: its own current ticket, or an inactive session no other start
+    /// has claimed. An active run is never terminated by a rejected submission.
+    private func settleStartRejectedBeforeProvider(
+        session: TabSession,
+        startupTicket: AgentRunStartupTicket?,
+        message: String,
+        attachments: [AgentImageAttachment]
+    ) async {
+        let ownsStart: () -> Bool = { [unowned self] in
+            if let startupTicket {
+                return startupTicketOwnsSession(startupTicket, session: session)
+            }
+            return sessions[session.tabID] === session
+                && !session.runState.isActive
+                && session.activeRunOwnership == nil
+                && session.unresolvedStartupTicket == nil
+        }
+        guard ownsStart() else { return }
+        // A rejection this early precedes the start's MCP epoch, and a terminal result without an
+        // epoch cannot be published, so MCP waiters would never see it.
+        if session.mcpControlContext != nil {
+            await prepareMCPWaitTrackingForRunStart(session: session, startupTicket: startupTicket)
+            guard ownsStart() else { return }
+        }
+        await runService.failAcceptedStartBeforeProvider(
+            session: session,
+            message: message,
+            attachments: attachments
         )
     }
 
