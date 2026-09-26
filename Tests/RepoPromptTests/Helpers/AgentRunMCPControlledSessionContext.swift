@@ -25,7 +25,8 @@ final class AgentRunMCPControlledSessionContext {
         workspaceNamePrefix: String,
         workspaceSwitchReason: String,
         clientName: String,
-        unusedStartRunMessage: String
+        unusedStartRunMessage: String,
+        bindWorkspaceComposeTab: Bool = false
     ) async throws -> AgentRunMCPControlledSessionContext {
         let settings = GlobalSettingsStore.shared
         let previousAutoStart = settings.mcpAutoStart()
@@ -51,8 +52,27 @@ final class AgentRunMCPControlledSessionContext {
             window.promptManager.loadComposeTabsFromWorkspace(activeWorkspace, syncPromptText: true)
 
             let sessionID = UUID()
-            let session = await window.agentModeViewModel.ensureSessionReady(tabID: UUID())
-            _ = window.agentModeViewModel.test_installPersistentSessionBinding(sessionID: sessionID, on: session)
+            let session: AgentModeViewModel.TabSession
+            if bindWorkspaceComposeTab {
+                // Binding the workspace's own compose tab records the session in the workspace, as
+                // a real session is recorded; a detached tab keeps the binding in the runtime
+                // only, so work gated on the workspace's view of the session, such as transcript
+                // sync, skips it.
+                guard let tabID = activeWorkspace.activeComposeTabID else {
+                    throw MCPError.internalError("Expected an active compose tab")
+                }
+                session = await window.agentModeViewModel.ensureSessionReady(tabID: tabID)
+                guard window.agentModeViewModel.test_installPersistentSessionBinding(
+                    sessionID: sessionID,
+                    on: session,
+                    compareAndSetInWorkspaceID: activeWorkspace.id
+                ) != nil else {
+                    throw MCPError.internalError("Expected the compose tab binding to install")
+                }
+            } else {
+                session = await window.agentModeViewModel.ensureSessionReady(tabID: UUID())
+                _ = window.agentModeViewModel.test_installPersistentSessionBinding(sessionID: sessionID, on: session)
+            }
             try await window.agentModeViewModel.mcpActivateControlContext(
                 forTabID: session.tabID,
                 sessionID: sessionID,

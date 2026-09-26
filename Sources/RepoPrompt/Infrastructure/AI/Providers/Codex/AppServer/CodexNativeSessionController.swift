@@ -1942,7 +1942,7 @@ final class CodexNativeSessionController {
             }
 
             let configOverrides = await options.configOverridesProvider()
-            let result: [String: Any]
+            let snapshot: ThreadSnapshot
             #if DEBUG
                 let threadPhase: AgentModePerfDiagnostics.CodexLifecyclePhase = resumeThreadID == nil
                     ? .threadStart
@@ -1951,7 +1951,7 @@ final class CodexNativeSessionController {
             #endif
 
             do {
-                result = try await requestThreadBinding(
+                let result = try await requestThreadBinding(
                     resumeThreadID: resumeThreadID,
                     existing: existing,
                     baseInstructions: baseInstructions,
@@ -1959,6 +1959,11 @@ final class CodexNativeSessionController {
                     serviceTier: serviceTier,
                     configOverrides: configOverrides,
                     timeout: options.requestTimeout
+                )
+                snapshot = try Self.validatedThreadBindingSnapshot(
+                    from: result,
+                    request: resumeThreadID == nil ? .start : .resume,
+                    fallbackEffort: reasoningEffort
                 )
                 #if DEBUG
                     await recordLifecyclePhase(
@@ -1980,13 +1985,7 @@ final class CodexNativeSessionController {
                 throw error
             }
 
-            let sessionRef = try await eventHandlingMutex.withLock {
-                try ensureBindingCanComplete()
-                let sessionRef = applyThreadResponse(result, fallbackEffort: reasoningEffort)
-                await finishBindingAndDrainBufferedInbound()
-                return sessionRef
-            }
-            try markStartOrResumeSucceeded()
+            let sessionRef = try await activateThreadBinding(snapshot)
             threadBindingContext = ThreadBindingContext(
                 existing: existing,
                 baseInstructions: baseInstructions,
@@ -2005,6 +2004,35 @@ final class CodexNativeSessionController {
             }
             throw error
         }
+    }
+
+    /// Parses a `thread/start` or `thread/resume` response and rejects one that names no thread, so
+    /// an invalid identity is refused before any thread state is applied, buffered inbound events
+    /// drain, or the controller becomes active.
+    private static func validatedThreadBindingSnapshot(
+        from result: [String: Any],
+        request: CodexSessionControllerError.ThreadBindingRequest,
+        fallbackEffort: String?
+    ) throws -> ThreadSnapshot {
+        let snapshot = parseThreadSnapshot(from: result, fallbackEffort: fallbackEffort)
+        guard !snapshot.conversationID.isEmpty else {
+            logger.error("Codex \(request.rawValue, privacy: .public) response named no thread; rejecting the binding")
+            throw CodexSessionControllerError.threadBindingResponseMissingThreadID(request)
+        }
+        return snapshot
+    }
+
+    /// Installs a validated binding snapshot, drains the events buffered while binding, and marks
+    /// the controller active.
+    private func activateThreadBinding(_ snapshot: ThreadSnapshot) async throws -> SessionRef {
+        let sessionRef = try await eventHandlingMutex.withLock {
+            try ensureBindingCanComplete()
+            let sessionRef = applyThreadSnapshot(snapshot)
+            await finishBindingAndDrainBufferedInbound()
+            return sessionRef
+        }
+        try markStartOrResumeSucceeded()
+        return sessionRef
     }
 
     private func setThreadMemoryMode(
@@ -2661,7 +2689,7 @@ final class CodexNativeSessionController {
         fallbackEffort: String?
     ) -> ThreadSnapshot {
         let thread = result["thread"] as? [String: Any] ?? [:]
-        let conversationID = firstString(in: thread, keys: ["id", "threadId", "thread_id", "threadID"]) ?? ""
+        let conversationID = threadIdentity(in: thread) ?? ""
         let rolloutPath = firstString(in: thread, keys: ["path"])
         let model = result["model"] as? String
         let reasoningEffort = result["reasoningEffort"] as? String ?? fallbackEffort
@@ -2714,6 +2742,17 @@ final class CodexNativeSessionController {
             activeToolItems: activeToolItems,
             hasAuthoritativeActiveTurnItems: hasAuthoritativeActiveTurnItems
         )
+    }
+
+    /// Reads only the thread object's own identity keys. The recursive lookup other fields use
+    /// would take a nested turn or item ID for the thread's when the thread's own ID is absent.
+    private static func threadIdentity(in thread: [String: Any]) -> String? {
+        for key in ["id", "threadId", "thread_id", "threadID"] {
+            if let id = nonEmptyString(thread[key] as? String) {
+                return id
+            }
+        }
+        return nil
     }
 
     private static func parseThreadSnapshotToolItem(
@@ -4620,6 +4659,21 @@ final class CodexNativeSessionController {
             }
             try? markStartOrResumeSucceeded()
             return sessionRef
+        }
+
+        /// Completes a binding begun with `test_beginBindingSession` the way `startOrResume` does
+        /// once its thread request returns.
+        func test_completeThreadBinding(
+            response result: [String: Any],
+            request: CodexSessionControllerError.ThreadBindingRequest,
+            fallbackEffort: String?
+        ) async throws -> SessionRef {
+            let snapshot = try Self.validatedThreadBindingSnapshot(
+                from: result,
+                request: request,
+                fallbackEffort: fallbackEffort
+            )
+            return try await activateThreadBinding(snapshot)
         }
 
         func test_bindingBufferState() async throws -> (isBinding: Bool, bufferedCount: Int) {
@@ -9283,10 +9337,16 @@ enum CommandExecutionOutputSanitizer {
     }
 }
 
-enum CodexSessionControllerError: LocalizedError {
+enum CodexSessionControllerError: LocalizedError, Equatable {
+    enum ThreadBindingRequest: String, Equatable {
+        case start = "thread/start"
+        case resume = "thread/resume"
+    }
+
     case imageAttachmentsUnsupported
     case emptyUserTurn
     case invalidResumeReferenceMissingThreadID
+    case threadBindingResponseMissingThreadID(ThreadBindingRequest)
     case invalidLifecycleState(String)
 
     var errorDescription: String? {
@@ -9297,6 +9357,8 @@ enum CodexSessionControllerError: LocalizedError {
             "Cannot send an empty user turn."
         case .invalidResumeReferenceMissingThreadID:
             "Cannot resume this Codex thread because its saved thread ID is missing. Start a new Codex thread instead."
+        case let .threadBindingResponseMissingThreadID(request):
+            "Codex \(request.rawValue) returned no thread ID."
         case let .invalidLifecycleState(description):
             "This Codex session controller cannot be started because it is \(description). Create a new controller instance."
         }

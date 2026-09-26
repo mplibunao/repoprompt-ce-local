@@ -2375,5 +2375,21 @@ actor CodexAppServerClient {
             decodeRecoveryAttemptsByGeneration[transportGeneration] = 0
         }
 
+        /// Installs `runtime` as this client's resolved launch runtime, so a test drives native
+        /// startup without depending on the machine's Codex installation.
+        func debugInstallPreparedRuntime(_ runtime: CodexRuntimeAuthority.Runtime) {
+            preparedRuntimeLaunchContext = PreparedRuntimeLaunchContext(
+                environment: [:],
+                resolution: CodexProviderHelpers.CodexExecutableResolution(
+                    commandName: config.commandName,
+                    resolvedCommand: runtime.executableURL.path,
+                    status: .available,
+                    runtime: runtime,
+                    userMessage: "",
+                    debugMessage: ""
+                )
+            )
+        }
+
     #endif
 }

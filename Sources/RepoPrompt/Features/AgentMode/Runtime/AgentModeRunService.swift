@@ -11,6 +11,9 @@ final class AgentModeRunService {
         let connectionPolicyInstaller: AgentModeViewModel.ConnectionPolicyInstaller
         let expectedPIDPolicyArmer: (MCPBootstrapLeaseSpec) async -> Bool
         let mcpServerEnabler: AgentModeViewModel.MCPServerEnabler
+        /// Codex's first readiness check, which reports why readiness failed. `nil` adapts
+        /// `mcpServerEnabler`, whose `false` carries no cause.
+        let codexReadinessRequirement: AgentModeViewModel.MCPServerReadinessRequirement?
         let workspacePathProvider: (AgentTabSession) throws -> String?
         let codexCoordinator: CodexAgentModeCoordinator
         let claudeCoordinator: ClaudeAgentModeCoordinator
@@ -82,9 +85,11 @@ final class AgentModeRunService {
             terminalCommitBarrier: terminalCommitBarrier
         )
         codexRunner = CodexIntegratedAgentModeRunner(
-            mcpServerEnabler: dependencies.mcpServerEnabler,
+            readinessRequirement: dependencies.codexReadinessRequirement
+                ?? AgentModeViewModel.readinessRequirement(adapting: dependencies.mcpServerEnabler),
             codexCoordinator: dependencies.codexCoordinator,
-            hooks: hooks
+            hooks: hooks,
+            terminalCommitBarrier: terminalCommitBarrier
         )
         claudeRunner = ClaudeIntegratedAgentModeRunner(
             claudeCoordinator: dependencies.claudeCoordinator,
@@ -117,7 +122,7 @@ final class AgentModeRunService {
             workspacePath = try dependencies.workspacePathProvider(session)
         } catch {
             let message = Self.providerStartupFailureMessage(for: error)
-            await failBeforeProviderStartup(session: session, message: message)
+            await failAcceptedStartBeforeProvider(session: session, message: message, attachments: attachments)
             return selectedAgent == .codexExec ? .failed(message: message) : nil
         }
 
@@ -451,8 +456,40 @@ final class AgentModeRunService {
         return description.isEmpty ? String(describing: error) : description
     }
 
-    private func failBeforeProviderStartup(session: AgentTabSession, message: String) async {
-        let ownership = session.activeRunOwnership ?? session.beginRunAttempt(source: "runService.startupFailure")
+    /// Settles an accepted start that was rejected before any provider runner took it: an
+    /// unavailable agent, a failed tab binding, or an unresolvable workspace. The rejection
+    /// becomes the start's failed terminal result instead of a return value nobody publishes.
+    /// Codex restores the start's attachments to the composer through a reservation, as its
+    /// runner does; other providers keep deleting them.
+    func failAcceptedStartBeforeProvider(
+        session: AgentTabSession,
+        message: String,
+        attachments: [AgentImageAttachment]
+    ) async {
+        let attachmentReservationID = session.selectedAgent == .codexExec
+            ? hooks.attachments.reserveAttachmentsForTurn(attachments, session)
+            : nil
+        await failBeforeProviderStartup(
+            session: session,
+            message: message,
+            attachmentReservationID: attachmentReservationID
+        )
+    }
+
+    private func failBeforeProviderStartup(
+        session: AgentTabSession,
+        message: String,
+        attachmentReservationID: UUID? = nil
+    ) async {
+        // A start nobody claimed yet settles under its own reserved run identity, so the failure
+        // cannot land on the previous run's ID.
+        let ownership: AgentRunOwnership = if let activeOwnership = session.activeRunOwnership {
+            activeOwnership
+        } else if let ticket = session.unresolvedStartupTicket, ticket.ownership == nil {
+            session.beginRunAttemptForUnclaimedStartup(ticket, source: "runService.startupFailure")
+        } else {
+            session.beginRunAttempt(source: "runService.startupFailure")
+        }
         hooks.providerInput.recordPendingHandoffSendOutcome(session, false)
         await terminalCommitBarrier.commit(.init(
             binding: hooks.bindTerminalSession(session),
@@ -461,10 +498,12 @@ final class AgentModeRunService {
             terminalState: .failed,
             source: "runService.startupFailure",
             errorText: message,
-            attachmentDisposition: .deleteFiles,
+            attachmentReservationID: attachmentReservationID,
+            attachmentDisposition: session.selectedAgent == .codexExec ? .restoreToPending : .deleteFiles,
             finalizeNonCodexUsage: session.selectedAgent != .codexExec,
             supportsFollowUp: false,
             notifyTurnComplete: false,
+            providerDrainGeneration: session.providerTerminalDrainGeneration,
             prepareProviderState: {
                 session.provider = nil
                 return nil
@@ -929,7 +968,12 @@ final class AgentModeRunService {
         intent: CancellationIntent = .userStop,
         completion: CancellationCompletion = .terminalPublished
     ) async {
-        if session.runState.isTerminalForCommit,
+        // A newly accepted start outranks the previous run's terminal revision: invalidating it
+        // before any suspension blocks its dispatch and withdraws its queued work, and the
+        // cancellation then settles that start rather than returning early.
+        let cancelledStartup = session.invalidatePendingStartup(.cancelled)
+        if cancelledStartup == nil,
+           session.runState.isTerminalForCommit,
            let revision = session.lastTerminalCommitRevision
         {
             await terminalCommitBarrier.awaitTerminalPublication(
@@ -990,7 +1034,13 @@ final class AgentModeRunService {
             reason: intent.cancellationReason
         )
 
-        let ownership = session.activeRunOwnership ?? session.beginRunAttempt(source: "runService.cancel")
+        let ownership: AgentRunOwnership = if let activeOwnership = session.activeRunOwnership {
+            activeOwnership
+        } else if let cancelledStartup {
+            session.beginRunAttemptForUnclaimedStartup(cancelledStartup, source: "runService.cancelPendingStartup")
+        } else {
+            session.beginRunAttempt(source: "runService.cancel")
+        }
         let expectedRunID = session.runID
         let provider = session.provider
         let acpController = session.acpController
