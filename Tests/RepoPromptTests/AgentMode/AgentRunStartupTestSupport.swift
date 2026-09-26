@@ -156,6 +156,48 @@ import XCTest
         throw SettleTimeout()
     }
 
+    /// A view model whose provider startup goes through `readiness` and `controller`, and, when
+    /// `claude` is given, whose Claude-compatible runs use that recorder's runtimes and count as
+    /// available without an installed CLI.
+    @MainActor
+    func startupTestMakeViewModel(
+        storageRoot: URL,
+        readiness: StartupTestGatedReadiness,
+        controller: StartupTestCodexController,
+        claude: StartupTestClaudeRecorder? = nil
+    ) -> AgentModeViewModel {
+        let viewModel = AgentModeViewModel(
+            testWorkspacePath: storageRoot.path,
+            testWorkspaceDirectory: storageRoot,
+            codexControllerFactory: { _, _, _, _, _, _ in controller },
+            claudeControllerFactory: claude.map { recorder in
+                { _, _, _, _ in MainActor.assumeIsolated { recorder.makeRuntime() } }
+            },
+            mcpServerEnabler: { await readiness.enter() }
+        )
+        if claude != nil {
+            viewModel.test_agentAvailabilityForRunOverride = { _ in true }
+        }
+        return viewModel
+    }
+
+    /// Submits `text` to `session` the way `mcpDispatchInstruction` submits an instruction that
+    /// starts a run: as the dispatch of the MCP start that owns the session's pending start, if
+    /// one does. `agent_run start` raises that pending start before its dispatch, and it refuses
+    /// every other submission, so a test modeling the start submits this way.
+    @MainActor
+    func startupTestSubmitAsMCPDispatch(
+        _ text: String,
+        viewModel: AgentModeViewModel,
+        session: AgentModeViewModel.TabSession
+    ) -> AgentModeViewModel.UserTurnSubmissionResult {
+        viewModel.submitUserTurn(
+            text: text,
+            tabID: session.tabID,
+            origin: .mcpDispatch(pendingStartOwner: session.mcpPendingStartOwner)
+        )
+    }
+
     /// A Codex session that has loaded its persisted state, ready to take a submission.
     @MainActor
     func startupTestCodexSession(tabID: UUID = UUID()) -> AgentModeViewModel.TabSession {
@@ -220,24 +262,36 @@ import XCTest
             viewModel.test_installLiveSession(session)
         }
 
-        /// Submits a manual turn into the inactive session and returns the startup ticket the
-        /// submission installed; teardown joins its start.
+        /// Submits a turn into the inactive session and returns the startup ticket the submission
+        /// installed; teardown joins its start. A session under MCP control receives it as the
+        /// controller's dispatch, the way `agent_run` starts it; any other session as a manual turn.
         func submit(_ text: String) throws -> AgentRunStartupTicket {
-            XCTAssertEqual(viewModel.submitUserTurn(text: text, tabID: tabID), .submitted)
+            let result = session.mcpControlContext == nil
+                ? viewModel.submitUserTurn(text: text, tabID: tabID)
+                : submitAsMCPDispatch(text)
+            XCTAssertEqual(result, .submitted)
             let ticket = try XCTUnwrap(session.unresolvedStartupTicket)
             cleanup.tickets.append(ticket)
             return ticket
         }
 
+        /// Submits `text` as the MCP dispatch of the start that owns the session's pending start, if
+        /// one does. On Codex, a dispatch arriving while another start is pending queues behind it.
+        func submitAsMCPDispatch(_ text: String) -> AgentModeViewModel.UserTurnSubmissionResult {
+            startupTestSubmitAsMCPDispatch(text, viewModel: viewModel, session: session)
+        }
+
         /// Puts the session under MCP control, as `agent_run` does; `startPending` raises the
-        /// queued-start flag `agent_run start` raises. Teardown deactivates it once starts settle.
+        /// queued-start flag `agent_run start` raises, owned by that start so its own dispatch is
+        /// admitted. Teardown deactivates it once starts settle.
         @discardableResult
         func activateMCPControl(startPending: Bool = true) async throws -> AgentRunSessionStore.Registration {
             let registration = try await startupTestActivateMCPControl(
                 viewModel: viewModel,
                 session: session,
                 sessionID: sessionID,
-                startPending: startPending
+                startPending: startPending,
+                pendingStartOwner: startPending ? UUID() : nil
             )
             let viewModel = viewModel
             let sessionID = sessionID
@@ -245,6 +299,15 @@ import XCTest
                 await viewModel.mcpDeactivateControlContext(sessionID: sessionID, cleanupSessionStore: true)
             }
             return registration
+        }
+
+        /// Ends the owning start's hold on the pending-start flag without submitting, as an
+        /// `agent_run start` whose dispatch never reached the session does; the flag stays raised
+        /// until it expires.
+        func releasePendingStartOwnership() {
+            if let owner = session.mcpPendingStartOwner {
+                session.releaseMCPPendingStartOwnership(owner)
+            }
         }
 
         /// Completes the active native turn as the app-server reports it: started, then completed.
@@ -355,7 +418,8 @@ import XCTest
         viewModel: AgentModeViewModel,
         session: AgentModeViewModel.TabSession,
         sessionID: UUID,
-        startPending: Bool
+        startPending: Bool,
+        pendingStartOwner: UUID? = nil
     ) async throws -> AgentRunSessionStore.Registration {
         session.testInstallPersistentSessionBinding(sessionID: sessionID)
         return try await viewModel.mcpActivateControlContext(
@@ -363,9 +427,110 @@ import XCTest
             sessionID: sessionID,
             originatingConnectionID: UUID(),
             startPending: startPending,
+            pendingStartOwner: pendingStartOwner,
             markSessionAsMCPOriginated: true,
             requireInactiveRunState: true
         ).registration
+    }
+
+    /// Counts the Claude-compatible runtimes a view model creates, their session starts, and the
+    /// messages sent to them.
+    @MainActor
+    final class StartupTestClaudeRecorder {
+        private(set) var runtimes: [StartupTestClaudeRuntime] = []
+        private(set) var sessionStarts = 0
+        private(set) var sentMessages: [String] = []
+        /// The provider turn each sent message started, in send order.
+        private(set) var sentTurnIDs: [UUID] = []
+
+        var runtimesCreated: Int {
+            runtimes.count
+        }
+
+        func makeRuntime() -> StartupTestClaudeRuntime {
+            let runtime = StartupTestClaudeRuntime(recorder: self)
+            runtimes.append(runtime)
+            return runtime
+        }
+
+        fileprivate func recordSessionStart() {
+            sessionStarts += 1
+        }
+
+        fileprivate func recordSentMessage(_ text: String, turnID: UUID) {
+            sentMessages.append(text)
+            sentTurnIDs.append(turnID)
+        }
+    }
+
+    /// Claude-compatible runtime that reports to its recorder and emits only the events a test
+    /// sends it, so a run it receives stays running until the test ends it or cancels it.
+    actor StartupTestClaudeRuntime: NativeAgentRuntimeControlling {
+        private let recorder: StartupTestClaudeRecorder
+        private var sessionStarted = false
+        private var eventStream: AsyncStream<NativeAgentRuntimeEvent>
+        private var eventContinuation: AsyncStream<NativeAgentRuntimeEvent>.Continuation
+
+        init(recorder: StartupTestClaudeRecorder) {
+            self.recorder = recorder
+            (eventStream, eventContinuation) = AsyncStream.makeStream()
+        }
+
+        var hasActiveSession: Bool {
+            sessionStarted
+        }
+
+        var hasTurnInFlight: Bool {
+            false
+        }
+
+        var events: AsyncStream<NativeAgentRuntimeEvent> {
+            eventStream
+        }
+
+        func ensureEventsStreamReady() {}
+
+        func resetEventsStreamForNewRun() {
+            eventContinuation.finish()
+            (eventStream, eventContinuation) = AsyncStream.makeStream()
+        }
+
+        func startOrResume(
+            existingSessionID: String?,
+            model _: String?,
+            effortLevel _: NativeAgentRuntimeEffortLevel?,
+            systemPromptOverride _: String?
+        ) async throws -> NativeAgentRuntimeSessionRef {
+            sessionStarted = true
+            await recorder.recordSessionStart()
+            return NativeAgentRuntimeSessionRef(sessionID: existingSessionID ?? "startup-test-claude")
+        }
+
+        func currentSessionRef() -> NativeAgentRuntimeSessionRef {
+            NativeAgentRuntimeSessionRef(sessionID: "startup-test-claude")
+        }
+
+        func applyModelAndEffort(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws {}
+
+        func sendUserMessage(_ text: String) async throws -> UUID {
+            let turnID = UUID()
+            await recorder.recordSentMessage(text, turnID: turnID)
+            return turnID
+        }
+
+        func emit(_ event: NativeAgentRuntimeEvent) {
+            eventContinuation.yield(event)
+        }
+
+        func interruptTurn(reason _: String) -> NativeAgentRuntimeInterruptOutcome {
+            .noTurnInFlight
+        }
+
+        func shutdown() {
+            eventContinuation.finish()
+        }
+
+        func respondToPermissionRequest(id _: String, decision _: AgentApprovalDecision) {}
     }
 
     /// Holds every caller of `wait()` until `release()`; later callers pass straight through.

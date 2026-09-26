@@ -26,7 +26,11 @@ extension AgentModeRunService {
     struct UsageAccountingHooks {
         let estimateRuntimeTokens: (String) -> Int
         let addUserInputTokensToActiveNonCodexTurn: (Int, AgentTabSession) -> Void
-        let startNonCodexTurnAccountingIfNeeded: (AgentTabSession, String) -> Void
+        let startNonCodexTurnAccountingIfNeeded: (
+            _ session: AgentTabSession,
+            _ providerMessage: String,
+            _ startingSubmissionID: UUID?
+        ) -> Void
         let finalizeNonCodexTurnUsage: (AgentTabSession, Int?, Int?, Int?) -> Void
     }
 
@@ -68,6 +72,17 @@ extension AgentModeRunService {
     /// Authority: queued-work recovery projection.
     struct QueuedWorkRecoveryHooks {
         let restoreDraftText: (_ tabID: UUID, _ text: String, _ message: String, _ strategy: DraftRestorationStrategy) -> Void
+        /// Returns unsent submissions to the composer: their text above the current draft and their
+        /// attachments ahead of any staged since, skipping attachments already staged.
+        let restoreUnsentSubmissions: (
+            _ session: AgentTabSession,
+            _ draftText: String,
+            _ images: [AgentImageAttachment],
+            _ taggedFiles: [AgentTaggedFileAttachment],
+            _ message: String
+        ) -> Void
+        /// Removes the transcript item of a submission that was queued but never sent.
+        let removeUnsentUserItem: (_ session: AgentTabSession, _ itemID: UUID) -> Void
     }
 
     /// Host persistence scheduling for session/tab state.
@@ -144,7 +159,7 @@ extension AgentModeRunService {
     ///
     /// Authority: lifecycle command issuance back into the host.
     struct RunContinuationHooks {
-        let startFollowUpRun: (AgentTabSession, String) -> Void
+        let startFollowUpRun: (AgentTabSession, AgentQueuedInstruction, AgentRunStartupTicket?) -> Void
         /// Wakes MCP waiters once a steering instruction has actually been delivered to the provider.
         let signalMCPInstructionDelivered: (_ session: AgentTabSession) async -> Void
     }
@@ -233,8 +248,14 @@ extension AgentModeRunService.Hooks {
                         successorKind
                     )
                 },
-                startFollowUpRun: { instruction in
-                    continuation.startFollowUpRun(session, instruction)
+                admitQueuedFollowUp: {
+                    session.admitStartIfFree(submissionID: session.pendingInstructions.first?.submissionID)
+                },
+                startFollowUpRun: { instruction, admission in
+                    continuation.startFollowUpRun(session, instruction, admission)
+                },
+                returnQueuedFollowUpsToComposer: {
+                    returnQueuedFollowUpsToComposer(session)
                 }
             ),
             validatesOwnership: { ownership, expectedRunID in
@@ -298,5 +319,59 @@ extension AgentModeRunService.Hooks {
                 )
             }
         )
+    }
+
+    /// Gives queued follow-ups that will not start back to the user, once their run's terminal
+    /// commit has published without a successor for them.
+    @MainActor
+    private func returnQueuedFollowUpsToComposer(_ session: AgentTabSession) {
+        // A newer run owns whatever is queued now, and drains it itself.
+        guard !session.runState.isActive else { return }
+        let returned = session.pendingInstructions
+        session.pendingInstructions.removeAll()
+        let constituentIDs = returned.flatMap(\.constituentSubmissionIDs)
+        session.removeQueuedUserInputTokenEstimates(
+            forSubmissions: Array(Set(constituentIDs + returned.compactMap(\.submissionID)))
+        )
+        // Each entry gives back what its user typed, and every submission it stands for
+        // gives back the attachments that left the composer with it; those are
+        // referenced only by the submission's unsent item, so they are taken before
+        // the item is removed.
+        let draftText = returned
+            .map { $0.restorationDraftText.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        var images: [AgentImageAttachment] = []
+        var taggedFiles: [AgentTaggedFileAttachment] = []
+        for itemID in constituentIDs {
+            guard let item = session.items.first(where: { $0.id == itemID }) else { continue }
+            for image in item.attachments where !images.contains(where: { $0.id == image.id }) {
+                images.append(image)
+            }
+            for file in item.taggedFileAttachments
+                where !taggedFiles.contains(where: { $0.relativePath == file.relativePath })
+            {
+                taggedFiles.append(file)
+            }
+        }
+        if !draftText.isEmpty || !images.isEmpty || !taggedFiles.isEmpty {
+            queuedWorkRecovery.restoreUnsentSubmissions(
+                session,
+                draftText,
+                images,
+                taggedFiles,
+                "Restored queued messages that could not start after the run ended"
+            )
+        }
+        for itemID in constituentIDs {
+            queuedWorkRecovery.removeUnsentUserItem(session, itemID)
+        }
+        // The flag was raised for these follow-ups. A start that owns it, or a newer
+        // start's ticket, keeps it for itself.
+        if session.mcpPendingStartOwner == nil, session.unresolvedStartupTicket == nil {
+            session.mcpFollowUpRunPending = false
+        }
+        bindingObservation.updateBindings(session)
+        persistence.scheduleSave(session)
     }
 }

@@ -107,7 +107,9 @@ final class AgentRunLifecycleContractsTests: XCTestCase {
                 publicationCount += 1
                 return .accepted(successorEpoch: nil)
             },
-            startFollowUpRun: { _ in }
+            admitQueuedFollowUp: { nil },
+            startFollowUpRun: { _, _ in },
+            returnQueuedFollowUpsToComposer: {}
         )
         let binding = AgentRunTerminalSessionBinding(
             tabID: tabID,

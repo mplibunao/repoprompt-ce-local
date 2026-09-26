@@ -148,16 +148,18 @@ final class ACPIntegratedAgentModeRunner {
         initialMessageForRun: String,
         attachments: [AgentImageAttachment],
         runRequest: ACPRunRequest,
+        submissionID: UUID?,
         makeLease: @escaping (_ runID: UUID) -> MCPBootstrapLease
     ) async {
         let attachmentReservationID = hooks.attachments.reserveAttachmentsForTurn(attachments, session)
 
-        if initialMessageForRun != initialUserMessage,
-           !session.pendingNonCodexUserInputTokenQueue.isEmpty
-        {
-            session.pendingNonCodexUserInputTokenQueue[0] = hooks.usage.estimateRuntimeTokens(initialMessageForRun)
+        if initialMessageForRun != initialUserMessage, let submissionID {
+            session.replaceQueuedUserInputTokenEstimate(
+                forSubmission: submissionID,
+                tokens: hooks.usage.estimateRuntimeTokens(initialMessageForRun)
+            )
         }
-        hooks.usage.startNonCodexTurnAccountingIfNeeded(session, initialMessageForRun)
+        hooks.usage.startNonCodexTurnAccountingIfNeeded(session, initialMessageForRun, submissionID)
         session.activeReasoningItemID = nil
         session.reasoningItemIDsByGroupID.removeAll()
         session.codexReasoningSegmentsByKey.removeAll()

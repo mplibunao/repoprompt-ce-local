@@ -178,10 +178,26 @@ final class AgentTabSession: ObservableObject {
             if oldValue != mcpFollowUpRunPending {
                 mcpFollowUpRunPendingUpdatedAt = Date()
             }
+            if !mcpFollowUpRunPending {
+                mcpPendingStartOwner = nil
+            }
         }
     }
 
-    var isMCPInstructionDispatchInProgress: Bool = false
+    /// The MCP start still preparing its submission under `mcpFollowUpRunPending`, such as an
+    /// `agent_run start` configuring and binding the session before it dispatches. While it is set,
+    /// the flag stands for live work however old it is; it is released by that start, by the
+    /// submission's startup ticket taking over, or by the flag dropping.
+    var mcpPendingStartOwner: UUID?
+
+    /// Releases the pending-start ownership `owner` holds; ownership another start took over is
+    /// left alone.
+    func releaseMCPPendingStartOwnership(_ owner: UUID) {
+        if mcpPendingStartOwner == owner {
+            mcpPendingStartOwner = nil
+        }
+    }
+
     /// Whether this session was originally created by an MCP client.
     var isMCPOriginated: Bool = false
     /// Lifetime classification for sessions created, controlled, parented, or pending activation through MCP.
@@ -202,7 +218,7 @@ final class AgentTabSession: ObservableObject {
     var permissionProfile: AgentModeViewModel.AgentPermissionProfile = .userConfigured
 
     // Instruction queue for when user sends while agent is not waiting (shared across all runners)
-    var pendingInstructions: [String] = []
+    var pendingInstructions: [AgentQueuedInstruction] = []
     let codexSteerAckTracker = CodexSteerAckTracker()
 
     /// Claude-only steering queue — carries draft text for restoration on cancel/failure
@@ -629,7 +645,45 @@ final class AgentTabSession: ObservableObject {
     var providerSessionID: String?
     var providerCleanupHandle: ProviderConversationCleanupHandle?
     var providerTokenUsageByTurn: [AgentTokenUsagePersist] = []
-    var pendingNonCodexUserInputTokenQueue: [Int] = []
+    /// One queued user turn's input-token estimate, owned by the submission (its optimistic user
+    /// item) it was queued for. Every turn and steering delivery takes only the estimates of the
+    /// submissions it delivers, so withdrawn or still-waiting work never lends its estimate to
+    /// another turn.
+    struct PendingUserInputTokenEstimate: Equatable {
+        let submissionID: UUID
+        var tokens: Int
+    }
+
+    var pendingNonCodexUserInputTokenQueue: [PendingUserInputTokenEstimate] = []
+
+    func removeQueuedUserInputTokenEstimates(forSubmissions submissionIDs: [UUID]) {
+        guard !submissionIDs.isEmpty else { return }
+        let withdrawn = Set(submissionIDs)
+        pendingNonCodexUserInputTokenQueue.removeAll { withdrawn.contains($0.submissionID) }
+    }
+
+    func takeQueuedUserInputTokenEstimate(forSubmission submissionID: UUID) -> PendingUserInputTokenEstimate? {
+        guard let index = pendingNonCodexUserInputTokenQueue.firstIndex(where: { $0.submissionID == submissionID })
+        else { return nil }
+        return pendingNonCodexUserInputTokenQueue.remove(at: index)
+    }
+
+    func replaceQueuedUserInputTokenEstimate(forSubmission submissionID: UUID, tokens: Int) {
+        guard let index = pendingNonCodexUserInputTokenQueue.firstIndex(where: { $0.submissionID == submissionID })
+        else { return }
+        pendingNonCodexUserInputTokenQueue[index].tokens = tokens
+    }
+
+    /// Folds the estimates of submissions delivered together as one instruction into the entry of
+    /// `target`, so the single turn that delivers them consumes all of them.
+    func mergeQueuedUserInputTokenEstimates(of submissionIDs: [UUID], into target: UUID) {
+        let merged = Set(submissionIDs).union([target])
+        let entries = pendingNonCodexUserInputTokenQueue.filter { merged.contains($0.submissionID) }
+        guard !entries.isEmpty else { return }
+        pendingNonCodexUserInputTokenQueue.removeAll { merged.contains($0.submissionID) }
+        pendingNonCodexUserInputTokenQueue.append(.init(submissionID: target, tokens: entries.map(\.tokens).reduce(0, +)))
+    }
+
     var activeNonCodexTurnTokenAccumulator: AgentModeViewModel.NonCodexTurnTokenAccumulator?
 
     // Codex native session identifiers and metadata
@@ -910,7 +964,27 @@ final class AgentTabSession: ObservableObject {
             mcpActivationID: mcpControlContext?.activationID,
             mcpActivationGeneration: mcpControlActivationGeneration
         ))
+        // A withdrawn submission's estimate goes when the withdrawal happens, not when its
+        // suspended task unwinds, so a turn that starts meanwhile only finds live estimates.
+        ticket.onWithdrawal = { [weak self] submissionIDs in
+            self?.removeQueuedUserInputTokenEstimates(forSubmissions: submissionIDs)
+        }
         startupTicket = ticket
+        mcpPendingStartOwner = nil
+        return ticket
+    }
+
+    /// Admits a start no new submission is making, such as a queued follow-up, by installing its
+    /// ticket. Returns `nil` while the session is not free: a run is active, another start holds a
+    /// ticket, or an MCP start still preparing its dispatch owns the pending start.
+    func admitStartIfFree(submissionID: UUID?) -> AgentRunStartupTicket? {
+        guard !runState.isActive,
+              mcpPendingStartOwner == nil,
+              let ticket = installStartupTicketIfAbsent()
+        else { return nil }
+        if let submissionID {
+            ticket.bindOptimisticUserItem(submissionID)
+        }
         return ticket
     }
 

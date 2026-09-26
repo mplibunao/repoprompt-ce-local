@@ -60,7 +60,16 @@ final class AgentRunAttemptLifecycle {
     /// Provider process run identity for the active or most recent run.
     private(set) var currentRunID: UUID?
     private(set) var providerTerminalDrainGeneration: UInt64 = 0
-    private(set) var terminalCommitInProgress = false
+    private(set) var terminalCommitInProgress = false {
+        didSet {
+            guard !terminalCommitInProgress, !terminalCommitCompletionWaiters.isEmpty else { return }
+            let waiters = terminalCommitCompletionWaiters
+            terminalCommitCompletionWaiters.removeAll()
+            waiters.forEach { $0.continuation.resume() }
+        }
+    }
+
+    private var terminalCommitCompletionWaiters: [(id: UUID, continuation: CheckedContinuation<Void, Never>)] = []
     private(set) var lastTerminalCommitRevision: AgentRunTerminalCommitRevision?
     private(set) var lastTerminalPublicationResult: AgentRunTerminalPublicationResult?
     private(set) var terminalResources: AgentRunAttemptTerminalResources?
@@ -238,6 +247,38 @@ final class AgentRunAttemptLifecycle {
     /// Ends the terminal-commit phase, preserving revision and result.
     func completeTerminalCommit() {
         terminalCommitInProgress = false
+    }
+
+    /// Suspends until no terminal commit is in progress, or the calling task is cancelled. The
+    /// barrier finishes its commit, including admitting any follow-up it starts, before a waiter
+    /// resumes.
+    func waitForTerminalCommitCompletion() async {
+        guard terminalCommitInProgress, !Task.isCancelled else { return }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard terminalCommitInProgress, !Task.isCancelled else {
+                    continuation.resume()
+                    return
+                }
+                terminalCommitCompletionWaiters.append((waiterID, continuation))
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.resumeTerminalCommitCompletionWaiter(waiterID)
+            }
+        }
+    }
+
+    #if DEBUG
+        var test_terminalCommitCompletionWaiterCount: Int {
+            terminalCommitCompletionWaiters.count
+        }
+    #endif
+
+    private func resumeTerminalCommitCompletionWaiter(_ waiterID: UUID) {
+        guard let index = terminalCommitCompletionWaiters.firstIndex(where: { $0.id == waiterID }) else { return }
+        terminalCommitCompletionWaiters.remove(at: index).continuation.resume()
     }
 
     /// A rebind must not carry the runtime-only terminal classification or

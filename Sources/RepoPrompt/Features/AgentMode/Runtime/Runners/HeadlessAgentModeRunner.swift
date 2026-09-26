@@ -23,16 +23,18 @@ final class HeadlessAgentModeRunner {
         initialUserMessage: String,
         initialMessageForRun: String,
         attachments: [AgentImageAttachment],
+        submissionID: UUID?,
         makeLease: (_ runID: UUID) -> MCPBootstrapLease
     ) async {
         let attachmentReservationID = hooks.attachments.reserveAttachmentsForTurn(attachments, session)
 
-        if initialMessageForRun != initialUserMessage,
-           !session.pendingNonCodexUserInputTokenQueue.isEmpty
-        {
-            session.pendingNonCodexUserInputTokenQueue[0] = hooks.usage.estimateRuntimeTokens(initialMessageForRun)
+        if initialMessageForRun != initialUserMessage, let submissionID {
+            session.replaceQueuedUserInputTokenEstimate(
+                forSubmission: submissionID,
+                tokens: hooks.usage.estimateRuntimeTokens(initialMessageForRun)
+            )
         }
-        hooks.usage.startNonCodexTurnAccountingIfNeeded(session, initialMessageForRun)
+        hooks.usage.startNonCodexTurnAccountingIfNeeded(session, initialMessageForRun, submissionID)
 
         let runID = AgentModeProcessRunIdentity.startFreshProcessRun(for: session)
         let lease = makeLease(runID)

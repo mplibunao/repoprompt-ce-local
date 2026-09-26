@@ -33,7 +33,14 @@ struct AgentRunTerminalSessionBinding {
             AgentRunTerminalCommitRevision,
             AgentRunEpochTransitionKind?
         ) async -> AgentRunTerminalPublicationResult
-        let startFollowUpRun: @MainActor (String) -> Void
+        /// Admits the queued follow-up this commit will start, before its publication suspends, so
+        /// a start arriving meanwhile is refused. Returns `nil` when the session is not free.
+        let admitQueuedFollowUp: @MainActor () -> AgentRunStartupTicket?
+        /// Starts a queued follow-up, under the admission taken for it if there is one.
+        let startFollowUpRun: @MainActor (AgentQueuedInstruction, AgentRunStartupTicket?) -> Void
+        /// Hands queued follow-ups that will not start back to the user: their text returns to the
+        /// composer, and their transcript items and estimates go.
+        let returnQueuedFollowUpsToComposer: @MainActor () -> Void
     }
 
     let tabID: UUID
@@ -43,9 +50,9 @@ struct AgentRunTerminalSessionBinding {
     private let ownershipValidator: @MainActor (AgentRunOwnership, UUID?) -> Bool
     private let providerDrainGenerationProvider: @MainActor () -> UInt64
     private let terminalTurnIDProvider: @MainActor () -> UUID?
-    private let queuedFollowUpProvider: @MainActor () -> String?
+    private let queuedFollowUpProvider: @MainActor () -> AgentQueuedInstruction?
     private let followUpPendingSetter: @MainActor (Bool) -> Void
-    private let firstQueuedFollowUpRemover: @MainActor () -> String?
+    private let firstQueuedFollowUpRemover: @MainActor () -> AgentQueuedInstruction?
     private let errorAppender: @MainActor (String) -> Void
     private let activeStateFinisher: @MainActor (AgentRunOwnership, AgentSessionRunState, String) -> Void
     private let processRunIdentityRetainer: @MainActor (UUID, UUID) -> Void
@@ -60,9 +67,9 @@ struct AgentRunTerminalSessionBinding {
         validatesOwnership: @escaping @MainActor (AgentRunOwnership, UUID?) -> Bool,
         providerDrainGeneration: @escaping @MainActor () -> UInt64,
         terminalTurnID: @escaping @MainActor () -> UUID?,
-        queuedFollowUp: @escaping @MainActor () -> String?,
+        queuedFollowUp: @escaping @MainActor () -> AgentQueuedInstruction?,
         setFollowUpPending: @escaping @MainActor (Bool) -> Void,
-        removeFirstQueuedFollowUp: @escaping @MainActor () -> String?,
+        removeFirstQueuedFollowUp: @escaping @MainActor () -> AgentQueuedInstruction?,
         appendError: @escaping @MainActor (String) -> Void,
         finishActiveState: @escaping @MainActor (AgentRunOwnership, AgentSessionRunState, String) -> Void,
         retainProcessRunIdentity: @escaping @MainActor (UUID, UUID) -> Void,
@@ -99,7 +106,7 @@ struct AgentRunTerminalSessionBinding {
         terminalTurnIDProvider()
     }
 
-    var queuedFollowUp: String? {
+    var queuedFollowUp: AgentQueuedInstruction? {
         queuedFollowUpProvider()
     }
 
@@ -108,7 +115,7 @@ struct AgentRunTerminalSessionBinding {
     }
 
     @discardableResult
-    func removeFirstQueuedFollowUp() -> String? {
+    func removeFirstQueuedFollowUp() -> AgentQueuedInstruction? {
         firstQueuedFollowUpRemover()
     }
 

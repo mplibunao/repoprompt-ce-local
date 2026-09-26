@@ -7,24 +7,17 @@ final class CodexContextUsageEstimator: ContextUsageEstimating {
     @discardableResult
     func enqueueUserTurnEstimate(
         messageForProvider _: String,
+        submissionID _: UUID,
         session _: AgentTabSession
     ) -> Int {
         0
     }
 
-    @discardableResult
-    func replaceNextQueuedUserTurnEstimate(
-        messageForProvider _: String,
-        session _: AgentTabSession
-    ) -> Int? {
+    func dequeueQueuedUserTurnEstimate(session _: AgentTabSession, submissionID _: UUID?) -> Int? {
         nil
     }
 
-    func dequeueQueuedUserTurnEstimate(session _: AgentTabSession) -> Int? {
-        nil
-    }
-
-    func beginTurn(session _: AgentTabSession, initialMessage _: String) {
+    func beginTurn(session _: AgentTabSession, initialMessage _: String, submissionID _: UUID?) {
         // Codex uses native token usage events.
     }
 

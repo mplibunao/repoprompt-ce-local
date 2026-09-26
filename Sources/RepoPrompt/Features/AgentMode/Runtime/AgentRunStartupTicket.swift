@@ -70,6 +70,9 @@ final class AgentRunStartupTicket {
     private(set) var dispatchGateTicket: UInt64?
     private(set) var followerDispatchGateTickets: [UInt64] = []
     private var followerTasksByID: [UUID: Task<Void, Never>] = [:]
+    /// Receives the submission a cancellation or supersession withdraws at the moment the ticket
+    /// resolves, so its per-submission state goes before any other work can run.
+    var onWithdrawal: ((_ submissionIDs: [UUID]) -> Void)?
     /// The follower promoted to head after this start resolved. It carries the queued work this
     /// ticket held, so work queued behind this start answers to it from then on.
     private(set) var successor: AgentRunStartupTicket?
@@ -145,6 +148,12 @@ final class AgentRunStartupTicket {
         promotedDispatchGateTicket: UInt64
     ) {
         guard successor !== self else { return }
+        // A queue only moves forward. A target already linked into this queue's chain, either way,
+        // would close a loop that `currentHead` never leaves.
+        guard !successor.chainReaches(self), !chainReaches(successor) else {
+            assertionFailure("A startup queue cannot be handed back into its own chain")
+            return
+        }
         self.successor = successor
         followerTasksByID.removeValue(forKey: promotedFollowerID)
         for followerTicket in followerDispatchGateTickets where followerTicket > promotedDispatchGateTicket {
@@ -155,6 +164,15 @@ final class AgentRunStartupTicket {
             successor.registerFollower(task: task, id: id)
         }
         followerTasksByID.removeAll()
+    }
+
+    private func chainReaches(_ ticket: AgentRunStartupTicket) -> Bool {
+        var node: AgentRunStartupTicket? = self
+        while let current = node {
+            if current === ticket { return true }
+            node = current.successor
+        }
+        return false
     }
 
     func markPreparing() {
@@ -185,6 +203,9 @@ final class AgentRunStartupTicket {
         precondition(resolution.isResolved, "AgentRunStartupTicket.resolve requires a resolved phase")
         guard isUnresolved else { return false }
         phase = resolution
+        if resolution == .cancelled || resolution == .superseded {
+            onWithdrawal?([optimisticUserItemID].compactMap(\.self))
+        }
         return true
     }
 
