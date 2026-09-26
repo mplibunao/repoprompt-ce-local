@@ -162,9 +162,10 @@ final class AgentRunTerminalCommitBarrier {
             if let followUpInstruction = takeQueuedFollowUpIfReady(
                 binding: binding,
                 revision: existingRevision,
-                publicationResult: lifecycle.lastTerminalPublicationResult
+                publicationResult: lifecycle.lastTerminalPublicationResult,
+                admission: nil
             ) {
-                binding.hooks.startFollowUpRun(followUpInstruction)
+                binding.hooks.startFollowUpRun(followUpInstruction, nil)
             }
             if let providerSuccessor = request.providerSuccessor,
                providerSuccessor.id == existingRevision.providerSuccessorID,
@@ -313,6 +314,10 @@ final class AgentRunTerminalCommitBarrier {
             binding.hooks.notifyAgentTurnComplete()
         }
         binding.hooks.scheduleSave()
+        // The session is inactive while the result publishes. The follow-up this commit will start
+        // takes its admission now, so a start arriving in that gap is refused instead of beginning
+        // another beside it.
+        let followUpAdmission = queuedInstruction != nil ? binding.hooks.admitQueuedFollowUp() : nil
         let publicationResult = await binding.hooks.publishTerminalCommit(
             revision,
             successorKind
@@ -321,7 +326,8 @@ final class AgentRunTerminalCommitBarrier {
         let followUpInstruction = takeQueuedFollowUpIfReady(
             binding: binding,
             revision: revision,
-            publicationResult: lifecycle.lastTerminalPublicationResult
+            publicationResult: lifecycle.lastTerminalPublicationResult,
+            admission: followUpAdmission
         )
         if let providerSuccessor,
            let publicationResult = lifecycle.lastTerminalPublicationResult
@@ -342,7 +348,7 @@ final class AgentRunTerminalCommitBarrier {
         request.postCommit()
 
         if let followUpInstruction {
-            binding.hooks.startFollowUpRun(followUpInstruction)
+            binding.hooks.startFollowUpRun(followUpInstruction, followUpAdmission)
         }
         if request.completion == .terminalTeardownCompleted {
             await teardownTask?.value
@@ -403,28 +409,36 @@ final class AgentRunTerminalCommitBarrier {
         _ = providerSuccessor.consumeAfterPublication(revision, publicationResult)
     }
 
+    /// Takes the queued follow-up this commit starts. When it will not start, the admission taken
+    /// for it is released as rejected, so work that queued behind it can take the session.
     private func takeQueuedFollowUpIfReady(
         binding: AgentRunTerminalSessionBinding,
         revision: AgentRunTerminalCommitRevision,
-        publicationResult: AgentRunTerminalPublicationResult?
-    ) -> String? {
+        publicationResult: AgentRunTerminalPublicationResult?,
+        admission: AgentRunStartupTicket?
+    ) -> AgentQueuedInstruction? {
         guard revision.successorKind != nil,
               revision.providerSuccessorID == nil,
               let publicationResult
-        else { return nil }
-        switch publicationResult {
-        case let .accepted(successorEpoch):
-            if revision.mcpPublicationEnvelope != nil, successorEpoch == nil {
-                return nil
-            }
-        case .rejected:
+        else {
+            admission?.resolve(.rejected)
             return nil
-        case .stale:
-            _ = binding.removeFirstQueuedFollowUp()
-            binding.setFollowUpPending(false)
+        }
+        // Without a published successor epoch the queued follow-up has no MCP turn to run under,
+        // so it goes back to the user instead of holding the session as a start that never comes.
+        let returnsToComposer = switch publicationResult {
+        case let .accepted(successorEpoch):
+            revision.mcpPublicationEnvelope != nil && successorEpoch == nil
+        case .rejected, .stale:
+            true
+        }
+        if returnsToComposer {
+            admission?.resolve(.rejected)
+            binding.hooks.returnQueuedFollowUpsToComposer()
             return nil
         }
         guard binding.queuedFollowUp != nil else {
+            admission?.resolve(.rejected)
             binding.setFollowUpPending(false)
             return nil
         }

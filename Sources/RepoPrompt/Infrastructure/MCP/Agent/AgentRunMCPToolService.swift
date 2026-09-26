@@ -141,6 +141,9 @@ private struct SteerControlResolution {
     let session: AgentModeViewModel.TabSession
     let reactivatedTarget: AgentModeViewModel.MCPSessionTarget?
     let reactivatedControlIdentity: SteerControlIdentity?
+    /// Held while a reactivated control's pending-start flag stands for this steer's own
+    /// dispatch; released when the steer finishes.
+    var pendingStartOwner: UUID?
 }
 
 private struct TimestampedWaitAnyResult {
@@ -1026,6 +1029,9 @@ struct AgentRunMCPToolService {
         let sessionID = try await resolveControlSessionID(args, targetWindow: targetWindow, agentModeVM: agentModeVM)
         let text = try resolveMessage(args["message"], name: "message")
         let workflow = try resolveWorkflow(args: args)
+        if let controlledSession = agentModeVM.mcpControlledSession(sessionID: sessionID) {
+            try rejectSteerWhileStartupPending(controlledSession, agentModeVM: agentModeVM)
+        }
         let metadata = await captureRequestMetadata()
         let resolution = try await ensureSteerControlContext(
             sessionID: sessionID,
@@ -1033,6 +1039,19 @@ struct AgentRunMCPToolService {
             agentModeVM: agentModeVM,
             metadata: metadata,
             expectedWorkspaceID: expectedWorkspaceID
+        )
+        // The steer owns the pending start it raises, so its own dispatch passes that start and no
+        // other submission does. A reactivation already raised it under this owner.
+        let dispatchOwner = resolution.pendingStartOwner ?? UUID()
+        defer {
+            agentModeVM.mcpReleasePendingStartOwnership(tabID: resolution.session.tabID, owner: dispatchOwner)
+        }
+        // Checked outside the failure handling below, which clears the pending-start flag and
+        // releases a reactivated control context: a start that is still pending owns both.
+        try rejectSteerWhileStartupPending(
+            resolution.session,
+            agentModeVM: agentModeVM,
+            ownActivationID: resolution.reactivatedControlIdentity?.activationID
         )
         let delivery: AgentModeViewModel.MCPInstructionDispatch
         let snapshot: AgentRunMCPSnapshot
@@ -1053,6 +1072,7 @@ struct AgentRunMCPToolService {
                     sessionID: sessionID,
                     text: text,
                     workflow: workflow,
+                    pendingStartOwner: dispatchOwner,
                     agentModeVM: agentModeVM
                 )
                 if let reactivatedTarget = resolution.reactivatedTarget {
@@ -1065,7 +1085,7 @@ struct AgentRunMCPToolService {
                 snapshot = await currentSnapshot(sessionID: sessionID, agentModeVM: agentModeVM)
             } else {
                 // Inactive steering starts a new epoch without replacing the session activation.
-                agentModeVM.setMCPFollowUpRunPending(sessionID: sessionID, true)
+                agentModeVM.mcpBeginOwnedPendingStart(sessionID: sessionID, owner: dispatchOwner)
                 do {
                     delivery = try await agentModeVM.withMCPRunEpochTransition(
                         sessionID: sessionID,
@@ -1089,6 +1109,7 @@ struct AgentRunMCPToolService {
                             sessionID: sessionID,
                             text: text,
                             workflow: workflow,
+                            pendingStartOwner: dispatchOwner,
                             agentModeVM: agentModeVM
                         )
                         if let reactivatedTarget = resolution.reactivatedTarget {
@@ -1177,6 +1198,23 @@ struct AgentRunMCPToolService {
         )
     }
 
+    static let startupPendingSteerRejectionMessage = "Retryable startup_pending: The session is still starting. The steering message was not accepted. Retry after startup finishes; the existing run is unchanged."
+
+    /// Refuses a steer while the target's accepted start has not reached its provider. Accepting
+    /// the text then would start a second run beside that start, or for Codex queue behind a first
+    /// dispatch that may never be accepted, so the steer is rejected before it changes anything.
+    private func rejectSteerWhileStartupPending(
+        _ session: AgentModeViewModel.TabSession,
+        agentModeVM: AgentModeViewModel,
+        ownActivationID: UUID? = nil
+    ) throws {
+        guard agentModeVM.isStartupPendingBeforeProviderOwnership(
+            session,
+            exemptingActivationID: ownActivationID
+        ) else { return }
+        throw MCPError.invalidParams(Self.startupPendingSteerRejectionMessage)
+    }
+
     private func clearFollowUpPendingAfterSteerFailure(
         sessionID: UUID,
         resolution: SteerControlResolution,
@@ -1247,15 +1285,22 @@ struct AgentRunMCPToolService {
                 "The requested agent run is active but is not controlled by this MCP handle."
             )
         }
-
+        // Activation would raise the pending-start flag over a start that is already on its way,
+        // including one accepted while activation is suspended, so activation refuses to install
+        // control whenever such a start exists.
+        let pendingStartOwner = UUID()
         do {
             try await agentModeVM.mcpActivateControlContext(
                 forTabID: target.tabID,
                 sessionID: sessionID,
                 originatingConnectionID: metadata.connectionID,
                 startPending: true,
+                pendingStartOwner: pendingStartOwner,
                 markSessionAsMCPOriginated: false,
-                requireInactiveRunState: true
+                requireInactiveRunState: true,
+                admissionGuard: { [self] activatingSession in
+                    try rejectSteerWhileStartupPending(activatingSession, agentModeVM: agentModeVM)
+                }
             )
         } catch {
             await agentModeVM.mcpDiscardSessionTarget(target)
@@ -1277,7 +1322,8 @@ struct AgentRunMCPToolService {
         return SteerControlResolution(
             session: reactivatedSession,
             reactivatedTarget: target,
-            reactivatedControlIdentity: identity
+            reactivatedControlIdentity: identity,
+            pendingStartOwner: pendingStartOwner
         )
     }
 
@@ -1285,6 +1331,7 @@ struct AgentRunMCPToolService {
         sessionID: UUID,
         text: String,
         workflow: AgentWorkflowDefinition?,
+        pendingStartOwner: UUID,
         agentModeVM: AgentModeViewModel
     ) async throws -> AgentModeViewModel.MCPInstructionDispatch {
         #if DEBUG
@@ -1296,7 +1343,8 @@ struct AgentRunMCPToolService {
             sessionID: sessionID,
             text: text,
             allowStartingRun: true,
-            workflow: workflow
+            workflow: workflow,
+            pendingStartOwner: pendingStartOwner
         )
     }
 

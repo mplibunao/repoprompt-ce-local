@@ -29,6 +29,7 @@ import XCTest
         func testIdleUserOnlySessionPastTheStartupMaskReportsUnrecordedFailure() async throws {
             let fixture = makeFixture()
             try await fixture.activateMCPControl(startPending: true)
+            fixture.releasePendingStartOwnership()
             fixture.session.appendItem(.user("prompt that never ran"))
             fixture.session.mcpFollowUpRunPendingUpdatedAt = Date().addingTimeInterval(-20)
 
@@ -861,11 +862,15 @@ import XCTest
                 }
             }
 
-            /// Submits while the agent is available, then withdraws availability so the accepted
-            /// start is rejected at the run gate, before any runner exists.
+            /// Submits as the MCP start's dispatch while the agent is available, then withdraws
+            /// availability so the accepted start is rejected at the run gate, before any runner
+            /// exists.
             func submitRejectedAtTheRunGate(_ text: String) throws {
                 viewModel.test_agentAvailabilityForRunOverride = { _ in true }
-                XCTAssertEqual(viewModel.submitUserTurn(text: text, tabID: context.session.tabID), .submitted)
+                XCTAssertEqual(
+                    startupTestSubmitAsMCPDispatch(text, viewModel: viewModel, session: context.session),
+                    .submitted
+                )
                 XCTAssertNotNil(context.session.unresolvedStartupTicket)
                 viewModel.test_agentAvailabilityForRunOverride = { _ in false }
             }

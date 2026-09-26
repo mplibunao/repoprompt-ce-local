@@ -52,17 +52,12 @@ protocol ContextUsageEstimating: AnyObject {
     @discardableResult
     func enqueueUserTurnEstimate(
         messageForProvider: String,
+        submissionID: UUID,
         session: AgentTabSession
     ) -> Int
 
-    @discardableResult
-    func replaceNextQueuedUserTurnEstimate(
-        messageForProvider: String,
-        session: AgentTabSession
-    ) -> Int?
-
-    func dequeueQueuedUserTurnEstimate(session: AgentTabSession) -> Int?
-    func beginTurn(session: AgentTabSession, initialMessage: String)
+    func dequeueQueuedUserTurnEstimate(session: AgentTabSession, submissionID: UUID?) -> Int?
+    func beginTurn(session: AgentTabSession, initialMessage: String, submissionID: UUID?)
     func addUserInputTokens(_ tokens: Int, session: AgentTabSession)
     func addToolInputPayload(_ payload: String?, session: AgentTabSession)
     func addToolOutputPayload(_ payload: String?, session: AgentTabSession)

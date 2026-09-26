@@ -140,13 +140,20 @@ enum AgentExternalMCPRunStarter {
                 "workflowName": workflow?.displayName ?? "nil"
             ])
         #endif
+        // The start owns the pending-start flag through configuration and binding until its
+        // dispatch submits, however long that takes.
+        let pendingStartOwner = UUID()
         try await agentModeVM.mcpActivateControlContext(
             forTabID: target.tabID,
             sessionID: sessionID,
             originatingConnectionID: metadata.connectionID,
             taskLabelKind: taskLabelKind,
-            startPending: true
+            startPending: true,
+            pendingStartOwner: pendingStartOwner
         )
+        defer {
+            agentModeVM.mcpReleasePendingStartOwnership(tabID: target.tabID, owner: pendingStartOwner)
+        }
 
         // All failures after activation must clean up MCP control context and session store.
         do {
@@ -195,7 +202,8 @@ enum AgentExternalMCPRunStarter {
                     sessionID: sessionID,
                     text: message,
                     allowStartingRun: true,
-                    workflow: workflow
+                    workflow: workflow,
+                    pendingStartOwner: pendingStartOwner
                 )
             }
 

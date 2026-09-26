@@ -796,10 +796,17 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         var test_afterMCPControlActivation: (@MainActor (TabSession) async -> Void)?
         var test_submitUserTurnResultOverride: ((String, UUID, String?) -> UserTurnSubmissionResult)?
         var test_startAgentRunObserver: (@MainActor (TabSession) -> Void)?
-        var test_beforeMCPSelectionCommit: (@MainActor () async -> Void)?
         /// Runs inside `startAgentRun` just before the initial message is augmented, with that
         /// message, so a test can hold chosen starts at that suspension point.
         var test_beforeStartMessageAugmentation: (@MainActor (String) async -> Void)?
+        /// Runs as a start rejected before provider dispatch begins its settlement, so a test can
+        /// hold the rejection while later work is queued behind it.
+        var test_beforeStartRejectedSettlement: (@MainActor () async -> Void)?
+        /// Runs as a terminal commit is about to publish its result to the session store.
+        var test_beforeTerminalPublication: (@MainActor () async -> Void)?
+        /// Runs in an MCP dispatch once its submission is made, before its delivery bookkeeping.
+        var test_afterMCPDispatchSubmission: (@MainActor () async -> Void)?
+        var test_beforeMCPSelectionCommit: (@MainActor () async -> Void)?
         /// Holds deactivation at its restore of the approval store's auto-edit override.
         var test_beforeMCPDeactivationAutoEditRestore: (@MainActor () async -> Void)?
         /// Overrides provider availability for submissions and run starts.
@@ -824,6 +831,21 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private nonisolated static let detachedTranscriptEvictionChunkSize = 5
     private nonisolated static let pendingToolFinalizationNonToolBoundary = 200
     private nonisolated static let staleComposerSubmitTargetMessage = "This composer changed before the message could be sent. Please try again."
+    nonisolated static let manualSubmissionDuringStartupMessage = "The session is still starting, so the message was not sent. Send it again once the run has started."
+    nonisolated static let mcpDispatchDuringStartupMessage = "Retryable startup_pending: The session is still starting. The message was not accepted. Retry after startup finishes; the existing run is unchanged."
+
+    /// Who is submitting a user turn. An MCP dispatch carries the pending-start ownership it holds,
+    /// if any, so that only its own submission passes the pending start it raised.
+    enum UserTurnSubmissionOrigin: Equatable {
+        case user
+        case mcpDispatch(pendingStartOwner: UUID?)
+
+        var isMCPDispatch: Bool {
+            if case .mcpDispatch = self { return true }
+            return false
+        }
+    }
+
     private nonisolated static let childAgentRunWaitDrainTimeoutSeconds: TimeInterval = 2.0
 
     #if DEBUG
@@ -933,11 +955,35 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             _ = runService
         }
 
+        func test_requeueAllQueuedACPSteeringAsFollowUp(session: TabSession) {
+            runService.test_requeueAllQueuedACPSteeringAsFollowUp(session: session)
+        }
+
+        /// Stops the run the way a confirmed execution-location change stops it.
+        func test_cancelAgentRunForExecutionLocationChange(tabID: UUID) async {
+            guard let session = sessions[tabID] else { return }
+            cancelPendingInstruction(for: session)
+            await runService.cancelRun(
+                tabID: tabID,
+                session: session,
+                intent: .executionLocationChange,
+                completion: .terminalPublished
+            )
+        }
+
         func test_startFollowUpRun(
             for session: TabSession,
             initialMessage: String
         ) async {
-            await startFollowUpRun(for: session, initialMessage: initialMessage)
+            await startFollowUpRun(
+                for: session,
+                instruction: AgentQueuedInstruction(
+                    text: initialMessage,
+                    submissionID: nil,
+                    constituentSubmissionIDs: [],
+                    restorationDraftText: initialMessage
+                )
+            )?.value
         }
 
         var test_isCursorModelPollingActive: Bool {
@@ -2872,8 +2918,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 addUserInputTokensToActiveNonCodexTurn: { [weak self] tokens, session in
                     self?.addUserInputTokensToActiveNonCodexTurn(tokens, for: session)
                 },
-                startNonCodexTurnAccountingIfNeeded: { [weak self] session, initialMessage in
-                    self?.startNonCodexTurnAccountingIfNeeded(for: session, initialMessage: initialMessage)
+                startNonCodexTurnAccountingIfNeeded: { [weak self] session, initialMessage, submissionID in
+                    self?.startNonCodexTurnAccountingIfNeeded(
+                        for: session,
+                        initialMessage: initialMessage,
+                        submissionID: submissionID
+                    )
                 },
                 finalizeNonCodexTurnUsage: { [weak self] session, promptTokens, completionTokens, contextUsedTokens in
                     self?.finalizeNonCodexTurnUsageIfNeeded(
@@ -2922,6 +2972,27 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             queuedWorkRecovery: .init(
                 restoreDraftText: { [weak self] tabID, text, message, strategy in
                     self?.restoreComposerDraft(tabID: tabID, text: text, message: message, strategy: strategy)
+                },
+                restoreUnsentSubmissions: { [weak self] session, draftText, images, taggedFiles, message in
+                    self?.restoreRejectedManualSubmissionComposerState(
+                        tabID: session.tabID,
+                        session: session,
+                        draftText: draftText,
+                        images: images,
+                        taggedFiles: taggedFiles,
+                        selectedWorkflow: nil,
+                        selectedWorkflowMutationGeneration: nil,
+                        message: message
+                    )
+                },
+                removeUnsentUserItem: { [weak self] session, itemID in
+                    session.pendingTurnRuntimeAnchors.removeAll { $0.userItemID == itemID }
+                    self?.removeUnconfirmedOptimisticUserItem(
+                        session: session,
+                        tabID: session.tabID,
+                        itemID: itemID,
+                        reason: "its queued follow-up was returned to the composer"
+                    )
                 }
             ),
             persistence: .init(
@@ -3036,11 +3107,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 }
             ),
             continuation: .init(
-                startFollowUpRun: { [weak self] session, initialMessage in
-                    Task { @MainActor [weak self, weak session] in
-                        guard let self, let session else { return }
-                        await startFollowUpRun(for: session, initialMessage: initialMessage)
-                    }
+                startFollowUpRun: { [weak self] session, instruction, admission in
+                    self?.startFollowUpRun(for: session, instruction: instruction, admission: admission)
                 },
                 signalMCPInstructionDelivered: { [weak self] session in
                     await self?.signalMCPInstructionDelivered(for: session)
@@ -3057,11 +3125,18 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         )
     }
 
+    /// Starts a queued follow-up as the head of its own start, under the admission its run's
+    /// terminal commit took for it, or one taken now. A follow-up that cannot be admitted, because
+    /// another start holds the session or a run is active, stays first in the queue and runs after
+    /// that work. One whose admission was withdrawn meanwhile went with that withdrawal.
+    @discardableResult
     private func startFollowUpRun(
         for session: TabSession,
-        initialMessage: String
-    ) async {
+        instruction: AgentQueuedInstruction,
+        admission: AgentRunStartupTicket? = nil
+    ) -> Task<Void, Never>? {
         guard sessions[session.tabID] === session else {
+            admission?.resolve(.superseded)
             session.mcpFollowUpRunPending = false
             #if DEBUG
                 AgentModePerfDiagnostics.increment("run.followUp.dropped.staleSession", tabID: session.tabID)
@@ -3072,9 +3147,83 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 )
             #endif
             handleObservedMCPStateChange(for: session)
-            return
+            return nil
         }
-        await startAgentRun(tabID: session.tabID, initialMessage: initialMessage)
+        if let admission {
+            guard admission.isUnresolved else { return nil }
+            return launchAdmittedRun(
+                admission,
+                session: session,
+                initialMessage: instruction.text,
+                submissionID: instruction.submissionID
+            )
+        }
+        if let task = startAdmittedRun(
+            session: session,
+            initialMessage: instruction.text,
+            submissionID: instruction.submissionID
+        ) {
+            return task
+        }
+        session.pendingInstructions.insert(instruction, at: 0)
+        session.isDirty = true
+        updateBindingsFromSession(session)
+        scheduleSave(for: session.tabID)
+        return nil
+    }
+
+    /// Starts a run no new submission is starting, such as a queued follow-up, as the head of its
+    /// own start. The run's startup ticket is installed before anything can suspend, so a start
+    /// arriving meanwhile is refused instead of beginning another beside this run.
+    ///
+    /// Returns `nil`, starting nothing, while the session is not free: a run is active, another
+    /// start holds a ticket, or an MCP start still preparing its dispatch owns the pending start.
+    @discardableResult
+    private func startAdmittedRun(
+        session: TabSession,
+        initialMessage: String,
+        attachments: [AgentImageAttachment] = [],
+        taggedFileAttachments: [AgentTaggedFileAttachment] = [],
+        submissionID: UUID?
+    ) -> Task<Void, Never>? {
+        guard sessions[session.tabID] === session,
+              let ticket = session.admitStartIfFree(submissionID: submissionID)
+        else { return nil }
+        return launchAdmittedRun(
+            ticket,
+            session: session,
+            initialMessage: initialMessage,
+            attachments: attachments,
+            taggedFileAttachments: taggedFileAttachments,
+            submissionID: submissionID
+        )
+    }
+
+    /// Runs an admitted start as the head of `ticket`, and resolves the ticket with its outcome.
+    private func launchAdmittedRun(
+        _ ticket: AgentRunStartupTicket,
+        session: TabSession,
+        initialMessage: String,
+        attachments: [AgentImageAttachment] = [],
+        taggedFileAttachments: [AgentTaggedFileAttachment] = [],
+        submissionID: UUID?
+    ) -> Task<Void, Never> {
+        let tabID = session.tabID
+        syncComposerUIStateIfCurrent(session)
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await startAgentRun(
+                tabID: tabID,
+                initialMessage: initialMessage,
+                attachments: attachments,
+                taggedFileAttachments: taggedFileAttachments,
+                startupTicket: ticket,
+                submissionID: submissionID
+            )
+            resolveStartupTicketAfterRunServiceReturn(ticket, outcome: outcome, session: session)
+        }
+        ticket.attachTask(task)
+        return task
     }
 
     /// Build the generic orchestration hooks that provider tool tracking handlers need.
@@ -5967,6 +6116,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         else {
             return .rejected(reason: "activation_replaced")
         }
+        #if DEBUG
+            await test_beforeTerminalPublication?()
+        #endif
         var result = await AgentRunSessionStore.publishTerminal(
             envelope,
             registration: context.registration,
@@ -6181,6 +6333,26 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         handleObservedMCPStateChange(for: session)
     }
 
+    /// Raises the pending-start flag for a start `owner` is about to dispatch, which owns the flag
+    /// until it submits: only that start's own dispatch passes the pending start. Ownership another
+    /// start already holds is left alone.
+    func mcpBeginOwnedPendingStart(sessionID: UUID, owner: UUID) {
+        guard let session = mcpControlledSession(sessionID: sessionID) else { return }
+        if !session.mcpFollowUpRunPending {
+            session.mcpFollowUpRunPending = true
+            session.mcpPendingStartOwner = owner
+            handleObservedMCPStateChange(for: session)
+        } else if session.mcpPendingStartOwner == nil {
+            session.mcpPendingStartOwner = owner
+        }
+    }
+
+    /// Ends a start's ownership of the pending-start flag once it has submitted or failed; from
+    /// then on the flag can expire like any other stale mask.
+    func mcpReleasePendingStartOwnership(tabID: UUID, owner: UUID) {
+        sessions[tabID]?.releaseMCPPendingStartOwnership(owner)
+    }
+
     @discardableResult
     func stageMCPRunEpochTransition(
         sessionID: UUID,
@@ -6251,7 +6423,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             session.clearMCPEpochPreparation(ifCurrent: inFlight)
         }
         let preparation = Task<Void, Never> { @MainActor [weak self] in
-            await self?.performMCPWaitTrackingPreparation(session: session, startupTicket: startupTicket)
+            await self?.performMCPWaitTrackingPreparation(
+                session: session,
+                startupTicket: startupTicket
+            )
         }
         session.mcpEpochPreparation = preparation
         await preparation.value
@@ -6342,9 +6517,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
             return
         }
-        let startupStillOwnsSession = startupTicket.map {
+        let startupStillOwnsSession = (startupTicket.map {
             startupTicketOwnsSession($0, session: session)
-        } ?? true
+        } ?? true)
         // Preparations are serialized, so a successor start has not prepared yet and follows the
         // store from here. Only a run that began without preparing may hold an attempt bound to
         // the context's epoch; the stale epoch must not be installed underneath it.
@@ -6668,18 +6843,91 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     ) {
         let now = Date()
         let followUpMaskIsStale = session.mcpFollowUpRunPending
-            && session.mcpFollowUpRunPendingUpdatedAt.map { now.timeIntervalSince($0) > 15 } == true
+            && session.mcpPendingStartOwner == nil
+            && Self.mcpRunningMaskHasExpired(since: session.mcpFollowUpRunPendingUpdatedAt, now: now)
         let supersedingMaskIsStale = session.pendingSupersedingTurnCompletions > 0
-            && session.pendingSupersedingTurnCompletionsUpdatedAt.map { now.timeIntervalSince($0) > 15 } == true
+            && Self.mcpRunningMaskHasExpired(since: session.pendingSupersedingTurnCompletionsUpdatedAt, now: now)
         guard followUpMaskIsStale || supersedingMaskIsStale,
-              session.agentTask == nil,
-              session.pendingInstructions.isEmpty,
-              session.claudeSteeringFlushTask == nil,
-              session.acpSteeringFlushTask == nil
+              Self.sessionHoldsNoQueuedRunWork(session)
         else { return }
         Self.steeringDebugLog("[AgentRunSteeringWake] clearing stale MCP running mask sessionID=\(sessionID) tab=\(session.tabID) runState=\(session.runState.rawValue) settled=\(settled.status.rawValue) followUp=\(session.mcpFollowUpRunPending) superseding=\(session.pendingSupersedingTurnCompletions)")
-        session.mcpFollowUpRunPending = false
-        session.pendingSupersedingTurnCompletions = 0
+        // Each mask goes only when it is stale itself: an expired superseding mask must not take a
+        // pending-start flag, and with it that flag's owner, from a start still preparing.
+        if followUpMaskIsStale {
+            session.mcpFollowUpRunPending = false
+        }
+        if supersedingMaskIsStale {
+            session.pendingSupersedingTurnCompletions = 0
+        }
+    }
+
+    private static func mcpRunningMaskHasExpired(since updatedAt: Date?, now: Date) -> Bool {
+        updatedAt.map { now.timeIntervalSince($0) > 15 } == true
+    }
+
+    private static func sessionHoldsNoQueuedRunWork(_ session: TabSession) -> Bool {
+        session.agentTask == nil
+            && session.pendingInstructions.isEmpty
+            && session.claudeSteeringFlushTask == nil
+            && session.acpSteeringFlushTask == nil
+    }
+
+    /// Whether an accepted start on `session` has not reached the provider-owned phase yet, so a
+    /// further submission would collide with it instead of steering a run. The window opens with
+    /// the MCP pending-start flag, before the start's submission installs its ticket, and spans the
+    /// ticket's queued and preparing phases. Codex keeps it open until its first native dispatch is
+    /// accepted; other runners take the run on entry, so an active run state closes it for them.
+    ///
+    /// A pending-start flag that expired with no owner still preparing its start and no run work
+    /// behind it is the stale mask MCP snapshots drop, not a start, so it does not hold the window
+    /// open.
+    ///
+    /// - Parameter ownActivationID: an MCP activation the caller created itself. The flag that
+    ///   activation raised is the caller's own setup, not a competing start.
+    func isStartupPendingBeforeProviderOwnership(
+        _ session: TabSession,
+        exemptingActivationID ownActivationID: UUID? = nil,
+        exemptingPendingStartOwner ownPendingStartOwner: UUID? = nil
+    ) -> Bool {
+        if let ticket = session.unresolvedStartupTicket {
+            switch ticket.phase {
+            case .queued, .preparing:
+                return true
+            case .dispatching:
+                return session.selectedAgent == .codexExec || !session.runState.isActive
+            case .accepted, .rejected, .cancelled, .superseded:
+                return false
+            }
+        }
+        guard session.mcpFollowUpRunPending, !session.runState.isActive else { return false }
+        if let ownActivationID, session.mcpControlContext?.activationID == ownActivationID {
+            return false
+        }
+        if let ownPendingStartOwner, session.mcpPendingStartOwner == ownPendingStartOwner {
+            return false
+        }
+        guard session.mcpPendingStartOwner == nil else { return true }
+        let flagExpired = Self.mcpRunningMaskHasExpired(since: session.mcpFollowUpRunPendingUpdatedAt, now: Date())
+        return !(flagExpired && Self.sessionHoldsNoQueuedRunWork(session))
+    }
+
+    /// Why a submission is refused because it would begin a run beside the session's pending
+    /// start, checked before the composer or the transcript changes. A manual message waits for any
+    /// pending start. An MCP dispatch passes only the pending start it owns itself; a Codex dispatch
+    /// instead queues behind the start through its dispatch gate. Once a non-Codex runner owns the
+    /// run, submissions steer it.
+    private func competingStartRefusal(for session: TabSession, origin: UserTurnSubmissionOrigin) -> String? {
+        switch origin {
+        case .user:
+            return isStartupPendingBeforeProviderOwnership(session)
+                ? Self.manualSubmissionDuringStartupMessage
+                : nil
+        case let .mcpDispatch(pendingStartOwner):
+            guard session.selectedAgent != .codexExec,
+                  isStartupPendingBeforeProviderOwnership(session, exemptingPendingStartOwner: pendingStartOwner)
+            else { return nil }
+            return Self.mcpDispatchDuringStartupMessage
+        }
     }
 
     private func startupHasTerminalSettlement(_ ticket: AgentRunStartupTicket, session: TabSession) -> Bool {
@@ -9187,6 +9435,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         return identities(source) == identities(target)
     }
 
+    /// - Parameter pendingStartOwner: the start that raises the pending-start flag with
+    ///   `startPending` and owns it until it submits or fails; see
+    ///   `AgentTabSession.mcpPendingStartOwner`.
+    /// - Parameter admissionGuard: refuses the activation by throwing. It runs before any setup and
+    ///   again immediately before control is installed, so a condition that arises while activation
+    ///   is suspended still refuses it before the session changes.
     @discardableResult
     func mcpActivateControlContext(
         forTabID tabID: UUID,
@@ -9194,8 +9448,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         originatingConnectionID: UUID?,
         taskLabelKind: AgentModelCatalog.TaskLabelKind? = nil,
         startPending: Bool = false,
+        pendingStartOwner: UUID? = nil,
         markSessionAsMCPOriginated: Bool = true,
-        requireInactiveRunState: Bool = false
+        requireInactiveRunState: Bool = false,
+        admissionGuard: (@MainActor (TabSession) throws -> Void)? = nil
     ) async throws -> AgentMCPControlContext {
         let session = await ensureSessionReady(tabID: tabID)
         guard sessions[tabID] === session,
@@ -9209,6 +9465,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 "The requested agent session is already running and cannot be reactivated for inactive MCP control."
             )
         }
+        try admissionGuard?(session)
         // A new control activation owns a new launch lifecycle. Never retain review state from a
         // prior activation, including direct/source-equals-target starts that do not stage anew.
         mcpRemoveAgentRunOracleReviewContexts(sessionID: sessionID)
@@ -9259,6 +9516,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 "The requested agent session became active before MCP control activation."
             )
         }
+        do {
+            try admissionGuard?(session)
+        } catch {
+            await AgentRunSessionStore.cleanup(registration: registration)
+            throw error
+        }
         let priorAutoEditEnabled = existingContext?.sessionID == sessionID
             ? existingContext?.autoEditEnabledBeforeOverride ?? session.autoEditEnabled
             : session.autoEditEnabled
@@ -9283,7 +9546,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         // a recorded result nor a queued start publishes that no result was recorded; the queued
         // start therefore has to be visible before the context is.
         let followUpRunPendingBeforeActivation = session.mcpFollowUpRunPending
+        let pendingStartOwnerBeforeActivation = session.mcpPendingStartOwner
+        let restorePendingStartBeforeActivation = {
+            session.mcpFollowUpRunPending = followUpRunPendingBeforeActivation
+            session.mcpPendingStartOwner = pendingStartOwnerBeforeActivation
+        }
         session.mcpFollowUpRunPending = startPending
+        session.mcpPendingStartOwner = startPending ? pendingStartOwner : nil
         session.mcpControlContext = activatedContext
         let cancellationInstalled = await AgentRunSessionStore.installCancellationHandler(
             registration: registration
@@ -9301,13 +9570,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
               session.mcpControlContext?.registration == registration
         else {
             if session.mcpControlActivationGeneration == activationGeneration {
-                session.mcpFollowUpRunPending = followUpRunPendingBeforeActivation
+                restorePendingStartBeforeActivation()
             }
             await AgentRunSessionStore.cleanup(registration: registration)
             throw MCPError.invalidParams("The MCP control activation was superseded during setup.")
         }
         guard cancellationInstalled else {
-            session.mcpFollowUpRunPending = followUpRunPendingBeforeActivation
+            restorePendingStartBeforeActivation()
             session.mcpControlContext = nil
             await AgentRunSessionStore.cleanup(registration: registration)
             throw MCPError.internalError(
@@ -10417,7 +10686,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         text: String,
         allowStartingRun: Bool,
         workflow: AgentWorkflowDefinition? = nil,
-        nativePreparedTurn: NativeSlashPreparedUserTurn? = nil
+        nativePreparedTurn: NativeSlashPreparedUserTurn? = nil,
+        pendingStartOwner: UUID? = nil
     ) async throws -> MCPInstructionDispatch {
         guard let session = mcpControlledSession(sessionID: sessionID) else {
             throw MCPError.invalidParams("The requested agent run is no longer active.")
@@ -10468,16 +10738,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 }
             }
 
-            let submission: UserTurnSubmissionResult
-            session.isMCPInstructionDispatchInProgress = true
-            defer {
-                session.isMCPInstructionDispatchInProgress = false
-            }
-            submission = withMCPWorkflowOverride(session: session, workflow: workflow) {
+            let origin = UserTurnSubmissionOrigin.mcpDispatch(pendingStartOwner: pendingStartOwner)
+            let submission = withMCPWorkflowOverride(session: session, workflow: workflow) {
                 if let nativePreparedTurn {
                     return submitPreparedUserTurn(
                         tabID: session.tabID,
                         session: session,
+                        origin: origin,
                         trimmedText: trimmedText,
                         attachmentsToSend: [],
                         taggedFilesToSend: [],
@@ -10489,9 +10756,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 return submitUserTurn(
                     text: trimmedText,
                     tabID: session.tabID,
-                    codexAttemptID: codexAttemptID
+                    codexAttemptID: codexAttemptID,
+                    origin: origin
                 )
             }
+            #if DEBUG
+                await test_afterMCPDispatchSubmission?()
+            #endif
             switch submission {
             case .submittedControlPlaneCommand:
                 if let codexAttemptID {
@@ -11489,7 +11760,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 + pendingClaudeReasoningStatusBytes
                 + pendingAssistantDeltaBytes
             let pendingInstructionBytes = session.pendingInstructions.reduce(0) { partial, instruction in
-                partial + instruction.utf8.count
+                partial + instruction.text.utf8.count
             }
             let ownership = session.activeRunOwnership
             let liveness = session.activeRunLiveness
@@ -15861,9 +16132,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         text: String,
         tabID: UUID,
         codexAttemptID: UUID? = nil,
-        rawDraftText: String? = nil
+        rawDraftText: String? = nil,
+        origin requestedOrigin: UserTurnSubmissionOrigin = .user
     ) -> UserTurnSubmissionResult {
         let session = session(for: tabID)
+        // Codex steer-acknowledgement attempts are issued only to MCP dispatches.
+        let origin: UserTurnSubmissionOrigin = codexAttemptID != nil && requestedOrigin == .user
+            ? .mcpDispatch(pendingStartOwner: nil)
+            : requestedOrigin
         #if DEBUG
             if let test_submitUserTurnResultOverride {
                 return test_submitUserTurnResultOverride(text, tabID, rawDraftText)
@@ -15874,6 +16150,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         let taggedFilesToSend = session.pendingTaggedFileAttachments
         guard !trimmedText.isEmpty || !attachmentsToSend.isEmpty || !taggedFilesToSend.isEmpty else {
             return .blocked(message: "")
+        }
+        if let refusal = competingStartRefusal(for: session, origin: origin) {
+            return .blocked(message: refusal)
         }
         guard isAgentAvailableForRun(session.selectedAgent) else {
             return .blocked(message: unavailableAgentMessage(for: session.selectedAgent))
@@ -16006,6 +16285,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 await submitUserTurnAfterHydration(
                     tabID: tabID,
                     session: session,
+                    origin: origin,
                     startupTicket: startupTicket,
                     headStartupTicket: headStartupTicket,
                     trimmedText: trimmedText,
@@ -16030,6 +16310,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         return submitPreparedUserTurn(
             tabID: tabID,
             session: session,
+            origin: origin,
             startupTicket: startupTicket,
             trimmedText: trimmedText,
             attachmentsToSend: attachmentsToSend,
@@ -16046,6 +16327,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private func submitUserTurnAfterHydration(
         tabID: UUID,
         session: TabSession,
+        origin: UserTurnSubmissionOrigin,
         startupTicket: AgentRunStartupTicket?,
         headStartupTicket: AgentRunStartupTicket?,
         trimmedText: String,
@@ -16107,9 +16389,28 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         ) {
             return
         }
+        // A submission accepted without a start of its own that now finds another start pending is
+        // refused as it would have been when submitted. Codex keeps queueing behind that start.
+        if startupTicket == nil,
+           session.selectedAgent != .codexExec,
+           let refusal = competingStartRefusal(for: session, origin: origin)
+        {
+            restoreRejectedManualSubmissionComposerState(
+                tabID: tabID,
+                session: session,
+                draftText: rawDraftText ?? trimmedText,
+                images: attachmentsToSend,
+                taggedFiles: taggedFilesToSend,
+                selectedWorkflow: restorationSelectedWorkflow,
+                selectedWorkflowMutationGeneration: restorationSelectedWorkflowMutationGeneration,
+                message: refusal
+            )
+            return
+        }
         _ = submitPreparedUserTurn(
             tabID: tabID,
             session: session,
+            origin: origin,
             startupTicket: startupTicket,
             trimmedText: trimmedText,
             attachmentsToSend: attachmentsToSend,
@@ -16258,7 +16559,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         }
     #endif
 
-    private func removeUnconfirmedOptimisticCodexUserItem(
+    private func removeUnconfirmedOptimisticUserItem(
         session: TabSession,
         tabID: UUID,
         itemID: UUID?,
@@ -16269,7 +16570,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         else { return }
         guard session.removeItem(at: index) != nil else { return }
         Self.steeringDebugLog(
-            "[AgentRunSteeringWake] removed unconfirmed Codex optimistic item tab=\(tabID) itemID=\(itemID) reason=\(reason)"
+            "[AgentRunSteeringWake] removed unconfirmed optimistic item tab=\(tabID) itemID=\(itemID) reason=\(reason)"
         )
         requestUIRefresh(tabID: tabID, urgent: true)
         scheduleSave(for: tabID)
@@ -16374,6 +16675,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private func submitPreparedUserTurn(
         tabID: UUID,
         session: TabSession,
+        origin: UserTurnSubmissionOrigin,
         startupTicket providedStartupTicket: AgentRunStartupTicket? = nil,
         trimmedText: String,
         attachmentsToSend: [AgentImageAttachment],
@@ -16386,7 +16688,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         restorationSelectedWorkflowMutationGeneration: UInt64? = nil
     ) -> UserTurnSubmissionResult {
         Self.logCodexDebug("[AgentModeVM] submitUserTurn: tabID=\(tabID), selectedAgent=\(session.selectedAgent), attachments=\(attachmentsToSend.count), taggedFiles=\(taggedFilesToSend.count), workflow=\(activeWorkflow?.displayName ?? "none")")
-        // Callers that reach this point directly (MCP native slash turns) have no ticket yet.
+        // Callers that reach this point directly (MCP native slash turns) have no ticket yet, and
+        // pass the same admission as any other submission.
+        if providedStartupTicket == nil, let refusal = competingStartRefusal(for: session, origin: origin) {
+            return .blocked(message: refusal)
+        }
         let startupTicket: AgentRunStartupTicket? = {
             guard let ticket = providedStartupTicket
                 ?? (session.runState.isActive ? nil : session.installStartupTicketIfAbsent())
@@ -16499,7 +16805,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         let steeringMessage = trimmedText.isEmpty ? nil : trimmedText
         if session.runState == .running,
-           !session.isMCPInstructionDispatchInProgress
+           !origin.isMCPDispatch
         {
             Self.steeringDebugLog("[AgentRunSteeringWake] manual active submit accepted tab=\(tabID) runState=\(session.runState.rawValue) agent=\(session.selectedAgent.displayName) runID=\(String(describing: session.runID)) hasMCPContext=\(session.mcpControlContext != nil)")
             if let steeringOriginIdentity = activeRunSteeringOriginIdentity(for: session),
@@ -16536,7 +16842,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
         }
 
-        if shouldSignalMCPInstructionDeliveredAfterOptimisticSubmit(for: session) {
+        if shouldSignalMCPInstructionDeliveredAfterOptimisticSubmit(for: session, origin: origin) {
             signalMCPInstructionDeliveredFireAndForget(for: session)
         }
 
@@ -16569,7 +16875,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                         attemptID: codexAttemptID
                     ) else {
                         startupTicket?.resolve(.rejected)
-                        self.removeUnconfirmedOptimisticCodexUserItem(
+                        self.removeUnconfirmedOptimisticUserItem(
                             session: session,
                             tabID: tabID,
                             itemID: userItem.id,
@@ -16645,7 +16951,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                         activationID: stagedCodexComputerUseActivationID
                     )
                     if codexAttemptID != nil {
-                        self.removeUnconfirmedOptimisticCodexUserItem(
+                        self.removeUnconfirmedOptimisticUserItem(
                             session: session,
                             tabID: tabID,
                             itemID: userItem.id,
@@ -16667,7 +16973,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     // The dispatch ticket remains held through this synchronous
                     // rollback/restore, so the next queued send cannot observe
                     // partially restored state.
-                    self.removeUnconfirmedOptimisticCodexUserItem(
+                    self.removeUnconfirmedOptimisticUserItem(
                         session: session,
                         tabID: tabID,
                         itemID: userItem.id,
@@ -16723,7 +17029,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             agent: session.selectedAgent
         )
         let userInputTokenEstimate = nonCodexContextUsageEstimator(for: session.selectedAgent)?
-            .enqueueUserTurnEstimate(messageForProvider: providerPreviewText, session: session)
+            .enqueueUserTurnEstimate(messageForProvider: providerPreviewText, submissionID: userItem.id, session: session)
             ?? Self.estimateRuntimeTokens(for: providerPreviewText)
 
         // If agent is waiting for instruction, resume it.
@@ -16734,11 +17040,31 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 Task { [weak self] in
                     guard let self else { return }
                     await cancelAgentRun(tabID: tabID)
-                    await startAgentRun(
-                        tabID: tabID,
+                    guard startAdmittedRun(
+                        session: session,
                         initialMessage: wrappedText,
                         attachments: attachmentsToSend,
-                        taggedFileAttachments: taggedFilesToSend
+                        taggedFileAttachments: taggedFilesToSend,
+                        submissionID: userItem.id
+                    ) == nil else { return }
+                    // Another start took the session while this run stopped. A competing start is
+                    // refused, so the message and its attachments go back to the composer.
+                    session.removeQueuedUserInputTokenEstimates(forSubmissions: [userItem.id])
+                    removeUnconfirmedOptimisticUserItem(
+                        session: session,
+                        tabID: tabID,
+                        itemID: userItem.id,
+                        reason: "another start took the session"
+                    )
+                    restoreRejectedManualSubmissionComposerState(
+                        tabID: tabID,
+                        session: session,
+                        draftText: restorationDraftText,
+                        images: attachmentsToSend,
+                        taggedFiles: taggedFilesToSend,
+                        selectedWorkflow: restorationSelectedWorkflow,
+                        selectedWorkflowMutationGeneration: restorationSelectedWorkflowMutationGeneration,
+                        message: Self.manualSubmissionDuringStartupMessage
                     )
                 }
                 return UserTurnSubmissionResult.submitted
@@ -16747,7 +17073,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 let textForContinuation = wrappedText
                 let continuationAttachments = attachmentsToSend
                 let continuationTaggedFiles = taggedFilesToSend
-                _ = dequeuePendingNonCodexUserTokens(for: session) ?? userInputTokenEstimate
+                // Delivery into the waiting turn counts the augmented text below, so this
+                // submission's queued estimate is dropped rather than left for another turn.
+                session.removeQueuedUserInputTokenEstimates(forSubmissions: [userItem.id])
                 Task { @MainActor [weak self, weak session] in
                     guard let self, let session else { return }
                     let augmentedText = await augmentUserMessageForProviderSend(
@@ -16785,7 +17113,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     initialMessage: wrappedText,
                     attachments: attachmentsToSend,
                     taggedFileAttachments: taggedFilesToSend,
-                    startupTicket: startupTicket
+                    startupTicket: startupTicket,
+                    submissionID: userItem.id
                 )
                 if let startupTicket {
                     resolveStartupTicketAfterRunServiceReturn(
@@ -16800,6 +17129,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             submitActiveProviderSteering(
                 route,
                 session: session,
+                origin: origin,
                 wrappedText: wrappedText,
                 attachmentsToSend: attachmentsToSend,
                 taggedFilesToSend: taggedFilesToSend,
@@ -16809,7 +17139,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             )
         } else {
             // Shared follow-up queue for providers that consume queued instructions at the next turn boundary.
-            session.pendingInstructions.append(wrappedText)
+            session.pendingInstructions.append(AgentQueuedInstruction(
+                text: wrappedText,
+                submissionID: userItem.id,
+                constituentSubmissionIDs: [userItem.id],
+                restorationDraftText: restorationDraftText
+            ))
         }
         return UserTurnSubmissionResult.submitted
     }
@@ -16872,6 +17207,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private func submitActiveProviderSteering(
         _ route: ActiveProviderSteeringRoute,
         session: TabSession,
+        origin: UserTurnSubmissionOrigin,
         wrappedText: String,
         attachmentsToSend: [AgentImageAttachment],
         taggedFilesToSend: [AgentTaggedFileAttachment],
@@ -16899,8 +17235,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 createdAt: Date()
             )
             session.pendingACPSteeringInstructions.append(steering)
-            Self.steeringDebugLog("[AgentRunSteeringWake] ACP steering queued tab=\(session.tabID) runID=\(String(describing: session.runID)) attempt=\(String(describing: session.activeRunAttemptID)) queue=\(session.pendingACPSteeringInstructions.count) mcpDispatch=\(session.isMCPInstructionDispatchInProgress)")
-            guard !session.isMCPInstructionDispatchInProgress else {
+            Self.steeringDebugLog("[AgentRunSteeringWake] ACP steering queued tab=\(session.tabID) runID=\(String(describing: session.runID)) attempt=\(String(describing: session.activeRunAttemptID)) queue=\(session.pendingACPSteeringInstructions.count) mcpDispatch=\(origin.isMCPDispatch)")
+            guard !origin.isMCPDispatch else {
                 Self.steeringDebugLog("[AgentRunSteeringWake] ACP steering flush owned by MCP dispatch tab=\(session.tabID) queue=\(session.pendingACPSteeringInstructions.count)")
                 return
             }
@@ -16913,15 +17249,21 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     return
                 }
                 let queued = session.pendingACPSteeringInstructions.remove(at: queuedIndex)
+                let followUp = AgentQueuedInstruction(
+                    text: queued.providerText,
+                    submissionID: queued.optimisticUserItemID,
+                    constituentSubmissionIDs: queued.optimisticUserItemID.map { [$0] } ?? [],
+                    restorationDraftText: queued.draftText
+                )
                 if session.runState.isActive {
-                    session.pendingInstructions.insert(queued.providerText, at: 0)
+                    session.pendingInstructions.insert(followUp, at: 0)
                 } else if session.runState == .completed, session.acpController != nil {
-                    await startAgentRun(tabID: session.tabID, initialMessage: queued.providerText)
+                    startFollowUpRun(for: session, instruction: followUp)
                 } else {
                     // ACP steering should never bounce back into the composer. If the
                     // active-steering queue was rejected before the run service could take it,
                     // preserve it as a normal provider follow-up instead.
-                    session.pendingInstructions.insert(queued.providerText, at: 0)
+                    session.pendingInstructions.insert(followUp, at: 0)
                     session.isDirty = true
                     updateBindingsFromSession(session)
                     scheduleSave(for: session.tabID)
@@ -16944,8 +17286,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             )
             session.pendingClaudeSteeringInstructions.append(steering)
             runService.protectCurrentClaudeTurnForAcceptedSteeringIfNeeded(session: session, steeringID: steering.id)
-            Self.steeringDebugLog("[AgentRunSteeringWake] Claude steering queued tab=\(session.tabID) runID=\(String(describing: session.runID)) attempt=\(String(describing: session.activeRunAttemptID)) queue=\(session.pendingClaudeSteeringInstructions.count) mcpDispatch=\(session.isMCPInstructionDispatchInProgress)")
-            guard !session.isMCPInstructionDispatchInProgress else {
+            Self.steeringDebugLog("[AgentRunSteeringWake] Claude steering queued tab=\(session.tabID) runID=\(String(describing: session.runID)) attempt=\(String(describing: session.activeRunAttemptID)) queue=\(session.pendingClaudeSteeringInstructions.count) mcpDispatch=\(origin.isMCPDispatch)")
+            guard !origin.isMCPDispatch else {
                 Self.steeringDebugLog("[AgentRunSteeringWake] Claude steering flush owned by MCP dispatch tab=\(session.tabID) queue=\(session.pendingClaudeSteeringInstructions.count)")
                 return
             }
@@ -17295,10 +17637,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         return [SlashSkillToken(name: name, tokenRange: tokenRange, argumentsRange: argumentsRange)]
     }
 
-    private func shouldSignalMCPInstructionDeliveredAfterOptimisticSubmit(for session: TabSession) -> Bool {
+    private func shouldSignalMCPInstructionDeliveredAfterOptimisticSubmit(
+        for session: TabSession,
+        origin: UserTurnSubmissionOrigin
+    ) -> Bool {
         guard session.mcpControlContext != nil,
               session.runState == .running,
-              !session.isMCPInstructionDispatchInProgress
+              !origin.isMCPDispatch
         else {
             return false
         }
@@ -18038,6 +18383,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     // MARK: - Agent Run Lifecycle
 
     /// Start an agent run for the given tab.
+    ///
+    /// - Parameter submissionID: the optimistic user item of the submission starting this run,
+    ///   whose queued token estimate the run's first turn consumes.
     @discardableResult
     func startAgentRun(
         tabID: UUID,
@@ -18045,12 +18393,31 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         attachments: [AgentImageAttachment] = [],
         taggedFileAttachments: [AgentTaggedFileAttachment] = [],
         codexFallbackContext: TabSession.CodexFallbackSubmissionContext? = nil,
-        startupTicket: AgentRunStartupTicket? = nil
+        startupTicket: AgentRunStartupTicket? = nil,
+        submissionID: UUID? = nil
     ) async -> CodexAgentModeCoordinator.NativeSendOutcome? {
         let session = session(for: tabID)
         #if DEBUG
             test_startAgentRunObserver?(session)
         #endif
+        // Every run start takes its admission, the session's startup ticket, before its first
+        // suspension. Only Codex arrives without one, to steer the run its dispatch gate serializes
+        // it behind. A start without admission fails closed before touching the session.
+        guard startupTicket != nil || session.selectedAgent == .codexExec else {
+            assertionFailure("A run start must hold its startup admission")
+            let message = "The run did not start because it was not admitted to the session."
+            await settleStartRejectedBeforeProvider(
+                session: session,
+                startupTicket: nil,
+                submissionID: submissionID,
+                message: message,
+                attachments: attachments
+            )
+            return .preDispatchRejected(message: message)
+        }
+        // The previous run's terminal commit still owns the session while its result publishes: an
+        // epoch or attempt begun now would overtake that publication.
+        await session.runLifecycle.waitForTerminalCommitCompletion()
         let mcpActivationGenerationAtEntry = session.mcpControlActivationGeneration
         // The pending-start flag is session-wide, so only the start it was raised for may clear
         // it: a cancelled or superseded start, a newer accepted start, or a newer MCP activation
@@ -18073,6 +18440,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             await settleStartRejectedBeforeProvider(
                 session: session,
                 startupTicket: startupTicket,
+                submissionID: submissionID,
                 message: message,
                 attachments: attachments
             )
@@ -18092,6 +18460,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             await settleStartRejectedBeforeProvider(
                 session: session,
                 startupTicket: startupTicket,
+                submissionID: submissionID,
                 message: message,
                 attachments: attachments
             )
@@ -18144,14 +18513,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 dispatchTicket: context.dispatchTicket
             )
         }
-
         return await runService.startRun(
             tabID: tabID,
             session: session,
             initialUserMessage: augmentedInitialMessage,
             initialMessageForRun: initialMessageForRun,
             attachments: attachments,
-            codexFallbackContext: preparedCodexFallbackContext
+            codexFallbackContext: preparedCodexFallbackContext,
+            submissionID: submissionID
         )
     }
 
@@ -18162,12 +18531,23 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private func settleStartRejectedBeforeProvider(
         session: TabSession,
         startupTicket: AgentRunStartupTicket?,
+        submissionID: UUID?,
         message: String,
         attachments: [AgentImageAttachment]
     ) async {
+        // The rejected submission will start no turn; its estimate goes before the settlement
+        // suspends, so no turn starting meanwhile can take it.
+        if let submissionID {
+            session.removeQueuedUserInputTokenEstimates(forSubmissions: [submissionID])
+        }
+        #if DEBUG
+            await test_beforeStartRejectedSettlement?()
+        #endif
         let ownsStart: () -> Bool = { [unowned self] in
+            // A live run never belongs to a rejected start: the failure settlement would adopt
+            // that run's ownership and fail it.
             if let startupTicket {
-                return startupTicketOwnsSession(startupTicket, session: session)
+                return startupTicketOwnsSession(startupTicket, session: session) && !session.runState.isActive
             }
             return sessions[session.tabID] === session
                 && !session.runState.isActive
@@ -19449,9 +19829,15 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         // Check for queued instructions first
         if !session.pendingInstructions.isEmpty {
-            let queuedText = session.pendingInstructions.removeFirst()
+            let queued = session.pendingInstructions.removeFirst()
+            // The instruction is delivered into the running turn, which takes its estimate.
+            if let submissionID = queued.submissionID,
+               let estimate = session.takeQueuedUserInputTokenEstimate(forSubmission: submissionID)
+            {
+                addUserInputTokensToActiveNonCodexTurn(estimate.tokens, for: session)
+            }
             let text = await augmentUserMessageForProviderSend(
-                queuedText,
+                queued.text,
                 agent: session.selectedAgent,
                 session: session
             )

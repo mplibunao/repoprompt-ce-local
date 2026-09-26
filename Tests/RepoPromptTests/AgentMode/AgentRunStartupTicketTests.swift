@@ -211,7 +211,7 @@ import XCTest
             let head = try fixture.submit("head")
             try await eventually { fixture.readiness.isWaiting(1) }
 
-            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "follower", tabID: fixture.tabID), .submitted)
+            XCTAssertEqual(fixture.submitAsMCPDispatch("follower"), .submitted)
             let followerGateTicket = try XCTUnwrap(head.followerDispatchGateTickets.first)
             try await eventually { fixture.session.codexDispatchSerialGate.test_hasWaiter(for: followerGateTicket) }
 
@@ -237,7 +237,7 @@ import XCTest
             let fixture = makeFixture(gatedReadinessCalls: [1])
             let head = try fixture.submit("head")
             try await eventually { fixture.readiness.isWaiting(1) }
-            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "follower", tabID: fixture.tabID), .submitted)
+            XCTAssertEqual(fixture.submitAsMCPDispatch("follower"), .submitted)
             let followers = head.followerTasks
             XCTAssertEqual(followers.count, 1)
             let followerGateTicket = try XCTUnwrap(head.followerDispatchGateTickets.first)
@@ -259,11 +259,648 @@ import XCTest
             XCTAssertEqual(later.phase, .accepted)
         }
 
+        func testManualSubmissionDuringPendingStartIsRefusedBeforeComposerOrTranscriptChange() async throws {
+            let fixture = makeFixture(gatedReadinessCalls: [1])
+            let head = try fixture.submit("head")
+            try await eventually { fixture.readiness.isWaiting(1) }
+            let attachment = AgentTaggedFileAttachment(relativePath: "kept.swift", displayName: "kept.swift")
+            fixture.session.pendingTaggedFileAttachments = [attachment]
+            fixture.session.selectedWorkflow = AgentWorkflow.build.definition
+            let itemIDs = fixture.session.items.map(\.id)
+
+            XCTAssertEqual(
+                fixture.viewModel.submitUserTurn(text: "second manual message", tabID: fixture.tabID),
+                .blocked(message: AgentModeViewModel.manualSubmissionDuringStartupMessage)
+            )
+
+            XCTAssertEqual(fixture.session.items.map(\.id), itemIDs)
+            XCTAssertEqual(fixture.session.pendingTaggedFileAttachments, [attachment])
+            XCTAssertEqual(fixture.session.selectedWorkflow?.id, AgentWorkflow.build.definition.id)
+            XCTAssertTrue(fixture.session.startupTicket === head)
+            XCTAssertEqual(head.followerTasks.count, 0)
+            XCTAssertEqual(head.followerDispatchGateTickets, [])
+
+            fixture.readiness.release(1, ready: true)
+            try await startupTestJoin(head.task)
+            XCTAssertEqual(head.phase, .accepted)
+            XCTAssertEqual(fixture.controller.startUserTurnTexts, ["head"])
+        }
+
+        func testQueuedFollowUpOfARunWhosePublicationWasRejectedReturnsToTheComposer() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            // A follow-up queues while the run waits on an approval.
+            let runtime = try await startClaudeRunWaitingOnApproval(fixture: fixture, claude: claude)
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "queued follow-up", tabID: fixture.tabID), .submitted)
+            let followUpItemID = try XCTUnwrap(fixture.session.items.last { $0.kind == .user }?.id)
+            XCTAssertEqual(fixture.session.pendingInstructions.map(\.submissionID), [followUpItemID])
+            XCTAssertEqual(fixture.session.pendingNonCodexUserInputTokenQueue.map(\.submissionID), [followUpItemID])
+
+            // Control is re-activated mid-run, so the run's terminal publication is refused.
+            _ = try await fixture.viewModel.mcpActivateControlContext(
+                forTabID: fixture.tabID,
+                sessionID: fixture.sessionID,
+                originatingConnectionID: UUID(),
+                markSessionAsMCPOriginated: true
+            )
+            await runtime.emit(.approvalCancelled(requestID: "approval"))
+            try await eventually { fixture.session.runState == .running }
+            let headTurnID = try XCTUnwrap(claude.sentTurnIDs.first)
+            await runtime.emit(.turnCompleted(turnID: headTurnID, status: .completed))
+            try await eventually(seconds: 15) { fixture.session.runState == .completed }
+            // The replaced activation's envelope is dropped before publication, so the refusal
+            // arrives as a rejected publication.
+            guard case .rejected? = fixture.session.runLifecycle.lastTerminalPublicationResult else {
+                return XCTFail("unexpected publication \(String(describing: fixture.session.runLifecycle.lastTerminalPublicationResult))")
+            }
+            try await eventually { fixture.session.pendingInstructions.isEmpty }
+
+            XCTAssertFalse(fixture.session.mcpFollowUpRunPending, "the refused follow-up left the pending-start flag up")
+            XCTAssertNil(fixture.session.mcpPendingStartOwner)
+            XCTAssertEqual(fixture.session.pendingNonCodexUserInputTokenQueue, [])
+            XCTAssertTrue(
+                fixture.viewModel.retrieveDraftText(for: fixture.tabID).contains("queued follow-up"),
+                fixture.viewModel.retrieveDraftText(for: fixture.tabID)
+            )
+            XCTAssertFalse(
+                fixture.session.items.contains { $0.id == followUpItemID },
+                "the returned follow-up still looks sent"
+            )
+            XCTAssertEqual(claude.sentMessages.count, 1)
+            XCTAssertFalse(
+                fixture.viewModel.isStartupPendingBeforeProviderOwnership(fixture.session, exemptingActivationID: nil),
+                "a steer would be refused as startup_pending"
+            )
+            XCTAssertNotEqual(fixture.viewModel.mcpSnapshot(sessionID: fixture.sessionID)?.status, .running)
+            XCTAssertEqual(
+                fixture.viewModel.submitUserTurn(text: "next message", tabID: fixture.tabID),
+                .submitted,
+                "a manual send was refused"
+            )
+        }
+
+        func testQueuedFollowUpOfARunWhosePublicationWentStaleReturnsToTheComposer() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            let runtime = try await startClaudeRunWaitingOnApproval(fixture: fixture, claude: claude)
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "queued follow-up", tabID: fixture.tabID), .submitted)
+            let followUpItemID = try XCTUnwrap(fixture.session.items.last { $0.kind == .user }?.id)
+
+            _ = try await finishClaudeRunWithStalePublication(fixture: fixture, claude: claude, runtime: runtime)
+
+            XCTAssertTrue(
+                fixture.viewModel.retrieveDraftText(for: fixture.tabID).contains("queued follow-up"),
+                "the stale publication dropped the queued follow-up"
+            )
+            XCTAssertFalse(fixture.session.items.contains { $0.id == followUpItemID })
+            XCTAssertEqual(fixture.session.pendingNonCodexUserInputTokenQueue, [])
+            XCTAssertFalse(fixture.session.mcpFollowUpRunPending)
+            XCTAssertNil(fixture.session.unresolvedStartupTicket)
+            XCTAssertEqual(claude.sentMessages.count, 1)
+        }
+
+        func testQueuedFollowUpReturnedToTheComposerBringsBackItsAttachments() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            let session = fixture.session
+            let runtime = try await startClaudeRunWaitingOnApproval(fixture: fixture, claude: claude)
+
+            // The follow-up queues with an image and a tagged file, which leave the composer with it.
+            let queuedImage = AgentImageAttachment(source: .url("https://example.invalid/queued.png"))
+            let queuedFile = AgentTaggedFileAttachment(relativePath: "Sources/Queued.swift", displayName: "Queued.swift")
+            session.pendingImageAttachments = [queuedImage]
+            session.pendingTaggedFileAttachments = [queuedFile]
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "queued follow-up", tabID: fixture.tabID), .submitted)
+            let followUpItem = try XCTUnwrap(session.items.last { $0.kind == .user })
+            XCTAssertEqual(followUpItem.attachments, [queuedImage])
+            XCTAssertEqual(followUpItem.taggedFileAttachments, [queuedFile])
+            XCTAssertEqual(session.pendingInstructions.map(\.submissionID), [followUpItem.id])
+            XCTAssertEqual(session.pendingImageAttachments, [])
+            XCTAssertEqual(session.pendingTaggedFileAttachments, [])
+
+            // The user stages more attachments while it waits.
+            let stagedImage = AgentImageAttachment(source: .url("https://example.invalid/staged.png"))
+            let stagedFile = AgentTaggedFileAttachment(relativePath: "Sources/Staged.swift", displayName: "Staged.swift")
+            session.pendingImageAttachments = [stagedImage]
+            session.pendingTaggedFileAttachments = [stagedFile]
+
+            let followUpAdmission = try await finishClaudeRunWithStalePublication(
+                fixture: fixture,
+                claude: claude,
+                runtime: runtime
+            )
+
+            XCTAssertEqual(fixture.viewModel.retrieveDraftText(for: fixture.tabID), "queued follow-up")
+            XCTAssertEqual(session.pendingImageAttachments, [queuedImage, stagedImage])
+            XCTAssertEqual(session.pendingTaggedFileAttachments, [queuedFile, stagedFile])
+            XCTAssertFalse(session.items.contains { $0.id == followUpItem.id }, "the returned follow-up still looks sent")
+            let admission = try XCTUnwrap(followUpAdmission, "the follow-up was not admitted before its run's result published")
+            XCTAssertEqual(admission.phase, .rejected)
+            XCTAssertNil(session.unresolvedStartupTicket)
+            XCTAssertEqual(claude.sentMessages.count, 1)
+        }
+
+        func testQueuedFollowUpReturnedToTheComposerRestoresWhatTheUserTypedNotItsWorkflowWrapping() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            let session = fixture.session
+            let runtime = try await startClaudeRunWaitingOnApproval(fixture: fixture, claude: claude)
+
+            session.selectedWorkflow = AgentWorkflowDefinition(
+                customID: UUID(),
+                displayName: "Careful review",
+                template: "Review carefully before answering.\n$ARGUMENTS\nList every risk."
+            )
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "check the diff", tabID: fixture.tabID), .submitted)
+            let followUpItem = try XCTUnwrap(session.items.last { $0.kind == .user })
+            XCTAssertEqual(
+                session.pendingInstructions.map(\.text),
+                ["Review carefully before answering.\ncheck the diff\nList every risk."],
+                "the queued provider text was not wrapped by the workflow"
+            )
+
+            _ = try await finishClaudeRunWithStalePublication(fixture: fixture, claude: claude, runtime: runtime)
+
+            XCTAssertEqual(fixture.viewModel.retrieveDraftText(for: fixture.tabID), "check the diff")
+            XCTAssertFalse(session.items.contains { $0.id == followUpItem.id })
+            XCTAssertEqual(claude.sentMessages.count, 1)
+        }
+
+        func testQueuedWorkflowFollowUpRestoredByAnExecutionLocationChangeReturnsWhatTheUserTyped() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            let session = fixture.session
+            _ = try await startClaudeRunWaitingOnApproval(fixture: fixture, claude: claude)
+            session.selectedWorkflow = AgentWorkflowDefinition(
+                customID: UUID(),
+                displayName: "Careful review",
+                template: "Review carefully before answering.\n$ARGUMENTS\nList every risk."
+            )
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "check the diff", tabID: fixture.tabID), .submitted)
+            XCTAssertEqual(session.pendingInstructions.map(\.text), ["Review carefully before answering.\ncheck the diff\nList every risk."])
+
+            await fixture.viewModel.test_cancelAgentRunForExecutionLocationChange(tabID: fixture.tabID)
+
+            XCTAssertEqual(fixture.viewModel.retrieveDraftText(for: fixture.tabID), "check the diff")
+            XCTAssertEqual(session.pendingInstructions, [])
+        }
+
+        /// A slash-skill message's bubble drops the command, and an attachment-only message's
+        /// bubble is a placeholder; neither is what the user typed.
+        func testQueuedSlashSkillAndAttachmentOnlyFollowUpsReturnWhatTheUserTyped() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            let session = fixture.session
+            let runtime = try await startClaudeRunWaitingOnApproval(fixture: fixture, claude: claude)
+
+            session.selectedWorkflow = AgentWorkflowDefinition(
+                customID: UUID(),
+                displayName: "/careful-review",
+                template: "Review carefully.\n$ARGUMENTS"
+            )
+            XCTAssertEqual(
+                fixture.viewModel.submitUserTurn(text: "/careful-review check the diff", tabID: fixture.tabID),
+                .submitted
+            )
+            let slashItem = try XCTUnwrap(session.items.last { $0.kind == .user })
+            XCTAssertEqual(slashItem.text, "check the diff")
+
+            session.selectedWorkflow = nil
+            let image = AgentImageAttachment(source: .url("https://example.invalid/only.png"))
+            session.pendingImageAttachments = [image]
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "", tabID: fixture.tabID), .submitted)
+            let attachmentOnlyItem = try XCTUnwrap(session.items.last { $0.kind == .user })
+            XCTAssertNotEqual(attachmentOnlyItem.id, slashItem.id)
+            XCTAssertEqual(attachmentOnlyItem.text, "Sent 1 image")
+            XCTAssertEqual(session.pendingInstructions.count, 2)
+
+            _ = try await finishClaudeRunWithStalePublication(fixture: fixture, claude: claude, runtime: runtime)
+
+            XCTAssertEqual(fixture.viewModel.retrieveDraftText(for: fixture.tabID), "/careful-review check the diff")
+            XCTAssertEqual(session.pendingImageAttachments, [image])
+            XCTAssertFalse(session.items.contains { $0.id == slashItem.id || $0.id == attachmentOnlyItem.id })
+            XCTAssertEqual(claude.sentMessages.count, 1)
+        }
+
+        /// ACP steering messages requeued together become one follow-up, filed under the first
+        /// message's submission, that stands for all of them.
+        func testCoalescedACPFollowUpReturnsEveryMessageItStandsFor() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            let session = fixture.session
+            let runtime = try await startClaudeRunWaitingOnApproval(fixture: fixture, claude: claude)
+
+            // B and C were steered at the run and are sent back as the steering path leaves them:
+            // an optimistic item each, carrying its tagged file.
+            let fileB = AgentTaggedFileAttachment(relativePath: "Sources/B.swift", displayName: "B.swift")
+            let fileC = AgentTaggedFileAttachment(relativePath: "Sources/C.swift", displayName: "C.swift")
+            let steerings = [("B typed", fileB), ("C typed", fileC)].map { text, file in
+                let item = AgentChatItem.user(text, taggedFileAttachments: [file], sequenceIndex: session.nextSequenceIndex)
+                session.appendItem(item)
+                return AgentModeViewModel.TabSession.ACPSteeringInstruction(
+                    id: UUID(),
+                    targetRunID: session.runID,
+                    targetRunAttemptID: session.activeRunAttemptID,
+                    providerText: "<wrapped>\(text)</wrapped>",
+                    interruptedPromptProviderText: nil,
+                    attachments: [],
+                    taggedFileAttachments: [file],
+                    draftText: text,
+                    optimisticUserItemID: item.id,
+                    createdAt: Date()
+                )
+            }
+            let itemIDs = steerings.compactMap(\.optimisticUserItemID)
+            session.pendingACPSteeringInstructions = steerings
+            fixture.viewModel.test_requeueAllQueuedACPSteeringAsFollowUp(session: session)
+            XCTAssertEqual(session.pendingInstructions.map(\.submissionID), [itemIDs[0]])
+            XCTAssertEqual(session.pendingInstructions.map(\.constituentSubmissionIDs), [itemIDs])
+
+            _ = try await finishClaudeRunWithStalePublication(fixture: fixture, claude: claude, runtime: runtime)
+
+            XCTAssertEqual(fixture.viewModel.retrieveDraftText(for: fixture.tabID), "B typed\nC typed")
+            XCTAssertEqual(session.pendingTaggedFileAttachments, [fileB, fileC])
+            XCTAssertFalse(session.items.contains { itemIDs.contains($0.id) }, "a returned message still looks sent")
+            XCTAssertEqual(claude.sentMessages.count, 1)
+        }
+
+        /// Starts a Claude run under MCP control and leaves it waiting on an approval, where turns
+        /// the user sends queue as follow-ups.
+        private func startClaudeRunWaitingOnApproval(
+            fixture: Fixture,
+            claude: StartupTestClaudeRecorder
+        ) async throws -> StartupTestClaudeRuntime {
+            fixture.session.selectedAgent = .claudeCode
+            _ = try await activateMCPControl(fixture: fixture, sessionID: fixture.sessionID)
+            let head = try fixture.submit("head")
+            try await startupTestJoin(head.task)
+            try await eventually { claude.sentMessages.count == 1 }
+            try await MCPRoutingWaiter.notifyRouted(runID: XCTUnwrap(fixture.session.runID))
+            let runtime = try XCTUnwrap(claude.runtimes.last)
+            await runtime.emit(.approvalRequest(Self.claudeApprovalRequest(id: "approval")))
+            try await eventually(seconds: 15) { fixture.session.runState == .waitingForApproval }
+            return runtime
+        }
+
+        /// Answers the approval and completes the run, whose terminal publication goes stale, then
+        /// waits for its queued follow-ups to leave the queue. Returns the admission the follow-up
+        /// held while the result published.
+        private func finishClaudeRunWithStalePublication(
+            fixture: Fixture,
+            claude: StartupTestClaudeRecorder,
+            runtime: StartupTestClaudeRuntime
+        ) async throws -> AgentRunStartupTicket? {
+            let session = fixture.session
+            var followUpAdmission: AgentRunStartupTicket?
+            fixture.viewModel.test_setTerminalPublicationOverride { _, _, session in
+                followUpAdmission = session.unresolvedStartupTicket
+                return .stale
+            }
+            fixture.cleanup.releases.append { fixture.viewModel.test_setTerminalPublicationOverride(nil) }
+            await runtime.emit(.approvalCancelled(requestID: "approval"))
+            try await eventually { session.runState == .running }
+            let headTurnID = try XCTUnwrap(claude.sentTurnIDs.first)
+            await runtime.emit(.turnCompleted(turnID: headTurnID, status: .completed))
+            try await eventually(seconds: 15) { session.runState == .completed }
+            try await eventually { session.pendingInstructions.isEmpty }
+            return followUpAdmission
+        }
+
+        func testManualSubmissionIsRefusedWhileAnUnrelatedMCPDispatchIsStillInFlight() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            fixture.session.selectedAgent = .claudeCode
+            _ = try await activateMCPControl(fixture: fixture, sessionID: fixture.sessionID)
+            let first = try fixture.submit("first")
+            try await startupTestJoin(first.task)
+            try await eventually { claude.sentMessages.count == 1 && fixture.session.runState == .running }
+
+            // Steer S has made its submission and is held in its delivery bookkeeping.
+            let bookkeepingGate = StartupTestHeldGate()
+            fixture.cleanup.heldGates.append(bookkeepingGate)
+            var dispatches = 0
+            fixture.viewModel.test_afterMCPDispatchSubmission = {
+                dispatches += 1
+                if dispatches == 1 { await bookkeepingGate.wait() }
+            }
+            let viewModel = fixture.viewModel
+            let sessionID = fixture.sessionID
+            let steer = Task { @MainActor in
+                _ = try? await viewModel.mcpDispatchInstruction(sessionID: sessionID, text: "steer", allowStartingRun: false)
+            }
+            fixture.cleanup.join(steer)
+            try await eventually { bookkeepingGate.isWaiting }
+
+            // The run ends and manual H starts while S is still in flight.
+            try await settle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            XCTAssertFalse(fixture.session.runState.isActive)
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "H manual", tabID: fixture.tabID), .submitted)
+            let head = try XCTUnwrap(fixture.session.unresolvedStartupTicket)
+            fixture.cleanup.tickets.append(head)
+
+            XCTAssertEqual(
+                fixture.viewModel.submitUserTurn(text: "F manual", tabID: fixture.tabID),
+                .blocked(message: AgentModeViewModel.manualSubmissionDuringStartupMessage),
+                "an unrelated in-flight dispatch let a competing start through"
+            )
+            XCTAssertFalse(fixture.session.items.contains { $0.kind == .user && $0.text == "F manual" })
+            XCTAssertEqual(head.followerTasks, [])
+
+            bookkeepingGate.release()
+            try await startupTestJoin(head.task)
+            XCTAssertEqual(head.phase, .accepted)
+            try await eventually { claude.sentMessages.contains { $0.contains("H manual") } }
+            XCTAssertFalse(claude.sentMessages.contains { $0.contains("F manual") })
+        }
+
+        func testHydrationDeferredSubmissionFindingAnotherStartIsRefusedToTheComposer() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(gatedHydration: true, claude: claude)
+            fixture.session.selectedAgent = .claudeCode
+            // Accepted while a run is active, so it takes no start of its own before hydrating.
+            fixture.session.runState = .running
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "deferred message", tabID: fixture.tabID), .submitted)
+            XCTAssertNil(fixture.session.unresolvedStartupTicket)
+            try await eventually { fixture.hydration.isWaiting }
+
+            // While it hydrates, the run ends and another start is admitted.
+            fixture.session.runState = .completed
+            let head = try XCTUnwrap(fixture.session.installStartupTicketIfAbsent())
+            defer { head.resolve(.cancelled) }
+            fixture.hydration.release()
+
+            try await eventually {
+                fixture.viewModel.retrieveDraftText(for: fixture.tabID).contains("deferred message")
+            }
+            XCTAssertFalse(fixture.session.items.contains { $0.kind == .user }, "the refused submission reached the transcript")
+            XCTAssertTrue(fixture.session.unresolvedStartupTicket === head)
+            XCTAssertEqual(head.followerTasks, [])
+            XCTAssertEqual(fixture.startAgentRunCalls.count, 0)
+            XCTAssertEqual(claude.runtimesCreated, 0)
+        }
+
+        func testExternalStartsOwnDispatchPassesItsPendingStartAndNoOtherDispatchDoes() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            fixture.session.selectedAgent = .claudeCode
+            fixture.session.testInstallPersistentSessionBinding(sessionID: fixture.sessionID)
+            let startOwner = UUID()
+            _ = try await fixture.viewModel.mcpActivateControlContext(
+                forTabID: fixture.tabID,
+                sessionID: fixture.sessionID,
+                originatingConnectionID: UUID(),
+                startPending: true,
+                pendingStartOwner: startOwner,
+                markSessionAsMCPOriginated: true,
+                requireInactiveRunState: true
+            )
+            let sessionID = fixture.sessionID
+            let viewModel = fixture.viewModel
+            fixture.cleanup.afterStartsSettle.append {
+                await viewModel.mcpDeactivateControlContext(sessionID: sessionID, cleanupSessionStore: true)
+            }
+
+            do {
+                _ = try await fixture.viewModel.mcpDispatchInstruction(
+                    sessionID: sessionID,
+                    text: "intruder",
+                    allowStartingRun: true
+                )
+                XCTFail("a dispatch that does not own the pending start was accepted")
+            } catch {
+                XCTAssertTrue("\(error)".contains("startup_pending"), "\(error)")
+            }
+            XCTAssertFalse(fixture.session.items.contains { $0.kind == .user })
+            XCTAssertEqual(fixture.session.mcpPendingStartOwner, startOwner)
+
+            let delivery = try await fixture.viewModel.mcpDispatchInstruction(
+                sessionID: sessionID,
+                text: "own start",
+                allowStartingRun: true,
+                pendingStartOwner: startOwner
+            )
+            XCTAssertEqual(delivery, .startedRun)
+            let started = try XCTUnwrap(fixture.session.startupTicket)
+            fixture.cleanup.tickets.append(started)
+            try await startupTestJoin(started.task)
+            XCTAssertEqual(started.phase, .accepted)
+            try await eventually { claude.sentMessages.count == 1 }
+            XCTAssertTrue(claude.sentMessages[0].contains("own start"), claude.sentMessages[0])
+        }
+
+        func testSubmissionsSteerARunWhoseRunnerOwnsTheStart() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            fixture.session.selectedAgent = .claudeCode
+            let first = try fixture.submit("first")
+            try await startupTestJoin(first.task)
+            try await eventually { claude.sentMessages.count == 1 && fixture.session.runState == .running }
+            let attemptID = try XCTUnwrap(fixture.session.activeRunAttemptID)
+
+            // Between the runner beginning its attempt and the start resolving, nothing suspends, so
+            // that state is set up directly: a start in dispatch over the run its runner now owns.
+            let dispatching = try XCTUnwrap(fixture.session.installStartupTicketIfAbsent())
+            dispatching.markDispatching()
+            defer { dispatching.resolve(.accepted) }
+
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "manual steer", tabID: fixture.tabID), .submitted)
+            XCTAssertEqual(fixture.submitAsMCPDispatch("dispatched steer"), .submitted)
+            XCTAssertTrue(fixture.session.items.contains { $0.kind == .user && $0.text == "manual steer" })
+            XCTAssertTrue(fixture.session.items.contains { $0.kind == .user && $0.text == "dispatched steer" })
+            XCTAssertTrue(fixture.session.startupTicket === dispatching, "a steering submission started a run of its own")
+            XCTAssertEqual(fixture.session.activeRunAttemptID, attemptID)
+            XCTAssertEqual(claude.runtimesCreated, 1)
+        }
+
+        func testQueuedFollowUpIsAdmittedBeforeItsRunsResultPublishes() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            fixture.session.selectedAgent = .claudeCode
+            let registration = try await activateMCPControl(fixture: fixture, sessionID: fixture.sessionID)
+            let head = try fixture.submit("head")
+            try await startupTestJoin(head.task)
+            try await eventually { claude.sentMessages.count == 1 }
+            let headEpoch = try XCTUnwrap(fixture.session.activeRunOwnership?.turnEpoch)
+            try await MCPRoutingWaiter.notifyRouted(runID: XCTUnwrap(fixture.session.runID))
+
+            let runtime = try XCTUnwrap(claude.runtimes.last)
+            await runtime.emit(.approvalRequest(Self.claudeApprovalRequest(id: "approval")))
+            try await eventually(seconds: 15) { fixture.session.runState == .waitingForApproval }
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "queued", tabID: fixture.tabID), .submitted)
+            let followUpItemID = try XCTUnwrap(fixture.session.items.last { $0.kind == .user }?.id)
+            try pinQueuedEstimate(of: followUpItemID, to: 4_000_004, in: fixture.session)
+            await runtime.emit(.approvalCancelled(requestID: "approval"))
+            try await eventually { fixture.session.runState == .running }
+
+            // H's result is held before it reaches the store.
+            let publicationGate = StartupTestHeldGate()
+            fixture.cleanup.heldGates.append(publicationGate)
+            var publications = 0
+            fixture.viewModel.test_beforeTerminalPublication = {
+                publications += 1
+                if publications == 1 { await publicationGate.wait() }
+            }
+            let headTurnID = try XCTUnwrap(claude.sentTurnIDs.first)
+            await runtime.emit(.turnCompleted(turnID: headTurnID, status: .completed))
+            try await eventually(seconds: 15) { publicationGate.isWaiting }
+            XCTAssertTrue(fixture.session.runLifecycle.terminalCommitInProgress)
+            XCTAssertFalse(fixture.session.runState.isActive)
+            let followUpTicket = try XCTUnwrap(
+                fixture.session.unresolvedStartupTicket,
+                "the follow-up was not admitted before its run's result published"
+            )
+            XCTAssertEqual(followUpTicket.optimisticUserItemID, followUpItemID)
+
+            // Starts arriving in the gap are refused rather than started beside the follow-up.
+            do {
+                _ = try await fixture.viewModel.mcpDispatchInstruction(
+                    sessionID: fixture.sessionID,
+                    text: "dispatched intruder",
+                    allowStartingRun: true
+                )
+                XCTFail("a dispatch started a run in the publication gap")
+            } catch {
+                XCTAssertTrue("\(error)".contains("startup_pending"), "\(error)")
+            }
+            XCTAssertEqual(
+                fixture.viewModel.submitUserTurn(text: "manual intruder", tabID: fixture.tabID),
+                .blocked(message: AgentModeViewModel.manualSubmissionDuringStartupMessage)
+            )
+            XCTAssertNil(fixture.session.activeRunAttemptID, "an attempt began while the result was publishing")
+            let storeEpoch = await AgentRunSessionStore.currentEpoch(for: registration)
+            XCTAssertEqual(storeEpoch, headEpoch, "the store advanced before the result published")
+
+            publicationGate.release()
+            try await eventually(seconds: 15) { followUpTicket.phase == .accepted }
+            try await eventually { claude.sentMessages.count == 2 }
+            XCTAssertTrue(claude.sentMessages[1].contains("queued"), claude.sentMessages[1])
+            let followUpEpoch = try XCTUnwrap(fixture.session.activeRunOwnership?.turnEpoch)
+            XCTAssertNotEqual(followUpEpoch.id, headEpoch.id)
+            XCTAssertEqual(fixture.session.activeNonCodexTurnTokenAccumulator?.estimatedUserInputTokens, 4_000_004)
+            let headResult = await AgentRunSessionStore.snapshot(for: .init(registration: registration, epoch: headEpoch))
+            XCTAssertEqual(headResult?.status, .completed)
+            XCTAssertFalse(claude.sentMessages.contains { $0.contains("intruder") })
+            XCTAssertEqual(fixture.session.pendingInstructions, [])
+            XCTAssertEqual(fixture.session.pendingNonCodexUserInputTokenQueue, [])
+        }
+
+        func testStartAcceptedWhileTheResultPublishesWaitsForThePublication() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            fixture.session.selectedAgent = .claudeCode
+            let registration = try await activateMCPControl(fixture: fixture, sessionID: fixture.sessionID)
+            let head = try fixture.submit("head")
+            try await startupTestJoin(head.task)
+            try await eventually { claude.sentMessages.count == 1 }
+            let headEpoch = try XCTUnwrap(fixture.session.activeRunOwnership?.turnEpoch)
+            try await MCPRoutingWaiter.notifyRouted(runID: XCTUnwrap(fixture.session.runID))
+
+            let publicationGate = StartupTestHeldGate()
+            fixture.cleanup.heldGates.append(publicationGate)
+            var publications = 0
+            fixture.viewModel.test_beforeTerminalPublication = {
+                publications += 1
+                if publications == 1 { await publicationGate.wait() }
+            }
+            let runtime = try XCTUnwrap(claude.runtimes.last)
+            let headTurnID = try XCTUnwrap(claude.sentTurnIDs.first)
+            await runtime.emit(.turnCompleted(turnID: headTurnID, status: .completed))
+            try await eventually(seconds: 15) { publicationGate.isWaiting }
+            XCTAssertNil(fixture.session.unresolvedStartupTicket)
+
+            // With nothing queued, a new start is admitted in the gap and waits for the publication.
+            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "next", tabID: fixture.tabID), .submitted)
+            let next = try XCTUnwrap(fixture.session.unresolvedStartupTicket)
+            fixture.cleanup.tickets.append(next)
+            try await eventually { fixture.session.runLifecycle.test_terminalCommitCompletionWaiterCount == 1 }
+            XCTAssertEqual(next.phase, .queued)
+            XCTAssertNil(fixture.session.activeRunAttemptID, "an attempt began while the result was publishing")
+            let storeEpoch = await AgentRunSessionStore.currentEpoch(for: registration)
+            XCTAssertEqual(storeEpoch, headEpoch, "the store advanced before the result published")
+
+            publicationGate.release()
+            try await startupTestJoin(next.task)
+            XCTAssertEqual(next.phase, .accepted)
+            try await eventually { claude.sentMessages.count == 2 }
+            XCTAssertTrue(claude.sentMessages[1].contains("next"), claude.sentMessages[1])
+            let headResult = await AgentRunSessionStore.snapshot(for: .init(registration: registration, epoch: headEpoch))
+            XCTAssertEqual(headResult?.status, .completed)
+            let nextEpoch = try XCTUnwrap(fixture.session.activeRunOwnership?.turnEpoch)
+            XCTAssertNotEqual(nextEpoch.id, headEpoch.id)
+        }
+
+        func testRejectedStartLeavesALiveRunWithoutATicketRunning() async throws {
+            let claude = StartupTestClaudeRecorder()
+            let fixture = makeFixture(claude: claude)
+            fixture.session.selectedAgent = .claudeCode
+            // Bound up front, so the follow-up start installs no binding that would already make
+            // H's ticket stale.
+            fixture.session.testInstallPersistentSessionBinding(sessionID: fixture.sessionID)
+            var rejectRunStarts = false
+            fixture.viewModel.test_agentAvailabilityForRunOverride = { _ in !rejectRunStarts }
+            let settlementGate = StartupTestHeldGate()
+            fixture.cleanup.heldGates.append(settlementGate)
+            fixture.viewModel.test_beforeStartRejectedSettlement = {
+                await settlementGate.wait()
+            }
+            let head = try fixture.submit("head")
+            rejectRunStarts = true
+            try await eventually { settlementGate.isWaiting }
+            rejectRunStarts = false
+
+            // Every run start takes a startup ticket first, so no path starts a run beside H's
+            // unresolved one; the live run is set up directly to hold the settlement to never
+            // failing a run it does not own.
+            let liveOwnership = fixture.session.beginRunAttempt(source: "test.liveRunWithoutTicket")
+            fixture.session.runState = .running
+            let liveAttemptID = liveOwnership.attemptID
+
+            XCTAssertTrue(fixture.session.startupTicket === head && head.isUnresolved && head.ownership == nil)
+            settlementGate.release()
+            try await startupTestJoin(head.task)
+            XCTAssertEqual(head.phase, .rejected)
+            XCTAssertTrue(fixture.session.runState.isActive, "the rejected start failed the live run")
+            XCTAssertEqual(fixture.session.activeRunAttemptID, liveAttemptID)
+        }
+
+        private static func claudeApprovalRequest(id: String) -> AgentApprovalRequest {
+            AgentApprovalRequest(
+                requestID: .claudeControl(id),
+                method: "can_use_tool",
+                kind: .commandExecution,
+                threadID: "thread",
+                turnID: "turn",
+                itemID: "item",
+                reason: nil,
+                command: nil,
+                cwd: nil,
+                grantRoot: nil,
+                proposedExecpolicyAmendmentJSON: nil,
+                details: []
+            )
+        }
+
+        private func pinQueuedEstimate(
+            of submissionID: UUID,
+            to tokens: Int,
+            in session: AgentModeViewModel.TabSession,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) throws {
+            let index = try XCTUnwrap(
+                session.pendingNonCodexUserInputTokenQueue.firstIndex { $0.submissionID == submissionID },
+                "no estimate is queued for the submission",
+                file: file,
+                line: line
+            )
+            session.pendingNonCodexUserInputTokenQueue[index].tokens = tokens
+        }
+
         func testCancellingPromotedHeadWithdrawsFollowerStillAwaitingDispatchAuthorization() async throws {
             let fixture = makeFixture(gatedReadinessCalls: [1, 2])
             let first = try fixture.submit("rejected head")
             try await eventually { fixture.readiness.isWaiting(1) }
-            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "promoted", tabID: fixture.tabID), .submitted)
+            XCTAssertEqual(fixture.submitAsMCPDispatch("promoted"), .submitted)
             let promotedTasks = Set(first.followerTasks)
             let tracker = fixture.session.codexSteerAckTracker
             let attemptID = tracker.beginAttempt()
@@ -301,7 +938,7 @@ import XCTest
             let fixture = makeFixture(gatedReadinessCalls: [1])
             let head = try fixture.submit("head")
             try await eventually { fixture.readiness.isWaiting(1) }
-            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "follower", tabID: fixture.tabID), .submitted)
+            XCTAssertEqual(fixture.submitAsMCPDispatch("follower"), .submitted)
             let followers = head.followerTasks
             XCTAssertEqual(followers.count, 1)
             let followerGateTicket = try XCTUnwrap(head.followerDispatchGateTickets.first)
@@ -461,7 +1098,7 @@ import XCTest
             let fixture = makeFixture(gatedHydration: true)
             let head = try fixture.submit("head")
             try await eventually { fixture.hydration.isWaiting }
-            XCTAssertEqual(fixture.viewModel.submitUserTurn(text: "follower", tabID: fixture.tabID), .submitted)
+            XCTAssertEqual(fixture.submitAsMCPDispatch("follower"), .submitted)
             XCTAssertTrue(fixture.session.startupTicket === head)
             let followers = head.followerTasks
             XCTAssertEqual(followers.count, 1)
@@ -625,6 +1262,7 @@ import XCTest
                 sessionID: sessionID,
                 originatingConnectionID: UUID(),
                 startPending: true,
+                pendingStartOwner: UUID(),
                 markSessionAsMCPOriginated: true,
                 requireInactiveRunState: true
             )
@@ -661,15 +1299,16 @@ import XCTest
         private func makeFixture(
             gatedReadinessCalls: Set<Int> = [],
             gateControllerStartup: Bool = false,
-            gatedHydration: Bool = false
+            gatedHydration: Bool = false,
+            claude: StartupTestClaudeRecorder? = nil
         ) -> Fixture {
             let readiness = StartupTestGatedReadiness(gatedCalls: gatedReadinessCalls)
             let controller = StartupTestCodexController(gatesStartup: gateControllerStartup)
-            let viewModel = AgentModeViewModel(
-                testWorkspacePath: storageRoot.path,
-                testWorkspaceDirectory: storageRoot,
-                codexControllerFactory: { _, _, _, _, _, _ in controller },
-                mcpServerEnabler: { await readiness.enter() }
+            let viewModel = startupTestMakeViewModel(
+                storageRoot: storageRoot,
+                readiness: readiness,
+                controller: controller,
+                claude: claude
             )
             let session = startupTestCodexSession()
             let hydration = StartupTestHeldGate()

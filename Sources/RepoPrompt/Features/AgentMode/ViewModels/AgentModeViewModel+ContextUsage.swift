@@ -25,17 +25,12 @@ extension AgentModeViewModel {
         session.contextCompactedAt = nil
     }
 
-    func dequeuePendingNonCodexUserTokens(for session: TabSession) -> Int? {
-        guard !session.pendingNonCodexUserInputTokenQueue.isEmpty else { return nil }
-        return session.pendingNonCodexUserInputTokenQueue.removeFirst()
-    }
-
-    func startNonCodexTurnAccountingIfNeeded(for session: TabSession, initialMessage: String) {
+    func startNonCodexTurnAccountingIfNeeded(for session: TabSession, initialMessage: String, submissionID: UUID?) {
         guard let estimator = nonCodexContextUsageEstimator(for: session.selectedAgent) else { return }
         if session.activeNonCodexTurnTokenAccumulator != nil {
             finalizeNonCodexTurnUsageIfNeeded(for: session, promptTokens: nil, completionTokens: nil, contextUsedTokens: nil)
         }
-        estimator.beginTurn(session: session, initialMessage: initialMessage)
+        estimator.beginTurn(session: session, initialMessage: initialMessage, submissionID: submissionID)
     }
 
     func addUserInputTokensToActiveNonCodexTurn(_ tokens: Int, for session: TabSession) {

@@ -17,31 +17,22 @@ final class ClaudeContextUsageEstimator: ContextUsageEstimating {
     @discardableResult
     func enqueueUserTurnEstimate(
         messageForProvider: String,
+        submissionID: UUID,
         session: AgentTabSession
     ) -> Int {
         let estimate = max(0, tokenEstimator(messageForProvider))
-        session.pendingNonCodexUserInputTokenQueue.append(estimate)
+        session.pendingNonCodexUserInputTokenQueue.append(.init(submissionID: submissionID, tokens: estimate))
         return estimate
     }
 
-    @discardableResult
-    func replaceNextQueuedUserTurnEstimate(
-        messageForProvider: String,
-        session: AgentTabSession
-    ) -> Int? {
-        guard !session.pendingNonCodexUserInputTokenQueue.isEmpty else { return nil }
-        let estimate = max(0, tokenEstimator(messageForProvider))
-        session.pendingNonCodexUserInputTokenQueue[0] = estimate
-        return estimate
+    func dequeueQueuedUserTurnEstimate(session: AgentTabSession, submissionID: UUID?) -> Int? {
+        // A turn with no submission owns no queued estimate and is estimated from its message.
+        submissionID.flatMap { session.takeQueuedUserInputTokenEstimate(forSubmission: $0)?.tokens }
     }
 
-    func dequeueQueuedUserTurnEstimate(session: AgentTabSession) -> Int? {
-        guard !session.pendingNonCodexUserInputTokenQueue.isEmpty else { return nil }
-        return session.pendingNonCodexUserInputTokenQueue.removeFirst()
-    }
-
-    func beginTurn(session: AgentTabSession, initialMessage: String) {
-        let userTokens = dequeueQueuedUserTurnEstimate(session: session) ?? tokenEstimate(for: initialMessage)
+    func beginTurn(session: AgentTabSession, initialMessage: String, submissionID: UUID?) {
+        let userTokens = dequeueQueuedUserTurnEstimate(session: session, submissionID: submissionID)
+            ?? tokenEstimate(for: initialMessage)
         session.activeNonCodexTurnTokenAccumulator = AgentModeViewModel.NonCodexTurnTokenAccumulator(
             estimatedUserInputTokens: max(0, userTokens),
             estimatedToolInputTokens: 0,

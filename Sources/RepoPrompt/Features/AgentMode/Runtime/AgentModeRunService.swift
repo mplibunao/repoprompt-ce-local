@@ -112,7 +112,8 @@ final class AgentModeRunService {
         initialUserMessage: String,
         initialMessageForRun: String,
         attachments: [AgentImageAttachment],
-        codexFallbackContext: AgentTabSession.CodexFallbackSubmissionContext? = nil
+        codexFallbackContext: AgentTabSession.CodexFallbackSubmissionContext? = nil,
+        submissionID: UUID? = nil
     ) async -> CodexAgentModeCoordinator.NativeSendOutcome? {
         assert(session.tabID == tabID, "AgentModeRunService.startRun requires the originating tab ID to match the AgentTabSession tab ID")
         let selectedAgent = session.selectedAgent
@@ -122,6 +123,10 @@ final class AgentModeRunService {
             workspacePath = try dependencies.workspacePathProvider(session)
         } catch {
             let message = Self.providerStartupFailureMessage(for: error)
+            // The rejected submission will start no turn, so its estimate is not left for another.
+            if let submissionID {
+                session.removeQueuedUserInputTokenEstimates(forSubmissions: [submissionID])
+            }
             await failAcceptedStartBeforeProvider(session: session, message: message, attachments: attachments)
             return selectedAgent == .codexExec ? .failed(message: message) : nil
         }
@@ -174,6 +179,7 @@ final class AgentModeRunService {
                 initialUserMessage: initialUserMessage,
                 initialMessageForRun: initialMessageForRun,
                 attachments: attachments,
+                submissionID: submissionID,
                 makeLease: makeLease
             )
             return nil
@@ -186,6 +192,7 @@ final class AgentModeRunService {
                 initialMessageForRun: initialMessageForRun,
                 attachments: attachments,
                 runRequest: acpRunRequest,
+                submissionID: submissionID,
                 makeLease: makeLease
             )
             return nil
@@ -196,6 +203,7 @@ final class AgentModeRunService {
             initialUserMessage: initialUserMessage,
             initialMessageForRun: initialMessageForRun,
             attachments: attachments,
+            submissionID: submissionID,
             makeLease: makeLease
         )
         return nil
@@ -398,13 +406,11 @@ final class AgentModeRunService {
                 session.pendingACPSteeringInstructions.removeFirst(steeringBatch.count)
 
                 let providerTextForSend = coalescedACPProviderText(for: steeringBatch)
-                var dequeuedUserInputTokens: [Int] = []
-                for _ in steeringBatch {
-                    guard !session.pendingNonCodexUserInputTokenQueue.isEmpty else { break }
-                    dequeuedUserInputTokens.append(session.pendingNonCodexUserInputTokenQueue.removeFirst())
+                let dequeuedUserInputTokens = steeringBatch.compactMap { steering in
+                    steering.optimisticUserItemID.flatMap(session.takeQueuedUserInputTokenEstimate(forSubmission:))
                 }
                 let steeringUserInputTokens = dequeuedUserInputTokens.count == steeringBatch.count
-                    ? dequeuedUserInputTokens.reduce(0, +)
+                    ? dequeuedUserInputTokens.map(\.tokens).reduce(0, +)
                     : hooks.usage.estimateRuntimeTokens(providerTextForSend)
                 hooks.usage.addUserInputTokensToActiveNonCodexTurn(steeringUserInputTokens, session)
 
@@ -559,6 +565,12 @@ final class AgentModeRunService {
         requeueACPSteeringAsFollowUp(instructions, tabID: tabID, session: session, reason: reason)
     }
 
+    #if DEBUG
+        func test_requeueAllQueuedACPSteeringAsFollowUp(session: AgentTabSession) {
+            requeueAllQueuedACPSteeringAsFollowUp(tabID: session.tabID, session: session, reason: "test")
+        }
+    #endif
+
     private func coalescedACPProviderText(
         for instructions: [AgentTabSession.ACPSteeringInstruction]
     ) -> String {
@@ -613,20 +625,30 @@ final class AgentModeRunService {
         session: AgentTabSession,
         reason: String
     ) {
-        var providerTexts = [coalescedACPProviderText(for: instructions)]
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !providerTexts.isEmpty else { return }
+        let providerText = coalescedACPProviderText(for: instructions)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !providerText.isEmpty else { return }
+        // One follow-up turn delivers all of the coalesced instructions, so it takes all of their
+        // estimates.
+        let submissionIDs = instructions.compactMap(\.optimisticUserItemID)
+        if let target = submissionIDs.first {
+            session.mergeQueuedUserInputTokenEstimates(of: submissionIDs, into: target)
+        }
+        let followUp = AgentQueuedInstruction(
+            text: providerText,
+            submissionID: submissionIDs.first,
+            constituentSubmissionIDs: submissionIDs,
+            restorationDraftText: instructions
+                .map { $0.draftText.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+        )
         if session.runState == .completed, session.acpController != nil {
-            let first = providerTexts.removeFirst()
-            if !providerTexts.isEmpty {
-                session.pendingInstructions.insert(contentsOf: providerTexts, at: 0)
-            }
             session.mcpFollowUpRunPending = true
-            hooks.continuation.startFollowUpRun(session, first)
+            hooks.continuation.startFollowUpRun(session, followUp, nil)
             return
         }
-        session.pendingInstructions.insert(contentsOf: providerTexts, at: 0)
+        session.pendingInstructions.insert(followUp, at: 0)
         session.isDirty = true
         hooks.bindingObservation.updateBindings(session)
         hooks.persistence.scheduleSave(session)
@@ -833,10 +855,8 @@ final class AgentModeRunService {
 
                 let steering = session.pendingClaudeSteeringInstructions.removeFirst()
                 steeringDebugLog("[AgentRunSteeringWake] Claude flush dequeued steering id=\(steering.id) tab=\(tabID) runID=\(runID) attempt=\(runAttemptID) remaining=\(session.pendingClaudeSteeringInstructions.count)")
-                let dequeuedUserInputTokens: Int? = {
-                    guard !session.pendingNonCodexUserInputTokenQueue.isEmpty else { return nil }
-                    return session.pendingNonCodexUserInputTokenQueue.removeFirst()
-                }()
+                let dequeuedUserInputTokens = steering.optimisticUserItemID
+                    .flatMap(session.takeQueuedUserInputTokenEstimate(forSubmission:))
 
                 let augmentedSteeringText = await hooks.providerInput.augmentUserMessageForProviderSend(
                     steering.providerText,
@@ -940,7 +960,7 @@ final class AgentModeRunService {
         let drafts = (
             session.pendingClaudeSteeringInstructions.map(\.draftText)
                 + session.pendingACPSteeringInstructions.map(\.draftText)
-                + session.pendingInstructions
+                + session.pendingInstructions.map(\.restorationDraftText)
         )
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
