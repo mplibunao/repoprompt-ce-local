@@ -300,6 +300,48 @@ import XCTest
             )
         }
 
+        func testSelectAgentAndModelLeavesPendingStartOnItsAcceptedAgentAndModel() async throws {
+            let fixture = makeFixture()
+            fixture.viewModel.test_setCurrentTabIDOverride(fixture.tabID)
+            fixture.cleanup.releases.append { [weak viewModel = fixture.viewModel] in
+                viewModel?.test_setCurrentTabIDOverride(nil)
+            }
+            fixture.session.selectedModelRaw = AgentModel.gpt54High.rawValue
+            fixture.session.selectedReasoningEffortRaw = CodexReasoningEffort.high.rawValue
+            fixture.viewModel.applySessionToBindings(fixture.session)
+
+            let occupying = fixture.session.codexDispatchSerialGate.issueTicket()
+            fixture.cleanup.releases.append {
+                fixture.session.codexDispatchSerialGate.cancel(occupying)
+            }
+            let startup = try fixture.submit("queued start")
+            let dispatchGateTicket = try XCTUnwrap(startup.dispatchGateTicket)
+            try await eventually { fixture.session.codexDispatchSerialGate.test_hasWaiter(for: dispatchGateTicket) }
+            XCTAssertTrue(fixture.session.hasPendingStartup)
+
+            let originalAgent = fixture.session.selectedAgent
+            let originalModel = fixture.session.selectedModelRaw
+            let originalEffort = fixture.session.selectedReasoningEffortRaw
+            XCTAssertEqual(originalAgent, .codexExec)
+            XCTAssertEqual(originalModel, AgentModel.gpt54High.rawValue)
+            fixture.viewModel.selectAgentAndModel(
+                agent: .claudeCode,
+                rawModel: AgentModel.claudeSonnet.rawValue
+            )
+            XCTAssertEqual(fixture.session.selectedAgent, originalAgent)
+            XCTAssertEqual(fixture.session.selectedModelRaw, originalModel)
+            XCTAssertEqual(fixture.session.selectedReasoningEffortRaw, originalEffort)
+
+            fixture.session.codexDispatchSerialGate.cancel(occupying)
+            try await eventually { fixture.controller.startUserTurnTexts == ["queued start"] }
+            XCTAssertEqual(fixture.session.selectedAgent, originalAgent)
+            XCTAssertEqual(fixture.session.selectedModelRaw, originalModel)
+            XCTAssertEqual(fixture.session.selectedReasoningEffortRaw, originalEffort)
+            try await eventually { !fixture.session.hasPendingStartup }
+            try await fixture.completeActiveTurn(turnID: "queued-start-turn")
+            try await startupTestJoin(startup.task)
+        }
+
         func testMCPConfigureRejectsWhenStartArrivesDuringSelectionCommit() async throws {
             let fixture = makeFixture()
             fixture.viewModel.test_setCurrentTabIDOverride(fixture.tabID)

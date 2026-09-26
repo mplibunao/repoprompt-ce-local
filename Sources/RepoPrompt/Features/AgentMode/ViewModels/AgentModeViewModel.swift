@@ -1383,6 +1383,17 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         selectedModelRaw = rawModel
     }
 
+    func selectAgentAndModel(agent: AgentProviderKind, rawModel: String) {
+        if let session = activeSession,
+           session.hasPendingStartup,
+           agent != session.selectedAgent
+        {
+            return
+        }
+        selectedAgent = agent
+        selectModel(rawModel: rawModel)
+    }
+
     func selectACPModelParameter(
         _ target: ACPModelParameterSelection,
         openCodeDiscoveryKey: OpenCodeACPModelParameterKey? = nil

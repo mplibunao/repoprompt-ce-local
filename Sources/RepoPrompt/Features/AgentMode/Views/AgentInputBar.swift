@@ -135,8 +135,7 @@ struct AgentInputBar: View {
             },
             canSelectAgentInCurrentChat: { agent in agentModeVM.canSelectAgentInCurrentChat(agent) },
             selectAgentModel: { agent, rawModel in
-                agentModeVM.selectedAgent = agent
-                agentModeVM.selectModel(rawModel: rawModel)
+                agentModeVM.selectAgentAndModel(agent: agent, rawModel: rawModel)
             },
             reasoningEffortOptionsForCurrentSelection: { agentModeVM.reasoningEffortOptionsForCurrentSelection() },
             selectReasoningEffort: { effort in agentModeVM.selectReasoningEffort(effort) },
