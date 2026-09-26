@@ -49,6 +49,7 @@ extension AgentModeViewModel {
             acpModelParameterControls: acpControls,
             availableAgents: availableAgents,
             isProviderPickerLockedForCurrentTab: isProviderPickerLocked(tabID: tabID),
+            isAgentPickerDisabledForPendingStartup: session?.hasPendingStartup ?? false,
             lockedAgentSelectionMessage: lockedAgentSelectionMessage(tabID: tabID),
             autoEditEnabled: autoEditEnabled,
             stagedSlashCommand: stagedSlashCommandProps(tabID: tabID),
@@ -181,6 +182,11 @@ extension AgentModeViewModel {
         #endif
         reconcileOpenCodeModelParameterObservation()
         ui.composer.update(makeComposerProps(tabID: tabID))
+    }
+
+    func syncComposerUIStateIfCurrent(_ session: TabSession) {
+        guard session.tabID == currentTabID else { return }
+        syncComposerUIState()
     }
 
     func syncAllActiveUIState(tabID: UUID? = nil) {

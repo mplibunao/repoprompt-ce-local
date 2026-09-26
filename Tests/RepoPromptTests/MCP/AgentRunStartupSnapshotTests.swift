@@ -284,6 +284,346 @@ import XCTest
             XCTAssertEqual(stored?.status, .completed)
         }
 
+        func testMCPConfigureAndPickerRejectProviderChangeWhileCodexStartIsQueued() async throws {
+            try await assertProviderChangeRejectedWhileStartIsPending(hold: .codexDispatchGate)
+        }
+
+        func testMCPConfigureAndPickerRejectProviderChangeWhileClaudeStartIsHeldBeforeRunner() async throws {
+            try await assertProviderChangeRejectedWhileStartIsPending(hold: .claudeBeforeRunner)
+        }
+
+        func testMCPConfigureAndPickerRejectClaudeFamilyChangeWhileStartIsPending() async throws {
+            try await assertProviderChangeRejectedWhileStartIsPending(
+                hold: .claudeBeforeRunner,
+                otherAgent: .claudeCodeGLM,
+                deferProviderLockUntilSend: false
+            )
+        }
+
+        func testMCPConfigureRejectsWhenStartArrivesDuringSelectionCommit() async throws {
+            let fixture = makeFixture()
+            fixture.viewModel.test_setCurrentTabIDOverride(fixture.tabID)
+            fixture.cleanup.releases.append { [weak viewModel = fixture.viewModel] in
+                viewModel?.test_setCurrentTabIDOverride(nil)
+                viewModel?.test_beforeMCPSelectionCommit = nil
+            }
+            fixture.viewModel.applySessionToBindings(fixture.session)
+            let recorder = StartupTestPublicationRecorder()
+            recorder.install(on: fixture.viewModel)
+            _ = try await fixture.activateMCPControl(startPending: true)
+
+            let occupying = fixture.session.codexDispatchSerialGate.issueTicket()
+            fixture.cleanup.releases.append {
+                fixture.session.codexDispatchSerialGate.cancel(occupying)
+            }
+            let commitGate = StartupTestHeldGate()
+            fixture.cleanup.heldGates.append(commitGate)
+            fixture.viewModel.test_beforeMCPSelectionCommit = { await commitGate.wait() }
+            let capturedPermissionProfile = fixture.session.permissionProfile
+            let capturedCodexController = fixture.session.codexController.map { ObjectIdentifier($0) }
+            let capturedCodexGeneration = fixture.session.codexControllerGeneration
+
+            let configureTask = Task { @MainActor in
+                try await fixture.viewModel.mcpConfigureSession(
+                    tabID: fixture.tabID,
+                    agentRaw: AgentProviderKind.claudeCode.rawValue,
+                    modelRaw: nil,
+                    reasoningEffortRaw: nil
+                )
+            }
+            try await eventually { commitGate.isWaiting }
+
+            let startup = try fixture.submit("queued start")
+            let dispatchGateTicket = try XCTUnwrap(startup.dispatchGateTicket)
+            try await eventually { fixture.session.codexDispatchSerialGate.test_hasWaiter(for: dispatchGateTicket) }
+            XCTAssertTrue(fixture.session.hasPendingStartup)
+
+            commitGate.release()
+            do {
+                try await configureTask.value
+                XCTFail("mcpConfigureSession changed the agent after a start installed a ticket")
+            } catch let error as MCPError {
+                guard case let .invalidParams(message) = error else {
+                    return XCTFail("Expected invalidParams, got \(error)")
+                }
+                XCTAssertEqual(message, AgentModeViewModel.startupPendingConfigureRejectionMessage)
+            }
+            XCTAssertEqual(fixture.session.selectedAgent, .codexExec)
+            XCTAssertEqual(fixture.session.permissionProfile, capturedPermissionProfile)
+            XCTAssertEqual(fixture.session.codexController.map { ObjectIdentifier($0) }, capturedCodexController)
+            XCTAssertEqual(fixture.session.codexControllerGeneration, capturedCodexGeneration)
+
+            fixture.session.codexDispatchSerialGate.cancel(occupying)
+            try await eventually { fixture.controller.startUserTurnTexts == ["queued start"] }
+            try await eventually { !fixture.session.hasPendingStartup }
+            XCTAssertFalse(
+                fixture.viewModel.makeComposerProps(tabID: fixture.tabID).isAgentPickerDisabledForPendingStartup
+            )
+            try await fixture.completeActiveTurn(turnID: "queued-start-turn")
+            try await eventually { recorder.revisions.count == 1 }
+            try await startupTestJoin(startup.task)
+            XCTAssertEqual(recorder.revisions.first?.terminalState, .completed)
+        }
+
+        func testResolvingStartupInABackgroundTabLeavesTheCurrentTabPublishedComposerUnchanged() async throws {
+            let fixture = makeFixture()
+            let sessionB = startupTestCodexSession()
+            fixture.viewModel.test_installLiveSession(sessionB)
+            fixture.viewModel.test_setCurrentTabIDOverride(fixture.tabID)
+            fixture.cleanup.releases.append { [weak viewModel = fixture.viewModel] in
+                viewModel?.test_setCurrentTabIDOverride(nil)
+            }
+            fixture.viewModel.applySessionToBindings(fixture.session)
+
+            let occupying = fixture.session.codexDispatchSerialGate.issueTicket()
+            fixture.cleanup.releases.append {
+                fixture.session.codexDispatchSerialGate.cancel(occupying)
+            }
+            let startup = try fixture.submit("queued start")
+            let dispatchGateTicket = try XCTUnwrap(startup.dispatchGateTicket)
+            try await eventually { fixture.session.codexDispatchSerialGate.test_hasWaiter(for: dispatchGateTicket) }
+            XCTAssertTrue(fixture.session.hasPendingStartup)
+            XCTAssertTrue(fixture.viewModel.ui.composer.props.isAgentPickerDisabledForPendingStartup)
+
+            fixture.viewModel.test_setCurrentTabIDOverride(sessionB.tabID)
+            fixture.viewModel.applySessionToBindings(sessionB)
+            let publishedWhileB = fixture.viewModel.ui.composer.props
+            XCTAssertEqual(publishedWhileB.currentTabID, sessionB.tabID)
+            XCTAssertFalse(publishedWhileB.isAgentPickerDisabledForPendingStartup)
+
+            fixture.session.codexDispatchSerialGate.cancel(occupying)
+            try await eventually { fixture.controller.startUserTurnTexts == ["queued start"] }
+            try await eventually { !fixture.session.hasPendingStartup }
+            XCTAssertEqual(fixture.viewModel.ui.composer.props, publishedWhileB)
+            XCTAssertEqual(fixture.viewModel.ui.composer.props.currentTabID, sessionB.tabID)
+            XCTAssertFalse(fixture.viewModel.ui.composer.props.isAgentPickerDisabledForPendingStartup)
+
+            fixture.viewModel.test_setCurrentTabIDOverride(fixture.tabID)
+            fixture.viewModel.applySessionToBindings(fixture.session)
+            XCTAssertEqual(fixture.viewModel.ui.composer.props.currentTabID, fixture.tabID)
+            XCTAssertFalse(fixture.viewModel.ui.composer.props.isAgentPickerDisabledForPendingStartup)
+
+            try await fixture.completeActiveTurn(turnID: "queued-start-turn")
+            try await startupTestJoin(startup.task)
+        }
+
+        func testMCPConfigureAndPickerRejectProviderChangeWhileStartAwaitsHydration() async throws {
+            let fixture = makeFixture()
+            fixture.viewModel.test_setCurrentTabIDOverride(fixture.tabID)
+            fixture.cleanup.releases.append { [weak viewModel = fixture.viewModel] in
+                viewModel?.test_setCurrentTabIDOverride(nil)
+            }
+            fixture.viewModel.applySessionToBindings(fixture.session)
+            // Lets the post-start configure check succeed once the start is done.
+            fixture.session.pendingHandoff.defersProviderLockUntilSend = true
+            let recorder = StartupTestPublicationRecorder()
+            recorder.install(on: fixture.viewModel)
+            _ = try await fixture.activateMCPControl(startPending: true)
+
+            let occupying = fixture.session.codexDispatchSerialGate.issueTicket()
+            fixture.cleanup.releases.append {
+                fixture.session.codexDispatchSerialGate.cancel(occupying)
+            }
+            let hydration = StartupTestHeldGate()
+            fixture.cleanup.heldGates.append(hydration)
+            fixture.session.hasLoadedPersistedState = false
+            fixture.session.persistedLoadTask = Task { @MainActor in
+                await hydration.wait()
+                fixture.session.hasLoadedPersistedState = true
+            }
+
+            let startup = try fixture.submit("queued start")
+            try await eventually { hydration.isWaiting }
+            XCTAssertTrue(fixture.session.hasPendingStartup)
+            XCTAssertTrue(
+                fixture.viewModel.makeComposerProps(tabID: fixture.tabID).isAgentPickerDisabledForPendingStartup
+            )
+            fixture.viewModel.selectedAgent = .claudeCode
+            XCTAssertEqual(fixture.viewModel.selectedAgent, .codexExec)
+            XCTAssertEqual(fixture.session.selectedAgent, .codexExec)
+            let capturedModel = fixture.session.selectedModelRaw
+
+            let configureTask = Task { @MainActor in
+                try await fixture.viewModel.mcpConfigureSession(
+                    tabID: fixture.tabID,
+                    agentRaw: AgentProviderKind.claudeCode.rawValue,
+                    modelRaw: "rejected-while-starting",
+                    reasoningEffortRaw: "high"
+                )
+            }
+            hydration.release()
+            do {
+                try await configureTask.value
+                XCTFail("mcpConfigureSession changed the agent while a start was pending hydration")
+            } catch let error as MCPError {
+                guard case let .invalidParams(message) = error else {
+                    return XCTFail("Expected invalidParams, got \(error)")
+                }
+                XCTAssertEqual(message, AgentModeViewModel.startupPendingConfigureRejectionMessage)
+            }
+            XCTAssertEqual(fixture.session.selectedAgent, .codexExec)
+            XCTAssertEqual(fixture.session.selectedModelRaw, capturedModel)
+
+            try await eventually { startup.dispatchGateTicket != nil }
+            let dispatchGateTicket = try XCTUnwrap(startup.dispatchGateTicket)
+            try await eventually { fixture.session.codexDispatchSerialGate.test_hasWaiter(for: dispatchGateTicket) }
+            fixture.session.codexDispatchSerialGate.cancel(occupying)
+            try await eventually { fixture.controller.startUserTurnTexts == ["queued start"] }
+            try await eventually { !fixture.session.hasPendingStartup }
+            XCTAssertFalse(
+                fixture.viewModel.makeComposerProps(tabID: fixture.tabID).isAgentPickerDisabledForPendingStartup
+            )
+            try await fixture.completeActiveTurn(turnID: "queued-start-turn")
+            try await eventually { recorder.revisions.count == 1 }
+            try await startupTestJoin(startup.task)
+            XCTAssertEqual(recorder.revisions.first?.terminalState, .completed)
+        }
+
+        private enum PendingStartHold {
+            case codexDispatchGate
+            case claudeBeforeRunner
+        }
+
+        /// A pending start must keep its accepted agent: configure throws `startup_pending`
+        /// without writing settings, and a picker assignment is restored.
+        private func assertProviderChangeRejectedWhileStartIsPending(
+            hold: PendingStartHold,
+            otherAgent: AgentProviderKind? = nil,
+            deferProviderLockUntilSend: Bool = true
+        ) async throws {
+            let claudeController: StartupTestClaudeController? = hold == .claudeBeforeRunner
+                ? StartupTestClaudeController()
+                : nil
+            let fixture = makeFixture(
+                selectedAgent: hold == .claudeBeforeRunner ? .claudeCode : .codexExec,
+                claudeController: claudeController
+            )
+            fixture.viewModel.test_setCurrentTabIDOverride(fixture.tabID)
+            fixture.cleanup.releases.append { [weak viewModel = fixture.viewModel] in
+                viewModel?.test_setCurrentTabIDOverride(nil)
+                viewModel?.test_beforeStartMessageAugmentation = nil
+                viewModel?.test_agentAvailabilityForRunOverride = nil
+            }
+            fixture.viewModel.applySessionToBindings(fixture.session)
+            // After the start completes, first-message lock would hide later configure
+            // success unless this start is allowed to send before the lock applies.
+            fixture.session.pendingHandoff.defersProviderLockUntilSend = deferProviderLockUntilSend
+            let originalAgent = fixture.session.selectedAgent
+            let otherAgent = otherAgent ?? (originalAgent == .codexExec ? .claudeCode : .codexExec)
+            XCTAssertEqual(fixture.viewModel.selectedAgent, originalAgent)
+
+            let recorder = StartupTestPublicationRecorder()
+            recorder.install(on: fixture.viewModel)
+            _ = try await fixture.activateMCPControl(startPending: true)
+
+            let occupying: UInt64?
+            let holdGate: StartupTestHeldGate?
+            switch hold {
+            case .codexDispatchGate:
+                let ticket = fixture.session.codexDispatchSerialGate.issueTicket()
+                occupying = ticket
+                holdGate = nil
+                fixture.cleanup.releases.append {
+                    fixture.session.codexDispatchSerialGate.cancel(ticket)
+                }
+            case .claudeBeforeRunner:
+                occupying = nil
+                let gate = StartupTestHeldGate()
+                holdGate = gate
+                fixture.cleanup.heldGates.append(gate)
+                fixture.viewModel.test_beforeStartMessageAugmentation = { _ in await gate.wait() }
+            }
+
+            let startup = try fixture.submit("queued start")
+            switch hold {
+            case .codexDispatchGate:
+                let dispatchGateTicket = try XCTUnwrap(startup.dispatchGateTicket)
+                try await eventually { fixture.session.codexDispatchSerialGate.test_hasWaiter(for: dispatchGateTicket) }
+            case .claudeBeforeRunner:
+                try await eventually { holdGate?.isWaiting == true }
+            }
+            XCTAssertTrue(fixture.session.hasPendingStartup)
+            XCTAssertTrue(
+                fixture.viewModel.makeComposerProps(tabID: fixture.tabID).isAgentPickerDisabledForPendingStartup
+            )
+
+            let capturedAgent = fixture.session.selectedAgent
+            let capturedModel = fixture.session.selectedModelRaw
+            let capturedEffort = fixture.session.selectedReasoningEffortRaw
+            do {
+                try await fixture.viewModel.mcpConfigureSession(
+                    tabID: fixture.tabID,
+                    agentRaw: otherAgent.rawValue,
+                    modelRaw: "rejected-while-starting",
+                    reasoningEffortRaw: "high"
+                )
+                XCTFail("mcpConfigureSession changed the agent while a start was pending")
+            } catch let error as MCPError {
+                guard case let .invalidParams(message) = error else {
+                    return XCTFail("Expected invalidParams, got \(error)")
+                }
+                XCTAssertEqual(message, AgentModeViewModel.startupPendingConfigureRejectionMessage)
+            }
+            XCTAssertEqual(fixture.session.selectedAgent, capturedAgent)
+            XCTAssertEqual(fixture.session.selectedModelRaw, capturedModel)
+            XCTAssertEqual(fixture.session.selectedReasoningEffortRaw, capturedEffort)
+            XCTAssertEqual(fixture.viewModel.selectedAgent, capturedAgent)
+
+            fixture.viewModel.selectedAgent = otherAgent
+            XCTAssertEqual(fixture.viewModel.selectedAgent, originalAgent)
+            XCTAssertEqual(fixture.session.selectedAgent, originalAgent)
+
+            switch hold {
+            case .codexDispatchGate:
+                try fixture.session.codexDispatchSerialGate.cancel(XCTUnwrap(occupying))
+            case .claudeBeforeRunner:
+                holdGate?.release()
+            }
+
+            switch hold {
+            case .codexDispatchGate:
+                try await eventually { fixture.controller.startUserTurnTexts == ["queued start"] }
+                try await eventually { !fixture.session.hasPendingStartup }
+                XCTAssertFalse(
+                    fixture.viewModel.makeComposerProps(tabID: fixture.tabID).isAgentPickerDisabledForPendingStartup
+                )
+                try await fixture.completeActiveTurn(turnID: "queued-start-turn")
+            case .claudeBeforeRunner:
+                let claude = try XCTUnwrap(claudeController)
+                try await eventually { await claude.sentTextCount() == 1 }
+                let sent = await claude.sentTexts()
+                XCTAssertTrue(sent.contains { $0.contains("queued start") }, "\(sent)")
+                XCTAssertFalse(fixture.session.hasPendingStartup)
+                XCTAssertFalse(
+                    fixture.viewModel.makeComposerProps(tabID: fixture.tabID).isAgentPickerDisabledForPendingStartup
+                )
+                // The Claude runner waits for MCP routing after send and before it
+                // subscribes to events. Signal routed so consumeEvents can start.
+                try await MCPRoutingWaiter.notifyRouted(runID: XCTUnwrap(fixture.session.runID))
+                await claude.finishTurn()
+            }
+
+            try await eventually { recorder.revisions.count == 1 }
+            try await startupTestJoin(startup.task)
+            XCTAssertEqual(recorder.revisions.count, 1)
+            XCTAssertEqual(recorder.revisions.first?.terminalState, .completed)
+            XCTAssertFalse(fixture.session.hasPendingStartup)
+            XCTAssertFalse(
+                fixture.viewModel.makeComposerProps(tabID: fixture.tabID).isAgentPickerDisabledForPendingStartup
+            )
+
+            try await fixture.viewModel.mcpConfigureSession(
+                tabID: fixture.tabID,
+                agentRaw: otherAgent.rawValue,
+                modelRaw: nil,
+                reasoningEffortRaw: nil
+            )
+            XCTAssertEqual(fixture.session.selectedAgent, otherAgent)
+            fixture.viewModel.applySessionToBindings(fixture.session)
+            fixture.viewModel.selectedAgent = originalAgent
+            XCTAssertEqual(fixture.session.selectedAgent, originalAgent)
+        }
+
         /// Reads the store until its snapshot for `registration` satisfies `condition`, boundedly.
         private func storeSnapshot(
             for registration: AgentRunSessionStore.Registration,
@@ -574,18 +914,30 @@ import XCTest
             }
         }
 
-        private func makeFixture(gatedReadinessCalls: Set<Int> = []) -> Fixture {
+        private func makeFixture(
+            gatedReadinessCalls: Set<Int> = [],
+            selectedAgent: AgentProviderKind = .codexExec,
+            claudeController: StartupTestClaudeController? = nil
+        ) -> Fixture {
             let readiness = StartupTestGatedReadiness(gatedCalls: gatedReadinessCalls)
             let controller = StartupTestCodexController(gatesStartup: false)
             let viewModel = AgentModeViewModel(
                 testWorkspacePath: storageRoot.path,
                 testWorkspaceDirectory: storageRoot,
                 codexControllerFactory: { _, _, _, _, _, _ in controller },
+                claudeControllerFactory: claudeController.map { claude in
+                    { _, _, _, _ in claude }
+                },
                 mcpServerReadinessRequirement: { try await readiness.require() }
             )
+            let session = startupTestCodexSession()
+            session.selectedAgent = selectedAgent
+            if selectedAgent != .codexExec {
+                viewModel.test_agentAvailabilityForRunOverride = { _ in true }
+            }
             let fixture = Fixture(
                 viewModel: viewModel,
-                session: startupTestCodexSession(),
+                session: session,
                 readiness: readiness,
                 controller: controller
             )
@@ -606,12 +958,96 @@ import XCTest
             seconds: TimeInterval = 5,
             file: StaticString = #filePath,
             line: UInt = #line,
-            _ condition: @MainActor () -> Bool
+            _ condition: @MainActor () async -> Bool
         ) async throws {
             struct ConditionTimeout: Error {}
-            if await startupTestWaitBounded(seconds: seconds, until: condition) { return }
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                if await condition() { return }
+                await Task.yield()
+                try? await Task.sleep(nanoseconds: 2_000_000)
+            }
+            if await condition() { return }
             XCTFail("Timed out waiting for condition", file: file, line: line)
             throw ConditionTimeout()
         }
+    }
+
+    /// Records Claude native start/send and completes the turn when the test asks.
+    /// Events are unbounded so a completion yielded before the runner subscribes is not dropped;
+    /// the coordinator sends first and only then asks for the stream.
+    private actor StartupTestClaudeController: NativeAgentRuntimeControlling {
+        private let eventsStream: AsyncStream<NativeAgentRuntimeEvent>
+        private let eventsContinuation: AsyncStream<NativeAgentRuntimeEvent>.Continuation
+        private var recordedSentTexts: [String] = []
+        private var sessionIsActive = false
+        private var turnInFlight = false
+        private let turnID = UUID()
+
+        init() {
+            let events = AsyncStream.makeStream(of: NativeAgentRuntimeEvent.self, bufferingPolicy: .unbounded)
+            eventsStream = events.stream
+            eventsContinuation = events.continuation
+        }
+
+        var hasActiveSession: Bool {
+            sessionIsActive
+        }
+
+        var hasTurnInFlight: Bool {
+            turnInFlight
+        }
+
+        var events: AsyncStream<NativeAgentRuntimeEvent> {
+            eventsStream
+        }
+
+        func sentTexts() -> [String] {
+            recordedSentTexts
+        }
+
+        func sentTextCount() -> Int {
+            recordedSentTexts.count
+        }
+
+        func ensureEventsStreamReady() {}
+        func resetEventsStreamForNewRun() {}
+
+        func startOrResume(
+            existingSessionID: String?,
+            model: String?,
+            effortLevel: NativeAgentRuntimeEffortLevel?,
+            systemPromptOverride: String?
+        ) async throws -> NativeAgentRuntimeSessionRef {
+            sessionIsActive = true
+            return NativeAgentRuntimeSessionRef(sessionID: existingSessionID ?? "startup-test-claude")
+        }
+
+        func currentSessionRef() -> NativeAgentRuntimeSessionRef {
+            NativeAgentRuntimeSessionRef(sessionID: "startup-test-claude")
+        }
+
+        func applyModelAndEffort(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?) async throws {}
+
+        func sendUserMessage(_ text: String) async throws -> UUID {
+            recordedSentTexts.append(text)
+            turnInFlight = true
+            return turnID
+        }
+
+        func finishTurn() {
+            turnInFlight = false
+            eventsContinuation.yield(.turnCompleted(turnID: turnID, status: .completed))
+        }
+
+        func interruptTurn(reason: String) -> NativeAgentRuntimeInterruptOutcome {
+            .noTurnInFlight
+        }
+
+        func shutdown() {
+            eventsContinuation.finish()
+        }
+
+        func respondToPermissionRequest(id: String, decision: AgentApprovalDecision) {}
     }
 #endif

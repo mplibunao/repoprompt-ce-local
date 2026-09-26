@@ -370,6 +370,10 @@ struct AgentComposerView: View, Equatable {
         props.areModelControlsDisabled
     }
 
+    private var agentPickerDisabled: Bool {
+        modelControlsDisabled || props.isAgentPickerDisabledForPendingStartup
+    }
+
     private var modelControlsDisabledTooltip: String {
         if props.isCurrentTabMCPControlled {
             return "Model and effort controls are locked while this session is controlled by an MCP agent."
@@ -378,6 +382,16 @@ struct AgentComposerView: View, Equatable {
             return "Cursor model, effort, and speed controls are locked while this run is active."
         }
         return "Model controls are temporarily unavailable."
+    }
+
+    private var agentPickerDisabledTooltip: String {
+        if let lockedMessage = props.lockedAgentSelectionMessage {
+            return lockedMessage
+        }
+        if props.isAgentPickerDisabledForPendingStartup, !modelControlsDisabled {
+            return "Agent selection is locked while this session is still starting."
+        }
+        return modelControlsDisabledTooltip
     }
 
     private var permissionBinding: AgentPermissionChromeBinding? {
@@ -781,8 +795,8 @@ struct AgentComposerView: View, Equatable {
     }
 
     private func providerChipTooltip(isLocked: Bool, lockedMessage: String?) -> String {
-        let baseTooltip: String = if modelControlsDisabled {
-            modelControlsDisabledTooltip
+        let baseTooltip: String = if agentPickerDisabled {
+            agentPickerDisabledTooltip
         } else if isLocked {
             lockedMessage ?? "This chat is limited to this agent family."
         } else {
@@ -853,8 +867,8 @@ struct AgentComposerView: View, Equatable {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
         }
-        .disabled(modelControlsDisabled)
-        .opacity(modelControlsDisabled ? 0.55 : 1.0)
+        .disabled(agentPickerDisabled)
+        .opacity(agentPickerDisabled ? 0.55 : 1.0)
         .hoverTooltip(providerChipTooltip(isLocked: isLocked, lockedMessage: lockedMessage))
         .frame(maxWidth: providerChipMaxWidth, alignment: .leading)
         .fixedSize(horizontal: true, vertical: false)

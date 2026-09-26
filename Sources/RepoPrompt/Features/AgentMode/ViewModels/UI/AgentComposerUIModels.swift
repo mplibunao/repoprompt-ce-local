@@ -305,6 +305,7 @@ struct AgentComposerProps: Equatable {
     let acpModelParameterControls: [AgentComposerModelParameterControlProps]
     let availableAgents: [AgentProviderKind]
     let isProviderPickerLockedForCurrentTab: Bool
+    let isAgentPickerDisabledForPendingStartup: Bool
     let lockedAgentSelectionMessage: String?
     let autoEditEnabled: Bool
     let stagedSlashCommand: AgentStagedSlashCommandProps?
@@ -338,6 +339,7 @@ struct AgentComposerProps: Equatable {
         acpModelParameterControls: [],
         availableAgents: [],
         isProviderPickerLockedForCurrentTab: false,
+        isAgentPickerDisabledForPendingStartup: false,
         lockedAgentSelectionMessage: nil,
         autoEditEnabled: ApplyEditsApprovalStore.globalDefaultAutoEditEnabled(),
         stagedSlashCommand: nil,

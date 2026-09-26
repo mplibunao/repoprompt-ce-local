@@ -308,13 +308,22 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 isRestoringState = false
                 return
             }
+            if let session = activeSession,
+               session.hasPendingStartup,
+               selectedAgent != session.selectedAgent
+            {
+                isRestoringState = true
+                selectedAgent = session.selectedAgent
+                isRestoringState = false
+                return
+            }
             if usesProductionAgentDefaultsAndModelPolling {
                 UserDefaults.standard.set(selectedAgent.rawValue, forKey: Self.lastUsedAgentKey)
             }
             if let session = activeSession {
                 let previousAgent = session.selectedAgent
                 if previousAgent != selectedAgent {
-                    session.invalidatePendingStartup(.superseded)
+                    assert(!session.hasPendingStartup)
                     codexCoordinator.handleProviderSwitch(from: previousAgent, to: selectedAgent, session: session)
                     claudeCoordinator.handleProviderIdentityTransitionSync(
                         session: session,
@@ -788,6 +797,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         var test_submitUserTurnResultOverride: ((String, UUID, String?) -> UserTurnSubmissionResult)?
         var test_startAgentRunObserver: (@MainActor (TabSession) -> Void)?
         var test_beforeMCPSelectionCommit: (@MainActor () async -> Void)?
+        /// Runs inside `startAgentRun` just before the initial message is augmented, with that
+        /// message, so a test can hold chosen starts at that suspension point.
+        var test_beforeStartMessageAugmentation: (@MainActor (String) async -> Void)?
         /// Holds deactivation at its restore of the approval store's auto-edit override.
         var test_beforeMCPDeactivationAutoEditRestore: (@MainActor () async -> Void)?
         /// Overrides provider availability for submissions and run starts.
@@ -1741,7 +1753,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private func handleAgentProviderAvailabilityChanged() {
         refreshAvailableAgents()
         if let activeSession,
-           activeSession.runState.isActive || activeSession.isProviderSelectionLocked
+           activeSession.runState.isActive
+           || activeSession.isProviderSelectionLocked
+           || activeSession.hasPendingStartup
         {
             return
         }
@@ -6568,6 +6582,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     }
 
     nonisolated static let mcpUnrecordedTerminalStatusText = "No terminal result was recorded for this run. It may have been interrupted during startup or execution. Send a new instruction to continue."
+    nonisolated static let startupPendingConfigureRejectionMessage =
+        "Retryable startup_pending: The session is still starting. The configuration was not changed. Retry after startup finishes; the existing run is unchanged."
     nonisolated static let mcpNonterminalPublicationStatusText = "Internal error: a terminal publication carried a nonterminal run state."
 
     /// Terminal publications come only from the terminal barrier, which accepts terminal states
@@ -8879,28 +8895,34 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             selectedModelRaw: normalized.modelRaw,
             selections: modelParameterSelections
         )
-        let previousAgent = session.selectedAgent
-        if previousAgent != normalized.agent {
-            session.invalidatePendingStartup(.superseded)
-            codexCoordinator.handleProviderSwitch(from: previousAgent, to: normalized.agent, session: session)
-            await claudeCoordinator.handleProviderIdentityTransition(
-                session: session,
-                from: previousAgent,
-                to: normalized.agent
-            )
+        if normalized.agent != session.selectedAgent, session.hasPendingStartup {
+            throw MCPError.invalidParams(Self.startupPendingConfigureRejectionMessage)
         }
 
         #if DEBUG
             await test_beforeMCPSelectionCommit?()
         #endif
-        // Recheck after awaited hydration/provider setup, then apply the complete
-        // configuration without suspension before another run can be admitted.
+        // Recheck after awaited hydration, then commit the provider change without
+        // suspension so a start cannot install a ticket between the check and the writes.
         try requireConfigurationAdmission()
         if let workspaceAuthority {
             try requireCurrentMCPWorkspaceTarget(
                 workspaceAuthority.target,
                 expectedWorkspaceID: workspaceAuthority.expectedWorkspaceID,
                 allowMatchingControlledSession: workspaceAuthority.allowMatchingControlledSession
+            )
+        }
+        if normalized.agent != session.selectedAgent, session.hasPendingStartup {
+            throw MCPError.invalidParams(Self.startupPendingConfigureRejectionMessage)
+        }
+        let previousAgent = session.selectedAgent
+        if previousAgent != normalized.agent {
+            assert(!session.hasPendingStartup)
+            codexCoordinator.handleProviderSwitch(from: previousAgent, to: normalized.agent, session: session)
+            claudeCoordinator.handleProviderIdentityTransitionSync(
+                session: session,
+                from: previousAgent,
+                to: normalized.agent
             )
         }
         session.selectedAgent = normalized.agent
@@ -15938,6 +15960,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         // The submission is accepted from here on. An inactive session records it as pending
         // startup before any asynchronous work, so cancellation and teardown can find it.
         let startupTicket = session.runState.isActive ? nil : session.installStartupTicketIfAbsent()
+        if startupTicket != nil {
+            syncComposerUIStateIfCurrent(session)
+        }
 
         // Capture and clear workflow before sending
         session.selectedWorkflow = nil
@@ -16262,7 +16287,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
     private func resolveStartupTicketAfterRunServiceReturn(
         _ ticket: AgentRunStartupTicket,
-        outcome: CodexAgentModeCoordinator.NativeSendOutcome?
+        outcome: CodexAgentModeCoordinator.NativeSendOutcome?,
+        session: TabSession
     ) {
         let resolution: AgentRunStartupTicket.Phase = switch outcome {
         case .sent?, .queuedFallback?:
@@ -16279,6 +16305,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             .rejected
         }
         ticket.resolve(resolution)
+        syncComposerUIStateIfCurrent(session)
     }
 
     /// A queued Codex submission whose gate turn arrives while its session is inactive starts a
@@ -16296,6 +16323,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         guard sessions[tabID] === session, !session.runState.isActive else { return nil }
         let previousTicket = session.startupTicket
         guard let ticket = session.installStartupTicketIfAbsent() else { return nil }
+        syncComposerUIStateIfCurrent(session)
         ticket.bindOptimisticUserItem(optimisticUserItemID)
         if let dispatchTask {
             ticket.attachTask(dispatchTask, dispatchGateTicket: dispatchGateTicket)
@@ -16356,10 +16384,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 // The session became active while a hydration-deferred submission waited, so
                 // the submission joins the active run instead of starting one.
                 ticket.resolve(.superseded)
+                syncComposerUIStateIfCurrent(session)
                 return nil
             }
             return ticket
         }()
+        if startupTicket != nil {
+            syncComposerUIStateIfCurrent(session)
+        }
         // Composer claims preserve the exact raw snapshot separately from provider-normalized text.
         let restorationDraftText = rawDraftText ?? trimmedText
 
@@ -16590,7 +16622,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     return
                 }
                 if let dispatchStartupTicket {
-                    self.resolveStartupTicketAfterRunServiceReturn(dispatchStartupTicket, outcome: sendOutcome)
+                    self.resolveStartupTicketAfterRunServiceReturn(
+                        dispatchStartupTicket,
+                        outcome: sendOutcome,
+                        session: session
+                    )
                 }
                 if sendOutcome?.didSend != true {
                     self.clearPendingCodexComputerUseActivationIfMatched(
@@ -16741,7 +16777,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     startupTicket: startupTicket
                 )
                 if let startupTicket {
-                    resolveStartupTicketAfterRunServiceReturn(startupTicket, outcome: outcome)
+                    resolveStartupTicketAfterRunServiceReturn(
+                        startupTicket,
+                        outcome: outcome,
+                        session: session
+                    )
                 }
             }
             startupTicket?.attachTask(startTask)
@@ -18059,6 +18099,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return outcome
         }
         await prepareMCPWaitTrackingForRunStart(session: session, startupTicket: startupTicket)
+        #if DEBUG
+            await test_beforeStartMessageAugmentation?(initialMessage)
+        #endif
         let augmentedInitialMessage = await augmentUserMessageForProviderSend(
             initialMessage,
             attachments: attachments,

@@ -550,6 +550,10 @@ final class AgentTabSession: ObservableObject {
         return startupTicket
     }
 
+    var hasPendingStartup: Bool {
+        unresolvedStartupTicket != nil
+    }
+
     // Settings (per-tab)
     var selectedAgent: AgentProviderKind = .claudeCode
     var selectedModelRaw: String = AgentModel.defaultModel.rawValue
