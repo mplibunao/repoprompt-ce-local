@@ -65,53 +65,25 @@ final class AnthropicProviderRequestPolicyTests: XCTestCase {
         }
     }
 
+    private struct LegacyRow {
+        let model: AIModel
+        let wireModel: String
+        let thinkingBudget: Int?
+        let streamingMaxTokens: Int
+        let nonStreamingDefaultMaxTokens: Int
+    }
+
     func testLegacyThinkingRequestShapesRemainUnchanged() throws {
-        struct LegacyRow {
-            let model: AIModel
-            let wireModel: String
-            let thinkingBudget: Int?
-            let streamingMaxTokens: Int
-            let nonStreamingDefaultMaxTokens: Int
-        }
         let rows: [LegacyRow] = [
             .init(model: .claude4Sonnet, wireModel: "claude-sonnet-4-5-20250929", thinkingBudget: nil, streamingMaxTokens: 8192, nonStreamingDefaultMaxTokens: 4096),
             .init(model: .claude45Haiku, wireModel: "claude-haiku-4-5", thinkingBudget: nil, streamingMaxTokens: 8192, nonStreamingDefaultMaxTokens: 4096),
             .init(model: .claude4SonnetThinking, wireModel: "claude-sonnet-4-5-20250929", thinkingBudget: 16000, streamingMaxTokens: 64000, nonStreamingDefaultMaxTokens: 64000),
             .init(model: .claude4SonnetThinkingMax, wireModel: "claude-sonnet-4-5-20250929", thinkingBudget: 32000, streamingMaxTokens: 64000, nonStreamingDefaultMaxTokens: 64000),
             .init(model: .claude4OpusThinking, wireModel: "claude-opus-4-6", thinkingBudget: 16000, streamingMaxTokens: 32000, nonStreamingDefaultMaxTokens: 32000),
-            .init(model: .anthropicCustom(name: "claude-opus-4-8-thinking"), wireModel: "claude-opus-4-8", thinkingBudget: 16000, streamingMaxTokens: 32000, nonStreamingDefaultMaxTokens: 32000),
-            // Saved custom names with surrounding whitespace and a differently cased suffix.
-            .init(model: .anthropicCustom(name: " claude-opus-4-8-Thinking "), wireModel: "claude-opus-4-8", thinkingBudget: 16000, streamingMaxTokens: 32000, nonStreamingDefaultMaxTokens: 32000),
-            .init(model: .anthropicCustom(name: "claude-sonnet-4-5-20250929-THINKING-max\n"), wireModel: "claude-sonnet-4-5-20250929", thinkingBudget: 32000, streamingMaxTokens: 64000, nonStreamingDefaultMaxTokens: 64000),
-            .init(model: .anthropicCustom(name: " claude-haiku-4-5 "), wireModel: "claude-haiku-4-5", thinkingBudget: nil, streamingMaxTokens: 8192, nonStreamingDefaultMaxTokens: 4096)
+            .init(model: .anthropicCustom(name: "claude-opus-4-8-thinking"), wireModel: "claude-opus-4-8", thinkingBudget: 16000, streamingMaxTokens: 32000, nonStreamingDefaultMaxTokens: 32000)
         ]
-
         for row in rows {
-            let name = row.model.rawValue
-            let expectedThinking: [String: AnyHashable]? = row.thinkingBudget.map { ["type": "enabled", "budget_tokens": $0] }
-
-            let streaming = try encodedRequest(row.model, stream: true)
-            XCTAssertEqual(streaming["model"] as? String, row.wireModel, name)
-            XCTAssertEqual(streaming["thinking"] as? [String: AnyHashable], expectedThinking, name)
-            XCTAssertEqual(streaming["max_tokens"] as? Int, row.streamingMaxTokens, name)
-            // Streaming has always used its fixed per-mode cap rather than the caller's cap.
-            XCTAssertEqual(try encodedRequest(row.model, maxTokens: 2048, stream: true)["max_tokens"] as? Int, row.streamingMaxTokens, name)
-
-            let overridden = try encodedRequest(row.model, stream: true, temperature: 0.7)
-            if row.thinkingBudget == nil {
-                XCTAssertEqual(streaming["temperature"] as? Double, 0, name)
-                XCTAssertEqual(overridden["temperature"] as? Double, 0.7, name)
-            } else {
-                XCTAssertNil(streaming["temperature"], name)
-                XCTAssertNil(overridden["temperature"], name)
-            }
-
-            let nonStreaming = try encodedRequest(row.model, stream: false, temperature: 0.7)
-            XCTAssertEqual(nonStreaming["model"] as? String, row.wireModel, name)
-            XCTAssertEqual(nonStreaming["thinking"] as? [String: AnyHashable], expectedThinking, name)
-            XCTAssertEqual(nonStreaming["max_tokens"] as? Int, row.nonStreamingDefaultMaxTokens, name)
-            XCTAssertNil(nonStreaming["temperature"], name)
-            XCTAssertEqual(try encodedRequest(row.model, maxTokens: 2048, stream: false)["max_tokens"] as? Int, 2048, name)
+            try assertLegacyRequestShape(row)
         }
 
         XCTAssertThrowsError(try AnthropicProvider.makeMessageParameters(
@@ -120,6 +92,45 @@ final class AnthropicProviderRequestPolicyTests: XCTestCase {
             maxTokens: nil,
             stream: true
         ))
+    }
+
+    func testLegacyCustomNamesAreTrimmedAndMatchThinkingSuffixesCaseInsensitively() throws {
+        let rows: [LegacyRow] = [
+            .init(model: .anthropicCustom(name: " claude-opus-4-8-Thinking "), wireModel: "claude-opus-4-8", thinkingBudget: 16000, streamingMaxTokens: 32000, nonStreamingDefaultMaxTokens: 32000),
+            .init(model: .anthropicCustom(name: "claude-sonnet-4-5-20250929-THINKING-max\n"), wireModel: "claude-sonnet-4-5-20250929", thinkingBudget: 32000, streamingMaxTokens: 64000, nonStreamingDefaultMaxTokens: 64000),
+            .init(model: .anthropicCustom(name: " claude-haiku-4-5 "), wireModel: "claude-haiku-4-5", thinkingBudget: nil, streamingMaxTokens: 8192, nonStreamingDefaultMaxTokens: 4096)
+        ]
+        for row in rows {
+            try assertLegacyRequestShape(row)
+        }
+    }
+
+    private func assertLegacyRequestShape(_ row: LegacyRow, file: StaticString = #filePath, line: UInt = #line) throws {
+        let name = row.model.rawValue
+        let expectedThinking: [String: AnyHashable]? = row.thinkingBudget.map { ["type": "enabled", "budget_tokens": $0] }
+
+        let streaming = try encodedRequest(row.model, stream: true)
+        XCTAssertEqual(streaming["model"] as? String, row.wireModel, name, file: file, line: line)
+        XCTAssertEqual(streaming["thinking"] as? [String: AnyHashable], expectedThinking, name, file: file, line: line)
+        XCTAssertEqual(streaming["max_tokens"] as? Int, row.streamingMaxTokens, name, file: file, line: line)
+        // Streaming has always used its fixed per-mode cap rather than the caller's cap.
+        XCTAssertEqual(try encodedRequest(row.model, maxTokens: 2048, stream: true)["max_tokens"] as? Int, row.streamingMaxTokens, name, file: file, line: line)
+
+        let overridden = try encodedRequest(row.model, stream: true, temperature: 0.7)
+        if row.thinkingBudget == nil {
+            XCTAssertEqual(streaming["temperature"] as? Double, 0, name, file: file, line: line)
+            XCTAssertEqual(overridden["temperature"] as? Double, 0.7, name, file: file, line: line)
+        } else {
+            XCTAssertNil(streaming["temperature"], name, file: file, line: line)
+            XCTAssertNil(overridden["temperature"], name, file: file, line: line)
+        }
+
+        let nonStreaming = try encodedRequest(row.model, stream: false, temperature: 0.7)
+        XCTAssertEqual(nonStreaming["model"] as? String, row.wireModel, name, file: file, line: line)
+        XCTAssertEqual(nonStreaming["thinking"] as? [String: AnyHashable], expectedThinking, name, file: file, line: line)
+        XCTAssertEqual(nonStreaming["max_tokens"] as? Int, row.nonStreamingDefaultMaxTokens, name, file: file, line: line)
+        XCTAssertNil(nonStreaming["temperature"], name, file: file, line: line)
+        XCTAssertEqual(try encodedRequest(row.model, maxTokens: 2048, stream: false)["max_tokens"] as? Int, 2048, name, file: file, line: line)
     }
 
     private func encodedRequest(

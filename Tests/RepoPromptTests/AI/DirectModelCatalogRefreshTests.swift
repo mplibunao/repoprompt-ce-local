@@ -84,7 +84,13 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
             XCTAssertEqual(entry.rawValue, "azure_custom___azure_default__\(row.raw)")
             XCTAssertEqual(AIModel.fromModelName(entry.rawValue), entry)
             XCTAssertEqual(entry.displayName, "azure/\(row.displayName)")
-            try assertRoute(unconfigured.requestRoute(for: entry), deploymentID: row.wireModel, row: row)
+            let route = try unconfigured.requestRoute(for: entry)
+            assertRoute(route, deploymentID: row.wireModel, row: row)
+
+            // Every request path resolves the cap from the route's base model; an explicit cap wins.
+            XCTAssertEqual(unconfigured.resolvedMaxTokens(for: route.baseModel, override: nil), 128_000, row.raw)
+            XCTAssertEqual(unconfigured.resolvedMaxTokens(for: row.model, override: nil), 128_000, row.raw)
+            XCTAssertEqual(unconfigured.resolvedMaxTokens(for: route.baseModel, override: 4096), 4096, row.raw)
         }
 
         // Settings picker entries are built from the default deployment descriptors.
@@ -196,6 +202,104 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         // Anthropic's hyphenated IDs are not OpenRouter slugs, and restricted Mythos has no preset.
         XCTAssertNil(AIModel.fromModelName("anthropic/claude-sonnet-5-5"))
         XCTAssertFalse(openRouterModels.contains { $0.rawValue.contains("mythos") })
+    }
+
+    // MARK: - Catalog identity
+
+    /// Every payload-free `AIModel` case, in declaration order. `AIModel` cannot be `CaseIterable`,
+    /// so `isPayloadFree(_:)` keeps this list honest: a new case does not compile until it is
+    /// classified there, and a new payload-free case belongs here too.
+    private let staticModels: [AIModel] = [
+        .gpt41, .gpt5, .gpt5Low, .gpt5High, .gpt5XHigh,
+        .gpt54, .gpt54Low, .gpt54High, .gpt54XHigh, .gpt54Mini, .gpt54MiniLow, .gpt54MiniHigh, .gpt54MiniXHigh, .gpt54Nano,
+        .gpt61Sol, .gpt61SolLow, .gpt61SolHigh, .gpt61SolXHigh, .gpt61SolMax,
+        .gpt6Astra, .gpt6AstraLow, .gpt6AstraHigh, .gpt6AstraXHigh, .gpt6AstraMax,
+        .gpt6Luna, .gpt6LunaLow, .gpt6LunaHigh, .gpt6LunaXHigh, .gpt6Sol,
+        .gpt5CodexLow, .gpt5CodexMed, .gpt5CodexHigh, .gpt5CodexXHigh,
+        .codexCliGpt56SolLow, .codexCliGpt56SolMedium, .codexCliGpt56SolHigh, .codexCliGpt56SolXHigh, .codexCliGpt56SolMax, .codexCliGpt56SolUltra,
+        .codexCliGpt56TerraLow, .codexCliGpt56TerraMedium, .codexCliGpt56TerraHigh, .codexCliGpt56TerraXHigh, .codexCliGpt56TerraMax, .codexCliGpt56TerraUltra,
+        .codexCliGpt56LunaLow, .codexCliGpt56LunaMedium, .codexCliGpt56LunaHigh, .codexCliGpt56LunaXHigh, .codexCliGpt56LunaMax,
+        .codexCliGpt5Low, .codexCliGpt5Medium, .codexCliGpt5High, .codexCliGpt5XHigh,
+        .codexCliGpt54Low, .codexCliGpt54Medium, .codexCliGpt54High, .codexCliGpt54XHigh, .codexCliGpt5Mini,
+        .codexCliGpt5CodexLow, .codexCliGpt5CodexMedium, .codexCliGpt5CodexHigh, .codexCliGpt5CodexXHigh, .codexCliGpt5CodexMini,
+        .gpt4o, .o3, .o1Preview, .o1Mini, .gpt5Pro, .gpt5ProXHigh, .gpt54Pro, .gpt54ProXHigh, .o3Low, .o3High,
+        .claudeSonnet55, .claudeSonnet5, .claudeOpus55, .claudeOpus5, .claudeFable51, .claudeMythos51,
+        .claude45Haiku, .claude4Sonnet, .claude4SonnetThinking, .claude4SonnetThinkingMax, .claude4Opus, .claude4OpusThinking,
+        .geminiFlashLatest, .gemini2flashlite, .geminiProLatest, .geminiFlash2, .geminiFlash25, .geminiFlash25LitePreview,
+        .geminiFlashThinking, .geminiPro25, .gemini3p1ProPreview, .gemini3FlashPreview,
+        .deepseekChat, .deepseekReasoner, .ollama,
+        .openrouterDeepseekChat, .openrouterGpt5, .openrouterGeminiFlash, .openrouterGeminiPro, .openrouterClaude4Sonnet, .openrouterClaude4Opus,
+        .openrouterGpt61Sol, .openrouterGpt6Astra, .openrouterGpt6Luna, .openrouterClaudeSonnet55, .openrouterClaudeOpus55, .openrouterClaudeFable51,
+        .openrouterGeminiPro25,
+        .fireworksDeepseekV3p1Terminus, .fireworksGLM46, .fireworksKimiK2Instruct0905, .fireworksGptOss120b,
+        .fireworksQwen3235bA22bThinking2507, .fireworksQwen3Coder480bA35bInstruct, .fireworksQwen3235bA22bInstruct2507,
+        .grok40709, .grokCodeFast1, .grok4FastReasoning, .grok4FastNonReasoning, .groqKimi,
+        .zaiGLM52, .zaiGLM5, .zaiGLM5_0, .zaiGLM5Turbo, .zaiGLM47, .zaiGLM47Flash, .zaiGLM46, .zaiGLM45, .zaiGLM45Air, .zaiGLM45Flash,
+        .claudeCode, .claudeCodeSonnet, .claudeCodeHaiku, .claudeCodeOpus
+    ]
+
+    /// Exhaustive over `AIModel` without a `default`.
+    private func isPayloadFree(_ model: AIModel) -> Bool {
+        switch model {
+        case .openAIServiceTierVariant, .openrouterCustom, .openaiCustom, .openaiCustomResponses, .openaiCustomReasoning,
+             .anthropicCustom, .geminiCustom, .deepseekCustom, .fireworksCustom, .azureCustom, .grokCustom, .groqCustom,
+             .zaiCustom, .codexCustom, .openCodeCustom, .cursorCustom, .grokBuildCustom,
+             .customProvider, .customProviderUser, .claudeCodeModel:
+            false
+        case .gpt41, .gpt5, .gpt5Low, .gpt5High, .gpt5XHigh,
+             .gpt54, .gpt54Low, .gpt54High, .gpt54XHigh, .gpt54Mini, .gpt54MiniLow, .gpt54MiniHigh, .gpt54MiniXHigh, .gpt54Nano,
+             .gpt61Sol, .gpt61SolLow, .gpt61SolHigh, .gpt61SolXHigh, .gpt61SolMax,
+             .gpt6Astra, .gpt6AstraLow, .gpt6AstraHigh, .gpt6AstraXHigh, .gpt6AstraMax,
+             .gpt6Luna, .gpt6LunaLow, .gpt6LunaHigh, .gpt6LunaXHigh, .gpt6Sol,
+             .gpt5CodexLow, .gpt5CodexMed, .gpt5CodexHigh, .gpt5CodexXHigh,
+             .codexCliGpt56SolLow, .codexCliGpt56SolMedium, .codexCliGpt56SolHigh, .codexCliGpt56SolXHigh, .codexCliGpt56SolMax, .codexCliGpt56SolUltra,
+             .codexCliGpt56TerraLow, .codexCliGpt56TerraMedium, .codexCliGpt56TerraHigh, .codexCliGpt56TerraXHigh, .codexCliGpt56TerraMax, .codexCliGpt56TerraUltra,
+             .codexCliGpt56LunaLow, .codexCliGpt56LunaMedium, .codexCliGpt56LunaHigh, .codexCliGpt56LunaXHigh, .codexCliGpt56LunaMax,
+             .codexCliGpt5Low, .codexCliGpt5Medium, .codexCliGpt5High, .codexCliGpt5XHigh,
+             .codexCliGpt54Low, .codexCliGpt54Medium, .codexCliGpt54High, .codexCliGpt54XHigh, .codexCliGpt5Mini,
+             .codexCliGpt5CodexLow, .codexCliGpt5CodexMedium, .codexCliGpt5CodexHigh, .codexCliGpt5CodexXHigh, .codexCliGpt5CodexMini,
+             .gpt4o, .o3, .o1Preview, .o1Mini, .gpt5Pro, .gpt5ProXHigh, .gpt54Pro, .gpt54ProXHigh, .o3Low, .o3High,
+             .claudeSonnet55, .claudeSonnet5, .claudeOpus55, .claudeOpus5, .claudeFable51, .claudeMythos51,
+             .claude45Haiku, .claude4Sonnet, .claude4SonnetThinking, .claude4SonnetThinkingMax, .claude4Opus, .claude4OpusThinking,
+             .geminiFlashLatest, .gemini2flashlite, .geminiProLatest, .geminiFlash2, .geminiFlash25, .geminiFlash25LitePreview,
+             .geminiFlashThinking, .geminiPro25, .gemini3p1ProPreview, .gemini3FlashPreview,
+             .deepseekChat, .deepseekReasoner, .ollama,
+             .openrouterDeepseekChat, .openrouterGpt5, .openrouterGeminiFlash, .openrouterGeminiPro, .openrouterClaude4Sonnet, .openrouterClaude4Opus,
+             .openrouterGpt61Sol, .openrouterGpt6Astra, .openrouterGpt6Luna, .openrouterClaudeSonnet55, .openrouterClaudeOpus55, .openrouterClaudeFable51,
+             .openrouterGeminiPro25,
+             .fireworksDeepseekV3p1Terminus, .fireworksGLM46, .fireworksKimiK2Instruct0905, .fireworksGptOss120b,
+             .fireworksQwen3235bA22bThinking2507, .fireworksQwen3Coder480bA35bInstruct, .fireworksQwen3235bA22bInstruct2507,
+             .grok40709, .grokCodeFast1, .grok4FastReasoning, .grok4FastNonReasoning, .groqKimi,
+             .zaiGLM52, .zaiGLM5, .zaiGLM5_0, .zaiGLM5Turbo, .zaiGLM47, .zaiGLM47Flash, .zaiGLM46, .zaiGLM45, .zaiGLM45Air, .zaiGLM45Flash,
+             .claudeCode, .claudeCodeSonnet, .claudeCodeHaiku, .claudeCodeOpus:
+            true
+        }
+    }
+
+    func testEveryStaticModelHasDistinctCatalogIdentityAndRawValue() {
+        XCTAssertEqual(staticModels.filter { !isPayloadFree($0) }.map { "\($0)" }, [])
+
+        // Equality and hashing compare catalog identities, so a case mapped to another case's
+        // identity is indistinguishable from it in comparisons, sets, and dictionary keys.
+        var sharedIdentities: [String] = []
+        for (index, model) in staticModels.enumerated() {
+            for other in staticModels[(index + 1)...] where other == model {
+                sharedIdentities.append("\(model) == \(other)")
+            }
+        }
+        XCTAssertEqual(sharedIdentities, [])
+        XCTAssertEqual(Set(staticModels).count, staticModels.count)
+
+        // Only hidden legacy cases may lack a catalog entry and share the fallback raw value.
+        let legacyUncataloged = Set([
+            "gpt41", "gpt4o", "o3", "o3Low", "o3High", "o1Preview", "o1Mini",
+            "geminiFlashLatest", "geminiProLatest", "geminiFlashThinking", "openrouterGeminiPro"
+        ])
+        let uncataloged = staticModels.filter { $0.rawValue == "unknown_model" }.map { "\($0)" }
+        XCTAssertEqual(uncataloged.filter { !legacyUncataloged.contains($0) }, [])
+        let catalogedRawValues = staticModels.map(\.rawValue).filter { $0 != "unknown_model" }
+        let repeatedRawValues = Dictionary(grouping: catalogedRawValues, by: { $0 }).filter { $0.value.count > 1 }.keys.sorted()
+        XCTAssertEqual(repeatedRawValues, [])
     }
 
     // MARK: - Priority hints

@@ -583,7 +583,7 @@ final class AzureOpenAIProvider: AIProvider {
         return [.gpt5Pro, .gpt5ProXHigh, .gpt54Pro, .gpt54ProXHigh].contains(model)
     }
 
-    private func resolvedMaxTokens(for model: AIModel?, override: Int?) -> Int? {
+    func resolvedMaxTokens(for model: AIModel?, override: Int?) -> Int? {
         if let override {
             return override
         }
