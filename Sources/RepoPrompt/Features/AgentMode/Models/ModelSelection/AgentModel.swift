@@ -106,6 +106,8 @@ enum AgentModel: String, CaseIterable, Codable {
     // Claude Code full model IDs (static known versions; no dynamic probing)
     case claudeFable51 = "claude-fable-5-1"
     case claudeFable5 = "claude-fable-5"
+    case claudeMythos51 = "claude-mythos-5-1"
+    case claudeSonnet55 = "claude-sonnet-5-5"
     case claudeSonnet5 = "claude-sonnet-5"
     case claudeSonnet46 = "claude-sonnet-4-6"
     case claudeSonnet45 = "claude-sonnet-4-5"
@@ -203,6 +205,8 @@ enum AgentModel: String, CaseIterable, Codable {
         case .claudeOpus1m: "Opus Latest (1M)"
         case .claudeFable51: "Fable 5.1"
         case .claudeFable5: "Fable 5"
+        case .claudeMythos51: "Mythos 5.1 (Restricted)"
+        case .claudeSonnet55: "Sonnet 5.5"
         case .claudeSonnet5: "Sonnet 5"
         case .claudeSonnet46: "Sonnet 4.6"
         case .claudeSonnet45: "Sonnet 4.5"
@@ -294,6 +298,8 @@ enum AgentModel: String, CaseIterable, Codable {
         case .claudeOpus1m: "Claude Opus with 1M token context. Best for large codebases and tasks requiring extensive context."
         case .claudeFable51: "Pinned Claude Fable 5.1 with 1M context for demanding reasoning and long-horizon agentic work. Requires Claude Code 2.1.255 or newer."
         case .claudeFable5: "Pinned Claude Fable 5 with 1M context for demanding reasoning and long-horizon agentic work."
+        case .claudeMythos51: "Pinned Claude Mythos 5.1 with 1M context. Restricted-access tier; only works for entitled accounts and is never used as a default."
+        case .claudeSonnet55: "Pinned Claude Sonnet 5.5 with 1M context and adaptive thinking. Balanced speed and capability for everyday engineering."
         case .claudeSonnet5: "Pinned Claude Sonnet 5. Balanced speed and capability with 1M context for everyday engineering."
         case .claudeSonnet46: "Pinned Claude Sonnet 4.6. Balanced speed and capability for everyday engineering."
         case .claudeSonnet45: "Pinned Claude Sonnet 4.5. Balanced speed and capability for everyday engineering."
@@ -361,14 +367,14 @@ enum AgentModel: String, CaseIterable, Codable {
             ]
         case .claudeCode:
             // Family priority matches the Claude Code picker catalog:
-            // Fable → Opus[1M] → Opus → Sonnet → Haiku. Within each family,
+            // Fable (incl. restricted Mythos) → Opus[1M] → Opus → Sonnet → Haiku. Within each family,
             // latest aliases come first, then pinned full IDs by descending version.
             [
                 .defaultModel,
-                .claudeFable, .claudeFable51, .claudeFable5,
+                .claudeFable, .claudeFable51, .claudeFable5, .claudeMythos51,
                 .claudeOpus1m,
                 .claudeOpus, .claudeOpus55, .claudeOpus5, .claudeOpus48, .claudeOpus47, .claudeOpus46, .claudeOpus45,
-                .claudeSonnet, .claudeSonnet5, .claudeSonnet46, .claudeSonnet45,
+                .claudeSonnet, .claudeSonnet55, .claudeSonnet5, .claudeSonnet46, .claudeSonnet45,
                 .claudeHaiku, .claudeHaiku45
             ]
         case .openCode:
@@ -732,7 +738,7 @@ enum AgentModel: String, CaseIterable, Codable {
             [.complex, .engineering, .pair]
         case .claudeFable, .claudeFable51, .claudeFable5, .claudeOpus55, .claudeOpus5:
             [.complex, .engineering, .pair, .extendedContext]
-        case .claudeSonnet5:
+        case .claudeSonnet55:
             [.balanced, .engineering, .extendedContext]
         case .claudeOpus:
             [.complex, .engineering, .pair]
@@ -748,7 +754,7 @@ enum AgentModel: String, CaseIterable, Codable {
         case .gpt6SolLow, .gpt6SolMedium, .gpt6SolHigh, .gpt6SolXHigh, .gpt6SolMax,
              .gpt6LunaLow, .gpt6LunaMedium, .gpt6LunaHigh, .gpt6LunaXHigh, .gpt6LunaMax:
             1_050_000
-        case .claudeFable, .claudeFable51, .claudeFable5, .claudeSonnet5, .claudeOpus55, .claudeOpus5, .claudeOpus48, .claudeOpus1m, .glm52_1m:
+        case .claudeFable, .claudeFable51, .claudeFable5, .claudeMythos51, .claudeSonnet55, .claudeSonnet5, .claudeOpus55, .claudeOpus5, .claudeOpus48, .claudeOpus1m, .glm52_1m:
             1_000_000
         case .claudeSonnet, .claudeOpus, .claudeHaiku,
              .claudeSonnet46, .claudeSonnet45,

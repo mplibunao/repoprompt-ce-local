@@ -2099,6 +2099,10 @@ public class APISettingsViewModel: ObservableObject {
             contextBuilderVerifiedCLIProviders = []
             isContextBuilderProviderValidationComplete = false
         }
+
+        func test_setAvailableModels(_ models: [AIModel]) {
+            availableModels = models
+        }
     #endif
 
     private func resetPreferredModelIfNeeded(for provider: AIProviderType) {
@@ -2136,7 +2140,7 @@ public class APISettingsViewModel: ObservableObject {
                     honorSync: false
                 )
             } else {
-                let replacement = availableModels.first(where: { !condition($0) })?.rawValue
+                let replacement = AIModel.firstAutomaticallyEligibleModel(in: availableModels, where: { !condition($0) })?.rawValue
                 // Only re-point the Oracle when there is a real replacement model. When
                 // `replacement` is nil (no other available model — e.g. the removed provider
                 // was the only one), preserve the existing Oracle planningModel instead of
@@ -2163,7 +2167,7 @@ public class APISettingsViewModel: ObservableObject {
         }
 
         if let model = AIModel.fromModelName(currentContextBuilderModel), condition(model) {
-            if let firstAvailableModel = availableModels.first(where: { !condition($0) }) {
+            if let firstAvailableModel = AIModel.firstAutomaticallyEligibleModel(in: availableModels, where: { !condition($0) }) {
                 UserDefaults.standard.set(firstAvailableModel.rawValue, forKey: "contextBuilderModel")
             } else {
                 UserDefaults.standard.removeObject(forKey: "contextBuilderModel")

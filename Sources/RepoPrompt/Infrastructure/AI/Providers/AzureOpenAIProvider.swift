@@ -158,15 +158,14 @@ extension AzureOpenAIProvider: ResponsesJobProvider {
         model: AIModel,
         maxTokens: Int?
     ) async throws -> ResponseModel {
-        let (deploymentID, descriptor) = try deploymentInfo(for: model)
-        let (baseModel, reasoningEffort) = resolveBaseModelAndEffort(for: deploymentID, descriptor: descriptor)
-        let finalMaxTokens = resolvedMaxTokens(for: baseModel, override: maxTokens)
+        let route = try requestRoute(for: model)
+        let finalMaxTokens = resolvedMaxTokens(for: route.baseModel, override: maxTokens)
         let parameters = buildBackgroundResponseParameters(
             for: message,
             model: model,
-            deploymentID: deploymentID,
-            baseModel: baseModel,
-            reasoningEffort: reasoningEffort,
+            deploymentID: route.deploymentID,
+            baseModel: route.baseModel,
+            reasoningEffort: route.reasoningEffort,
             maxTokens: finalMaxTokens
         )
 
@@ -368,13 +367,37 @@ final class AzureOpenAIProvider: AIProvider {
 
     // MARK: - Helpers
 
+    /// Where and how a selection is sent: the deployment, the catalog model behind it, the effort,
+    /// and whether it uses the Responses API. Every request path resolves a selection through here.
+    struct RequestRoute: Equatable {
+        let deploymentID: String
+        let descriptor: AzureOpenAIConfiguration.ModelDescriptor?
+        let baseModel: AIModel?
+        let reasoningEffort: String?
+        let usesResponsesAPI: Bool
+    }
+
+    func requestRoute(for model: AIModel) throws -> RequestRoute {
+        let (deploymentID, descriptor) = try deploymentInfo(for: model)
+        let (baseModel, reasoningEffort) = resolveBaseModelAndEffort(for: deploymentID, descriptor: descriptor)
+        return RequestRoute(
+            deploymentID: deploymentID,
+            descriptor: descriptor,
+            baseModel: baseModel,
+            reasoningEffort: reasoningEffort,
+            usesResponsesAPI: shouldUseResponsesAPI(descriptor: descriptor, baseModel: baseModel)
+        )
+    }
+
     private func deploymentInfo(for model: AIModel) throws -> (id: String, descriptor: AzureOpenAIConfiguration.ModelDescriptor?) {
         switch model {
-        case let .azureCustom(name):
+        case .azureCustom:
+            // Generated catalog entries carry an internal marker; `modelName` is the deployable name.
+            let name = model.modelName
             let normalizedName = Self.normalizedModelName(from: name)
-            var descriptor = configuration.descriptor(for: name)
+            let configuredDescriptor = configuration.descriptor(for: name)
                 ?? configuration.descriptor(for: normalizedName)
-                ?? Self.defaultDescriptor(for: name)
+            var descriptor = configuredDescriptor ?? Self.defaultDescriptor(for: name)
             var deploymentID = descriptor?.id ?? name
 
             let descriptorMatchesRequested = descriptor.map {
@@ -384,7 +407,9 @@ final class AzureOpenAIProvider: AIProvider {
             if descriptor == nil || descriptorMatchesRequested {
                 if let aiModel = AIModel.fromModelName(normalizedName) {
                     let (baseModel, _) = resolveBaseModelAndEffort(for: aiModel)
-                    if baseModel != aiModel {
+                    // A configured deployment is authoritative even when it is named like an effort
+                    // variant; only a variant without its own deployment routes to the base deployment.
+                    if baseModel != aiModel, configuredDescriptor == nil {
                         let baseName = Self.normalizedModelName(from: baseModel.modelName)
                         let baseDescriptor = configuration.descriptor(for: baseName)
                             ?? Self.defaultDescriptor(for: baseName)
@@ -515,6 +540,14 @@ final class AzureOpenAIProvider: AIProvider {
             (.gpt5CodexMed, "medium")
         case .gpt5CodexLow:
             (.gpt5CodexMed, "low")
+        case .gpt61Sol, .gpt61SolLow, .gpt61SolHigh, .gpt61SolXHigh, .gpt61SolMax:
+            (.gpt61Sol, model.defaultReasoningEffort)
+        case .gpt6Astra, .gpt6AstraLow, .gpt6AstraHigh, .gpt6AstraXHigh, .gpt6AstraMax:
+            (.gpt6Astra, model.defaultReasoningEffort)
+        case .gpt6Luna, .gpt6LunaLow, .gpt6LunaHigh, .gpt6LunaXHigh:
+            (.gpt6Luna, model.defaultReasoningEffort)
+        case .gpt6Sol:
+            (.gpt6Sol, "medium")
         default:
             (model, nil)
         }
@@ -535,6 +568,9 @@ final class AzureOpenAIProvider: AIProvider {
         case .gpt5, .gpt5Low, .gpt5High, .gpt5XHigh,
              .gpt54, .gpt54Low, .gpt54High, .gpt54XHigh,
              .gpt54Mini, .gpt54MiniLow, .gpt54MiniHigh, .gpt54MiniXHigh, .gpt54Nano,
+             .gpt61Sol, .gpt61SolLow, .gpt61SolHigh, .gpt61SolXHigh, .gpt61SolMax,
+             .gpt6Astra, .gpt6AstraLow, .gpt6AstraHigh, .gpt6AstraXHigh, .gpt6AstraMax,
+             .gpt6Luna, .gpt6LunaLow, .gpt6LunaHigh, .gpt6LunaXHigh, .gpt6Sol,
              .gpt5CodexLow, .gpt5CodexMed, .gpt5CodexHigh, .gpt5CodexXHigh:
             128_000
         default:
@@ -729,14 +765,15 @@ final class AzureOpenAIProvider: AIProvider {
     // MARK: - AIProvider
 
     func streamMessage(_ aiMessage: AIMessage, model: AIModel, maxTokens: Int?) async throws -> AsyncThrowingStream<AIStreamResult, Error> {
-        let (deploymentID, descriptor) = try deploymentInfo(for: model)
-        let (baseModel, reasoningEffort) = resolveBaseModelAndEffort(for: deploymentID, descriptor: descriptor)
+        let route = try requestRoute(for: model)
+        let deploymentID = route.deploymentID
+        let baseModel = route.baseModel
+        let reasoningEffort = route.reasoningEffort
         let finalMaxTokens = resolvedMaxTokens(for: baseModel, override: maxTokens)
-        let useResponses = shouldUseResponsesAPI(descriptor: descriptor, baseModel: baseModel)
-        let streamingSupported = supportsStreaming(descriptor: descriptor, baseModel: baseModel)
+        let streamingSupported = supportsStreaming(descriptor: route.descriptor, baseModel: baseModel)
 
         // Route via Responses API when required
-        if useResponses {
+        if route.usesResponsesAPI {
             if streamingSupported {
                 // Real streaming via SSE (responseCreateStream)
                 let parameters = buildResponseParameters(
@@ -842,11 +879,13 @@ final class AzureOpenAIProvider: AIProvider {
     }
 
     func completeMessage(_ aiMessage: AIMessage, model: AIModel, maxTokens: Int?) async throws -> AICompletionResult {
-        let (deploymentID, descriptor) = try deploymentInfo(for: model)
-        let (baseModel, reasoningEffort) = resolveBaseModelAndEffort(for: deploymentID, descriptor: descriptor)
+        let route = try requestRoute(for: model)
+        let deploymentID = route.deploymentID
+        let baseModel = route.baseModel
+        let reasoningEffort = route.reasoningEffort
         let finalMaxTokens = resolvedMaxTokens(for: baseModel, override: maxTokens)
 
-        if shouldUseResponsesAPI(descriptor: descriptor, baseModel: baseModel) {
+        if route.usesResponsesAPI {
             let parameters = buildResponseParameters(
                 for: aiMessage,
                 model: model,

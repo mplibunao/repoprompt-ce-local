@@ -96,6 +96,34 @@ final class ModelPickerStringOrderingTests: XCTestCase {
             "claude-opus-5-5:max"
         ])
 
+        // Sonnet 5.5 leads the pinned Sonnet run; restricted Mythos sits after the Fable pins rather
+        // than leading the menu, labeled so users know it needs an entitled account.
+        let sonnetRunStart = try XCTUnwrap(groupRaws.firstIndex(of: "sonnet"))
+        XCTAssertEqual(
+            Array(groupRaws[sonnetRunStart...].prefix(3)),
+            ["sonnet", "claude-sonnet-5-5", "claude-sonnet-5"]
+        )
+        let fableRunStart = try XCTUnwrap(groupRaws.firstIndex(of: "fable"))
+        XCTAssertEqual(
+            Array(groupRaws[fableRunStart...].prefix(5)),
+            ["fable", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "opus[1m]"]
+        )
+        for (raw, displayName) in [("claude-sonnet-5-5", "Sonnet 5.5"), ("claude-mythos-5-1", "Mythos 5.1 (Restricted)")] {
+            let newGroup = try XCTUnwrap(menu.groups.first { $0.baseModelRaw == raw }, raw)
+            XCTAssertEqual(newGroup.displayName, displayName)
+            XCTAssertEqual(newGroup.options.map(\.displayName), ["Low", "Medium", "High", "XHigh", "Max"], raw)
+            XCTAssertEqual(
+                newGroup.options.compactMap(\.model.claudeCodeRuntimeSpecifierRaw),
+                ["low", "medium", "high", "xhigh", "max"].map { "\(raw):\($0)" }
+            )
+        }
+        XCTAssertEqual(
+            ClaudeCodeAIModelCatalog.displayName(for: "claude-mythos-5-1:high"),
+            "Claude Code Mythos 5.1 (Restricted) High"
+        )
+        XCTAssertEqual(AIModel.claudeMythos51.displayName, "Claude Mythos 5.1 (Restricted)")
+        XCTAssertEqual(menu.groups.first?.baseModelRaw, "fable")
+
         XCTAssertEqual(AgentModel(rawValue: "claude-opus-5-5"), .claudeOpus55)
         XCTAssertEqual(AgentModel.claudeOpus55.contextWindowTokens, 1_000_000)
         XCTAssertTrue(AgentModel.claudeOpus55.isExtendedContext)
