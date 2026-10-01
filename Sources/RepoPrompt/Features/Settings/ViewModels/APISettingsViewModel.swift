@@ -1019,6 +1019,8 @@ public class APISettingsViewModel: ObservableObject {
     private let codexExecutablePreflight: @MainActor @Sendable (CLIProcessLogCollector?) async -> CodexProviderHelpers.CodexExecutableResolution
     private let storedDataLoadBoundary: (@MainActor @Sendable () async -> Void)?
     private let contextBuilderProviderValidationWillBegin: (@MainActor @Sendable () async -> Void)?
+    /// Store that receives the empty-compose model seed after a successful API-key validation.
+    private let modelSeedSettingsStore: GlobalSettingsStore
     private var hasPreparedForWindowClose = false
 
     init(
@@ -1032,7 +1034,8 @@ public class APISettingsViewModel: ObservableObject {
             await CodexProviderHelpers.preflightCodexExecutable(logCollector: collector)
         },
         storedDataLoadBoundary: (@MainActor @Sendable () async -> Void)? = nil,
-        contextBuilderProviderValidationWillBegin: (@MainActor @Sendable () async -> Void)? = nil
+        contextBuilderProviderValidationWillBegin: (@MainActor @Sendable () async -> Void)? = nil,
+        modelSeedSettingsStore: GlobalSettingsStore = .shared
     ) {
         self.aiQueriesService = aiQueriesService
         self.keyManager = keyManager
@@ -1042,6 +1045,7 @@ public class APISettingsViewModel: ObservableObject {
         self.codexExecutablePreflight = codexExecutablePreflight
         self.storedDataLoadBoundary = storedDataLoadBoundary
         self.contextBuilderProviderValidationWillBegin = contextBuilderProviderValidationWillBegin
+        self.modelSeedSettingsStore = modelSeedSettingsStore
         installCLIConnectionObservers()
         installAgentAvailabilityObservers()
         refreshAgentAvailability()
@@ -1894,7 +1898,7 @@ public class APISettingsViewModel: ObservableObject {
     }
 
     private func seedPreferredComposeModelIfMissing(_ model: AIModel, reason: String) {
-        let settingsStore = GlobalSettingsStore.shared
+        let settingsStore = modelSeedSettingsStore
         let current = settingsStore.preferredComposeModelRaw()?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard current?.isEmpty ?? true else { return }
         let planning = settingsStore.planningModelRaw()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1949,11 +1953,11 @@ public class APISettingsViewModel: ObservableObject {
             case .anthropic:
                 anthropicApiKey = trimmedKey
                 isAnthropicKeyValid = true
-                seedPreferredComposeModelIfMissing(AIModel.claude4Sonnet, reason: "api_settings.validate_key.default_seed.anthropic")
+                seedPreferredComposeModelIfMissing(AIModel.claudeSonnet55, reason: "api_settings.validate_key.default_seed.anthropic")
             case .openAI:
                 openAIApiKey = trimmedKey
                 isOpenAIKeyValid = true
-                seedPreferredComposeModelIfMissing(AIModel.gpt54Mini, reason: "api_settings.validate_key.default_seed.openai")
+                seedPreferredComposeModelIfMissing(AIModel.gpt6Luna, reason: "api_settings.validate_key.default_seed.openai")
             case .gemini:
                 geminiApiKey = trimmedKey
                 isGeminiKeyValid = true
@@ -1964,7 +1968,7 @@ public class APISettingsViewModel: ObservableObject {
             case .openRouter:
                 openRouterApiKey = trimmedKey
                 isOpenRouterKeyValid = true
-                seedPreferredComposeModelIfMissing(AIModel.openrouterClaude4Sonnet, reason: "api_settings.validate_key.default_seed.openrouter")
+                seedPreferredComposeModelIfMissing(AIModel.openrouterClaudeSonnet55, reason: "api_settings.validate_key.default_seed.openrouter")
             case .azure:
                 azureBaseURL = ""
                 azureApiKey = ""

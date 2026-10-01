@@ -801,13 +801,27 @@ public enum AIModel: Equatable, Hashable {
     // DIFF PRIORITY ARRAYS
     // ==========================================================
 
+    // GPT-6.1 Sol reaches Codex only through live discovery, so its priority entries are the exact
+    // discovered option identities. Matching is by equality, so a hint wins only when Codex
+    // advertises that exact option; an absent effort falls through to the next entry.
+    private static let codexCliGpt61SolLow: AIModel = .codexCustom(name: "gpt-6.1-sol-low")
+    private static let codexCliGpt61SolMedium: AIModel = .codexCustom(name: "gpt-6.1-sol-medium")
+    private static let codexCliGpt61SolHigh: AIModel = .codexCustom(name: "gpt-6.1-sol-high")
+    private static let codexCliGpt61SolXHigh: AIModel = .codexCustom(name: "gpt-6.1-sol-xhigh")
+
     /// "Simple" diff (cheaper first).
     static let simpleDiffPriority: [AIModel] = [
         // Prioritize practical current CLI variants first
         .claudeCodeSonnet,
+        .codexCliGpt61SolMedium,
+        .codexCliGpt61SolLow,
+        .codexCliGpt61SolHigh,
         .codexCliGpt56SolMedium,
         .codexCliGpt56SolLow,
         .codexCliGpt56SolHigh,
+        .gpt61SolLow,
+        .gpt61Sol,
+        .gpt61SolHigh,
         .gpt54Low,
         .gpt54,
         .gpt54High,
@@ -816,6 +830,7 @@ public enum AIModel: Equatable, Hashable {
         .gpt41,
         .fireworksDeepseekV3p1Terminus,
         .deepseekChat, .openrouterDeepseekChat,
+        .claudeSonnet55, .openrouterClaudeSonnet55,
         .claude4Sonnet, .openrouterClaude4Sonnet,
         .gemini3p1ProPreview,
         .geminiPro25, .openrouterGeminiPro25,
@@ -834,9 +849,15 @@ public enum AIModel: Equatable, Hashable {
     static let mediumDiffPriority: [AIModel] = [
         // Prioritize practical current CLI variants first
         .claudeCodeSonnet,
+        .codexCliGpt61SolHigh,
+        .codexCliGpt61SolMedium,
+        .codexCliGpt61SolLow,
         .codexCliGpt56SolHigh,
         .codexCliGpt56SolMedium,
         .codexCliGpt56SolLow,
+        .gpt61Sol,
+        .gpt61SolHigh,
+        .gpt61SolLow,
         .gpt54,
         .gpt54High,
         .gpt54Low,
@@ -845,6 +866,7 @@ public enum AIModel: Equatable, Hashable {
         .gpt41,
         .fireworksDeepseekV3p1Terminus,
         .deepseekChat, .openrouterDeepseekChat,
+        .claudeSonnet55, .openrouterClaudeSonnet55,
         .claude4Sonnet, .openrouterClaude4Sonnet,
         .gemini3p1ProPreview,
         .geminiPro25, .openrouterGeminiPro25,
@@ -863,11 +885,17 @@ public enum AIModel: Equatable, Hashable {
     static let highDiffPriority: [AIModel] = [
         // Then other top models
         .claudeCodeSonnet,
+        .codexCliGpt61SolHigh,
+        .codexCliGpt61SolXHigh,
+        .codexCliGpt61SolMedium,
         .codexCliGpt56SolHigh,
         .codexCliGpt56SolXHigh,
         .codexCliGpt56SolMedium,
+        .gpt61SolHigh,
+        .gpt61Sol,
         .gpt54High,
         .gpt54,
+        .claudeSonnet55, .openrouterClaudeSonnet55,
         .claude4Sonnet, .openrouterClaude4Sonnet,
         .gpt5CodexLow,
         .gpt5Low,
@@ -895,8 +923,10 @@ public enum AIModel: Equatable, Hashable {
     static let simpleWholePriority: [AIModel] = [
         .claudeCodeSonnet,
         .gemini3FlashPreview,
+        .gpt6LunaLow,
         .gpt54Low,
         // Prioritize fast and affordable models
+        .gpt6Luna,
         .gpt54Mini,
         // Then other cheap/fast models
         .deepseekChat, .openrouterDeepseekChat,
@@ -921,8 +951,10 @@ public enum AIModel: Equatable, Hashable {
     static let mediumWholePriority: [AIModel] = [
         .claudeCodeSonnet,
         .gemini3FlashPreview,
+        .gpt61Sol,
         .gpt54,
         // Then the simple priorities
+        .gpt6Luna,
         .gpt54Mini,
         // fallback: everything else
         .deepseekChat, .openrouterDeepseekChat,
@@ -946,8 +978,10 @@ public enum AIModel: Equatable, Hashable {
     static let highWholePriority: [AIModel] = [
         // Prioritize higher-quality models for complex whole-file edits
         .claudeCodeSonnet,
+        .gpt61SolHigh,
         .gpt54High,
         .gemini3FlashPreview,
+        .gpt6Luna,
         .gpt54Mini,
         .geminiFlashLatest,
         // fallback: everything else
