@@ -1548,6 +1548,21 @@
           "path": "itemId",
           "presence": "required",
           "nullable": false
+        },
+        {
+          "path": "availableDecisions",
+          "presence": "optional",
+          "nullable": true
+        },
+        {
+          "path": "availableDecisions[].acceptWithExecpolicyAmendment",
+          "presence": "conditional",
+          "nullable": false
+        },
+        {
+          "path": "availableDecisions[].acceptWithExecpolicyAmendment.execpolicy_amendment",
+          "presence": "conditional",
+          "nullable": false
         }
       ],
       "responseSchema": "CommandExecutionRequestApprovalResponse.json",

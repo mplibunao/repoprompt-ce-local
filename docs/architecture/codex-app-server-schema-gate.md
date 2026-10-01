@@ -65,7 +65,7 @@ hook-key → `{trusted_hash}` object shape cannot be expressed by the current ch
 After a trust write, the post-write `hooks/list` result is the semantic success authority;
 `config/batchWrite.status` alone is not.
 
-The hardened 0.156.1 baseline checks 45 methods, 193 parameter paths, and 93 response paths. A failure names
+The hardened 0.156.1 baseline checks 45 methods, 196 parameter paths, and 93 response paths. A failure names
 the union, method, and exact missing field, required field, response path, or enum value.
 
 This is intentionally not a complete protocol mirror. New upstream methods do not fail the gate
@@ -205,6 +205,21 @@ generated; RepoPrompt never calls it, so no client change follows. No new outgoi
 Codex 0.156.1 is the first release whose model catalog advertises GPT-6 Sol and Luna, which is why
 this rotation skips 0.156.0. Model availability remains runtime-discovered through `model/list`;
 the rotation adds no static model identifier.
+
+## Approval decision constraints (2026-10-01)
+
+RepoPrompt reads `availableDecisions` on `item/commandExecution/requestApproval` and answers only
+with a decision the request offered. Codex 0.156.1 fills the field on every command approval; an
+ordinary command offers only `accept` and `cancel`, plus the amendment decision when one is
+proposed. The contract records the field as optional and nullable, and records the
+`acceptWithExecpolicyAmendment` object variant and its `execpolicy_amendment` rule, which
+RepoPrompt reads so that only the offered rule can be remembered. This raises the projection to
+45 methods, 196 parameter paths, and 93 response paths. The checker has no
+consumed-request enum check, so the plain decision names stay pinned by the response-side
+`decision` enum, which Codex generates from the same decision type. RepoPrompt leaves out offered
+entries it cannot send, such as `applyNetworkPolicyAmendment`, instead of rejecting the request, so
+the contract does not treat the offered set as an exhaustive enum.
+`item/fileChange/requestApproval` does not declare the field.
 
 ## Files and tests
 

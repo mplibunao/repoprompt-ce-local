@@ -837,6 +837,91 @@ enum AgentApprovalDecision: Hashable {
     case acceptWithExecpolicyAmendment(String)
     case decline
     case cancel
+
+    var kind: AgentApprovalDecisionKind {
+        switch self {
+        case .accept:
+            .accept
+        case .acceptForSession:
+            .acceptForSession
+        case .acceptWithExecpolicyAmendment:
+            .acceptWithExecpolicyAmendment
+        case .decline:
+            .decline
+        case .cancel:
+            .cancel
+        }
+    }
+}
+
+/// Approval decision variants RepoPrompt can send, named after the Codex app-server
+/// `CommandExecutionApprovalDecision` / `FileChangeApprovalDecision` wire values.
+enum AgentApprovalDecisionKind: String, Hashable {
+    case accept
+    case acceptForSession
+    case acceptWithExecpolicyAmendment
+    case decline
+    case cancel
+}
+
+/// The decisions a provider accepts for one approval request. Codex declares a restricted set
+/// through `availableDecisions` (a terminal-input approval offers only accept or cancel), and any
+/// other decision would answer the request with a choice the user was never offered.
+enum AgentApprovalDecisionConstraint: Hashable {
+    /// The request did not declare its decisions, so every decision RepoPrompt supports applies.
+    case unrestricted
+    /// The request declared exactly these decisions, in the provider's presentation order.
+    /// `execpolicyAmendment` is the command rule offered with `acceptWithExecpolicyAmendment`; it
+    /// is present exactly when that decision is offered, and only that rule may be remembered.
+    case offered([AgentApprovalDecisionKind], execpolicyAmendment: [String]? = nil)
+
+    func permits(_ kind: AgentApprovalDecisionKind) -> Bool {
+        switch self {
+        case .unrestricted:
+            true
+        case let .offered(kinds, _):
+            kinds.contains(kind)
+        }
+    }
+}
+
+/// A Codex exec-policy amendment is a command-prefix rule, sent as a non-empty array of strings.
+enum AgentExecpolicyAmendment {
+    static func rule(from value: Any) -> [String]? {
+        guard let rule = value as? [String], !rule.isEmpty else { return nil }
+        return rule
+    }
+
+    static func rule(fromJSON json: String) -> [String]? {
+        guard let data = json.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data)
+        else {
+            return nil
+        }
+        return rule(from: value)
+    }
+
+    static func json(for rule: [String]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: rule) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+enum AgentApprovalSubmissionResult: Equatable {
+    case sent
+    case noPendingApproval
+    /// The answer was issued for an approval that is no longer the pending one.
+    case staleRequest
+    case providerUnavailable
+    case unsupportedDecision
+    /// The request restricts its decisions and this one is not among them; nothing was sent and
+    /// the request stays pending.
+    case decisionNotOffered(offered: [AgentApprovalDecisionKind])
+    /// The amendment is not a command rule; nothing was sent and the request stays pending.
+    case invalidAmendment
+    /// The amendment differs from the rule the request offered; nothing was sent and the request
+    /// stays pending.
+    case amendmentNotOffered
 }
 
 enum AgentApprovalRequestID: Hashable {
@@ -937,6 +1022,7 @@ struct AgentApprovalRequest: Identifiable, Hashable {
     let cwd: String?
     let grantRoot: String?
     let proposedExecpolicyAmendmentJSON: String?
+    let decisionConstraint: AgentApprovalDecisionConstraint
     let details: [AgentApprovalDetail]
 
     init(
@@ -952,6 +1038,7 @@ struct AgentApprovalRequest: Identifiable, Hashable {
         cwd: String? = nil,
         grantRoot: String? = nil,
         proposedExecpolicyAmendmentJSON: String? = nil,
+        decisionConstraint: AgentApprovalDecisionConstraint = .unrestricted,
         details: [AgentApprovalDetail] = []
     ) {
         self.id = id ?? Self.stableID(
@@ -973,6 +1060,7 @@ struct AgentApprovalRequest: Identifiable, Hashable {
         self.cwd = cwd
         self.grantRoot = grantRoot
         self.proposedExecpolicyAmendmentJSON = proposedExecpolicyAmendmentJSON
+        self.decisionConstraint = decisionConstraint
         self.details = details
     }
 
@@ -1000,5 +1088,47 @@ struct AgentApprovalRequest: Identifiable, Hashable {
 
     var supportsAlwaysAllow: Bool {
         true
+    }
+
+    func offers(_ decision: AgentApprovalDecision) -> Bool {
+        decisionConstraint.permits(decision.kind)
+    }
+
+    /// The remembered-approval choice: the exec-policy amendment when one is proposed (or, for a
+    /// restricted request, offered), otherwise session-wide approval when offered.
+    var alwaysAllowDecision: AgentApprovalDecision? {
+        guard supportsAlwaysAllow else { return nil }
+        switch decisionConstraint {
+        case .unrestricted:
+            if let amendment = proposedExecpolicyAmendmentJSON, !amendment.isEmpty {
+                return .acceptWithExecpolicyAmendment(amendment)
+            }
+            return .acceptForSession
+        case let .offered(kinds, execpolicyAmendment):
+            if let execpolicyAmendment, let amendment = AgentExecpolicyAmendment.json(for: execpolicyAmendment) {
+                return .acceptWithExecpolicyAmendment(amendment)
+            }
+            return kinds.contains(.acceptForSession) ? .acceptForSession : nil
+        }
+    }
+
+    /// Decisions the approval card presents, rejecting choices first. Cancel appears only when the
+    /// request explicitly offers it; an unrestricted request keeps the decline/always-allow/approve
+    /// layout.
+    var presentedDecisions: [AgentApprovalDecision] {
+        var decisions: [AgentApprovalDecision] = []
+        if decisionConstraint.permits(.decline) {
+            decisions.append(.decline)
+        }
+        if case .offered = decisionConstraint, decisionConstraint.permits(.cancel) {
+            decisions.append(.cancel)
+        }
+        if let alwaysAllowDecision {
+            decisions.append(alwaysAllowDecision)
+        }
+        if decisionConstraint.permits(.accept) {
+            decisions.append(.accept)
+        }
+        return decisions
     }
 }

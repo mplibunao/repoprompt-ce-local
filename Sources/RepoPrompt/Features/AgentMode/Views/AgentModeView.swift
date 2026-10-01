@@ -2472,7 +2472,7 @@ struct AgentModeChatDetailView: View {
                 request: approval,
                 onDecision: { decision in
                     guard let tabID = currentTabID else { return }
-                    agentModeVM.submitApprovalDecision(tabID: tabID, decision: decision)
+                    agentModeVM.submitApprovalDecision(tabID: tabID, requestID: approval.id, decision: decision)
                 }
             )
             .id("pendingApproval")

@@ -744,6 +744,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
 
     private func hasPendingCodexInteraction(for session: AgentTabSession) -> Bool {
         session.pendingApproval != nil
+            || !session.queuedApprovalRequests.isEmpty
             || session.hasPendingCodexHookReviewWait
             || session.pendingPermissionsRequest != nil
             || session.pendingMCPElicitationRequest != nil
@@ -756,13 +757,14 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     @discardableResult
     private func clearCodexPendingInteractions(in session: AgentTabSession) -> Bool {
         let didClear = session.pendingApproval != nil
+            || !session.queuedApprovalRequests.isEmpty
             || session.hasPendingCodexHookReviewWait
             || session.pendingPermissionsRequest != nil
             || session.pendingMCPElicitationRequest != nil
             || !session.queuedMCPElicitationRequests.isEmpty
             || session.pendingUserInputRequest != nil
             || !session.queuedUserInputRequests.isEmpty
-        session.pendingApproval = nil
+        session.clearApprovalRequests()
         if session.hasActiveCodexHookGateOperation {
             session.resetCodexHookGateBinding()
         }
@@ -776,6 +778,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
 
     private func pendingCodexInteractionMatches(turnID: String, session: AgentTabSession) -> Bool {
         session.pendingApproval?.turnID == turnID
+            || session.queuedApprovalRequests.contains { $0.turnID == turnID }
             || session.pendingPermissionsRequest?.turnID == turnID
             || session.pendingMCPElicitationRequest?.turnID == turnID
             || session.queuedMCPElicitationRequests.contains { $0.turnID == turnID }
@@ -1446,6 +1449,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         }
         if activeFlags.contains(where: Self.isCodexWaitingOnApprovalFlag),
            session.pendingApproval == nil,
+           session.queuedApprovalRequests.isEmpty,
            !session.hasPendingCodexHookReviewWait,
            session.pendingPermissionsRequest == nil,
            session.pendingMCPElicitationRequest == nil,
@@ -8320,7 +8324,17 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             guard session.runState.isActive else { return }
             clearCodexPendingAuthRetryTurn(session)
             sealAssistantBoundary(session)
-            session.pendingApproval = request
+            // Codex awaits each approval independently and parallel tool calls can each ask for
+            // one, so a second request may arrive while the first is unanswered. Queue it: an
+            // overwritten request would never receive a response and could wedge its turn.
+            let alreadyPending = session.pendingApproval?.requestID == request.requestID
+            let alreadyQueued = session.queuedApprovalRequests.contains { $0.requestID == request.requestID }
+            guard !alreadyPending, !alreadyQueued else { return }
+            if session.pendingApproval == nil {
+                session.pendingApproval = request
+            } else {
+                session.queuedApprovalRequests.append(request)
+            }
             viewModel?.reconcileInteractiveRunState(session)
             viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
             viewModel?.publishMCPStateChange(for: session)
@@ -10493,31 +10507,57 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         return json
     }
 
+    @discardableResult
     func submitApprovalDecision(
         session: AgentTabSession,
+        requestID: UUID,
         decision: AgentApprovalDecision
-    ) {
-        guard let request = session.pendingApproval,
-              let controller = session.codexController
-        else {
-            return
+    ) -> AgentApprovalSubmissionResult {
+        guard let request = session.pendingApproval else {
+            return .noPendingApproval
+        }
+        guard request.id == requestID else {
+            return .staleRequest
         }
         if case .acceptWithExecpolicyAmendment = decision,
            request.kind != .commandExecution
         {
-            return
+            return .unsupportedDecision
         }
-        let result = buildApprovalResult(decision: decision, request: request)
-        session.pendingApproval = nil
+        if case let .offered(kinds, _) = request.decisionConstraint,
+           !kinds.contains(decision.kind)
+        {
+            return .decisionNotOffered(offered: kinds)
+        }
+        guard let response = Self.buildApprovalResponse(decision: decision) else {
+            return .invalidAmendment
+        }
+        // The serialized payload is what Codex acts on, so it is checked as well: its kind must be
+        // offered, and a remembered rule must be exactly the offered one rather than a broader one.
+        if case let .offered(kinds, offeredAmendment) = request.decisionConstraint {
+            guard kinds.contains(response.decisionKind) else {
+                return .decisionNotOffered(offered: kinds)
+            }
+            if let rule = response.execpolicyAmendment, rule != offeredAmendment {
+                return .amendmentNotOffered
+            }
+        }
+        guard let controller = session.codexController,
+              case let .codex(serverRequestID) = request.requestID
+        else {
+            return .providerUnavailable
+        }
+        session.pendingApproval = session.queuedApprovalRequests.isEmpty
+            ? nil
+            : session.queuedApprovalRequests.removeFirst()
         viewModel?.reconcileInteractiveRunState(session)
         handleRunInteractionStateChange(for: session, reason: .approvalResponseSubmitted)
         viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
-        guard case let .codex(requestID) = request.requestID else {
-            return
-        }
+        viewModel?.publishMCPStateChange(for: session)
         Task { [controller] in
-            await controller.respondToServerRequest(id: requestID, result: result)
+            await controller.respondToServerRequest(id: serverRequestID, result: response.result)
         }
+        return .sent
     }
 
     func submitPermissionsDecision(
@@ -10631,37 +10671,37 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         ]
     }
 
-    private func buildApprovalResult(decision: AgentApprovalDecision, request: AgentApprovalRequest) -> [String: Any] {
+    private struct CodexApprovalResponse {
+        let decisionKind: AgentApprovalDecisionKind
+        let execpolicyAmendment: [String]?
+        let result: [String: Any]
+    }
+
+    /// Returns nil for an amendment that is not a command rule; it is never downgraded to a
+    /// different decision.
+    private static func buildApprovalResponse(decision: AgentApprovalDecision) -> CodexApprovalResponse? {
         // The server request id already scopes routing. Keep payload to `{ decision }`.
-        let decisionValue: String
-        switch decision {
-        case .accept:
-            decisionValue = "accept"
-        case .decline:
-            decisionValue = "decline"
-        case .cancel:
-            decisionValue = "cancel"
-        case .acceptForSession:
-            decisionValue = "acceptForSession"
-        case let .acceptWithExecpolicyAmendment(amendment):
-            guard request.kind == .commandExecution else {
-                decisionValue = "decline"
-                break
-            }
-            if let data = amendment.data(using: .utf8),
-               let parsed = try? JSONSerialization.jsonObject(with: data)
-            {
-                return [
-                    "decision": [
-                        "acceptWithExecpolicyAmendment": [
-                            "execpolicy_amendment": parsed
-                        ]
+        guard case let .acceptWithExecpolicyAmendment(amendment) = decision else {
+            return CodexApprovalResponse(
+                decisionKind: decision.kind,
+                execpolicyAmendment: nil,
+                result: ["decision": decision.kind.rawValue]
+            )
+        }
+        guard let rule = AgentExecpolicyAmendment.rule(fromJSON: amendment) else {
+            return nil
+        }
+        return CodexApprovalResponse(
+            decisionKind: .acceptWithExecpolicyAmendment,
+            execpolicyAmendment: rule,
+            result: [
+                "decision": [
+                    "acceptWithExecpolicyAmendment": [
+                        "execpolicy_amendment": rule
                     ]
                 ]
-            }
-            decisionValue = "acceptForSession"
-        }
-        return ["decision": decisionValue]
+            ]
+        )
     }
 
     func clearCodexSessionState(_ session: AgentTabSession) {

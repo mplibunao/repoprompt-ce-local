@@ -24,7 +24,7 @@
             session.selectedModelRaw = defaultModelRaw(for: .codexExec)
             session.selectedReasoningEffortRaw = nil
             session.pendingAskUser = nil
-            session.pendingApproval = nil
+            session.clearApprovalRequests()
             session.pendingPermissionsRequest = nil
             session.pendingMCPElicitationRequest = nil
             session.queuedMCPElicitationRequests.removeAll()
@@ -46,7 +46,7 @@
             session.setItemsSilently([], reason: .stressHarnessReset)
             session.clearDerivedTranscriptCaches()
             session.pendingAskUser = nil
-            session.pendingApproval = nil
+            session.clearApprovalRequests()
             session.pendingPermissionsRequest = nil
             session.pendingMCPElicitationRequest = nil
             session.queuedMCPElicitationRequests.removeAll()
@@ -199,7 +199,7 @@
             session.runState = .completed
             session.runningStatusText = nil
             session.pendingAskUser = nil
-            session.pendingApproval = nil
+            session.clearApprovalRequests()
             session.pendingPermissionsRequest = nil
             session.pendingMCPElicitationRequest = nil
             session.queuedMCPElicitationRequests.removeAll()
