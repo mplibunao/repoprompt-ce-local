@@ -21,9 +21,9 @@ consumes at its current integration boundary.
 
 ## Version contract
 
-- The contract floor is **Codex CLI 0.156.1**.
-- Local validation accepts 0.156.1 or newer so a developer can detect drift before CI moves.
-- CI installs exactly `@openai/codex@0.156.1`, making the required check deterministic.
+- The contract floor is **Codex CLI 0.159.0**.
+- Local validation accepts 0.159.0 or newer so a developer can detect drift before CI moves.
+- CI installs exactly `@openai/codex@0.159.0`, making the required check deterministic.
 - The gate fails before generation when the installed CLI is older than the floor.
 
 This schema baseline and exact CI pin are distinct from
@@ -65,7 +65,7 @@ hook-key → `{trusted_hash}` object shape cannot be expressed by the current ch
 After a trust write, the post-write `hooks/list` result is the semantic success authority;
 `config/batchWrite.status` alone is not.
 
-The hardened 0.156.1 baseline checks 45 methods, 196 parameter paths, and 93 response paths. A failure names
+The current 0.159.0 baseline checks 45 methods, 196 parameter paths, and 93 response paths. A failure names
 the union, method, and exact missing field, required field, response path, or enum value.
 
 This is intentionally not a complete protocol mirror. New upstream methods do not fail the gate
@@ -220,6 +220,63 @@ consumed-request enum check, so the plain decision names stay pinned by the resp
 entries it cannot send, such as `applyNetworkPolicyAmendment`, instead of rejecting the request, so
 the contract does not treat the offered set as an exhaustive enum.
 `item/fileChange/requestApproval` does not declare the field.
+
+## 0.159.0 rotation findings (2026-10-01)
+
+This rotation moves the bundled runtime from 0.156.1 to `rust-v0.159.0`.
+
+**Official artifacts.** The repository candidate flow verified both official macOS packages in
+official online mode: release metadata, the official checksum asset, both archive hashes, the
+extracted package identities, and the generated manifest agree. Both targets keep the 0.156.1
+52-entry layout, all 30 thin Mach-Os, the pinned OpenAI signing identities, and the closed-world
+release-signing entitlement profile; only file digests change. `codex-path/rg`, Zsh, `libpcre2`,
+and `libz` change only their signatures, with unchanged normalized payloads. Upstream `LICENSE`
+and `NOTICE` and the packaged voice notice, source manifest, and licences are byte-identical to
+0.156.1.
+
+**Bounded schema.** The exact verified 0.159.0 CLI passes the bounded experimental projection at
+45 methods, 196 parameter paths, and 93 response paths, the projection set by the approval decision
+constraints above. A full generated-bundle comparison with verified 0.156.1 schemas shows only
+additive evolution: Gateway OAuth account methods and their notification, optional fields such as
+`EnvironmentAddParams.authBearerToken`, `McpResourceReadParams.target`, and thread item
+timestamps, item anchors for `thread/items/list`, the `PlanType` value `promax`, and the
+`CodexErrorInfo` values `flexUnavailable` and `tooManyDenials`. RepoPrompt calls none of the
+changed methods and reads plan types and error details as free-form text. `Turn.error` is now
+documented for interrupted as well as failed turns; RepoPrompt reads a turn error only when the
+status is `failed`, so an interrupted turn stays interrupted. The command-approval request schema,
+including `availableDecisions`, is unchanged. No new outgoing request requires 0.159.0, so the
+external admission minimum remains 0.149.0, while the schema contract and CI pin move to 0.159.0.
+
+**Model discovery.** The model catalog bundled in the 0.159.0 executable does not list GPT-6.1 Sol
+and no longer lists GPT-5.4. GPT-6.1 Sol can reach RepoPrompt only through the
+account-dependent remote model list that Codex reports through `model/list`, and the rotation adds
+no static model identifier.
+
+**Old-thread continuity.** A Codex thread created on bundled 0.156.1 in RepoPrompt-owned debug
+state resumes on bundled 0.159.0 as the same thread: the earlier conversation is retained, and a
+new turn completes with a RepoPrompt tool call. The thread's recorded `cli_version` stays 0.156.1,
+the version that created it.
+
+**Account discovery.** On 0.159.0, the server-provided model list for the ChatGPT-plan account used
+for validation advertises `gpt-6.1-sol` as the account default, with efforts from low to ultra,
+alongside `gpt-6-sol`, `gpt-6-astra`, `gpt-6-luna`, and the `gpt-5.6-*` models. That entry comes
+from server discovery, not the bundled catalog. The advertised set depends on the account and on
+when the list is fetched.
+
+**Approval behavior.** With the approval decision constraints above and user-reviewed approvals,
+command approvals offer accept, the exec-policy amendment, and cancel. Terminal-input approvals
+(`kind: writeStdin`), which Codex raises only for a terminal launched outside the sandbox, offer
+only accept and cancel. RepoPrompt presents exactly the offered choices, refuses an unoffered
+response without answering the request, and Accept and Cancel each reach a bounded outcome.
+
+Cancelling a terminal-input approval interrupts the turn, but Codex keeps the thread's open
+terminals until the Codex session shuts down or a client calls the experimental
+`thread/backgroundTerminals/clean`, which RepoPrompt does not call. A terminal launched outside the
+sandbox can outlive the cancelled turn.
+
+**Unverified.** A model-list fetch that bypasses Codex's five-minute model cache (the observed
+list came from a 0.159.0 fetch inside that window), x86_64 runtime behavior, and accounts other
+than the one used for validation.
 
 ## Files and tests
 
