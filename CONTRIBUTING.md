@@ -66,12 +66,17 @@ Work is tracked as issues and pull requests there.
    rpce-cli-debug -w 1 -e '<the check for this change>'
    ```
 
-6. The Codex review bot reviews the pull request when it is ready for review.
-   While addressing its findings, convert the pull request to a draft so the
-   open, non-draft list stays a list of reviewable work; reply to and resolve
-   each thread, commit the fix through the commit preflight, push it through
-   the push preflight, and mark the pull request ready again so the bot
-   reviews the fixed code. Repeat until a pass leaves no findings.
+6. Before asking for MP's review, run an independent review and a separate
+   refactor pass on the change, such as an orchestrated workflow's review and
+   refactor gates, and fix what they find. The Codex review bot may also
+   review the pull request when it is ready for review. Its review is optional
+   input, never a merge gate: when it does not review, nothing waits for it or
+   asks it to review again. When it posts findings, assess each one. While
+   addressing them, convert the pull request to a draft so the open, non-draft
+   list stays a list of reviewable work; fix the findings that are real
+   defects, reply with the reason for any you decline, resolve each thread,
+   commit the fix through the commit preflight, push it through the push
+   preflight, and mark the pull request ready again.
 
    ```bash
    gh pr ready <number> --undo   # draft while fixing
@@ -86,18 +91,18 @@ Work is tracked as issues and pull requests there.
    is current for everything below. If the branch conflicts with `main`,
    resolve that first: merge `origin/main` into the branch, commit the
    resolution through the commit preflight, push it through the push
-   preflight, and let the review bot and the checks run on the new head as in
-   step 6. MP's approval covers that conflict-resolution commit; any other
-   commit pushed after the approval, such as a review-bot fix, needs MP's
-   approval again before the merge. Then, with the bot's last pass clean and
-   the checks green, run the `pr-ready` lane on the final head with the
-   upstream unset so it validates `origin/main..HEAD` rather than an empty
-   range, restore the upstream, confirm the local head is the pushed head, and
-   merge with a merge commit pinned to that commit so a head that moved in the
-   meantime aborts the merge. A pull request that is part of a stack merges
-   through the stack command after the same head check; merging a lower layer
-   makes GitHub retarget and rewrite the layers above it, and MP's approval of
-   the lower layer covers that rewrite. Nothing merges into `main` directly.
+   preflight, and let the checks run on the new head. MP's approval covers
+   that conflict-resolution commit; any other commit pushed after the
+   approval, such as a review fix, needs MP's approval again before the merge.
+   Then, with every review thread resolved and the checks green, run the
+   `pr-ready` lane on the final head with the upstream unset so it validates
+   `origin/main..HEAD` rather than an empty range, restore the upstream,
+   confirm the local head is the pushed head, and merge with a merge commit
+   pinned to that commit so a head that moved in the meantime aborts the
+   merge. A pull request that is part of a stack merges through the stack
+   command after the same head check; merging a lower layer makes GitHub
+   retarget and rewrite the layers above it, and MP's approval of the lower
+   layer covers that rewrite. Nothing merges into `main` directly.
 
    ```bash
    git fetch origin
