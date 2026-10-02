@@ -39,6 +39,44 @@ final class ClaudeCompatiblePluginBridgeTests: XCTestCase {
         XCTAssertTrue(AgentModel.modelsForAgent(.claudeCode).contains(.claudeOpus55))
     }
 
+    func testClaudeCodeCatalogExposesSonnet55AndRestrictedMythos51() throws {
+        let availability = AgentModelCatalog.AvailabilityContext(
+            claudeCodeAvailable: true,
+            codexAvailable: false,
+            openCodeAvailable: false
+        )
+        let agentOptions = AgentModelCatalog.options(for: .claudeCode, availability: availability)
+        let chatMenu = AIModel.claudeCodeMenu(for: AIModel.modelsForProvider(.claudeCode))
+        let expectedEfforts = ["low", "medium", "high", "xhigh", "max"]
+
+        // The provider package (through Agent Mode options) and the chat picker must offer the same
+        // effort variants; a mismatch lets one surface accept a selection the other rejects.
+        for (model, displayName) in [(AgentModel.claudeSonnet55, "Sonnet 5.5"), (.claudeMythos51, "Mythos 5.1 (Restricted)")] {
+            let raw = model.rawValue
+            let expectedRaws = expectedEfforts.map { "\(raw):\($0)" }
+            XCTAssertEqual(agentOptions.filter { $0.rawValue.hasPrefix("\(raw):") }.map(\.rawValue), expectedRaws, raw)
+            let chatGroup = try XCTUnwrap(chatMenu.groups.first { $0.baseModelRaw == raw }, raw)
+            XCTAssertEqual(chatGroup.displayName, displayName)
+            XCTAssertEqual(chatGroup.options.compactMap(\.model.claudeCodeRuntimeSpecifierRaw), expectedRaws)
+            XCTAssertEqual(model.displayName, displayName)
+            XCTAssertTrue(AgentModel.modelsForAgent(.claudeCode).contains(model), raw)
+            XCTAssertEqual(model.contextWindowTokens, 1_000_000, raw)
+            XCTAssertEqual(AgentModel.resolvedModel(forRaw: "\(raw):high", agentKind: .claudeCode), model)
+            for effortRaw in ["\(raw):xhigh", "\(raw):max"] {
+                XCTAssertTrue(AgentModelCatalog.isValid(rawModel: effortRaw, for: .claudeCode, availability: availability), effortRaw)
+            }
+            XCTAssertFalse(AgentModelCatalog.isValid(rawModel: "\(raw):ultra", for: .claudeCode, availability: availability))
+            XCTAssertNil(ClaudeCodeAIModelCatalog.validatedModel(specifier: "\(raw):ultra"))
+        }
+
+        XCTAssertEqual(AgentModel.claudeSonnet55.discoveryTags, [.balanced, .engineering, .extendedContext])
+        XCTAssertEqual(AgentModel.claudeSonnet5.discoveryTags, [])
+        // The restricted tier is selectable but never a recommendation target or provider default.
+        XCTAssertEqual(AgentModel.claudeMythos51.discoveryTags, [])
+        XCTAssertEqual(AgentModelCatalog.defaultModelRaw(for: .claudeCode, availability: availability), AgentModel.claudeOpus.rawValue)
+        XCTAssertFalse(agentOptions.contains { $0.isProviderDefault && $0.rawValue.hasPrefix(AgentModel.claudeMythos51.rawValue) })
+    }
+
     func testBridgeRuntimeSmokeMapsPluginIDsDiscoveryRuntimeAndHeadlessAdapters() throws {
         let cases: [(AgentProviderKind, String)] = [
             (.claudeCode, "claude-code"),

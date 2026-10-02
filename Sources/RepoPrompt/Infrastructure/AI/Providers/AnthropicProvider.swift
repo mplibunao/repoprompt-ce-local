@@ -17,7 +17,7 @@ class AnthropicProvider: AIProvider {
         }
     }
 
-    private func createMessages(for aiMessage: AIMessage) -> [MessageParameter.Message] {
+    private static func createMessages(for aiMessage: AIMessage) -> [MessageParameter.Message] {
         let tail = aiMessage.buildTail(embedSystemPrompt: false)
         let lastUserIndex = aiMessage.conversationMessages.lastIndex { $0.role == .user }
         var messages: [MessageParameter.Message] = []
@@ -45,7 +45,7 @@ class AnthropicProvider: AIProvider {
         return messages
     }
 
-    private func createSystemParameter(systemPrompt: String) -> MessageParameter.System {
+    private static func createSystemParameter(systemPrompt: String) -> MessageParameter.System {
         .list([
             MessageParameter.Cache(
                 type: .text,
@@ -70,67 +70,7 @@ class AnthropicProvider: AIProvider {
                 continuation.finish()
             }
         }
-        guard !aiMessage.systemPrompt.isEmpty else {
-            throw AIProviderError.invalidSystemPrompt
-        }
-
-        // Get the model name and strip thinking suffix if present
-        let modelName = model.modelName
-        let baseModelName: String
-        let isThinkingMode: Bool
-        let thinkingBudget: Int
-        var overrideMaxTokens = 8192
-
-        if modelName.hasSuffix("-thinking-max") {
-            baseModelName = String(modelName.dropLast("-thinking-max".count))
-            isThinkingMode = true
-            thinkingBudget = 32000
-            overrideMaxTokens = 64000
-        } else if modelName.hasSuffix("-thinking") {
-            baseModelName = String(modelName.dropLast("-thinking".count))
-            isThinkingMode = true
-            // Check if it's Opus thinking (different budget)
-            if modelName.contains("opus") {
-                thinkingBudget = 16000
-                overrideMaxTokens = 32000
-            } else {
-                // Sonnet thinking
-                thinkingBudget = 16000
-                overrideMaxTokens = 64000
-            }
-        } else {
-            baseModelName = modelName
-            isThinkingMode = false
-            thinkingBudget = 0
-        }
-
-        let anthropicModel = SwiftAnthropic.Model.other(baseModelName)
-
-        // Use your existing helper functions
-        let systemParameter = createSystemParameter(systemPrompt: aiMessage.systemPrompt)
-        let messages = createMessages(for: aiMessage)
-
-        var temperature: Double? = 0
-        // Skip temperature setting for thinking models
-        if isThinkingMode {
-            temperature = nil
-        }
-        // Apply user-defined temperature if override is enabled (for non-thinking models)
-        else if let messageTemperature = aiMessage.effectiveTemperature(for: model) {
-            temperature = messageTemperature
-        }
-
-        // Create parameters with thinking mode if needed
-        let parameters = MessageParameter(
-            model: anthropicModel,
-            messages: messages,
-            maxTokens: overrideMaxTokens,
-            system: systemParameter,
-            stream: true,
-            temperature: temperature,
-            thinking: isThinkingMode ? MessageParameter.Thinking(budgetTokens: thinkingBudget) : nil
-        )
-
+        let parameters = try Self.makeMessageParameters(for: aiMessage, model: model, maxTokens: maxTokens, stream: true)
         let stream = try await service.streamMessage(parameters)
 
         return AsyncThrowingStream { continuation in
@@ -239,57 +179,101 @@ class AnthropicProvider: AIProvider {
     }
 
     func completeMessage(_ aiMessage: AIMessage, model: AIModel, maxTokens: Int? = nil) async throws -> AICompletionResult {
-        // Get the model name and strip thinking suffix if present
-        let modelName = model.modelName
-        let baseModelName: String
-        let isThinkingMode: Bool
-        let thinkingBudget: Int
-        var overrideMaxTokens = maxTokens ?? 4096
-
-        if modelName.hasSuffix("-thinking-max") {
-            baseModelName = String(modelName.dropLast("-thinking-max".count))
-            isThinkingMode = true
-            thinkingBudget = 32000
-            if maxTokens == nil { overrideMaxTokens = 64000 }
-        } else if modelName.hasSuffix("-thinking") {
-            baseModelName = String(modelName.dropLast("-thinking".count))
-            isThinkingMode = true
-            // Check if it's Opus thinking (different budget)
-            if modelName.contains("opus") {
-                thinkingBudget = 16000
-                if maxTokens == nil { overrideMaxTokens = 32000 }
-            } else {
-                // Sonnet thinking
-                thinkingBudget = 16000
-                if maxTokens == nil { overrideMaxTokens = 64000 }
-            }
-        } else {
-            baseModelName = modelName
-            isThinkingMode = false
-            thinkingBudget = 0
-        }
-
-        let anthropicModel = SwiftAnthropic.Model.other(baseModelName)
-        return try await completeMessage(aiMessage, model: anthropicModel, maxTokens: overrideMaxTokens, isThinkingMode: isThinkingMode, thinkingBudget: thinkingBudget)
+        let parameters = try Self.makeMessageParameters(for: aiMessage, model: model, maxTokens: maxTokens, stream: false)
+        return try await executeCompletion(parameters)
     }
 
-    private func completeMessage(_ aiMessage: AIMessage, model: SwiftAnthropic.Model, maxTokens: Int? = nil, isThinkingMode: Bool = false, thinkingBudget: Int = 0) async throws -> AICompletionResult {
+    static let adaptiveStreamingMaxTokens = 64000
+    static let adaptiveNonStreamingMaxTokens = 16000
+
+    /// Claude 5.x-generation models (Sonnet 5/5.5, Opus 5/5.5, Fable, Mythos) accept only adaptive
+    /// thinking: `thinking.budget_tokens` and sampling parameters such as `temperature` return 400.
+    /// Omitting `thinking` runs adaptive thinking at the model's default effort.
+    static func usesAdaptiveThinkingOnly(_ modelName: String) -> Bool {
+        let normalized = modelName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let prefixes = ["claude-fable-", "claude-mythos-", "claude-opus-5", "claude-sonnet-5"]
+        return prefixes.contains { normalized.hasPrefix($0) }
+    }
+
+    /// RepoPrompt's `-thinking` / `-thinking-max` model-name suffixes select a manual thinking budget.
+    /// The suffix is a local request-shape marker and is never sent to the API.
+    enum ManualThinkingSuffix: String {
+        case thinkingMax = "-thinking-max"
+        case thinking = "-thinking"
+    }
+
+    static func splitThinkingSuffix(_ modelName: String) -> (baseModelName: String, suffix: ManualThinkingSuffix?) {
+        for suffix in [ManualThinkingSuffix.thinkingMax, .thinking] {
+            if let range = modelName.range(of: suffix.rawValue, options: [.caseInsensitive, .anchored, .backwards]) {
+                return (String(modelName[..<range.lowerBound]), suffix)
+            }
+        }
+        return (modelName, nil)
+    }
+
+    /// Builds the exact request both public paths send, so request-shape policy has one owner.
+    static func makeMessageParameters(
+        for aiMessage: AIMessage,
+        model: AIModel,
+        maxTokens: Int?,
+        stream: Bool
+    ) throws -> MessageParameter {
         guard !aiMessage.systemPrompt.isEmpty else {
             throw AIProviderError.invalidSystemPrompt
         }
 
-        let systemParameter = createSystemParameter(systemPrompt: aiMessage.systemPrompt)
-        let messages = createMessages(for: aiMessage)
+        // Saved custom names may carry stray whitespace or a differently cased suffix; neither
+        // belongs in the wire model ID. The persisted raw is left as saved.
+        let modelName = model.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (baseModelName, thinkingSuffix) = splitThinkingSuffix(modelName)
+        let requestMaxTokens: Int
+        let thinking: MessageParameter.Thinking?
+        let temperature: Double?
 
-        let parameters = MessageParameter(
-            model: model,
-            messages: messages,
-            maxTokens: maxTokens ?? 4096,
-            system: systemParameter,
-            stream: false,
-            thinking: isThinkingMode ? MessageParameter.Thinking(budgetTokens: thinkingBudget) : nil
+        if usesAdaptiveThinkingOnly(baseModelName) {
+            // Adaptive thinking consumes output tokens, so the default leaves room for reasoning
+            // plus the answer; an explicit caller cap still wins.
+            requestMaxTokens = maxTokens ?? (stream ? adaptiveStreamingMaxTokens : adaptiveNonStreamingMaxTokens)
+            thinking = nil
+            temperature = nil
+        } else {
+            let thinkingBudget: Int?
+            let thinkingMaxTokens: Int?
+            switch thinkingSuffix {
+            case .thinkingMax:
+                thinkingBudget = 32000
+                thinkingMaxTokens = 64000
+            case .thinking:
+                thinkingBudget = 16000
+                thinkingMaxTokens = modelName.lowercased().contains("opus") ? 32000 : 64000
+            case nil:
+                thinkingBudget = nil
+                thinkingMaxTokens = nil
+            }
+            thinking = thinkingBudget.map { MessageParameter.Thinking(budgetTokens: $0) }
+
+            if stream {
+                // The streaming path has always used fixed per-mode caps rather than the caller's cap.
+                requestMaxTokens = thinkingMaxTokens ?? 8192
+                temperature = thinking == nil ? (aiMessage.effectiveTemperature(for: model) ?? 0) : nil
+            } else {
+                requestMaxTokens = maxTokens ?? thinkingMaxTokens ?? 4096
+                temperature = nil
+            }
+        }
+
+        return MessageParameter(
+            model: SwiftAnthropic.Model.other(baseModelName),
+            messages: createMessages(for: aiMessage),
+            maxTokens: requestMaxTokens,
+            system: createSystemParameter(systemPrompt: aiMessage.systemPrompt),
+            stream: stream,
+            temperature: temperature,
+            thinking: thinking
         )
+    }
 
+    private func executeCompletion(_ parameters: MessageParameter) async throws -> AICompletionResult {
         let response = try await service.createMessage(parameters)
 
         let text = response.content.compactMap { contentItem in
@@ -333,7 +317,14 @@ class AnthropicProvider: AIProvider {
 
     func testAPIKey() async throws -> Bool {
         let testMessage = AIMessage(systemPrompt: "You are a helpful assistant.", userMessage: "Say hello")
-        let result = try await completeMessage(testMessage, model: .claude3Haiku)
+        let parameters = MessageParameter(
+            model: .claude3Haiku,
+            messages: Self.createMessages(for: testMessage),
+            maxTokens: 4096,
+            system: Self.createSystemParameter(systemPrompt: testMessage.systemPrompt),
+            stream: false
+        )
+        let result = try await executeCompletion(parameters)
         return result.text.lowercased().contains("hello")
     }
 }

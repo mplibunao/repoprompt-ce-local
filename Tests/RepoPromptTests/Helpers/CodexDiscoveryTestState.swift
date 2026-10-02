@@ -44,6 +44,19 @@ struct CodexDiscoveryTestState {
         ]
     }
 
+    /// The GPT-6 generation as Codex 0.159.0 advertises it to a ChatGPT account: GPT-6.1 Sol
+    /// (provider default), GPT-6 Sol, and GPT-6 Astra through Ultra, and GPT-6 Luna through Max.
+    static func gpt61Models() -> [CodexAppServerClient.RemoteModel] {
+        let throughMax = ["low", "medium", "high", "xhigh", "max"]
+        let throughUltra = throughMax + ["ultra"]
+        return [
+            remoteModel("gpt-6.1-sol", efforts: throughUltra, defaultEffort: "medium", isDefault: true),
+            remoteModel("gpt-6-sol", efforts: throughUltra, defaultEffort: "medium"),
+            remoteModel("gpt-6-astra", efforts: throughUltra, defaultEffort: "medium"),
+            remoteModel("gpt-6-luna", efforts: throughMax, defaultEffort: "medium")
+        ]
+    }
+
     static func remoteModel(
         _ id: String,
         efforts: [String],
