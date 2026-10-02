@@ -110,7 +110,8 @@ explicit compatible `DEVELOPER_DIR`; otherwise it uses the selected full Xcode o
 a compatible Xcode app for that process without changing the system-wide `xcode-select`
 setting. It first confirms that the installed app isn't running, before any signing or
 packaging work. It checks again before staging the new bundle and before replacing the
-installed app.
+installed app. These checks match only the installed app's executable, so a running debug
+app does not block installation.
 
 The installer uses the exact identity name `RepoPrompt CE Local Self-Signed Code Signing`,
 but continuity is anchored to the selected certificate's SHA-256 fingerprint rather than to
@@ -161,7 +162,10 @@ GitHub Release and do not copy it to another Mac.
 One archive covers everything a promotion can break: the installed app bundle, the app's
 Application Support state, its preferences domain, and the local signing identity record.
 Both scripts refuse to run while any RepoPrompt process holds that state, so quit
-production, the debug app, and any attached CLI first.
+production, the debug app, and any attached CLI first. The debug app is recognized by its
+executable path: `RepoPromptDebug`, or `RepoPrompt` in a debug bundle packaged before that
+name, inside `DebugApps` or a `DebugApps-*` directory of the Application Support directory,
+or in the bundle that `REPOPROMPT_DEBUG_APP_BUNDLE` or `REPOPROMPT_DEBUG_APP_ROOT` names.
 
 ```bash
 ./Scripts/local_release_archive.sh local/v1.4.0-b37
@@ -217,6 +221,13 @@ are null. `Scripts/conductor.py` reads the manifest to identify a bundle, and th
 manifest reads the commit from it. After an install, confirm the file names the promoted
 commit with `dirty: false` and `git_status: "ok"`. The `untracked_files` field may be true when
 the checkout contains local investigation files.
+
+Debug and release bundles share the `RepoPrompt.app` directory name but declare different
+executables in `CFBundleExecutable`: release and local production bundles use `RepoPrompt`,
+while debug bundles use `RepoPromptDebug` and display as `RepoPrompt CE Debug` with
+`AppBundle/AppIconDebug.icns`. Production's install path, executable, bundle identifier, and
+signing are the release values. The packaging validators, the packaged MCP round-trip smoke,
+and conductor read the executable from `CFBundleExecutable` instead of assuming a name.
 
 ## Acceptance matrix
 

@@ -29,6 +29,8 @@ import time
 import uuid
 from typing import Any, Iterable
 
+from debug_app_process import ProcessIdentityError, packaged_app_executable
+
 
 SCHEMA_VERSION = 1
 DIAGNOSTIC_SCHEMA_VERSION = 6
@@ -1244,9 +1246,13 @@ def resolve_cli(raw: str | None) -> Path:
 
 def exact_live_build_identity(cli: Path, plan: dict[str, Any]) -> dict[str, str]:
     resolved_cli = cli.resolve(strict=True)
-    app_executable = resolved_cli.parent / "RepoPrompt"
-    if not app_executable.is_file() or not os.access(app_executable, os.X_OK):
-        raise BenchmarkError("resolved CE CLI did not identify the exact RepoPrompt app executable")
+    bundle = resolved_cli.parent.parent.parent
+    if resolved_cli.parent.name != "MacOS" or resolved_cli.parent.parent.name != "Contents":
+        raise BenchmarkError("resolved CE CLI is not inside an app bundle")
+    try:
+        app_executable = packaged_app_executable(bundle)
+    except ProcessIdentityError as error:
+        raise BenchmarkError(f"resolved CE CLI did not identify the exact RepoPrompt app executable: {error}") from error
     source = Path(__file__).resolve(strict=True)
     return {
         "cli_sha256": sha256_bytes(resolved_cli.read_bytes()),

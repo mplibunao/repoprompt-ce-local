@@ -3,21 +3,27 @@ set -euo pipefail
 
 APP_BUNDLE="${1:-}"
 LAYOUT_LABEL="${2:-Required SwiftPM resource bundle layout}"
+# Packaging validates the layout before it writes Info.plist, so it names the packaged
+# executable here. Once Info.plist exists, it must declare that same executable.
+EXECUTABLE_NAME="${3:-}"
 
 fail() {
     printf 'ERROR: %s\n' "$*" >&2
     exit 1
 }
 
-[[ -n "$APP_BUNDLE" ]] || fail "Usage: $0 <app-bundle> [label]"
+[[ -n "$APP_BUNDLE" ]] || fail "Usage: $0 <app-bundle> [label] [packaged-executable-name]"
 
-python3 - "$APP_BUNDLE" "$LAYOUT_LABEL" <<'PYTHON'
+python3 - "$APP_BUNDLE" "$LAYOUT_LABEL" "$EXECUTABLE_NAME" <<'PYTHON'
+import os
+import plistlib
 import stat
 import sys
 from pathlib import Path
 
 app = Path(sys.argv[1])
 label = sys.argv[2]
+executable_name = sys.argv[3]
 required_bundles = ["KeyboardShortcuts_KeyboardShortcuts.bundle"]
 patch_marker = b"RepoPromptKeyboardShortcutsResourceLookupV1"
 
@@ -57,7 +63,21 @@ for bundle_name in required_bundles:
     require_regular_file(bundle / "Contents" / "Info.plist")
     require_regular_file(bundle / "Contents" / "Resources" / "en.lproj" / "Localizable.strings")
 
-executable = app / "Contents" / "MacOS" / "RepoPrompt"
+info_plist = app / "Contents" / "Info.plist"
+if executable_name and not os.path.lexists(info_plist):
+    declared = executable_name
+else:
+    require_regular_file(info_plist)
+    try:
+        with info_plist.open("rb") as source:
+            declared = plistlib.load(source).get("CFBundleExecutable")
+    except Exception as exc:
+        fail(f"could not read CFBundleExecutable from {info_plist}: {exc}")
+    if executable_name and declared != executable_name:
+        fail(f"Info.plist declares executable {declared!r}, expected {executable_name!r}")
+if not isinstance(declared, str) or not declared or declared in {".", ".."} or "/" in declared:
+    fail(f"invalid packaged executable name: {declared!r}")
+executable = app / "Contents" / "MacOS" / declared
 require_regular_file(executable)
 if patch_marker not in executable.read_bytes():
     fail(f"packaged RepoPrompt executable is missing KeyboardShortcuts resource lookup patch marker: {patch_marker.decode()}")

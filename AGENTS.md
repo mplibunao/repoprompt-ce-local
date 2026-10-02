@@ -76,6 +76,8 @@ The debug app bundle is created through:
 .build/debug/RepoPrompt.app
 ```
 
+A debug package keeps the `RepoPrompt.app` directory and the `<bundle ID>.debug` identifier, but its GUI executable is `Contents/MacOS/RepoPromptDebug`, and it shows as `RepoPrompt CE Debug` with the debug icon and a blue DEBUG badge, top rule, and composer ring in its windows. Release packages keep `Contents/MacOS/RepoPrompt`. Conductor stop, status, and launch, and the archive and restore guards, also recognize a debug bundle packaged before that name, whose executable is still `RepoPrompt`, at the configured debug path.
+
 SwiftPM’s architecture-specific build output is usually under:
 
 ```text
@@ -122,15 +124,17 @@ The installer links:
 
 ```text
 /usr/local/bin/rpce-cli-debug
-  -> ~/Library/Application Support/RepoPrompt CE/repoprompt_ce_cli_debug
+  -> ~/RepoPrompt/repoprompt_ce_cli_debug
   -> ~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app/Contents/MacOS/repoprompt-mcp
 ```
 
 If `/usr/local/bin` needs administrator privileges, run the install target from an interactive terminal so `sudo` can prompt, or install the CLI from Settings → MCP → CLI Tools. Without the PATH link, use the direct fallback:
 
 ```bash
-"$HOME/Library/Application Support/RepoPrompt CE/repoprompt_ce_cli_debug" -e 'windows'
+"$HOME/RepoPrompt/repoprompt_ce_cli_debug" -e 'windows'
 ```
+
+The debug app currently shares the production profile, `~/Library/Application Support/RepoPrompt CE`, so it reads and writes production's workspaces, history, and settings (#66). The smoke flow below, `make dev-smoke`, and `make dev-smoke-launch` are fine for validating a pull request. Run validation that writes test state into stores, such as sentinel writes or bulk workspace changes, only in a verified disposable home, as [`docs/testing.md`](docs/testing.md) describes.
 
 Live CE MCP smoke flow:
 

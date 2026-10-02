@@ -58,3 +58,5 @@ Use the read-only reference clone at:
 ## Source-level boundary
 
 Changes cross from the reference clone into the working repository only as hand-written source edits. Never `git cherry-pick`, `git format-patch`, or `git merge` anything from the reference clone.
+
+One binary asset is the documented exception: `AppBundle/AppIconDebug.icns` is a byte-for-byte copy of upstream's file from upstream PR 1074 (commit `77d45fd6`), SHA-256 `1acb93894a4506cd3d87a278f762edce881db4e77c3e0eccf0b77d1228016c6b`. It is the app icon with a blue `DEBUG` tag, and reproducing the same artwork locally would only add generator code to review. Code, patches, and merges still cross only as hand-written source edits.

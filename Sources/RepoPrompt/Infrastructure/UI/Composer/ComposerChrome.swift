@@ -78,6 +78,18 @@ struct ComposerChrome<Main: View, Strip: View>: View {
                     .stroke(highlightColor.opacity(0.25), lineWidth: 1)
             }
 
+            #if DEBUG
+                if DebugBuildIdentity.showsComposerRing(explicitHighlight: highlightColor) {
+                    // Debug identity at the send decision point.
+                    RoundedRectangle(cornerRadius: bubbleCornerRadius)
+                        .stroke(
+                            DebugBuildIdentity.accentColor.opacity(DebugBuildIdentity.composerRingOpacity),
+                            lineWidth: 1
+                        )
+                        .accessibilityHidden(true)
+                }
+            #endif
+
             VStack(spacing: bubbleInnerSpacing) {
                 main()
 

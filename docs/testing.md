@@ -70,6 +70,33 @@ Define the workload, acceptance threshold, comparable environment, sample count,
 
 Use focused before/after measurements to attribute a change, then exercise the full affected boundary before making repository-wide performance claims. Store durable evidence only when it has continuing review value; otherwise keep raw logs and machine-specific samples local. Do not create a replacement executable registry, method census, append-only repository scoreboard, or mandatory artifact hierarchy merely to track test counts.
 
+## Live debug app identity and lifecycle
+
+A change to debug packaging, conductor's debug lifecycle, or the archive and restore guards is validated against the packaged debug app while production keeps running, after `make conductor-selftest` and `make release-selftest` pass. Production's process is never stopped, launched, or relaunched by these steps.
+
+1. Record production's PID, executable path, and start time. The production guard prints the PID and path and exits 3 while production runs; `ps -o lstart= -p <pid>` gives the start time:
+
+   ```bash
+   python3 Scripts/debug_app_process.py guard production \
+       --production-executable "/Applications/RepoPrompt CE.app/Contents/MacOS/RepoPrompt"
+   ```
+
+   Compare all three values after every step below. Any change is a failure, even if the step itself succeeded.
+2. Exercise each debug action on its own through conductor: `make dev-run`, `./conductor app stop`, `make dev-launch-existing`, `make dev-smoke`, and a package that fails on purpose. Confirm through `./conductor app status` that the intended debug PID stopped or started and that it runs `Contents/MacOS/RepoPromptDebug`; a window title or a process-name match is not evidence. A failed package must leave the running debug app and its bundle untouched.
+3. With both apps running, `guard release-state` must report production and the debug app, plus any attached helpers, and exit 3, while `guard production` reports only production:
+
+   ```bash
+   python3 Scripts/debug_app_process.py guard release-state \
+       --production-executable "/Applications/RepoPrompt CE.app/Contents/MacOS/RepoPrompt" \
+       --app-name RepoPrompt \
+       --display-name "RepoPrompt CE" \
+       --support-dir "$HOME/Library/Application Support/RepoPrompt CE"
+   ```
+
+4. In light and dark appearance, confirm the DEBUG toolbar badge, the 2-point blue rule under the window chrome, and the blue composer ring. On an explicitly highlighted composer, such as an MCP-controlled tab, the orange highlight replaces the ring. Check one narrow window for toolbar layout. Release builds show none of these cues.
+
+The debug app shares the production profile, `~/Library/Application Support/RepoPrompt CE`, until debug profile isolation lands (#66). Every debug action therefore reads and writes production's workspaces, history, and settings. The documented smoke flow (`make dev-smoke`, `make dev-smoke-launch`, and the `AGENTS.md` sequence) is accepted for pull request validation. Validation that writes test state into stores, such as sentinel writes, bulk workspace changes, or failure and cancellation drills during persistence, runs only in a verified disposable home. Do not assume that setting `HOME` alone moves Foundation preferences or sockets: also set `CFFIXED_USER_HOME` where the harness needs it, and confirm the app's effective Application Support and preferences paths before starting.
+
 ## Live Codex Desktop direct-headless worktree routing
 
 Run this release acceptance only from a Codex Desktop task whose repository root is an existing linked worktree and whose RepoPrompt launcher selects `--backend headless` with that exact root in `REPOPROMPT_MCP_WORKING_DIRS`. The canonical checkout must already belong to one saved RepoPrompt CE workspace. This lane validates an installed release candidate; it does not build, install, launch, stop, or relaunch RepoPrompt, create a workspace, or create a worktree.

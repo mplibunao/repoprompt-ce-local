@@ -39,7 +39,11 @@ require_arches() {
         fail "$LABEL rejected $path: expected architectures $expected, got ${actual:-<none>}"
 }
 
-MAIN="$APP_BUNDLE/Contents/MacOS/RepoPrompt"
+MAIN_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null)" ||
+    fail "could not read CFBundleExecutable from $APP_BUNDLE"
+[[ -n "$MAIN_NAME" && "$MAIN_NAME" != */* && "$MAIN_NAME" != "." && "$MAIN_NAME" != ".." ]] ||
+    fail "invalid CFBundleExecutable in $APP_BUNDLE: ${MAIN_NAME:-<empty>}"
+MAIN="$APP_BUNDLE/Contents/MacOS/$MAIN_NAME"
 HELPER="$APP_BUNDLE/Contents/MacOS/repoprompt-mcp"
 require_regular_executable "$MAIN"
 require_regular_executable "$HELPER"
@@ -55,6 +59,9 @@ fi
 
 EXPECTED="$(normalize_list "$EXPECTED")"
 [[ "$EXPECTED" == "arm64,x86_64" ]] || fail "public architecture policy must be exactly arm64,x86_64, got $EXPECTED"
+# The public universal lane ships the release app, so its executable name is part of the contract.
+[[ "$MAIN_NAME" == "RepoPrompt" ]] ||
+    fail "$LABEL requires the release executable Contents/MacOS/RepoPrompt under the public universal policy, but $APP_BUNDLE declares $MAIN_NAME"
 
 MACHO_PATHS=(
     "$MAIN"
