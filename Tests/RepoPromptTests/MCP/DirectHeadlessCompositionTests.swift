@@ -18,6 +18,114 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: snapshotURL), generated)
     }
 
+    func testHeadlessBindContextRejectsAdvertisedWindowSelectorWithoutChangingScope() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rp-headless-bind-window-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = MCPDomainRuntime(configuration: DomainRuntimeConfiguration(
+            mode: .standalone,
+            profileIdentifier: "test",
+            storageDirectory: root.appendingPathComponent("Runtime", isDirectory: true),
+            eventDirectory: root.appendingPathComponent("Events", isDirectory: true),
+            temporaryDirectory: root.appendingPathComponent("Temporary", isDirectory: true)
+        ))
+        try await runtime.start()
+        let scopeID = DomainStandaloneScopeID()
+        _ = try await runtime.standaloneScopeCoordinator.register(
+            scopeID: scopeID,
+            connectionID: UUID(),
+            workingDirectories: []
+        )
+        let context = DirectHeadlessDomainContext(runtime: runtime, scopeID: scopeID)
+        let settingsStore = DomainDirectSettingsStore(
+            persistence: runtime.persistenceCoordinator,
+            profileIdentifier: runtime.configuration.profileIdentifier
+        )
+        let global = DirectHeadlessGlobalBackend(
+            runtime: runtime,
+            scopeID: scopeID,
+            context: context,
+            settingsStore: settingsStore
+        )
+        let providers = DirectHeadlessProviderCoordinator(
+            runtime: runtime,
+            context: context,
+            settingsStore: settingsStore,
+            environment: [:]
+        )
+        let installation = try await MCPDomainStandaloneToolInstaller.install(
+            runtime: runtime,
+            scopeID: scopeID,
+            backends: MCPDomainStandaloneCapabilityBackends(
+                global: global,
+                workspace: DirectHeadlessWorkspaceBackend(context: context),
+                filesystem: DirectHeadlessFilesystemBackend(context: context),
+                conversation: DirectHeadlessConversationBackend(coordinator: providers),
+                versionControl: DirectHeadlessVersionControlBackend(runtime: runtime, context: context),
+                agent: DirectHeadlessAgentBackend(coordinator: providers),
+                history: DirectHeadlessHistoryBackend(runtime: runtime)
+            )
+        )
+        let resolution = await runtime.toolRegistry.resolve(
+            toolName: MCPGlobalToolName.bindContext,
+            scope: .application
+        )
+        let bindContext = try XCTUnwrap(resolution).binding
+        XCTAssertEqual(
+            bindContext.definition,
+            MCPDomainCanonicalToolDefinitions.definition(named: MCPGlobalToolName.bindContext)
+        )
+        let bindingBefore = try await runtime.standaloneScopeCoordinator.snapshot(scopeID: scopeID).binding
+        let workspaceCountBefore = await runtime.workspaceStore.snapshot().workspaces.count
+
+        // The same binding answers without window_id, so each failure below is the selector rejection.
+        _ = try await bindContext(["op": .string("list")])
+        let windowSelectors: [(op: String, windowID: Value)] = [
+            ("list", .int(1)),
+            ("status", .int(1)),
+            ("list", .null),
+            ("list", .string("1"))
+        ]
+        for selector in windowSelectors {
+            do {
+                _ = try await bindContext(["op": .string(selector.op), "window_id": selector.windowID])
+                XCTFail("headless \(selector.op) accepted window_id \(selector.windowID)")
+            } catch {
+                XCTAssertTrue(
+                    error.localizedDescription.contains("window_id is unavailable with --backend headless"),
+                    error.localizedDescription
+                )
+            }
+        }
+
+        // bind reaches the backend only after protected-mutation authorization, so call the owning
+        // backend directly; the window rejection must precede context_id resolution.
+        do {
+            _ = try await global.routeContext(DomainPhysicalToolRequest(
+                argumentsJSON: JSONEncoder().encode([
+                    "op": Value.string("bind"),
+                    "window_id": .int(1),
+                    "context_id": .string(UUID().uuidString)
+                ]),
+                securityContext: nil
+            ))
+            XCTFail("headless bind accepted window_id")
+        } catch {
+            XCTAssertTrue(
+                error.localizedDescription.contains("window_id is unavailable with --backend headless"),
+                error.localizedDescription
+            )
+        }
+
+        let bindingAfter = try await runtime.standaloneScopeCoordinator.snapshot(scopeID: scopeID).binding
+        XCTAssertEqual(bindingAfter, bindingBefore)
+        let workspaceCountAfter = await runtime.workspaceStore.snapshot().workspaces.count
+        XCTAssertEqual(workspaceCountAfter, workspaceCountBefore)
+
+        await MCPDomainStandaloneToolInstaller.uninstall(installation, runtime: runtime)
+        _ = await runtime.shutdown()
+    }
+
     func testCanonicalAgentSchemasAdvertiseCursorModelParameterInputs() throws {
         for toolName in ["agent_run", "agent_manage"] {
             let definition = try XCTUnwrap(MCPDomainCanonicalToolDefinitions.definition(named: toolName))

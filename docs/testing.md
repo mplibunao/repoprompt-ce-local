@@ -770,6 +770,28 @@ python3 Scripts/worktree_startup_live_benchmark.py aggregate --help
 python3 Scripts/worktree_startup_live_benchmark.py cleanup --help
 ```
 
+## Canonical MCP schema and bind_context discovery
+
+`docs/spec/mcp-domain-canonical-tool-definitions.generated.json` is a review projection of `MCPDomainCanonicalToolDefinitions`; never edit it by hand. After changing a canonical definition, regenerate it from the Swift authority, then rerun without the marker to prove equality:
+
+```bash
+mkdir -p .build && touch .build/update-mcp-domain-schema-review-snapshot
+make dev-test FILTER=DirectHeadlessCompositionTests/testCanonicalDefinitionsMatchReadableGeneratedReviewSnapshot
+make dev-test FILTER=DirectHeadlessCompositionTests/testCanonicalDefinitionsMatchReadableGeneratedReviewSnapshot
+```
+
+Review the snapshot diff: only the definitions you changed may differ. Update the expected `catalogFingerprint` in `MCPDomainStandaloneCompositionTests` from the value that test reports, never from a guess.
+
+Four suites cover `bind_context` discovery: `MCPDomainStandaloneCompositionTests` (canonical schema), `DirectHeadlessCompositionTests` (real headless rejection), `BindContextRoutingAuthorityTests` (handler parsing, listing, and binding), and `BindContextOutputFormattingTests` (compact and filtered output, hinted arguments). A change to its schema, handler, or hints is also exercised live from a client that sees only the retrieved schema:
+
+1. Start a fresh external MCP client, such as a new Claude Code session, against the CE debug app; a client that cached the old tool list must reinitialize. Validate each intended `bind_context` argument against the `tools/list` schema with a stock JSON-schema validator before sending it, because a raw `rpce-cli-debug -c` call skips schema validation.
+2. Prepare one window with an active tab, a bound inactive tab, and at least two inactive unbound tabs, and a second window with unrelated tabs. An unfiltered `list` keeps the compact Windows summary. A `list` with the first window's integer `window_id` returns every compose tab of that window and none of the second, without changing the active tab, focus, binding, or selection.
+3. Bind an inactive tab by its listed `context_id`, switch the visible tab, and confirm later calls still target the bound tab. Repeat with `window_id` alone and with `window_id` beside `context_id` or `working_dirs`.
+4. Unknown, `null`, string, fractional, and out-of-range `window_id` values fail; none returns an unfiltered list.
+5. Against `repoprompt-mcp --backend headless` with an explicit `REPOPROMPT_MCP_HEADLESS_PROFILE_DIR`, the backend advertises the same schema and rejects any supplied `window_id`, including `null`, without changing scope. Agent Mode sessions still do not receive `bind_context`.
+
+Keep the captured schema and assertion results as local evidence; do not commit raw MCP transcripts.
+
 ## Handoff checklist
 
 - Protected contract, plausible defect, chosen layer, and observable oracle.

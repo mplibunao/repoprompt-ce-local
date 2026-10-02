@@ -1927,12 +1927,17 @@ extension ToolOutputFormatter {
         }
 
         if op == "list" {
+            let windows = dto.windows ?? []
+            // A real window ID from this response keeps each example a schema-valid call.
+            let exampleWindowID = (windows.first(where: \.isCurrentWindow) ?? windows.first)?.windowID
             out.append("")
             out.append("### Next Steps")
-            out.append("- Use `bind_context` with `op=bind` and a `context_id` to bind a specific tab context.")
-            out.append("- Or use `bind_context` with `op=bind` and a `window_id` to capture and bind that window's current tab context.")
-            if let windows = dto.windows, windows.count > 1 {
-                out.append("- Use `window_id` filter on `op=list` to see all tabs in a specific window.")
+            if windows.count > 1, let exampleWindowID {
+                out.append("- To see every compose tab in one window, call `bind_context` with `{\"op\":\"list\",\"window_id\":\(exampleWindowID)}`, using any `window_id` above.")
+            }
+            out.append("- To bind one tab, call `bind_context` with `{\"op\":\"bind\",\"context_id\":\"<context_id>\"}`, using a `context_id` above.")
+            if let exampleWindowID {
+                out.append("- `{\"op\":\"bind\",\"window_id\":\(exampleWindowID)}` binds the tab that is active in that window when you call it; later tab switches do not move the binding.")
             }
         }
 

@@ -97,7 +97,7 @@
         "openWorldHint" : false,
         "readOnlyHint" : false
       },
-      "description" : "List, inspect, and bind the canonical workspace context for this MCP connection. Bind by working_dirs (preferred) or context_id. This global tool never accepts an app window selector.",
+      "description" : "List, inspect, and bind the workspace context for this MCP connection. Bindings are sticky: bind captures one compose-tab context, and later tab or workspace switches do not move it.\n\nOperations:\n• list   – app-backed: open windows, their compose tabs, and this connection's binding. Standalone headless: the saved workspace/context catalog; there are no windows.\n• status – this connection's current binding only\n• bind   – bind by working_dirs (preferred), context_id, or window_id (app-backed only)\n\n**Find and bind a specific tab (app-backed):**\n1. `{\"op\":\"list\"}` returns every open window. When several windows are open, each one shows only its active and bound tabs.\n2. `{\"op\":\"list\",\"window_id\":<window_id>}` returns every compose tab of that window with its context_id.\n3. `{\"op\":\"bind\",\"context_id\":\"<context_id>\"}` binds that exact tab.\n\n**Bind by workspace roots:**\n`{\"op\":\"bind\",\"working_dirs\":[\"/path/to/root1\",\"/path/to/root2\"]}` binds the workspace whose repo_paths set matches exactly (order-insensitive), falling back to a workspace whose repo_paths is a strict superset of the requested roots. Matching uses workspace roots only, not descendant paths. In the app, a window already showing the workspace is preferred, and a saved workspace that is not open gets a new window. Add `create_if_missing=true` to create a workspace after approval when nothing matches.\n\nParameters:\n- op: \"list\" | \"status\" | \"bind\" (required)\n- working_dirs: string | string[]  (bind: absolute workspace roots; a string may be comma-separated)\n- context_id: string               (bind: compose-tab context UUID returned by list)\n- window_id: integer               (app-backed only. list: every compose tab of that window. bind alone: capture that window's active tab once. With context_id or working_dirs: choose the match in that window.)\n- create_if_missing: boolean       (app-backed bind with working_dirs; default false)\n- tab_name: string                 (app-backed workspace name hint with working_dirs + create_if_missing=true)\n\nStandalone headless sessions reject window_id; bind there by context_id or working_dirs. Use `manage_workspaces list` to see saved workspaces, including ones not open in any window.",
       "inputSchema" : {
         "properties" : {
           "context_id" : {
@@ -105,7 +105,7 @@
             "type" : "string"
           },
           "create_if_missing" : {
-            "description" : "For bind with working_dirs: create a new workspace after approval if no exact or superset workspace matches",
+            "description" : "App-backed bind with working_dirs: create a new workspace after approval if no exact or superset workspace matches",
             "type" : "boolean"
           },
           "op" : {
@@ -118,12 +118,27 @@
             "type" : "string"
           },
           "tab_name" : {
-            "description" : "Optional workspace name when creating via working_dirs + create_if_missing",
+            "description" : "App-backed: optional workspace name when creating via working_dirs + create_if_missing",
             "type" : "string"
           },
+          "window_id" : {
+            "description" : "App-backed only; standalone headless sessions reject it. For list: return every compose tab of this open window with its context_id. For bind alone: capture this window's active tab once. With context_id or working_dirs: choose the match shown in this window.",
+            "type" : "integer"
+          },
           "working_dirs" : {
-            "description" : "For bind: comma-separated absolute workspace root paths; exact match first, then repo_paths superset fallback",
-            "type" : "string"
+            "anyOf" : [
+              {
+                "description" : "For bind: absolute workspace root paths; exact repo_paths set match first, then repo_paths superset fallback",
+                "items" : {
+                  "type" : "string"
+                },
+                "type" : "array"
+              },
+              {
+                "description" : "For bind: comma-separated absolute workspace root paths; exact repo_paths set match first, then repo_paths superset fallback",
+                "type" : "string"
+              }
+            ]
           }
         },
         "required" : [

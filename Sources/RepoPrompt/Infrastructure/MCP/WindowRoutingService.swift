@@ -870,6 +870,33 @@ final class WindowRoutingService: Service {
         return normalized
     }
 
+    /// A supplied but unusable `window_id` must fail: treating it as absent would turn a
+    /// filtered `list` into an unfiltered one. Matching the raw `Value` case accepts a JSON
+    /// whole number encoded as `1.0` and never coerces strings, booleans, or fractions.
+    private nonisolated static func parseWindowID(_ value: Value?) throws -> Int? {
+        guard let value else { return nil }
+        let received: String
+        switch value {
+        case let .int(windowID):
+            return windowID
+        case let .double(number):
+            if let windowID = Int(exactly: number) { return windowID }
+            received = "\(number)"
+        case .null:
+            received = "null"
+        case .bool:
+            received = "a boolean"
+        case .string:
+            received = "a string"
+        case .data, .array, .object:
+            received = "a non-numeric value"
+        }
+        throw MCPError.invalidParams(
+            "bind_context window_id must be a JSON integer window ID; received \(received). " +
+                "Omit window_id to list every window, or copy an integer window_id from bind_context op=list."
+        )
+    }
+
     nonisolated static func parseBindContextRequest(_ args: [String: Value]) throws -> BindContextRequest {
         guard let rawOperation = args["op"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               let op = BindContextRequest.Operation(rawValue: rawOperation)
@@ -879,13 +906,13 @@ final class WindowRoutingService: Service {
 
         let contextID = try parseContextID(args["context_id"], action: "bind_context")
         let workingDirs = try parseWorkingDirs(args["working_dirs"])
-        let windowID = args["window_id"]?.intValue
+        let windowID = try parseWindowID(args["window_id"])
         let createIfMissing = args["create_if_missing"]?.boolValue ?? false
         let tabName = args["tab_name"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if op == .bind {
             if contextID != nil, !workingDirs.isEmpty {
-                throw MCPError.invalidParams("bind_context op='bind' accepts exactly one primary selector: context_id, working_dirs, or window_id.")
+                throw MCPError.invalidParams("bind_context op='bind' accepts context_id or working_dirs, not both. window_id may accompany either one to choose the match in that window.")
             }
             if createIfMissing, workingDirs.isEmpty {
                 throw MCPError.invalidParams("create_if_missing is only valid when binding by working_dirs.")
@@ -895,7 +922,7 @@ final class WindowRoutingService: Service {
             }
             let selectorCount = (contextID != nil ? 1 : 0) + (!workingDirs.isEmpty ? 1 : 0) + ((windowID != nil && contextID == nil && workingDirs.isEmpty) ? 1 : 0)
             guard selectorCount == 1 else {
-                throw MCPError.invalidParams("bind_context op='bind' requires exactly one primary selector: context_id, working_dirs, or window_id.")
+                throw MCPError.invalidParams("bind_context op='bind' requires a selector: context_id, working_dirs, or window_id alone. window_id may also accompany context_id or working_dirs to choose the match in that window.")
             }
         }
 
@@ -2177,45 +2204,20 @@ final class WindowRoutingService: Service {
         newTools.append(
             Tool(
                 name: MCPGlobalToolName.bindContext,
-                description: """
-                List, inspect, and bind sticky RepoPrompt window/tab context for this MCP connection.
-
-                Operations:
-                • list    – return **all** open windows, their compose tabs, and this connection's current binding
-                • status  – return this connection's current binding only
-                • bind    – bind by working_dirs (preferred), context_id, or window_id
-
-                **Recommended binding flow:**
-                Bind by `working_dirs` using absolute workspace root paths:
-                	`{"op":"bind","working_dirs":["/path/to/root1","/path/to/root2"]}`
-                RepoPrompt first looks for an exact workspace `repo_paths` set match (order-insensitive). If no exact match exists, RepoPrompt may fall back to a workspace whose `repo_paths` is a strict superset of the requested roots. Both modes match workspace roots only — not descendant paths.
-                If the matching workspace is already open, RepoPrompt prefers that window. If it exists but is not open, RepoPrompt opens a window and switches to it. Add `create_if_missing=true` to create a new workspace after approval when neither exact nor superset workspace matches.
-
-                Parameters:
-                - op: "list" | "status" | "bind" (required)
-                - working_dirs: string | string[]         (for bind: preferred — absolute workspace roots; exact match first, repo_paths superset fallback)
-                - context_id: string                      (for bind: canonical compose-tab context UUID from a previous list)
-                - window_id: integer                      (for list: filter to one window; for bind: capture and explicitly bind that window's current workspace/tab context)
-                - create_if_missing: boolean              (for bind with working_dirs; create a new workspace after approval when no exact or superset workspace matches)
-                - tab_name: string                        (optional workspace name hint when creating via working_dirs + create_if_missing)
-
-                **Binding semantics:**
-                - working_dirs and window_id resolve the presentation target once, then explicitly bind the captured compose-tab context.
-                - context_id binds that exact compose tab directly.
-                - switching the visible tab later never redirects an existing binding.
-
-                **Discovery:**
-                - Use `bind_context list` to see what's currently open (windows, active workspaces, tabs, context_ids)
-                - Use `manage_workspaces list` to see saved visible workspaces, or `include_hidden=true` to include recoverable hidden workspaces
-                """,
+                // Tool.domainBinding() advertises the canonical definition; Settings lists this
+                // raw description, so it reads the same canonical text instead of a second copy.
+                description: MCPDomainCanonicalToolDefinitions.definition(named: MCPGlobalToolName.bindContext)!.description,
                 inputSchema: .object(
                     properties: [
                         "op": .string(description: "Operation: 'list', 'status', or 'bind'", enum: ["list", "status", "bind"]),
-                        "window_id": .integer(description: "For list: filter to one window. For bind: capture and explicitly bind that window's current workspace/tab context."),
+                        "window_id": .integer(description: MCPBindContextPropertyDescriptions.windowID),
                         "context_id": .string(description: "For bind: canonical compose-tab context UUID"),
-                        "working_dirs": .string(description: "For bind: comma-separated absolute workspace root paths; exact match first, then repo_paths superset fallback"),
-                        "create_if_missing": .boolean(description: "For bind with working_dirs: create a new workspace after approval if no exact or superset workspace matches"),
-                        "tab_name": .string(description: "Optional workspace name when creating via working_dirs + create_if_missing")
+                        "working_dirs": .anyOf([
+                            .array(description: MCPBindContextPropertyDescriptions.workingDirsArray, items: .string()),
+                            .string(description: MCPBindContextPropertyDescriptions.workingDirsString)
+                        ]),
+                        "create_if_missing": .boolean(description: MCPBindContextPropertyDescriptions.createIfMissing),
+                        "tab_name": .string(description: MCPBindContextPropertyDescriptions.tabName)
                     ],
                     required: ["op"]
                 ),
