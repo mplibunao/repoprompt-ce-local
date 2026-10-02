@@ -6534,9 +6534,9 @@ class PromptViewModel: ObservableObject {
             return
         }
 
-        // 4) Otherwise fallback to first available or empty
-        if !availableModels.isEmpty {
-            setPreferredModelRaw(availableModels[0].rawValue, markDirty: false, reason: "prompt.validate_preferred_model.fallback.first_available")
+        // 4) Otherwise fallback to the first automatically eligible model or empty
+        if let model = AIModel.firstAutomaticallyEligibleModel(in: availableModels) {
+            setPreferredModelRaw(model.rawValue, markDirty: false, reason: "prompt.validate_preferred_model.fallback.first_available")
         } else {
             setPreferredModelRaw("", markDirty: false, reason: "prompt.validate_preferred_model.fallback.empty")
         }
@@ -6570,9 +6570,14 @@ class PromptViewModel: ObservableObject {
             return
         }
 
-        // Fallback to the first available model if no suitable 'whole' model found
+        // Fallback to the compose model if no suitable 'whole' model found. Copying it here is an
+        // automatic choice for a separate selection, so a restricted compose pin is not carried over.
         if !availableModels.isEmpty {
-            _contextBuilderModel = preferredModel
+            if let composeModel = AIModel.fromModelName(preferredModel), !composeModel.isEligibleForAutomaticSelection {
+                _contextBuilderModel = AIModel.firstAutomaticallyEligibleModel(in: availableModels)?.rawValue ?? ""
+            } else {
+                _contextBuilderModel = preferredModel
+            }
         } else {
             _contextBuilderModel = "" // No models available
         }

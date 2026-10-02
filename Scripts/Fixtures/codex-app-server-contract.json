@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "minimumCodexVersion": "0.156.1",
+  "minimumCodexVersion": "0.159.0",
   "experimental": true,
   "methodChecks": [
     {
@@ -1547,6 +1547,21 @@
         {
           "path": "itemId",
           "presence": "required",
+          "nullable": false
+        },
+        {
+          "path": "availableDecisions",
+          "presence": "optional",
+          "nullable": true
+        },
+        {
+          "path": "availableDecisions[].acceptWithExecpolicyAmendment",
+          "presence": "conditional",
+          "nullable": false
+        },
+        {
+          "path": "availableDecisions[].acceptWithExecpolicyAmendment.execpolicy_amendment",
+          "presence": "conditional",
           "nullable": false
         }
       ],

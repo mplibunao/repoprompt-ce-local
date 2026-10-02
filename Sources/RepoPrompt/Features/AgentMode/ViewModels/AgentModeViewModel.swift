@@ -5895,7 +5895,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         session.waitingPrompt = nil
         session.pendingAskUser = nil
         session.pendingUserInputRequest = nil
-        session.pendingApproval = nil
+        session.clearApprovalRequests()
         if session.hasActiveCodexHookGateOperation {
             session.resetCodexHookGateBinding()
         }
@@ -6952,36 +6952,17 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     }
 
     private func mcpApprovalDecisionOptions(for approval: AgentApprovalRequest) -> [AgentRunMCPSnapshot.Interaction.Option] {
-        mcpApprovalDecisionLabels(for: approval, includeAliases: false).map { label in
-            let description: String? = switch label {
-            case "accept":
-                "Allow this action"
-            case "accept_for_session":
-                "Allow this action for the rest of the session"
-            case "accept_with_amendment":
-                "Allow with exec policy amendment (provide amendment field)"
-            case "decline":
-                "Reject this action"
-            case "cancel":
-                "Cancel the run"
-            default:
-                nil
-            }
-            return .init(label: label, description: description)
+        mcpApprovalDecisionKinds(for: approval).map { kind in
+            .init(label: kind.mcpLabel, description: kind.mcpDescription)
         }
     }
 
-    private func mcpApprovalDecisionLabels(for approval: AgentApprovalRequest, includeAliases: Bool = true) -> [String] {
-        var labels = ["accept", "accept_for_session"]
-        if approval.kind == .commandExecution {
-            labels.append("accept_with_amendment")
+    /// The decisions `approval` advertises over MCP, in option order.
+    private func mcpApprovalDecisionKinds(for approval: AgentApprovalRequest) -> [AgentApprovalDecisionKind] {
+        AgentApprovalDecisionKind.mcpOptionOrder.filter { kind in
+            guard approval.decisionConstraint.permits(kind) else { return false }
+            return kind != .acceptWithExecpolicyAmendment || approval.kind == .commandExecution
         }
-        labels.append("decline")
-        if includeAliases {
-            labels.append("reject")
-        }
-        labels.append("cancel")
-        return labels
     }
 
     private func mcpCanonicalApprovalResponse(from payload: MCPInteractionResponsePayload) throws -> String {
@@ -11147,12 +11128,41 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 decision = .cancel
             default:
                 throw MCPError.invalidParams(
-                    "response must be one of: \(mcpApprovalDecisionLabels(for: approval, includeAliases: false).joined(separator: ", "))."
+                    "response must be one of: \(mcpApprovalDecisionKinds(for: approval).map(\.mcpLabel).joined(separator: ", "))."
                 )
             }
-            submitApprovalDecision(tabID: session.tabID, decision: decision)
-            handleObservedMCPStateChange(for: session)
-            return nil
+            switch resolveApprovalDecision(tabID: session.tabID, requestID: approval.id, decision: decision) {
+            case .sent:
+                handleObservedMCPStateChange(for: session)
+                return nil
+            case let .decisionNotOffered(offered):
+                let offeredLabels = offered.map(\.mcpLabel).joined(separator: ", ")
+                throw MCPError.invalidParams(
+                    "response \"\(rawDecision)\" is not offered by the current approval interaction. Offered responses: \(offeredLabels). No response was applied."
+                )
+            case .unsupportedDecision:
+                throw MCPError.invalidParams("accept_with_amendment is only supported for command approvals.")
+            case .invalidAmendment:
+                throw MCPError.invalidParams(
+                    "amendment must be a JSON array of command strings, for example [\"git\",\"status\"]. No response was applied."
+                )
+            case .amendmentNotOffered:
+                var offered = ""
+                if case let .offered(_, rule?) = approval.decisionConstraint,
+                   let json = AgentExecpolicyAmendment.json(for: rule)
+                {
+                    offered = " Offered amendment: \(json)."
+                }
+                throw MCPError.invalidParams(
+                    "amendment does not match the amendment offered by the current approval interaction.\(offered) No response was applied."
+                )
+            case .providerUnavailable:
+                throw MCPError.invalidParams(
+                    "The approval could not be answered because its provider session is unavailable. No response was applied."
+                )
+            case .noPendingApproval, .staleRequest:
+                throw MCPError.invalidParams("The pending approval no longer matches interaction_id.")
+            }
         }
     }
 
@@ -20247,7 +20257,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     }
 
     private func cancelPendingApproval(for session: TabSession) {
-        session.pendingApproval = nil
+        session.clearApprovalRequests()
         if session.hasActiveCodexHookGateOperation {
             session.resetCodexHookGateBinding()
         }
@@ -21570,5 +21580,41 @@ extension AgentModeViewModel: WorkspaceSwitchSessionProviderDelegate {
             explicitRunID: explicitRunID,
             reason: reason
         )
+    }
+}
+
+/// How `agent_run` advertises approval decisions: one canonical `response` label and option
+/// description per decision. The respond parser also accepts input aliases such as `reject`, which
+/// are never advertised.
+private extension AgentApprovalDecisionKind {
+    static let mcpOptionOrder: [AgentApprovalDecisionKind] = [
+        .accept,
+        .acceptForSession,
+        .acceptWithExecpolicyAmendment,
+        .decline,
+        .cancel
+    ]
+
+    var mcpLabel: String {
+        mcpMetadata.label
+    }
+
+    var mcpDescription: String {
+        mcpMetadata.description
+    }
+
+    private var mcpMetadata: (label: String, description: String) {
+        switch self {
+        case .accept:
+            ("accept", "Allow this action")
+        case .acceptForSession:
+            ("accept_for_session", "Allow this action for the rest of the session")
+        case .acceptWithExecpolicyAmendment:
+            ("accept_with_amendment", "Allow with exec policy amendment (provide amendment field)")
+        case .decline:
+            ("decline", "Reject this action")
+        case .cancel:
+            ("cancel", "Cancel the run")
+        }
     }
 }

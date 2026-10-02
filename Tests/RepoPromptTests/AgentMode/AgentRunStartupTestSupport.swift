@@ -636,6 +636,8 @@ import XCTest
         var startupHook: ((CodexNativeSessionController.SessionRef?) async throws -> Void)?
         private(set) var startUserTurnTexts: [String] = []
         private(set) var steerUserTurnTexts: [String] = []
+        /// Every server-request response, in the order it reached the controller.
+        private(set) var serverRequestResponses: [(id: CodexAppServerRequestID, result: [String: Any])] = []
         var startupError: Error?
         var compactError: Error?
         var compactHold: StartupTestHeldGate?
@@ -817,6 +819,8 @@ import XCTest
         func cancelCurrentTurn() async {}
         func shutdown() async {}
 
-        func respondToServerRequest(id _: CodexAppServerRequestID, result _: [String: Any]) async {}
+        func respondToServerRequest(id: CodexAppServerRequestID, result: [String: Any]) async {
+            serverRequestResponses.append((id, result))
+        }
     }
 #endif

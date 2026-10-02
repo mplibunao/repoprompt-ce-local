@@ -140,6 +140,7 @@ final class AgentTabSession: ObservableObject {
     @Published var pendingWorktreeMergeReview: PendingWorktreeMergeReview? = nil
     var queuedUserInputRequests: [AgentRequestUserInputRequest] = []
     var queuedMCPElicitationRequests: [AgentMCPElicitationRequest] = []
+    var queuedApprovalRequests: [AgentApprovalRequest] = []
     var transcriptViewportState: AgentTranscriptViewportState = .liveBottom
     var transcriptAutoFollowArmingState: AgentModeViewModel.AgentTranscriptAutoFollowArmingState = .armed
     var askUserContinuation: CheckedContinuation<AgentAskUserResponse, Error>?
@@ -1112,6 +1113,14 @@ final class AgentTabSession: ObservableObject {
             || pendingWorktreeMergeReview != nil
             || !queuedUserInputRequests.isEmpty
             || !queuedMCPElicitationRequests.isEmpty
+            || !queuedApprovalRequests.isEmpty
+    }
+
+    /// Abandoning approvals drops the queue with the pending one; otherwise a queued request could
+    /// be promoted after the run that issued it was cleared.
+    func clearApprovalRequests() {
+        pendingApproval = nil
+        queuedApprovalRequests.removeAll()
     }
 
     func persistentBindingTransitionToken() -> AgentModeViewModel.PersistentBindingTransitionToken {

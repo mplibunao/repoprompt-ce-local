@@ -2,27 +2,46 @@ import Foundation
 
 @MainActor
 extension AgentModeViewModel {
-    func submitApprovalDecision(tabID: UUID, decision: AgentApprovalDecision) {
+    /// Id-checked approval submission: applies `decision` only while `requestID` is still the pending
+    /// approval for `tabID`. Returns whether that approval was consumed.
+    @discardableResult
+    func submitApprovalDecision(tabID: UUID, requestID: UUID, decision: AgentApprovalDecision) -> Bool {
+        resolveApprovalDecision(tabID: tabID, requestID: requestID, decision: decision) == .sent
+    }
+
+    /// Id-checked approval submission that reports why an answer was not applied.
+    func resolveApprovalDecision(
+        tabID: UUID,
+        requestID: UUID,
+        decision: AgentApprovalDecision
+    ) -> AgentApprovalSubmissionResult {
         guard let session = sessions[tabID],
               let request = session.pendingApproval
         else {
-            return
+            return .noPendingApproval
+        }
+        guard request.id == requestID else {
+            return .staleRequest
         }
         switch request.requestID {
         case .codex:
-            codexCoordinator.submitApprovalDecision(session: session, decision: decision)
+            return codexCoordinator.submitApprovalDecision(session: session, requestID: requestID, decision: decision)
         case .claudeControl:
             claudeCoordinator.submitApprovalDecision(session: session, decision: decision)
-        case let .acp(requestID):
+        case let .acp(acpRequestID):
+            guard let controller = session.acpController else {
+                return .providerUnavailable
+            }
             session.pendingApproval = nil
             if session.runState == .waitingForApproval {
                 session.runState = .running
             }
             requestUIRefresh(tabID: tabID, urgent: true)
-            Task { [controller = session.acpController] in
-                await controller?.respondToPermissionRequest(id: requestID, decision: decision)
+            Task { [controller] in
+                await controller.respondToPermissionRequest(id: acpRequestID, decision: decision)
             }
         }
+        return session.pendingApproval?.id == requestID ? .providerUnavailable : .sent
     }
 
     func submitCodexHookReviewDecision(

@@ -131,9 +131,9 @@ final class AutoRecommendationEngine {
         )
         let codexPlanningModel = AIModel.codexCustom(name: codexPlanningRaw)
         let codexPlanningLabel = AgentModelCatalog.displayName(for: codexPlanningRaw, agentKind: .codexExec)
-        let apiPlanningModelString = AIModel.openaiCustomReasoning(name: "gpt-6-sol", effort: .high).rawValue
-        // The custom-model display name renders the raw ID ("gpt-6-sol High"), so name the fixed policy model here.
-        let apiPlanningModelLabel = "GPT-6 Sol High"
+        let apiPlanningModel = AIModel.gpt61SolHigh
+        let apiPlanningModelString = apiPlanningModel.rawValue
+        let apiPlanningModelLabel = apiPlanningModel.displayName
 
         // Build available options
         var codexOption: ChatBackendOption?
@@ -165,7 +165,7 @@ final class AutoRecommendationEngine {
                 tradeoffs: [
                     "• API-backed planning and review when Codex CLI is unavailable",
                     "• Visible reasoning traces",
-                    "• GPT-6 Sol is available through the OpenAI Responses API"
+                    "• GPT-6.1 Sol is available through the OpenAI Responses API"
                 ]
             )
         }
@@ -261,8 +261,8 @@ final class AutoRecommendationEngine {
             openAIOption = ChatBackendOption(
                 kind: .openAI,
                 displayName: "OpenAI API",
-                modelString: AIModel.gpt54.rawValue,
-                description: "GPT-5.4 via OpenAI API",
+                modelString: AIModel.gpt61Sol.rawValue,
+                description: "GPT-6.1 Sol via OpenAI API",
                 tradeoffs: [
                     "• Superior reasoning capabilities",
                     "• Pay-per-use pricing",
@@ -522,7 +522,7 @@ final class AutoRecommendationEngine {
         // Suggest upgrade if only some CLIs are available
         let upgradeHint: String? = {
             if recommendedStatus.codexCLI != .ready {
-                return "Connect Codex CLI for GPT-6 Luna High (explore/discovery), GPT-6 Sol Medium (engineer and design fallback), and GPT-6 Sol High (pair/Oracle)."
+                return "Connect Codex CLI for GPT-6 Luna High (explore/discovery) and the newest Sol it advertises, such as GPT-6.1 Sol, at Medium (engineer and design fallback) and High (pair/Oracle)."
             }
             if recommendedStatus.claudeCodeCLI != .ready {
                 return "Connect Claude Code for Claude Opus (design/pair). Best for architecture and creative work."
@@ -630,7 +630,7 @@ final class AutoRecommendationEngine {
             ).rawValue
         case .openAI:
             rec.openAIOption?.modelString
-                ?? AIModel.openaiCustomReasoning(name: "gpt-6-sol", effort: .high).rawValue
+                ?? AIModel.gpt61SolHigh.rawValue
         }
         let trimmedModel = modelString.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedModel.isEmpty ? nil : trimmedModel

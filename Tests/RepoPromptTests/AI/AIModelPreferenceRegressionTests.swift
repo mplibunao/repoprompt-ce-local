@@ -175,4 +175,64 @@ final class AIModelPreferenceRegressionTests: XCTestCase {
         store.setPreferredComposeModelRaw(newModel, commit: true, honorSync: true)
         XCTAssertEqual(store.planningModelRaw(), newModel)
     }
+
+    // MARK: - Restricted model fallback
+
+    @MainActor
+    func testContextBuilderFallbackDoesNotCopyRestrictedComposePin() throws {
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ContextBuilderRestrictedFallback.\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temp) }
+        let store = try makeIsolatedStore(temp.appendingPathComponent("Settings/globalSettings.json"))
+
+        // The user explicitly pinned restricted Mythos as the compose model.
+        let mythosCompose = AIModel.claudeCodeModel(specifier: "claude-mythos-5-1:max").rawValue
+        store.setPreferredComposeModelRaw(mythosCompose, commit: true)
+
+        let keyManager = KeyManager(secureService: SecureKeysService(secureStorage: TestSecureStorageBackend()))
+        let aiQueriesService = AIQueriesService(keyManager: keyManager)
+        let apiSettings = APISettingsViewModel(
+            aiQueriesService: aiQueriesService,
+            keyManager: keyManager,
+            loadStoredDataOnInit: false
+        )
+        // Every available model is restricted, so no priority or unlisted pick is eligible.
+        apiSettings.test_setAvailableModels([
+            .claudeMythos51,
+            .claudeCodeModel(specifier: "claude-mythos-5-1"),
+            .claudeCodeModel(specifier: "claude-mythos-5-1:max")
+        ])
+        let prompt = PromptViewModel(
+            fileManager: WorkspaceFilesViewModel(),
+            aiQueriesService: aiQueriesService,
+            apiSettingsViewModel: apiSettings,
+            windowID: -1311,
+            settingsManager: store
+        )
+
+        // An unusable Context Builder selection (no OpenAI key) falls back automatically.
+        prompt.contextBuilderModelName = AIModel.gpt61SolHigh.rawValue
+        prompt.refreshModelSelectionState()
+
+        XCTAssertEqual(prompt.contextBuilderModelName, "", "Context Builder must not inherit a restricted compose pin")
+        XCTAssertEqual(prompt.preferredModel, mythosCompose, "The explicit compose pin is preserved")
+        XCTAssertEqual(store.preferredComposeModelRaw(), mythosCompose)
+
+        // Control: an explicit, preservable Context Builder pin on Mythos is left alone.
+        let mythosContextBuilder = AIModel.claudeCodeModel(specifier: "claude-mythos-5-1:high").rawValue
+        prompt.contextBuilderModelName = mythosContextBuilder
+        prompt.refreshModelSelectionState()
+        XCTAssertEqual(prompt.contextBuilderModelName, mythosContextBuilder)
+        XCTAssertEqual(prompt.preferredModel, mythosCompose)
+
+        // A compose raw that no longer resolves to a known model is still copied as before.
+        let unresolvableCompose = "legacy-compose-model"
+        XCTAssertNil(AIModel.fromModelName(unresolvableCompose))
+        store.setPreferredComposeModelRaw(unresolvableCompose, commit: true)
+        prompt.contextBuilderModelName = AIModel.gpt61SolHigh.rawValue
+        prompt.refreshModelSelectionState()
+        XCTAssertEqual(prompt.preferredModel, unresolvableCompose)
+        XCTAssertEqual(prompt.contextBuilderModelName, unresolvableCompose)
+    }
 }

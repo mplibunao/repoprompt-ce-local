@@ -72,6 +72,11 @@ final class AgentRunMCPToolServiceRespondDiagnosticsTests: XCTestCase {
                 "provider file change",
                 { fixture.installProviderApproval(kind: .fileChange) },
                 "response must be one of: accept, accept_for_session, decline, cancel."
+            ),
+            (
+                "provider command offering accept and cancel",
+                { fixture.installProviderApproval(kind: .commandExecution, decisionConstraint: .offered([.accept, .cancel])) },
+                "response must be one of: accept, cancel."
             )
         ]
 
@@ -87,6 +92,35 @@ final class AgentRunMCPToolServiceRespondDiagnosticsTests: XCTestCase {
                 label: label
             )
             XCTAssertEqual(fixture.currentPendingInteractionID, interactionID, label)
+        }
+    }
+
+    func testApprovalRespondRejectsUnofferedResponseWithoutMutation() async throws {
+        let fixture = try await ControlledApprovalSessionFixture.make()
+        addTeardownBlock { @MainActor in await fixture.cleanup() }
+        let interactionID = fixture.installProviderApproval(
+            kind: .commandExecution,
+            decisionConstraint: .offered([.accept, .cancel])
+        )
+        let pendingApproval = try XCTUnwrap(fixture.session.pendingApproval)
+
+        let cases: [(String, [String: Value])] = [
+            ("decline", ["response": .string("decline")]),
+            ("reject", ["response": .string("reject")]),
+            ("accept_for_session", ["response": .string("accept_for_session")]),
+            ("accept_with_amendment", ["response": .string("accept_with_amendment"), "amendment": .string(#"["git"]"#)])
+        ]
+        for (response, arguments) in cases {
+            await assertInvalidParams(
+                service: fixture.service,
+                sessionID: fixture.sessionID,
+                interactionID: interactionID,
+                arguments: arguments,
+                expectedMessage: "response \"\(response)\" is not offered by the current approval interaction. Offered responses: accept, cancel. No response was applied.",
+                label: response
+            )
+            XCTAssertEqual(fixture.session.pendingApproval, pendingApproval, response)
+            XCTAssertEqual(fixture.session.runState, .waitingForApproval, response)
         }
     }
 
@@ -232,7 +266,11 @@ final class AgentRunMCPToolServiceRespondDiagnosticsTests: XCTestCase {
         }
 
         @discardableResult
-        func installProviderApproval(kind: AgentApprovalKind, privacySentinels: Bool = false) -> UUID {
+        func installProviderApproval(
+            kind: AgentApprovalKind,
+            privacySentinels: Bool = false,
+            decisionConstraint: AgentApprovalDecisionConstraint = .unrestricted
+        ) -> UUID {
             let id = UUID()
             session.pendingApproval = AgentApprovalRequest(
                 id: id,
@@ -247,6 +285,7 @@ final class AgentRunMCPToolServiceRespondDiagnosticsTests: XCTestCase {
                 cwd: privacySentinels ? "CWD_SENTINEL" : nil,
                 grantRoot: privacySentinels ? "SCOPE_SENTINEL" : nil,
                 proposedExecpolicyAmendmentJSON: privacySentinels ? "AMENDMENT_SENTINEL" : nil,
+                decisionConstraint: decisionConstraint,
                 details: privacySentinels ? [.init(label: "OPTION_SENTINEL", value: "RESPONSE_SENTINEL")] : []
             )
             return id

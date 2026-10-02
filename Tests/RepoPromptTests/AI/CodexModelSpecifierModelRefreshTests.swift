@@ -2,8 +2,10 @@
 import XCTest
 
 final class CodexModelSpecifierModelRefreshTests: XCTestCase {
+    private let gpt6GenerationBases = ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra"]
+
     func testGPT6FamiliesSplitEveryEffortWithoutDiscovery() {
-        for base in ["gpt-6-sol", "gpt-6-luna"] {
+        for base in gpt6GenerationBases {
             for effort in ["low", "medium", "high", "xhigh", "max"] {
                 assertWire(raw: "\(base)-\(effort)", records: [], model: base, effort: effort, serviceTier: nil)
             }
@@ -12,27 +14,25 @@ final class CodexModelSpecifierModelRefreshTests: XCTestCase {
     }
 
     func testGPT6UltraIsNotBackfilled() {
-        for base in ["gpt-6-sol", "gpt-6-luna"] {
+        for base in gpt6GenerationBases {
             assertWire(raw: "\(base)-ultra", records: [], model: "\(base)-ultra", effort: nil, serviceTier: nil)
         }
         // Discovered capability, not the family backfill, authorizes Ultra.
-        assertWire(
-            raw: "gpt-6-sol-ultra",
-            records: [record("gpt-6-sol", efforts: ["high", "ultra"])],
-            model: "gpt-6-sol",
-            effort: "ultra",
-            serviceTier: nil
-        )
+        for base in ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra"] {
+            assertWire(
+                raw: "\(base)-ultra",
+                records: [record(base, efforts: ["high", "ultra"])],
+                model: base,
+                effort: "ultra",
+                serviceTier: nil
+            )
+        }
     }
 
     func testExactAdvertisedIdentifierOwnsItsWireIdentity() {
-        assertWire(
-            raw: "gpt-6-sol-max",
-            records: [record("gpt-6-sol-max", efforts: ["high"])],
-            model: "gpt-6-sol-max",
-            effort: nil,
-            serviceTier: nil
-        )
+        for raw in ["gpt-6-sol-max", "gpt-6.1-sol-max"] {
+            assertWire(raw: raw, records: [record(raw, efforts: ["high"])], model: raw, effort: nil, serviceTier: nil)
+        }
         assertWire(
             raw: "gpt-6-luna-fast",
             records: [record("gpt-6-luna-fast", efforts: [])],

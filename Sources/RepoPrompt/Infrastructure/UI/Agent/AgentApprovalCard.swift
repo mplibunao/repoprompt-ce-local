@@ -71,51 +71,55 @@ struct AgentApprovalCard: View {
     }
 
     private var actionButtons: some View {
-        HStack {
-            Button(action: { onDecision(.decline) }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "xmark")
-                    Text("Decline")
-                }
-            }
-            .buttonStyle(.bordered)
-
-            Spacer()
-
-            if request.supportsAlwaysAllow {
-                Button(action: alwaysAllowDecision) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.seal")
-                        Text(alwaysAllowLabel)
+        let decisions = request.presentedDecisions
+        return HStack {
+            if decisions.contains(.decline) {
+                Button(action: { onDecision(.decline) }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "xmark")
+                        Text("Decline")
                     }
                 }
                 .buttonStyle(.bordered)
             }
 
-            Button(action: { onDecision(.accept) }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                    Text("Approve")
+            if decisions.contains(.cancel) {
+                Button(role: .destructive, action: { onDecision(.cancel) }) {
+                    Label("Cancel Run", systemImage: "stop.circle")
                 }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut(.return, modifiers: [])
+
+            Spacer()
+
+            if let alwaysAllowDecision = request.alwaysAllowDecision {
+                Button(action: { onDecision(alwaysAllowDecision) }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.seal")
+                        Text(alwaysAllowLabel(for: alwaysAllowDecision))
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if decisions.contains(.accept) {
+                Button(action: { onDecision(.accept) }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text("Approve")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: [])
+            }
         }
     }
 
-    private var alwaysAllowLabel: String {
-        if request.proposedExecpolicyAmendmentJSON != nil {
+    private func alwaysAllowLabel(for decision: AgentApprovalDecision) -> String {
+        if case .acceptWithExecpolicyAmendment = decision {
             return "Approve & Remember"
         }
         return "Always Allow"
-    }
-
-    private func alwaysAllowDecision() {
-        if let amendment = request.proposedExecpolicyAmendmentJSON, !amendment.isEmpty {
-            onDecision(.acceptWithExecpolicyAmendment(amendment))
-        } else {
-            onDecision(.acceptForSession)
-        }
     }
 }
 

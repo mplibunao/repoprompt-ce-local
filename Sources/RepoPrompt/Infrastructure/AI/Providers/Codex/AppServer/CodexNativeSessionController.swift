@@ -4712,17 +4712,28 @@ final class CodexNativeSessionController {
                 await emit(.approvalRequest(approval))
                 return
             }
+            // A request whose declared decisions RepoPrompt cannot send is refused visibly instead
+            // of being answered with a decision the user was never offered.
+            let unusableOfferReason = Self.parseApprovalDecisionOffer(
+                from: params,
+                kind: Self.approvalKind(method: method, params: params)
+            ).unusableReason
             do {
                 try await client.respondToServerRequestError(
                     id: request.id,
                     code: -32602,
-                    message: "Unsupported approval request payload for method: \(method)"
+                    message: unusableOfferReason.map {
+                        "Approval request for method \(method) offers no decision RepoPrompt can send: \($0)"
+                    } ?? "Unsupported approval request payload for method: \(method)"
                 )
             } catch {
                 await emit(.error("Codex approval request response failed: \(error.localizedDescription)"))
                 return
             }
-            await emit(.error("Codex approval request could not be parsed (\(method))."))
+            await emit(.error(
+                unusableOfferReason.map { "Codex approval request could not be answered (\(method)): \($0)." }
+                    ?? "Codex approval request could not be parsed (\(method))."
+            ))
         case .requestUserInput:
             guard let userInputRequest = Self.parseRequestUserInputRequest(
                 requestID: request.id,
@@ -5287,6 +5298,174 @@ final class CodexNativeSessionController {
         )
     }
 
+    enum ApprovalDecisionOffer: Equatable {
+        /// The request did not declare `availableDecisions`; legacy behavior applies.
+        case unrestricted
+        /// `execpolicyAmendment` is the rule offered with `acceptWithExecpolicyAmendment`;
+        /// `unsupported` names offered entries RepoPrompt cannot send.
+        case offered([AgentApprovalDecisionKind], execpolicyAmendment: [String]?, unsupported: [String])
+        /// The request declared its decisions, but none of them can be sent.
+        case unusable(reason: String)
+
+        var unusableReason: String? {
+            if case let .unusable(reason) = self {
+                return reason
+            }
+            return nil
+        }
+    }
+
+    static func parseApprovalDecisionOffer(from params: [String: Any], kind: AgentApprovalKind) -> ApprovalDecisionOffer {
+        // Only the request's own top-level field constrains it; a nested `availableDecisions`
+        // belongs to some other payload and must neither restrict nor widen this request.
+        let declared: Any
+        switch declaredApprovalField("availabledecisions", in: params) {
+        case .absent:
+            return .unrestricted
+        case .conflicting:
+            return .unusable(reason: "availableDecisions is declared more than once with different values")
+        case let .value(value):
+            declared = value
+        }
+        guard !(declared is NSNull) else {
+            return .unrestricted
+        }
+        guard let entries = declared as? [Any] else {
+            return .unusable(reason: "availableDecisions is not a list")
+        }
+        var offered: [AgentApprovalDecisionKind] = []
+        var offeredAmendment: [String]?
+        var unsupported: [String] = []
+        for entry in entries {
+            switch offeredApprovalDecision(entry) {
+            case let .unit(decision):
+                if !offered.contains(decision) {
+                    offered.append(decision)
+                }
+            case let .execpolicyAmendment(rule):
+                if kind != .commandExecution {
+                    // An exec-policy amendment remembers a command rule, which a file-change
+                    // approval cannot accept.
+                    unsupported.append("acceptWithExecpolicyAmendment (command approvals only)")
+                } else if offeredAmendment == nil {
+                    offeredAmendment = rule
+                    offered.append(.acceptWithExecpolicyAmendment)
+                } else if offeredAmendment != rule {
+                    // Only one rule can back the single remembered-approval choice.
+                    unsupported.append("acceptWithExecpolicyAmendment (additional rule)")
+                }
+            case .malformedExecpolicyAmendment:
+                unsupported.append("acceptWithExecpolicyAmendment (malformed)")
+            case nil:
+                unsupported.append(offeredApprovalDecisionLabel(entry))
+            }
+        }
+        guard !offered.isEmpty else {
+            if unsupported.isEmpty {
+                return .unusable(reason: "availableDecisions is empty")
+            }
+            return .unusable(
+                reason: "availableDecisions offers only decisions RepoPrompt cannot send (\(unsupported.joined(separator: ", ")))"
+            )
+        }
+        return .offered(offered, execpolicyAmendment: offeredAmendment, unsupported: unsupported)
+    }
+
+    private enum OfferedApprovalDecision {
+        case unit(AgentApprovalDecisionKind)
+        case execpolicyAmendment([String])
+        case malformedExecpolicyAmendment
+    }
+
+    private enum DeclaredApprovalField {
+        case absent
+        case value(Any)
+        case conflicting
+    }
+
+    /// Keys are matched loosely, so one field can arrive under several spellings. Spellings that
+    /// disagree make the field unreadable instead of letting dictionary order choose one.
+    private static func declaredApprovalField(
+        _ normalizedKey: String,
+        in dictionary: [String: Any]
+    ) -> DeclaredApprovalField {
+        let values = dictionary.filter { normalizeApprovalKey($0.key) == normalizedKey }.map(\.value)
+        guard let first = values.first else { return .absent }
+        let firstObject = first as AnyObject
+        return values.dropFirst().allSatisfy { firstObject.isEqual($0 as AnyObject) } ? .value(first) : .conflicting
+    }
+
+    /// Unit decisions are strings and the amendment decision is a single-key object carrying the
+    /// offered rule; any other shape is not a decision RepoPrompt knows how to send.
+    private static func offeredApprovalDecision(_ entry: Any) -> OfferedApprovalDecision? {
+        if let name = entry as? String {
+            switch normalizeApprovalKey(name) {
+            case "accept":
+                return .unit(.accept)
+            case "acceptforsession":
+                return .unit(.acceptForSession)
+            case "decline":
+                return .unit(.decline)
+            case "cancel":
+                return .unit(.cancel)
+            default:
+                return nil
+            }
+        }
+        guard let object = entry as? [String: Any],
+              object.count == 1,
+              let variant = object.first,
+              normalizeApprovalKey(variant.key) == "acceptwithexecpolicyamendment"
+        else {
+            return nil
+        }
+        // The offered rule is what Codex will remember, so it must be well formed before the
+        // choice can be presented or answered.
+        guard let fields = variant.value as? [String: Any],
+              case let .value(ruleValue) = declaredApprovalField("execpolicyamendment", in: fields),
+              let rule = AgentExecpolicyAmendment.rule(from: ruleValue)
+        else {
+            return .malformedExecpolicyAmendment
+        }
+        return .execpolicyAmendment(rule)
+    }
+
+    private static func offeredApprovalDecisionLabel(_ entry: Any) -> String {
+        if let name = entry as? String {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "empty value" : String(trimmed.prefix(80))
+        }
+        if let object = entry as? [String: Any], !object.isEmpty {
+            return String(object.keys.sorted().joined(separator: "+").prefix(80))
+        }
+        return "unrecognized value"
+    }
+
+    private static func approvalCommand(in params: [String: Any]) -> String? {
+        firstString(
+            in: params,
+            keys: ["command", "cmd", "rawCommand", "raw_command", "shellCommand", "shell_command"]
+        )
+            ?? firstString(
+                in: params,
+                keys: ["argv", "args", "exec", "script"]
+            )
+    }
+
+    private static func approvalKind(method: String, params: [String: Any]) -> AgentApprovalKind {
+        let methodNormalized = normalizeApprovalKey(method)
+        if methodNormalized.contains("filechange") || methodNormalized.contains("file_change") {
+            return .fileChange
+        }
+        if methodNormalized.contains("commandexecution") || methodNormalized.contains("command") {
+            return .commandExecution
+        }
+        if approvalCommand(in: params)?.isEmpty == false {
+            return .commandExecution
+        }
+        return .fileChange
+    }
+
     static func parseApprovalRequest(
         requestID: CodexAppServerRequestID,
         method: String,
@@ -5302,6 +5481,22 @@ final class CodexNativeSessionController {
         guard let threadID = explicitThreadID ?? activeThreadID, !threadID.isEmpty else {
             return nil
         }
+        let kind = approvalKind(method: method, params: params)
+        let decisionConstraint: AgentApprovalDecisionConstraint
+        let unsupportedOfferedDecisions: [String]
+        let offeredAmendmentJSON: String?
+        switch parseApprovalDecisionOffer(from: params, kind: kind) {
+        case .unrestricted:
+            decisionConstraint = .unrestricted
+            unsupportedOfferedDecisions = []
+            offeredAmendmentJSON = nil
+        case let .offered(kinds, execpolicyAmendment, unsupported):
+            decisionConstraint = .offered(kinds, execpolicyAmendment: execpolicyAmendment)
+            unsupportedOfferedDecisions = unsupported
+            offeredAmendmentJSON = execpolicyAmendment.flatMap(AgentExecpolicyAmendment.json(for:))
+        case .unusable:
+            return nil
+        }
 
         let explicitTurnID = notificationTurnID(from: params)
         let turnID =
@@ -5314,20 +5509,14 @@ final class CodexNativeSessionController {
         let stableTurnID = explicitTurnID ?? "turn:\(requestID.displayValue)"
 
         let reason = firstString(in: params, keys: ["reason", "message", "prompt", "description"])
-        let command = firstString(
-            in: params,
-            keys: ["command", "cmd", "rawCommand", "raw_command", "shellCommand", "shell_command"]
-        )
-            ?? firstString(
-                in: params,
-                keys: ["argv", "args", "exec", "script"]
-            )
+        let command = approvalCommand(in: params)
         let cwd = firstString(
             in: params,
             keys: ["cwd", "workingDirectory", "working_directory", "workdir", "directory"]
         )
         let grantRoot = firstString(in: params, keys: ["grantRoot", "grant_root"])
-        let proposedExecpolicyAmendmentJSON = firstJSONString(
+        // An offered amendment is the only rule that can be sent, so it is the one shown.
+        let proposedExecpolicyAmendmentJSON = offeredAmendmentJSON ?? firstJSONString(
             in: params,
             keys: ["proposedExecpolicyAmendment", "proposed_execpolicy_amendment", "execpolicyAmendment", "execpolicy_amendment"]
         )
@@ -5335,20 +5524,6 @@ final class CodexNativeSessionController {
             in: params,
             keys: ["commandActions", "command_actions", "actions"]
         )
-
-        let methodNormalized = normalizeApprovalKey(method)
-        let kind: AgentApprovalKind = {
-            if methodNormalized.contains("filechange") || methodNormalized.contains("file_change") {
-                return .fileChange
-            }
-            if methodNormalized.contains("commandexecution") || methodNormalized.contains("command") {
-                return .commandExecution
-            }
-            if command?.isEmpty == false {
-                return .commandExecution
-            }
-            return .fileChange
-        }()
 
         let approvalID = AgentApprovalRequest.stableID(
             requestID: .codex(requestID),
@@ -5396,6 +5571,13 @@ final class CodexNativeSessionController {
         if let proposedExecpolicyAmendmentJSON, !proposedExecpolicyAmendmentJSON.isEmpty {
             appendDetail(label: "Execpolicy Amendment", value: proposedExecpolicyAmendmentJSON, isCode: true)
         }
+        if !unsupportedOfferedDecisions.isEmpty {
+            appendDetail(
+                label: "Unsupported Offered Decisions",
+                value: unsupportedOfferedDecisions.joined(separator: ", "),
+                isCode: true
+            )
+        }
         if details.isEmpty {
             appendDetail(label: "Method", value: method, isCode: true)
         }
@@ -5413,6 +5595,7 @@ final class CodexNativeSessionController {
             cwd: cwd,
             grantRoot: grantRoot,
             proposedExecpolicyAmendmentJSON: proposedExecpolicyAmendmentJSON,
+            decisionConstraint: decisionConstraint,
             details: details
         )
     }
