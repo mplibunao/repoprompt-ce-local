@@ -445,6 +445,41 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertIn("Settings", top_level)
         self.assertIn("Workspaces", top_level)
 
+    def test_sibling_debug_profile_is_never_archived_moved_or_restored(self) -> None:
+        self.write_baseline_fixture()
+        old_codex = self.state / "Codex" / "Debug" / "home" / "history.jsonl"
+        old_codex.parent.mkdir(parents=True)
+        old_codex.write_text("old-shared-debug-codex\n", encoding="utf-8")
+        sibling = self.state.parent / f"{DISPLAY_NAME} Debug"
+        (sibling / "Settings").mkdir(parents=True)
+        (sibling / "Settings" / "globalSettings.json").write_text('{"marker":"debug"}\n', encoding="utf-8")
+        sibling_before = directory_snapshot(sibling)
+
+        self.archive()
+        listing = subprocess.run(
+            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+
+        self.assertFalse(any(f"{DISPLAY_NAME} Debug" in entry for entry in listing), listing)
+        self.assertIn("./Codex/Debug/home/history.jsonl", listing)
+        self.assertEqual(
+            self.manifest()["applicationSupport"]["excludedNames"],
+            ["DebugApps", "Rollbacks", "Conductor", "DebugApps-*"],
+        )
+        self.assertEqual(directory_snapshot(sibling), sibling_before)
+
+        old_codex.write_text("changed-after-archive\n", encoding="utf-8")
+        (sibling / "Settings" / "globalSettings.json").write_text('{"marker":"debug-after"}\n', encoding="utf-8")
+        sibling_after_change = directory_snapshot(sibling)
+        self.restore()
+
+        self.assertEqual(old_codex.read_text(encoding="utf-8"), "old-shared-debug-codex\n")
+        self.assertEqual(directory_snapshot(sibling), sibling_after_change)
+        self.assertEqual(sorted(path.name for path in self.state.parent.iterdir()), [DISPLAY_NAME, f"{DISPLAY_NAME} Debug"])
+
     def test_prefix_exclusion_survives_restore_with_post_archive_content(self) -> None:
         self.write_baseline_fixture()
         preserved = self.state / "DebugApps-foo-preserved"

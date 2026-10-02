@@ -596,5 +596,122 @@ class HighOutputDiagnosticTests(unittest.TestCase):
         self.assertEqual(lines, ["==> high-output diagnostic start", "==> high-output diagnostic done"])
 
 
+class SmokeWorkspaceBootstrapTests(unittest.TestCase):
+    """Command sequencing and timeouts for the smoke flow, which creates its workspace once in a
+    fresh debug profile. Every CLI call answers from a minimal in-test listing, so no debug app
+    or CLI runs; the listing parser itself is checked against recorded debug CLI output in
+    SmokeWorkspaceListingContractTests."""
+
+    APPROVAL_PATH = "Settings → Permissions → Workspace Approvals → Create workspace"
+
+    def setUp(self) -> None:
+        self.tmp = enter_context(self, temporary_directory())
+        self.calls: list[tuple[str, list[str], object]] = []
+        self.output = io.StringIO()
+        enter_context(self, contextlib.redirect_stdout(self.output))
+        enter_context(self, mock.patch.object(conductor, "require_debug_cli", return_value="rpce-cli-debug"))
+
+    def run_smoke(self, responses: dict[str, Tuple[int, str, str]]) -> int:
+        def respond(label: str, argv: list[object], _cwd: Path, **kwargs: object) -> Tuple[int, str, str]:
+            self.calls.append((label, [str(arg) for arg in argv], kwargs.get("timeout")))
+            return responses.get(label, (0, "", ""))
+
+        with mock.patch.object(conductor, "run_operation_command", side_effect=respond):
+            return conductor.operation_smoke(self.tmp, {})
+
+    @staticmethod
+    def minimal_listing(*names: str) -> Tuple[int, str, str]:
+        workspaces = [{"id": str(index), "name": name} for index, name in enumerate(names)]
+        return 0, json.dumps({"action": "list", "workspaces": workspaces}), ""
+
+    def labels(self) -> list[str]:
+        return [label for label, _argv, _timeout in self.calls]
+
+    def payload(self, label: str) -> dict[str, object]:
+        argv = next(argv for call_label, argv, _timeout in self.calls if call_label == label)
+        return json.loads(argv[argv.index("-j") + 1])
+
+    def test_missing_workspace_is_created_once_then_switched_to(self) -> None:
+        code = self.run_smoke({"workspace list": self.minimal_listing("other")})
+
+        self.assertEqual(code, 0, self.output.getvalue())
+        self.assertEqual(self.labels()[:4], ["workspace list", "workspace create", "windows", "workspace switch"])
+        self.assertEqual(self.labels().count("workspace create"), 1)
+        list_argv = self.calls[0][1]
+        self.assertIn("--raw-json", list_argv)
+        self.assertEqual(self.payload("workspace list"), {"action": "list", "include_hidden": True, "_windowID": 1})
+        self.assertEqual(
+            self.payload("workspace create"),
+            {"action": "create", "name": "repoprompt-ce", "folder_path": str(self.tmp), "_windowID": 1},
+        )
+        create_timeout = next(timeout for label, _argv, timeout in self.calls if label == "workspace create")
+        self.assertEqual(create_timeout, conductor.SMOKE_WORKSPACE_CREATE_TIMEOUT_SECONDS)
+
+    def test_existing_workspace_is_never_recreated(self) -> None:
+        code = self.run_smoke({"workspace list": self.minimal_listing("other", "repoprompt-ce")})
+
+        self.assertEqual(code, 0, self.output.getvalue())
+        self.assertNotIn("workspace create", self.labels())
+        self.assertIn("workspace switch", self.labels())
+
+    def test_approval_required_create_fails_fast_with_the_settings_path(self) -> None:
+        for label, create_response in (
+            ("approval card left waiting", (124, "", "")),
+            ("approval denied", (1, "", "Error: [-32600] Invalid Request: Workspace creation was denied by the user.")),
+        ):
+            with self.subTest(case=label):
+                self.calls.clear()
+                self.output.truncate(0)
+                self.output.seek(0)
+
+                code = self.run_smoke({"workspace list": self.minimal_listing(), "workspace create": create_response})
+
+                self.assertEqual(code, 1)
+                self.assertIn(self.APPROVAL_PATH, self.output.getvalue())
+                self.assertEqual(self.labels(), ["workspace list", "workspace create"])
+
+    def test_unreadable_listing_never_creates(self) -> None:
+        code = self.run_smoke({"workspace list": (0, "## Workspaces\n- Count: 0\n", "")})
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self.labels(), ["workspace list"])
+        self.assertIn("could not read the workspace list", self.output.getvalue())
+
+
+class SmokeWorkspaceListingContractTests(unittest.TestCase):
+    """`smoke_workspace_names` against the output of the exact list call the smoke bootstrap
+    makes, recorded from the debug app through `rpce-cli-debug --raw-json` with paths, IDs, and
+    workspace names replaced."""
+
+    FIXTURE = SCRIPT_DIR / "Fixtures" / "manage_workspaces_list_debug_cli.json"
+
+    def setUp(self) -> None:
+        self.stdout = self.FIXTURE.read_text(encoding="utf-8")
+        self.recorded_names = {entry["name"] for entry in json.loads(self.stdout)["workspaces"]}
+
+    def test_recorded_listing_yields_every_workspace_name(self) -> None:
+        self.assertGreater(len(self.recorded_names), 1)
+        self.assertEqual(conductor.smoke_workspace_names(self.stdout), self.recorded_names)
+
+    def test_recorded_listing_without_the_smoke_workspace_creates_it_once(self) -> None:
+        self.assertNotIn("repoprompt-ce", self.recorded_names)
+        calls: list[str] = []
+
+        def respond(label: str, _argv: list[object], _cwd: Path, **_kwargs: object) -> Tuple[int, str, str]:
+            calls.append(label)
+            return (0, self.stdout, "") if label == "workspace list" else (0, "", "")
+
+        with (
+            temporary_directory() as tmp,
+            contextlib.redirect_stdout(io.StringIO()),
+            mock.patch.object(conductor, "require_debug_cli", return_value="rpce-cli-debug"),
+            mock.patch.object(conductor, "run_operation_command", side_effect=respond),
+        ):
+            code = conductor.operation_smoke(tmp, {})
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls.count("workspace create"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

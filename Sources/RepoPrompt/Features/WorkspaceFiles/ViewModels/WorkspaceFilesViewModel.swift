@@ -3370,6 +3370,13 @@ class WorkspaceFilesViewModel: ObservableObject {
         }
 
         let gitDataURL = workspaceManager.gitDataDirectory(for: workspace)
+        // A loaded git-data root is browsable and editable, so one linked out of the isolated debug
+        // profile is never loaded.
+        guard GitDiffSnapshotStore().admitsIsolatedGitData(
+            workspaceDirectory: workspaceManager.workspaceDirectory(for: workspace)
+        ) else {
+            throw WorkspaceStorageIsolationError.storageOutsideProfile(gitDataURL)
+        }
         if !isFolderAlreadyLoaded(gitDataURL) {
             try await loadSupplementalRoot(
                 at: gitDataURL,

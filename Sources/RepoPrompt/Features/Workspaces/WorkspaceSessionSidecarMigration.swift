@@ -81,14 +81,28 @@ enum WorkspaceSessionSidecarMigration {
     static func workspaceDirectory(
         for workspace: WorkspaceModel,
         root: URL
-    ) -> URL {
+    ) throws -> URL {
         if let customStoragePath = workspace.customStoragePath {
+            // Chat and agent-session I/O never reaches external backing under debug isolation.
+            guard WorkspaceStoragePaths.admitsCustomStoragePath(customStoragePath, within: root) else {
+                throw WorkspaceStorageIsolationError.customStorageUnavailable
+            }
             return customStoragePath.standardizedFileURL
         }
         return root.standardizedFileURL.appendingPathComponent(
             WorkspaceDirectoryName.directoryName(name: workspace.name, id: workspace.id),
             isDirectory: true
         )
+    }
+
+    /// A workspace's session folder (`Chats` or `AgentSessions`). Under debug isolation it must
+    /// resolve inside `root`, so a symlinked workspace or session folder cannot route session
+    /// I/O into another profile.
+    static func sessionFolder(named name: String, for workspace: WorkspaceModel, root: URL) throws -> URL {
+        let folder = try workspaceDirectory(for: workspace, root: root)
+            .appendingPathComponent(name, isDirectory: true)
+        try WorkspaceStoragePaths.requireProfileLocation(folder, within: root)
+        return folder
     }
 
     static func validateDistinctSessionFolders(
@@ -142,6 +156,9 @@ enum WorkspaceSessionSidecarMigration {
             let destinationURL = destinationFolder
                 .appendingPathComponent(sourceURL.lastPathComponent)
                 .standardizedFileURL
+            // Source links are not regular files and are skipped above; a destination link out of
+            // the isolated debug profile is refused before it is compared or replaced.
+            try WorkspaceStoragePaths.requireProfileLocation(destinationURL)
             let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
             let normalizedSource = try normalizedPayload(
                 sourceData,

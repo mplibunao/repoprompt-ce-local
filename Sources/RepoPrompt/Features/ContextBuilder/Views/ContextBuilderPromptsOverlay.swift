@@ -66,19 +66,8 @@ class ContextBuilderPromptStorage: ObservableObject {
         builtInPrompts + prompts
     }
 
-    private var fileURL: URL {
-        let supportDir = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first!
-
-        let appSupportFolder = supportDir.appendingPathComponent("com.pvncher.repoprompt", isDirectory: true)
-        try? FileManager.default.createDirectory(
-            at: appSupportFolder,
-            withIntermediateDirectories: true
-        )
-
-        return appSupportFolder.appendingPathComponent(filename)
+    private func resolvedFileURL() throws -> URL {
+        try PromptStorage.preparedDefaultPromptFileURL(named: filename)
     }
 
     private init() {
@@ -89,14 +78,14 @@ class ContextBuilderPromptStorage: ObservableObject {
     /// Load prompts from disk
     func loadPrompts() {
         Self.queue.sync {
-            if !FileManager.default.fileExists(atPath: fileURL.path) {
-                DispatchQueue.main.async {
-                    self.prompts = []
-                }
-                return
-            }
-
             do {
+                let fileURL = try resolvedFileURL()
+                if !FileManager.default.fileExists(atPath: fileURL.path) {
+                    DispatchQueue.main.async {
+                        self.prompts = []
+                    }
+                    return
+                }
                 let data = try Data(contentsOf: fileURL)
                 let loaded = try JSONDecoder().decode([ContextBuilderPrompt].self, from: data)
                 DispatchQueue.main.async {
@@ -120,7 +109,7 @@ class ContextBuilderPromptStorage: ObservableObject {
         Self.queue.async {
             do {
                 let data = try JSONEncoder().encode(newPrompts)
-                try data.write(to: self.fileURL, options: .atomicWrite)
+                try data.write(to: self.resolvedFileURL(), options: .atomicWrite)
             } catch {
                 print("⚠️ Failed to save context builder prompts: \(error)")
             }

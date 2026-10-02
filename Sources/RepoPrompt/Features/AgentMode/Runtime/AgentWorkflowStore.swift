@@ -205,7 +205,11 @@ final class AgentWorkflowStore: ObservableObject {
     /// Frontmatter keys: `id`, `name`, `icon`, `accent_color`, `tooltip`, `description`
     /// If no `id` in frontmatter, derives UUID from filename pattern `workflow-<uuid>.md`.
     private func parseWorkflowFile(at url: URL) -> AgentWorkflowDefinition? {
-        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        // A workflow file that links out of the isolated debug profile is neither listed nor
+        // deletable, since only parsed files are tracked.
+        guard WorkspaceStoragePaths.admitsProfileLocation(url),
+              let content = try? String(contentsOf: url, encoding: .utf8)
+        else { return nil }
 
         var frontmatter: [String: String] = [:]
         var templateBody = content

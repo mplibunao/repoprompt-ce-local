@@ -4,6 +4,6 @@ import RepoPromptApp
 enum RepoPromptExecutable {
     @MainActor
     static func main() {
-        RepoPromptApplication.main()
+        RepoPromptApplicationLauncher.main()
     }
 }

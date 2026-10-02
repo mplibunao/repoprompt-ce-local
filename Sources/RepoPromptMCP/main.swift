@@ -24,14 +24,28 @@ let log: Logger = {
     return logger
 }()
 
+// A debug CLI refuses to start when its profile resolves into production state. Globals in this
+// file initialize in order, so this runs before any profile-backed side effect, including the
+// socket-log truncation below, policy administration, and events.
+do {
+    try MCPFilesystemConstants.identity.validateProfileIsolation(
+        managedStateURLs: RuntimePolicyAdministration
+            .makeRuntimeConfiguration(identity: MCPFilesystemConstants.identity)
+            .managedStateLocations
+    )
+} catch {
+    fputs("RepoPrompt MCP: \(error)\n", stderr)
+    exit(MCPCLIExitCode.unknownError.rawValue)
+}
+
 /// File-based debug logging for socket proxy debugging
 /// Enable via: defaults write com.repoprompt.ce.mcp enableSocketDebugLog -bool true
 private let enableSocketDebugLog: Bool = ProcessInfo.processInfo.environment["MCP_SOCKET_DEBUG"] == "1" ||
     UserDefaults.standard.bool(forKey: "enableSocketDebugLog")
 
 private let debugLogURL: URL = {
-    let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/RepoPrompt CE/socket-proxy-debug.log")
+    let url = MCPFilesystemConstants.identity.applicationSupportRootURL()
+        .appendingPathComponent("socket-proxy-debug.log")
     guard enableSocketDebugLog else { return url }
     // Create directory if needed
     try? FileManager.default.createDirectory(

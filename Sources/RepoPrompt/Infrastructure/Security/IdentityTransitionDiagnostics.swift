@@ -159,7 +159,7 @@ final class IdentityTransitionDiagnostics: @unchecked Sendable {
         return ledger
     }
 
-    private static func defaultFileURL(fileManager: FileManager = .default) -> URL? {
+    static func defaultFileURL(fileManager: FileManager = .default) -> URL? {
         MCPFilesystemConstants.identity.applicationSupportRootURL(fileManager: fileManager)
             .appendingPathComponent("Diagnostics", isDirectory: true)
             .appendingPathComponent("identity-transition-v1.json", isDirectory: false)

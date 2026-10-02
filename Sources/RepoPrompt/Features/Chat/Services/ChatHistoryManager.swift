@@ -197,19 +197,13 @@ actor ChatDataService {
         from sourceWorkspace: WorkspaceModel,
         to destinationWorkspace: WorkspaceModel
     ) async throws -> WorkspaceSessionSidecarPreparedBatch? {
-        let sourceWorkspaceDirectory = resolvedWorkspaceFolderURL(for: sourceWorkspace)
-        let destinationWorkspaceDirectory = resolvedWorkspaceFolderURL(for: destinationWorkspace)
+        let sourceFolder = try chatsFolderURL(for: sourceWorkspace).standardizedFileURL
+        let destinationFolder = try chatsFolderURL(for: destinationWorkspace).standardizedFileURL
         let canonicalWorkspaceID = destinationWorkspace.id
         return try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<WorkspaceSessionSidecarPreparedBatch?, Error>) in
             fileSaveQueue.async {
                 do {
-                    let sourceFolder = sourceWorkspaceDirectory
-                        .appendingPathComponent("Chats", isDirectory: true)
-                        .standardizedFileURL
-                    let destinationFolder = destinationWorkspaceDirectory
-                        .appendingPathComponent("Chats", isDirectory: true)
-                        .standardizedFileURL
                     try WorkspaceSessionSidecarMigration.validateDistinctSessionFolders(
                         source: sourceFolder,
                         destination: destinationFolder
@@ -293,6 +287,7 @@ actor ChatDataService {
         // 2) Build file URL
         let filename = "ChatSession-\(session.id.uuidString).json"
         let fileURL = chatsFolder.appendingPathComponent(filename)
+        try WorkspaceStoragePaths.requireProfileLocation(fileURL, within: Self.workspaceRootURL())
 
         // 3) Update session with file path & timestamp and capture it as a constant copy
         var sessionToSave = session
@@ -323,6 +318,7 @@ actor ChatDataService {
         guard filename.hasPrefix("ChatSession-"), filename.hasSuffix(".json") else {
             throw ChatDataError.invalidFilename(filename)
         }
+        try WorkspaceStoragePaths.requireProfileLocation(fileURL, within: Self.workspaceRootURL())
 
         do {
             // Use memory-mapped reads to reduce peak memory pressure for large sessions
@@ -416,6 +412,7 @@ actor ChatDataService {
         guard filename.hasPrefix("ChatSession-"), filename.hasSuffix(".json") else {
             throw ChatDataError.invalidFilename(filename)
         }
+        try WorkspaceStoragePaths.requireProfileLocation(fileURL, within: workspaceRootURL())
 
         do {
             // Use memory-mapped reads to reduce peak memory pressure when listing many sessions
@@ -573,6 +570,7 @@ actor ChatDataService {
 
     /// Delete a particular chat session file.
     func deleteChatSessionFile(_ fileURL: URL) async throws {
+        try WorkspaceStoragePaths.requireProfileLocation(fileURL, within: Self.workspaceRootURL())
         try await Self.removeItem(at: fileURL)
     }
 
@@ -581,28 +579,18 @@ actor ChatDataService {
     /// Creates (if needed) and returns the "Chats" subfolder for the given workspace.
     /// Uses workspace.customStoragePath if set, else the default ~Library location.
     private func ensureChatsFolder(for workspace: WorkspaceModel) throws -> URL {
-        let baseFolder = try workspaceFolderURL(for: workspace)
-        let chatsFolder = baseFolder.appendingPathComponent("Chats")
-
+        let chatsFolder = try Self.chatsFolderURL(for: workspace)
         if !FileManager.default.fileExists(atPath: chatsFolder.path) {
             try FileManager.default.createDirectory(at: chatsFolder, withIntermediateDirectories: true)
         }
         return chatsFolder
     }
 
-    private nonisolated static func resolvedWorkspaceFolderURL(for workspace: WorkspaceModel) -> URL {
-        WorkspaceSessionSidecarMigration.workspaceDirectory(
+    private nonisolated static func chatsFolderURL(for workspace: WorkspaceModel) throws -> URL {
+        try WorkspaceSessionSidecarMigration.sessionFolder(
+            named: "Chats",
             for: workspace,
             root: workspaceRootURL()
         )
-    }
-
-    /// Return the main folder for the workspace.
-    private func workspaceFolderURL(for workspace: WorkspaceModel) throws -> URL {
-        let workspaceDir = Self.resolvedWorkspaceFolderURL(for: workspace)
-        if !FileManager.default.fileExists(atPath: workspaceDir.path) {
-            try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
-        }
-        return workspaceDir
     }
 }

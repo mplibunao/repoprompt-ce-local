@@ -56,10 +56,25 @@ final class AppDomainRuntimeComposition: Sendable {
     }
 
     private init() {
-        let root = MCPFilesystemConstants.identity.applicationSupportRootURL()
-        let defaults = UserDefaults.standard
-        let customStoragePath = defaults.string(forKey: "GlobalCustomStorageURL")
-        var legacyRuntimeDefaults = Self.collectLegacyRuntimeDefaults(from: defaults)
+        runtime = MCPDomainRuntime(
+            configuration: Self.makeConfiguration(
+                identity: MCPFilesystemConstants.identity,
+                isolatesDebugProfile: WorkspaceStoragePaths.isolatesDebugProfile,
+                defaults: .standard
+            )
+        )
+    }
+
+    /// The isolated debug profile keeps workspace documents in its own `Workspaces` directory and
+    /// ignores a saved custom-storage redirect, which is preserved but never migrated or followed.
+    static func makeConfiguration(
+        identity: MCPFilesystemIdentity,
+        isolatesDebugProfile: Bool,
+        defaults: UserDefaults
+    ) -> DomainRuntimeConfiguration {
+        let root = identity.applicationSupportRootURL()
+        let customStoragePath = isolatesDebugProfile ? nil : defaults.string(forKey: "GlobalCustomStorageURL")
+        var legacyRuntimeDefaults = collectLegacyRuntimeDefaults(from: defaults)
         if let customStoragePath,
            let bytes = try? JSONEncoder().encode(customStoragePath)
         {
@@ -68,18 +83,16 @@ final class AppDomainRuntimeComposition: Sendable {
         let workspaceStorageDirectory = customStoragePath.map {
             URL(fileURLWithPath: $0, isDirectory: true)
         } ?? root.appendingPathComponent("Workspaces", isDirectory: true)
-        runtime = MCPDomainRuntime(
-            configuration: DomainRuntimeConfiguration(
-                mode: .app,
-                profileIdentifier: "default",
-                storageDirectory: root,
-                workspaceStorageDirectory: workspaceStorageDirectory,
-                eventDirectory: root.appendingPathComponent("Events", isDirectory: true),
-                temporaryDirectory: FileManager.default.temporaryDirectory
-                    .appendingPathComponent("RepoPrompt CE", isDirectory: true),
-                legacyRuntimeDefaults: legacyRuntimeDefaults,
-                metrics: AppDomainRuntimeMetrics.editFlowSink
-            )
+        return DomainRuntimeConfiguration(
+            mode: .app,
+            profileIdentifier: "default",
+            storageDirectory: root,
+            workspaceStorageDirectory: workspaceStorageDirectory,
+            eventDirectory: root.appendingPathComponent("Events", isDirectory: true),
+            temporaryDirectory: identity.temporaryRootURL(),
+            legacyRuntimeDefaults: legacyRuntimeDefaults,
+            metrics: AppDomainRuntimeMetrics.editFlowSink,
+            enforcesWorkspaceStorageBoundary: isolatesDebugProfile
         )
     }
 }

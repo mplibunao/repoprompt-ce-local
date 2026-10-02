@@ -161,6 +161,13 @@ MEDIUM_TIMEOUT_SECONDS = 60 * 60
 RELEASE_TIMEOUT_SECONDS = 2 * 60 * 60
 RELEASE_ARTIFACT_TIMEOUT_SECONDS = 4 * 60 * 60
 SMOKE_AGENT_WAIT_SECONDS = 120.0
+# An auto-approved create answers in about a second; anything slower is waiting on the
+# approval card, which would otherwise hold the smoke for its full 300-second deadline.
+SMOKE_WORKSPACE_CREATE_TIMEOUT_SECONDS = 15.0
+SMOKE_WORKSPACE_APPROVAL_MESSAGE = (
+    "Creating the smoke workspace needs approval in the debug app. Open RepoPrompt CE Debug, go to "
+    "Settings → Permissions → Workspace Approvals → Create workspace, allow it, then rerun the smoke."
+)
 
 XCTEST_OPERATIONS = frozenset({"test", "provider-test"})
 TEST_SANDBOX_ENV_KEY = "REPOPROMPT_TEST_SANDBOX_ROOT"
@@ -7222,6 +7229,80 @@ def _print_captured(stdout: str, stderr: str) -> None:
         print(stderr, end="" if stderr.endswith("\n") else "\n", flush=True)
 
 
+def smoke_workspace_names(stdout: str) -> Optional[set[str]]:
+    """Names from a raw-JSON `manage_workspaces` list result, or None when no list is readable."""
+    text = stdout.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end < start:
+        return None
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    names: set[str] = set()
+    found = False
+    pending: List[Any] = [payload]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            workspaces = item.get("workspaces")
+            if isinstance(workspaces, list):
+                found = True
+                names.update(
+                    entry["name"] for entry in workspaces if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+                )
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return names if found else None
+
+
+def ensure_smoke_workspace(
+    cli: str,
+    window_id: int,
+    workspace: str,
+    repo_root: Path,
+    env: Dict[str, str],
+) -> int:
+    """Creates the smoke workspace once in a fresh debug profile.
+
+    An existing workspace is never recreated, because a second create silently produces a
+    suffixed duplicate. Hidden workspaces count as existing.
+    """
+    list_argv = routed_structured_cli_argv(
+        cli, window_id, "manage_workspaces", {"action": "list", "include_hidden": True}
+    )
+    code, stdout, _stderr = run_operation_command(
+        "workspace list", [cli, "--raw-json", *list_argv[1:]], repo_root, env=env
+    )
+    if code != 0:
+        return code
+    names = smoke_workspace_names(stdout)
+    if names is None:
+        print("ERROR: could not read the workspace list, so the smoke workspace was not created.", flush=True)
+        return 1
+    if workspace in names:
+        return 0
+    print(f'Workspace "{workspace}" is missing from the debug profile; creating it from {repo_root}.', flush=True)
+    code, stdout, stderr = run_operation_command(
+        "workspace create",
+        routed_structured_cli_argv(
+            cli,
+            window_id,
+            "manage_workspaces",
+            {"action": "create", "name": workspace, "folder_path": str(repo_root)},
+        ),
+        repo_root,
+        env=env,
+        allow_exit_codes={0, 1},
+        timeout=SMOKE_WORKSPACE_CREATE_TIMEOUT_SECONDS,
+    )
+    if code == 124 or "Workspace creation was denied by the user." in stdout + stderr:
+        print(f"ERROR: {SMOKE_WORKSPACE_APPROVAL_MESSAGE}", flush=True)
+        return 1
+    return code
+
+
 def is_already_on_workspace(stderr: str, workspace: str) -> bool:
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     expected = f'Already on workspace "{workspace}"'
@@ -7798,6 +7879,10 @@ def operation_smoke(repo_root: Path, args: Dict[str, Any]) -> int:
                 print("ERROR: timed out waiting for rpce-cli-debug windows after launch", flush=True)
                 return code or 1
             time.sleep(2.0)
+
+    code = ensure_smoke_workspace(cli, window_id, workspace, repo_root, env)
+    if code != 0:
+        return code
 
     stages = [
         ("windows", [cli, "-e", "windows"]),

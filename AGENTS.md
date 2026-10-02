@@ -134,13 +134,16 @@ If `/usr/local/bin` needs administrator privileges, run the install target from 
 "$HOME/RepoPrompt/repoprompt_ce_cli_debug" -e 'windows'
 ```
 
-The debug app currently shares the production profile, `~/Library/Application Support/RepoPrompt CE`, so it reads and writes production's workspaces, history, and settings (#66). The smoke flow below, `make dev-smoke`, and `make dev-smoke-launch` are fine for validating a pull request. Run validation that writes test state into stores, such as sentinel writes or bulk workspace changes, only in a verified disposable home, as [`docs/testing.md`](docs/testing.md) describes.
+The debug app and the debug CLI keep their own runtime profile at `~/Library/Application Support/RepoPrompt CE Debug`, with runtime temporary files under `$TMPDIR/RepoPrompt CE Debug`. Workspaces, chat and agent history, settings, presets, window sessions, saved prompts, and the managed Codex home live there, and production's `~/Library/Application Support/RepoPrompt CE` is neither read nor written. A fresh debug profile starts empty. Nothing is copied from production, from the `~/Downloads/RepoPrompt-Backup` restore, or from a saved custom workspace storage location, and a debug build ignores that saved location without changing the preference. Developer tooling stays where it was: the debug bundle under `RepoPrompt CE/DebugApps`, conductor state, and the CLI links above. A debug build packaged before the profile split still shares production's profile, so rebuild before relying on the separation. When the profile resolves into production state, such as through a symlink, the debug app and CLI exit before opening any store and print the reason to stderr. [`docs/testing.md`](docs/testing.md#debug-profile-isolation) covers the details.
+
+`make dev-smoke` and `make dev-smoke-launch` create the `repoprompt-ce` workspace once in a fresh debug profile and never recreate it. When creating it needs approval, the smoke stops within seconds and names the setting to change: Settings → Permissions → Workspace Approvals → Create workspace.
 
 Live CE MCP smoke flow:
 
 ```bash
 make run
 rpce-cli-debug -e 'windows'
+rpce-cli-debug -w 1 -e "workspace create repoprompt-ce --folder-path $PWD"   # only when 'workspace list' lacks it
 rpce-cli-debug -w 1 -e 'workspace switch repoprompt-ce'
 rpce-cli-debug -w 1 -e 'tree --type roots'
 rpce-cli-debug -w 1 -c agent_manage -j '{"op":"list_agents","roles_only":true}'

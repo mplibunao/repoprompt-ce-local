@@ -491,7 +491,15 @@ actor AgentSessionDataService {
     }
 
     private func writeDataAtomically(_ data: Data, to fileURL: URL) async throws {
+        try requireProfileFile(fileURL)
         try await diskWriter.enqueueAndWait(data: data, url: fileURL)
+    }
+
+    /// Under debug isolation, a session file or index is used only when it resolves inside the
+    /// profile's workspace storage, so a link to another profile's file is neither read nor
+    /// replaced, and a refused index is rebuilt in memory only.
+    private func requireProfileFile(_ fileURL: URL) throws {
+        try WorkspaceStoragePaths.requireProfileLocation(fileURL, within: workspaceRootURL())
     }
 
     // MARK: - Metadata Index Helpers
@@ -558,7 +566,9 @@ actor AgentSessionDataService {
             return cached
         }
         let fileURL = metadataIndexFileURL(forAgentSessionsFolder: folder)
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        guard WorkspaceStoragePaths.admitsProfileLocation(fileURL, within: workspaceRootURL()),
+              FileManager.default.fileExists(atPath: fileURL.path)
+        else {
             metadataIndexCacheByFolder.removeValue(forKey: key)
             #if DEBUG
                 if let readStartMS {
@@ -610,12 +620,14 @@ actor AgentSessionDataService {
             let writeStartMS = AgentModePerfDiagnostics.timestampMSIfEnabled()
         #endif
         let key = canonicalMetadataFolderKey(folder)
+        let indexURL = metadataIndexFileURL(forAgentSessionsFolder: folder)
+        try requireProfileFile(indexURL)
         var normalized = index
         normalized.schemaVersion = AgentSessionMetadataIndex.currentSchemaVersion
         normalized.entries = normalized.entries.sortedForAgentSessionMetadataIndex()
         let data = try encoder.encode(normalized)
         metadataIndexCacheByFolder[key] = normalized
-        try data.write(to: metadataIndexFileURL(forAgentSessionsFolder: folder), options: .atomic)
+        try data.write(to: indexURL, options: .atomic)
         #if DEBUG
             AgentModePerfDiagnostics.durationEvent(
                 "cleanup.metadata.writeIndex",
@@ -929,7 +941,9 @@ actor AgentSessionDataService {
         }
 
         let fileURL = metadataIndexFileURL(forAgentSessionsFolder: folder)
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        guard WorkspaceStoragePaths.admitsProfileLocation(fileURL, within: workspaceRootURL()),
+              FileManager.default.fileExists(atPath: fileURL.path)
+        else {
             metadataIndexCacheByFolder.removeValue(forKey: key)
             return nil
         }
@@ -1001,14 +1015,8 @@ actor AgentSessionDataService {
         from sourceWorkspace: WorkspaceModel,
         to destinationWorkspace: WorkspaceModel
     ) async throws -> WorkspaceSessionSidecarPreparedBatch? {
-        let sourceWorkspaceDirectory = resolvedWorkspaceFolderURL(for: sourceWorkspace)
-        let destinationWorkspaceDirectory = resolvedWorkspaceFolderURL(for: destinationWorkspace)
-        let sourceFolder = sourceWorkspaceDirectory
-            .appendingPathComponent("AgentSessions", isDirectory: true)
-            .standardizedFileURL
-        let destinationFolder = destinationWorkspaceDirectory
-            .appendingPathComponent("AgentSessions", isDirectory: true)
-            .standardizedFileURL
+        let sourceFolder = try agentSessionsFolderURL(for: sourceWorkspace).standardizedFileURL
+        let destinationFolder = try agentSessionsFolderURL(for: destinationWorkspace).standardizedFileURL
         try WorkspaceSessionSidecarMigration.validateDistinctSessionFolders(
             source: sourceFolder,
             destination: destinationFolder
@@ -1120,6 +1128,7 @@ actor AgentSessionDataService {
         guard !deletedSessionFileURLs.contains(fileURL) else {
             throw AgentSessionDataError.sessionDeleted(session.id)
         }
+        try requireProfileFile(fileURL)
 
         let sessionToSave = sessionPreparedForStorage(
             session,
@@ -1156,6 +1165,7 @@ actor AgentSessionDataService {
         guard filename.starts(with: "AgentSession-"), filename.hasSuffix(".json") else {
             throw AgentSessionDataError.invalidFilename(filename)
         }
+        try requireProfileFile(fileURL)
 
         do {
             let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
@@ -1200,6 +1210,7 @@ actor AgentSessionDataService {
         guard filename.starts(with: "AgentSession-"), filename.hasSuffix(".json") else {
             throw AgentSessionDataError.invalidFilename(filename)
         }
+        try requireProfileFile(fileURL)
 
         do {
             let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
@@ -1577,6 +1588,7 @@ actor AgentSessionDataService {
     }
 
     private func deleteSessionFileDurably(_ fileURL: URL) async throws {
+        try requireProfileFile(fileURL)
         deletedSessionFileURLs.insert(fileURL)
         #if DEBUG
             let tombstoneWaiters = deletionTombstoneWaitersByURL.removeValue(forKey: fileURL) ?? []
@@ -1601,7 +1613,9 @@ actor AgentSessionDataService {
         folder: URL
     ) async throws {
         guard deletedSessionFileURLs.contains(fileURL) else { return }
-        try? FileManager.default.removeItem(at: fileURL)
+        if WorkspaceStoragePaths.admitsProfileLocation(fileURL, within: workspaceRootURL()) {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
         await removeMetadataRecords(
             matching: { $0.id == sessionID || $0.filename == fileURL.lastPathComponent },
             folder: folder
@@ -1661,9 +1675,7 @@ actor AgentSessionDataService {
 
     /// Creates (if needed) and returns the "AgentSessions" subfolder for the given workspace.
     private func ensureAgentSessionsFolder(for workspace: WorkspaceModel) throws -> URL {
-        let baseFolder = try workspaceFolderURL(for: workspace)
-        let agentSessionsFolder = baseFolder.appendingPathComponent("AgentSessions")
-
+        let agentSessionsFolder = try agentSessionsFolderURL(for: workspace)
         if !FileManager.default.fileExists(atPath: agentSessionsFolder.path) {
             try FileManager.default.createDirectory(at: agentSessionsFolder, withIntermediateDirectories: true)
         }
@@ -1679,19 +1691,11 @@ actor AgentSessionDataService {
         return Self.defaultWorkspaceRootURL()
     }
 
-    private func resolvedWorkspaceFolderURL(for workspace: WorkspaceModel) -> URL {
-        WorkspaceSessionSidecarMigration.workspaceDirectory(
+    private func agentSessionsFolderURL(for workspace: WorkspaceModel) throws -> URL {
+        try WorkspaceSessionSidecarMigration.sessionFolder(
+            named: "AgentSessions",
             for: workspace,
             root: workspaceRootURL()
         )
-    }
-
-    /// Return the main folder for the workspace.
-    private func workspaceFolderURL(for workspace: WorkspaceModel) throws -> URL {
-        let workspaceDir = resolvedWorkspaceFolderURL(for: workspace)
-        if !FileManager.default.fileExists(atPath: workspaceDir.path) {
-            try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
-        }
-        return workspaceDir
     }
 }

@@ -78,13 +78,14 @@ actor GitDiffDataMaintenance {
     /// Run maintenance when a workspace is opened.
     /// This handles version upgrades, legacy purge, and retention enforcement.
     func runOnWorkspaceOpen(workspaceDirectory: URL, policy: Policy = .default) async -> MaintenanceResult {
-        let state = readMaintenanceState(workspaceDirectory: workspaceDirectory)
         var result = MaintenanceResult(
             expiredSnapshotsDeleted: 0,
             excessSnapshotsDeleted: 0,
             legacyPurgePerformed: false,
             versionUpgraded: false
         )
+        guard admitsGitData(workspaceDirectory: workspaceDirectory) else { return result }
+        let state = readMaintenanceState(workspaceDirectory: workspaceDirectory)
 
         // Check if version upgrade is needed
         if state.version < Self.currentDataVersion {
@@ -148,6 +149,7 @@ actor GitDiffDataMaintenance {
         generatedAt: Date,
         policy: Policy = .default
     ) async {
+        guard admitsGitData(workspaceDirectory: workspaceDirectory) else { return }
         var entries = retentionEntries(workspaceDirectory: workspaceDirectory)
         let published = SnapshotRetentionEntry(repoKey: repoKey, snapshotID: snapshotID, generatedAt: generatedAt)
         entries.removeAll { $0.identity == published.identity }
@@ -165,6 +167,7 @@ actor GitDiffDataMaintenance {
     /// Called when a compose tab is closed.
     @discardableResult
     func deleteSnapshotsForTab(workspaceDirectory: URL, tabID: UUID) async -> Int {
+        guard admitsGitData(workspaceDirectory: workspaceDirectory) else { return 0 }
         var deletedCount = 0
 
         // Collect all entries across all repos
@@ -207,7 +210,7 @@ actor GitDiffDataMaintenance {
     /// More efficient than calling deleteSnapshotsForTab multiple times.
     @discardableResult
     func deleteSnapshotsForTabs(workspaceDirectory: URL, tabIDs: Set<UUID>) async -> Int {
-        guard !tabIDs.isEmpty else { return 0 }
+        guard !tabIDs.isEmpty, admitsGitData(workspaceDirectory: workspaceDirectory) else { return 0 }
 
         var deletedCount = 0
 
@@ -251,6 +254,7 @@ actor GitDiffDataMaintenance {
     /// Called when a workspace is deleted.
     @discardableResult
     func deleteAllGitData(workspaceDirectory: URL) async -> Bool {
+        guard admitsGitData(workspaceDirectory: workspaceDirectory) else { return false }
         let gitDataDir = store.gitDataRoot(workspaceDirectory: workspaceDirectory)
         let fileManager = FileManager.default
 
@@ -402,6 +406,17 @@ actor GitDiffDataMaintenance {
             })
         }
         return entries
+    }
+
+    /// Git data linked out of the isolated debug profile is neither read, purged, nor removed.
+    private func admitsGitData(workspaceDirectory: URL) -> Bool {
+        store.admitsIsolatedGitData(
+            workspaceDirectory: workspaceDirectory,
+            fixedFiles: [
+                retentionIndexURL(workspaceDirectory: workspaceDirectory),
+                maintenanceStateURL(workspaceDirectory: workspaceDirectory)
+            ]
+        )
     }
 
     private func retentionIndexURL(workspaceDirectory: URL) -> URL {

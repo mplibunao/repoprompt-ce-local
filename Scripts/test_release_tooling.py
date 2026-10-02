@@ -886,6 +886,59 @@ class DebugPackagingIdentityTests(unittest.TestCase):
         )
 
 
+class DebugProfileCutoverToolingTests(unittest.TestCase):
+    """The debug runtime profile lives in its own sibling directory; the release rollback unit and
+    the developer debug bundle keep their existing locations."""
+
+    def setUp(self) -> None:
+        self.home = enter_context(self, temporary_directory(prefix="repoprompt-cutover-home-"))
+        self.env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("LOCAL_") and not key.startswith("REPOPROMPT_DEBUG_APP_")
+        }
+        self.env["HOME"] = str(self.home)
+
+    def test_release_rollback_unit_locations_are_unchanged(self) -> None:
+        script = (
+            'source "$1"; printf "%s\\n" "$LOCAL_PRODUCTION_APP" "$LOCAL_PRODUCTION_EXECUTABLE" '
+            '"$LOCAL_APP_SUPPORT_DIR" "$LOCAL_DEFAULTS_DOMAIN"'
+        )
+        result = subprocess.run(
+            ["bash", "-c", script, "bash", str(SCRIPT_DIR / "local_release_env.sh")],
+            cwd=ROOT_DIR,
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "/Applications/RepoPrompt CE.app",
+                "/Applications/RepoPrompt CE.app/Contents/MacOS/RepoPrompt",
+                f"{self.home}/Library/Application Support/RepoPrompt CE",
+                "com.pvncher.repoprompt.ce",
+            ],
+        )
+
+    def test_developer_debug_bundle_location_is_unchanged(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-c", "import conductor; print(conductor.debug_app_bundle_path())"],
+            cwd=SCRIPT_DIR,
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            f"{self.home}/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app",
+        )
+
+
 class PackagedExecutableValidatorTests(unittest.TestCase):
     PATCH_MARKER = b"RepoPromptKeyboardShortcutsResourceLookupV1"
 

@@ -32,6 +32,11 @@ actor GitDiffSnapshotPublisher {
         snapshotIDOverride: String?,
         tabID: UUID? = nil
     ) async throws -> GitDiffSnapshotManifest {
+        guard store.admitsIsolatedGitData(workspaceDirectory: workspaceDirectory) else {
+            throw WorkspaceStorageIsolationError.storageOutsideProfile(
+                store.gitDataRoot(workspaceDirectory: workspaceDirectory)
+            )
+        }
         let normalizedSelected = normalizedAbsolutePaths(selectedAbsolutePaths)
 
         return try await publishNewSnapshot(

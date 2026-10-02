@@ -1077,7 +1077,7 @@ actor HistorySessionScanner: HistorySessionScanning {
             let sessionFile = workspaceDir
                 .appendingPathComponent("AgentSessions", isDirectory: true)
                 .appendingPathComponent(filename)
-            guard fileSignature(for: sessionFile) != nil else {
+            guard admitsProfileLocation(sessionFile), fileSignature(for: sessionFile) != nil else {
                 if inspected.isMultiple(of: 32) { await Task.yield() }
                 return nil
             }
@@ -1247,7 +1247,7 @@ actor HistorySessionScanner: HistorySessionScanning {
         let sessionFile = agentSessionsDir.appendingPathComponent(filename)
         let cacheKey = sessionFile.standardizedFileURL.path
 
-        guard let signature = fileSignature(for: sessionFile) else {
+        guard admitsProfileLocation(sessionFile), let signature = fileSignature(for: sessionFile) else {
             removeTranscriptCacheEntry(cacheKey)
             throw HistorySessionScannerError.sessionFileNotFound(
                 sessionID: sessionID,
@@ -1442,7 +1442,7 @@ actor HistorySessionScanner: HistorySessionScanning {
         let indexFile = workspaceDir
             .appendingPathComponent("AgentSessions", isDirectory: true)
             .appendingPathComponent("AgentSessionIndex.json")
-        guard let indexSignature = fileSignature(for: indexFile) else {
+        guard admitsProfileLocation(indexFile), let indexSignature = fileSignature(for: indexFile) else {
             return .result(result(), counters)
         }
         try Task.checkCancellation()
@@ -1713,6 +1713,12 @@ actor HistorySessionScanner: HistorySessionScanning {
         }
     }
 
+    /// Under debug isolation, a workspace folder, index, document, or transcript is read only when
+    /// it resolves inside the scanned profile; one linked to another profile reads as absent.
+    private func admitsProfileLocation(_ url: URL) -> Bool {
+        WorkspaceStoragePaths.admitsProfileLocation(url, within: applicationSupportRoot)
+    }
+
     private func directoryExists(at url: URL) -> Bool {
         var statResult = Darwin.stat()
         return url.withUnsafeFileSystemRepresentation { path in
@@ -1761,7 +1767,7 @@ actor HistorySessionScanner: HistorySessionScanning {
             throw HistorySessionScannerError.workBudgetExceeded(diagnostic)
         }
         let workspaceJSON = workspaceDir.appendingPathComponent("workspace.json")
-        guard let signature = fileSignature(for: workspaceJSON) else {
+        guard admitsProfileLocation(workspaceJSON), let signature = fileSignature(for: workspaceJSON) else {
             return WorkspaceIdentityResolution(identity: fallback, diagnostic: nil)
         }
         if signature.fileSize > inventoryBudget.maxWorkspaceMetadataFileBytes {

@@ -173,6 +173,7 @@ actor PartitionStore {
 
     private func loadData(forRoot rootPath: String, scope: PartitionScope) -> PartitionData {
         let primaryURL = partitionURL(forRoot: rootPath, scope: scope)
+        guard WorkspaceStoragePaths.admitsProfileLocation(primaryURL) else { return PartitionData.empty() }
         return loadPartition(at: primaryURL) ?? PartitionData.empty()
     }
 
@@ -193,6 +194,9 @@ actor PartitionStore {
     ) throws {
         try Task.checkCancellation()
         let url = partitionURL(forRoot: rootPath, scope: scope)
+        // A per-repository folder or file that links out of the isolated debug profile is refused
+        // before the folder is created or the file replaced.
+        try WorkspaceStoragePaths.requireProfileLocation(url)
 
         // Ensure directories exist: .../Application Support/RepoPrompt CE/Partitions/<repoKey>/
         let dirURL = url.deletingLastPathComponent()

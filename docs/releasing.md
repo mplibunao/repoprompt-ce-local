@@ -200,6 +200,13 @@ below the top level remain archived. The manifest records the effective list in
 `applicationSupport.excludedNames`, which restore honors when it moves excluded entries
 back from the rescue copy; `Codex/` stays archived because it holds agent session history.
 
+The debug profile, `~/Library/Application Support/RepoPrompt CE Debug`, sits beside the
+production profile rather than inside it, so it is not part of the rollback unit: archive
+and restore neither include nor move it. Data that debug builds wrote into the shared profile
+before the split, including `Codex/Debug/`, stays in the production profile and is archived
+and restored with it. Rolling the debug app back to a build from before the split is unsafe,
+because that build reads and writes the production profile again.
+
 The restore verifies every checksum before touching anything, moves the current app and
 state into a rescue directory beside the archive, extracts the archived bundle and state,
 moves the excluded top-level entries back from the rescue copy, clears the preferences
@@ -388,9 +395,10 @@ schema-gate pin at 0.159.0 because no outgoing request needs the newer version.
 [`docs/architecture/codex-app-server-schema-gate.md`](architecture/codex-app-server-schema-gate.md)
 owns the per-rotation schema findings behind both numbers and the limits of what admission at
 the floor proves. Bundled and external runtimes both use RepoPrompt-owned `CODEX_HOME`
-and `CODEX_SQLITE_HOME` directories under
-`~/Library/Application Support/RepoPrompt CE/Codex/{Debug,Release}/`, leaving `~/.codex` and
-official Codex App state untouched.
+and `CODEX_SQLITE_HOME` directories in the build flavor's profile,
+`~/Library/Application Support/RepoPrompt CE/Codex/Release/` for release and
+`~/Library/Application Support/RepoPrompt CE Debug/Codex/Debug/` for debug, leaving
+`~/.codex` and official Codex App state untouched.
 
 Within that isolated `config.toml`, RepoPrompt owns the `[mcp_servers.RepoPromptCE]`
 launch/policy keys, the managed global tool-output limit, and exactly
