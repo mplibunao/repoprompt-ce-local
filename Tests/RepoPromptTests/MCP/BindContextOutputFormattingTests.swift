@@ -20,7 +20,6 @@ final class BindContextOutputFormattingTests: XCTestCase {
           repo: `/tmp/rp-other`
           • active: Main — context_id: `00000000-0000-0000-0000-000000000005`
         """)
-        XCTAssertTrue(try nextSteps(of: text).contains("`{\"op\":\"list\",\"window_id\":3}`"), text)
     }
 
     func testWindowFilteredListShowsEveryComposeTabIncludingInactiveUnbound() throws {
@@ -41,11 +40,40 @@ final class BindContextOutputFormattingTests: XCTestCase {
           • Idle Two — context_id: `00000000-0000-0000-0000-000000000004`
             repo: `/tmp/rp-discovery`
         """)
-        // Every tab is already listed, so the window filter is not suggested again.
-        XCTAssertFalse(try nextSteps(of: text).contains("\"op\":\"list\""), text)
     }
 
-    func testHintedArgumentsMatchProjectedCanonicalSchema() throws {
+    func testNextStepsBindDirectlyAndExpandAWindowOnlyWhenTabsAreOmitted() throws {
+        let bindListedTab = #"{"op":"bind","context_id":"<context_id>"}"#
+        let expandWindow = #"{"op":"list","window_id":3}"#
+        let bindWindow = #"{"op":"bind","window_id":3}"#
+        let windows = try twoWindows()
+        let cases: [(label: String, filter: Int?, windows: [MCPBindContextWindowSummary], calls: [String])] = [
+            ("compact multi-window list omits tabs", nil, windows, [bindListedTab, expandWindow, bindWindow]),
+            ("single-window list shows every tab", nil, [windows[0]], [bindListedTab, bindWindow]),
+            ("filtered list shows every tab", 3, [windows[0]], [bindListedTab, bindWindow])
+        ]
+        for testCase in cases {
+            let text = try formattedList(windowID: testCase.filter, windows: testCase.windows)
+            XCTAssertEqual(try hintedCalls(in: nextSteps(of: text)), testCase.calls, testCase.label)
+        }
+    }
+
+    @MainActor
+    func testDomainBindingAdvertisesCanonicalDefinitionWhileRegistrationKeepsItsFullerDescription() async throws {
+        let registered = try await registeredBindContextTool()
+        let canonical = try XCTUnwrap(
+            MCPDomainCanonicalToolDefinitions.definition(named: MCPGlobalToolName.bindContext)
+        )
+
+        XCTAssertEqual(try registered.domainBinding().definition, canonical)
+        XCTAssertNotEqual(registered.description, canonical.description)
+        // A client pays for the canonical text on each tools/list that advertises the tool;
+        // the registration's text is read on demand.
+        XCTAssertLessThan(canonical.description.count, registered.description.count)
+    }
+
+    @MainActor
+    func testHintedArgumentsMatchProjectedCanonicalSchema() async throws {
         let canonical = try XCTUnwrap(
             MCPDomainCanonicalToolDefinitions.definition(named: MCPGlobalToolName.bindContext)
         )
@@ -65,15 +93,18 @@ final class BindContextOutputFormattingTests: XCTestCase {
         XCTAssertEqual(try Value(projected.inputSchema), canonical.inputSchema)
 
         let schema = try XCTUnwrap(projectedCanonicalSchema.objectValue)
-        let hints = try [
-            nextSteps(of: formattedList(windowID: nil, windows: twoWindows())),
+        let windows = try twoWindows()
+        let hints = try await [
+            nextSteps(of: formattedList(windowID: nil, windows: windows)),
+            nextSteps(of: formattedList(windowID: nil, windows: [windows[0]])),
+            nextSteps(of: formattedList(windowID: 3, windows: [windows[0]])),
             ServerNetworkManager.multiWindowSelectionGuidance(),
-            canonical.description
+            canonical.description,
+            registeredBindContextTool().description
         ]
         let listedContextID = try fixtureID(2).uuidString
         for hint in hints {
-            // Every backticked JSON object is a hinted call, whichever key it starts with.
-            let examples = try matches(of: #"`(\{[^`]*\})`"#, in: hint, group: 1)
+            let examples = try hintedCalls(in: hint)
             XCTAssertFalse(examples.isEmpty, hint)
             for example in examples {
                 let call = example
@@ -85,10 +116,30 @@ final class BindContextOutputFormattingTests: XCTestCase {
                 )
                 XCTAssertEqual(schemaViolations(of: arguments, against: schema), [], call)
             }
+            // The hidden one-shot routing argument is not an advertised parameter.
             XCTAssertFalse(hint.contains("_windowID"), hint)
-            XCTAssertFalse(hint.contains("whichever tab"), hint)
-            XCTAssertFalse(hint.localizedCaseInsensitiveContains("window affinity"), hint)
         }
+    }
+
+    /// Every brace-delimited object in a hint is a hinted call, whichever key it starts with
+    /// and whether or not the surface renders Markdown.
+    private func hintedCalls(in hint: String) throws -> [String] {
+        let regex = try NSRegularExpression(pattern: #"\{[^{}]*\}"#)
+        return regex.matches(in: hint, range: NSRange(hint.startIndex..., in: hint)).compactMap { match in
+            Range(match.range, in: hint).map { String(hint[$0]) }
+        }
+    }
+
+    /// The raw registration is what Settings lists; its `domainBinding()` is what MCP advertises.
+    @MainActor
+    private func registeredBindContextTool() async throws -> RepoPromptApp.Tool {
+        let service = WindowRoutingService(
+            windowStates: WindowStatesManager.shared,
+            networkMgr: ServerNetworkManager.shared
+        )
+        await service.prepareDomainTools()
+        let tools = await service.tools
+        return try XCTUnwrap(tools.first { $0.name == MCPGlobalToolName.bindContext })
     }
 
     /// Covers the JSON Schema subset the canonical tool definitions use: required keys, declared
@@ -217,12 +268,5 @@ final class BindContextOutputFormattingTests: XCTestCase {
     private func nextSteps(of text: String) throws -> String {
         let start = try XCTUnwrap(text.range(of: "### Next Steps"), text)
         return String(text[start.lowerBound...])
-    }
-
-    private func matches(of pattern: String, in text: String, group: Int = 0) throws -> [String] {
-        let regex = try NSRegularExpression(pattern: pattern)
-        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
-            Range(match.range(at: group), in: text).map { String(text[$0]) }
-        }
     }
 }

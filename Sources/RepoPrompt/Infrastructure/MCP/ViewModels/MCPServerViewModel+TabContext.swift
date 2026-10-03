@@ -3314,8 +3314,8 @@ extension MCPServerViewModel {
             return agentModeRoutingRecoveryMessage(toolName: toolName)
         }
         return "No tab context is bound for \(toolName). To resolve:\n" +
-            "• Call 'bind_context' with op='list' to see available windows and context_id values\n" +
-            "• Call 'bind_context' with op='bind' and a context_id to bind this connection to a tab context\n" +
+            "• Call 'bind_context' with op='bind' and the context_id or working_dirs you already know\n" +
+            "• If you do not know the target, call 'bind_context' with op='list' to find its context_id, then bind it\n" +
             "• Or pass a matching explicit tab context hint for this tool call"
     }
 

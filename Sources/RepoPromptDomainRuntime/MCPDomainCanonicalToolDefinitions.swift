@@ -1155,40 +1155,25 @@ package enum MCPDomainCanonicalToolDefinitions {
         )
     }
 
+    /// A client pays for this text on each `tools/list` that advertises `bind_context` to it, so
+    /// it holds only what the schema cannot express: what a binding is, when listing is needed,
+    /// and how the two backends differ. Each parameter fact lives once, in
+    /// `MCPBindContextPropertyDescriptions`. See `docs/architecture/mcp-tool-descriptions.md`.
     private static let bindContextDescription = """
-    List, inspect, and bind the workspace context for this MCP connection. Bindings are sticky: bind captures one compose-tab context, and later tab or workspace switches do not move it.
+    Inspect or bind the workspace context that this MCP connection's tool calls run in. Binding is sticky: `bind` captures one compose-tab context, and later tab or workspace switches do not move it. `status` returns the current binding.
 
-    Operations:
-    • list   – app-backed: open windows, their compose tabs, and this connection's binding. Standalone headless: the saved workspace/context catalog; there are no windows.
-    • status – this connection's current binding only
-    • bind   – bind by working_dirs (preferred), context_id, or window_id (app-backed only)
+    Bind a target you already know directly, with no list first: `{"op":"bind","context_id":"<context_id>"}`, or `{"op":"bind","working_dirs":["/path/to/root1","/path/to/root2"]}` with the workspace's full set of roots. Call `list` only to find a target you do not know: it returns the open windows, and when more than one is open each one shows only its active and bound tabs. If the tab you want is not among them, `{"op":"list","window_id":<window_id>}` returns every compose tab of that one window; bind the context_id it shows.
 
-    **Find and bind a specific tab (app-backed):**
-    1. `{"op":"list"}` returns every open window. When several windows are open, each one shows only its active and bound tabs.
-    2. `{"op":"list","window_id":<window_id>}` returns every compose tab of that window with its context_id.
-    3. `{"op":"bind","context_id":"<context_id>"}` binds that exact tab.
-
-    **Bind by workspace roots:**
-    `{"op":"bind","working_dirs":["/path/to/root1","/path/to/root2"]}` binds the workspace whose repo_paths set matches exactly (order-insensitive), falling back to a workspace whose repo_paths is a strict superset of the requested roots. Matching uses workspace roots only, not descendant paths. In the app, a window already showing the workspace is preferred, and a saved workspace that is not open gets a new window. Add `create_if_missing=true` to create a workspace after approval when nothing matches.
-
-    Parameters:
-    - op: "list" | "status" | "bind" (required)
-    - working_dirs: string | string[]  (bind: absolute workspace roots; a string may be comma-separated)
-    - context_id: string               (bind: compose-tab context UUID returned by list)
-    - window_id: integer               (app-backed only. list: every compose tab of that window. bind alone: capture that window's active tab once. With context_id or working_dirs: choose the match in that window.)
-    - create_if_missing: boolean       (app-backed bind with working_dirs; default false)
-    - tab_name: string                 (app-backed workspace name hint with working_dirs + create_if_missing=true)
-
-    Standalone headless sessions reject window_id; bind there by context_id or working_dirs. Use `manage_workspaces list` to see saved workspaces, including ones not open in any window.
+    Standalone headless sessions have no windows: `list` returns saved workspace contexts, and window_id is rejected.
     """
 }
 
 /// Single source for bind_context property descriptions: the canonical schema overrides and the
 /// app-side raw Tool registration publish the same text, so both sites read it from here.
 package enum MCPBindContextPropertyDescriptions {
-    package static let windowID = "App-backed only; standalone headless sessions reject it. For list: return every compose tab of this open window with its context_id. For bind alone: capture this window's active tab once. With context_id or working_dirs: choose the match shown in this window."
-    package static let workingDirsArray = "For bind: absolute workspace root paths; exact repo_paths set match first, then repo_paths superset fallback"
-    package static let workingDirsString = "For bind: comma-separated absolute workspace root paths; exact repo_paths set match first, then repo_paths superset fallback"
-    package static let createIfMissing = "App-backed bind with working_dirs: create a new workspace after approval if no exact or superset workspace matches"
-    package static let tabName = "App-backed: optional workspace name when creating via working_dirs + create_if_missing"
+    package static let windowID = "App-backed only. With list: return every compose tab of this window. With bind alone: capture this window's active tab. With bind and context_id: the tab must be in this window's active workspace; it need not be the active tab. With bind and working_dirs: a match is bound in this window, which is switched to the match when it shows another workspace; when more than one workspace matches, the one this window shows is chosen."
+    package static let workingDirsArray = "For bind: absolute workspace roots. Binds the active tab of the workspace with exactly these roots, else of one whose roots strictly contain them. Paths inside a root do not match. App-backed, without window_id: a match that no window shows opens in a new window."
+    package static let workingDirsString = "The same roots as one comma-separated string."
+    package static let createIfMissing = "App-backed bind with working_dirs: when no workspace matches, create one in a new window after the user approves."
+    package static let tabName = "App-backed: name for the workspace created by working_dirs with create_if_missing=true."
 }

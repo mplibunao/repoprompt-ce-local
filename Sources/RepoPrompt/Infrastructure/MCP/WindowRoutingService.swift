@@ -2197,6 +2197,29 @@ final class WindowRoutingService: Service {
 
     // MARK: Private Helpers
 
+    /// A person reads this text in Settings, shown verbatim and without Markdown, so it explains
+    /// the tool in plain sentences. MCP clients receive the canonical description instead, which
+    /// states the same facts compactly for agents. See
+    /// `docs/architecture/mcp-tool-descriptions.md`.
+    private nonisolated static let bindContextSettingsDescription = """
+    Lets an MCP client choose which RepoPrompt tab its tool calls work in. Reading files, changing the selection, and editing the prompt all act on the tab the client is bound to.
+
+    A binding is sticky. Binding captures one compose tab, and the client keeps using that tab even after you switch tabs or workspaces in the window. The client moves only when it binds again.
+
+    A client can pick its tab in three ways:
+    • By workspace folders (working_dirs). The client names the workspace's root folders. RepoPrompt binds the active tab of the workspace whose folders match exactly; if none does, it uses a workspace that contains all of them. A folder inside a root does not count as a match. Unless the client names a window, a saved workspace that is not open is opened in a new window. With create_if_missing, RepoPrompt asks you to approve creating a workspace when nothing matches, and creates it in a new window.
+    • By tab (context_id). The client binds one exact tab, using the ID that list reports for it.
+    • By window (window_id). The client binds whichever tab is active in that window at that moment. A window can also be given together with folders or a tab ID to bind inside that window; with folders, a window that shows a different workspace is switched to the matching one.
+
+    A client that already knows its folders or tab ID binds straight away. It lists only to find a tab it does not know: list shows the open windows, and with more than one window open it shows just each window's active and bound tabs. Listing one window by its ID shows every tab in it. status reports the client's current binding.
+
+    Standalone headless sessions (repoprompt-mcp --backend headless) have no windows. There, list shows saved workspace contexts, and window IDs are rejected.
+
+    Examples:
+    {"op":"bind","working_dirs":["/path/to/root1","/path/to/root2"]}
+    {"op":"list","window_id":<window_id>}
+    """
+
     /// ---------------------------------------------------------------------
     private func updateCachedTools() async {
         var newTools: [Tool] = []
@@ -2204,9 +2227,7 @@ final class WindowRoutingService: Service {
         newTools.append(
             Tool(
                 name: MCPGlobalToolName.bindContext,
-                // Tool.domainBinding() advertises the canonical definition; Settings lists this
-                // raw description, so it reads the same canonical text instead of a second copy.
-                description: MCPDomainCanonicalToolDefinitions.definition(named: MCPGlobalToolName.bindContext)!.description,
+                description: Self.bindContextSettingsDescription,
                 inputSchema: .object(
                     properties: [
                         "op": .string(description: "Operation: 'list', 'status', or 'bind'", enum: ["list", "status", "bind"]),

@@ -1930,12 +1930,15 @@ extension ToolOutputFormatter {
             let windows = dto.windows ?? []
             // A real window ID from this response keeps each example a schema-valid call.
             let exampleWindowID = (windows.first(where: \.isCurrentWindow) ?? windows.first)?.windowID
+            // Only the compact rendering above omits tabs, so only then can a wanted tab be
+            // missing and a single window be worth listing in full.
+            let omitsTabs = args["window_id"] == nil && windows.count > 1
             out.append("")
             out.append("### Next Steps")
-            if windows.count > 1, let exampleWindowID {
-                out.append("- To see every compose tab in one window, call `bind_context` with `{\"op\":\"list\",\"window_id\":\(exampleWindowID)}`, using any `window_id` above.")
+            out.append("- To bind a tab shown above, call `bind_context` with `{\"op\":\"bind\",\"context_id\":\"<context_id>\"}`, using its `context_id`.")
+            if omitsTabs, let exampleWindowID {
+                out.append("- Each window above shows only its active and bound tabs. If the tab you want is missing, list its window to get every compose tab there, for example `{\"op\":\"list\",\"window_id\":\(exampleWindowID)}`.")
             }
-            out.append("- To bind one tab, call `bind_context` with `{\"op\":\"bind\",\"context_id\":\"<context_id>\"}`, using a `context_id` above.")
             if let exampleWindowID {
                 out.append("- `{\"op\":\"bind\",\"window_id\":\(exampleWindowID)}` binds the tab that is active in that window when you call it; later tab switches do not move the binding.")
             }
