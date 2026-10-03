@@ -219,6 +219,10 @@ actor MCPBootstrapLease {
     private var ownsGate = false
     private var routingRegistered = false
     private var policyInstalled = false
+    /// True from just before the policy installer is called until it returns.
+    private var installationInFlight = false
+    /// Releases waiting for the installation in flight to return; see ``releaseWithoutRoutingWait()``.
+    private var installationWaiters: [CheckedContinuation<Void, Never>] = []
     /// Set by ``acquireOnEstablishedRoute()``.
     private var keepsEstablishedRoute = false
     private var didSignalRoutingFailure = false
@@ -232,6 +236,7 @@ actor MCPBootstrapLease {
     private var routingCleanupOperation: Task<Void, Never>?
     #if DEBUG
         private var debugAfterExpectedPIDGateReleaseHook: (@Sendable () async -> Void)?
+        private var debugBeforePendingPolicyRemovalHook: (@Sendable () async -> Void)?
         // Test-only observability for the join probe (see debugWaitForPolicyClearJoiner()).
         private var debugPolicyClearJoinerCount = 0
         private var debugPolicyClearJoinWaiters: [CheckedContinuation<Void, Never>] = []
@@ -290,19 +295,36 @@ actor MCPBootstrapLease {
     /// Acquires for a run whose route is already established and stays in use while this lease's
     /// policy is pending, as on a follow-up turn of a reused session. Routing state is keyed by run
     /// ID, so revoking the run would remove that live route. A failed acquisition leaves the run
-    /// routed and removes only its pending policy, unless it was cancelled or a revoking cleanup
-    /// such as ``cancelAndCleanup()`` was requested: those revoke the run, as they do after
-    /// ``acquire()``. Either removal happens only once the lease has recorded its policy as
-    /// installed.
+    /// routed and removes no more than the run's pending policy, unless it was cancelled or a
+    /// revoking cleanup such as ``cancelAndCleanup()`` was requested: those revoke the run, as they
+    /// do after ``acquire()``. Either removal happens only once the lease has recorded its policy
+    /// as installed.
+    ///
+    /// Pending policies are keyed by run ID as well, and every turn of a run shares it. While
+    /// nothing revokes the run, this order keeps an earlier turn's cleanup and installation away
+    /// from a later turn's policy:
+    /// - A failure on an unreleased lease removes the run's pending policy before it releases the
+    ///   gate.
+    /// - A failure on a lease already released leaves the removal to the releaser, which clears
+    ///   the run's pending policy after its ``releaseWithoutRoutingWait()`` returns.
+    /// - The call to ``releaseWithoutRoutingWait()`` that releases the lease returns only after an
+    ///   installation already in flight has landed, and a released lease issues no installation.
+    ///   A call that finds the lease already released returns at once.
+    /// - A later turn waits until the turn before it has been released and cleared, and its lease
+    ///   installs only once it owns the gate.
+    ///
+    /// So neither cleanup reaches a later turn's policy, and an earlier installation neither
+    /// replaces it nor reseeds the run's policy state after it.
     func acquireOnEstablishedRoute() async -> Bool {
         keepsEstablishedRoute = true
         return await acquire()
     }
 
     /// Throwing core of ``acquire()``. Every failure after the entry checks runs the lease's cleanup
-    /// before it throws: gate ownership is released, an installed policy is cleared, and routing is
-    /// cleaned. That cleanup is joinable, except for the pending-policy removal of a failure that
-    /// ``acquireOnEstablishedRoute()`` keeps from revoking the run.
+    /// before it throws. Ordinarily that cleanup releases gate ownership, clears an installed
+    /// policy, cleans routing, and is joinable. A failure that ``acquireOnEstablishedRoute()`` keeps
+    /// from revoking the run is cleaned up in the order that method describes, and its
+    /// pending-policy removal is not joinable.
     ///
     /// - Throws: `CancellationError` when the calling task is cancelled; otherwise a
     ///   ``MCPBootstrapReadinessError`` naming the failed phase, or the readiness requirement's error.
@@ -392,8 +414,16 @@ actor MCPBootstrapLease {
 
             // Install per-run connection policy
             acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) installing connection policy for client=\(spec.clientName ?? "<none>")")
+            // No suspension separates the abort check above from this call, so a release never
+            // precedes an installation it cannot see: the acquisition aborts at that check or has
+            // this marker set.
+            installationInFlight = true
             await policyInstaller(spec)
             policyInstalled = true
+            installationInFlight = false
+            let waiters = installationWaiters
+            installationWaiters.removeAll()
+            waiters.forEach { $0.resume() }
             try await abortAcquireIfNeeded()
             if spec.requiresExpectedAgentPID {
                 let policyArmed = await expectedPIDPolicyArmer(spec)
@@ -456,16 +486,17 @@ actor MCPBootstrapLease {
     /// acquisitions: cancellation before or during cleanup wins over the phase error, including a
     /// legacy Boolean refusal, so a cancelled start is never reported as a readiness failure.
     ///
-    /// On an established route the cleanup leaves the run routed and removes no more than its
-    /// pending policy, unless the acquisition was cancelled or a revoking cleanup was requested
-    /// while it was in flight. Such a request skips a policy the lease has not yet recorded as
-    /// installed, so its revocation falls to this cleanup. A cancellation that arrives during the
-    /// non-revoking cleanup also runs the revoking one here, so the revocation has finished by the
-    /// time the acquisition throws.
+    /// On an established route the cleanup is the non-revoking one ``acquireOnEstablishedRoute()``
+    /// describes, unless the acquisition was cancelled or a revoking cleanup was requested while it
+    /// was in flight. Such a request skips a policy the lease has not yet recorded as installed, so
+    /// its revocation falls to this cleanup. A cancellation that arrives during the non-revoking
+    /// cleanup also runs the revoking one here, so the revocation has finished by the time the
+    /// acquisition throws.
     private func failAcquisition(_ failure: Error) async throws -> Never {
         if keepsEstablishedRoute, !Task.isCancelled, !cleanupRequested {
+            let policyCleanup: PolicyCleanup = hasReleased ? .leaveToReleaser : .removePendingPolicy
             hasReleased = true
-            await performCancellationCleanup(reason: "acquisition_failed", revokingRun: false)
+            await performCancellationCleanup(reason: "acquisition_failed", policyCleanup: policyCleanup)
             guard Task.isCancelled else { throw failure }
         }
         await cancelAndCleanup()
@@ -727,6 +758,18 @@ actor MCPBootstrapLease {
             debugAfterExpectedPIDGateReleaseHook = hook
         }
 
+        /// Runs just before a failed acquisition on an established route removes the run's pending
+        /// policy.
+        func debugSetBeforePendingPolicyRemovalHook(_ hook: (@Sendable () async -> Void)?) {
+            debugBeforePendingPolicyRemovalHook = hook
+        }
+
+        /// Whether a release is waiting for the installation in flight; see
+        /// ``releaseWithoutRoutingWait()``.
+        var debugHasInstallationWaiter: Bool {
+            !installationWaiters.isEmpty
+        }
+
         /// Awaits the next caller joining an in-flight ``clearPolicyOnce()`` operation and returns the
         /// observed joiner count, so tests can deterministically prove a second caller entered the
         /// existing-operation branch while the primary clear is still parked.
@@ -742,6 +785,12 @@ actor MCPBootstrapLease {
 
     /// Releases the global connection gate without waiting for a routing signal.
     /// Use this when no fresh connection is expected but we still need to free the gate.
+    ///
+    /// On an established route the call that releases the lease also waits for an installation
+    /// already in flight; ``acquireOnEstablishedRoute()`` gives the order that needs it. That is the
+    /// only step waited for: an acquisition that has not issued its installation aborts at its next
+    /// check and installs nothing, so the wait is for one call, issued after the gate was acquired,
+    /// never for the gate, the arming, or the acquisition itself.
     func releaseWithoutRoutingWait() async {
         if hasReleased {
             acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) releaseWithoutRoutingWait() ignored because lease already released")
@@ -751,6 +800,9 @@ actor MCPBootstrapLease {
         acpLeaseLog("[ACP-Runner] lease run=\(spec.runID) gate=\(spec.gateID) releasing gate without waiting for routing")
         await releaseOwnedGate(reason: "without_routing_wait")
         await cleanupRoutingOnce()
+        if keepsEstablishedRoute, installationInFlight {
+            await withCheckedContinuation { installationWaiters.append($0) }
+        }
     }
 
     /// Releases only the serialized bootstrap gate while retaining the pending run policy.
@@ -892,10 +944,22 @@ actor MCPBootstrapLease {
         #endif
     }
 
-    /// `revokingRun` is false only for an acquisition that failed on an established route. Its
-    /// pending policy is removed without ``clearPolicyOnce()``, whose single clear is the
-    /// revocation a later cancellation still has to run.
-    private func performCancellationCleanup(reason: String, revokingRun: Bool = true) async {
+    /// What a cleanup does with a policy the lease has recorded as installed.
+    private enum PolicyCleanup {
+        /// Revokes the run through ``clearPolicyOnce()``.
+        case revokeRun
+        /// Removes the run's pending policy and keeps its route, in the order
+        /// ``acquireOnEstablishedRoute()`` describes. The removal stays outside
+        /// ``clearPolicyOnce()``, whose single clear is the revocation a later cancellation still
+        /// has to run.
+        case removePendingPolicy
+        /// Removes nothing: the lease was released, and its releaser clears the run's pending policy.
+        case leaveToReleaser
+    }
+
+    /// Only an acquisition that failed on an established route passes a `policyCleanup` other than
+    /// revocation.
+    private func performCancellationCleanup(reason: String, policyCleanup: PolicyCleanup = .revokeRun) async {
         #if DEBUG
             await ServerNetworkManager.shared.debugRecordRunRoutingEvent(
                 runID: spec.runID,
@@ -911,17 +975,22 @@ actor MCPBootstrapLease {
             didSignalRoutingFailure = true
             await MCPRoutingWaiter.notifyFailed(runID: spec.runID)
         }
-        await releaseOwnedGate(reason: reason)
-        if policyInstalled {
-            if revokingRun {
-                await clearPolicyOnce()
-            } else if let clientName = spec.clientName {
+        // Ahead of the gate release: the order ``acquireOnEstablishedRoute()`` describes.
+        if policyInstalled, case .removePendingPolicy = policyCleanup {
+            #if DEBUG
+                await debugBeforePendingPolicyRemovalHook?()
+            #endif
+            if let clientName = spec.clientName {
                 await ServerNetworkManager.shared.clearClientConnectionPolicy(
                     for: clientName,
                     windowID: spec.windowID,
                     runID: spec.runID
                 )
             }
+        }
+        await releaseOwnedGate(reason: reason)
+        if policyInstalled, case .revokeRun = policyCleanup {
+            await clearPolicyOnce()
         }
         if routingRegistered {
             await cleanupRoutingOnce()

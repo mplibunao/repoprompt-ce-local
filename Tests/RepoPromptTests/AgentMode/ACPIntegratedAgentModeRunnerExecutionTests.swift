@@ -407,6 +407,168 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             }
         }
 
+        func testEarlierTurnsAcquisitionEndingAfterItsSettlementLeavesNewerTurnsPolicy() async throws {
+            try await withFollowUpRun { run, turns in
+                let gate = ReadinessTestGate()
+                let earlier = try XCTUnwrap(turns.begin())
+                let arming = try await turns.startArming(earlier, heldBy: gate)
+                await earlier.settle(.failed)
+
+                let later = try XCTUnwrap(turns.begin())
+                let laterArmed = await later.arm()
+                XCTAssertTrue(laterArmed)
+                let pendingWhileHeld = await run.pendingPolicyCount()
+                XCTAssertEqual(pendingWhileHeld, 1)
+
+                await gate.release()
+                let earlierArmed = await arming.value
+
+                XCTAssertFalse(earlierArmed)
+                await Self.assertNewerTurnAdmitsRespawnedHelper(in: run)
+            }
+        }
+
+        func testSettlementWaitsForItsTurnsInstallationInFlightAndRemovesItsPolicy() async throws {
+            try await withFollowUpRun { run, turns in
+                let gate = ReadinessTestGate()
+                let earlier = try XCTUnwrap(turns.begin(installationHeldBy: gate))
+                let arming = try await turns.startArming(earlier, heldBy: gate)
+
+                let settling = Task { await earlier.settle(.failed) }
+                let settlingEvent = await Self.firstEvent(of: settling) { await turns.releaseWaitsForInstallation(of: earlier) }
+                XCTAssertEqual(settlingEvent, .waiting, "The settlement waits for the installation its clear has to remove.")
+
+                await gate.release()
+                await settling.value
+                let pendingAfterSettlement = await run.pendingPolicyCount()
+                XCTAssertEqual(pendingAfterSettlement, 0, "The settled turn leaves no policy it installed pending.")
+
+                let later = try XCTUnwrap(turns.begin())
+                let laterArmed = await later.arm()
+                XCTAssertTrue(laterArmed)
+                let pendingAfterLaterArmed = await run.pendingPolicyCount()
+                XCTAssertEqual(pendingAfterLaterArmed, 1)
+                let earlierArmed = await arming.value
+
+                XCTAssertFalse(earlierArmed)
+                await Self.assertNewerTurnAdmitsRespawnedHelper(in: run)
+            }
+        }
+
+        /// The newer turn's arming settles the earlier turn first, so it installs only after the
+        /// earlier installation has landed and been cleared, and the run's policy state stays the
+        /// newer turn's.
+        func testNewerTurnArmsAfterAnEarlierInstallationInFlightAndKeepsItsPolicyState() async throws {
+            try await withFollowUpRun { run, turns in
+                let gate = ReadinessTestGate()
+                let earlier = try XCTUnwrap(turns.begin(installationHeldBy: gate))
+                let earlierArming = try await turns.startArming(earlier, heldBy: gate)
+                let later = try XCTUnwrap(turns.begin(taskLabelKind: .explore))
+
+                let laterArming = Task { await later.arm() }
+                let laterArmingEvent = await Self.firstEvent(of: laterArming) { await turns.releaseWaitsForInstallation(of: earlier) }
+                XCTAssertEqual(laterArmingEvent, .waiting, "The newer turn's arming waits for the earlier installation in flight.")
+
+                await gate.release()
+                let laterArmed = await laterArming.value
+                let earlierArmed = await earlierArming.value
+
+                XCTAssertTrue(laterArmed)
+                XCTAssertFalse(earlierArmed)
+                let pending = await run.pendingPolicyCount()
+                XCTAssertEqual(pending, 1)
+                let policyState = await run.manager.debugEffectivePolicyState(for: run.c1)
+                XCTAssertEqual(policyState.taskLabelKind, .explore, "The run's policy state is the newer turn's.")
+            }
+        }
+
+        /// The second turn settles while its arming still waits for the first turn, whose
+        /// installation is in flight. The third turn waits for both, so it installs only after the
+        /// first turn's policy has landed and been cleared.
+        func testThirdTurnInstallsAfterTheFirstTurnsInstallationWhenTheSecondSettlesWhileArming() async throws {
+            try await withFollowUpRun { run, turns in
+                let gate = ReadinessTestGate()
+                let first = try XCTUnwrap(turns.begin(installationHeldBy: gate))
+                let firstArming = try await turns.startArming(first, heldBy: gate)
+                let second = try XCTUnwrap(turns.begin())
+                let secondArming = Task { await second.arm() }
+                let secondArmingEvent = await Self.firstEvent(of: secondArming) { second.debugPredecessorSettlementWaiterCount == 1 }
+                XCTAssertEqual(secondArmingEvent, .waiting, "The second turn's arming waits for the first turn's settlement.")
+
+                // The settlement joins the arming: both of the second turn's callers wait for the
+                // first turn.
+                let secondSettling = Task { await second.settle(.failed) }
+                let secondSettlingEvent = await Self.firstEvent(of: secondSettling) { second.debugPredecessorSettlementWaiterCount == 2 }
+                XCTAssertEqual(secondSettlingEvent, .waiting, "The second turn's settlement waits for the first turn's settlement.")
+
+                let third = try XCTUnwrap(turns.begin(taskLabelKind: .explore))
+                let thirdArming = Task { await third.arm() }
+                let thirdArmingEvent = await Self.firstEvent(of: thirdArming) { third.debugPredecessorSettlementWaiterCount == 1 }
+                XCTAssertEqual(thirdArmingEvent, .waiting, "The third turn's arming waits for the second turn's settlement.")
+
+                await gate.release()
+                let thirdArmed = await thirdArming.value
+                await secondSettling.value
+                _ = await secondArming.value
+                let firstArmed = await firstArming.value
+
+                XCTAssertTrue(thirdArmed)
+                XCTAssertFalse(firstArmed)
+                let policyState = await run.manager.debugEffectivePolicyState(for: run.c1)
+                XCTAssertEqual(policyState.taskLabelKind, .explore, "The run's policy state is the third turn's.")
+                await Self.assertNewerTurnAdmitsRespawnedHelper(in: run)
+            }
+        }
+
+        /// The earlier turn's failed arming is held just before it removes the run's pending policy,
+        /// and the turn settles there. The newer turn installs only after that removal, because the
+        /// earlier lease keeps the bootstrap gate until it has removed the policy.
+        func testFailedArmRemovesItsPolicyBeforeANewerTurnInstalls() async throws {
+            try await withFollowUpRun { run, turns in
+                await Self.installUnreplacedRunPolicy(in: run)
+                let gate = ReadinessTestGate()
+                let earlier = try XCTUnwrap(turns.begin())
+                let earlierArming = try await turns.startArming(earlier, heldBy: gate, at: .pendingPolicyRemoval)
+                await earlier.settle(.failed)
+
+                let later = try XCTUnwrap(turns.begin(taskLabelKind: .explore))
+                let laterArming = Task { await later.arm() }
+                let laterArmingEvent = await Self.firstEvent(of: laterArming) {
+                    await HeadlessAgentConnectionGate.shared.debugWaitingCount() > 0
+                }
+                XCTAssertEqual(laterArmingEvent, .waiting, "The newer turn's arming waits for the gate the earlier lease still owns.")
+
+                await gate.release()
+                let laterArmed = await laterArming.value
+                let earlierArmed = await earlierArming.value
+
+                XCTAssertTrue(laterArmed)
+                XCTAssertFalse(earlierArmed)
+                let policyState = await run.manager.debugEffectivePolicyState(for: run.c1)
+                XCTAssertEqual(policyState.taskLabelKind, .explore, "The run's policy state is the newer turn's.")
+                await Self.assertNewerTurnAdmitsRespawnedHelper(in: run)
+            }
+        }
+
+        func testCancelledSettlementDuringAFailedArmsCleanupEndsItsRunsRouting() async throws {
+            try await withFollowUpRun { run, turns in
+                await Self.installUnreplacedRunPolicy(in: run)
+                let gate = ReadinessTestGate()
+                let turn = try XCTUnwrap(turns.begin())
+                let arming = try await turns.startArming(turn, heldBy: gate, at: .pendingPolicyRemoval)
+
+                await turn.settle(.cancelled)
+                await gate.release()
+                let armed = await arming.value
+
+                XCTAssertFalse(armed)
+                let pending = await run.pendingPolicyCount()
+                XCTAssertEqual(pending, 0)
+                let trackedRunID = await run.manager.runIDForConnection(run.c1)
+                XCTAssertNil(trackedRunID, "A turn cancelled while its failed arming is being cleaned up ends its run's routing.")
+            }
+        }
+
         // MARK: Follow-up turns through the runner
 
         // These turns go through the view model's submission into the runner's reuse branch and
@@ -480,7 +642,7 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             private let tabID: UUID
             private let admissions = ACPFollowUpRespawnAdmissions()
             private var issued: [ACPFollowUpRespawnAdmission] = []
-            private var latestLease: MCPBootstrapLease?
+            private var leases: [ObjectIdentifier: MCPBootstrapLease] = [:]
             private(set) var leaseCount = 0
 
             init(run: ExpectedPIDRunFixture, tabID: UUID) {
@@ -492,8 +654,10 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             /// policy, so the lease has not yet recorded a policy as installed while it waits.
             func begin(
                 agentKind: AgentProviderKind = .openCode,
-                installationHeldBy installationGate: ReadinessTestGate? = nil
+                installationHeldBy installationGate: ReadinessTestGate? = nil,
+                taskLabelKind: AgentModelCatalog.TaskLabelKind? = nil
             ) -> ACPFollowUpRespawnAdmission? {
+                var madeLease: MCPBootstrapLease?
                 let admission = admissions.make(agentKind: agentKind, runID: run.runID) { runID in
                     leaseCount += 1
                     let lease = MCPBootstrapLease(
@@ -502,7 +666,8 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
                             runID: runID,
                             gateID: UUID(),
                             windowID: run.window.windowID,
-                            agent: agentKind
+                            agent: agentKind,
+                            taskLabelKind: taskLabelKind
                         ),
                         policyInstaller: installationGate.map { gate in
                             { [run] _ in
@@ -511,27 +676,49 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
                             }
                         }
                     )
-                    latestLease = lease
+                    madeLease = lease
                     return lease
                 }
                 if let admission {
                     issued.append(admission)
+                    leases[ObjectIdentifier(admission)] = madeLease
                 }
                 return admission
             }
 
-            /// Starts arming `turn`, the turn begun last, and returns once `gate` holds its lease's
-            /// acquisition. A turn begun with `installationHeldBy: gate` is held before its policy is
-            /// installed. Any other turn is held at its last step: the policy is installed and armed,
-            /// and success is not yet reported. The acquisition resumes when `gate` is released.
+            /// Whether a release of `turn`'s lease is waiting for the installation its acquisition
+            /// has in flight.
+            func releaseWaitsForInstallation(of turn: ACPFollowUpRespawnAdmission) async -> Bool {
+                await leases[ObjectIdentifier(turn)]?.debugHasInstallationWaiter ?? false
+            }
+
+            /// Where `startArming` holds a lease's acquisition.
+            enum ArmingHold {
+                /// At the acquisition's last step: the policy is installed and armed, and success is
+                /// not yet reported.
+                case lastStep
+                /// In the cleanup of an arming that failed, just before it removes the run's pending
+                /// policy.
+                case pendingPolicyRemoval
+            }
+
+            /// Starts arming `turn` and returns once `gate` holds its lease's acquisition. A turn begun with `installationHeldBy: gate` is held before its policy is
+            /// installed. Any other turn is held at `hold`. The acquisition resumes when `gate` is
+            /// released.
             func startArming(
                 _ turn: ACPFollowUpRespawnAdmission,
                 heldBy gate: ReadinessTestGate,
+                at hold: ArmingHold = .lastStep,
                 file: StaticString = #filePath,
                 line: UInt = #line
             ) async throws -> Task<Bool, Never> {
-                let lease = try XCTUnwrap(latestLease, file: file, line: line)
-                await lease.debugSetAfterExpectedPIDGateReleaseHook { await gate.arriveAndWait() }
+                let lease = try XCTUnwrap(leases[ObjectIdentifier(turn)], file: file, line: line)
+                switch hold {
+                case .lastStep:
+                    await lease.debugSetAfterExpectedPIDGateReleaseHook { await gate.arriveAndWait() }
+                case .pendingPolicyRemoval:
+                    await lease.debugSetBeforePendingPolicyRemovalHook { await gate.arriveAndWait() }
+                }
                 let arming = Task { await turn.arm() }
                 // A failing test still lets the held acquisition finish.
                 run.cleanup.add {
@@ -559,6 +746,52 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
                 run.cleanup.add { await turns.settleAll() }
                 try await body(run, turns)
             }
+        }
+
+        /// The newer turn's policy is the run's one pending policy after the earlier turn's
+        /// acquisition ended, C1 still owns the run, and a respawned helper is admitted.
+        private static func assertNewerTurnAdmitsRespawnedHelper(
+            in run: ExpectedPIDRunFixture,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async {
+            let pending = await run.pendingPolicyCount()
+            XCTAssertEqual(pending, 1, "The earlier turn's acquisition leaves the newer turn's policy in place.", file: file, line: line)
+            await run.assertOwner(run.c1, file: file, line: line)
+            let respawn = await run.apply(run.c4, sessionKey: run.c4Token)
+            XCTAssertEqual(respawn.outcome, "applied", "The newer turn still admits a respawned helper.", file: file, line: line)
+        }
+
+        /// What a task started under a hold does first.
+        private enum FirstEvent: Equatable {
+            /// It reached the wait the test observes, where it stays until the hold is released.
+            case waiting
+            /// It finished without reaching that wait.
+            case finished
+            /// Neither within the deadline, which only keeps a stalled run from hanging.
+            case neither
+        }
+
+        /// Polls until `isWaiting` holds or `task` finishes and reports which came first. A task
+        /// that has to wait for the hold cannot finish before the hold is released, and one that
+        /// does not wait finishes on its own, so each outcome is stable once it is seen.
+        private static func firstEvent(
+            of task: Task<some Sendable, Never>,
+            isWaiting: @MainActor () async -> Bool
+        ) async -> FirstEvent {
+            let finished = StartupTestCompletionFlag()
+            Task {
+                _ = await task.value
+                finished.value = true
+            }
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(30))
+            while clock.now < deadline {
+                if await isWaiting() { return .waiting }
+                if finished.value { return .finished }
+                try? await clock.sleep(for: .milliseconds(2))
+            }
+            return .neither
         }
 
         /// Leaves the run with a pending policy that a turn's installation does not replace, so the

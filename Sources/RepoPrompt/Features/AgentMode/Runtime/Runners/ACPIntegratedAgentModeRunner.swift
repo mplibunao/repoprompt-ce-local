@@ -2015,9 +2015,12 @@ final class ACPIntegratedAgentModeRunner {
 }
 
 /// Issues the respawn admissions of follow-up turns. Every turn of a process run shares its run ID,
-/// and the MCP policy operations a turn settles with are keyed by run ID, so each admission settles
-/// its predecessor before installing its own policy: an earlier turn's cleanup, whose terminal
-/// teardown may still be pending when the next turn starts, never removes a later turn's policy.
+/// and the MCP policy operations a turn settles with are keyed by run ID. An earlier turn's
+/// terminal teardown may still be pending when the next turn starts, and its lease may still be
+/// acquiring. Each admission's arming and settlement both wait for its predecessor's settlement,
+/// so a turn installs its policy only after every earlier turn has settled.
+/// ``MCPBootstrapLease/acquireOnEstablishedRoute()`` describes how that order keeps an earlier
+/// turn's cleanup and installation away from a later turn's policy.
 @MainActor
 final class ACPFollowUpRespawnAdmissions {
     private var latestUnsettledByRunID: [UUID: ACPFollowUpRespawnAdmission] = [:]
@@ -2071,8 +2074,9 @@ final class ACPFollowUpRespawnAdmissions {
 /// The run-owned policy a pre-prompt-routed provider arms for a follow-up turn on a reused session.
 /// That provider's MCP helper stays connected and routed across turns, so the policy only admits a
 /// helper that respawns during the turn. Settling the turn removes the policy if no connection
-/// consumed it and leaves the established route in place; cancellation ends the run's routing as a
-/// cancelled fresh start does.
+/// consumed it, including one whose installation was still in flight when the turn settled, and
+/// leaves the established route in place; cancellation ends the run's routing as a cancelled fresh
+/// start does.
 @MainActor
 final class ACPFollowUpRespawnAdmission {
     let runID: UUID
@@ -2081,6 +2085,11 @@ final class ACPFollowUpRespawnAdmission {
     private var predecessor: ACPFollowUpRespawnAdmission?
     private weak var issuer: ACPFollowUpRespawnAdmissions?
     private var settlement: Task<Void, Never>?
+    #if DEBUG
+        /// How many of this turn's callers, its arming and its settlement, are waiting for its
+        /// predecessor's settlement.
+        private(set) var debugPredecessorSettlementWaiterCount = 0
+    #endif
 
     fileprivate init(
         lease: MCPBootstrapLease,
@@ -2118,8 +2127,10 @@ final class ACPFollowUpRespawnAdmission {
                 if revokingRun {
                     await lease.cancelAndCleanup()
                 } else {
-                    await ServerNetworkManager.shared.clearClientConnectionPolicy(for: clientName, runID: runID)
+                    // Release, then clear: the order
+                    // ``MCPBootstrapLease/acquireOnEstablishedRoute()`` requires of the releaser.
                     await lease.releaseWithoutRoutingWait()
+                    await ServerNetworkManager.shared.clearClientConnectionPolicy(for: clientName, runID: runID)
                 }
                 issuer?.didSettle(self)
             }
@@ -2128,10 +2139,16 @@ final class ACPFollowUpRespawnAdmission {
     }
 
     /// A successor turn exists only while its run is still live, so a predecessor that has not
-    /// settled by then keeps the run's route whatever its own terminal state.
+    /// settled by then keeps the run's route whatever its own terminal state. The predecessor stays
+    /// referenced until its settlement has finished, so this turn's arming and its settlement both
+    /// wait for it.
     private func settlePredecessor() async {
         guard let predecessor else { return }
-        self.predecessor = nil
+        #if DEBUG
+            debugPredecessorSettlementWaiterCount += 1
+            defer { debugPredecessorSettlementWaiterCount -= 1 }
+        #endif
         await predecessor.settle(revokingRun: false)
+        self.predecessor = nil
     }
 }
