@@ -61,6 +61,12 @@ client-name/PID policy. It is intentionally sticky: if route installation later
 rolls back, the connection was still observed, so an unchanged routing deadline
 that subsequently expires is reported as `routing_timeout_after_connection`.
 Explicit routing failure or cancellation is not mislabeled as a timeout.
+A connection refused for joining an established run by process ancestry alone
+(`expected_pid_without_pending_policy`) never matched a run-owned policy, so it
+is neither an observed child connection nor a routed one: it emits neither
+`child_connection_observed` nor `routing_confirmed`, and the waiting run's
+deadline, timeout classification, and cancellation proceed as if that
+connection had not arrived.
 These phases are observations only and do not change provider launch, routing,
 timeout, cleanup, cancellation, or final-result behavior.
 
