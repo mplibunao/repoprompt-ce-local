@@ -319,6 +319,94 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             }
         }
 
+        func testFailedArmRemovesItsPolicyAndKeepsEstablishedRouteAndToolTracking() async throws {
+            try await withFollowUpRun { run, turns in
+                await Self.installUnreplacedRunPolicy(in: run)
+                let turn = try XCTUnwrap(turns.begin())
+
+                let armed = await turn.arm()
+
+                XCTAssertFalse(armed)
+                let pending = await run.pendingPolicyCount()
+                XCTAssertEqual(pending, 0, "A turn that cannot arm its policy leaves none pending.")
+                await run.assertOwner(run.c1)
+                let trackedRunID = await run.manager.runIDForConnection(run.c1)
+                XCTAssertEqual(trackedRunID, run.runID, "The turn continues on the route its helper already holds.")
+            }
+        }
+
+        func testCancelledTurnEndsItsRunsRoutingAfterAFailedArm() async throws {
+            try await withFollowUpRun { run, turns in
+                await Self.installUnreplacedRunPolicy(in: run)
+                let turn = try XCTUnwrap(turns.begin())
+                let armed = await turn.arm()
+                XCTAssertFalse(armed)
+
+                await turn.settle(.cancelled)
+
+                let trackedRunID = await run.manager.runIDForConnection(run.c1)
+                XCTAssertNil(trackedRunID, "Cancelling the turn ends its run's routing whether or not its policy was armed.")
+            }
+        }
+
+        func testSettlementDuringArmKeepsEstablishedRouteAndToolTracking() async throws {
+            try await withFollowUpRun { run, turns in
+                let turn = try XCTUnwrap(turns.begin())
+                let gate = ReadinessTestGate()
+                let arming = try await turns.startArming(turn, heldBy: gate)
+
+                // The turn settles after its policy is armed but before acquisition reports success.
+                await turn.settle(.failed)
+                await gate.release()
+                let armed = await arming.value
+
+                XCTAssertFalse(armed)
+                let pending = await run.pendingPolicyCount()
+                XCTAssertEqual(pending, 0)
+                await run.assertOwner(run.c1)
+                let trackedRunID = await run.manager.runIDForConnection(run.c1)
+                XCTAssertEqual(trackedRunID, run.runID)
+            }
+        }
+
+        func testCancellationDuringArmEndsItsRunsRouting() async throws {
+            try await withFollowUpRun { run, turns in
+                let turn = try XCTUnwrap(turns.begin())
+                let gate = ReadinessTestGate()
+                let arming = try await turns.startArming(turn, heldBy: gate)
+
+                arming.cancel()
+                await gate.release()
+                let armed = await arming.value
+
+                XCTAssertFalse(armed)
+                let pending = await run.pendingPolicyCount()
+                XCTAssertEqual(pending, 0)
+                let trackedRunID = await run.manager.runIDForConnection(run.c1)
+                XCTAssertNil(trackedRunID, "A turn cancelled while its policy is being armed ends its run's routing.")
+            }
+        }
+
+        func testCancelledSettlementDuringPolicyInstallationEndsItsRunsRouting() async throws {
+            try await withFollowUpRun { run, turns in
+                let gate = ReadinessTestGate()
+                let turn = try XCTUnwrap(turns.begin(installationHeldBy: gate))
+                let arming = try await turns.startArming(turn, heldBy: gate)
+
+                // The settlement's cleanup finds no installed policy to revoke; the installation
+                // that completes after it still belongs to a cancelled turn.
+                await turn.settle(.cancelled)
+                await gate.release()
+                let armed = await arming.value
+
+                XCTAssertFalse(armed)
+                let pending = await run.pendingPolicyCount()
+                XCTAssertEqual(pending, 0)
+                let trackedRunID = await run.manager.runIDForConnection(run.c1)
+                XCTAssertNil(trackedRunID, "A turn cancelled while its policy is being installed ends its run's routing.")
+            }
+        }
+
         // MARK: Follow-up turns through the runner
 
         // These turns go through the view model's submission into the runner's reuse branch and
@@ -351,6 +439,22 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             }
         }
 
+        func testFollowUpTurnWhosePolicyCannotBeArmedRunsOnTheEstablishedRoute() async throws {
+            try await withReusedOpenCodeSession { run, reused in
+                await Self.installUnreplacedRunPolicy(in: run)
+
+                try await reused.submit("Follow-up turn")
+
+                XCTAssertEqual(reused.events.entries, [.policyInstalled, .promptSubmitted])
+                let pending = await run.pendingPolicyCount()
+                XCTAssertEqual(pending, 0, "The turn's unarmed policy does not stay pending while its prompt runs.")
+                await run.assertOwner(run.c1)
+
+                try await reused.finishPrompt()
+                await run.assertOwner(run.c1)
+            }
+        }
+
         /// No later turn settles this turn's admission as its predecessor, so only the turn's own
         /// teardown can release the issuer's record of it.
         func testSessionEndingAfterItsFirstTurnRetainsNoFollowUpBookkeeping() async throws {
@@ -376,6 +480,7 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             private let tabID: UUID
             private let admissions = ACPFollowUpRespawnAdmissions()
             private var issued: [ACPFollowUpRespawnAdmission] = []
+            private var latestLease: MCPBootstrapLease?
             private(set) var leaseCount = 0
 
             init(run: ExpectedPIDRunFixture, tabID: UUID) {
@@ -383,21 +488,59 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
                 self.tabID = tabID
             }
 
-            func begin(agentKind: AgentProviderKind = .openCode) -> ACPFollowUpRespawnAdmission? {
+            /// With `installationGate`, the turn's lease waits there before it installs the run's
+            /// policy, so the lease has not yet recorded a policy as installed while it waits.
+            func begin(
+                agentKind: AgentProviderKind = .openCode,
+                installationHeldBy installationGate: ReadinessTestGate? = nil
+            ) -> ACPFollowUpRespawnAdmission? {
                 let admission = admissions.make(agentKind: agentKind, runID: run.runID) { runID in
                     leaseCount += 1
-                    return MCPBootstrapLease(spec: .agentMode(
-                        tabID: tabID,
-                        runID: runID,
-                        gateID: UUID(),
-                        windowID: run.window.windowID,
-                        agent: agentKind
-                    ))
+                    let lease = MCPBootstrapLease(
+                        spec: .agentMode(
+                            tabID: tabID,
+                            runID: runID,
+                            gateID: UUID(),
+                            windowID: run.window.windowID,
+                            agent: agentKind
+                        ),
+                        policyInstaller: installationGate.map { gate in
+                            { [run] _ in
+                                await gate.arriveAndWait()
+                                await run.installRunPolicy()
+                            }
+                        }
+                    )
+                    latestLease = lease
+                    return lease
                 }
                 if let admission {
                     issued.append(admission)
                 }
                 return admission
+            }
+
+            /// Starts arming `turn`, the turn begun last, and returns once `gate` holds its lease's
+            /// acquisition. A turn begun with `installationHeldBy: gate` is held before its policy is
+            /// installed. Any other turn is held at its last step: the policy is installed and armed,
+            /// and success is not yet reported. The acquisition resumes when `gate` is released.
+            func startArming(
+                _ turn: ACPFollowUpRespawnAdmission,
+                heldBy gate: ReadinessTestGate,
+                file: StaticString = #filePath,
+                line: UInt = #line
+            ) async throws -> Task<Bool, Never> {
+                let lease = try XCTUnwrap(latestLease, file: file, line: line)
+                await lease.debugSetAfterExpectedPIDGateReleaseHook { await gate.arriveAndWait() }
+                let arming = Task { await turn.arm() }
+                // A failing test still lets the held acquisition finish.
+                run.cleanup.add {
+                    await gate.release()
+                    _ = await arming.value
+                }
+                let held = await gate.waitUntilEntered(timeout: .seconds(5))
+                XCTAssertTrue(held, "The turn's acquisition was not held.", file: file, line: line)
+                return arming
             }
 
             func settleAll() async {
@@ -416,6 +559,21 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
                 run.cleanup.add { await turns.settleAll() }
                 try await body(run, turns)
             }
+        }
+
+        /// Leaves the run with a pending policy that a turn's installation does not replace, so the
+        /// turn's own policy is not the run's only one and cannot be armed.
+        private static func installUnreplacedRunPolicy(in run: ExpectedPIDRunFixture) async {
+            await run.manager.installClientConnectionPolicy(
+                for: run.clientName,
+                windowID: run.window.windowID,
+                restrictedTools: run.restrictedTools,
+                oneShot: false,
+                ttl: 60,
+                tabID: run.tabID,
+                runID: run.runID,
+                purpose: .agentModeRun
+            )
         }
 
         /// The peer session's helper reconnects with its own ticket from a process unrelated to the run.

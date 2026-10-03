@@ -2101,7 +2101,7 @@ final class ACPFollowUpRespawnAdmission {
     @discardableResult
     func arm() async -> Bool {
         await settlePredecessor()
-        guard await lease.acquire() else { return false }
+        guard await lease.acquireOnEstablishedRoute() else { return false }
         await lease.releaseGateForDeferredRouting()
         return true
     }

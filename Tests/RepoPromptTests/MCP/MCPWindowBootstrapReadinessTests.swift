@@ -708,7 +708,7 @@ import XCTest
     }
 
     /// Holds every arrival until released; arrivals after the release pass straight through.
-    private actor ReadinessTestGate {
+    actor ReadinessTestGate {
         private var arrivals = 0
         private var released = false
         private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
