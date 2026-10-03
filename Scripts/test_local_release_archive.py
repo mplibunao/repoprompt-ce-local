@@ -445,6 +445,41 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertIn("Settings", top_level)
         self.assertIn("Workspaces", top_level)
 
+    def test_sibling_debug_profile_is_never_archived_moved_or_restored(self) -> None:
+        self.write_baseline_fixture()
+        old_codex = self.state / "Codex" / "Debug" / "home" / "history.jsonl"
+        old_codex.parent.mkdir(parents=True)
+        old_codex.write_text("old-shared-debug-codex\n", encoding="utf-8")
+        sibling = self.state.parent / f"{DISPLAY_NAME} Debug"
+        (sibling / "Settings").mkdir(parents=True)
+        (sibling / "Settings" / "globalSettings.json").write_text('{"marker":"debug"}\n', encoding="utf-8")
+        sibling_before = directory_snapshot(sibling)
+
+        self.archive()
+        listing = subprocess.run(
+            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+
+        self.assertFalse(any(f"{DISPLAY_NAME} Debug" in entry for entry in listing), listing)
+        self.assertIn("./Codex/Debug/home/history.jsonl", listing)
+        self.assertEqual(
+            self.manifest()["applicationSupport"]["excludedNames"],
+            ["DebugApps", "Rollbacks", "Conductor", "DebugApps-*"],
+        )
+        self.assertEqual(directory_snapshot(sibling), sibling_before)
+
+        old_codex.write_text("changed-after-archive\n", encoding="utf-8")
+        (sibling / "Settings" / "globalSettings.json").write_text('{"marker":"debug-after"}\n', encoding="utf-8")
+        sibling_after_change = directory_snapshot(sibling)
+        self.restore()
+
+        self.assertEqual(old_codex.read_text(encoding="utf-8"), "old-shared-debug-codex\n")
+        self.assertEqual(directory_snapshot(sibling), sibling_after_change)
+        self.assertEqual(sorted(path.name for path in self.state.parent.iterdir()), [DISPLAY_NAME, f"{DISPLAY_NAME} Debug"])
+
     def test_prefix_exclusion_survives_restore_with_post_archive_content(self) -> None:
         self.write_baseline_fixture()
         preserved = self.state / "DebugApps-foo-preserved"
@@ -704,12 +739,14 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         processes: list[dict[str, object]] | None = None,
         *,
         fail_enumeration: bool = False,
+        **overrides: str,
     ) -> subprocess.CompletedProcess[str]:
         self.process_guard.set_processes(processes or [], fail_enumeration=fail_enumeration)
         return self.run_script(
             self.process_guard.scripts_dir / script_name,
             LOCAL_RELEASE_ARCHIVE_OVERWRITE="1",
             **self.process_guard.env,
+            **overrides,
         )
 
     def identity_fixtures(self) -> dict[str, list[dict[str, object]]]:
@@ -720,6 +757,12 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         cli_link.symlink_to(production_mcp)
         debug = self.state / "DebugApps-wt1" / "RepoPrompt.app" / "Contents" / "MacOS" / "RepoPrompt"
         write_executable(debug, "#!/bin/sh\nexit 0\n")
+        renamed_debug_macos = self.state / "DebugApps" / "RepoPrompt.app" / "Contents" / "MacOS"
+        renamed_debug = renamed_debug_macos / "RepoPromptDebug"
+        renamed_debug_mcp = renamed_debug_macos / "repoprompt-mcp"
+        renamed_worktree_debug = self.state / "DebugApps-wt2" / "RepoPrompt.app" / "Contents" / "MacOS" / "RepoPromptDebug"
+        for executable in (renamed_debug, renamed_debug_mcp, renamed_worktree_debug):
+            write_executable(executable, "#!/bin/sh\nexit 0\n")
         other_install = self.tmp / "Elsewhere" / f"{DISPLAY_NAME}.app" / "Contents" / "MacOS" / "RepoPrompt"
         write_executable(other_install, "#!/bin/sh\nexit 0\n")
         return {
@@ -728,6 +771,9 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             "debug": [{"pid": 1103, "name": "RepoPrompt", "path": str(debug)}],
             "mcp": [{"pid": 1104, "name": "repoprompt-mcp", "path": str(production_mcp)}],
             "cli alias": [{"pid": 1105, "name": "repoprompt_ce_cli", "path": str(cli_link)}],
+            "renamed debug": [{"pid": 1106, "name": "RepoPromptDebug", "path": str(renamed_debug)}],
+            "renamed debug helper": [{"pid": 1107, "name": "repoprompt-mcp", "path": str(renamed_debug_mcp)}],
+            "renamed worktree debug": [{"pid": 1108, "name": "RepoPromptDebug", "path": str(renamed_worktree_debug)}],
         }
 
     def rollback_surfaces(self) -> tuple[object, ...]:
@@ -757,6 +803,40 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
                     self.assertIn("Quit RepoPrompt CE before", output)
                     self.assertIn(str(processes[0]["pid"]), output)
                     self.assertEqual(self.rollback_surfaces(), before)
+
+    def test_debug_app_at_a_conductor_override_blocks_archive_and_restore_without_mutation(self) -> None:
+        self.archive_isolated_baseline()
+        (self.state / "Settings" / "globalSettings.json").write_text('{"marker":"live"}\n', encoding="utf-8")
+        custom_bundle = self.tmp / "CustomDebug" / "RepoPrompt.app"
+        custom_root = self.tmp / "CustomDebugRoot"
+        overrides = {
+            "bundle": ({"REPOPROMPT_DEBUG_APP_BUNDLE": str(custom_bundle), "REPOPROMPT_DEBUG_APP_ROOT": ""}, custom_bundle),
+            "root": ({"REPOPROMPT_DEBUG_APP_BUNDLE": "", "REPOPROMPT_DEBUG_APP_ROOT": str(custom_root)}, custom_root / "RepoPrompt.app"),
+        }
+        for label, (environment, bundle) in overrides.items():
+            macos = bundle / "Contents" / "MacOS"
+            for name in ("RepoPromptDebug", "RepoPrompt", "repoprompt-mcp"):
+                write_executable(macos / name, "#!/bin/sh\nexit 0\n")
+            cli_alias = self.tmp / "aliases" / label / "repoprompt_ce_cli_debug"
+            cli_alias.parent.mkdir(parents=True, exist_ok=True)
+            cli_alias.symlink_to(macos / "repoprompt-mcp")
+            identities = {
+                "RepoPromptDebug": macos / "RepoPromptDebug",
+                "RepoPrompt": macos / "RepoPrompt",
+                "repoprompt-mcp": macos / "repoprompt-mcp",
+                "repoprompt_ce_cli_debug": cli_alias,
+            }
+            for name, executable in identities.items():
+                processes = [{"pid": 1301, "name": name, "path": str(executable)}]
+                for script in (ARCHIVE_SCRIPT, RESTORE_SCRIPT):
+                    with self.subTest(override=label, process=name, script=script.name):
+                        before = self.rollback_surfaces()
+                        result = self.run_isolated(script.name, processes, **environment)
+                        output = result.stdout + result.stderr
+                        self.assertNotEqual(result.returncode, 0, output)
+                        self.assertIn("Quit RepoPrompt CE before", output)
+                        self.assertIn("1301", output)
+                        self.assertEqual(self.rollback_surfaces(), before)
 
     def test_restore_rechecks_before_moving_the_installed_app(self) -> None:
         self.archive_isolated_baseline()

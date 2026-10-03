@@ -110,7 +110,8 @@ explicit compatible `DEVELOPER_DIR`; otherwise it uses the selected full Xcode o
 a compatible Xcode app for that process without changing the system-wide `xcode-select`
 setting. It first confirms that the installed app isn't running, before any signing or
 packaging work. It checks again before staging the new bundle and before replacing the
-installed app.
+installed app. These checks match only the installed app's executable, so a running debug
+app does not block installation.
 
 The installer uses the exact identity name `RepoPrompt CE Local Self-Signed Code Signing`,
 but continuity is anchored to the selected certificate's SHA-256 fingerprint rather than to
@@ -161,7 +162,10 @@ GitHub Release and do not copy it to another Mac.
 One archive covers everything a promotion can break: the installed app bundle, the app's
 Application Support state, its preferences domain, and the local signing identity record.
 Both scripts refuse to run while any RepoPrompt process holds that state, so quit
-production, the debug app, and any attached CLI first.
+production, the debug app, and any attached CLI first. The debug app is recognized by its
+executable path: `RepoPromptDebug`, or `RepoPrompt` in a debug bundle packaged before that
+name, inside `DebugApps` or a `DebugApps-*` directory of the Application Support directory,
+or in the bundle that `REPOPROMPT_DEBUG_APP_BUNDLE` or `REPOPROMPT_DEBUG_APP_ROOT` names.
 
 ```bash
 ./Scripts/local_release_archive.sh local/v1.4.0-b37
@@ -196,6 +200,13 @@ below the top level remain archived. The manifest records the effective list in
 `applicationSupport.excludedNames`, which restore honors when it moves excluded entries
 back from the rescue copy; `Codex/` stays archived because it holds agent session history.
 
+The debug profile, `~/Library/Application Support/RepoPrompt CE Debug`, sits beside the
+production profile rather than inside it, so it is not part of the rollback unit: archive
+and restore neither include nor move it. Data that debug builds wrote into the shared profile
+before the split, including `Codex/Debug/`, stays in the production profile and is archived
+and restored with it. Rolling the debug app back to a build from before the split is unsafe,
+because that build reads and writes the production profile again.
+
 The restore verifies every checksum before touching anything, moves the current app and
 state into a rescue directory beside the archive, extracts the archived bundle and state,
 moves the excluded top-level entries back from the rescue copy, clears the preferences
@@ -217,6 +228,13 @@ are null. `Scripts/conductor.py` reads the manifest to identify a bundle, and th
 manifest reads the commit from it. After an install, confirm the file names the promoted
 commit with `dirty: false` and `git_status: "ok"`. The `untracked_files` field may be true when
 the checkout contains local investigation files.
+
+Debug and release bundles share the `RepoPrompt.app` directory name but declare different
+executables in `CFBundleExecutable`: release and local production bundles use `RepoPrompt`,
+while debug bundles use `RepoPromptDebug` and display as `RepoPrompt CE Debug` with
+`AppBundle/AppIconDebug.icns`. Production's install path, executable, bundle identifier, and
+signing are the release values. The packaging validators, the packaged MCP round-trip smoke,
+and conductor read the executable from `CFBundleExecutable` instead of assuming a name.
 
 ## Acceptance matrix
 
@@ -377,9 +395,10 @@ schema-gate pin at 0.159.0 because no outgoing request needs the newer version.
 [`docs/architecture/codex-app-server-schema-gate.md`](architecture/codex-app-server-schema-gate.md)
 owns the per-rotation schema findings behind both numbers and the limits of what admission at
 the floor proves. Bundled and external runtimes both use RepoPrompt-owned `CODEX_HOME`
-and `CODEX_SQLITE_HOME` directories under
-`~/Library/Application Support/RepoPrompt CE/Codex/{Debug,Release}/`, leaving `~/.codex` and
-official Codex App state untouched.
+and `CODEX_SQLITE_HOME` directories in the build flavor's profile,
+`~/Library/Application Support/RepoPrompt CE/Codex/Release/` for release and
+`~/Library/Application Support/RepoPrompt CE Debug/Codex/Debug/` for debug, leaving
+`~/.codex` and official Codex App state untouched.
 
 Within that isolated `config.toml`, RepoPrompt owns the `[mcp_servers.RepoPromptCE]`
 launch/policy keys, the managed global tool-output limit, and exactly

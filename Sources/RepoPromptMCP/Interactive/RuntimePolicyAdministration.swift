@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import RepoPromptDomainRuntime
+import RepoPromptShared
 
 enum RuntimePolicyAdministration {
     enum CommandError: Error, LocalizedError {
@@ -160,16 +161,22 @@ enum RuntimePolicyAdministration {
     }
 
     private static func makeRuntime() -> MCPDomainRuntime {
-        let root = MCPFilesystemConstants.identity.applicationSupportRootURL()
-        return MCPDomainRuntime(configuration: DomainRuntimeConfiguration(
+        MCPDomainRuntime(configuration: makeRuntimeConfiguration(identity: MCPFilesystemConstants.identity))
+    }
+
+    /// Policy administration shares the app's profile for the same build flavor, including the
+    /// debug workspace-storage boundary.
+    static func makeRuntimeConfiguration(identity: MCPFilesystemIdentity) -> DomainRuntimeConfiguration {
+        let root = identity.applicationSupportRootURL()
+        return DomainRuntimeConfiguration(
             mode: .standalone,
             profileIdentifier: "default",
             storageDirectory: root,
             eventDirectory: root.appendingPathComponent("Events", isDirectory: true),
-            temporaryDirectory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("RepoPrompt CE", isDirectory: true),
-            externalReloadInterval: nil
-        ))
+            temporaryDirectory: identity.temporaryRootURL(),
+            externalReloadInterval: nil,
+            enforcesWorkspaceStorageBoundary: identity.buildFlavor == .debug
+        )
     }
 
     private static let usage = """

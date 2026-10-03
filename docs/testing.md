@@ -31,7 +31,7 @@ Do not use smoke as the only protection for deterministic logic. Without a prede
 - Keep one coherent contract per method. Labeled tables are appropriate when cases differ only by input, boundary, or expected outcome.
 - Control time, randomness, locale, environment, resources, ordering, and concurrency. Prefer gates, clocks, or continuations over sleeps, and verify meaningful cleanup or ownership.
 
-Each root or provider test job gets a fresh conductor profile sandbox beside its job log, with the path shown in the summary until job retention removes the directory. Export a non-empty `REPOPROMPT_TEST_SANDBOX_ROOT` before invoking conductor to use a caller-owned sandbox instead.
+Each root or provider test job gets a fresh conductor profile sandbox beside its job log, with the path shown in the summary until job retention removes the directory. Export a non-empty `REPOPROMPT_TEST_SANDBOX_ROOT` before invoking conductor to use a caller-owned sandbox instead. Inside the sandbox, a test's profile takes its build flavor's name, `profile/RepoPrompt CE Debug` for the debug test build. Its runtime temporary files sit in that profile's `Temporary` folder, so no test resolves a developer's real debug or production profile.
 
 Focused daemon-coordinated examples:
 
@@ -69,6 +69,61 @@ Run these when changes touch CodeMap generation, syntax parsing, artifact storag
 Define the workload, acceptance threshold, comparable environment, sample count, warmup policy, source-state controls, invalid-sample rules, and retained evidence before measuring. Keep root and provider timings separate unless a derived serial estimate is clearly labeled. Diagnostic and wake-probe runs are lifecycle evidence, not valid timing samples.
 
 Use focused before/after measurements to attribute a change, then exercise the full affected boundary before making repository-wide performance claims. Store durable evidence only when it has continuing review value; otherwise keep raw logs and machine-specific samples local. Do not create a replacement executable registry, method census, append-only repository scoreboard, or mandatory artifact hierarchy merely to track test counts.
+
+## Live debug app identity and lifecycle
+
+A change to debug packaging, conductor's debug lifecycle, or the archive and restore guards is validated against the packaged debug app while production keeps running, after `make conductor-selftest` and `make release-selftest` pass. Production's process is never stopped, launched, or relaunched by these steps.
+
+1. Record production's PID, executable path, and start time. The production guard prints the PID and path and exits 3 while production runs; `ps -o lstart= -p <pid>` gives the start time:
+
+   ```bash
+   python3 Scripts/debug_app_process.py guard production \
+       --production-executable "/Applications/RepoPrompt CE.app/Contents/MacOS/RepoPrompt"
+   ```
+
+   Compare all three values after every step below. Any change is a failure, even if the step itself succeeded.
+2. Exercise each debug action on its own through conductor: `make dev-run`, `./conductor app stop`, `make dev-launch-existing`, `make dev-smoke`, and a package that fails on purpose. Confirm through `./conductor app status` that the intended debug PID stopped or started and that it runs `Contents/MacOS/RepoPromptDebug`; a window title or a process-name match is not evidence. A failed package must leave the running debug app and its bundle untouched.
+3. With both apps running, `guard release-state` must report production and the debug app, plus any attached helpers, and exit 3, while `guard production` reports only production:
+
+   ```bash
+   python3 Scripts/debug_app_process.py guard release-state \
+       --production-executable "/Applications/RepoPrompt CE.app/Contents/MacOS/RepoPrompt" \
+       --app-name RepoPrompt \
+       --display-name "RepoPrompt CE" \
+       --support-dir "$HOME/Library/Application Support/RepoPrompt CE"
+   ```
+
+4. In light and dark appearance, confirm the DEBUG toolbar badge, the 2-point blue rule under the window chrome, and the blue composer ring. On an explicitly highlighted composer, such as an MCP-controlled tab, the orange highlight replaces the ring. Check one narrow window for toolbar layout. Release builds show none of these cues.
+
+These steps run the debug app against its own profile, which [Debug profile isolation](#debug-profile-isolation) describes.
+
+## Debug profile isolation
+
+The debug app, the debug CLI, and debug headless sessions keep runtime state in `~/Library/Application Support/RepoPrompt CE Debug` and `$TMPDIR/RepoPrompt CE Debug`. Developer infrastructure stays in the production profile's directory: the debug bundle under `DebugApps`, conductor state under `Conductor`, and the CLI links in `AGENTS.md`. Archive and restore keep excluding those entries and never touch the debug profile. A debug build packaged before the split still reads and writes production's profile.
+
+Preferences stay in the debug app's own defaults domain. A debug build ignores a saved custom workspace storage location and the automatic `~/Downloads/RepoPrompt-Backup` restore without changing either preference, and it refuses to relocate workspace storage. Workspace metadata that points outside the debug profile's `Workspaces` directory, whether in the workspace index, the runtime catalog, or a working journal, stays on disk unchanged. The runtime reports that workspace unavailable with the reason `workspace_storage_boundary_violation`, and mutations against it fail with the same reason.
+
+Production state is the release profile, its temporary root, and the release prompt folder `~/Library/Application Support/com.pvncher.repoprompt`. Nothing starts when the debug profile resolves into production state, such as through a symlink. The same check covers the top-level entries of the profile and of its temporary root. It also covers the fixed files and directories each store declares below them, such as the domain runtime's state, the Codex homes and configuration, and the settings, preset, and identity-diagnostics files. The app prints `RepoPrompt CE Debug did not start:` and the reason to stderr, and records the same message in the unified log under subsystem `com.repoprompt.debug-profile`, category `launch`:
+
+```bash
+log show --last 1h --predicate 'subsystem == "com.repoprompt.debug-profile"'
+```
+
+The CLI prints `RepoPrompt MCP:` and the reason to stderr, then exits 1. Remove the symlink or override the message names, then relaunch.
+
+Each store checks the locations it names per workspace or per item where it resolves them: workspace documents and the workspace index, chat and agent-session files and indexes, saved prompts, partitions, workflows, git data, and the domain runtime's per-workspace journals, revisions, deletion records, and locks. A location that resolves outside the debug profile, through a symlink at the file or along its folders, is never followed. A read skips it and leaves it on disk unchanged, a write fails with an error that names it, and the domain runtime reports `workspace_storage_boundary_violation` and stays read-only.
+
+Three suites hold the deterministic contracts. Each opts in to the debug isolation policy, which stays off under XCTest so other suites can keep using temporary custom storage locations:
+
+```bash
+make dev-test FILTER=MCPFilesystemIdentityIsolationTests
+make dev-test FILTER=DebugProfilePersistenceIsolationTests
+make dev-test FILTER=DomainWorkspaceStorageBoundaryTests
+```
+
+The live check writes distinct markers through the debug and release apps and their CLIs, then reopens both. Each profile must hold only its own markers, and a fresh debug profile must hold nothing from production. A byte-for-byte comparison of the production profile needs an approved quiet window, because a running production app changes its own state. For a run that must not touch either real profile, use a disposable home and set `CFFIXED_USER_HOME` as well as `HOME`, because `HOME` alone does not move Foundation preferences or sockets. Confirm the app's effective Application Support and preferences paths before starting.
+
+Isolation covers state files only. The URL scheme, document types, global shortcuts, and Sparkle update ownership are still shared between the two apps.
 
 ## Live Codex Desktop direct-headless worktree routing
 

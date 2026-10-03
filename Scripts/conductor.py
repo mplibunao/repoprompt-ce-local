@@ -37,7 +37,15 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
-from debug_app_process import ProcessIdentityError, matching_processes, terminate_matching_processes
+from debug_app_process import (
+    DEBUG_APP_EXECUTABLE_NAME,
+    ProcessIdentityError,
+    debug_bundle_executable,
+    debug_lifecycle_executables,
+    matching_processes,
+    packaged_app_executable,
+    terminate_matching_processes,
+)
 
 PROTOCOL_VERSION = 18
 TERMINAL_STATES = {"completed", "failed", "canceled"}
@@ -153,6 +161,13 @@ MEDIUM_TIMEOUT_SECONDS = 60 * 60
 RELEASE_TIMEOUT_SECONDS = 2 * 60 * 60
 RELEASE_ARTIFACT_TIMEOUT_SECONDS = 4 * 60 * 60
 SMOKE_AGENT_WAIT_SECONDS = 120.0
+# An auto-approved create answers in about a second; anything slower is waiting on the
+# approval card, which would otherwise hold the smoke for its full 300-second deadline.
+SMOKE_WORKSPACE_CREATE_TIMEOUT_SECONDS = 15.0
+SMOKE_WORKSPACE_APPROVAL_MESSAGE = (
+    "Creating the smoke workspace needs approval in the debug app. Open RepoPrompt CE Debug, go to "
+    "Settings → Permissions → Workspace Approvals → Create workspace, allow it, then rerun the smoke."
+)
 
 XCTEST_OPERATIONS = frozenset({"test", "provider-test"})
 TEST_SANDBOX_ENV_KEY = "REPOPROMPT_TEST_SANDBOX_ROOT"
@@ -7214,10 +7229,92 @@ def _print_captured(stdout: str, stderr: str) -> None:
         print(stderr, end="" if stderr.endswith("\n") else "\n", flush=True)
 
 
-def is_already_on_workspace(stderr: str, workspace: str) -> bool:
-    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+def smoke_workspace_names(stdout: str) -> Optional[set[str]]:
+    """Names from a raw-JSON `manage_workspaces` list result, or None when no list is readable."""
+    text = stdout.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end < start:
+        return None
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    names: set[str] = set()
+    found = False
+    pending: List[Any] = [payload]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            workspaces = item.get("workspaces")
+            if isinstance(workspaces, list):
+                found = True
+                names.update(
+                    entry["name"] for entry in workspaces if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+                )
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return names if found else None
+
+
+def ensure_smoke_workspace(
+    cli: str,
+    window_id: int,
+    workspace: str,
+    repo_root: Path,
+    env: Dict[str, str],
+) -> int:
+    """Creates the smoke workspace once in a fresh debug profile.
+
+    An existing workspace is never recreated, because a second create silently produces a
+    suffixed duplicate. Hidden workspaces count as existing.
+    """
+    list_argv = routed_structured_cli_argv(
+        cli, window_id, "manage_workspaces", {"action": "list", "include_hidden": True}
+    )
+    code, stdout, _stderr = run_operation_command(
+        "workspace list", [cli, "--raw-json", *list_argv[1:]], repo_root, env=env
+    )
+    if code != 0:
+        return code
+    names = smoke_workspace_names(stdout)
+    if names is None:
+        print("ERROR: could not read the workspace list, so the smoke workspace was not created.", flush=True)
+        return 1
+    if workspace in names:
+        return 0
+    print(f'Workspace "{workspace}" is missing from the debug profile; creating it from {repo_root}.', flush=True)
+    code, stdout, stderr = run_operation_command(
+        "workspace create",
+        routed_structured_cli_argv(
+            cli,
+            window_id,
+            "manage_workspaces",
+            {"action": "create", "name": workspace, "folder_path": str(repo_root)},
+        ),
+        repo_root,
+        env=env,
+        allow_exit_codes={0, 1},
+        timeout=SMOKE_WORKSPACE_CREATE_TIMEOUT_SECONDS,
+    )
+    if code == 124 or "Workspace creation was denied by the user." in stdout + stderr:
+        print(f"ERROR: {SMOKE_WORKSPACE_APPROVAL_MESSAGE}", flush=True)
+        return 1
+    return code
+
+
+def is_already_on_workspace(stdout: str, stderr: str, workspace: str) -> bool:
+    # The CLI has reported this condition bare, behind an `Error: Invalid Request:` prefix with or without
+    # a JSON-RPC code, and on either stream. The opening quote anchors the name so a workspace whose name
+    # merely ends with the expected one does not count as already selected.
     expected = f'Already on workspace "{workspace}"'
-    return expected in lines or f"Error: [-32600] Invalid Request: {expected}." in lines
+    for line in (stdout + "\n" + stderr).splitlines():
+        line = line.strip()
+        if line.endswith("."):
+            line = line[:-1]
+        if line.endswith(expected):
+            return True
+    return False
 
 
 def routed_structured_cli_argv(cli: str, window_id: int, command: str, payload: Dict[str, Any]) -> List[str]:
@@ -7303,12 +7400,13 @@ def debug_app_bundle_path() -> Path:
     return Path(os.environ.get("REPOPROMPT_DEBUG_APP_BUNDLE", str(Path(root) / "RepoPrompt.app")))
 
 
-def debug_app_executable_path() -> Path:
-    return debug_app_bundle_path() / "Contents" / "MacOS" / "RepoPrompt"
+def debug_app_executable_paths() -> Tuple[Path, ...]:
+    return debug_lifecycle_executables(debug_app_bundle_path())
 
 
 def find_debug_app_pids() -> List[str]:
-    return [str(pid) for pid in matching_processes(debug_app_executable_path())]
+    pids = {pid for path in debug_app_executable_paths() for pid in matching_processes(path)}
+    return [str(pid) for pid in sorted(pids)]
 
 
 def execution_location_ui_smoke_timeout(env: Dict[str, str]) -> float:
@@ -7324,7 +7422,15 @@ def execution_location_ui_smoke_timeout(env: Dict[str, str]) -> float:
 
 
 def terminate_debug_app_processes() -> List[str]:
-    return [str(pid) for pid in terminate_matching_processes(debug_app_executable_path())]
+    pids = {pid for path in debug_app_executable_paths() for pid in terminate_matching_processes(path)}
+    return [str(pid) for pid in sorted(pids)]
+
+
+def packaged_executable_report(bundle: Path) -> str:
+    try:
+        return str(packaged_app_executable(bundle))
+    except ProcessIdentityError as exc:
+        return f"<invalid: {exc}>"
 
 
 def debug_app_provenance_path(bundle: Path) -> Path:
@@ -7400,6 +7506,7 @@ def print_debug_app_provenance(repo_root: Path, bundle: Path) -> None:
 
 def report_launch_bundle_details(repo_root: Path, bundle: Path) -> int:
     print(f"Launch app path: {bundle}", flush=True)
+    print(f"Launch app executable: {packaged_executable_report(bundle)}", flush=True)
     print_debug_app_provenance(repo_root, bundle)
     codesign = subprocess.run(["codesign", "-dv", str(bundle)], text=True, capture_output=True)
     details = (codesign.stdout or "") + (codesign.stderr or "")
@@ -7529,9 +7636,10 @@ def package_debug_app_under_heavy(repo_root: Path, operation_label: str) -> Tupl
         if code != 0:
             cleanup_staged_debug_bundle(staged_bundle)
             return code, None
-        executable = staged_bundle / "Contents" / "MacOS" / "RepoPrompt"
-        if not executable.is_file() or not os.access(executable, os.X_OK):
-            print(f"ERROR: staged debug app is not launchable: {staged_bundle}", flush=True)
+        try:
+            debug_bundle_executable(staged_bundle, DEBUG_APP_EXECUTABLE_NAME)
+        except ProcessIdentityError as exc:
+            print(f"ERROR: staged debug app is not launchable: {staged_bundle}: {exc}", flush=True)
             cleanup_staged_debug_bundle(staged_bundle)
             return 1, None
         print(f"Staged debug app bundle: {staged_bundle}", flush=True)
@@ -7564,9 +7672,10 @@ def activate_staged_debug_bundle(staged_bundle: Path, live_bundle: Optional[Path
     live = live_bundle or debug_app_bundle_path()
     if not staged_bundle.exists():
         raise ConductorError(f"staged debug app bundle is missing: {staged_bundle}")
-    executable = staged_bundle / "Contents" / "MacOS" / "RepoPrompt"
-    if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise ConductorError(f"staged debug app bundle is not launchable: {staged_bundle}")
+    try:
+        debug_bundle_executable(staged_bundle, DEBUG_APP_EXECUTABLE_NAME)
+    except ProcessIdentityError as exc:
+        raise ConductorError(f"staged debug app bundle is not launchable: {staged_bundle}: {exc}") from exc
     live.parent.mkdir(parents=True, exist_ok=True)
     backup = live.parent / f".{live.name}.previous.{os.getpid()}.{uuid.uuid4().hex[:8]}"
     moved_existing = False
@@ -7595,11 +7704,15 @@ def operation_app_launch_existing(repo_root: Path, args: Dict[str, Any]) -> int:
     staged_value = args.get("stagedBundle")
     staged_bundle = Path(str(staged_value)) if staged_value else None
     activated = False
-    executable = bundle / "Contents" / "MacOS" / "RepoPrompt"
-    if staged_bundle is None and (not bundle.exists() or not executable.is_file() or not os.access(executable, os.X_OK)):
-        print(f"ERROR: existing debug app bundle is not launchable: {bundle}", flush=True)
-        print("Build it first with './conductor build' or './conductor run'.", flush=True)
-        return 1
+    if staged_bundle is None:
+        # An intact pre-rename bundle stays launchable; its plist, not whichever leaf
+        # happens to exist, decides the executable.
+        try:
+            debug_bundle_executable(bundle)
+        except ProcessIdentityError as exc:
+            print(f"ERROR: existing debug app bundle is not launchable: {bundle}: {exc}", flush=True)
+            print("Build it first with './conductor build' or './conductor run'.", flush=True)
+            return 1
     metadata = display_lock_metadata(
         lock_kind="live-app",
         ticket=os.environ.get("REPOPROMPT_CONDUCTOR_JOB_TICKET"),
@@ -7668,6 +7781,7 @@ def operation_app_status(repo_root: Path) -> int:
     print(", ".join(pids) if pids else "none")
     print(f"  Bundle exists: {'yes' if bundle.exists() else 'no'}")
     if bundle.exists():
+        print(f"  App executable: {packaged_executable_report(bundle)}")
         # Keep the signing/storage probes aligned with Scripts/run.sh launch diagnostics.
         codesign = subprocess.run(["codesign", "-dv", str(bundle)], text=True, capture_output=True)
         details = (codesign.stdout or "") + (codesign.stderr or "")
@@ -7774,6 +7888,10 @@ def operation_smoke(repo_root: Path, args: Dict[str, Any]) -> int:
                 return code or 1
             time.sleep(2.0)
 
+    code = ensure_smoke_workspace(cli, window_id, workspace, repo_root, env)
+    if code != 0:
+        return code
+
     stages = [
         ("windows", [cli, "-e", "windows"]),
         ("workspace switch", [cli, "-w", str(window_id), "-e", f"workspace switch {workspace}"]),
@@ -7786,8 +7904,8 @@ def operation_smoke(repo_root: Path, args: Dict[str, Any]) -> int:
     ]
     for name, argv in stages:
         allow_exit_codes = {0, 1} if name == "workspace switch" else None
-        code, _stdout, stderr = run_operation_command(name, argv, repo_root, env=env, allow_exit_codes=allow_exit_codes)
-        if name == "workspace switch" and code == 1 and is_already_on_workspace(stderr, workspace):
+        code, stdout, stderr = run_operation_command(name, argv, repo_root, env=env, allow_exit_codes=allow_exit_codes)
+        if name == "workspace switch" and code == 1 and is_already_on_workspace(stdout, stderr, workspace):
             print(f'Already on workspace "{workspace}"; continuing smoke flow.', flush=True)
             continue
         if code != 0:
@@ -7800,7 +7918,7 @@ def operation_smoke(repo_root: Path, args: Dict[str, Any]) -> int:
         if len(debug_pids) != 1:
             print(
                 "ERROR: execution-location UI smoke requires exactly one running RepoPrompt debug app "
-                f"matching {debug_app_executable_path()}; found {len(debug_pids)}.",
+                f"from {debug_app_bundle_path()}; found {len(debug_pids)}.",
                 flush=True,
             )
             return 1

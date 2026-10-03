@@ -35,6 +35,24 @@ struct GitDiffSnapshotStore {
             .appendingPathComponent("_git_data", isDirectory: true)
     }
 
+    /// Under debug isolation, a workspace's git data is used only when its folder, the legacy and
+    /// repository folders, each repository's folder, and the caller's fixed files all resolve
+    /// inside the debug profile. Snapshot listings already skip linked entries, and `CURRENT`
+    /// pointers are links by design that are replaced, never written through.
+    func admitsIsolatedGitData(workspaceDirectory: URL, fixedFiles: [URL] = []) -> Bool {
+        guard WorkspaceStoragePaths.isolatesDebugProfile else { return true }
+        let gitData = gitDataRoot(workspaceDirectory: workspaceDirectory)
+        let repos = reposRoot(workspaceDirectory: workspaceDirectory)
+        let fixedLocations = [gitData, gitData.appendingPathComponent("diff-snapshots", isDirectory: true), repos]
+            + fixedFiles
+        guard fixedLocations.allSatisfy({ WorkspaceStoragePaths.admitsProfileLocation($0) }) else { return false }
+        let repoFolders = (try? FileManager.default.contentsOfDirectory(at: repos, includingPropertiesForKeys: nil)) ?? []
+        return repoFolders.allSatisfy { folder in
+            folder.lastPathComponent == "CURRENT" || folder.lastPathComponent.hasPrefix(".")
+                || WorkspaceStoragePaths.admitsProfileLocation(folder)
+        }
+    }
+
     /// Legacy snapshots root (for backward compatibility)
     func snapshotsRoot(workspaceDirectory: URL) -> URL {
         gitDataRoot(workspaceDirectory: workspaceDirectory)
@@ -203,7 +221,9 @@ struct GitDiffSnapshotStore {
         let manifestURL = snapshotDir(workspaceDirectory: workspaceDirectory, repoKey: repoKey, snapshotID: snapshotID)
             .appendingPathComponent("manifest.json")
         let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: manifestURL.path) else { return nil }
+        guard WorkspaceStoragePaths.admitsProfileLocation(manifestURL),
+              fileManager.fileExists(atPath: manifestURL.path)
+        else { return nil }
         let data = try Data(contentsOf: manifestURL)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -389,7 +409,11 @@ struct GitDiffSnapshotStore {
     /// Helper to read a CURRENT symlink/file at a given URL
     private func readCurrentPointer(at url: URL, relativeTo root: URL) -> String? {
         let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        // The pointer itself may be a dangling link by design, so its folder is what must stay
+        // inside the isolated debug profile; a link's own text is read, never its target.
+        guard WorkspaceStoragePaths.admitsProfileLocation(url.deletingLastPathComponent()),
+              fileManager.fileExists(atPath: url.path)
+        else { return nil }
         if let destination = try? fileManager.destinationOfSymbolicLink(atPath: url.path) {
             let trimmed = destination.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { return nil }
@@ -614,7 +638,9 @@ struct GitDiffSnapshotStore {
         let manifestURL = snapshotDir(workspaceDirectory: workspaceDirectory, snapshotID: snapshotID)
             .appendingPathComponent("manifest.json")
         let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: manifestURL.path) else { return nil }
+        guard WorkspaceStoragePaths.admitsProfileLocation(manifestURL),
+              fileManager.fileExists(atPath: manifestURL.path)
+        else { return nil }
         let data = try Data(contentsOf: manifestURL)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -623,7 +649,7 @@ struct GitDiffSnapshotStore {
 
     private func listSnapshotEntries(in root: URL, allowLegacyPaths: Bool, repoKey: String? = nil) throws -> [SnapshotEntry] {
         let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: root.path) else { return [] }
+        guard WorkspaceStoragePaths.admitsProfileLocation(root), fileManager.fileExists(atPath: root.path) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         var entries: [SnapshotEntry] = []

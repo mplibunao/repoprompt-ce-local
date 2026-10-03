@@ -59,7 +59,11 @@ struct ManageWorkspacesView: View {
                 content: {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            if let globalURL = workspaceManager.globalCustomStorageURL {
+                            if WorkspaceStoragePaths.isolatesDebugProfile {
+                                Text(workspaceManager.effectiveWorkspaceStorageRoot.path)
+                                    .truncationMode(.head)
+                                    .font(fontPreset.subheadlineFont)
+                            } else if let globalURL = workspaceManager.globalCustomStorageURL {
                                 Text("\(globalURL.path)")
                                     .truncationMode(.head)
                                     .font(fontPreset.subheadlineFont)
@@ -84,6 +88,7 @@ struct ManageWorkspacesView: View {
                                 Text("Set Storage Location")
                             }
                             .buttonStyle(CustomButtonStyle())
+                            .disabled(WorkspaceStoragePaths.isolatesDebugProfile)
 
                             if workspaceManager.globalCustomStorageURL != nil {
                                 Button {
@@ -96,6 +101,16 @@ struct ManageWorkspacesView: View {
                                     Text("Reset to Default")
                                 }
                                 .buttonStyle(CustomButtonStyle())
+                            }
+                        }
+                        if WorkspaceStoragePaths.isolatesDebugProfile {
+                            Text(WorkspaceStoragePaths.debugProfileIsolationMessage)
+                                .font(fontPreset.captionFont)
+                                .foregroundStyle(.secondary)
+                            if let ignoredPath = workspaceManager.ignoredGlobalCustomStoragePath {
+                                Text("The saved storage location \(ignoredPath) is ignored by debug builds and left unchanged.")
+                                    .font(fontPreset.captionFont)
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     }

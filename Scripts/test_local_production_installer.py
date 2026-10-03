@@ -430,6 +430,55 @@ class LocalProductionInstallerTests(unittest.TestCase):
         self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "new\n")
         self.assertEqual(context["process_guard"].calls, 3)
 
+    DEBUG_APP_PROCESSES = [
+        {
+            "pid": 511,
+            "name": "RepoPrompt",
+            "path": "{temp}/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app/Contents/MacOS/RepoPrompt",
+        },
+        {
+            "pid": 512,
+            "name": "RepoPromptDebug",
+            "path": "{temp}/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app/Contents/MacOS/RepoPromptDebug",
+        },
+        {
+            "pid": 513,
+            "name": "repoprompt-mcp",
+            "path": "{temp}/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app/Contents/MacOS/repoprompt-mcp",
+        },
+    ]
+
+    def test_current_and_legacy_debug_apps_do_not_block_replacement(self) -> None:
+        result, context = self.run_installer(
+            [certificate(SHA1_A, SHA256_A)],
+            expected_sha1=SHA1_A,
+            processes=self.DEBUG_APP_PROCESSES,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "new\n")
+        self.assertEqual(context["process_guard"].calls, 3)
+
+    def test_production_beside_running_debug_apps_still_blocks_every_checkpoint(self) -> None:
+        for checkpoint, message in enumerate(
+            ("before building a replacement", "before staging", "before replacing"),
+            start=1,
+        ):
+            with self.subTest(checkpoint=checkpoint):
+                result, context = self.run_installer(
+                    [certificate(SHA1_A, SHA256_A)],
+                    registry={"fingerprint": SHA256_A, "generation": 3},
+                    expected_sha1=SHA1_A,
+                    processes=[
+                        *self.DEBUG_APP_PROCESSES,
+                        {"pid": 514, "name": "RepoPrompt", "path": "{production_executable}", "from_call": checkpoint},
+                    ],
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"Quit RepoPrompt CE {message}", result.stderr)
+                self.assertIn("514", result.stderr)
+                self.assertNotIn("DebugApps", result.stderr)
+                self.assert_no_install_mutation(context, packaged=checkpoint > 1)
+
     def test_native_inspection_failure_stops_before_packaging(self) -> None:
         for scenario, kwargs in [
             ("enumeration", {"fail_process_enumeration": True}),

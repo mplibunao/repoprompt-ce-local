@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import os
+import RepoPromptShared
 
 struct DomainPendingSave: Codable {
     let operationID: UUID
@@ -169,7 +170,7 @@ enum DomainPersistenceError: Error, Equatable {
     case futureJournal(Int)
     case corruptJournal
     case operationIDCollision
-    case invalidWorkspaceDocument
+    case invalidWorkspaceDocument(reason: String)
     case writeFailed(String)
     case lockTimedOut
     case cancelled
@@ -325,8 +326,10 @@ package struct DomainPersistenceCoordinator {
         Self(configuration: configuration, identity: identity, cancellation: cancellation)
     }
 
+    /// Opening a lock creates its file, so a lock is taken only at a location inside the profile.
     private func withLock<T>(at url: URL, _ body: () throws -> T) throws -> T {
-        try DomainPersistenceLock.withLock(
+        try requireProfileOwnedFile(url)
+        return try DomainPersistenceLock.withLock(
             at: url,
             cancellation: cancellation,
             body
@@ -338,63 +341,93 @@ package struct DomainPersistenceCoordinator {
     }
 
     private var runtimeRoot: URL {
-        let safe = configuration.profileIdentifier
-            .unicodeScalars
-            .map { CharacterSet.alphanumerics.contains($0) ? String($0) : "_" }
-            .joined()
-            .prefix(48)
-        let digest = DomainContentDigest.sha256(Data(configuration.profileIdentifier.utf8)).prefix(12)
-        return configuration.storageDirectory
-            .appendingPathComponent("DomainRuntime", isDirectory: true)
-            .appendingPathComponent("v1", isDirectory: true)
-            .appendingPathComponent("\(safe)-\(digest)", isDirectory: true)
+        DomainRuntimeConfiguration.runtimeRootDirectory(
+            storageDirectory: configuration.storageDirectory,
+            profileIdentifier: configuration.profileIdentifier
+        )
     }
 
-    private var journalDirectory: URL { runtimeRoot.appendingPathComponent("working-journals", isDirectory: true) }
-    private var revisionDirectory: URL { runtimeRoot.appendingPathComponent("revisions", isDirectory: true) }
-    private var deletionDirectory: URL { runtimeRoot.appendingPathComponent("deletion-tombstones", isDirectory: true) }
-    private var lockDirectory: URL { runtimeRoot.appendingPathComponent("locks", isDirectory: true) }
-    private var settingsDirectory: URL { runtimeRoot.appendingPathComponent("settings", isDirectory: true) }
-    private var rollbackRoot: URL { runtimeRoot.appendingPathComponent("rollback", isDirectory: true) }
-    private var policyURL: URL { settingsDirectory.appendingPathComponent("runtime-policy.json") }
-    private var protectedMutationPolicyURL: URL {
-        settingsDirectory.appendingPathComponent("protected-mutations.json")
+    private func stateDirectory(_ directory: DomainRuntimeStateDirectory) -> URL {
+        runtimeRoot.appendingPathComponent(directory.rawValue, isDirectory: true)
     }
+
+    private var journalDirectory: URL { stateDirectory(.workingJournals) }
+    private var revisionDirectory: URL { stateDirectory(.revisions) }
+    private var deletionDirectory: URL { stateDirectory(.deletionTombstones) }
+    private var lockDirectory: URL { stateDirectory(.locks) }
+    private var settingsDirectory: URL { stateDirectory(.settings) }
+    private var rollbackRoot: URL { stateDirectory(.rollback) }
+    private func stateFileURL(_ file: DomainRuntimeStateFile) -> URL {
+        DomainRuntimeConfiguration.stateFileURL(file, runtimeRoot: runtimeRoot)
+    }
+
+    private var policyURL: URL { stateFileURL(.runtimePolicy) }
+    private var protectedMutationPolicyURL: URL { stateFileURL(.protectedMutations) }
     private var protectedMutationPolicyLockURL: URL {
         lockDirectory.appendingPathComponent("protected-mutations.lock")
     }
-    private var protectedMutationJournalURL: URL {
-        settingsDirectory.appendingPathComponent("protected-mutation-journal.json")
-    }
+    private var protectedMutationJournalURL: URL { stateFileURL(.protectedMutationJournal) }
     private var protectedMutationJournalLockURL: URL {
         lockDirectory.appendingPathComponent("protected-mutation-journal.lock")
     }
-    private var agentSessionMetadataURL: URL {
-        settingsDirectory.appendingPathComponent("agent-sessions.json")
-    }
+    private var agentSessionMetadataURL: URL { stateFileURL(.agentSessions) }
     private var agentSessionMetadataLockURL: URL {
         lockDirectory.appendingPathComponent("agent-sessions.lock")
     }
-    private var directSettingsURL: URL {
-        settingsDirectory.appendingPathComponent("direct-settings.json")
-    }
+    private var directSettingsURL: URL { stateFileURL(.directSettings) }
     private var directSettingsLockURL: URL {
         lockDirectory.appendingPathComponent("direct-settings.lock")
     }
-    private var agentWorktreeBindingsURL: URL {
-        settingsDirectory.appendingPathComponent("agent-worktree-bindings.json")
-    }
+    private var agentWorktreeBindingsURL: URL { stateFileURL(.agentWorktreeBindings) }
     private var agentWorktreeBindingsLockURL: URL {
         lockDirectory.appendingPathComponent("agent-worktree-bindings.lock")
     }
     private var legacyAgentSessionMetadataURL: URL {
-        configuration.storageDirectory
-            .appendingPathComponent("DomainRuntime", isDirectory: true)
-            .appendingPathComponent("v1", isDirectory: true)
-            .appendingPathComponent("agent-sessions.json")
+        DomainRuntimeConfiguration.runtimeVersionDirectory(storageDirectory: configuration.storageDirectory)
+            .appendingPathComponent(DomainRuntimeStateFile.agentSessions.rawValue)
     }
-    private var catalogURL: URL { runtimeRoot.appendingPathComponent("workspace-catalog.json") }
-    private var indexURL: URL { workspaceRoot.appendingPathComponent("workspacesIndex.json") }
+    private var catalogURL: URL { stateFileURL(.catalog) }
+    private var indexURL: URL {
+        workspaceRoot.appendingPathComponent(DomainRuntimeConfiguration.legacyWorkspaceIndexFileName)
+    }
+
+    private static let workspaceStorageBoundaryViolation = "workspace_storage_boundary_violation"
+
+    private static func isWorkspaceStorageBoundaryViolation(_ error: Error) -> Bool {
+        (error as? DomainPersistenceError)
+            == .invalidWorkspaceDocument(reason: workspaceStorageBoundaryViolation)
+    }
+
+    /// Under the boundary flag, a storage location is used only when it resolves strictly inside
+    /// `root`; with enforcement off every location is admitted without a containment inspection.
+    private func admitsStorageLocation(_ location: URL, within root: URL) -> Bool {
+        guard configuration.enforcesWorkspaceStorageBoundary else { return true }
+        return MCPFilesystemPathContainment.resolvesStrictlyInside(location, root: root)
+    }
+
+    /// Catalog, index, and journal metadata carry absolute workspace URLs that a base-directory
+    /// change cannot constrain. Under the boundary flag, a decoded backing URL is followed only
+    /// when it resolves strictly inside the configured workspace storage directory.
+    private func admitsWorkspaceBacking(_ fileURL: URL) -> Bool {
+        admitsStorageLocation(fileURL, within: workspaceRoot)
+    }
+
+    private func requireWorkspaceStorageBoundary(_ fileURLs: [URL]) throws {
+        guard fileURLs.allSatisfy(admitsWorkspaceBacking) else {
+            throw DomainPersistenceError.invalidWorkspaceDocument(
+                reason: Self.workspaceStorageBoundaryViolation
+            )
+        }
+    }
+
+    /// Under the boundary flag, a per-workspace runtime file (journal, revision, tombstone, or
+    /// lock) is used only when it resolves inside the profile. Fixed runtime files and directories
+    /// are validated before the runtime starts; these names are only known per workspace.
+    private func requireProfileOwnedFile(_ url: URL) throws {
+        guard admitsStorageLocation(url, within: configuration.storageDirectory) else {
+            throw DomainPersistenceError.invalidWorkspaceDocument(reason: Self.workspaceStorageBoundaryViolation)
+        }
+    }
 
     private func journalURL(_ workspaceID: UUID) -> URL {
         journalDirectory.appendingPathComponent("\(workspaceID.uuidString).json")
@@ -800,7 +833,7 @@ package struct DomainPersistenceCoordinator {
         do {
             return try await DomainBlockingIO.run { cancellation in
                 try cancellation.check()
-                return blockingWorker(cancellation).loadWorkspace(
+                return try blockingWorker(cancellation).loadWorkspace(
                     workspaceID: workspaceID,
                     fileURL: fileURL
                 )?.workspace
@@ -840,13 +873,37 @@ package struct DomainPersistenceCoordinator {
         workspaceID: UUID,
         fallbackFileURL: URL
     ) -> DomainPersistenceWorkspaceRefresh {
+        // One shared success/refusal path for the missing-catalog fallback and the decoded-catalog
+        // refresh: an admitted backing file loads (deleted workspaces skip loading), and a refusal —
+        // failed admission or a throwing load — surfaces as the boundary violation.
+        func refreshResult(
+            fileURL: URL,
+            isDeleted: Bool,
+            catalogRevision: UInt64
+        ) -> DomainPersistenceWorkspaceRefresh {
+            do {
+                guard admitsWorkspaceBacking(fileURL) else {
+                    throw DomainPersistenceError.invalidWorkspaceDocument(
+                        reason: Self.workspaceStorageBoundaryViolation
+                    )
+                }
+                return try DomainPersistenceWorkspaceRefresh(
+                    workspace: isDeleted ? nil : loadWorkspace(workspaceID: workspaceID, fileURL: fileURL)?.workspace,
+                    workspaceIsDeleted: isDeleted,
+                    health: .writable,
+                    catalogRevision: catalogRevision
+                )
+            } catch {
+                return DomainPersistenceWorkspaceRefresh(
+                    workspace: nil,
+                    workspaceIsDeleted: isDeleted,
+                    health: .degradedReadOnly(reason: Self.workspaceStorageBoundaryViolation),
+                    catalogRevision: catalogRevision
+                )
+            }
+        }
         guard let catalogData = try? Data(contentsOf: catalogURL) else {
-            return DomainPersistenceWorkspaceRefresh(
-                workspace: loadWorkspace(workspaceID: workspaceID, fileURL: fallbackFileURL)?.workspace,
-                workspaceIsDeleted: false,
-                health: .writable,
-                catalogRevision: 0
-            )
+            return refreshResult(fileURL: fallbackFileURL, isDeleted: false, catalogRevision: 0)
         }
         guard let catalog = try? decoder.decode(RuntimeWorkspaceCatalog.self, from: catalogData) else {
             return DomainPersistenceWorkspaceRefresh(
@@ -875,12 +932,7 @@ package struct DomainPersistenceCoordinator {
             )
         }
         let fileURL = matchingEntries.first?.fileURL ?? fallbackFileURL
-        return DomainPersistenceWorkspaceRefresh(
-            workspace: isDeleted ? nil : loadWorkspace(workspaceID: workspaceID, fileURL: fileURL)?.workspace,
-            workspaceIsDeleted: isDeleted,
-            health: .writable,
-            catalogRevision: catalog.revision
-        )
+        return refreshResult(fileURL: fileURL, isDeleted: isDeleted, catalogRevision: catalog.revision)
     }
 
     private func bootstrapBlocking() -> DomainPersistenceBootstrap {
@@ -907,9 +959,16 @@ package struct DomainPersistenceCoordinator {
             at: deletionDirectory,
             includingPropertiesForKeys: nil
         )) ?? []
+        // A sidecar that resolves outside the profile is not read; the catalog stays read-only so
+        // the deletion it might record is never undone by a later write.
+        var refusesDeletionSidecar = false
         let sidecarTombstones = deletionURLs.compactMap { url -> DomainDeletionTombstone? in
-            guard url.pathExtension == "json",
-                  let data = try? Data(contentsOf: url),
+            guard url.pathExtension == "json" else { return nil }
+            guard (try? requireProfileOwnedFile(url)) != nil else {
+                refusesDeletionSidecar = true
+                return nil
+            }
+            guard let data = try? Data(contentsOf: url),
                   let tombstone = try? decoder.decode(DomainDeletionTombstone.self, from: data),
                   tombstone.version <= DomainDeletionTombstone.schemaVersion
             else { return nil }
@@ -952,24 +1011,50 @@ package struct DomainPersistenceCoordinator {
         if !duplicateWorkspaceIDs.isEmpty {
             globalHealth = .degradedReadOnly(reason: "duplicate_workspace_catalog_id")
         }
+        // An unsafe entry stays in the catalog and on disk; it is surfaced as unavailable and the
+        // catalog becomes read-only, so it is never followed, pruned, or rewritten elsewhere.
+        var violatesWorkspaceStorageBoundary = refusesDeletionSidecar
+        // The shared shape of every boundary refusal that names a backing file: raise the flag and
+        // report the workspace as unavailable with the caller-observed metadata.
+        func recordBoundaryUnavailable(workspaceID: UUID, backingURL: URL, metadata: DomainFileMetadata) {
+            violatesWorkspaceStorageBoundary = true
+            unavailable.append(.init(
+                workspaceID: workspaceID,
+                fileURL: backingURL,
+                reason: Self.workspaceStorageBoundaryViolation,
+                fileMetadata: metadata
+            ))
+        }
         for entry in entries {
             guard loadedIDs.insert(entry.workspaceID).inserted else { continue }
-            if duplicateWorkspaceIDs.contains(entry.workspaceID) {
+            if !admitsWorkspaceBacking(entry.fileURL) {
+                recordBoundaryUnavailable(workspaceID: entry.workspaceID, backingURL: entry.fileURL, metadata: .missing)
+            } else if duplicateWorkspaceIDs.contains(entry.workspaceID) {
                 unavailable.append(.init(
                     workspaceID: entry.workspaceID,
                     fileURL: entry.fileURL,
                     reason: "duplicate_workspace_catalog_id",
                     fileMetadata: fileMetadata(at: entry.fileURL)
                 ))
-            } else if let result = loadWorkspace(workspaceID: entry.workspaceID, fileURL: entry.fileURL) {
-                loaded.append(result.workspace)
             } else {
-                unavailable.append(.init(
-                    workspaceID: entry.workspaceID,
-                    fileURL: entry.fileURL,
-                    reason: "workspace_document_unavailable",
-                    fileMetadata: fileMetadata(at: entry.fileURL)
-                ))
+                do {
+                    if let result = try loadWorkspace(workspaceID: entry.workspaceID, fileURL: entry.fileURL) {
+                        loaded.append(result.workspace)
+                    } else {
+                        unavailable.append(.init(
+                            workspaceID: entry.workspaceID,
+                            fileURL: entry.fileURL,
+                            reason: "workspace_document_unavailable",
+                            fileMetadata: fileMetadata(at: entry.fileURL)
+                        ))
+                    }
+                } catch {
+                    recordBoundaryUnavailable(
+                        workspaceID: entry.workspaceID,
+                        backingURL: entry.fileURL,
+                        metadata: fileMetadata(at: entry.fileURL)
+                    )
+                }
             }
         }
 
@@ -982,13 +1067,48 @@ package struct DomainPersistenceCoordinator {
         for journalURL in journalURLs where journalURL.pathExtension == "json" {
             guard let workspaceID = UUID(uuidString: journalURL.deletingPathExtension().lastPathComponent),
                   !loadedIDs.contains(workspaceID),
-                  !deletedIDs.contains(workspaceID),
-                  case let .success(journal?) = loadJournal(workspaceID: workspaceID),
-                  journal.version <= DomainWorkingJournal.schemaVersion,
-                  let result = loadWorkspace(workspaceID: workspaceID, fileURL: journal.fileURL)
+                  !deletedIDs.contains(workspaceID)
             else { continue }
+            let journal: DomainWorkingJournal
+            switch loadJournal(workspaceID: workspaceID) {
+            case let .success(loadedJournal?) where loadedJournal.version <= DomainWorkingJournal.schemaVersion:
+                journal = loadedJournal
+            case let .failure(error) where Self.isWorkspaceStorageBoundaryViolation(error):
+                // The journal names no trusted backing file, so the refusal is carried by the
+                // catalog's read-only health rather than an unavailable entry.
+                violatesWorkspaceStorageBoundary = true
+                loadedIDs.insert(workspaceID)
+                continue
+            case .success, .failure:
+                continue
+            }
+            guard admitsWorkspaceBacking(journal.fileURL) else {
+                recordBoundaryUnavailable(workspaceID: workspaceID, backingURL: journal.fileURL, metadata: .missing)
+                loadedIDs.insert(workspaceID)
+                continue
+            }
+            let recovered: (workspace: DomainPersistenceBootstrap.Workspace, degradedReason: String?)?
+            do {
+                recovered = try loadWorkspace(workspaceID: workspaceID, fileURL: journal.fileURL)
+            } catch let error where Self.isWorkspaceStorageBoundaryViolation(error) {
+                // A per-workspace runtime file, such as the revision record, resolves outside the
+                // profile, so the workspace is reported like any cataloged boundary refusal.
+                recordBoundaryUnavailable(
+                    workspaceID: workspaceID,
+                    backingURL: journal.fileURL,
+                    metadata: fileMetadata(at: journal.fileURL)
+                )
+                loadedIDs.insert(workspaceID)
+                continue
+            } catch {
+                continue
+            }
+            guard let result = recovered else { continue }
             loaded.append(result.workspace)
             loadedIDs.insert(workspaceID)
+        }
+        if violatesWorkspaceStorageBoundary {
+            globalHealth = .degradedReadOnly(reason: Self.workspaceStorageBoundaryViolation)
         }
 
         return DomainPersistenceBootstrap(
@@ -1015,10 +1135,17 @@ package struct DomainPersistenceCoordinator {
         }
     }
 
+    /// Throws the storage-boundary violation when the backing file, the journal's backing file,
+    /// or a per-workspace runtime file resolves outside its owned root, so callers report the
+    /// violation rather than load the workspace degraded or report it missing.
     private func loadWorkspace(
         workspaceID: UUID,
         fileURL: URL
-    ) -> (workspace: DomainPersistenceBootstrap.Workspace, degradedReason: String?)? {
+    ) throws -> (workspace: DomainPersistenceBootstrap.Workspace, degradedReason: String?)? {
+        try requireWorkspaceStorageBoundary([fileURL])
+        // The next save replaces the revision record whether or not its contents are read here,
+        // so it is checked even when a valid journal makes those contents unnecessary.
+        try requireProfileOwnedFile(revisionURL(workspaceID))
         let observedMetadata = fileMetadata(at: fileURL)
         let savedBytes = try? Data(contentsOf: fileURL)
         let savedBytesDigest = savedBytes.map(DomainContentDigest.sha256)
@@ -1059,6 +1186,7 @@ package struct DomainPersistenceCoordinator {
 
         switch loadJournal(workspaceID: workspaceID) {
         case let .success(journal?):
+            try requireWorkspaceStorageBoundary([journal.fileURL])
             guard journal.workspaceID == workspaceID,
                   journal.fileURL.standardizedFileURL == fileURL.standardizedFileURL
             else {
@@ -1114,7 +1242,7 @@ package struct DomainPersistenceCoordinator {
             ), nil)
         case .success(nil):
             guard let savedDocument else { return nil }
-            let revisions = loadSavedRevision(workspaceID: workspaceID, digest: savedDocument.contentDigest)
+            let revisions = try loadSavedRevision(workspaceID: workspaceID, digest: savedDocument.contentDigest)
             return (.init(
                 document: savedDocument,
                 savedDigest: savedDocument.contentDigest,
@@ -1127,7 +1255,8 @@ package struct DomainPersistenceCoordinator {
                 health: .writable,
                 fileMetadata: observedMetadata
             ), nil)
-        case .failure:
+        case let .failure(error):
+            if Self.isWorkspaceStorageBoundaryViolation(error) { throw error }
             return degradedSavedWorkspace(reason: "working_journal_decode_failed")
         }
     }
@@ -1151,6 +1280,8 @@ package struct DomainPersistenceCoordinator {
         operation: DomainRecordedOperation,
         now: Date
     ) throws -> DomainPersistenceSavedCommit {
+        // A create introduces a backing URL that no decoded metadata has vouched for yet.
+        try requireWorkspaceStorageBoundary([document.fileURL])
         try ensureLazyMigration(now: now)
         return try withLock(at: lockDirectory.appendingPathComponent("workspace-catalog.lock")) {
             let currentCatalog = try loadCurrentCatalog(now: now)
@@ -1174,11 +1305,21 @@ package struct DomainPersistenceCoordinator {
                 dirtyRevision: nil
             )
             let journal = try withLock(at: lockURL(document.workspaceID)) {
-                if case let .success(existing?) = loadJournal(workspaceID: document.workspaceID) {
+                // A create writes the revision record and removes any prior deletion record, so
+                // both are checked before anything is committed; the journal is checked as it is
+                // read below.
+                try requireProfileOwnedFile(revisionURL(document.workspaceID))
+                try requireProfileOwnedFile(deletionURL(document.workspaceID))
+                switch loadJournal(workspaceID: document.workspaceID) {
+                case let .success(existing?):
                     throw DomainPersistenceError.stateConflict(
                         expected: 0,
                         actual: existing.revisions.workingRevision
                     )
+                case let .failure(error) where Self.isWorkspaceStorageBoundaryViolation(error):
+                    throw error
+                case .success(nil), .failure:
+                    break
                 }
                 guard !fileManager.fileExists(atPath: document.fileURL.path) else {
                     throw DomainPersistenceError.stateConflict(expected: 0, actual: 1)
@@ -1576,7 +1717,9 @@ package struct DomainPersistenceCoordinator {
                 && newRevisions.savedRevision == current.revisions.savedRevision
                 && newRevisions.dirtyRevision == newRevisions.workingRevision
             guard keepsRevision || advancesRevision else {
-                throw DomainPersistenceError.invalidWorkspaceDocument
+                throw DomainPersistenceError.invalidWorkspaceDocument(
+                    reason: "conflict_rebase_revision_out_of_sequence"
+                )
             }
             guard let externalBytes = try? Data(contentsOf: document.fileURL),
                   DomainContentDigest.sha256(externalBytes) == externalSavedDigest
@@ -1622,6 +1765,8 @@ package struct DomainPersistenceCoordinator {
             }
             return try withLock(at: lockURL(document.workspaceID)) {
                 let current = try readCurrentJournalOrSeed(document: document)
+                // The deletion record is written after the catalog commit, so it is checked first.
+                try requireProfileOwnedFile(deletionURL(document.workspaceID))
                 guard current.revisions.workingRevision == expectedWorkspaceRevision else {
                     throw DomainPersistenceError.stateConflict(
                         expected: expectedWorkspaceRevision,
@@ -1856,6 +2001,11 @@ package struct DomainPersistenceCoordinator {
 
     private func loadJournal(workspaceID: UUID) -> Result<DomainWorkingJournal?, Error> {
         let url = journalURL(workspaceID)
+        do {
+            try requireProfileOwnedFile(url)
+        } catch {
+            return .failure(error)
+        }
         guard fileManager.fileExists(atPath: url.path) else { return .success(nil) }
         do {
             let journal = try decoder.decode(DomainWorkingJournal.self, from: Data(contentsOf: url))
@@ -1865,8 +2015,9 @@ package struct DomainPersistenceCoordinator {
         }
     }
 
-    private func loadSavedRevision(workspaceID: UUID, digest: String) -> DomainRevisionState {
+    private func loadSavedRevision(workspaceID: UUID, digest: String) throws -> DomainRevisionState {
         let url = revisionURL(workspaceID)
+        try requireProfileOwnedFile(url)
         guard let data = try? Data(contentsOf: url),
               let record = try? decoder.decode(DomainSavedRevisionRecord.self, from: data),
               record.version <= DomainSavedRevisionRecord.schemaVersion,
@@ -1880,15 +2031,19 @@ package struct DomainPersistenceCoordinator {
     }
 
     private func readCurrentJournalOrSeed(document: DomainWorkspaceDocument) throws -> DomainWorkingJournal {
+        // Every mutation of an existing workspace reads its durable state here before writing, so
+        // a revision record outside the profile is refused before any commit.
+        try requireProfileOwnedFile(revisionURL(document.workspaceID))
         switch loadJournal(workspaceID: document.workspaceID) {
         case let .success(journal?):
+            try requireWorkspaceStorageBoundary([journal.fileURL])
             guard journal.version <= DomainWorkingJournal.schemaVersion else {
                 throw DomainPersistenceError.futureJournal(journal.version)
             }
             guard journal.workspaceID == document.workspaceID,
                   journal.fileURL.standardizedFileURL == document.fileURL.standardizedFileURL
             else {
-                throw DomainPersistenceError.invalidWorkspaceDocument
+                throw DomainPersistenceError.invalidWorkspaceDocument(reason: "journal_identity_mismatch")
             }
             return resolvedPendingSave(
                 journal,
@@ -1897,7 +2052,7 @@ package struct DomainPersistenceCoordinator {
         case .success(nil):
             let savedBytes = (try? Data(contentsOf: document.fileURL)) ?? document.documentBytes
             let savedDigest = DomainContentDigest.sha256(savedBytes)
-            let revisions = loadSavedRevision(workspaceID: document.workspaceID, digest: savedDigest)
+            let revisions = try loadSavedRevision(workspaceID: document.workspaceID, digest: savedDigest)
             return DomainWorkingJournal(
                 workspaceID: document.workspaceID,
                 fileURL: document.fileURL,
@@ -1914,7 +2069,8 @@ package struct DomainPersistenceCoordinator {
                 operations: [],
                 updatedAt: identity.createdAt
             )
-        case .failure:
+        case let .failure(error):
+            if Self.isWorkspaceStorageBoundaryViolation(error) { throw error }
             throw DomainPersistenceError.corruptJournal
         }
     }
@@ -1991,10 +2147,12 @@ package struct DomainPersistenceCoordinator {
                 throw DomainPersistenceError.futureJournal(current.version)
             }
             try validateUniqueCatalogEntries(current.entries)
+            try requireWorkspaceStorageBoundary(current.entries.map(\.fileURL))
             return current
         }
         let entries = try legacyCatalogEntries()
         try validateUniqueCatalogEntries(entries)
+        try requireWorkspaceStorageBoundary(entries.map(\.fileURL))
         return RuntimeWorkspaceCatalog(
             version: RuntimeWorkspaceCatalog.schemaVersion,
             revision: 0,
@@ -2005,7 +2163,7 @@ package struct DomainPersistenceCoordinator {
 
     private func validateUniqueCatalogEntries(_ entries: [RuntimeWorkspaceCatalog.Entry]) throws {
         guard Set(entries.map(\.workspaceID)).count == entries.count else {
-            throw DomainPersistenceError.invalidWorkspaceDocument
+            throw DomainPersistenceError.invalidWorkspaceDocument(reason: "duplicate_catalog_workspace_id")
         }
     }
 
@@ -2013,6 +2171,11 @@ package struct DomainPersistenceCoordinator {
         guard !fileManager.fileExists(atPath: policyURL.path) else { return }
         try withLock(at: lockDirectory.appendingPathComponent("runtime-policy.lock")) {
             guard !fileManager.fileExists(atPath: policyURL.path) else { return }
+            // The rollback snapshot below reads every indexed document; refuse before any read or
+            // write when one lies outside the workspace storage boundary.
+            if configuration.enforcesWorkspaceStorageBoundary {
+                try requireWorkspaceStorageBoundary(((try? legacyCatalogEntries()) ?? []).map(\.fileURL))
+            }
             let rollbackName = "migration-\(Int(now.timeIntervalSince1970))-\(identity.runtimeID.uuidString)"
             let rollbackDirectory = rollbackRoot.appendingPathComponent(rollbackName, isDirectory: true)
             var artifacts: [RollbackManifest.Artifact] = []

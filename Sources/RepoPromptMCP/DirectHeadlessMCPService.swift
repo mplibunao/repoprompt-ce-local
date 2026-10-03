@@ -142,7 +142,8 @@ actor DirectHeadlessMCPService {
             workspaceStorageDirectory: locations.workspaceStorageDirectory,
             eventDirectory: locations.eventDirectory,
             temporaryDirectory: locations.temporaryDirectory,
-            hostDrainTimeout: .seconds(5)
+            hostDrainTimeout: .seconds(5),
+            enforcesWorkspaceStorageBoundary: locations.enforcesWorkspaceStorageBoundary
         ), prepareChildLaunch: { toolName, arguments, securityContext in
             try await childLaunchCoordinator.prepare(
                 toolName: toolName,

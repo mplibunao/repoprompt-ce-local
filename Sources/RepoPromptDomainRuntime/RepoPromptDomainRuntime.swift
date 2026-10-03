@@ -17,6 +17,10 @@ package struct DomainRuntimeConfiguration: Sendable {
     package let externalReloadMaximumInterval: Duration
     package let metrics: DomainRuntimeMetricsSink
     package let hostDrainTimeout: Duration
+    /// When true, workspace backing URLs decoded from catalog, index, and journal metadata must
+    /// resolve inside `workspaceStorageDirectory`. Isolated debug compositions set it so an
+    /// absolute URL carried in copied metadata can never reach another profile's documents.
+    package let enforcesWorkspaceStorageBoundary: Bool
 
     package init(
         mode: DomainRuntimeMode,
@@ -29,7 +33,8 @@ package struct DomainRuntimeConfiguration: Sendable {
         externalReloadInterval: Duration? = .seconds(1),
         externalReloadMaximumInterval: Duration = .seconds(30),
         metrics: DomainRuntimeMetricsSink = .disabled,
-        hostDrainTimeout: Duration = .seconds(5)
+        hostDrainTimeout: Duration = .seconds(5),
+        enforcesWorkspaceStorageBoundary: Bool = false
     ) {
         self.mode = mode
         self.profileIdentifier = profileIdentifier
@@ -43,6 +48,95 @@ package struct DomainRuntimeConfiguration: Sendable {
         self.externalReloadMaximumInterval = externalReloadMaximumInterval
         self.metrics = metrics
         self.hostDrainTimeout = hostDrainTimeout
+        self.enforcesWorkspaceStorageBoundary = enforcesWorkspaceStorageBoundary
+    }
+}
+
+/// Directories the runtime keeps under each profile's runtime root.
+package enum DomainRuntimeStateDirectory: String, CaseIterable, Sendable {
+    case workingJournals = "working-journals"
+    case revisions
+    case deletionTombstones = "deletion-tombstones"
+    case locks
+    case settings
+    case rollback
+}
+
+/// Fixed-name files the runtime keeps in its runtime root or its settings directory.
+package enum DomainRuntimeStateFile: String, CaseIterable, Sendable {
+    case catalog = "workspace-catalog.json"
+    case runtimePolicy = "runtime-policy.json"
+    case protectedMutations = "protected-mutations.json"
+    case protectedMutationJournal = "protected-mutation-journal.json"
+    case agentSessions = "agent-sessions.json"
+    case directSettings = "direct-settings.json"
+    case agentWorktreeBindings = "agent-worktree-bindings.json"
+
+    /// The runtime-root subdirectory holding the file, or nil for the runtime root itself.
+    package var directory: DomainRuntimeStateDirectory? {
+        self == .catalog ? nil : .settings
+    }
+}
+
+package extension DomainRuntimeConfiguration {
+    static func runtimeVersionDirectory(storageDirectory: URL) -> URL {
+        storageDirectory
+            .appendingPathComponent("DomainRuntime", isDirectory: true)
+            .appendingPathComponent("v1", isDirectory: true)
+    }
+
+    /// One runtime root per profile identifier, named by a readable prefix and a digest so
+    /// distinct identifiers that sanitize alike stay apart.
+    static func runtimeRootDirectory(storageDirectory: URL, profileIdentifier: String) -> URL {
+        let safe = profileIdentifier
+            .unicodeScalars
+            .map { CharacterSet.alphanumerics.contains($0) ? String($0) : "_" }
+            .joined()
+            .prefix(48)
+        let digest = DomainContentDigest.sha256(Data(profileIdentifier.utf8)).prefix(12)
+        return runtimeVersionDirectory(storageDirectory: storageDirectory)
+            .appendingPathComponent("\(safe)-\(digest)", isDirectory: true)
+    }
+
+    static let legacyWorkspaceIndexFileName = "workspacesIndex.json"
+
+    static func stateFileURL(_ file: DomainRuntimeStateFile, runtimeRoot: URL) -> URL {
+        let directory = file.directory.map {
+            runtimeRoot.appendingPathComponent($0.rawValue, isDirectory: true)
+        } ?? runtimeRoot
+        return directory.appendingPathComponent(file.rawValue)
+    }
+
+    /// Every directory and fixed-name file the runtime reads or writes below its storage and
+    /// workspace directories, parents first. Profile isolation validates these declared
+    /// destinations before the runtime's first I/O, so a symlink at any of them, or along their
+    /// parents, is caught without scanning the profile.
+    static func managedStateLocations(
+        storageDirectory: URL,
+        workspaceStorageDirectory: URL,
+        profileIdentifier: String
+    ) -> [URL] {
+        let versionDirectory = runtimeVersionDirectory(storageDirectory: storageDirectory)
+        let runtimeRoot = runtimeRootDirectory(storageDirectory: storageDirectory, profileIdentifier: profileIdentifier)
+        return [versionDirectory.deletingLastPathComponent(), versionDirectory, runtimeRoot]
+            + DomainRuntimeStateDirectory.allCases.map {
+                runtimeRoot.appendingPathComponent($0.rawValue, isDirectory: true)
+            }
+            + DomainRuntimeStateFile.allCases.map { stateFileURL($0, runtimeRoot: runtimeRoot) }
+            + [
+                versionDirectory.appendingPathComponent(DomainRuntimeStateFile.agentSessions.rawValue),
+                workspaceStorageDirectory,
+                workspaceStorageDirectory.appendingPathComponent(legacyWorkspaceIndexFileName)
+            ]
+    }
+
+    var managedStateLocations: [URL] {
+        [eventDirectory, temporaryDirectory]
+            + Self.managedStateLocations(
+                storageDirectory: storageDirectory,
+                workspaceStorageDirectory: workspaceStorageDirectory,
+                profileIdentifier: profileIdentifier
+            )
     }
 }
 

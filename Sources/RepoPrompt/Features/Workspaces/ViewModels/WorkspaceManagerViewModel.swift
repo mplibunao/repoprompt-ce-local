@@ -2,6 +2,7 @@ import Combine
 import Foundation
 import os
 import RepoPromptDomainRuntime
+import RepoPromptShared
 import SwiftUI
 
 /// Free helper function not tied to any actor
@@ -61,6 +62,71 @@ enum WorkspaceStoragePaths {
     static var defaultRoot: URL {
         MCPFilesystemConstants.identity.applicationSupportRootURL()
             .appendingPathComponent("Workspaces", isDirectory: true)
+    }
+
+    /// The debug app keeps workspace documents, chats, and agent sessions inside its own profile
+    /// and ignores saved custom-storage redirects. A test-scoped profile is already isolated, and
+    /// its suites keep their own storage seams; isolation suites opt in explicitly.
+    static var isolatesDebugProfile: Bool {
+        #if DEBUG
+            if let override = debugProfileIsolationOverride.withLock({ $0 }) {
+                return override
+            }
+        #endif
+        return MCPFilesystemConstants.identity.buildFlavor == .debug
+            && !MCPFilesystemIdentity.resolvesTestScopedProfile
+    }
+
+    static let debugProfileIsolationMessage =
+        "Debug builds keep workspaces in their isolated debug profile, so custom storage locations are unavailable."
+
+    /// A per-workspace storage directory is honored under debug isolation only when it resolves
+    /// strictly inside `root`; outside isolation every saved location keeps its existing meaning.
+    static func admitsCustomStoragePath(_ path: URL?, within root: URL) -> Bool {
+        guard let path else { return true }
+        return admitsProfileLocation(path, within: root)
+    }
+
+    /// The throwing form of `admitsProfileLocation` for stores: refuses with
+    /// `WorkspaceStorageIsolationError.storageOutsideProfile` when the location is not admitted.
+    static func requireProfileLocation(_ location: URL, within root: URL? = nil) throws {
+        guard admitsProfileLocation(location, within: root) else {
+            throw WorkspaceStorageIsolationError.storageOutsideProfile(location)
+        }
+    }
+
+    /// Whether `location` is admitted: outside debug isolation every location is; under it, the
+    /// location must resolve strictly inside `root`, the debug profile by default, before the
+    /// store reads, writes, or deletes there, so a symlink at the location or along its parents
+    /// cannot carry that I/O into another profile. Readers that skip a refused item use this
+    /// non-throwing form.
+    static func admitsProfileLocation(_ location: URL, within root: URL? = nil) -> Bool {
+        guard isolatesDebugProfile else { return true }
+        let root = root ?? MCPFilesystemConstants.identity.applicationSupportRootURL()
+        return MCPFilesystemPathContainment.resolvesStrictlyInside(location, root: root)
+    }
+
+    #if DEBUG
+        private static let debugProfileIsolationOverride = OSAllocatedUnfairLock<Bool?>(initialState: nil)
+
+        static func test_setIsolatesDebugProfile(_ value: Bool?) {
+            debugProfileIsolationOverride.withLock { $0 = value }
+        }
+    #endif
+}
+
+enum WorkspaceStorageIsolationError: LocalizedError, Equatable {
+    case customStorageUnavailable
+    case storageOutsideProfile(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .customStorageUnavailable:
+            WorkspaceStoragePaths.debugProfileIsolationMessage
+        case let .storageOutsideProfile(location):
+            "Debug builds keep their state inside the isolated debug profile, but \(location.path) "
+                + "resolves outside it. Remove the symlink that points there, then try again."
+        }
     }
 }
 
@@ -1333,7 +1399,19 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     private var currentBaseRoot: URL {
-        globalCustomStorageURL ?? defaultWorkspaceRoot()
+        guard !WorkspaceStoragePaths.isolatesDebugProfile else { return defaultWorkspaceRoot() }
+        return globalCustomStorageURL ?? defaultWorkspaceRoot()
+    }
+
+    /// The directory new workspace documents are stored under, as shown in storage settings.
+    var effectiveWorkspaceStorageRoot: URL {
+        currentBaseRoot
+    }
+
+    /// A saved global storage location that debug isolation keeps on disk but does not follow.
+    var ignoredGlobalCustomStoragePath: String? {
+        guard WorkspaceStoragePaths.isolatesDebugProfile else { return nil }
+        return UserDefaults.standard.string(forKey: "GlobalCustomStorageURL")
     }
 
     private var cancellables = Set<AnyCancellable>()
@@ -2287,7 +2365,9 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     nonisolated func workspaceDirectory(for workspace: WorkspaceModel, baseRoot: URL) -> URL {
         // ➊ Honour per-workspace override first
-        if let customRoot = workspace.customStoragePath {
+        if let customRoot = workspace.customStoragePath,
+           WorkspaceStoragePaths.admitsCustomStoragePath(customRoot, within: baseRoot)
+        {
             return customRoot
         }
 
@@ -2364,7 +2444,9 @@ class WorkspaceManagerViewModel: ObservableObject {
         self.promptViewModel.attachWorkspaceManager(self)
         self.fileManager.setWorkspaceManager(self)
 
-        if let path = UserDefaults.standard.string(forKey: "GlobalCustomStorageURL") {
+        if !WorkspaceStoragePaths.isolatesDebugProfile,
+           let path = UserDefaults.standard.string(forKey: "GlobalCustomStorageURL")
+        {
             globalCustomStorageURL = URL(fileURLWithPath: path)
         }
 
@@ -2445,17 +2527,11 @@ class WorkspaceManagerViewModel: ObservableObject {
         let base = currentBaseRoot
 
         for entry in indexEntries {
+            guard let wURL = Self.admittedWorkspaceFileURL(for: entry, base: base) else {
+                print("Skipping workspace \(entry.name): its storage lies outside the isolated debug profile")
+                continue
+            }
             do {
-                let wURL: URL
-                if let customURL = entry.customStoragePath {
-                    wURL = customURL.appendingPathComponent("workspace.json")
-                } else {
-                    let folder = base.appendingPathComponent(
-                        DomainWorkspaceStoragePath.directoryName(name: entry.name, id: entry.id)
-                    )
-                    wURL = folder.appendingPathComponent("workspace.json")
-                }
-
                 if FileManager.default.fileExists(atPath: wURL.path) {
                     guard let loadResult = try Self.loadPersistedWorkspaceFromFileResult(
                         at: wURL,
@@ -2615,6 +2691,12 @@ class WorkspaceManagerViewModel: ObservableObject {
         var test_isPollTimerActive: Bool {
             pollTimer?.isValid == true
         }
+
+        /// Awaits the index-driven legacy reloads so a test observes the state they applied.
+        func test_waitForDiskReloads() async {
+            await reloadWorkspacesTask?.value
+            await reloadPresetsTask?.value
+        }
     #endif
 
     // MARK: - Private Timer Control
@@ -2676,6 +2758,10 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     private nonisolated static func loadWorkspaceIndex(from indexURL: URL) -> [WorkspaceIndexEntry] {
+        guard WorkspaceStoragePaths.admitsProfileLocation(indexURL) else {
+            print("Skipping the workspace index at \(indexURL.path): it lies outside the isolated debug profile")
+            return []
+        }
         guard FileManager.default.fileExists(atPath: indexURL.path) else { return [] }
 
         do {
@@ -2687,8 +2773,23 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
     }
 
+    /// The legacy `workspace.json` an index entry names, or nil when the isolated debug profile
+    /// refuses it: its storage folder or the document itself resolves outside `base`. A refused
+    /// entry is neither loaded nor normalized, and the index keeps it unchanged.
+    nonisolated static func admittedWorkspaceFileURL(for entry: WorkspaceIndexEntry, base: URL) -> URL? {
+        guard WorkspaceStoragePaths.admitsCustomStoragePath(entry.customStoragePath, within: base) else {
+            return nil
+        }
+        let folder = entry.customStoragePath ?? base.appendingPathComponent(
+            DomainWorkspaceStoragePath.directoryName(name: entry.name, id: entry.id)
+        )
+        let fileURL = folder.appendingPathComponent("workspace.json")
+        return WorkspaceStoragePaths.admitsProfileLocation(fileURL, within: base) ? fileURL : nil
+    }
+
     private func saveWorkspaceIndex(_ entries: [WorkspaceIndexEntry]) throws {
         guard domainWorkspaceAuthorityClient == nil else { return }
+        try WorkspaceStoragePaths.requireProfileLocation(workspaceIndexFileURL)
         try ensureBaseRootExists(at: currentBaseRoot)
         let data = try JSONEncoder().encode(entries)
         try data.write(to: workspaceIndexFileURL, options: .atomic)
@@ -2696,6 +2797,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     private func saveWorkspaceIndexAsync(_ entries: [WorkspaceIndexEntry]) async throws {
         guard domainWorkspaceAuthorityClient == nil else { return }
+        try WorkspaceStoragePaths.requireProfileLocation(workspaceIndexFileURL)
         try ensureBaseRootExists(at: currentBaseRoot)
         let data = try JSONEncoder().encode(entries)
         await WorkspaceDiskWriter.shared.enqueue(data: data, url: workspaceIndexFileURL)
@@ -2757,16 +2859,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
             for entry in indexEntries {
                 if Task.isCancelled { return }
-
-                let wURL: URL
-                if let customURL = entry.customStoragePath {
-                    wURL = customURL.appendingPathComponent("workspace.json")
-                } else {
-                    let folder = base.appendingPathComponent(
-                        DomainWorkspaceStoragePath.directoryName(name: entry.name, id: entry.id)
-                    )
-                    wURL = folder.appendingPathComponent("workspace.json")
-                }
+                guard let wURL = Self.admittedWorkspaceFileURL(for: entry, base: base) else { continue }
 
                 if FileManager.default.fileExists(atPath: wURL.path) {
                     do {
@@ -2885,15 +2978,7 @@ class WorkspaceManagerViewModel: ObservableObject {
             var loaded: [WorkspaceModel] = []
 
             for entry in indexEntries {
-                let wURL: URL
-                if let customURL = entry.customStoragePath {
-                    wURL = customURL.appendingPathComponent("workspace.json")
-                } else {
-                    let folder = base.appendingPathComponent(
-                        DomainWorkspaceStoragePath.directoryName(name: entry.name, id: entry.id)
-                    )
-                    wURL = folder.appendingPathComponent("workspace.json")
-                }
+                guard let wURL = Self.admittedWorkspaceFileURL(for: entry, base: base) else { continue }
 
                 if FileManager.default.fileExists(atPath: wURL.path) {
                     do {
@@ -2932,16 +3017,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
             for entry in indexEntries {
                 if Task.isCancelled { return }
-
-                let wURL: URL
-                if let customURL = entry.customStoragePath {
-                    wURL = customURL.appendingPathComponent("workspace.json")
-                } else {
-                    let folder = base.appendingPathComponent(
-                        DomainWorkspaceStoragePath.directoryName(name: entry.name, id: entry.id)
-                    )
-                    wURL = folder.appendingPathComponent("workspace.json")
-                }
+                guard let wURL = Self.admittedWorkspaceFileURL(for: entry, base: base) else { continue }
 
                 guard FileManager.default.fileExists(atPath: wURL.path) else {
                     continue
@@ -3010,7 +3086,7 @@ class WorkspaceManagerViewModel: ObservableObject {
                 )
             }
         do {
-            try saveWorkspaceIndex(entries)
+            try saveWorkspaceIndex(entries + indexEntriesRefusedByIsolation(excluding: entries))
         } catch {
             print("Error saving index: \(error)")
         }
@@ -3030,9 +3106,20 @@ class WorkspaceManagerViewModel: ObservableObject {
                 )
             }
         do {
-            try await saveWorkspaceIndexAsync(entries)
+            try await saveWorkspaceIndexAsync(entries + indexEntriesRefusedByIsolation(excluding: entries))
         } catch {
             print("Error saving index: \(error)")
+        }
+    }
+
+    /// The index is rebuilt from loaded workspaces, so entries the isolated debug profile refused
+    /// to load are carried over from disk unchanged rather than pruned.
+    private func indexEntriesRefusedByIsolation(excluding entries: [WorkspaceIndexEntry]) -> [WorkspaceIndexEntry] {
+        guard WorkspaceStoragePaths.isolatesDebugProfile else { return [] }
+        let base = currentBaseRoot
+        let indexedIDs = Set(entries.map(\.id))
+        return loadWorkspaceIndex().filter {
+            !indexedIDs.contains($0.id) && Self.admittedWorkspaceFileURL(for: $0, base: base) == nil
         }
     }
 
@@ -11188,6 +11275,17 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
 
         private func enqueue(data: Data, url: URL, metadata: WorkspaceSavePayloadMetadata?) {
+            // Writers check the destination first; this keeps every queued write inside the
+            // isolated debug profile even for a caller that did not.
+            guard WorkspaceStoragePaths.admitsProfileLocation(url) else {
+                WorkspaceSaveTracer.event(
+                    "workspaceSave.denied",
+                    metadata: metadata,
+                    url: url,
+                    extra: ["reason": "outside_debug_profile"]
+                )
+                return
+            }
             let lifecycleCorrelation = EditFlowPerf.currentLifecycleCorrelation
             WorkspaceSaveTracer.event("workspaceSave.enqueue", metadata: metadata, url: url)
             recordLatestSelectionIfNeeded(metadata)
@@ -11252,7 +11350,7 @@ class WorkspaceManagerViewModel: ObservableObject {
             expectedModificationDate: Date,
             metadata: WorkspaceSavePayloadMetadata? = nil
         ) -> Bool {
-            guard pendingByURL[url] == nil else { return false }
+            guard pendingByURL[url] == nil, WorkspaceStoragePaths.admitsProfileLocation(url) else { return false }
             do {
                 let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
                 guard Int64(values.fileSize ?? -1) == expectedFileSize,
@@ -12143,6 +12241,7 @@ class WorkspaceManagerViewModel: ObservableObject {
             lastSavedVersionByWorkspaceID[workspace.id] = result.savedStateVersion
             return result.fileURL
         }
+        try WorkspaceStoragePaths.requireProfileLocation(targetURL, within: currentBaseRoot)
         let capturedStateVersion = stateVersionByWorkspaceID[workspace.id, default: 0]
         await WorkspaceDiskWriter.shared.flush(url: targetURL)
 
@@ -12214,6 +12313,8 @@ class WorkspaceManagerViewModel: ObservableObject {
             throw WorkspaceDirectWriteError.domainAuthorityRequired
         }
 
+        try WorkspaceStoragePaths.requireProfileLocation(finalURL, within: baseRoot)
+
         // Encode JSON only after the authority check so a denied writer has no side effects.
         let encoded = try JSONEncoder().encode(workspace)
         _ = try ensureWorkspaceDirectoryExists(for: workspace, baseRoot: baseRoot)
@@ -12240,6 +12341,7 @@ class WorkspaceManagerViewModel: ObservableObject {
                 userInfo: [NSLocalizedDescriptionKey: "Synchronous workspace writes are disabled for runtime-owned managers"]
             )
         }
+        try WorkspaceStoragePaths.requireProfileLocation(finalURL, within: currentBaseRoot)
         // Encode JSON and prepare file path
         let encoded = try JSONEncoder().encode(workspace)
         _ = try ensureWorkspaceDirectoryExists(for: workspace)
@@ -12267,10 +12369,13 @@ class WorkspaceManagerViewModel: ObservableObject {
         return try WorkspaceFileDecodeCache.decodeWorkspace(documentBytes: documentBytes).workspace
     }
 
+    /// Every legacy workspace-document read passes here, so under debug isolation a document that
+    /// resolves outside the debug profile is refused before it is read or normalized.
     nonisolated static func loadWorkspaceFromFileResult(
         at fileURL: URL,
         scheduleNormalizationWriteback: Bool
     ) throws -> WorkspaceFileLoadResult {
+        try WorkspaceStoragePaths.requireProfileLocation(fileURL)
         let cachedResult = try WorkspaceFileDecodeCache.shared.loadWorkspace(at: fileURL)
         let normalizationSaveTask: Task<Void, Never>?
         if scheduleNormalizationWriteback,
@@ -12393,6 +12498,9 @@ class WorkspaceManagerViewModel: ObservableObject {
     // MARK: - Reset to Default
 
     func resetGlobalStorageToDefault(migrate: Bool = true) throws {
+        guard !WorkspaceStoragePaths.isolatesDebugProfile else {
+            throw WorkspaceStorageIsolationError.customStorageUnavailable
+        }
         guard let currentGlobal = globalCustomStorageURL else {
             print("Already using default storage.")
             return
@@ -12451,6 +12559,9 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     func updateGlobalStoragePath(_ newURL: URL) throws {
+        guard !WorkspaceStoragePaths.isolatesDebugProfile else {
+            throw WorkspaceStorageIsolationError.customStorageUnavailable
+        }
         let oldBase = currentBaseRoot
         for ws in workspaces {
             let oldFolder = oldBase.appendingPathComponent(directoryName(for: ws))
@@ -13358,8 +13469,9 @@ class WorkspaceManagerViewModel: ObservableObject {
          }
          */
 
-        // 3) Check if user toggled "shouldAutoRestoreFromDownloads"; if so, restore
-        if shouldAutoRestoreFromDownloads {
+        // 3) Check if user toggled "shouldAutoRestoreFromDownloads"; if so, restore. The isolated
+        // debug profile never imports the shared Downloads backup; the saved preference is kept.
+        if shouldAutoRestoreFromDownloads, !WorkspaceStoragePaths.isolatesDebugProfile {
             do {
                 try await restoreUserDataFromDownloadsFolder()
                 print("Auto-restore from ~/Downloads/RepoPrompt-Backup completed.")
@@ -13450,6 +13562,9 @@ class WorkspaceManagerViewModel: ObservableObject {
     // and re-activate whichever was active (if still present). Finally, remove the backup folder.
     @MainActor
     func restoreUserDataFromDownloadsFolder() async throws {
+        guard !WorkspaceStoragePaths.isolatesDebugProfile else {
+            throw WorkspaceStorageIsolationError.customStorageUnavailable
+        }
         let fm = FileManager.default
         guard let downloads = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
             throw NSError(

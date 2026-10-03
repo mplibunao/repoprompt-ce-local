@@ -422,9 +422,10 @@ extension AgentModeViewModel {
             authorizedRoots: authorizedRoots
         )
         try await requireAuthorizedWorktreeMergeEndpoint(targetEndpoint, roots: authorizedRoots, label: "Target")
-        let directory = workspaceDirectory
-            ?? workspaceManager?.activeWorkspace?.customStoragePath
-            ?? FileManager.default.temporaryDirectory
+        let directory = Self.worktreeMergePreviewDirectory(
+            requested: workspaceDirectory,
+            workspaceManager: workspaceManager
+        )
         let preview = try await VCSService.shared.previewGitWorktreeMerge(.init(
             source: source,
             target: targetEndpoint,
@@ -444,6 +445,27 @@ extension AgentModeViewModel {
             in: session
         )
         return checkedPreview
+    }
+
+    /// The workspace directory a merge preview publishes its artifacts into. The isolated debug
+    /// profile publishes only inside itself: the active workspace's storage directory, or a
+    /// profile-owned folder when no workspace is active.
+    static func worktreeMergePreviewDirectory(
+        requested: URL?,
+        workspaceManager: WorkspaceManagerViewModel?
+    ) -> URL {
+        if let requested { return requested }
+        if let customStoragePath = workspaceManager?.activeWorkspace?.customStoragePath,
+           WorkspaceStoragePaths.admitsCustomStoragePath(customStoragePath, within: WorkspaceStoragePaths.defaultRoot)
+        {
+            return customStoragePath
+        }
+        guard WorkspaceStoragePaths.isolatesDebugProfile else { return FileManager.default.temporaryDirectory }
+        if let workspaceManager, let workspace = workspaceManager.activeWorkspace {
+            return workspaceManager.workspaceDirectory(for: workspace)
+        }
+        return MCPFilesystemConstants.identity.applicationSupportRootURL()
+            .appendingPathComponent("WorktreeMergePreviews", isDirectory: true)
     }
 
     func requestWorktreeMergeReviewAndApply(

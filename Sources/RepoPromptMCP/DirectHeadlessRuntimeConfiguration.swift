@@ -1,5 +1,6 @@
 import Foundation
 import RepoPromptDomainRuntime
+import RepoPromptShared
 
 struct DirectHeadlessRuntimeLocations: Equatable {
     let profileIdentifier: String
@@ -9,6 +10,7 @@ struct DirectHeadlessRuntimeLocations: Equatable {
     let temporaryDirectory: URL
     let workingDirectories: [URL]
     let usesExplicitProfileDirectory: Bool
+    let enforcesWorkspaceStorageBoundary: Bool
 
     var mayBootstrapIsolatedWorkspace: Bool {
         usesExplicitProfileDirectory && !workingDirectories.isEmpty
@@ -23,6 +25,7 @@ enum DirectHeadlessRuntimeLocationResolver {
     static func resolve(
         environment: [String: String],
         currentDirectory _: URL,
+        identity: MCPFilesystemIdentity = MCPFilesystemConstants.identity,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         temporaryDirectory: URL = FileManager.default.temporaryDirectory,
         customWorkspaceStoragePath: String? = UserDefaults.standard.string(forKey: "GlobalCustomStorageURL")
@@ -36,12 +39,16 @@ enum DirectHeadlessRuntimeLocationResolver {
         if profile != "default", !usesExplicitProfileDirectory {
             throw DirectHeadlessRuntimeLocationError.profileDirectoryRequired(profile)
         }
+        let isolatesDebugProfile = identity.buildFlavor == .debug
 
         let storageDirectory: URL
         let workspaceStorageDirectory: URL
         let eventDirectory: URL
         let runtimeTemporaryDirectory: URL
         if let explicitProfilePath, !explicitProfilePath.isEmpty {
+            if isolatesDebugProfile, !explicitProfilePath.hasPrefix("/") {
+                throw MCPProfileIsolationError.invalidPath(URL(fileURLWithPath: explicitProfilePath))
+            }
             let root = URL(fileURLWithPath: explicitProfilePath, isDirectory: true)
                 .standardizedFileURL
                 .resolvingSymlinksInPath()
@@ -50,10 +57,11 @@ enum DirectHeadlessRuntimeLocationResolver {
             eventDirectory = root.appendingPathComponent("Events", isDirectory: true)
             runtimeTemporaryDirectory = root.appendingPathComponent("Temporary", isDirectory: true)
         } else {
-            let root = homeDirectory
-                .appendingPathComponent("Library/Application Support/RepoPrompt CE", isDirectory: true)
+            let root = identity.applicationSupportRootURL(homeDirectory: homeDirectory)
                 .standardizedFileURL
             storageDirectory = root
+            // The isolated debug profile keeps its own workspaces; a saved redirect is not followed.
+            let customWorkspaceStoragePath = isolatesDebugProfile ? nil : customWorkspaceStoragePath
             workspaceStorageDirectory = customWorkspaceStoragePath.flatMap { path -> URL? in
                 let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { return nil }
@@ -62,8 +70,27 @@ enum DirectHeadlessRuntimeLocationResolver {
                     .resolvingSymlinksInPath()
             } ?? root.appendingPathComponent("Workspaces", isDirectory: true)
             eventDirectory = root.appendingPathComponent("Events", isDirectory: true)
-            runtimeTemporaryDirectory = temporaryDirectory
-                .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+            runtimeTemporaryDirectory = identity.temporaryRootURL(temporaryDirectory: temporaryDirectory)
+        }
+        if isolatesDebugProfile {
+            // Runs before prepareRuntime() creates any directory, for default and explicit profiles.
+            // The runtime's declared state directories and files are checked too, so a symlink
+            // below the profile root cannot carry domain state into production.
+            try MCPFilesystemIdentity.validateDebugProfileLocations(
+                profileRoot: storageDirectory,
+                temporaryRoot: runtimeTemporaryDirectory,
+                managedStateURLs: [eventDirectory]
+                    + DomainRuntimeConfiguration.managedStateLocations(
+                        storageDirectory: storageDirectory,
+                        workspaceStorageDirectory: workspaceStorageDirectory,
+                        profileIdentifier: profile
+                    ),
+                productionStateRoots: MCPFilesystemIdentity.productionStateRoots(
+                    product: identity.product,
+                    homeDirectory: homeDirectory,
+                    temporaryDirectory: temporaryDirectory
+                )
+            )
         }
 
         let workingDirectories = try resolvedWorkingDirectories(
@@ -76,7 +103,8 @@ enum DirectHeadlessRuntimeLocationResolver {
             eventDirectory: eventDirectory,
             temporaryDirectory: runtimeTemporaryDirectory,
             workingDirectories: workingDirectories,
-            usesExplicitProfileDirectory: usesExplicitProfileDirectory
+            usesExplicitProfileDirectory: usesExplicitProfileDirectory,
+            enforcesWorkspaceStorageBoundary: isolatesDebugProfile
         )
     }
 

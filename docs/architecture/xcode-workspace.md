@@ -22,7 +22,7 @@ Xcode exposes SwiftPM product schemes, including `RepoPrompt` and `repoprompt-mc
 
 The native `RepoPrompt` product scheme retains the shipped product, target, and emitted-binary identity. Internally, that executable is now a one-file entry target over the `RepoPromptApp` implementation library. `RepoPromptApp` is an internal SwiftPM target rather than a declared library product, so it does not add a supported product or convenience scheme. The AppKit-free `RepoPromptDomainRuntime` and direct `RepoPromptDomainRuntimeTests` owner target are likewise internal package targets discovered from the same manifest; they do not add product or convenience schemes.
 
-- `RepoPrompt CE App` delegates to conductor to assemble the real debug app through the existing packaging flow, verifies the `.build/debug/RepoPrompt.app` compatibility path, then runs the local debug bundle under `~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app`.
+- `RepoPrompt CE App` delegates to conductor to assemble the real debug app through the existing packaging flow, verifies the `.build/debug/RepoPrompt.app` compatibility path and its `Contents/MacOS/RepoPromptDebug` executable, then runs the local debug bundle under `~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app`.
 - `RepoPrompt CE MCP` delegates to conductor to build and run `.build/debug/repoprompt-mcp`.
 - `RepoPrompt CE Tests` delegates to the conductor test runner. Root tests import `RepoPromptApp`, but retain their separate `RepoPromptMCP` dependency/imports; the scheme remains a legacy build target rather than a native Xcode test bundle because `RepoPromptMCP` is executable-only.
 

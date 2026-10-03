@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import plistlib
 import sys
 import unittest
 from pathlib import Path
@@ -19,7 +20,49 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import conductor  # noqa: E402
 import conductor_diagnostics  # noqa: E402
-from script_test_support import enter_context, temporary_directory, write_executable  # noqa: E402
+import debug_app_process  # noqa: E402
+from script_test_support import (  # noqa: E402
+    directory_snapshot,
+    enter_context,
+    temporary_directory,
+    write_executable,
+)
+
+
+def write_app_bundle(
+    bundle: Path,
+    declared: str = "RepoPromptDebug",
+    *,
+    marker: str = "debug-adhoc",
+    leaves: tuple[str, ...] | None = None,
+) -> Path:
+    """Writes an app bundle whose Info.plist declares `declared` and holds executable `leaves`."""
+    (bundle / "Contents").mkdir(parents=True, exist_ok=True)
+    with (bundle / "Contents" / "Info.plist").open("wb") as handle:
+        plistlib.dump({"CFBundleExecutable": declared, "RepoPromptSigningMode": marker}, handle)
+    for leaf in leaves if leaves is not None else (declared,):
+        write_executable(bundle / "Contents" / "MacOS" / leaf, "#!/bin/sh\nexit 0\n")
+    return bundle
+
+
+def no_lock(*_args: object, **_kwargs: object) -> contextlib.AbstractContextManager[None]:
+    return contextlib.nullcontext()
+
+
+class ProcessTable:
+    """A fixed process table for the real process-identity helpers."""
+
+    def __init__(self, processes: dict[int, tuple[str, Path]]) -> None:
+        self.processes = processes
+
+    def list_pids(self) -> list[int]:
+        return list(self.processes)
+
+    def process_name(self, pid: int) -> str | None:
+        return self.processes[pid][0] if pid in self.processes else None
+
+    def process_path(self, pid: int) -> Path:
+        return self.processes[pid][1].resolve(strict=True)
 
 
 class XCTestSandboxTests(unittest.TestCase):
@@ -344,6 +387,193 @@ class FocusedBuildDiagnosticTests(unittest.TestCase):
         self.assertGreaterEqual(report["scratch"]["sizeBytes"], 1)
 
 
+class DebugAppLifecycleTests(unittest.TestCase):
+    """Debug app lifecycle against fixture bundles; machine-wide locks are replaced so no
+    real conductor lock, debug app, or production app is touched."""
+
+    def setUp(self) -> None:
+        self.tmp = enter_context(self, temporary_directory())
+        self.bundle = self.tmp / "DebugApps" / "RepoPrompt.app"
+        self.current = self.bundle / "Contents" / "MacOS" / "RepoPromptDebug"
+        self.legacy = self.bundle / "Contents" / "MacOS" / "RepoPrompt"
+        enter_context(self, mock.patch.dict(os.environ, {"REPOPROMPT_DEBUG_APP_BUNDLE": str(self.bundle)}))
+        enter_context(self, mock.patch.object(conductor, "APP_STOP_POLL_SECONDS", 0.01))
+        enter_context(self, mock.patch.object(conductor, "APP_STOP_QUIET_SECONDS", 0.05))
+        enter_context(self, mock.patch.object(conductor, "machine_exclusive_lock", no_lock))
+        enter_context(self, mock.patch.object(conductor, "machine_heavy_slot", no_lock))
+        self.commands: list[list[str]] = []
+        self.output = io.StringIO()
+        enter_context(self, contextlib.redirect_stdout(self.output))
+
+    def record_command(self, _label: str, argv: list[object], _cwd: Path, **_kwargs: object) -> Tuple[int, str, str]:
+        self.commands.append([str(arg) for arg in argv])
+        return 0, "", ""
+
+    def test_stop_and_status_target_only_the_exact_current_and_legacy_debug_paths(self) -> None:
+        write_app_bundle(self.bundle, leaves=("RepoPromptDebug", "RepoPrompt"))
+        running = {self.current: {12}, self.legacy: {11}}
+        inspected: set[Path] = set()
+        signaled: list[Path] = []
+
+        def matching(path: Path) -> list[int]:
+            inspected.add(path)
+            return sorted(running[path])
+
+        def terminate(path: Path) -> list[int]:
+            signaled.append(path)
+            pids, running[path] = sorted(running[path]), set()
+            return pids
+
+        with mock.patch.object(conductor, "matching_processes", side_effect=matching), mock.patch.object(
+            conductor, "terminate_matching_processes", side_effect=terminate
+        ), mock.patch.object(conductor, "run_operation_command", side_effect=self.record_command):
+            status_code = conductor.operation_app_status(self.tmp)
+            stop_code = conductor._operation_app_stop_unlocked(self.tmp, {})
+
+        output = self.output.getvalue()
+        self.assertEqual((status_code, stop_code), (0, 0))
+        self.assertIn("Running matching debug app PIDs: 11, 12", output)
+        self.assertIn(f"App executable: {self.current.resolve()}", output)
+        self.assertIn("RepoPrompt stop confirmed.", output)
+        self.assertEqual(signaled, [self.current, self.legacy])
+        self.assertEqual(inspected, {self.current, self.legacy})
+
+    def test_release_marked_debug_override_is_never_stopped_or_launched(self) -> None:
+        write_app_bundle(self.bundle, "RepoPrompt", marker="local-self-signed")
+        before = directory_snapshot(self.bundle)
+        matching = mock.Mock(side_effect=AssertionError("a release bundle must not be inspected"))
+        terminate = mock.Mock(side_effect=AssertionError("a release bundle must not be signaled"))
+
+        with mock.patch.object(conductor, "matching_processes", matching), mock.patch.object(
+            conductor, "terminate_matching_processes", terminate
+        ), mock.patch.object(conductor, "run_operation_command", side_effect=self.record_command):
+            stop_code = conductor._operation_app_stop_unlocked(self.tmp, {})
+            launch_code = conductor.operation_app_launch_existing(self.tmp, {})
+
+        self.assertEqual((stop_code, launch_code), (1, 1))
+        matching.assert_not_called()
+        terminate.assert_not_called()
+        self.assertEqual(self.commands, [])
+        self.assertEqual(directory_snapshot(self.bundle), before)
+        self.assertIn("not a debug app bundle", self.output.getvalue())
+
+    def test_undeclared_leaf_linking_to_production_fails_closed_without_signaling(self) -> None:
+        production = self.tmp / "Applications" / "RepoPrompt CE.app" / "Contents" / "MacOS" / "RepoPrompt"
+        write_executable(production, "#!/bin/sh\nexit 0\n")
+        write_app_bundle(self.bundle)
+        self.legacy.symlink_to(production)
+        table = ProcessTable({41: ("RepoPrompt", production)})
+        signals: list[tuple[int, int]] = []
+
+        def matching(path: Path) -> list[int]:
+            return debug_app_process.matching_processes(path, table)
+
+        def terminate(path: Path) -> list[int]:
+            return debug_app_process.terminate_matching_processes(
+                path, table, signaler=lambda pid, sent: signals.append((pid, sent))
+            )
+
+        with mock.patch.object(conductor, "matching_processes", side_effect=matching), mock.patch.object(
+            conductor, "terminate_matching_processes", side_effect=terminate
+        ), mock.patch.object(conductor, "run_operation_command", side_effect=self.record_command):
+            stop_code = conductor._operation_app_stop_unlocked(self.tmp, {})
+            status_code = conductor.operation_app_status(self.tmp)
+
+        output = self.output.getvalue()
+        self.assertEqual(signals, [])
+        self.assertEqual((stop_code, status_code), (1, 1))
+        self.assertIn("could not safely identify the debug app process", output)
+        self.assertIn(f"{self.legacy} is a symlink to {production}", output)
+        self.assertIn("remove or correct the unsafe leaf first, then retry './conductor run'", output)
+        self.assertIn("Running matching debug app PIDs: unknown", output)
+
+    def test_launch_existing_follows_the_declared_executable_of_an_intact_legacy_bundle(self) -> None:
+        write_app_bundle(self.bundle, "RepoPrompt")
+
+        with mock.patch.object(conductor, "_operation_app_stop_unlocked", return_value=0), mock.patch.object(
+            conductor, "report_launch_bundle_details", return_value=0
+        ), mock.patch.object(conductor, "wait_for_debug_app_process", return_value=["11"]), mock.patch.object(
+            conductor, "run_operation_command", side_effect=self.record_command
+        ):
+            code = conductor.operation_app_launch_existing(self.tmp, {})
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.commands, [["open", "-n", str(self.bundle)]])
+
+    def test_launch_existing_does_not_substitute_another_leaf_for_a_missing_declared_one(self) -> None:
+        write_app_bundle(self.bundle, "RepoPromptDebug", leaves=("RepoPrompt",))
+        stop = mock.Mock(return_value=0)
+
+        with mock.patch.object(conductor, "_operation_app_stop_unlocked", stop), mock.patch.object(
+            conductor, "run_operation_command", side_effect=self.record_command
+        ):
+            code = conductor.operation_app_launch_existing(self.tmp, {})
+
+        self.assertEqual(code, 1)
+        stop.assert_not_called()
+        self.assertEqual(self.commands, [])
+        self.assertIn("existing debug app bundle is not launchable", self.output.getvalue())
+
+    def test_staged_activation_requires_the_renamed_executable_and_a_debug_marker(self) -> None:
+        write_app_bundle(self.bundle, "RepoPrompt")
+        live_before = directory_snapshot(self.bundle)
+        staging = self.bundle.parent / ".staging"
+        for label, declared, marker in (
+            ("legacy-name", "RepoPrompt", "debug-adhoc"),
+            ("release-marker", "RepoPromptDebug", "local-self-signed"),
+        ):
+            with self.subTest(label=label):
+                staged = write_app_bundle(staging / label / "RepoPrompt.app", declared, marker=marker)
+                with self.assertRaisesRegex(conductor.ConductorError, "not launchable"):
+                    conductor.activate_staged_debug_bundle(staged, self.bundle)
+                self.assertEqual(directory_snapshot(self.bundle), live_before)
+
+        staged = write_app_bundle(staging / "current" / "RepoPrompt.app")
+        conductor.activate_staged_debug_bundle(staged, self.bundle)
+
+        self.assertEqual(debug_app_process.debug_bundle_executable(self.bundle).name, "RepoPromptDebug")
+        self.assertFalse(staged.parent.exists())
+
+    def test_packaging_admits_only_staged_output_that_declares_the_renamed_executable(self) -> None:
+        staging = self.bundle.parent / ".staging"
+        for declared, expected_code in (("RepoPrompt", 1), ("RepoPromptDebug", 0)):
+            with self.subTest(declared=declared):
+
+                def package(_label: str, _argv: list[str], _cwd: Path, env: dict[str, str], **_kwargs: object) -> Tuple[int, str, str]:
+                    write_app_bundle(Path(env["REPOPROMPT_DEBUG_APP_BUNDLE"]), declared)
+                    return 0, "", ""
+
+                with mock.patch.object(conductor, "run_operation_command", side_effect=package):
+                    code, staged = conductor.package_debug_app_under_heavy(self.tmp, "debug app build/package")
+
+                self.assertEqual(code, expected_code)
+                if expected_code:
+                    self.assertIsNone(staged)
+                    self.assertEqual(list(staging.iterdir()), [])
+                else:
+                    assert staged is not None
+                    self.assertEqual(debug_app_process.debug_bundle_executable(staged).name, "RepoPromptDebug")
+                    conductor.cleanup_staged_debug_bundle(staged)
+
+    def test_package_failure_leaves_the_live_debug_app_untouched(self) -> None:
+        write_app_bundle(self.bundle, "RepoPrompt")
+        before = directory_snapshot(self.bundle)
+        stop = mock.Mock(return_value=0)
+        activate = mock.Mock()
+
+        with mock.patch.object(conductor, "run_operation_command", return_value=(2, "", "")) as command, mock.patch.object(
+            conductor, "_operation_app_stop_unlocked", stop
+        ), mock.patch.object(conductor, "activate_staged_debug_bundle", activate):
+            code = conductor.operation_debug_app_build_then_launch(self.tmp, {})
+
+        self.assertEqual(code, 2)
+        self.assertEqual(command.call_count, 1)
+        stop.assert_not_called()
+        activate.assert_not_called()
+        self.assertEqual(directory_snapshot(self.bundle), before)
+        self.assertIn("no live bundle or stop/launch lifecycle action was performed", self.output.getvalue())
+
+
 class HighOutputDiagnosticTests(unittest.TestCase):
     def test_high_output_generates_expected_counts(self) -> None:
         buf = io.StringIO()
@@ -364,6 +594,159 @@ class HighOutputDiagnosticTests(unittest.TestCase):
         self.assertEqual(code, 7)
         lines = buf.getvalue().strip().splitlines()
         self.assertEqual(lines, ["==> high-output diagnostic start", "==> high-output diagnostic done"])
+
+
+class SmokeWorkspaceBootstrapTests(unittest.TestCase):
+    """Command sequencing and timeouts for the smoke flow, which creates its workspace once in a
+    fresh debug profile. Every CLI call answers from a minimal in-test listing, so no debug app
+    or CLI runs; the listing parser itself is checked against recorded debug CLI output in
+    SmokeWorkspaceListingContractTests."""
+
+    APPROVAL_PATH = "Settings → Permissions → Workspace Approvals → Create workspace"
+
+    def setUp(self) -> None:
+        self.tmp = enter_context(self, temporary_directory())
+        self.calls: list[tuple[str, list[str], object]] = []
+        self.output = io.StringIO()
+        enter_context(self, contextlib.redirect_stdout(self.output))
+        enter_context(self, mock.patch.object(conductor, "require_debug_cli", return_value="rpce-cli-debug"))
+
+    def run_smoke(self, responses: dict[str, Tuple[int, str, str]]) -> int:
+        def respond(label: str, argv: list[object], _cwd: Path, **kwargs: object) -> Tuple[int, str, str]:
+            self.calls.append((label, [str(arg) for arg in argv], kwargs.get("timeout")))
+            return responses.get(label, (0, "", ""))
+
+        with mock.patch.object(conductor, "run_operation_command", side_effect=respond):
+            return conductor.operation_smoke(self.tmp, {})
+
+    @staticmethod
+    def minimal_listing(*names: str) -> Tuple[int, str, str]:
+        workspaces = [{"id": str(index), "name": name} for index, name in enumerate(names)]
+        return 0, json.dumps({"action": "list", "workspaces": workspaces}), ""
+
+    def labels(self) -> list[str]:
+        return [label for label, _argv, _timeout in self.calls]
+
+    def payload(self, label: str) -> dict[str, object]:
+        argv = next(argv for call_label, argv, _timeout in self.calls if call_label == label)
+        return json.loads(argv[argv.index("-j") + 1])
+
+    def test_missing_workspace_is_created_once_then_switched_to(self) -> None:
+        code = self.run_smoke({"workspace list": self.minimal_listing("other")})
+
+        self.assertEqual(code, 0, self.output.getvalue())
+        self.assertEqual(self.labels()[:4], ["workspace list", "workspace create", "windows", "workspace switch"])
+        self.assertEqual(self.labels().count("workspace create"), 1)
+        list_argv = self.calls[0][1]
+        self.assertIn("--raw-json", list_argv)
+        self.assertEqual(self.payload("workspace list"), {"action": "list", "include_hidden": True, "_windowID": 1})
+        self.assertEqual(
+            self.payload("workspace create"),
+            {"action": "create", "name": "repoprompt-ce", "folder_path": str(self.tmp), "_windowID": 1},
+        )
+        create_timeout = next(timeout for label, _argv, timeout in self.calls if label == "workspace create")
+        self.assertEqual(create_timeout, conductor.SMOKE_WORKSPACE_CREATE_TIMEOUT_SECONDS)
+
+    def test_existing_workspace_is_never_recreated(self) -> None:
+        code = self.run_smoke({"workspace list": self.minimal_listing("other", "repoprompt-ce")})
+
+        self.assertEqual(code, 0, self.output.getvalue())
+        self.assertNotIn("workspace create", self.labels())
+        self.assertIn("workspace switch", self.labels())
+
+    def test_approval_required_create_fails_fast_with_the_settings_path(self) -> None:
+        for label, create_response in (
+            ("approval card left waiting", (124, "", "")),
+            ("approval denied", (1, "", "Error: [-32600] Invalid Request: Workspace creation was denied by the user.")),
+        ):
+            with self.subTest(case=label):
+                self.calls.clear()
+                self.output.truncate(0)
+                self.output.seek(0)
+
+                code = self.run_smoke({"workspace list": self.minimal_listing(), "workspace create": create_response})
+
+                self.assertEqual(code, 1)
+                self.assertIn(self.APPROVAL_PATH, self.output.getvalue())
+                self.assertEqual(self.labels(), ["workspace list", "workspace create"])
+
+    def test_unreadable_listing_never_creates(self) -> None:
+        code = self.run_smoke({"workspace list": (0, "## Workspaces\n- Count: 0\n", "")})
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self.labels(), ["workspace list"])
+        self.assertIn("could not read the workspace list", self.output.getvalue())
+
+    def run_switch(self, switch_response: Tuple[int, str, str]) -> int:
+        self.calls.clear()
+        self.output.truncate(0)
+        self.output.seek(0)
+        return self.run_smoke(
+            {"workspace list": self.minimal_listing("repoprompt-ce"), "workspace switch": switch_response}
+        )
+
+    def test_switch_to_the_already_selected_workspace_continues_the_smoke(self) -> None:
+        current = 'Error:\nError: Invalid Request: Already on workspace "repoprompt-ce".'
+        for label, switch_response in (
+            ("current CLI format on stderr", (1, "", current)),
+            ("current CLI format on stdout", (1, current, "")),
+            ("legacy JSON-RPC code prefix", (1, "", 'Error: [-32600] Invalid Request: Already on workspace "repoprompt-ce".')),
+            ("bare line", (1, "", 'Already on workspace "repoprompt-ce"')),
+        ):
+            with self.subTest(case=label):
+                code = self.run_switch(switch_response)
+
+                self.assertEqual(code, 0, self.output.getvalue())
+                self.assertIn('Already on workspace "repoprompt-ce"; continuing smoke flow.', self.output.getvalue())
+                self.assertEqual(self.labels()[-3:], ["tree roots", "manage_worktree list", "agent_manage roles"])
+
+    def test_switch_failure_other_than_the_selected_workspace_fails_the_smoke(self) -> None:
+        for label, switch_response in (
+            ("name ending with the smoke workspace", (1, "", 'Error: Invalid Request: Already on workspace "my-repoprompt-ce".')),
+            ("name starting with the smoke workspace", (1, 'Already on workspace "repoprompt-ce-old".', "")),
+            ("unrelated error", (1, "", "Error:\nError: Invalid Request: Window 1 not found.")),
+        ):
+            with self.subTest(case=label):
+                code = self.run_switch(switch_response)
+
+                self.assertEqual(code, 1)
+                self.assertIn("FAILED stage 'workspace switch' with status 1", self.output.getvalue())
+                self.assertEqual(self.labels()[-1], "workspace switch")
+
+
+class SmokeWorkspaceListingContractTests(unittest.TestCase):
+    """`smoke_workspace_names` against the output of the exact list call the smoke bootstrap
+    makes, recorded from the debug app through `rpce-cli-debug --raw-json` with paths, IDs, and
+    workspace names replaced."""
+
+    FIXTURE = SCRIPT_DIR / "Fixtures" / "manage_workspaces_list_debug_cli.json"
+
+    def setUp(self) -> None:
+        self.stdout = self.FIXTURE.read_text(encoding="utf-8")
+        self.recorded_names = {entry["name"] for entry in json.loads(self.stdout)["workspaces"]}
+
+    def test_recorded_listing_yields_every_workspace_name(self) -> None:
+        self.assertGreater(len(self.recorded_names), 1)
+        self.assertEqual(conductor.smoke_workspace_names(self.stdout), self.recorded_names)
+
+    def test_recorded_listing_without_the_smoke_workspace_creates_it_once(self) -> None:
+        self.assertNotIn("repoprompt-ce", self.recorded_names)
+        calls: list[str] = []
+
+        def respond(label: str, _argv: list[object], _cwd: Path, **_kwargs: object) -> Tuple[int, str, str]:
+            calls.append(label)
+            return (0, self.stdout, "") if label == "workspace list" else (0, "", "")
+
+        with (
+            temporary_directory() as tmp,
+            contextlib.redirect_stdout(io.StringIO()),
+            mock.patch.object(conductor, "require_debug_cli", return_value="rpce-cli-debug"),
+            mock.patch.object(conductor, "run_operation_command", side_effect=respond),
+        ):
+            code = conductor.operation_smoke(tmp, {})
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls.count("workspace create"), 1)
 
 
 if __name__ == "__main__":

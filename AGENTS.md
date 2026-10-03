@@ -76,6 +76,8 @@ The debug app bundle is created through:
 .build/debug/RepoPrompt.app
 ```
 
+A debug package keeps the `RepoPrompt.app` directory and the `<bundle ID>.debug` identifier, but its GUI executable is `Contents/MacOS/RepoPromptDebug`, and it shows as `RepoPrompt CE Debug` with the debug icon and a blue DEBUG badge, top rule, and composer ring in its windows. Release packages keep `Contents/MacOS/RepoPrompt`. Conductor stop, status, and launch, and the archive and restore guards, also recognize a debug bundle packaged before that name, whose executable is still `RepoPrompt`, at the configured debug path.
+
 SwiftPM’s architecture-specific build output is usually under:
 
 ```text
@@ -122,21 +124,26 @@ The installer links:
 
 ```text
 /usr/local/bin/rpce-cli-debug
-  -> ~/Library/Application Support/RepoPrompt CE/repoprompt_ce_cli_debug
+  -> ~/RepoPrompt/repoprompt_ce_cli_debug
   -> ~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app/Contents/MacOS/repoprompt-mcp
 ```
 
 If `/usr/local/bin` needs administrator privileges, run the install target from an interactive terminal so `sudo` can prompt, or install the CLI from Settings → MCP → CLI Tools. Without the PATH link, use the direct fallback:
 
 ```bash
-"$HOME/Library/Application Support/RepoPrompt CE/repoprompt_ce_cli_debug" -e 'windows'
+"$HOME/RepoPrompt/repoprompt_ce_cli_debug" -e 'windows'
 ```
+
+The debug app and the debug CLI keep their own runtime profile at `~/Library/Application Support/RepoPrompt CE Debug`, with runtime temporary files under `$TMPDIR/RepoPrompt CE Debug`. Workspaces, chat and agent history, settings, presets, window sessions, saved prompts, and the managed Codex home live there, and production's `~/Library/Application Support/RepoPrompt CE` is neither read nor written. A fresh debug profile starts empty. Nothing is copied from production, from the `~/Downloads/RepoPrompt-Backup` restore, or from a saved custom workspace storage location, and a debug build ignores that saved location without changing the preference. Developer tooling stays where it was: the debug bundle under `RepoPrompt CE/DebugApps`, conductor state, and the CLI links above. A debug build packaged before the profile split still shares production's profile, so rebuild before relying on the separation. When the profile resolves into production state, such as through a symlink, the debug app and CLI exit before opening any store and print the reason to stderr. [`docs/testing.md`](docs/testing.md#debug-profile-isolation) covers the details.
+
+`make dev-smoke` and `make dev-smoke-launch` create the `repoprompt-ce` workspace once in a fresh debug profile and never recreate it. When creating it needs approval, the smoke stops within seconds and names the setting to change: Settings → Permissions → Workspace Approvals → Create workspace.
 
 Live CE MCP smoke flow:
 
 ```bash
 make run
 rpce-cli-debug -e 'windows'
+rpce-cli-debug -w 1 -e "workspace create repoprompt-ce --folder-path $PWD"   # only when 'workspace list' lacks it
 rpce-cli-debug -w 1 -e 'workspace switch repoprompt-ce'
 rpce-cli-debug -w 1 -e 'tree --type roots'
 rpce-cli-debug -w 1 -c agent_manage -j '{"op":"list_agents","roles_only":true}'

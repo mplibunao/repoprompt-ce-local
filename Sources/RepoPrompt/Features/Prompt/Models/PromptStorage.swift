@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import RepoPromptShared
 
 struct StoredPromptRecord: Identifiable, Codable, Equatable {
     let id: UUID
@@ -64,8 +65,35 @@ class PromptStorage {
         configuredFileURL = fileURL
     }
 
-    /// Compute the file URL in Application Support under com.pvncher.repoprompt.
-    private var fileURL: URL {
+    /// Release shares the pre-CE `com.pvncher.repoprompt` folder with older builds. The debug build
+    /// keeps the same relative folder inside its own profile, so it never touches the shared copy.
+    static func defaultSupportDirectoryURL(identity: MCPFilesystemIdentity = MCPFilesystemConstants.identity) -> URL {
+        let base = identity.buildFlavor == .debug
+            ? identity.applicationSupportRootURL()
+            : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent(MCPFilesystemIdentity.sharedPromptDirectoryName, isDirectory: true)
+    }
+
+    /// Creates (if needed) and returns the default prompt folder. Under debug isolation the folder
+    /// must resolve inside the debug profile first, so a symlink to the shared release folder is
+    /// refused before any prompt store reads or writes it.
+    static func preparedDefaultSupportDirectoryURL() throws -> URL {
+        let folder = defaultSupportDirectoryURL()
+        try WorkspaceStoragePaths.requireProfileLocation(folder)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    /// A prompt file in the default prompt folder. Under debug isolation the file must resolve
+    /// inside the debug profile too, so a per-file symlink to a release prompt file is refused.
+    static func preparedDefaultPromptFileURL(named name: String) throws -> URL {
+        let fileURL = try preparedDefaultSupportDirectoryURL().appendingPathComponent(name)
+        try WorkspaceStoragePaths.requireProfileLocation(fileURL)
+        return fileURL
+    }
+
+    /// The configured file, or SavedPrompts.json in the default prompt folder.
+    private func resolvedFileURL() throws -> URL {
         if let configuredFileURL {
             try? FileManager.default.createDirectory(
                 at: configuredFileURL.deletingLastPathComponent(),
@@ -73,20 +101,7 @@ class PromptStorage {
             )
             return configuredFileURL
         }
-
-        let supportDir = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first!
-
-        // Create a subfolder "com.pvncher.repoprompt" if it doesn't exist
-        let appSupportFolder = supportDir.appendingPathComponent("com.pvncher.repoprompt", isDirectory: true)
-        try? FileManager.default.createDirectory(
-            at: appSupportFolder,
-            withIntermediateDirectories: true
-        )
-
-        return appSupportFolder.appendingPathComponent(filename)
+        return try Self.preparedDefaultPromptFileURL(named: filename)
     }
 
     /// <summary>
@@ -100,6 +115,13 @@ class PromptStorage {
 
         // Use a synchronous block so we can return the result directly
         Self.queue.sync {
+            let fileURL: URL
+            do {
+                fileURL = try resolvedFileURL()
+            } catch {
+                result = .failure(error)
+                return
+            }
             // Check if the file exists first
             if !FileManager.default.fileExists(atPath: fileURL.path) {
                 // First run - no prompts file exists yet, return empty array
@@ -158,6 +180,7 @@ class PromptStorage {
     }
 
     private func readPrompts() throws -> [StoredPromptRecord] {
+        let fileURL = try resolvedFileURL()
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
         let data = try Data(contentsOf: fileURL)
         return try JSONDecoder().decode([StoredPromptRecord].self, from: data)
@@ -165,7 +188,7 @@ class PromptStorage {
 
     private func writePrompts(_ prompts: [StoredPromptRecord]) throws {
         let data = try JSONEncoder().encode(prompts)
-        try data.write(to: fileURL, options: .atomicWrite)
+        try data.write(to: resolvedFileURL(), options: .atomicWrite)
     }
 }
 

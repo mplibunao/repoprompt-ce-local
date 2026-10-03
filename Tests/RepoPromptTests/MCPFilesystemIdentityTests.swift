@@ -49,7 +49,7 @@ final class MCPFilesystemIdentityTests: XCTestCase {
             isXCTestProcess: false
         )
         let expected = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+            .appendingPathComponent("RepoPrompt CE Debug", isDirectory: true)
 
         XCTAssertEqual(resolved.standardizedFileURL, expected.standardizedFileURL)
         XCTAssertFalse(resolved.path.hasPrefix(exportedRoot.path + "/"))
@@ -67,7 +67,7 @@ final class MCPFilesystemIdentityTests: XCTestCase {
         )
         let expected = explicitRoot
             .appendingPathComponent("profile", isDirectory: true)
-            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
+            .appendingPathComponent("RepoPrompt CE Debug", isDirectory: true)
 
         XCTAssertEqual(resolved.standardizedFileURL, expected.standardizedFileURL)
     }

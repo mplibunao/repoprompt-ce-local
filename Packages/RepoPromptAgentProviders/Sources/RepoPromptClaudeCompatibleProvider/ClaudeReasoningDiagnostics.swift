@@ -5,11 +5,21 @@ enum ClaudeReasoningExtractionFeature {
 }
 
 #if DEBUG
+    /// A package-owned, per-process diagnostic namespace. It never shares the app profile's
+    /// temporary root, so a debug build's log can neither land in nor fall back to production state.
     enum ClaudeReasoningDebugLog {
-        static let fileURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("RepoPrompt CE", isDirectory: true)
-            .appendingPathComponent("claude-reasoning-debug.log", isDirectory: false)
+        static let fileURL = logFileURL(
+            temporaryDirectory: FileManager.default.temporaryDirectory,
+            processID: ProcessInfo.processInfo.processIdentifier
+        )
         private static let lock = NSLock()
+
+        static func logFileURL(temporaryDirectory: URL, processID: Int32) -> URL {
+            temporaryDirectory
+                .appendingPathComponent("RepoPromptClaudeCompatibleProvider-Debug", isDirectory: true)
+                .appendingPathComponent(String(processID), isDirectory: true)
+                .appendingPathComponent("claude-reasoning-debug.log", isDirectory: false)
+        }
 
         static func emit(_ line: String) {
             print(line)
@@ -17,6 +27,11 @@ enum ClaudeReasoningExtractionFeature {
         }
 
         static func append(_ line: String) {
+            append(line, to: fileURL)
+        }
+
+        /// Best effort: a failed write is dropped rather than redirected anywhere else.
+        static func append(_ line: String, to fileURL: URL) {
             lock.lock()
             defer { lock.unlock() }
             let timestamp = ISO8601DateFormatter().string(from: Date())

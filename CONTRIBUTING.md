@@ -58,7 +58,9 @@ Work is tracked as issues and pull requests there.
    the branch, exercise the changed behavior through `rpce-cli-debug` or the
    app itself, and record the commands, what you observed, and the result in
    the description before marking it ready. The debug app runs beside
-   production and needs no approval to launch or relaunch.
+   production with its own profile and needs no approval to launch or
+   relaunch. A debug build packaged before the profile split still shares
+   production's state, so validate from a current build.
 
    ```bash
    gh pr create --base <main-or-lower-branch> --draft --label <type> --label area:<area>
