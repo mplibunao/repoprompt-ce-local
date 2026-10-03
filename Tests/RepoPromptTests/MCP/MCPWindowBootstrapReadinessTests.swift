@@ -404,6 +404,43 @@ import XCTest
             }
         }
 
+        // MARK: - Routing refusal
+
+        /// A bootstrap-ready window is not admission: a connection refused for joining an
+        /// established run by ancestry alone resumes no connection waiter and stays unbound.
+        func testExpectedPIDOnlyRefusalDoesNotNotifyWaitersOrBindReadyWindow() async throws {
+            try await withReadinessWindow { window, _ in
+                try await window.mcpServer.requireServerReadyForAgentBootstrap()
+                let cleanup = FixtureCleanup()
+                try await cleanup.perform {
+                    let run = try await ExpectedPIDRunFixture.establish(in: window, sessionName: nil, cleanup: cleanup)
+                    let manager = run.manager
+                    let clientName = run.clientName
+                    await manager.debugEnsureRunningLifecycleForSocketFixture()
+                    let waitersBefore = await manager.debugConnectionWaiterCountForLifecycleFenceTest()
+                    let waiter = Task { await manager.waitForNewConnection(clientName: clientName, timeout: 30) }
+                    // A waiter left running would take a later test's connection notification.
+                    cleanup.add {
+                        waiter.cancel()
+                        _ = await waiter.value
+                    }
+                    let waiterRegistered = await waitUntil {
+                        await manager.debugConnectionWaiterCountForLifecycleFenceTest() == waitersBefore + 1
+                    }
+                    XCTAssertTrue(waiterRegistered)
+
+                    let handshake = try await run.handshake(run.c2, sessionToken: run.c2Token)
+                    XCTAssertNotNil(handshake.error)
+                    // An admitted handshake resumes its waiter before the initialize response is sent.
+                    waiter.cancel()
+                    let notifiedConnectionID = await waiter.value
+                    XCTAssertNil(notifiedConnectionID)
+                    await run.assertUnrouted(run.c2)
+                    XCTAssertTrue(window.mcpServer.windowToolsEnabled)
+                }
+            }
+        }
+
         // MARK: - Fixture
 
         private struct ReadinessWindow {

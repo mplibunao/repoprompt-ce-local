@@ -5411,8 +5411,8 @@ actor ServerNetworkManager {
 
                 connectionLog("Starting MCP server for bootstrap connection \(connectionID)")
                 mcpACPLog("[MCP-ACP] starting MCP server connection=\(connectionID)")
-                try await manager.start { clientInfo in
-                    guard self.isCurrentConnection(connectionID, lifecycleGeneration: expectedLifecycleGeneration) else { return false }
+                try await manager.start(admissionHandler: { clientInfo in
+                    guard self.isCurrentConnection(connectionID, lifecycleGeneration: expectedLifecycleGeneration) else { return .refused }
                     connectionLog("MCP handshake callback for \(connectionID): clientName='\(clientInfo.name)'")
                     mcpACPLog("[MCP-ACP] handshake connection=\(connectionID) clientName=\(clientInfo.name)")
 
@@ -5433,18 +5433,18 @@ actor ServerNetworkManager {
                     let trimmedName = clientInfo.name.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmedName.isEmpty {
                         await self.recordIdentityFailure(for: connectionID, source: .filesystem, reason: "Bootstrap handshake provided empty client name")
-                        return false
+                        return .refused
                     }
 
                     // Check cooldown
                     if self.isSessionBlocked(sessionToken) {
                         log.warning("Rejecting bootstrap connection \(connectionID) - session in cooldown")
-                        return false
+                        return .refused
                     }
 
                     connectionLog("Calling approval handler for \(connectionID) client='\(clientInfo.name)'")
                     let approved = await approvalHandler(connectionID, clientInfo)
-                    guard self.isCurrentConnection(connectionID, lifecycleGeneration: expectedLifecycleGeneration) else { return false }
+                    guard self.isCurrentConnection(connectionID, lifecycleGeneration: expectedLifecycleGeneration) else { return .refused }
                     connectionLog("Approval handler returned \(approved) for \(connectionID)")
                     if approved {
                         #if DEBUG
@@ -5487,10 +5487,10 @@ actor ServerNetworkManager {
                             sessionKey: sessionToken,
                             clientPid: clientPid
                         )
-                        guard self.isCurrentConnection(connectionID, lifecycleGeneration: expectedLifecycleGeneration) else { return false }
+                        guard self.isCurrentConnection(connectionID, lifecycleGeneration: expectedLifecycleGeneration) else { return .refused }
                         if readiness == .timedOut {
                             self.pendingConnections.removeValue(forKey: connectionID)
-                            return false
+                            return .refused
                         }
 
                         let policyOutcome = await self.applyPendingPolicyIfAvailable(
@@ -5500,13 +5500,17 @@ actor ServerNetworkManager {
                             bootstrapClientName: bootstrapClientName,
                             expectedLifecycleGeneration: expectedLifecycleGeneration
                         )
-                        guard self.isCurrentConnection(connectionID, lifecycleGeneration: expectedLifecycleGeneration) else { return false }
+                        guard self.isCurrentConnection(connectionID, lifecycleGeneration: expectedLifecycleGeneration) else { return .refused }
                         if case let .rejected(runID, reason) = policyOutcome {
                             mcpPolicyLog(
                                 "rejected MCP initialize after pid-gated policy wait client=\(clientInfo.name) connection=\(connectionID) runID=\(runID?.uuidString ?? "nil") reason=\(reason)"
                             )
                             self.pendingConnections.removeValue(forKey: connectionID)
-                            return false
+                            guard reason == BootstrapHandshakeAdmission.expectedPIDWithoutPendingPolicyReason else {
+                                return .refused
+                            }
+                            let agentSessionName = await self.agentSessionDisplayName(forRunID: runID)
+                            return .establishedRunJoinRefused(agentSessionName: agentSessionName)
                         }
                         self.notifyConnectionWaiters(
                             connectionID: connectionID,
@@ -5536,8 +5540,8 @@ actor ServerNetworkManager {
                     } else {
                         self.pendingConnections.removeValue(forKey: connectionID)
                     }
-                    return approved
-                }
+                    return approved ? .admitted : .refused
+                })
 
                 guard self.isCurrentConnection(connectionID, lifecycleGeneration: expectedLifecycleGeneration) else { return }
 
@@ -9088,6 +9092,53 @@ actor ServerNetworkManager {
             saveRoutingState()
         }
 
+        /// Session tokens holding routing state for `clientName`, per store.
+        func debugRoutingSessionTokens(
+            for clientName: String
+        ) -> (records: Set<String>, lastWindows: Set<String>, liveRunAffinities: Set<String>) {
+            let recordKeys = matchingClientKeys(for: clientName, in: Array(routingState.records.keys))
+            let windowKeys = matchingClientKeys(for: clientName, in: Array(lastWindowByClientSession.keys))
+            let affinityKeys = matchingClientKeys(for: clientName, in: Array(liveRunAffinityByClientSession.keys))
+            return (
+                records: Set(recordKeys.flatMap { (routingState.records[$0] ?? []).compactMap(\.sessionKey) }),
+                lastWindows: Set(windowKeys.flatMap { (lastWindowByClientSession[$0] ?? [:]).keys }),
+                liveRunAffinities: Set(affinityKeys.flatMap { (liveRunAffinityByClientSession[$0] ?? [:]).keys })
+            )
+        }
+
+        /// Seeds the routing record, last window, and live run affinity a routed session leaves.
+        func debugSeedRoutingSessionForTesting(clientName: String, sessionToken: String, windowID: Int, runID: UUID) {
+            let storageKey = Self.clientStorageKey(clientName)
+            let now = Date()
+            routingState.records[storageKey, default: []].append(MCPRoutingState.ClientRecord(
+                clientID: clientName,
+                lastTransport: .network,
+                sessionKey: sessionToken,
+                lastWindowID: nil,
+                lastWorkspaceID: nil,
+                lastWorkspaceInstanceNumber: nil,
+                lastConnectionUUID: nil,
+                lastSeenAt: now
+            ))
+            lastWindowByClientSession[storageKey, default: [:]][sessionToken] = windowID
+            liveRunAffinityByClientSession[storageKey, default: [:]][sessionToken] = LiveRunAffinity(
+                windowID: windowID,
+                runID: runID,
+                purpose: .agentModeRun,
+                lastSeenAt: now
+            )
+            saveRoutingState()
+        }
+
+        /// Removes the routing records, last windows, live run affinities, and token bindings of
+        /// `sessionTokens` alone.
+        func debugRemoveRoutingSessionsForTesting(_ sessionTokens: Set<String>) {
+            for sessionToken in sessionTokens {
+                debugRemoveExactRoutingSessionFixtureToken(sessionToken)
+            }
+            saveRoutingState()
+        }
+
         func debugRemoveConnection(_ id: UUID) async {
             #if DEBUG
                 debugExecutionWatchdogAbortTargets.removeValue(forKey: id)
@@ -9484,6 +9535,45 @@ actor ServerNetworkManager {
                         fileSearchLimit: fileSearchLimiterLimit(for: connectionID)
                     )
                 }
+            }
+
+            /// Socket fixtures run without the bootstrap listener; this gives them a current lifecycle
+            /// so connection admission and connection waiters behave as they do while it listens.
+            func debugEnsureRunningLifecycleForSocketFixture() {
+                guard !isRunningState else { return }
+                lifecycleGeneration &+= 1
+                isRunningState = true
+            }
+
+            /// Registers a socket-fixture connection through production bootstrap registration and
+            /// starts its MCP server, so the fixture's `initialize` runs the real approval,
+            /// policy-admission, and refusal path.
+            func debugRegisterAndStartBootstrapConnectionForTesting(
+                connectionID: UUID,
+                sessionToken: String,
+                clientPid: Int,
+                clientName: String,
+                manager: BootstrapSocketConnectionManager
+            ) -> Bool {
+                debugEnsureRunningLifecycleForSocketFixture()
+                return registerAndStartBootstrapConnection(
+                    connectionID: connectionID,
+                    lifecycleGeneration: lifecycleGeneration,
+                    sessionToken: sessionToken,
+                    processIdentity: BootstrapClientProcessIdentity(claimedPID: clientPid, observedKernelPID: clientPid),
+                    clientName: clientName,
+                    manager: manager
+                )
+            }
+
+            /// Swaps in a test approval handler and returns the previous one for restoration; the
+            /// production handler can present approval UI.
+            func debugReplaceConnectionApprovalHandlerForTesting(
+                _ handler: ConnectionApprovalHandler?
+            ) -> ConnectionApprovalHandler? {
+                let previous = connectionApprovalHandler
+                connectionApprovalHandler = handler
+                return previous
             }
 
             func debugConnectionIDForSessionToken(_ sessionToken: String) -> UUID? {
@@ -10046,7 +10136,7 @@ actor ServerNetworkManager {
         connectionID: UUID,
         clientPid: Int? = nil,
         pendingPolicyWasReserved: Bool = false
-    ) async {
+    ) async -> PendingPolicyApplicationOutcome {
         if pendingPolicyWasReserved {
             mcpPolicyLog("pending policy reserved for different pid client=\(clientName) connection=\(connectionID)")
         } else {
@@ -10057,12 +10147,31 @@ actor ServerNetworkManager {
         let sessionKey = connections[connectionID]?.capabilityToken ?? capabilityTokenByConnection[connectionID]
         if let liveAffinity = preferredLiveRunAffinity(for: clientName, sessionKey: sessionKey) {
             await applyLiveRunAffinity(liveAffinity, clientName: clientName, connectionID: connectionID, reason: "session-token")
-            return
+            return .fallback
         }
 
+        // Process ancestry may validate consumption of a run-owned pending policy, but shared
+        // ancestry is not per-connection authority: joining an established run requires that
+        // run's session token or a newly armed pending policy. The run ID is diagnostic only.
         if let liveAffinity = preferredExpectedPIDRunAffinity(for: clientName, clientPid: clientPid) {
-            await applyLiveRunAffinity(liveAffinity, clientName: clientName, connectionID: connectionID, reason: "expected-pid")
-            return
+            mcpPolicyLog(
+                "refused expected-pid run join client=\(clientName) connection=\(connectionID) runID=\(liveAffinity.runID.uuidString) reason=\(BootstrapHandshakeAdmission.expectedPIDWithoutPendingPolicyReason)"
+            )
+            #if DEBUG
+                debugRecordRunRoutingEvent(
+                    runID: liveAffinity.runID,
+                    event: "policy_rejected",
+                    connectionID: connectionID,
+                    fields: [
+                        "client_name": clientName,
+                        "reason": BootstrapHandshakeAdmission.expectedPIDWithoutPendingPolicyReason
+                    ]
+                )
+            #endif
+            return .rejected(
+                runID: liveAffinity.runID,
+                reason: BootstrapHandshakeAdmission.expectedPIDWithoutPendingPolicyReason
+            )
         }
 
         if let preferredWindowID = await preferredWindowID(for: clientName, sessionKey: sessionKey) {
@@ -10071,6 +10180,26 @@ actor ServerNetworkManager {
             await updateRoutingRecordForConnection(connectionID, clientID: clientName)
             await notifyToolListChanged(connectionID: connectionID)
         }
+        return .fallback
+    }
+
+    /// Display name of the agent session that owns `runID`, used only to explain a refused
+    /// connection to its client. Agent Mode names a session after its compose tab.
+    private func agentSessionDisplayName(forRunID runID: UUID?) async -> String? {
+        guard let runID,
+              let cached = runPolicyStateByRunID[runID],
+              let tabID = cached.tabID
+        else {
+            return nil
+        }
+        let windowID = cached.windowID
+        let name = await MainActor.run {
+            WindowStatesManager.shared.window(withID: windowID)?.workspaceManager.composeTabName(with: tabID)
+        }
+        guard let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 
     private func canConsumePendingPolicy(
@@ -10166,6 +10295,24 @@ actor ServerNetworkManager {
         requireRunRouting: Bool = true,
         expectedLifecycleGeneration: UInt64? = nil
     ) async -> PendingPolicyApplicationOutcome {
+        // A session token is authority for its own live run, and a PID-gated policy armed for
+        // another run never admits this connection. The connection takes its token route at once
+        // and leaves that policy untouched for the helper it was armed for, so a concurrently
+        // running session's reconnect is neither held nor refused by another run's startup.
+        if let tokenAffinity = preferredLiveRunAffinity(
+            for: clientName,
+            sessionKey: connections[connectionID]?.capabilityToken ?? capabilityTokenByConnection[connectionID]
+        ),
+            hasPIDGatedPendingPolicy(for: clientName),
+            oldestPendingPolicyEntry(for: clientName, where: { $0.runID == tokenAffinity.runID }) == nil
+        {
+            mcpPolicyLog(
+                "routing session token past another run's pending policy client=\(clientName) connection=\(connectionID) runID=\(tokenAffinity.runID.uuidString)"
+            )
+            await applyLiveRunAffinity(tokenAffinity, clientName: clientName, connectionID: connectionID, reason: "session-token")
+            return .fallback
+        }
+
         if let reservedEntry = oldestReservedPendingPolicyEntry(for: clientName),
            canConsumePendingPolicy(reservedEntry.policy, clientName: clientName, clientPid: clientPid)
         {
@@ -10318,8 +10465,7 @@ actor ServerNetworkManager {
                 )
                 return .rejected(runID: reservedEntry.policy.runID, reason: "not_consumable")
             }
-            await applyRoutingFallback(clientName: clientName, connectionID: connectionID, clientPid: clientPid)
-            return .fallback
+            return await applyRoutingFallback(clientName: clientName, connectionID: connectionID, clientPid: clientPid)
         }
         let sessionKey = connections[connectionID]?.capabilityToken ?? capabilityTokenByConnection[connectionID]
         let liveAffinity = preferredLiveRunAffinity(for: clientName, sessionKey: sessionKey)
@@ -10983,7 +11129,13 @@ actor ServerNetworkManager {
         }
     }
 
-    func registerHandlers(for server: MCP.Server, connectionID: UUID) async {
+    /// `requireToolAccess` decides, when each tool request arrives, whether the connection may list or
+    /// call tools; it throws the error the request is answered with otherwise.
+    func registerHandlers(
+        for server: MCP.Server,
+        connectionID: UUID,
+        requireToolAccess: @escaping @Sendable () async throws -> Void
+    ) async {
         // ------------------------------------------------------------------
         //  prompts/list
         // ------------------------------------------------------------------
@@ -11060,6 +11212,7 @@ actor ServerNetworkManager {
         // ------------------------------------------------------------------
         await server.withMethodHandler(ListTools.self) { [weak self] _ in
             guard let self else { return ListTools.Result(tools: []) }
+            try await requireToolAccess()
 
             connectionLog("Handling ListTools request for \(connectionID)")
             let clientIdentifier = await clientIdentifier(forConnection: connectionID)
@@ -11166,6 +11319,7 @@ actor ServerNetworkManager {
                     isError: true
                 )
             }
+            try await requireToolAccess()
 
             let originalName = params.name
             let toolName = Self.canonicalToolName(for: originalName)

@@ -83,6 +83,49 @@ Record the saved workspace file hash and `git worktree list --porcelain` before 
 
 The Codex Desktop pre-start app-CLI isolation fallback remains in place through this acceptance and the release that contains the fix. Removing or bypassing it is a separate post-release change after the recorded acceptance passes; a failed or unavailable direct-headless check leaves the fallback unchanged.
 
+## Live MCP run-affinity validation
+
+Run this before merging a change to how MCP connections join Agent Mode runs: pending-policy admission, the bootstrap `initialize` refusal, the routing fallback, or a provider's per-turn policy lease. The contract is that a connection joins an established run only with that run's session token or a newly armed run-owned pending policy; a connection that matches the run by process ancestry alone is refused with `expected_pid_without_pending_policy`, receives an `initialize` error naming the agent session and the remedy, and never routes, binds a window, or serves tools.
+
+Deterministic coverage comes first:
+
+```bash
+make dev-test FILTER=PersistedMCPRoutingIdentityTests
+make dev-test FILTER=MCPWindowBootstrapReadinessTests
+make dev-test FILTER=CodexMCPRoutingReadinessTests
+make dev-test FILTER=ACPIntegratedAgentModeRunnerExecutionTests
+```
+
+`PersistedMCPRoutingIdentityTests` drives four connections against one established run:
+
+- C1 consumes the run's one-shot policy and owns the run.
+- C2 carries a fresh token with the same ancestry and no pending policy; a real socket handshake must refuse it.
+- C3 reconnects with C1's token and takes over the run with identical restrictions.
+- C4 carries a fresh token and consumes a newly installed policy exactly once.
+
+Then exercise the exact debug bundle through `rpce-cli-debug` with a disposable repository, using only models the debug app advertises. Record every arm as passed, failed, or not run with its reason; a provider quota or model refusal is "not run", never a pass, and says nothing about the routing contract.
+
+| Arm | Exercise | Required result |
+|---|---|---|
+| Start and steer | Start one Agent Mode session per configured provider (Codex, Claude Code, and OpenCode when configured), then steer it | Routed on start; no refusal |
+| Idle reconnect | Leave a session idle until its helper reconnects with its session token | Same run, same restrictions |
+| Provider restart | Use each provider's supported reconnect or restart path | Admitted by token or by a new pending policy |
+| Child runs | From a parent session, start one `agent_run` child per role: explore, engineer, pair, design | Each child routes to its own run |
+| Concurrent runs | Run two sessions at once, including two that share one parent process | Each keeps its own run and restrictions |
+| Context Builder | Run Context Builder, then send a follow-up on its chat | No refusal |
+| OpenCode follow-up | Continue an OpenCode session for several turns, and respawn its helper within the first minute of one follow-up turn | Each follow-up turn arms one pending policy; the respawned helper consumes it and is admitted, a turn that ends with its policy unused removes it, and the established helper keeps its run and restrictions throughout |
+| Forced refusal | Terminate a session's `repoprompt-mcp` helper mid-turn so its provider respawns it with a fresh token and no pending policy | Each provider surfaces the reason-bearing error text to the agent |
+
+Count refusals in the debug app's run-routing history, where each one is a `policy_rejected` event with reason `expected_pid_without_pending_policy`:
+
+```bash
+rpce-cli-debug -w 1 -c __repoprompt_debug_diagnostics -j '{"op":"run_routing_history","limit":500}'
+```
+
+Count by distinct cause, because a provider may retry a failed `initialize`; every arm other than the forced refusal requires zero. Repeated refusals must stay cheap and must not accumulate routing state. Finish with `agent_manage op=list_sessions` showing no orphan active run, and retain sanitized run and connection provenance only; never record capability tokens.
+
+This validation proves the admission contract only. The cause of unexplained `Transport closed` and tool-watchdog failures remains unproven; it is not attributed to this refusal and is investigated separately.
+
 ## Live large-workspace worktree-startup diagnostic
 
 `Scripts/worktree_startup_live_benchmark.py` is the reusable validation lane for
