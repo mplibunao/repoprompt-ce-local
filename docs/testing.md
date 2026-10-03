@@ -125,6 +125,46 @@ The live check writes distinct markers through the debug and release apps and th
 
 Isolation covers state files only. The URL scheme, document types, global shortcuts, and Sparkle update ownership are still shared between the two apps.
 
+## Seed the debug profile from a release archive
+
+A fresh debug profile is empty, so it can't reproduce how the app behaves with many workspaces and long chat and agent histories. `Scripts/seed_debug_profile.py` copies that state one way from a production [release archive](releasing.md#rollback-unit) into the debug profile. It reads only the archive, never the live production profile, so production can keep running.
+
+```bash
+python3 Scripts/seed_debug_profile.py --dry-run     # run every check and report what would be copied
+python3 Scripts/seed_debug_profile.py               # newest complete archive, every workspace
+python3 Scripts/seed_debug_profile.py --archive local/v1.4.0-b45 --workspace my-project
+python3 Scripts/seed_debug_profile.py --replace     # move the current debug profile aside first
+```
+
+`--archive` takes a tag under `~/Archives/repoprompt-ce` or an absolute archive directory. Without it, the seed picks the archive with the newest manifest timestamp. Repeat `--workspace` to select more than one workspace. Naming `repoprompt-ce` with `--workspace`, in any letter case, refuses without changing anything, because that name belongs to the smoke workspace. The data is only as fresh as the archive, and the report gives its age. For fresher data, quit production and run `Scripts/local_release_archive.sh <tag>`.
+
+The seed refuses, before it writes anything, when:
+
+- The manifest is missing, or a listed file doesn't match its `.sha256` sidecar and the checksum in the manifest.
+- The archive's working-journal schema version is unknown, or it or a journal in the archive is newer than the `RepoPromptWorkingJournalSchemaVersion` the debug bundle declares. Build the debug app with `make dev-build` first. An older archive is fine: the debug build reads it the way production will after its next upgrade, so seeding also exercises the upgrade path.
+- The debug app or a debug CLI is running. A running production app doesn't block it.
+- The debug profile or its staging directory resolves into the production profile, such as through a symlink in one of its parent folders.
+- The debug profile holds anything and `--replace` is absent. `--replace` renames the current profile to `RepoPrompt CE Debug.before-seed-<timestamp>` beside it and never deletes it.
+
+The seed copies each selected workspace's document with its `Chats` and `AgentSessions` folders, its working journal and revision record, the workspace index and runtime catalog filtered to those workspaces, presets, and `Settings/globalSettings.json`. It leaves out managed Codex homes, MCP routing records, policy files, agent run ownership records, event and kill-signal directories, locks, diagnostics, and temporary files. Anything else outside that list stays behind too, such as code map caches, partitions, workflows, window sessions, and each workspace's `_git_data`. Settings kept in the preferences domain, such as approvals, aren't copied. The report names every skipped workspace with its reason. The seed skips a workspace whose storage lies outside the archived profile or that the archive lacks, and it always skips `repoprompt-ce`, the small workspace `make dev-smoke` creates and uses.
+
+The seed rewrites JSON string values that start with the archived production profile's path, as a plain path or a file URL, to start with the debug profile's path. Text that only mentions the path stays as written, and source folder paths don't change, because debug opens the same folders. A file without such a value keeps its exact bytes. When the seed rewrites a workspace document, it also updates that workspace's working journal and revision record wherever their saved-document digest matched the archived document. Debug then neither treats the document as edited outside the app nor resets its saved revision. The seed also decodes each working journal's unsaved working document and rewrites and scans it the same way. A working document that names no production path keeps its exact bytes. After rewriting, any path value that still resolves into production, such as one that uses `..` or different letter case, stops the seed. The error names the archive member and the JSON location, never the value.
+
+Extraction refuses a member with an absolute or `..` name, a device, or a FIFO. It also refuses any symbolic or hard link inside the state it copies. A link can carry a later write out of the profile, and the release archives hold no links there. Two members whose names differ only in letter case or Unicode normalization also stop the seed, because one would overwrite the other on a case-insensitive file system. The seed assembles the profile in a staging directory beside the destination and publishes it with one rename. A failure removes the staging directory and leaves the debug profile unchanged. If Control-C, SIGTERM, or SIGHUP stops the publish after `--replace` moved the current profile aside, the seed moves it back, and the final message says whether it published anything. A kill the seed can't catch, such as SIGKILL, or a second interruption while it's already cleaning up or restoring, can leave the hidden `.RepoPrompt CE Debug.seed-staging-*` directory or the moved-aside `RepoPrompt CE Debug.before-seed-<timestamp>` in `~/Library/Application Support`.
+
+To seed a disposable profile instead of the real debug profile, point `HOME` at a temporary directory and pass the archive by absolute path. Name the real debug bundle with `REPOPROMPT_DEBUG_APP_BUNDLE`, so the format check and the running-app check both use it:
+
+```bash
+real_home="$HOME"
+HOME=/tmp/seed-home \
+    REPOPROMPT_DEBUG_APP_BUNDLE="$real_home/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app" \
+    python3 Scripts/seed_debug_profile.py --archive "$real_home/Archives/repoprompt-ce/local/v1.4.0-b45"
+```
+
+To launch the debug app on that profile, also set `CFFIXED_USER_HOME`, as [Debug profile isolation](#debug-profile-isolation) describes.
+
+`python3 Scripts/test_seed_debug_profile.py` covers each refusal, rewrite, skip, and replacement with small fixture archives under a temporary home.
+
 ## Live Codex Desktop direct-headless worktree routing
 
 Run this release acceptance only from a Codex Desktop task whose repository root is an existing linked worktree and whose RepoPrompt launcher selects `--backend headless` with that exact root in `REPOPROMPT_MCP_WORKING_DIRS`. The canonical checkout must already belong to one saved RepoPrompt CE workspace. This lane validates an installed release candidate; it does not build, install, launch, stop, or relaunch RepoPrompt, create a workspace, or create a worktree.

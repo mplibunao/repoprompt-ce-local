@@ -207,6 +207,10 @@ before the split, including `Codex/Debug/`, stays in the production profile and 
 and restored with it. Rolling the debug app back to a build from before the split is unsafe,
 because that build reads and writes the production profile again.
 
+`Scripts/seed_debug_profile.py` also reads these archives, without changing them, to copy
+production-scale workspaces and history into the debug profile. [Seed the debug profile from
+a release archive](testing.md#seed-the-debug-profile-from-a-release-archive) describes it.
+
 The restore verifies every checksum before touching anything, moves the current app and
 state into a rescue directory beside the archive, extracts the archived bundle and state,
 moves the excluded top-level entries back from the rescue copy, clears the preferences
