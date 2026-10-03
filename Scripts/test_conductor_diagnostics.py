@@ -677,6 +677,42 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
         self.assertEqual(self.labels(), ["workspace list"])
         self.assertIn("could not read the workspace list", self.output.getvalue())
 
+    def run_switch(self, switch_response: Tuple[int, str, str]) -> int:
+        self.calls.clear()
+        self.output.truncate(0)
+        self.output.seek(0)
+        return self.run_smoke(
+            {"workspace list": self.minimal_listing("repoprompt-ce"), "workspace switch": switch_response}
+        )
+
+    def test_switch_to_the_already_selected_workspace_continues_the_smoke(self) -> None:
+        current = 'Error:\nError: Invalid Request: Already on workspace "repoprompt-ce".'
+        for label, switch_response in (
+            ("current CLI format on stderr", (1, "", current)),
+            ("current CLI format on stdout", (1, current, "")),
+            ("legacy JSON-RPC code prefix", (1, "", 'Error: [-32600] Invalid Request: Already on workspace "repoprompt-ce".')),
+            ("bare line", (1, "", 'Already on workspace "repoprompt-ce"')),
+        ):
+            with self.subTest(case=label):
+                code = self.run_switch(switch_response)
+
+                self.assertEqual(code, 0, self.output.getvalue())
+                self.assertIn('Already on workspace "repoprompt-ce"; continuing smoke flow.', self.output.getvalue())
+                self.assertEqual(self.labels()[-3:], ["tree roots", "manage_worktree list", "agent_manage roles"])
+
+    def test_switch_failure_other_than_the_selected_workspace_fails_the_smoke(self) -> None:
+        for label, switch_response in (
+            ("name ending with the smoke workspace", (1, "", 'Error: Invalid Request: Already on workspace "my-repoprompt-ce".')),
+            ("name starting with the smoke workspace", (1, 'Already on workspace "repoprompt-ce-old".', "")),
+            ("unrelated error", (1, "", "Error:\nError: Invalid Request: Window 1 not found.")),
+        ):
+            with self.subTest(case=label):
+                code = self.run_switch(switch_response)
+
+                self.assertEqual(code, 1)
+                self.assertIn("FAILED stage 'workspace switch' with status 1", self.output.getvalue())
+                self.assertEqual(self.labels()[-1], "workspace switch")
+
 
 class SmokeWorkspaceListingContractTests(unittest.TestCase):
     """`smoke_workspace_names` against the output of the exact list call the smoke bootstrap

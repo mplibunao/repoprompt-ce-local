@@ -7303,10 +7303,18 @@ def ensure_smoke_workspace(
     return code
 
 
-def is_already_on_workspace(stderr: str, workspace: str) -> bool:
-    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+def is_already_on_workspace(stdout: str, stderr: str, workspace: str) -> bool:
+    # The CLI has reported this condition bare, behind an `Error: Invalid Request:` prefix with or without
+    # a JSON-RPC code, and on either stream. The opening quote anchors the name so a workspace whose name
+    # merely ends with the expected one does not count as already selected.
     expected = f'Already on workspace "{workspace}"'
-    return expected in lines or f"Error: [-32600] Invalid Request: {expected}." in lines
+    for line in (stdout + "\n" + stderr).splitlines():
+        line = line.strip()
+        if line.endswith("."):
+            line = line[:-1]
+        if line.endswith(expected):
+            return True
+    return False
 
 
 def routed_structured_cli_argv(cli: str, window_id: int, command: str, payload: Dict[str, Any]) -> List[str]:
@@ -7896,8 +7904,8 @@ def operation_smoke(repo_root: Path, args: Dict[str, Any]) -> int:
     ]
     for name, argv in stages:
         allow_exit_codes = {0, 1} if name == "workspace switch" else None
-        code, _stdout, stderr = run_operation_command(name, argv, repo_root, env=env, allow_exit_codes=allow_exit_codes)
-        if name == "workspace switch" and code == 1 and is_already_on_workspace(stderr, workspace):
+        code, stdout, stderr = run_operation_command(name, argv, repo_root, env=env, allow_exit_codes=allow_exit_codes)
+        if name == "workspace switch" and code == 1 and is_already_on_workspace(stdout, stderr, workspace):
             print(f'Already on workspace "{workspace}"; continuing smoke flow.', flush=True)
             continue
         if code != 0:
