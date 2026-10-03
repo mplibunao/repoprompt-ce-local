@@ -1116,14 +1116,64 @@ package enum MCPDomainCanonicalToolDefinitions {
         else {
             return definition
         }
-        properties.removeValue(forKey: "window_id")
+        // One catalog serves both backends. window_id stays declared for app-backed discovery;
+        // DirectHeadlessGlobalBackend.routeContext rejects its presence before any scope change.
+        properties["window_id"] = .object([
+            "type": .string("integer"),
+            "description": .string(MCPBindContextPropertyDescriptions.windowID)
+        ])
+        // Branch-level descriptions survive Tool(canonicalizing:) projection; JSONSchema's anyOf
+        // case keeps only its branches, so a description beside anyOf would be dropped there.
+        properties["working_dirs"] = .object([
+            "anyOf": .array([
+                .object([
+                    "type": .string("array"),
+                    "items": .object(["type": .string("string")]),
+                    "description": .string(MCPBindContextPropertyDescriptions.workingDirsArray)
+                ]),
+                .object([
+                    "type": .string("string"),
+                    "description": .string(MCPBindContextPropertyDescriptions.workingDirsString)
+                ])
+            ])
+        ])
+        properties["create_if_missing"] = .object([
+            "type": .string("boolean"),
+            "description": .string(MCPBindContextPropertyDescriptions.createIfMissing)
+        ])
+        properties["tab_name"] = .object([
+            "type": .string("string"),
+            "description": .string(MCPBindContextPropertyDescriptions.tabName)
+        ])
         schema["properties"] = .object(properties)
         return MCPDomainToolDefinition(
             name: definition.name,
-            description: "List, inspect, and bind the canonical workspace context for this MCP connection. Bind by working_dirs (preferred) or context_id. This global tool never accepts an app window selector.",
+            description: bindContextDescription,
             inputSchema: .object(schema),
             annotations: definition.annotations,
             isEnabledByDefault: definition.isEnabledByDefault
         )
     }
+
+    /// A client pays for this text on each `tools/list` that advertises `bind_context` to it, so
+    /// it holds only what the schema cannot express: what a binding is, when listing is needed,
+    /// and how the two backends differ. Each parameter fact lives once, in
+    /// `MCPBindContextPropertyDescriptions`. See `docs/architecture/mcp-tool-descriptions.md`.
+    private static let bindContextDescription = """
+    Inspect or bind the workspace context that this MCP connection's tool calls run in. Binding is sticky: `bind` captures one compose-tab context, and later tab or workspace switches do not move it. `status` returns the current binding.
+
+    Bind a target you already know directly, with no list first: `{"op":"bind","context_id":"<context_id>"}`, or `{"op":"bind","working_dirs":["/path/to/root1","/path/to/root2"]}` with the workspace's full set of roots. Call `list` only to find a target you do not know: it returns the open windows, and when more than one is open each one shows only its active and bound tabs. If the tab you want is not among them, `{"op":"list","window_id":<window_id>}` returns every compose tab of that one window; bind the context_id it shows.
+
+    Standalone headless sessions have no windows: `list` returns saved workspace contexts, and window_id is rejected.
+    """
+}
+
+/// Single source for bind_context property descriptions: the canonical schema overrides and the
+/// app-side raw Tool registration publish the same text, so both sites read it from here.
+package enum MCPBindContextPropertyDescriptions {
+    package static let windowID = "App-backed only. With list: return every compose tab of this window. With bind alone: capture this window's active tab. With bind and context_id: the tab must be in this window's active workspace; it need not be the active tab. With bind and working_dirs: a match is bound in this window, which is switched to the match when it shows another workspace; when more than one workspace matches, the one this window shows is chosen."
+    package static let workingDirsArray = "For bind: absolute workspace roots. Binds the active tab of the workspace with exactly these roots, else of one whose roots strictly contain them. Paths inside a root do not match. App-backed, without window_id: a match that no window shows opens in a new window."
+    package static let workingDirsString = "The same roots as one comma-separated string."
+    package static let createIfMissing = "App-backed bind with working_dirs: when no workspace matches, create one in a new window after the user approves."
+    package static let tabName = "App-backed: name for the workspace created by working_dirs with create_if_missing=true."
 }

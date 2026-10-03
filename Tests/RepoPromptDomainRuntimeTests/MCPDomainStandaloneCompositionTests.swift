@@ -48,7 +48,7 @@ final class MCPDomainStandaloneCompositionTests: XCTestCase {
         let snapshot = await runtime.toolRegistry.snapshot()
         XCTAssertEqual(snapshot.fingerprintsByToolName.count, 27)
         XCTAssertEqual(Set(snapshot.fingerprintsByToolName.keys), Set(canonicalNames))
-        XCTAssertEqual(snapshot.catalogFingerprint, "5ffa7b5dd5303403f25e8aad6ecb59f95134de20cb3300c9d2b07b1b2211366a")
+        XCTAssertEqual(snapshot.catalogFingerprint, "55b1e917734a4df5d6f53d510c18911a8a6ace8b7b1ebc1ac02527a9bc2e0685")
 
         let protectedCandidate = await runtime.toolRegistry.resolve(
             toolName: MCPWindowToolName.manageSelection,
@@ -66,17 +66,35 @@ final class MCPDomainStandaloneCompositionTests: XCTestCase {
         _ = await runtime.shutdown()
     }
 
-    func testCanonicalBindContextIsGlobalAndHasNoWindowSelector() throws {
+    func testCanonicalBindContextIsGlobalAndDeclaresExactlyTheHandledParameters() throws {
         let definition = try XCTUnwrap(
             MCPDomainCanonicalToolDefinitions.definition(named: MCPGlobalToolName.bindContext)
         )
-        let schema = try XCTUnwrap(definition.inputSchema.objectValue)
-        let properties = try XCTUnwrap(schema["properties"]?.objectValue)
-        XCTAssertNotNil(properties["context_id"])
-        XCTAssertNotNil(properties["working_dirs"])
-        XCTAssertNil(properties["window_id"])
         XCTAssertTrue(MCPGlobalToolName.orderedToolNames.contains(definition.name))
         XCTAssertFalse(MCPWindowToolName.orderedToolNames.contains(definition.name))
+
+        let schema = try XCTUnwrap(definition.inputSchema.objectValue)
+        XCTAssertEqual(schema["required"], .array([.string("op")]))
+        // Transport-private arguments such as _rawJSON and _windowID must stay accepted.
+        XCTAssertNil(schema["additionalProperties"])
+        let properties = try XCTUnwrap(schema["properties"]?.objectValue)
+        // Exactly the parameters the app and headless handlers read; a schema-only client can
+        // discover no others.
+        XCTAssertEqual(
+            Set(properties.keys),
+            ["op", "window_id", "context_id", "working_dirs", "create_if_missing", "tab_name"]
+        )
+        XCTAssertEqual(properties["context_id"]?.objectValue?["type"], .string("string"))
+        XCTAssertEqual(properties["window_id"]?.objectValue?["type"], .string("integer"))
+
+        let workingDirs = try XCTUnwrap(properties["working_dirs"]?.objectValue)
+        XCTAssertNil(workingDirs["type"])
+        let branches = try XCTUnwrap(workingDirs["anyOf"]?.arrayValue).compactMap(\.objectValue)
+        XCTAssertEqual(branches.count, 2)
+        XCTAssertTrue(branches.contains {
+            $0["type"] == .string("array") && $0["items"] == .object(["type": .string("string")])
+        })
+        XCTAssertTrue(branches.contains { $0["type"] == .string("string") })
     }
 }
 

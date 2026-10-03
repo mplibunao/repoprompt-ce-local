@@ -3083,7 +3083,8 @@ func printUsage() {
           windows                                      List windows, tabs, and context_id values
           bind_context op=status                       Show current binding
           bind_context op=bind context_id=<uuid>       Bind a specific compose context
-          bind_context op=bind window_id=<id>          Bind a window without pinning a tab
+          bind_context op=bind window_id=<id>          Bind the tab active in that window now (sticky:
+                                                       later tab switches in the UI do not redirect it)
 
         manage_workspaces (workspace, ws) - Manage workspaces/tab lifecycle
           workspace list                               List visible workspaces

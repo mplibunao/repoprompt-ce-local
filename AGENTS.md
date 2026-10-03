@@ -160,6 +160,8 @@ rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.perf_diagn
 
 These settings are intentionally DEBUG-only. If a key is unavailable, confirm `rpce-cli-debug --version` is resolving to the current CE debug build before falling back to lower-level defaults.
 
+Before changing an MCP tool's description, schema, output hints, or CLI help, read [`docs/architecture/mcp-tool-descriptions.md`](docs/architecture/mcp-tool-descriptions.md).
+
 ## Developer daemon / coordinated validation
 
 Prefer the developer daemon as the default way to build, run, and validate. Four properties are the whole reason it exists — and the reason to reach for it instead of a bare `swift build` / `swift test`:
