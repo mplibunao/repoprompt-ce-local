@@ -185,12 +185,340 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
         XCTAssertEqual(staleWindow.workspaceManager.activeWorkspaceID, unrelated.id)
     }
 
+    func testBindContextWindowIDAcceptsOnlyExactIntegersAndKeepsSelectorCombinations() throws {
+        XCTAssertNil(try WindowRoutingService.parseBindContextRequest(["op": .string("list")]).windowID)
+        XCTAssertEqual(
+            try WindowRoutingService.parseBindContextRequest(["op": .string("list"), "window_id": .int(7)]).windowID,
+            7
+        )
+        XCTAssertEqual(
+            try WindowRoutingService.parseBindContextRequest(["op": .string("list"), "window_id": .double(7)]).windowID,
+            7
+        )
+
+        // Each of these used to read as an absent window_id, broadening a filtered list.
+        let malformed: [Value] = [
+            .null, .bool(true), .string("7"), .double(7.5), .double(.infinity), .double(.nan), .double(1e19),
+            .array([.int(7)]), .object(["id": .int(7)])
+        ]
+        for op in ["list", "status", "bind"] {
+            for value in malformed {
+                XCTAssertThrowsError(
+                    try WindowRoutingService.parseBindContextRequest(["op": .string(op), "window_id": value])
+                ) { error in
+                    XCTAssertTrue(
+                        error.localizedDescription.contains("window_id must be a JSON integer"),
+                        "\(op) \(value): \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+
+        let windowOnly = try WindowRoutingService.parseBindContextRequest([
+            "op": .string("bind"),
+            "window_id": .int(3)
+        ])
+        XCTAssertEqual(windowOnly.matchKind, .windowID)
+        let workingDirsInWindow = try WindowRoutingService.parseBindContextRequest([
+            "op": .string("bind"),
+            "working_dirs": .array([.string("/tmp/repoprompt-bind-root")]),
+            "window_id": .int(3)
+        ])
+        XCTAssertEqual(workingDirsInWindow.matchKind, .workingDirs)
+        XCTAssertEqual(workingDirsInWindow.windowID, 3)
+        XCTAssertThrowsError(try WindowRoutingService.parseBindContextRequest([
+            "op": .string("bind"),
+            "context_id": .string(UUID().uuidString),
+            "working_dirs": .string("/tmp/repoprompt-bind-root")
+        ]))
+        let statusWithBindFields = try WindowRoutingService.parseBindContextRequest([
+            "op": .string("status"),
+            "window_id": .int(3),
+            "create_if_missing": .bool(true)
+        ])
+        XCTAssertEqual(statusWithBindFields.op, .status)
+    }
+
+    #if DEBUG
+        @MainActor
+        func testWindowFilteredListReturnsEveryComposeTabWithoutSideEffects() async throws {
+            let roots = try makeTemporaryRoots(count: 2)
+            let activeID = UUID()
+            let boundID = UUID()
+            let idleIDs = [UUID(), UUID()]
+            let discovery = WorkspaceModel(
+                name: "Discovery",
+                repoPaths: [roots[0].path],
+                composeTabs: [
+                    ComposeTabState(id: activeID, name: "Active"),
+                    ComposeTabState(id: boundID, name: "Bound"),
+                    ComposeTabState(id: idleIDs[0], name: "Idle One"),
+                    ComposeTabState(id: idleIDs[1], name: "Idle Two")
+                ],
+                activeComposeTabID: activeID
+            )
+            let unrelated = workspace(name: "Unrelated", root: roots[1].path, contextID: UUID())
+            let windows = try await makeRegisteredWindows(activeWorkspaces: [discovery, unrelated])
+            let target = windows[0]
+            let other = windows[1]
+            let connection = try await makeProductionMCPConnection()
+            addTeardownBlock { await connection.cleanup() }
+
+            // Binding an inactive tab by its listed context_id is the discovery flow's last step.
+            _ = try await bindContextResponse(connection, [
+                "op": .string("bind"),
+                "context_id": .string(boundID.uuidString)
+            ])
+            let bindingBefore = target.mcpServer.connectionBindingSnapshot(forConnection: connection.connectionID)
+            XCTAssertEqual(bindingBefore.tabID, boundID)
+
+            let unfiltered = try await bindContextResponse(connection, ["op": .string("list")])
+            XCTAssertEqual(
+                Set(unfiltered.windows?.map(\.windowID) ?? []),
+                Set(windows.map(\.windowID))
+            )
+
+            let filtered = try await bindContextResponse(connection, [
+                "op": .string("list"),
+                "window_id": .int(target.windowID)
+            ])
+            XCTAssertEqual(filtered.windows?.map(\.windowID), [target.windowID])
+            let tabs = try XCTUnwrap(filtered.windows?.first).tabs
+            XCTAssertEqual(tabs.map(\.contextID), [activeID, boundID] + idleIDs)
+            XCTAssertEqual(tabs.filter(\.isActive).map(\.contextID), [activeID])
+            XCTAssertEqual(tabs.filter(\.isBound).map(\.contextID), [boundID])
+
+            let formatted = await callBindContext(connection, [
+                "op": .string("list"),
+                "window_id": .int(target.windowID)
+            ])
+            XCTAssertFalse(formatted.isError, formatted.text)
+            for contextID in [activeID, boundID] + idleIDs {
+                XCTAssertTrue(formatted.text.contains(contextID.uuidString), formatted.text)
+            }
+
+            let unknownWindowID = (windows.map(\.windowID).max() ?? 0) + 1000
+            let unknown = await callBindContext(connection, [
+                "op": .string("list"),
+                "window_id": .int(unknownWindowID)
+            ])
+            XCTAssertTrue(unknown.isError, unknown.text)
+            XCTAssertTrue(unknown.text.contains("Unknown window_id \(unknownWindowID)"), unknown.text)
+
+            let malformed: [Value] = [.string(String(target.windowID)), .null, .bool(true), .double(1.5)]
+            for value in malformed {
+                let result = await callBindContext(connection, [
+                    "op": .string("list"),
+                    "window_id": value,
+                    "_rawJSON": .bool(true)
+                ])
+                XCTAssertTrue(result.isError, "window_id \(value): \(result.text)")
+                XCTAssertTrue(result.text.contains("window_id must be a JSON integer"), result.text)
+            }
+
+            let bindingAfter = target.mcpServer.connectionBindingSnapshot(forConnection: connection.connectionID)
+            XCTAssertEqual(bindingAfter.windowID, bindingBefore.windowID)
+            XCTAssertEqual(bindingAfter.workspaceID, bindingBefore.workspaceID)
+            XCTAssertEqual(bindingAfter.tabID, bindingBefore.tabID)
+            XCTAssertTrue(bindingAfter.explicitlyBound)
+            XCTAssertEqual(target.workspaceManager.activeWorkspaceID, discovery.id)
+            XCTAssertEqual(target.workspaceManager.activeWorkspace?.activeComposeTabID, activeID)
+            XCTAssertEqual(other.workspaceManager.activeWorkspaceID, unrelated.id)
+        }
+
+        @MainActor
+        func testWindowBindCapturesActiveTabOnceAndWindowSelectsContextIDMatch() async throws {
+            let roots = try makeTemporaryRoots(count: 3)
+            let sharedContextID = UUID()
+            let boundPrompt = "bound-workspace-prompt-\(UUID().uuidString)"
+            let visiblePrompt = "replacement-workspace-prompt-\(UUID().uuidString)"
+            let first = workspace(
+                name: "First",
+                root: roots[0].path,
+                contextID: sharedContextID,
+                promptText: boundPrompt
+            )
+            let second = workspace(name: "Second", root: roots[1].path, contextID: sharedContextID)
+            let replacement = workspace(
+                name: "Replacement",
+                root: roots[2].path,
+                contextID: UUID(),
+                promptText: visiblePrompt
+            )
+            let windows = try await makeRegisteredWindows(activeWorkspaces: [first, second])
+            let lower = windows[0]
+            let higher = windows[1]
+            let connection = try await makeProductionMCPConnection()
+            addTeardownBlock { await connection.cleanup() }
+
+            // Both windows show the context; without window_id the lowest window would win.
+            let disambiguated = try await bindContextResponse(connection, [
+                "op": .string("bind"),
+                "context_id": .string(sharedContextID.uuidString),
+                "window_id": .int(higher.windowID)
+            ])
+            XCTAssertEqual(disambiguated.binding.windowID, higher.windowID)
+            XCTAssertEqual(disambiguated.binding.workspaceID, second.id)
+            XCTAssertEqual(disambiguated.binding.contextID, sharedContextID)
+
+            let captured = try await bindContextResponse(connection, [
+                "op": .string("bind"),
+                "window_id": .int(lower.windowID)
+            ])
+            XCTAssertEqual(captured.binding.windowID, lower.windowID)
+            XCTAssertEqual(captured.binding.workspaceID, first.id)
+            XCTAssertEqual(captured.binding.contextID, sharedContextID)
+            XCTAssertTrue(captured.binding.explicit)
+
+            // The fixture activates workspaces without loading the editor. Mirror the app, where the
+            // editor shows the active tab's prompt, so leaving the bound tab snapshots it unchanged.
+            lower.promptManager.promptText = boundPrompt
+            try await configureWindow(lower, activeWorkspace: replacement, savedWorkspaces: [first])
+            XCTAssertEqual(lower.workspaceManager.activeWorkspaceID, replacement.id)
+            let status = try await bindContextResponse(connection, ["op": .string("status")])
+            XCTAssertEqual(status.binding.windowID, lower.windowID)
+            XCTAssertEqual(status.binding.workspaceID, first.id)
+            XCTAssertEqual(status.binding.contextID, sharedContextID)
+            let stickyRead = await readPromptThroughBinding(connection)
+            XCTAssertFalse(stickyRead.isError, stickyRead.text)
+            XCTAssertTrue(stickyRead.text.contains(boundPrompt), stickyRead.text)
+            XCTAssertFalse(stickyRead.text.contains(visiblePrompt), stickyRead.text)
+
+            // window_id restricts the context_id match instead of being ignored.
+            let mismatch = await callBindContext(connection, [
+                "op": .string("bind"),
+                "context_id": .string(sharedContextID.uuidString),
+                "window_id": .int(lower.windowID)
+            ])
+            XCTAssertTrue(mismatch.isError, mismatch.text)
+            XCTAssertTrue(mismatch.text.contains("does not actively show context_id"), mismatch.text)
+        }
+
+        @MainActor
+        func testWindowBindKeepsCapturedTabWhenVisibleTabChangesInSameWorkspace() async throws {
+            let roots = try makeTemporaryRoots(count: 2)
+            let boundTabID = UUID()
+            let visibleTabID = UUID()
+            let boundPrompt = "bound-tab-prompt-\(UUID().uuidString)"
+            let visiblePrompt = "visible-tab-prompt-\(UUID().uuidString)"
+            let tabs = WorkspaceModel(
+                name: "Tabs",
+                repoPaths: [roots[0].path],
+                composeTabs: [
+                    ComposeTabState(id: boundTabID, name: "Bound", promptText: boundPrompt),
+                    ComposeTabState(id: visibleTabID, name: "Visible", promptText: visiblePrompt)
+                ],
+                activeComposeTabID: boundTabID
+            )
+            let unrelated = workspace(name: "Unrelated", root: roots[1].path, contextID: UUID())
+            let windows = try await makeRegisteredWindows(activeWorkspaces: [tabs, unrelated])
+            let target = windows[0]
+            let connection = try await makeProductionMCPConnection()
+            addTeardownBlock { await connection.cleanup() }
+
+            let captured = try await bindContextResponse(connection, [
+                "op": .string("bind"),
+                "window_id": .int(target.windowID)
+            ])
+            XCTAssertEqual(captured.binding.contextID, boundTabID)
+
+            // Mirror the app, where the editor shows the active tab's prompt, so the switch below
+            // snapshots the bound tab unchanged.
+            target.promptManager.promptText = boundPrompt
+            await target.promptManager.switchComposeTab(visibleTabID)
+            XCTAssertEqual(target.workspaceManager.activeWorkspace?.activeComposeTabID, visibleTabID)
+            XCTAssertEqual(target.promptManager.promptText, visiblePrompt)
+
+            let stickyRead = await readPromptThroughBinding(connection)
+            XCTAssertFalse(stickyRead.isError, stickyRead.text)
+            XCTAssertTrue(stickyRead.text.contains(boundPrompt), stickyRead.text)
+            XCTAssertFalse(stickyRead.text.contains(visiblePrompt), stickyRead.text)
+            let status = try await bindContextResponse(connection, ["op": .string("status")])
+            XCTAssertEqual(status.binding.contextID, boundTabID)
+        }
+    #endif
+
     #if DEBUG
         private func toolText(_ result: (content: [MCP.Tool.Content], isError: Bool?)) -> String {
             result.content.compactMap { content -> String? in
                 if case let .text(text, _, _) = content { return text }
                 return nil
             }.joined(separator: "\n")
+        }
+
+        private func callTool(
+            _ connection: ProductionMCPConnection,
+            name: String,
+            arguments: [String: Value]
+        ) async -> (text: String, isError: Bool) {
+            do {
+                let result = try await connection.client.callTool(name: name, arguments: arguments)
+                return (toolText(result), result.isError == true)
+            } catch {
+                return (error.localizedDescription, true)
+            }
+        }
+
+        private func callBindContext(
+            _ connection: ProductionMCPConnection,
+            _ arguments: [String: Value]
+        ) async -> (text: String, isError: Bool) {
+            await callTool(connection, name: "bind_context", arguments: arguments)
+        }
+
+        /// Reads the prompt with no window_id, context_id, or _windowID, so only the connection's
+        /// binding can route the call.
+        private func readPromptThroughBinding(
+            _ connection: ProductionMCPConnection
+        ) async -> (text: String, isError: Bool) {
+            await callTool(connection, name: "prompt", arguments: [
+                "op": .string("get"),
+                "_rawJSON": .bool(true)
+            ])
+        }
+
+        private func bindContextResponse(
+            _ connection: ProductionMCPConnection,
+            _ arguments: [String: Value]
+        ) async throws -> BindContextResponse {
+            var rawArguments = arguments
+            rawArguments["_rawJSON"] = .bool(true)
+            let result = await callBindContext(connection, rawArguments)
+            XCTAssertFalse(result.isError, result.text)
+            return try JSONDecoder().decode(BindContextResponse.self, from: Data(result.text.utf8))
+        }
+
+        @MainActor
+        private func makeRegisteredWindows(activeWorkspaces: [WorkspaceModel]) async throws -> [WindowState] {
+            let windows = activeWorkspaces.map { _ in makeWindowInstance() }.sorted { $0.windowID < $1.windowID }
+            for (window, workspace) in zip(windows, activeWorkspaces) {
+                try await configureWindow(window, activeWorkspace: workspace)
+            }
+            _ = installWindows(windows)
+            try await AppGlobalMCPServiceComposition.shared.ensureRegistered()
+            for window in windows {
+                let enabled = await window.mcpServer.setWindowToolsEnabled(true)
+                XCTAssertTrue(enabled)
+            }
+            addTeardownBlock { @MainActor in
+                for window in windows {
+                    _ = await window.mcpServer.setWindowToolsEnabled(false)
+                }
+            }
+            return windows
+        }
+
+        private func makeTemporaryRoots(count: Int) throws -> [URL] {
+            let base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("repoprompt-bind-discovery-\(UUID().uuidString)", isDirectory: true)
+            let roots = (0 ..< count).map { base.appendingPathComponent("root\($0)", isDirectory: true) }
+            for root in roots {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            }
+            addTeardownBlock {
+                try? FileManager.default.removeItem(at: base)
+            }
+            return roots
         }
     #endif
 
@@ -284,11 +612,11 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
         }
     #endif
 
-    private func workspace(name: String, root: String, contextID: UUID) -> WorkspaceModel {
+    private func workspace(name: String, root: String, contextID: UUID, promptText: String = "") -> WorkspaceModel {
         WorkspaceModel(
             name: name,
             repoPaths: [root],
-            composeTabs: [ComposeTabState(id: contextID, name: "Context")],
+            composeTabs: [ComposeTabState(id: contextID, name: "Context", promptText: promptText)],
             activeComposeTabID: contextID
         )
     }

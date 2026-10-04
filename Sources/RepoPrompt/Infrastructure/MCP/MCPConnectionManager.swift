@@ -630,14 +630,10 @@ actor ServerNetworkManager {
     }
 
     nonisolated static func multiWindowSelectionGuidance() -> String {
-        "Multiple RepoPrompt windows detected. Bind your connection to a tab context to route tool calls:\n\n" +
-            "**Recommended: Bind by exact workspace root paths (auto-resolves to the matching workspace/window tab context)**\n" +
-            "Call `bind_context` with `{\"op\":\"bind\",\"working_dirs\":[\"/absolute/path/to/root1\",\"/absolute/path/to/root2\"]}` using the full workspace directory set.\n\n" +
-            "**Alternatives:**\n" +
-            "- `bind_context` with `{\"op\":\"list\"}` to see windows and context_id values\n" +
-            "- `bind_context` with `{\"op\":\"bind\",\"context_id\":\"<id>\"}` to bind a specific tab context\n" +
-            "- `bind_context` with `{\"op\":\"bind\",\"window_id\":<id>}` to capture and bind that window's current tab context\n" +
-            "- Pass `_windowID` as a hidden parameter on any tool call to capture that window's current tab for that call only"
+        "Multiple RepoPrompt windows detected. Bind your connection to a tab context with `bind_context` to route tool calls.\n\n" +
+            "If you know the target, bind it directly: `{\"op\":\"bind\",\"working_dirs\":[\"/absolute/path/to/root1\",\"/absolute/path/to/root2\"]}` with the workspace's full set of roots, or `{\"op\":\"bind\",\"context_id\":\"<context_id>\"}`.\n\n" +
+            "If you do not, `{\"op\":\"list\"}` shows the open windows with their active and bound tabs. If the tab you want is missing, `{\"op\":\"list\",\"window_id\":<window_id>}` returns every compose tab of that window. " +
+            "`{\"op\":\"bind\",\"window_id\":<window_id>}` binds the tab active in that window now; later tab switches do not move the binding."
     }
 
     nonisolated static func multiWindowSelectionGuidance(

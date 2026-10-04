@@ -639,12 +639,12 @@ actor MCPCommandRunner {
           bind_context                    Discover and bind window/tab routing context
             bind_context op=list          List windows, tabs, and current binding
             bind_context op=list window_id=<id>
-                                          Filter listing to a specific window
+                                          List every compose tab in one window
             bind_context op=status        Show current binding only
             bind_context op=bind context_id=<uuid>
                                           Bind to a specific compose tab (sticky)
             bind_context op=bind window_id=<id>
-                                          Set window affinity (follows whichever tab is active)
+                                          Bind the tab active in that window now (sticky)
             bind_context op=bind working_dirs="/path/to/project"
                                           Bind by matching working directory to a tab
             bind_context op=bind working_dirs="..." create_if_missing=true

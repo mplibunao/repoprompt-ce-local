@@ -97,19 +97,18 @@
         "openWorldHint" : false,
         "readOnlyHint" : false
       },
-      "description" : "List, inspect, and bind the canonical workspace context for this MCP connection. Bind by working_dirs (preferred) or context_id. This global tool never accepts an app window selector.",
+      "description" : "Bind this MCP connection's tool calls to one compose tab; UI tab or workspace switches do not move the binding. Bind a known context_id or working_dirs (not both) directly; `list` only to find a target; `status` returns the binding. Standalone headless: no windows; `list` returns saved workspace contexts; window_id is rejected.",
       "inputSchema" : {
         "properties" : {
           "context_id" : {
-            "description" : "For bind: canonical compose-tab context UUID",
+            "description" : "Compose-tab context UUID to bind.",
             "type" : "string"
           },
           "create_if_missing" : {
-            "description" : "For bind with working_dirs: create a new workspace after approval if no exact or superset workspace matches",
+            "description" : "App-backed, with working_dirs: if no workspace matches, create one in a new window after user approval.",
             "type" : "boolean"
           },
           "op" : {
-            "description" : "Operation: 'list', 'status', or 'bind'",
             "enum" : [
               "list",
               "status",
@@ -118,12 +117,26 @@
             "type" : "string"
           },
           "tab_name" : {
-            "description" : "Optional workspace name when creating via working_dirs + create_if_missing",
+            "description" : "App-backed: name for the workspace create_if_missing creates.",
             "type" : "string"
           },
+          "window_id" : {
+            "description" : "list: every compose tab of this window. bind: alone, its active tab; with context_id, the tab must be in its active workspace; with working_dirs, binds here, preferring the match this window shows and switching its workspace if needed.",
+            "type" : "integer"
+          },
           "working_dirs" : {
-            "description" : "For bind: comma-separated absolute workspace root paths; exact match first, then repo_paths superset fallback",
-            "type" : "string"
+            "anyOf" : [
+              {
+                "description" : "Absolute workspace roots to bind, or one comma-separated string. Binds the active tab of the workspace with exactly these roots, else a strict superset; subpaths do not match. App-backed without window_id: a match no window shows opens in a new window.",
+                "items" : {
+                  "type" : "string"
+                },
+                "type" : "array"
+              },
+              {
+                "type" : "string"
+              }
+            ]
           }
         },
         "required" : [
