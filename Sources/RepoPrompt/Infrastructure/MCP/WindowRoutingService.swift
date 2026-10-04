@@ -2230,12 +2230,12 @@ final class WindowRoutingService: Service {
                 description: Self.bindContextSettingsDescription,
                 inputSchema: .object(
                     properties: [
-                        "op": .string(description: "Operation: 'list', 'status', or 'bind'", enum: ["list", "status", "bind"]),
+                        "op": .string(enum: ["list", "status", "bind"]),
                         "window_id": .integer(description: MCPBindContextPropertyDescriptions.windowID),
-                        "context_id": .string(description: "For bind: canonical compose-tab context UUID"),
+                        "context_id": .string(description: MCPBindContextPropertyDescriptions.contextID),
                         "working_dirs": .anyOf([
-                            .array(description: MCPBindContextPropertyDescriptions.workingDirsArray, items: .string()),
-                            .string(description: MCPBindContextPropertyDescriptions.workingDirsString)
+                            .array(description: MCPBindContextPropertyDescriptions.workingDirs, items: .string()),
+                            .string()
                         ]),
                         "create_if_missing": .boolean(description: MCPBindContextPropertyDescriptions.createIfMissing),
                         "tab_name": .string(description: MCPBindContextPropertyDescriptions.tabName)

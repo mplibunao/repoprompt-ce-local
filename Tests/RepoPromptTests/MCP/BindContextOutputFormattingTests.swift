@@ -94,18 +94,22 @@ final class BindContextOutputFormattingTests: XCTestCase {
 
         let schema = try XCTUnwrap(projectedCanonicalSchema.objectValue)
         let windows = try twoWindows()
-        let hints = try await [
-            nextSteps(of: formattedList(windowID: nil, windows: windows)),
-            nextSteps(of: formattedList(windowID: nil, windows: [windows[0]])),
-            nextSteps(of: formattedList(windowID: 3, windows: [windows[0]])),
-            ServerNetworkManager.multiWindowSelectionGuidance(),
-            canonical.description,
-            registeredBindContextTool().description
+        // The canonical description is paid for on each tools/list, so it may carry no example;
+        // every hint, routing error, and Settings text shows at least one.
+        let surfaces: [(text: String, mustShowExample: Bool)] = try await [
+            (nextSteps(of: formattedList(windowID: nil, windows: windows)), true),
+            (nextSteps(of: formattedList(windowID: nil, windows: [windows[0]])), true),
+            (nextSteps(of: formattedList(windowID: 3, windows: [windows[0]])), true),
+            (ServerNetworkManager.multiWindowSelectionGuidance(), true),
+            (canonical.description, false),
+            (registeredBindContextTool().description, true)
         ]
         let listedContextID = try fixtureID(2).uuidString
-        for hint in hints {
+        for (hint, mustShowExample) in surfaces {
             let examples = try hintedCalls(in: hint)
-            XCTAssertFalse(examples.isEmpty, hint)
+            if mustShowExample {
+                XCTAssertFalse(examples.isEmpty, hint)
+            }
             for example in examples {
                 let call = example
                     .replacingOccurrences(of: "<window_id>", with: "3")
