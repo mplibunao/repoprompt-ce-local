@@ -26,3 +26,26 @@ Different audiences read a tool's text, and each gets it through a different pat
 ## Changing a definition
 
 Follow [Canonical MCP schema and bind_context discovery](../testing.md#canonical-mcp-schema-and-bind_context-discovery) for snapshot regeneration, the catalog fingerprint, the covering suites, and live validation.
+
+## Pull request descriptions
+
+A pull request that changes an agent-facing tool description, schema, or hint carries two things in its description by default: a before/after size comparison and a short list of where to review.
+
+### Size comparison
+
+The comparison shows a reviewer what the change costs each client that receives the text. It says:
+
+- **What each row is and who reads it.** The whole advertised entry is one tool's object in `tools/list` as a client receives it: the name, the description, the input schema, and every other field serialized with them (for `bind_context`, the annotations), including the JSON keys and punctuation. The description and the input schema are parts of that entry, shown as their own rows so a reader can see which part moved. They are not further totals, and they do not add up to the entry, because the entry also holds the other fields and the JSON around them, and JSON escapes the quotes and newlines inside the description. A Settings description that differs from the canonical one, as the one for `bind_context` does, is its own row: a person reads it, and it is never sent to an agent.
+- **The unit.** Characters and whitespace-separated words are not tokens. Call a number a token count only when a tokenizer produced it, and then name the tokenizer and the model.
+- **The method.** Name the revisions compared and how the text was serialized, such as compact JSON for the entry and the schema.
+- **What moved and why.** Explain each meaningful increase or decrease and what an agent gains or loses for it. A smaller entry that drops a fact an agent needs is a regression: compactness comes after correctness.
+
+When only a hint or an error changes, compare that output text. The entry did not change, so the comparison does not present it as if it had.
+
+### Where to review
+
+List the paths a reviewer should open as plain repository-relative paths in code formatting, not as links. A reviewer opens a path in an editor or an agent session, where a link to a hosted page does not help. Say after each path what to look at there, with line numbers when they help.
+
+For a tool with a canonical definition, start with `docs/spec/mcp-domain-canonical-tool-definitions.generated.json`: it holds the description and input schema that `tools/list` advertises, in readable form, so it is the place to review that text. Then list only the other surfaces the change touched: a Settings description, an output hint, a routing error, or CLI help. For a tool without a canonical definition, list the file that holds its registration. "Who reads what" says where each text lives.
+
+Add a source file beside the snapshot only when its behaviour needs review or the snapshot does not show the change; `Sources/RepoPromptDomainRuntime/MCPDomainCanonicalToolDefinitions.swift` is the source the snapshot is generated from, so listing both asks for one review twice.
