@@ -36,6 +36,38 @@ private let bootstrapLog: Logger = {
     return logger
 }()
 
+// MARK: - Handshake admission
+
+/// The app's decision on one bootstrap MCP `initialize` request.
+enum BootstrapHandshakeAdmission: Equatable {
+    /// Stable policy reason for a connection whose process ancestry matched an established agent
+    /// run while it carried neither that run's session token nor a pending run-owned policy.
+    static let expectedPIDWithoutPendingPolicyReason = "expected_pid_without_pending_policy"
+
+    /// Answers tool requests while no `initialize` on the connection is admitted or one is still
+    /// being decided.
+    static let admissionPendingMessage =
+        "RepoPrompt tools are unavailable on this MCP connection until RepoPrompt admits its initialize request."
+
+    case admitted
+    /// Refused with the generic `Connection closed` initialize error.
+    case refused
+    /// Refused because the connection tried to join an established agent run without authority.
+    /// The client is told which session, why, and how to recover.
+    case establishedRunJoinRefused(agentSessionName: String?)
+
+    /// Agents read this text in their MCP client's server-failure output, so it names the cause
+    /// and the one action that restores RepoPrompt tools.
+    static func establishedRunJoinRefusalMessage(agentSessionName: String?) -> String {
+        let session = agentSessionName.map { "agent session \"\($0)\"" } ?? "an established agent session"
+        return "RepoPrompt refused this MCP connection (\(expectedPIDWithoutPendingPolicyReason)). "
+            + "Its process descends from the agent process of \(session), but it carried no session ticket "
+            + "for that session, so it cannot join the session's run. RepoPrompt tools are unavailable on "
+            + "this connection. To restore them, start a new agent session; RepoPrompt and the MCP client "
+            + "do not need to restart."
+    }
+}
+
 // MARK: - Connection Manager
 
 /// Connection manager for bootstrap socket connections.
@@ -80,7 +112,14 @@ actor BootstrapSocketConnectionManager: MCPServerConnection {
     private var closeWatchTask: Task<Void, Never>?
     private var state: ConnectionStateSnapshot = .connecting
     private var isClosing = false
+    /// Set once some `initialize` on this connection is admitted.
     private var handshakeComplete = false
+    /// `initialize` requests whose admission is still being decided.
+    private var pendingAdmissions = 0
+    /// Set by a refused run join and kept until a later `initialize` is admitted.
+    private var runJoinRefusal: MCPError?
+    /// Counts admitted `initialize` requests. Each attempt records it when it begins.
+    private var admissionRevision = 0
     private var clientCapabilities: MCP.Client.Capabilities?
     private var startupFailureTransportSnapshot: MCPTransportCloseSnapshot?
 
@@ -129,6 +168,12 @@ actor BootstrapSocketConnectionManager: MCPServerConnection {
     }
 
     func start(approvalHandler: @escaping (MCP.Client.Info) async -> Bool) async throws {
+        try await start(admissionHandler: { clientInfo in
+            await approvalHandler(clientInfo) ? .admitted : .refused
+        })
+    }
+
+    func start(admissionHandler: @escaping (MCP.Client.Info) async -> BootstrapHandshakeAdmission) async throws {
         startupFailureTransportSnapshot = nil
 
         // Start close-watch task to clean up when socket closes
@@ -165,12 +210,14 @@ actor BootstrapSocketConnectionManager: MCPServerConnection {
                 mcpConnectionLog("BootstrapSocketConnectionManager: received client info: \(clientInfo.name)")
                 guard let self else { throw MCPError.connectionClosed }
 
-                await recordClientCapabilities(capabilities)
-                let approved = await approvalHandler(clientInfo)
-                if !approved {
-                    throw MCPError.connectionClosed
+                let revision = await beginAdmission(capabilities: capabilities)
+                let admission = await admissionHandler(clientInfo)
+                #if DEBUG
+                    await debugAdmissionDecided(admission)
+                #endif
+                if let refusal = await settleAdmission(admission, beganAt: revision) {
+                    throw refusal
                 }
-                await markHandshakeComplete()
             }
 
             mcpConnectionLog("BootstrapSocketConnectionManager: MCP server started successfully")
@@ -218,8 +265,74 @@ actor BootstrapSocketConnectionManager: MCPServerConnection {
         )
     }
 
-    private func recordClientCapabilities(_ capabilities: MCP.Client.Capabilities) {
+    /// The MCP server dispatches requests pipelined behind an `initialize` concurrently with its
+    /// admission, so this one state change closes tool access until the admission is decided.
+    /// Returns the admission revision the attempt began at.
+    private func beginAdmission(capabilities: MCP.Client.Capabilities) async -> Int {
         clientCapabilities = capabilities
+        pendingAdmissions += 1
+        let revision = admissionRevision
+        #if DEBUG
+            await debugAdmissionFenceHook?()
+        #endif
+        return revision
+    }
+
+    #if DEBUG
+        private var debugAdmissionFenceHook: (@Sendable () async -> Void)?
+        private var debugAdmissionDecidedHook: (@Sendable (BootstrapHandshakeAdmission) async -> Void)?
+
+        /// Runs inside admission begin, after tool access is closed.
+        func debugSetAdmissionFenceHook(_ hook: (@Sendable () async -> Void)?) {
+            debugAdmissionFenceHook = hook
+        }
+
+        /// Runs once an admission is decided, before it settles.
+        func debugSetAdmissionDecidedHook(_ hook: (@Sendable (BootstrapHandshakeAdmission) async -> Void)?) {
+            debugAdmissionDecidedHook = hook
+        }
+
+        private func debugAdmissionDecided(_ admission: BootstrapHandshakeAdmission) async {
+            await debugAdmissionDecidedHook?(admission)
+        }
+    #endif
+
+    /// Records one admission outcome and returns the error that fails its `initialize`, or nil
+    /// when it is admitted. An admission clears a standing run-join refusal. A refused run join
+    /// sets one only if no admission settled after its attempt began: its routing decision
+    /// predates that admission, so it fails only its own `initialize`. Any other refusal changes
+    /// nothing.
+    private func settleAdmission(_ admission: BootstrapHandshakeAdmission, beganAt revision: Int) -> MCPError? {
+        pendingAdmissions -= 1
+        switch admission {
+        case .admitted:
+            admissionRevision += 1
+            runJoinRefusal = nil
+            handshakeComplete = true
+            return nil
+        case .refused:
+            return .connectionClosed
+        case let .establishedRunJoinRefused(agentSessionName):
+            let refusal = MCPError.invalidRequest(
+                BootstrapHandshakeAdmission.establishedRunJoinRefusalMessage(agentSessionName: agentSessionName)
+            )
+            if revision == admissionRevision {
+                runJoinRefusal = refusal
+            }
+            return refusal
+        }
+    }
+
+    /// Tool requests are served only after some `initialize` was admitted, while no admission is
+    /// being decided and no refused run join stands. A standing refusal answers with its cause;
+    /// otherwise the request is told the connection is not admitted yet.
+    private func requireToolAccess() throws {
+        if pendingAdmissions == 0, let runJoinRefusal {
+            throw runJoinRefusal
+        }
+        guard pendingAdmissions == 0, handshakeComplete else {
+            throw MCPError.invalidRequest(BootstrapHandshakeAdmission.admissionPendingMessage)
+        }
     }
 
     #if DEBUG
@@ -229,7 +342,10 @@ actor BootstrapSocketConnectionManager: MCPServerConnection {
     #endif
 
     private func registerHandlers() async {
-        await parentManager.registerHandlers(for: server, connectionID: connectionID)
+        await parentManager.registerHandlers(for: server, connectionID: connectionID) { [weak self] in
+            guard let self else { throw MCPError.connectionClosed }
+            try await requireToolAccess()
+        }
     }
 
     private func startHealthMonitoring() async {
@@ -291,10 +407,6 @@ actor BootstrapSocketConnectionManager: MCPServerConnection {
                 )
             )
         }
-    }
-
-    private func markHandshakeComplete() {
-        handshakeComplete = true
     }
 
     func stop() async {
