@@ -121,7 +121,7 @@
             "type" : "string"
           },
           "window_id" : {
-            "description" : "list: every compose tab of this window. bind: alone, its active tab; with context_id, the tab must be in its active workspace; with working_dirs, binds the match in this window, switching its workspace if needed.",
+            "description" : "list: every compose tab of this window. bind: alone, its active tab; with context_id, the tab must be in its active workspace; with working_dirs, binds here, preferring the match this window shows and switching its workspace if needed.",
             "type" : "integer"
           },
           "working_dirs" : {

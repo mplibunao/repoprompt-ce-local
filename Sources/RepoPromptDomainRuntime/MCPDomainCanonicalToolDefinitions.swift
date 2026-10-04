@@ -1175,7 +1175,7 @@ package enum MCPDomainCanonicalToolDefinitions {
 /// app-side raw Tool registration publish the same text, so both sites read it from here.
 package enum MCPBindContextPropertyDescriptions {
     package static let contextID = "Compose-tab context UUID to bind."
-    package static let windowID = "list: every compose tab of this window. bind: alone, its active tab; with context_id, the tab must be in its active workspace; with working_dirs, binds the match in this window, switching its workspace if needed."
+    package static let windowID = "list: every compose tab of this window. bind: alone, its active tab; with context_id, the tab must be in its active workspace; with working_dirs, binds here, preferring the match this window shows and switching its workspace if needed."
     package static let workingDirs = "Absolute workspace roots to bind, or one comma-separated string. Binds the active tab of the workspace with exactly these roots, else a strict superset; subpaths do not match. App-backed without window_id: a match no window shows opens in a new window."
     package static let createIfMissing = "App-backed, with working_dirs: if no workspace matches, create one in a new window after user approval."
     package static let tabName = "App-backed: name for the workspace create_if_missing creates."
