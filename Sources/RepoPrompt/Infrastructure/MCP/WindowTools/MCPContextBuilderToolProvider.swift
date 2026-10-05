@@ -405,14 +405,16 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
             )
         }
 
-        return try await AsyncScope.withCleanup({}, cleanup: {
-            await contextBuilderVM.clearMCPControlledRun(
-                forTabID: tabIDForCleanup,
-                controlToken: mcpControlToken
-            )
-        }) {
+        // Everything the admitted call does, run as one piece of work: until its run is registered,
+        // closing the tab or the window cancels that work wherever it is suspended. Cancelling only
+        // signals the step it is suspended in; the cleanup below runs once the work has unwound.
+        // The auto-selection drain ends when cancelled. Provider validation is shared with other
+        // callers and does not respond to this call's cancellation, and a stage-progress send has
+        // no cancellation-responsive delivery, so a call cancelled in either unwinds when that
+        // step returns.
+        let admittedCall: @MainActor () async throws -> ContextBuilderToolResult = {
             // The tab can close, or the window can start closing, during any suspension, including
-            // the one between the claim and this scope. Each step that changes state first confirms
+            // the one between the claim and this work. Each step that changes state first confirms
             // this call still owns the tab. The check is synchronous on the main actor, so nothing
             // can run between it and a step that starts in the same turn.
             let requireControlOwnership: @MainActor @Sendable () throws -> Void = {
@@ -930,6 +932,19 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                 )
             }
             return try await runContextBuilderAndPlan()
+        }
+
+        return try await AsyncScope.withCleanup({}, cleanup: {
+            await contextBuilderVM.clearMCPControlledRun(
+                forTabID: tabIDForCleanup,
+                controlToken: mcpControlToken
+            )
+        }) {
+            try await contextBuilderVM.performAdmittedMCPCall(
+                forTabID: tabIDForCleanup,
+                controlToken: mcpControlToken,
+                admittedCall
+            )
         }
     }
 

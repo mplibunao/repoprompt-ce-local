@@ -100,6 +100,13 @@ enum ContextBuilderFollowUpType: String, CaseIterable, Codable {
     }
 }
 
+/// Where the task running an admitted MCP call leaves its result for the request that awaits
+/// it. Both run on the main actor, so the result need not be sendable.
+@MainActor
+private final class MCPCallOutcome<Reply> {
+    var result: Result<Reply, Error>?
+}
+
 private enum ContextBuilderMCPRoutingError: LocalizedError {
     case completedWithoutRoute(agentDisplayName: String, clientName: String)
     case routingFailed(agentDisplayName: String, clientName: String)
@@ -278,6 +285,16 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         var isMCPControlledRun: Bool {
             operationToken?.origin == .mcp
         }
+
+        /// Cancels the MCP call that holds the tab while that call is still preparing: from its
+        /// claim until its run is registered, when there is no run to cancel yet. `tokenID` names
+        /// the claim that installed it, so it never acts for a later holder.
+        struct PreparationCancellation {
+            let tokenID: UUID
+            let cancel: @MainActor () -> Void
+        }
+
+        var preparationCancellation: PreparationCancellation?
 
         /// Frozen workspace-scoped planning model for MCP follow-up generation.
         var mcpPlanningModelRaw: String?
@@ -470,8 +487,14 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     private enum OperationClaimResult {
         case claimed
         case windowClosing
+        /// The tab is closing, or its workspace no longer holds it.
+        case tabUnavailable
         case tabBusy
     }
+
+    /// Tabs whose close is still retiring their work, counted because a stashed tab can be
+    /// restored and closed again before its first close has finished.
+    private var closingTabCounts: [UUID: Int] = [:]
 
     private static var tabBusyError: NSError {
         NSError(
@@ -486,6 +509,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     /// Admits at most one Context Builder operation per tab. The check and the claim share one
     /// main-actor turn, so two entry paths cannot both pass the check.
+    ///
+    /// A tab that is closing, or that `workspaceID` no longer holds, is refused before a session
+    /// is made for it: tab close is what removes a tab's session, and it has either not finished
+    /// or already run for that tab. A caller's own check that the tab exists does not cover this
+    /// when the caller suspends between that check and the claim.
     private func claimOperationToken(
         _ id: UUID,
         origin: TabSession.OperationToken.Origin,
@@ -493,6 +521,12 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         workspaceID: UUID?
     ) -> OperationClaimResult {
         guard !hasPreparedForWindowClose else { return .windowClosing }
+        guard closingTabCounts[tabID] == nil,
+              let workspaceID,
+              workspaceManager?.composeTab(
+                  for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+              ) != nil
+        else { return .tabUnavailable }
         let session = session(for: tabID)
         guard runRegistry.activeRecord(tabID: tabID) == nil,
               !session.agentRunState.isRunning,
@@ -515,15 +549,24 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     private func releaseOperationToken(_ id: UUID, from session: TabSession?) -> Bool {
         guard let session, session.operationToken?.id == id else { return false }
         session.operationToken = nil
+        removePreparationCancellation(installedBy: id, from: session)
         publishOperationTokenHold(forTabID: session.tabID)
         return true
+    }
+
+    private func removePreparationCancellation(installedBy tokenID: UUID, from session: TabSession) {
+        guard session.preparationCancellation?.tokenID == tokenID else { return }
+        session.preparationCancellation = nil
     }
 
     /// Called once a UI run's routing policy is cleared. The token outlives discovery only while
     /// the tab has a follow-up whose task has not finished, cancelled or not; that follow-up's
     /// settlement releases it.
     private func settleUIOperationToken(for record: ContextBuilderRunRecord) {
-        let session = record.session
+        // The claim is on the run's own session unless a workspace switch moved it to the
+        // session that took its place.
+        let session = sessions[record.tabID].flatMap { $0.operationToken?.id == record.runID ? $0 : nil }
+            ?? record.session
         guard session.operationToken?.id == record.runID else { return }
         if session.currentFollowUpID != nil {
             session.operationToken?.isHeldByFollowUpOnly = true
@@ -553,12 +596,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
     }
 
-    /// A tab the workspace list has not caught up with yet is the active workspace's visible tab.
     private func workspace(owning tabID: UUID) -> WorkspaceModel? {
-        guard let manager = workspaceManager else { return nil }
-        return manager.workspaces.first { workspace in
+        workspaceManager?.workspaces.first { workspace in
             workspace.composeTabs.contains { $0.id == tabID }
-        } ?? manager.activeWorkspace
+        }
     }
 
     #if DEBUG
@@ -719,8 +760,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             scheduleRunTeardown(record, cancelExecution: cancelExecution)
         }
 
-        func setAppTerminationFinalContextGraceForTesting(_ nanoseconds: UInt64) {
-            appTerminationFinalContextGraceNanoseconds = nanoseconds
+        func setCloseSettlementGraceForTesting(_ nanoseconds: UInt64) {
+            closeSettlementGraceNanoseconds = nanoseconds
         }
 
         func setStartupPolicyForTesting(_ policy: ContextBuilderStartupPolicy) {
@@ -1032,7 +1073,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         let tabIDs = pendingBackgroundPlanRefreshTabIDs
         pendingBackgroundPlanRefreshTabIDs.removeAll()
         guard let currentTabID else { return }
-        guard tabIDs.contains(currentTabID), let session = sessions[currentTabID] else { return }
+        guard tabIDs.contains(currentTabID),
+              let session = sessions[currentTabID],
+              isMirroredByWindow(session)
+        else { return }
         applyBackgroundPlanBindings(from: session)
     }
 
@@ -1122,9 +1166,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     private var grokBuildModelsSubscriptionTask: Task<Void, Never>?
     private let codexModelPollingService: CodexModelPollingService
     private var hasPreparedForWindowClose = false
-    /// Preserve a brief chance to reach the final-context safe boundary while leaving app
-    /// termination enough time to dispose the provider process and its configuration lease.
-    private var appTerminationFinalContextGraceNanoseconds: UInt64 = 500_000_000
+    /// Preserve a brief chance to reach the final-context safe boundary while leaving a closing
+    /// tab or window, and app termination, enough time to dispose the provider process and its
+    /// configuration lease.
+    private var closeSettlementGraceNanoseconds: UInt64 = 500_000_000
     private var startupPolicy = ContextBuilderStartupPolicy.standard
 
     // MARK: - Init / Deinit
@@ -1257,6 +1302,32 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     func shutdownForAppTermination() async {
         prepareForWindowClose()
+        await joinTeardown(of: cancelRetainedRuns())
+    }
+
+    /// The first half of an ordinary window close. Asks everything Context Builder still has in
+    /// flight in the window to end: every run the window retains, whichever tab or session it
+    /// belongs to and whether or not it still owns its tab, every MCP call that is still
+    /// preparing, and every follow-up. It returns without waiting, so the rest of the close can
+    /// start before ``joinRunTeardownForWindowClose()`` waits for the runs.
+    func cancelRunsForWindowClose() {
+        prepareForWindowClose()
+        sessions.values.forEach(cancelUnregisteredWork)
+        cancelRetainedRuns()
+    }
+
+    /// The second half of an ordinary window close. Waits until the runs the first half cancelled
+    /// are torn down, so the window stays owned until their providers are disposed. A run whose
+    /// end was never requested has no teardown to wait for, and the closing window admits none.
+    func joinRunTeardownForWindowClose() async {
+        let cancelledRecords = runRegistry.retainedRecordsSnapshot().filter {
+            $0.isTerminal || $0.cancellationState != .none
+        }
+        await joinTeardown(of: cancelledRecords)
+    }
+
+    @discardableResult
+    private func cancelRetainedRuns() -> [ContextBuilderRunRecord] {
         let records = runRegistry.retainedRecordsSnapshot()
         for record in records where !record.isTerminal {
             cancelRun(
@@ -1266,20 +1337,37 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 saveHistory: true
             )
         }
+        return records
+    }
+
+    /// Requests cancellation of what holds a tab outside a registered run: a pending question, an
+    /// MCP call that is still preparing, and a follow-up, without waiting for any of it to stop.
+    /// Runs are cancelled through their records.
+    private func cancelUnregisteredWork(for session: TabSession) {
+        cancelPendingQuestion(for: session)
+        if let token = session.operationToken {
+            cancelMCPPreparation(forTabID: session.tabID, controlToken: token.id)
+        }
+        session.backgroundPlanTask?.cancel()
+        session.backgroundPlanTask = nil
+        session.isBackgroundPlanGenerating = false
+        if let oracleViewModel, let followUpSessionID = session.followUpOracleSessionID {
+            Task { @MainActor in
+                await oracleViewModel.cancelStreaming(in: followUpSessionID)
+            }
+        }
+        session.followUpOracleSessionID = nil
+    }
+
+    /// Waits for the teardown of `records`, whose cancellation has been requested.
+    private func joinTeardown(of records: [ContextBuilderRunRecord]) async {
         // Provider disposal remains joined because it owns process-family termination and launch-
         // config lease release. The outer run task receives the same bounded grace regardless of
         // whether cancellation first had to wait for a final-context commit.
-        let forceSettlementTasks = records.map { record in
-            Task { @MainActor [weak self, weak record] in
-                guard let self else { return }
-                try? await Task.sleep(nanoseconds: appTerminationFinalContextGraceNanoseconds)
-                guard !Task.isCancelled, let record else { return }
-                forceRunSettlementForAppTermination(record)
-            }
-        }
+        let forceSettlementTasks = forceSettlementAfterGrace(of: records)
         // Sweeps records that were already terminal with no teardown scheduled; such a record would
         // otherwise never settle and would hang the join below. Records settled by the cancellation
-        // pass above are revisited harmlessly because starting teardown is idempotent.
+        // pass are revisited harmlessly because starting teardown is idempotent.
         for record in records where record.isTerminal {
             scheduleRunTeardown(record, cancelExecution: true)
         }
@@ -1287,6 +1375,20 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             await record.awaitTeardownSettlement()
         }
         forceSettlementTasks.forEach { $0.cancel() }
+    }
+
+    /// Gives each record the final-context grace and then settles it by force, so that whoever
+    /// waits on the records does not wait on a commit, an execution, or a provider start that
+    /// ignores cancellation. The caller cancels the returned tasks once its wait is over.
+    private func forceSettlementAfterGrace(of records: [ContextBuilderRunRecord]) -> [Task<Void, Never>] {
+        records.map { record in
+            Task { @MainActor [weak self, weak record] in
+                guard let self else { return }
+                try? await Task.sleep(nanoseconds: closeSettlementGraceNanoseconds)
+                guard !Task.isCancelled, let record else { return }
+                forceRunSettlementForClose(record)
+            }
+        }
     }
 
     private var agentAvailabilityContext: AgentModelCatalog.AvailabilityContext {
@@ -1601,6 +1703,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         return newSession
     }
 
+    /// Whether `session` is still its tab's session and Context Builder has not prepared for
+    /// window close. Tab close and workspace switch remove a tab's session without ending work
+    /// suspended under it.
+    private func isPresentSession(_ session: TabSession) -> Bool {
+        !hasPreparedForWindowClose && sessions[session.tabID] === session
+    }
+
     private func loadConfigForSession(_ session: TabSession) {
         guard let manager = workspaceManager,
               let tabState = manager.composeTab(with: session.tabID) else { return }
@@ -1686,6 +1795,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         // Per-tab MCP control flag
         isMCPControlledRun = false
         mcpResponseType = nil
+        mcpPlanModel = nil
         // Per-tab clarifying questions state
         pendingAskUser = nil
         if let normalized = resolvedPersistedContextBuilderSelection() {
@@ -1700,11 +1810,18 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         updateDynamicModelPolling(startCursorPolling: false)
     }
 
+    /// Whether the window's mirrored properties show `session`: it is the visible tab's present
+    /// session, and an operation it holds belongs to the workspace the window shows. Updates from
+    /// a session the tab no longer uses, or from another workspace's operation, are kept out of
+    /// the window's mirrored properties.
+    private func isMirroredByWindow(_ session: TabSession) -> Bool {
+        guard session.tabID == currentTabID, sessions[session.tabID] === session else { return false }
+        guard let workspaceID = session.operationToken?.workspaceID else { return true }
+        return workspaceID == workspaceManager?.activeWorkspaceID
+    }
+
     private func updateRuntimeBindings(from session: TabSession) {
-        guard session.tabID == currentTabID,
-              session.operationToken?.workspaceID == nil
-              || session.operationToken?.workspaceID == workspaceManager?.activeWorkspaceID
-        else { return }
+        guard isMirroredByWindow(session) else { return }
         isRestoringState = true
         agentLog = session.agentLog
         toolCallCount = session.toolCallCount
@@ -1732,10 +1849,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Use this instead of updateRuntimeBindings during streaming to avoid excessive SwiftUI updates.
     /// Note: pendingAskUser and other state changes have their own explicit updateRuntimeBindings calls.
     private func updateAgentLogBinding(from session: TabSession) {
-        guard session.tabID == currentTabID,
-              session.operationToken?.workspaceID == nil
-              || session.operationToken?.workspaceID == workspaceManager?.activeWorkspaceID
-        else { return }
+        guard isMirroredByWindow(session) else { return }
         agentLog = session.agentLog
         toolCallCount = session.toolCallCount
     }
@@ -1769,7 +1883,18 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             }
             session.followUpOracleSessionID = nil
         }
-        sessions = sessions.filter(\.value.isMCPControlledRun)
+        var sessionsAfterSwitch = sessions.filter(\.value.isMCPControlledRun)
+        // A cancelled UI run still has its tail to run, and that tail is what clears its routing
+        // policy. Its claim moves to the session that takes the dropped one's place, so the tab
+        // admits no other run before then.
+        for (tabID, session) in sessions {
+            guard let token = session.operationToken, token.origin == .ui, !token.admitsNewUIRun else { continue }
+            let replacement = TabSession(tabID: tabID)
+            replacement.operationToken = token
+            session.operationToken = nil
+            sessionsAfterSwitch[tabID] = replacement
+        }
+        sessions = sessionsAfterSwitch
         tabsHeldAgainstNewRun.formIntersection(sessions.keys)
         lastProcessedTabID = nil
         clearBindings()
@@ -1805,48 +1930,67 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     // MARK: - Tab Close Cleanup
 
-    /// Called before compose tabs are closed. Cancels all running tasks for those tabs.
+    /// Called before compose tabs are closed. Ends everything Context Builder has in flight for
+    /// those tabs and leaves every other tab's work alone. Teardown stays with each run's record
+    /// and is not waited for.
     @MainActor
     private func handleComposeTabsWillClose(_ tabIDs: Set<UUID>) async {
+        // Nothing is admitted to these tabs until their sessions are removed below. A claim made
+        // during the wait would lose its session while it ran, and the stored-tab check alone
+        // does not refuse one: a stashed tab can be restored before the wait ends.
         for tabID in tabIDs {
-            guard let session = sessions[tabID] else { continue }
-
-            debugLog("handleComposeTabsWillClose: cleaning up tab \(tabID)")
-
-            // 1. Cancel any pending clarifying question
-            cancelPendingQuestion(for: session)
-
-            // 2. Cancel background plan generation for this tab
-            if session.isBackgroundPlanGenerating {
-                debugLog("handleComposeTabsWillClose: cancelling background plan for tab \(tabID)")
-                session.backgroundPlanTask?.cancel()
-                session.backgroundPlanTask = nil
-                session.isBackgroundPlanGenerating = false
-                if let followUpSessionID = session.followUpOracleSessionID {
-                    await oracleViewModel?.cancelStreaming(in: followUpSessionID)
-                }
-                session.followUpOracleSessionID = nil
+            closingTabCounts[tabID, default: 0] += 1
+        }
+        defer {
+            for tabID in tabIDs {
+                let remaining = closingTabCounts[tabID, default: 1] - 1
+                closingTabCounts[tabID] = remaining > 0 ? remaining : nil
             }
+        }
+        let cancelledRecords = cancelWork(forClosingTabs: tabIDs)
+        // A run whose final-context commit is already claimed keeps its tab's session until that
+        // commit reaches its safe boundary or the grace ends. The commit then finishes with the
+        // authority it started with, and the run's waiter receives what was committed.
+        let committingRecords = cancelledRecords.filter(\.hasDeferredCancellationPending)
+        if !committingRecords.isEmpty {
+            let forceSettlementTasks = forceSettlementAfterGrace(of: committingRecords)
+            for record in committingRecords {
+                await record.awaitExecutionSettlement()
+            }
+            forceSettlementTasks.forEach { $0.cancel() }
+        }
 
-            // 3. Logically cancel every registered run for the tab without waiting for teardown.
-            // A superseded record may no longer own the active slot but still owns a provider,
-            // execution task, waiter, and launch-config lease that tab close must retire.
+        // Removing a tab's session ends the authority of every claim on the tab, so it follows
+        // the cancellation above. The tab-change observer updates the bindings when the visible
+        // tab is among those closed.
+        for tabID in tabIDs {
+            sessions.removeValue(forKey: tabID)
+            tabsWithActiveContextBuilderRun.remove(tabID)
+            publishOperationTokenHold(forTabID: tabID)
+        }
+    }
+
+    /// Registered runs are found by tab instead of through the tab's session. A superseded record
+    /// no longer owns the active slot and can outlive its session, but it still owns a provider,
+    /// an execution task, a waiter, and a launch-config lease that tab close must retire.
+    private func cancelWork(forClosingTabs tabIDs: Set<UUID>) -> [ContextBuilderRunRecord] {
+        var cancelledRecords: [ContextBuilderRunRecord] = []
+        for tabID in tabIDs {
+            if let session = sessions[tabID] {
+                cancelUnregisteredWork(for: session)
+            }
             for record in runRegistry.records(tabID: tabID) where !record.isTerminal {
                 debugLog("handleComposeTabsWillClose: cancelling run \(record.runID) for tab \(tabID)")
                 cancelRun(
                     record,
                     waiterResolution: record.origin.isMCP ? .cancellationError : .snapshot,
+                    deferredWaiterResolution: .snapshot,
                     saveHistory: false
                 )
+                cancelledRecords.append(record)
             }
-
-            // 4. Remove session and tracking state
-            sessions.removeValue(forKey: tabID)
-            tabsWithActiveContextBuilderRun.remove(tabID)
-            publishOperationTokenHold(forTabID: tabID)
-
-            // 6. If this was the current tab, bindings will be updated by the tab-change observer
         }
+        return cancelledRecords
     }
 
     /// Load agent/model defaults from the effective Agent Models profile.
@@ -2118,7 +2262,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         progressReporter: ContextBuilderMCPProgressReporter? = nil,
         activityReporter: ContextBuilderMCPActivityReporter? = nil
     ) async throws -> MCPContextBuilderRunCompletion {
-        guard !hasPreparedForWindowClose else { throw CancellationError() }
+        // A call cancelled while it was still preparing never goes on to register a run.
+        guard !hasPreparedForWindowClose, !Task.isCancelled else { throw CancellationError() }
         let configuration = authority.configuration
         let identity = configuration.identity
         let tabID = identity.tabID
@@ -2205,6 +2350,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                     continuation.resume(throwing: Self.tabBusyError)
                     return
                 }
+                // The run now exists, so in this same turn the call's cancellation passes from
+                // the claim's action to the run.
+                removePreparationCancellation(installedBy: mcpControlToken, from: session)
 
                 captureRunStartState(
                     for: session,
@@ -2527,7 +2675,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Superseded/stale records must not publish previews, mutate current tab state, or
     /// restore run-start configuration over a newer run. They still own provider/process
     /// resources, continuations, and possibly a registry record, so retirement must always
-    /// schedule teardown and resolve any waiter exactly once.
+    /// schedule teardown and resolve any waiter exactly once. A record that already committed
+    /// its final context hands its own waiter that exact receipt: the tab was written, whatever
+    /// became of the run afterwards.
     private func retireContextBuilderRunRecordWithoutPublishing(
         _ record: ContextBuilderRunRecord,
         waiterResolution: ContextBuilderRunWaiterResolution,
@@ -2553,8 +2703,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             modelRaw: record.modelRaw,
             terminalDisposition: .cancelled,
             agentOutput: record.output.fullOutput(),
-            usedAgentOutputAsPrompt: false,
-            committedTab: nil
+            usedAgentOutputAsPrompt: record.committedTabSnapshot?.usedAgentOutputAsPrompt ?? false,
+            committedTab: record.committedTabSnapshot
         )
 
         scheduleRunTeardown(
@@ -2625,8 +2775,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
     }
 
-    private func forceRunSettlementForAppTermination(_ record: ContextBuilderRunRecord) {
-        if let policy = record.consumeDeferredCancellationForAppTermination() {
+    private func forceRunSettlementForClose(_ record: ContextBuilderRunRecord) {
+        if let policy = record.consumeDeferredCancellationForClose() {
             retireContextBuilderRunRecordWithoutPublishing(
                 record,
                 waiterResolution: policy.waiterResolution,
@@ -2637,8 +2787,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             return
         }
         guard record.isTeardownPending else { return }
-        record.stopAwaitingExecutionTaskForAppTermination()
-        record.stopAwaitingProviderStartForAppTermination()
+        record.stopAwaitingExecutionTaskForClose()
+        record.stopAwaitingProviderStartForClose()
     }
 
     /// If the main prompt area is empty but we have agent output,
@@ -3635,13 +3785,28 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Retains the exact committed tab snapshot on the owning run record and, in DEBUG, notifies
     /// the test capture hook at the precise commit seam. Both the synthetic-routing and real
     /// final-context commits route through here so the observable commit provenance is identical
-    /// across paths. Returns false without notifying when retention fails.
+    /// across paths. It is synchronous so that the real commit can retain its receipt in the turn
+    /// that writes the tab. Returns false without notifying when retention fails.
     private func retainCommittedTabSnapshot(
         _ snapshot: MCPServerViewModel.ContextBuilderCommittedTabSnapshot,
         on record: ContextBuilderRunRecord
-    ) async -> Bool {
-        guard record.installCommittedTabSnapshot(snapshot) else {
-            #if DEBUG
+    ) -> Bool {
+        guard record.installCommittedTabSnapshot(snapshot) else { return false }
+        #if DEBUG
+            runTestHooks?.committedTabSnapshotCaptured?(record.runID, snapshot)
+        #endif
+        return true
+    }
+
+    /// DEBUG diagnostics for a snapshot the record refused, and the test seam that follows one it
+    /// retained.
+    private func noteCommittedTabSnapshotRetention(
+        _ snapshot: MCPServerViewModel.ContextBuilderCommittedTabSnapshot,
+        on record: ContextBuilderRunRecord,
+        retained: Bool
+    ) async {
+        #if DEBUG
+            guard retained else {
                 let recordWorkspaceName = workspaceManager?.workspaces.first(where: {
                     $0.composeTabs.contains(where: { $0.id == record.tabID })
                 })?.name ?? "unknown"
@@ -3661,14 +3826,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                         "already_installed": String(record.committedTabSnapshot != nil)
                     ]
                 )
-            #endif
-            return false
-        }
-        #if DEBUG
-            runTestHooks?.committedTabSnapshotCaptured?(record.runID, snapshot)
+                return
+            }
             await runTestHooks?.afterCommittedTabSnapshotCaptured?(record.runID, snapshot)
         #endif
-        return true
     }
 
     private func commitTabContextForAgent(
@@ -3744,7 +3905,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                         ),
                         usedAgentOutputAsPrompt: usedAgentOutputAsPrompt
                     )
-                    guard await retainCommittedTabSnapshot(snapshot, on: record) else {
+                    let retained = retainCommittedTabSnapshot(snapshot, on: record)
+                    await noteCommittedTabSnapshotRetention(snapshot, on: record, retained: retained)
+                    guard retained else {
                         return MCPServerViewModel.ContextBuilderTabContextCommitResult(
                             outcome: .failed("Context Builder could not retain its committed tab snapshot."),
                             committedTab: nil
@@ -3898,13 +4061,20 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                     )
                     return false
                 }
+                var retainedReceipt = false
                 let result = await mcpServer.commitContextBuilderTabContext(
                     connectionID: cid,
                     expectedRunID: runID,
-                    isStillCurrent: { [weak self, weak record] in
-                        guard let self, let record else { return false }
-                        return acceptsEvents(from: record)
-                    },
+                    authority: MCPServerViewModel.ContextBuilderCommitAuthority(
+                        ownsCommit: { [weak self, weak record] in
+                            guard let self, let record else { return false }
+                            return acceptsEvents(from: record)
+                        },
+                        didWriteTab: { [weak self, weak record] committedTab in
+                            guard let self, let record else { return }
+                            retainedReceipt = retainCommittedTabSnapshot(committedTab, on: record)
+                        }
+                    ),
                     progressReporter: record.progressReporter,
                     deferRunMappingCleanupUntilCaller: true,
                     promptFallback: record.session.lastAgentOutput
@@ -3918,14 +4088,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                         fields: ["outcome": String(describing: result.outcome)]
                     )
                 #endif
-                guard result.outcome == .committed,
-                      let committedTab = result.committedTab,
-                      await retainCommittedTabSnapshot(committedTab, on: record)
-                else { return false }
+                guard result.outcome == .committed, let committedTab = result.committedTab else { return false }
+                await noteCommittedTabSnapshotRetention(committedTab, on: record, retained: retainedReceipt)
+                // A run that lost its tab while the commit finished keeps its receipt and
+                // publishes nothing more into the tab's session.
+                guard retainedReceipt, acceptsEvents(from: record) else { return false }
                 record.session.usedAgentOutputAsPrompt = committedTab.usedAgentOutputAsPrompt
-                return !record.hasDeferredCancellationPending
-                    && activeAgentRuns.contains(runID)
-                    && acceptsEvents(from: record)
+                return !record.hasDeferredCancellationPending && activeAgentRuns.contains(runID)
             },
             beforeTerminationRequest: {
                 await record.reportProgress(.childConnectionTermination)
@@ -4646,6 +4815,14 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         )
     }
 
+    /// Whether the user may start a follow-up for the tab by hand. While another operation claims
+    /// the tab, the tab's follow-up state is that operation's to write. The follow-up a run
+    /// starts for itself runs under the run's own claim and does not ask.
+    @MainActor
+    func admitsManualFollowUp(forTabID tabID: UUID) -> Bool {
+        !tabsHeldAgainstNewRun.contains(tabID)
+    }
+
     /// Start background plan/review/question generation (headless mode).
     /// Called when auto-generate is triggered after Context Builder completes.
     /// Note: Only cancels any existing plan generation for THIS tab, not other tabs.
@@ -4814,7 +4991,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         ) {
         case .claimed:
             break
-        case .windowClosing:
+        case .windowClosing, .tabUnavailable:
             throw CancellationError()
         case .tabBusy:
             throw Self.tabBusyError
@@ -4844,13 +5021,73 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
     }
 
-    /// Releases the tab's MCP claim when the caller still owns it. A run's execution task ends
-    /// by clearing its routing policy, so joining it first means no child of that run can still
-    /// be routed into the tab once a successor is admitted.
+    /// Runs an admitted MCP call as one piece of work and, until that call's run is registered,
+    /// gives the tab's claim an action that cancels it. No run exists before registration, so
+    /// nothing else could reach a call suspended in its preparation; from registration on the
+    /// call is cancelled through its run and the action is gone.
+    ///
+    /// The work runs in a task of its own so that it can be cancelled without cancelling the
+    /// request. That task inherits the request's task-local context, and the request's own
+    /// cancellation is passed on to it. Cancelling signals the step the work is suspended in. A
+    /// step that does not respond still runs until it returns, and only then does the work
+    /// unwind and the call's cleanup scope, which is what releases the claim, run.
+    @MainActor
+    func performAdmittedMCPCall<Reply>(
+        forTabID tabID: UUID,
+        controlToken: UUID,
+        _ call: @escaping @MainActor () async throws -> Reply
+    ) async throws -> Reply {
+        try requireMCPControlOwnership(forTabID: tabID, controlToken: controlToken)
+        let outcome = MCPCallOutcome<Reply>()
+        let work = Task { @MainActor in
+            do {
+                outcome.result = try await .success(call())
+            } catch {
+                outcome.result = .failure(error)
+            }
+        }
+        sessions[tabID]?.preparationCancellation = TabSession.PreparationCancellation(tokenID: controlToken) {
+            work.cancel()
+        }
+        await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            work.cancel()
+        }
+        guard let result = outcome.result else { throw CancellationError() }
+        // A cancelled call reports its cancellation, whichever error the step it was suspended in
+        // went on to surface.
+        if work.isCancelled, case .failure = result { throw CancellationError() }
+        return try result.get()
+    }
+
+    /// Asks the MCP call that claimed the tab with `controlToken` to stop its preparation work.
+    /// Does nothing unless that claim still holds the tab and installed the action: a claim that
+    /// was released or replaced cannot stop its successor's work.
+    @MainActor
+    func cancelMCPPreparation(forTabID tabID: UUID, controlToken: UUID) {
+        guard let session = sessions[tabID],
+              session.operationToken?.id == controlToken,
+              let action = session.preparationCancellation,
+              action.tokenID == controlToken
+        else { return }
+        action.cancel()
+    }
+
+    /// Releases the tab's MCP claim when the caller still owns it, once execution has settled for
+    /// the run the claim started. Execution settles when the run's task has ended, and the task
+    /// ends by clearing the run's routing policy, so no child of that run can then be routed
+    /// into the tab a successor is admitted to. Tab close, window close, and app termination also
+    /// settle it when their grace expires with the task still running. Then only this wait ends;
+    /// the task does not. The claim refuses a successor while the tab is closing, once the tab
+    /// has been removed, and in a closing window. A tab restored after its close has finished can
+    /// be claimed while that task is still running. The guarded view-model updates check the
+    /// session and the claim they captured before publishing; those checks do not cover writes
+    /// inside an Oracle operation already in progress.
     @MainActor
     func clearMCPControlledRun(forTabID tabID: UUID, controlToken: UUID) async {
         for record in runRegistry.retainedRecordsSnapshot() where record.origin == .mcp(controlToken: controlToken) {
-            await record.executionTask?.value
+            await record.awaitExecutionSettlement()
         }
         guard let session = sessions[tabID], releaseOperationToken(controlToken, from: session) else { return }
         session.mcpPlanningModelRaw = nil
@@ -4992,6 +5229,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         originWorkspaceID: UUID,
         modeName: String,
         session: TabSession,
+        ownerStillOwns: @MainActor () -> Bool = { true },
         timeoutSessionSaver: (@MainActor (ChatSession) async throws -> URL)? = nil
     ) async throws -> ChatSendReply {
         let responseText: String
@@ -5011,7 +5249,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             )
             try Task.checkCancellation()
             guard session.isBackgroundPlanGenerating,
-                  session.followUpOracleSessionID == oracleSession.id
+                  session.followUpOracleSessionID == oracleSession.id,
+                  ownerStillOwns()
             else {
                 throw CancellationError()
             }
@@ -5045,6 +5284,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     /// Unified follow-up generator that always streams in a real chat session.
     /// Used by both MCP-triggered follow-ups and UI auto-generate follow-ups.
+    ///
+    /// An MCP follow-up passes `owner`: the session it captured and its ownership check, which
+    /// guard the view-model updates in this function. A UI follow-up passes none: it takes the
+    /// tab's session, and its `followUpID` is what scopes it.
     @MainActor
     private func runFollowUpOracleStream(
         for tabID: UUID,
@@ -5062,16 +5305,22 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         model: AIModel,
         chatPresetID: UUID?,
         followUpID: UUID? = nil,
+        owner: (session: TabSession, stillOwns: @MainActor () -> Bool)? = nil,
         mcpSessionUIState: OracleViewModel.MCPSessionUIState? = nil,
         gitScopeOverride: GitInclusion? = nil,
         onProgress: ((_ text: String, _ reasoning: String?) -> Void)? = nil,
         progressReporter: ContextBuilderMCPProgressReporter? = nil,
         activityReporter: ContextBuilderMCPActivityReporter? = nil
     ) async throws -> ChatSendReply {
-        let session = session(for: tabID)
-        // Every write below is to state a replacement follow-up owns once it has launched, so a
-        // replaced follow-up stops at its next step instead of resetting or publishing over it.
-        guard session.ownsFollowUpState(followUpID) else {
+        let session = owner?.session ?? session(for: tabID)
+        let ownerStillOwns: @MainActor () -> Bool = { owner?.stillOwns() ?? true }
+        /// Every write below is to state a replacement follow-up owns once it has launched, so a
+        /// replaced follow-up stops at its next step instead of resetting or publishing over it.
+        /// An MCP follow-up stops the same way once its owner has lost the session.
+        func ownsFollowUpState() -> Bool {
+            session.ownsFollowUpState(followUpID) && ownerStillOwns()
+        }
+        guard ownsFollowUpState() else {
             throw CancellationError()
         }
 
@@ -5097,7 +5346,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         var startedQueryID: UUID?
         do {
             try Task.checkCancellation()
-            guard session.isBackgroundPlanGenerating, session.ownsFollowUpState(followUpID) else {
+            guard session.isBackgroundPlanGenerating, ownsFollowUpState() else {
                 throw CancellationError()
             }
 
@@ -5117,11 +5366,14 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             )
 
             try Task.checkCancellation()
-            guard session.isBackgroundPlanGenerating, session.ownsFollowUpState(followUpID) else {
+            guard session.isBackgroundPlanGenerating, ownsFollowUpState() else {
                 throw CancellationError()
             }
 
             await progressReporter?(.sessionCreationAndPersist)
+            guard session.isBackgroundPlanGenerating, ownsFollowUpState() else {
+                throw CancellationError()
+            }
             let createdSession = try await oracleViewModel.createSession(
                 named: chatName,
                 tabID: tabID,
@@ -5131,9 +5383,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 agentModeRunID: agentModeRunID
             )
             createdSessionID = createdSession.id
+            guard ownerStillOwns() else { throw CancellationError() }
             oracleViewModel.pinSession(createdSession.id)
             defer { oracleViewModel.unpinSession(createdSession.id) }
-            guard session.ownsFollowUpState(followUpID) else {
+            guard ownsFollowUpState() else {
                 throw CancellationError()
             }
             session.followUpOracleSessionID = createdSession.id
@@ -5145,7 +5398,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             updateRuntimeBindings(from: session)
 
             try Task.checkCancellation()
-            guard session.isBackgroundPlanGenerating, session.ownsFollowUpState(followUpID) else {
+            guard session.isBackgroundPlanGenerating, ownsFollowUpState() else {
                 throw CancellationError()
             }
 
@@ -5156,11 +5409,14 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             }
 
             try Task.checkCancellation()
-            guard session.isBackgroundPlanGenerating, session.ownsFollowUpState(followUpID) else {
+            guard session.isBackgroundPlanGenerating, ownsFollowUpState() else {
                 throw CancellationError()
             }
 
             await progressReporter?(.messageSend)
+            guard session.isBackgroundPlanGenerating, ownsFollowUpState() else {
+                throw CancellationError()
+            }
             guard let queryId = await oracleViewModel.sendMessage(
                 prompt,
                 sessionID: createdSession.id,
@@ -5174,6 +5430,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 completionPolicy: .contextBuilderStrict,
                 onProgress: { [weak self] text, reasoning in
                     guard let self,
+                          ownerStillOwns(),
                           let session = sessions[tabID],
                           session.isBackgroundPlanGenerating,
                           session.ownsFollowUpState(followUpID) else { return }
@@ -5188,7 +5445,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             }
 
             startedQueryID = queryId
-            guard session.isBackgroundPlanGenerating, session.ownsFollowUpState(followUpID) else {
+            guard session.isBackgroundPlanGenerating, ownsFollowUpState() else {
                 throw CancellationError()
             }
             await progressReporter?(.activeQueryAcquisition)
@@ -5201,7 +5458,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 progressReporter: progressReporter,
                 activityReporter: activityReporter
             )
-            guard session.isBackgroundPlanGenerating, session.ownsFollowUpState(followUpID) else {
+            guard session.isBackgroundPlanGenerating, ownsFollowUpState() else {
                 throw CancellationError()
             }
 
@@ -5212,7 +5469,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 oracleSession: createdSession,
                 originWorkspaceID: originWorkspaceID,
                 modeName: modeName,
-                session: session
+                session: session,
+                ownerStillOwns: ownerStillOwns
             )
         } catch {
             if let createdSessionID {
@@ -5225,6 +5483,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 }
             }
 
+            // An MCP follow-up that has lost its session ends as cancelled, whatever it failed with.
+            guard ownerStillOwns() else { throw CancellationError() }
             guard session.ownsFollowUpState(followUpID) else {
                 throw error
             }
@@ -5285,6 +5545,24 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             throw ContextBuilderGenerationError.missingWorkspace
         }
 
+        // What this follow-up owns is fixed here, before its first suspension: the tab's session,
+        // the claim that session holds (none, for a follow-up run outside a claim), and the
+        // planning model chosen under it. During any later suspension the tab can close, and be
+        // restored under the same ID with a different session or claim, so finding a session for
+        // the tab afterwards establishes nothing. The guarded view-model updates below require
+        // this session and claim to still be the tab's, and Context Builder not to have prepared
+        // for window close. Those checks do not cover writes inside an Oracle operation already
+        // in progress.
+        guard !hasPreparedForWindowClose, let session = sessions[tabID] else {
+            throw CancellationError()
+        }
+        let claimID = session.operationToken?.id
+        let planningModelRawOverride = session.mcpPlanningModelRaw
+        let ownsSession: @MainActor () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return isPresentSession(session) && session.operationToken?.id == claimID
+        }
+
         let modeName = mode.mcpModeName
         await progressReporter?(.modelResolution)
         let modelSelection: (
@@ -5299,16 +5577,17 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 modelSelection = try await oracleViewModel.resolveMCPFollowUpModel(
                     mode: modeName,
                     workspaceID: identity.workspaceID,
-                    planningModelRawOverride: sessions[tabID]?.mcpPlanningModelRaw
+                    planningModelRawOverride: planningModelRawOverride
                 )
             }
         #else
             modelSelection = try await oracleViewModel.resolveMCPFollowUpModel(
                 mode: modeName,
                 workspaceID: identity.workspaceID,
-                planningModelRawOverride: sessions[tabID]?.mcpPlanningModelRaw
+                planningModelRawOverride: planningModelRawOverride
             )
         #endif
+        guard ownsSession() else { throw CancellationError() }
         let mcpSessionUIState: OracleViewModel.MCPSessionUIState? = {
             guard let mcpModelInfo = modelSelection.mcpControlInfo else { return nil }
             let overrideChatPresetName = modelSelection.chatPresetID
@@ -5321,7 +5600,6 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }()
 
         if workspaceManager?.activeWorkspaceID != identity.workspaceID {
-            let session = session(for: tabID)
             session.generatedAnswerRoute = nil
             session.isBackgroundPlanGenerating = true
             session.backgroundPlanError = nil
@@ -5345,12 +5623,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                     agentModeSessionID: agentModeSessionID,
                     agentModeRunID: agentModeRunID,
                     completionPolicy: .contextBuilderStrict,
-                    onProgress: { [weak self] text, reasoning in
-                        guard let self, let session = sessions[tabID], session.isBackgroundPlanGenerating else { return }
+                    onProgress: { text, reasoning in
+                        guard ownsSession(), session.isBackgroundPlanGenerating else { return }
                         session.backgroundPlanResponseText = text
                         session.backgroundPlanReasoningText = reasoning
                     }
                 )
+                guard ownsSession() else { throw CancellationError() }
                 session.isBackgroundPlanGenerating = false
                 session.generatedAnswerRoute = ContextBuilderGeneratedAnswerRoute(
                     workspaceID: identity.workspaceID,
@@ -5362,6 +5641,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 updateRuntimeBindings(from: session)
                 return reply
             } catch {
+                guard ownsSession() else { throw CancellationError() }
                 session.isBackgroundPlanGenerating = false
                 session.backgroundPlanError = error is CancellationError ? nil : error.asFriendlyString()
                 session.backgroundPlanResponseText = nil
@@ -5387,6 +5667,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             chatName: chatNameForTab(tabID),
             model: modelSelection.model,
             chatPresetID: modelSelection.chatPresetID,
+            owner: (session, ownsSession),
             mcpSessionUIState: mcpSessionUIState,
             gitScopeOverride: gitScopeOverride,
             progressReporter: progressReporter,

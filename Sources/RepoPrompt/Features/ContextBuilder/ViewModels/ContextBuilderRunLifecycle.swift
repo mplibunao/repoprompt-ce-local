@@ -392,6 +392,7 @@ final class ContextBuilderRunRecord {
     private var hasStoppedAwaitingProviderStart = false
     private(set) var executionTaskFinished = false
     private var teardownSettlementWaiters: [CheckedContinuation<Void, Never>] = []
+    private var executionSettlementWaiters: [CheckedContinuation<Void, Never>] = []
     private var didBeginProviderStreamProgress = false
     private var didReportRoutingConfirmed = false
     private var didObserveProviderEventAfterRouting = false
@@ -541,11 +542,11 @@ final class ContextBuilderRunRecord {
         consumeDeferredCancellation()
     }
 
-    /// App termination cannot wait indefinitely for a final-context operation that ignored
-    /// cancellation. The caller must synchronously revoke registry publication authority before
-    /// yielding again. Ordinary cancellation remains governed by
-    /// `consumeDeferredCancellationAtSafeBoundary()`.
-    func consumeDeferredCancellationForAppTermination() -> ContextBuilderRunCancellationSettlementPolicy? {
+    /// A closing tab, a closing window, and a terminating app cannot wait indefinitely for a
+    /// final-context operation that ignored cancellation. The caller must synchronously revoke
+    /// registry publication authority before yielding again. Ordinary cancellation remains
+    /// governed by `consumeDeferredCancellationAtSafeBoundary()`.
+    func consumeDeferredCancellationForClose() -> ContextBuilderRunCancellationSettlementPolicy? {
         consumeDeferredCancellation()
     }
 
@@ -637,21 +638,40 @@ final class ContextBuilderRunRecord {
     func markExecutionTaskFinished() {
         executionTaskFinished = true
         executionTask = nil
+        let waiters = executionSettlementWaiters
+        executionSettlementWaiters.removeAll()
+        waiters.forEach { $0.resume() }
         finishTeardownIfReady()
     }
 
-    /// Provider disposal remains the process-family and launch-config-lease authority during app
-    /// termination. Once its grace period expires, the app need not also wait for an outer run task
-    /// that ignored cancellation after the provider has independently begun teardown.
-    func stopAwaitingExecutionTaskForAppTermination() {
+    /// Waits until the run's execution has ended or its teardown has stopped waiting for it,
+    /// without waiting for the provider's disposal. Teardown is what ends this wait, and every
+    /// run that reaches a terminal state is given one.
+    func awaitExecutionSettlement() async {
+        if executionTaskFinished { return }
+        await withCheckedContinuation { continuation in
+            if executionTaskFinished {
+                continuation.resume()
+            } else {
+                executionSettlementWaiters.append(continuation)
+            }
+        }
+    }
+
+    /// Provider disposal remains the process-family and launch-config-lease authority while a tab
+    /// or window closes or the app terminates. Once the grace period expires, none of them need
+    /// also wait for an outer run task that ignored cancellation after the provider has
+    /// independently begun teardown.
+    func stopAwaitingExecutionTaskForClose() {
         markExecutionTaskFinished()
     }
 
-    /// App termination joins the provider's first disposal, which ends whatever the provider had
-    /// started by then. Once its grace period expires, the app need not also wait for a provider
-    /// start that ignores cancellation. The disposal that follows such a start has not happened
-    /// and is not reported as finished; teardown counts as settled without it.
-    func stopAwaitingProviderStartForAppTermination() {
+    /// A closing window and a terminating app join the provider's first disposal, which ends
+    /// whatever the provider had started by then. Once the grace period expires, they need not
+    /// also wait for a provider start that ignores cancellation. The disposal that follows such a
+    /// start has not happened and is not reported as finished; teardown counts as settled without
+    /// it.
+    func stopAwaitingProviderStartForClose() {
         hasStoppedAwaitingProviderStart = true
         finishTeardownIfReady()
     }

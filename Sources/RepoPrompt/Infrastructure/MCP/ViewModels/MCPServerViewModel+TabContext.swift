@@ -30,11 +30,27 @@ extension MCPServerViewModel {
         let committedTab: ContextBuilderCommittedTabSnapshot?
     }
 
+    /// The run a final-context commit acts for.
+    struct ContextBuilderCommitAuthority {
+        /// Whether the run still owns its tab. The commit asks at each of its steps, the last time
+        /// in the main-actor turn that writes the tab, so a run that lost the tab cannot write it.
+        let ownsCommit: @MainActor () -> Bool
+        /// Hands the run its receipt in the turn that writes the tab. From then on the tab has
+        /// changed, so the run holds what was written even when the rest of the commit is cut
+        /// short or cannot confirm what it wrote.
+        let didWriteTab: @MainActor (ContextBuilderCommittedTabSnapshot) -> Void
+    }
+
     private struct CommittedTabWrite {
         let identity: WorkspaceSelectionIdentity
+        /// The tab as read back from the store after the write.
         let tab: ComposeTabState
+        /// The tab's selection revision as read back after the write.
         let selectionRevision: UInt64
         let usedAgentOutputAsPrompt: Bool
+        /// Whether the stored tab holds the selection the commit meant to leave, at a revision no
+        /// older than the one the commit was based on.
+        let holdsIntendedSelection: Bool
     }
 
     enum ContextBuilderTabContextCommitOutcome: Equatable {
@@ -4555,11 +4571,12 @@ extension MCPServerViewModel {
     func commitContextBuilderTabContext(
         connectionID: UUID,
         expectedRunID: UUID,
-        isStillCurrent: @MainActor () -> Bool,
+        authority: ContextBuilderCommitAuthority,
         progressReporter: ContextBuilderMCPProgressReporter? = nil,
         deferRunMappingCleanupUntilCaller: Bool = false,
         promptFallback: String? = nil
     ) async -> ContextBuilderTabContextCommitResult {
+        let isStillCurrent = authority.ownsCommit
         guard isStillCurrent(), !Task.isCancelled else {
             discardDetachedContextBuilderTabContext(runID: expectedRunID)
             return ContextBuilderTabContextCommitResult(
@@ -4598,10 +4615,24 @@ extension MCPServerViewModel {
             tabContextByConnectionID[connectionID] = finalContext
         }
 
-        let committedWrite = await commitAndClearTabContextSnapshot(
+        var writtenTab: ContextBuilderCommittedTabSnapshot?
+        var writeHoldsIntendedSelection = false
+        _ = await commitAndClearTabContextSnapshot(
             connectionID: connectionID,
             expectedRunID: expectedRunID,
             isStillCurrent: isStillCurrent,
+            didWriteTab: { write in
+                let snapshot = ContextBuilderCommittedTabSnapshot(
+                    identity: write.identity,
+                    nestedRunID: expectedRunID,
+                    tab: write.tab,
+                    selectionRevision: write.selectionRevision,
+                    usedAgentOutputAsPrompt: write.usedAgentOutputAsPrompt
+                )
+                writtenTab = snapshot
+                writeHoldsIntendedSelection = write.holdsIntendedSelection
+                authority.didWriteTab(snapshot)
+            },
             progressReporter: progressReporter,
             deferRunMappingCleanupUntilCaller: deferRunMappingCleanupUntilCaller,
             readFileAutoSelectionAlreadyFinished: alreadyFinishedAutoSelection
@@ -4614,17 +4645,18 @@ extension MCPServerViewModel {
             detachedContextBuilderTabContextByRunID.removeValue(forKey: expectedRunID)
         }
 
-        if let committedWrite {
-            let committedTab = ContextBuilderCommittedTabSnapshot(
-                identity: committedWrite.identity,
-                nestedRunID: expectedRunID,
-                tab: committedWrite.tab,
-                selectionRevision: committedWrite.selectionRevision,
-                usedAgentOutputAsPrompt: committedWrite.usedAgentOutputAsPrompt
-            )
+        // The tab was written, so the commit is reported with its receipt even when the run lost
+        // the tab before the rest of the commit finished. A write that left something other than
+        // the run's selection is a failure, and its receipt still says what the tab now holds.
+        if let writtenTab {
             return ContextBuilderTabContextCommitResult(
-                outcome: .committed,
-                committedTab: committedTab
+                outcome: writeHoldsIntendedSelection
+                    ? .committed
+                    : .failed(
+                        "Context Builder wrote the tab for run \(expectedRunID.uuidString) but could not " +
+                            "confirm that it holds the run's final selection."
+                    ),
+                committedTab: writtenTab
             )
         }
         if !isStillCurrent() || Task.isCancelled {
@@ -4664,6 +4696,7 @@ extension MCPServerViewModel {
         connectionID: UUID,
         expectedRunID: UUID? = nil,
         isStillCurrent: @MainActor () -> Bool = { true },
+        didWriteTab: (@MainActor (CommittedTabWrite) -> Void)? = nil,
         progressReporter: ContextBuilderMCPProgressReporter? = nil,
         deferRunMappingCleanupUntilCaller: Bool = false,
         readFileAutoSelectionAlreadyFinished: Bool = false
@@ -4724,7 +4757,8 @@ extension MCPServerViewModel {
         await progressReporter?(.tabContextCommit)
         guard let committedTab = await commitTabContext(
             commitOwnedContext,
-            isStillCurrent: isStillCurrent
+            isStillCurrent: isStillCurrent,
+            didWriteTab: didWriteTab
         ), isStillCurrent(), !Task.isCancelled else { return nil }
 
         if !committedTab.tab.name.isEmpty {
@@ -4878,7 +4912,8 @@ extension MCPServerViewModel {
     @MainActor
     private func commitTabContext(
         _ context: TabContextSnapshot,
-        isStillCurrent: @MainActor () -> Bool = { true }
+        isStillCurrent: @MainActor () -> Bool = { true },
+        didWriteTab: (@MainActor (CommittedTabWrite) -> Void)? = nil
     ) async -> CommittedTabWrite? {
         guard isStillCurrent(), !Task.isCancelled else { return nil }
         guard let manager = workspaceManager else {
@@ -4927,24 +4962,30 @@ extension MCPServerViewModel {
         guard isStillCurrent(), !Task.isCancelled else { return nil }
         guard manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspaceID) else { return nil }
         let identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: context.tabID)
-        guard let storedTab = manager.composeTab(for: identity),
-              storedTab.selection == updatedTab.selection
-        else { return nil }
-        selectionCoordinator?.protectCanonicalMCPSelectionFromDeferredUISnapshots(
-            storedTab.selection,
-            for: identity
-        )
+        guard let storedTab = manager.composeTab(for: identity) else { return nil }
         let committedSelectionRevision = manager.selectionRevisionForMCP(
             workspaceID: identity.workspaceID,
             tabID: identity.tabID
         )
-        guard committedSelectionRevision >= context.selectionRevision else { return nil }
+        let storedSelectionIsIntended = storedTab.selection == updatedTab.selection
+        let storedRevisionIsCurrent = committedSelectionRevision >= context.selectionRevision
         let committedTab = CommittedTabWrite(
             identity: identity,
             tab: storedTab,
             selectionRevision: committedSelectionRevision,
-            usedAgentOutputAsPrompt: context.usedAgentOutputAsPrompt
+            usedAgentOutputAsPrompt: context.usedAgentOutputAsPrompt,
+            holdsIntendedSelection: storedSelectionIsIntended && storedRevisionIsCurrent
         )
+        // Nothing has suspended since the ownership check above, so the write and this report of
+        // it share one main-actor turn. The report precedes the two rejections below: the tab has
+        // changed whichever way they go, and the run must hold exactly what is now stored.
+        didWriteTab?(committedTab)
+        guard storedSelectionIsIntended else { return nil }
+        selectionCoordinator?.protectCanonicalMCPSelectionFromDeferredUISnapshots(
+            storedTab.selection,
+            for: identity
+        )
+        guard storedRevisionIsCurrent else { return nil }
         tabContextLog("commitTabContext stored selection/prompt tab=\(context.tabID) window=\(context.windowID) runID=\(context.runID?.uuidString ?? "nil") workspaceID=\(workspaceID)")
 
         // 2) Apply to live UI ONLY if this tab is the active tab and the run still owns commit.

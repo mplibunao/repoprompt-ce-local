@@ -236,7 +236,8 @@ import XCTest
         @discardableResult
         func startMCPRun(
             on slot: TabSlot,
-            modelParameterSelections: [ACPModelParameterSelection] = []
+            modelParameterSelections: [ACPModelParameterSelection] = [],
+            progressReporter: ContextBuilderMCPProgressReporter? = nil
         ) -> MCPRun {
             let run = MCPRun(slot: slot)
             mcpRuns.append(run)
@@ -253,13 +254,90 @@ import XCTest
                     run.result = try await .success(AsyncScope.withCleanup({}, cleanup: {
                         await viewModel.clearMCPControlledRun(forTabID: slot.tabID, controlToken: token)
                     }) {
-                        try await viewModel.runContextBuilderForMCP(authority: authority, mcpControlToken: token)
+                        try await viewModel.runContextBuilderForMCP(
+                            authority: authority,
+                            mcpControlToken: token,
+                            progressReporter: progressReporter
+                        )
                     })
                 } catch {
                     run.result = .failure(error)
                 }
             }
             return run
+        }
+
+        // MARK: Calling the tool
+
+        /// Starts the window's MCP server, so that caller connections can reach its tools.
+        func startWindowServer() async {
+            await window.mcpServer.startServer()
+            XCTAssertTrue(window.mcpServer.windowToolsEnabled)
+            await manager.setEnabled(true)
+        }
+
+        /// An external client connection, admitted for protected calls as this process.
+        func connectCaller(_ label: String, cleanup: FixtureCleanup) async throws -> PersistentMCPTestEndpoint {
+            let manager = manager
+            let server = window.mcpServer
+            let caller = try await PersistentMCPTestEndpoint.make(
+                label: label,
+                networkManager: manager,
+                clientName: "context-builder-caller-\(label)-\(UUID().uuidString)",
+                requiredToolNames: [MCPWindowToolName.contextBuilder, MCPWindowToolName.readFile, "bind_context"]
+            )
+            cleanup.add {
+                await manager.debugSetDomainPeerIdentityForTesting(connectionID: caller.connectionID, identity: nil)
+                caller.client.close()
+                await caller.connectionManager.stop()
+                await manager.debugRemoveConnection(caller.connectionID)
+                await manager.clearClientConnectionPolicy(for: caller.clientName)
+                await manager.debugClearPersistedRoutingState(for: caller.clientName)
+                server.removeTabContext(
+                    forConnectionID: caller.connectionID,
+                    clientName: caller.clientName,
+                    windowID: nil,
+                    runID: nil
+                )
+            }
+            await manager.debugSetDomainPeerIdentityForTesting(
+                connectionID: caller.connectionID,
+                identity: .verified(
+                    processID: Int(getpid()),
+                    fingerprint: "test:verified:context-builder-caller"
+                )
+            )
+            return caller
+        }
+
+        /// Makes a completed UI run start its automatic follow-up.
+        func enableAutomaticFollowUp(cleanup: FixtureCleanup) {
+            let store = GlobalSettingsStore.shared
+            let previous = store.contextBuilderBehaviorSettings()
+            cleanup.add { store.setContextBuilderBehaviorSettings(previous, commit: false) }
+            var settings = previous
+            settings.followUpAnalysisEnabled = true
+            store.setContextBuilderBehaviorSettings(settings, commit: false)
+        }
+
+        /// Lets the `context_builder` tool resolve a run's agent and model in this window
+        /// whatever providers the machine has: Cursor is reported connected and verified, which
+        /// makes a selection available without running provider validation.
+        func makeRunAuthorityResolvable(cleanup: FixtureCleanup) {
+            let settings = window.apiSettingsViewModel
+            let wasConnected = settings.isCursorConnected
+            let wasComplete = settings.isContextBuilderProviderValidationComplete
+            let verifiedProviders = settings.contextBuilderVerifiedCLIProviders
+            cleanup.add {
+                settings.isCursorConnected = wasConnected
+                if wasComplete {
+                    settings.test_completeContextBuilderProviderValidation(verifiedProviders: verifiedProviders)
+                } else {
+                    settings.test_resetContextBuilderProviderValidation()
+                }
+            }
+            settings.isCursorConnected = true
+            settings.test_completeContextBuilderProviderValidation(verifiedProviders: [.cursor])
         }
 
         /// Shows `slot` and presses Run, as the Context Builder panel does. Returns the run the
@@ -299,6 +377,11 @@ import XCTest
 
         func storedTab(_ slot: TabSlot) -> ComposeTabState? {
             window.workspaceManager.composeTab(for: identity(of: slot))
+        }
+
+        /// The tabs the fixture's workspace holds, in order.
+        var storedTabIDs: [UUID] {
+            window.workspaceManager.workspaces.first { $0.id == workspaceID }?.composeTabs.map(\.id) ?? []
         }
 
         func slot(forRunID runID: UUID) throws -> TabSlot {

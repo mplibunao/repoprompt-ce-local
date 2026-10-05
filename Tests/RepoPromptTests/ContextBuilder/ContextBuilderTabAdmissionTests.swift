@@ -293,7 +293,7 @@ import XCTest
         func testUIRunKeepsAutomaticFollowUpAndUIIdentity() async throws {
             try await ContextBuilderRunFixture.withFixture(tabNames: ["settles", "fails", "cancelled", "unprompted"]) { fixture, cleanup in
                 let viewModel = fixture.viewModel
-                Self.enableAutomaticFollowUp(cleanup: cleanup)
+                fixture.enableAutomaticFollowUp(cleanup: cleanup)
                 let followUps = Self.holdUIFollowUps(on: fixture, cleanup: cleanup)
 
                 let settles = fixture.slots[0]
@@ -373,7 +373,7 @@ import XCTest
             try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
                 let viewModel = fixture.viewModel
                 let slot = fixture.slots[0]
-                Self.enableAutomaticFollowUp(cleanup: cleanup)
+                fixture.enableAutomaticFollowUp(cleanup: cleanup)
                 let followUps = Self.holdUIFollowUps(on: fixture, cleanup: cleanup)
 
                 var pressed = await fixture.pressRun(on: slot)
@@ -423,7 +423,7 @@ import XCTest
             try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
                 let viewModel = fixture.viewModel
                 let slot = fixture.slots[0]
-                Self.enableAutomaticFollowUp(cleanup: cleanup)
+                fixture.enableAutomaticFollowUp(cleanup: cleanup)
                 let cancelled = Self.holdUIFollowUpThroughItsCancellation(on: fixture, cleanup: cleanup)
 
                 let pressed = await fixture.pressRun(on: slot)
@@ -698,6 +698,32 @@ import XCTest
             }
         }
 
+        /// A follow-up started by hand is not admitted to a tab that another operation holds. No
+        /// run is registered for such a tab and no follow-up is generating on it, which is all
+        /// the Generate Plan control would otherwise look at.
+        func testManualFollowUpIsNotAdmittedWhileAnotherOperationHoldsTheTab() async throws {
+            try await ContextBuilderRunFixture.withFixture { fixture, _ in
+                let viewModel = fixture.viewModel
+                let held = fixture.slots[0]
+                let free = fixture.slots[1]
+                XCTAssertTrue(viewModel.admitsManualFollowUp(forTabID: held.tabID))
+
+                let token = try viewModel.beginMCPControlledRun(
+                    forTabID: held.tabID,
+                    workspaceID: fixture.workspaceID,
+                    responseType: nil,
+                    planModelName: nil
+                )
+                XCTAssertEqual(viewModel.tabsWithActiveContextBuilderRun, [])
+                XCTAssertEqual(fixture.session(held)?.isBackgroundPlanGenerating, false)
+                XCTAssertFalse(viewModel.admitsManualFollowUp(forTabID: held.tabID))
+                XCTAssertTrue(viewModel.admitsManualFollowUp(forTabID: free.tabID))
+
+                await viewModel.clearMCPControlledRun(forTabID: held.tabID, controlToken: token)
+                XCTAssertTrue(viewModel.admitsManualFollowUp(forTabID: held.tabID))
+            }
+        }
+
         /// Once the window has begun closing, neither entry claims a tab or leaves anything behind.
         func testClaimRefusesWhileWindowIsClosing() async throws {
             try await ContextBuilderRunFixture.withFixture { fixture, _ in
@@ -728,9 +754,306 @@ import XCTest
             }
         }
 
+        /// While a close of several tabs waits for a run that has claimed its final-context commit,
+        /// nothing is admitted to any tab in that close. A tab the workspace no longer holds is
+        /// refused for that reason alone. A stashed tab restored before the wait ends is stored and
+        /// visible again, and is still refused to both entries until the close has removed its
+        /// session. A run on a tab outside the close is untouched throughout.
+        func testTabsBeingClosedAdmitNothingWhileTheirCloseWaitsOnACommit() async throws {
+            try await ContextBuilderRunFixture.withFixture(
+                tabNames: ["visible", "committing", "idle", "other"]
+            ) { fixture, cleanup in
+                let viewModel = fixture.viewModel
+                let promptManager = fixture.window.promptManager
+                let committing = fixture.slots[1]
+                let idle = fixture.slots[2]
+                let other = fixture.slots[3]
+                let afterWrite = ContextBuilderTestGate()
+                cleanup.add { viewModel.installRunTestHooks(nil) }
+                // The close waits on the commit for as long as the gate holds it, not on a grace.
+                cleanup.add { viewModel.setCloseSettlementGraceForTesting(500_000_000) }
+                viewModel.setCloseSettlementGraceForTesting(600 * NSEC_PER_SEC)
+                fixture.releaseOnSettle { await afterWrite.open() }
+                viewModel.installRunTestHooks(.init(
+                    beforeProcessingProviderEvent: nil,
+                    providerEventDisposition: nil,
+                    teardownCompleted: nil,
+                    afterCommittedTabSnapshotCaptured: { _, receipt in
+                        if receipt.identity.tabID == committing.tabID {
+                            await afterWrite.wait()
+                        }
+                    }
+                ))
+
+                let committingRun = fixture.startMCPRun(on: committing)
+                try await fixture.waitFor("the committing tab's run to have written its tab") {
+                    await afterWrite.entered
+                }
+                let committingRunID = try XCTUnwrap(fixture.activeRunID(committing))
+                let committingToken = try XCTUnwrap(fixture.operationToken(committing))
+
+                fixture.holdsChildConnections = true
+                let otherRun = fixture.startMCPRun(on: other)
+                try await fixture.waitFor("the other tab's provider to be ready to connect") {
+                    fixture.child(forRunID: fixture.activeRunID(other))?.registeredProviderPID != nil
+                }
+                let otherRunID = try XCTUnwrap(fixture.activeRunID(other))
+                let otherChild = try XCTUnwrap(fixture.child(forRunID: otherRunID))
+                let otherSession = try XCTUnwrap(fixture.session(other))
+                let otherToken = try XCTUnwrap(fixture.operationToken(other))
+
+                let close = CloseObservation()
+                Task { @MainActor in
+                    _ = await promptManager.stashComposeTabs(withIDs: [committing.tabID, idle.tabID])
+                    close.returned = true
+                }
+                try await fixture.waitFor("the close to be waiting on the commit") {
+                    fixture.session(committing)?.isCancelling == true
+                }
+                XCTAssertFalse(close.returned)
+                XCTAssertNil(fixture.storedTab(committing))
+                XCTAssertNil(fixture.storedTab(idle))
+                XCTAssertNil(viewModel.sessions[idle.tabID])
+
+                // Neither tab is in the workspace any more.
+                let sessionsDuringWait = Set(viewModel.sessions.keys)
+                for closing in [committing, idle] {
+                    XCTAssertThrowsError(
+                        try viewModel.beginMCPControlledRun(
+                            forTabID: closing.tabID,
+                            workspaceID: fixture.workspaceID,
+                            responseType: nil,
+                            planModelName: nil
+                        )
+                    ) { XCTAssertTrue($0 is CancellationError, "Refused as \($0)") }
+                }
+                XCTAssertEqual(Set(viewModel.sessions.keys), sessionsDuringWait)
+                XCTAssertNil(viewModel.sessions[idle.tabID])
+                XCTAssertEqual(fixture.operationToken(committing), committingToken)
+
+                // Restored before the wait ends: in the workspace and on screen, and still closing.
+                let restored = await promptManager.restoreStashedComposeTab(containingTabID: idle.tabID)
+                XCTAssertEqual(restored?.id, idle.tabID)
+                XCTAssertNotNil(fixture.storedTab(idle))
+                XCTAssertEqual(viewModel.currentTabID, idle.tabID)
+                guard !close.returned else {
+                    XCTFail("The close returned before the commit it waits on was let go")
+                    throw ContextBuilderRunFixture.ScenarioAborted()
+                }
+                // Run is pressed first, so that neither entry's refusal can be the other's claim.
+                let requestsBefore = fixture.providerRequests.count
+                let pressed = await fixture.pressRun(on: idle)
+                XCTAssertNil(pressed)
+                XCTAssertNil(fixture.operationToken(idle))
+                XCTAssertThrowsError(
+                    try viewModel.beginMCPControlledRun(
+                        forTabID: idle.tabID,
+                        workspaceID: fixture.workspaceID,
+                        responseType: nil,
+                        planModelName: nil
+                    )
+                ) { XCTAssertTrue($0 is CancellationError, "Refused as \($0)") }
+                XCTAssertNil(fixture.operationToken(idle))
+                XCTAssertNil(fixture.activeRunID(idle))
+                XCTAssertEqual(fixture.session(idle)?.agentLog.count ?? 0, 0)
+                XCTAssertEqual(fixture.providerRequests.count, requestsBefore)
+                XCTAssertFalse(viewModel.tabsHeldAgainstNewRun.contains(idle.tabID))
+                XCTAssertFalse(viewModel.tabsWithActiveContextBuilderRun.contains(idle.tabID))
+                XCTAssertFalse(close.returned)
+
+                // The run outside the close.
+                XCTAssertNil(otherRun.result)
+                XCTAssertTrue(fixture.session(other) === otherSession)
+                XCTAssertEqual(fixture.operationToken(other), otherToken)
+                XCTAssertEqual(fixture.activeRunID(other), otherRunID)
+                XCTAssertEqual(otherChild.disposeCount, 0)
+
+                // Once the close has finished, the restored tab is a tab like any other, and the
+                // one still stashed has no tab to claim.
+                await afterWrite.open()
+                try await fixture.waitFor("the close to return") { close.returned }
+                let committed = try await fixture.completion(of: committingRun)
+                XCTAssertEqual(committed.runID, committingRunID)
+                XCTAssertEqual(committed.terminalDisposition, .cancelled)
+                XCTAssertNotNil(committed.committedTab)
+                try await assertClaimable(idle, in: fixture)
+                XCTAssertThrowsError(
+                    try viewModel.beginMCPControlledRun(
+                        forTabID: committing.tabID,
+                        workspaceID: fixture.workspaceID,
+                        responseType: nil,
+                        planModelName: nil
+                    )
+                ) { XCTAssertTrue($0 is CancellationError, "Refused as \($0)") }
+                XCTAssertNil(viewModel.sessions[committing.tabID])
+
+                XCTAssertNil(otherRun.result)
+                XCTAssertEqual(fixture.operationToken(other), otherToken)
+                await otherChild.allowConnection()
+                try await fixture.assertCommitted(fixture.completion(of: otherRun), by: otherChild)
+            }
+        }
+
+        /// A claim can reach the view model after its tab has gone: its caller saw the tab and then
+        /// suspended. Such a claim is refused as a cancellation, not as a busy tab, and makes no
+        /// session. So is a claim that names a tab, or a workspace for the tab, that never held it.
+        func testClaimOnTabItsWorkspaceDoesNotHoldIsCancelledAndMakesNoSession() async throws {
+            try await ContextBuilderRunFixture.withFixture { fixture, _ in
+                let viewModel = fixture.viewModel
+                let kept = fixture.slots[0]
+                let closed = fixture.slots[1]
+                try await assertClaimable(closed, in: fixture)
+                await fixture.window.promptManager.closeComposeTab(closed.tabID)
+                XCTAssertNil(fixture.storedTab(closed), "The tab closed")
+                XCTAssertNil(viewModel.sessions[closed.tabID])
+                let sessionsBefore = Set(viewModel.sessions.keys)
+                let keptBefore = TabState(fixture, kept)
+
+                let neverStored = UUID()
+                let claims: [(tabID: UUID, workspaceID: UUID?)] = [
+                    (closed.tabID, fixture.workspaceID),
+                    (closed.tabID, nil),
+                    (neverStored, fixture.workspaceID),
+                    (kept.tabID, UUID())
+                ]
+                for claim in claims {
+                    XCTAssertThrowsError(
+                        try viewModel.beginMCPControlledRun(
+                            forTabID: claim.tabID,
+                            workspaceID: claim.workspaceID,
+                            responseType: "plan",
+                            planModelName: nil
+                        )
+                    ) { XCTAssertTrue($0 is CancellationError, "Refused as \($0)") }
+                }
+
+                XCTAssertEqual(Set(viewModel.sessions.keys), sessionsBefore)
+                XCTAssertNil(viewModel.sessions[closed.tabID])
+                XCTAssertNil(viewModel.sessions[neverStored])
+                XCTAssertEqual(TabState(fixture, kept), keptBefore)
+                XCTAssertEqual(viewModel.tabsHeldAgainstNewRun, [])
+                XCTAssertFalse(viewModel.isMCPControlledRun)
+                XCTAssertNil(viewModel.mcpResponseType)
+                try await assertClaimable(kept, in: fixture)
+            }
+        }
+
+        /// A workspace switch drops a tab's session while a follow-up started for the tab is still
+        /// unwinding. When the tab is shown again it has another session. The follow-up ignores
+        /// its cancellation and goes on to answer, and that answer stays with the session it was
+        /// started for: the tab's present session, what the window shows of it, and the stored
+        /// tab are all left as they were.
+        func testFollowUpThatOutlivesItsSessionPublishesNothingOnceItsTabIsShownAgain() async throws {
+            try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
+                let viewModel = fixture.viewModel
+                let manager = fixture.window.workspaceManager
+                let slot = fixture.slots[0]
+                let execution = ContextBuilderTestGate()
+                let started = ContextBuilderCancellableTestGate()
+                let unwinding = ContextBuilderTestGate()
+                cleanup.add { viewModel.installRunTestHooks(nil) }
+                fixture.releaseOnSettle {
+                    await execution.open()
+                    started.open()
+                    await unwinding.open()
+                }
+                viewModel.installRunTestHooks(.init(
+                    beforeProcessingProviderEvent: { _, _ in await execution.wait() },
+                    providerEventDisposition: nil,
+                    teardownCompleted: nil,
+                    runUIFollowUp: { _, mode in
+                        // Held until cancelled, then held again where cancellation cannot reach
+                        // it, and then it answers as if it had never been cancelled.
+                        try? await started.wait()
+                        await unwinding.wait()
+                        return ChatSendReply(
+                            chatId: UUID(),
+                            shortId: "late",
+                            mode: mode.mcpModeName,
+                            response: Self.lateFollowUpAnswer,
+                            errors: nil
+                        )
+                    }
+                ))
+                fixture.providerScript = { _ in ContextBuilderUnroutedProvider(events: ["Looking around"]) }
+
+                // A cancelled run whose execution is still held, and a follow-up started under it.
+                let pressed = await fixture.pressRun(on: slot)
+                let runID = try XCTUnwrap(pressed)
+                await execution.waitUntilEntered()
+                await viewModel.cancelAgentRun()
+                XCTAssertEqual(
+                    fixture.operationToken(slot),
+                    OperationToken(id: runID, origin: .ui, workspaceID: fixture.workspaceID)
+                )
+                viewModel.startBackgroundPlanGeneration(
+                    tabID: slot.tabID,
+                    oracleViewModel: fixture.window.oracleViewModel
+                )
+                try await fixture.waitFor("the follow-up to start generating") { started.entryCount == 1 }
+                let outlived = try XCTUnwrap(fixture.session(slot))
+                let outlivingFollowUp = try XCTUnwrap(outlived.backgroundPlanTask)
+
+                // Away, which drops the session and cancels the follow-up, and back to the tab.
+                let elsewhere = manager.createWorkspace(
+                    name: "Context Builder runs, other workspace",
+                    repoPaths: [fixture.rootURL.path],
+                    ephemeral: true
+                )
+                cleanup.add { manager.workspaces.removeAll { $0.id == elsewhere.id } }
+                await manager.switchWorkspace(to: elsewhere, saveState: false, reason: "ContextBuilderTabAdmissionTests")
+                try await fixture.waitFor("the switch to cancel the follow-up") { await unwinding.entered }
+                let origin = try XCTUnwrap(manager.workspaces.first { $0.id == fixture.workspaceID })
+                await manager.switchWorkspace(to: origin, saveState: false, reason: "ContextBuilderTabAdmissionTests")
+                try await fixture.waitFor("the tab to be shown again") {
+                    manager.activeWorkspaceID == fixture.workspaceID
+                        && viewModel.currentTabID == slot.tabID
+                        && fixture.session(slot) != nil
+                }
+
+                // The run's execution ends, and the tab's present session is given state of its own.
+                await execution.open()
+                try await fixture.waitForRelease(of: slot)
+                let present = try XCTUnwrap(fixture.session(slot))
+                XCTAssertFalse(present === outlived)
+                viewModel.setBackgroundPlanGenerating(true, forTabID: slot.tabID)
+                viewModel.setBackgroundPlanResponseText(Self.followUpAnswer, forTabID: slot.tabID)
+                XCTAssertTrue(viewModel.isBackgroundPlanGenerating)
+                let shownAnswer = try XCTUnwrap(viewModel.backgroundPlanResponsePreviewText)
+                let shownLog = viewModel.agentLog.map(\.id)
+                let shownRunState = viewModel.agentRunState
+                let storedBefore = try XCTUnwrap(fixture.storedTab(slot))
+
+                await unwinding.open()
+                await outlivingFollowUp.value
+
+                // The late answer was written, to the session the follow-up was started for.
+                XCTAssertEqual(outlived.backgroundPlanResponseText, Self.lateFollowUpAnswer)
+                XCTAssertFalse(outlived.isBackgroundPlanGenerating)
+
+                XCTAssertTrue(fixture.session(slot) === present)
+                XCTAssertTrue(present.isBackgroundPlanGenerating)
+                XCTAssertEqual(present.backgroundPlanResponseText, Self.followUpAnswer)
+                XCTAssertNil(present.operationToken)
+                XCTAssertTrue(viewModel.isBackgroundPlanGenerating)
+                XCTAssertEqual(viewModel.backgroundPlanResponsePreviewText, shownAnswer)
+                XCTAssertNil(viewModel.backgroundPlanError)
+                XCTAssertEqual(viewModel.agentLog.map(\.id), shownLog)
+                XCTAssertEqual(viewModel.agentRunState, shownRunState)
+                XCTAssertEqual(fixture.storedTab(slot), storedBefore)
+                XCTAssertFalse(viewModel.tabsHeldAgainstNewRun.contains(slot.tabID))
+            }
+        }
+
         // MARK: Support
 
         private static let followUpAnswer = "Follow-up answer"
+        private static let lateFollowUpAnswer = "Answer of a follow-up that outlived its session"
+
+        @MainActor
+        private final class CloseObservation {
+            var returned = false
+        }
 
         /// What a refused attempt must leave as it found it.
         private struct TabState: Equatable {
@@ -822,15 +1145,6 @@ import XCTest
                 modelRaw: authority.modelRaw,
                 modelParameterSelections: authority.modelParameterSelections
             )
-        }
-
-        private static func enableAutomaticFollowUp(cleanup: FixtureCleanup) {
-            let store = GlobalSettingsStore.shared
-            let previous = store.contextBuilderBehaviorSettings()
-            cleanup.add { store.setContextBuilderBehaviorSettings(previous, commit: false) }
-            var settings = previous
-            settings.followUpAnalysisEnabled = true
-            store.setContextBuilderBehaviorSettings(settings, commit: false)
         }
 
         /// Replaces the Oracle generation of UI follow-ups with one that waits at `started` to be

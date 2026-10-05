@@ -134,7 +134,7 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
         let completion = await fixture.window.mcpServer.commitContextBuilderTabContext(
             connectionID: fixture.connectionID,
             expectedRunID: fixture.runID,
-            isStillCurrent: { true }
+            authority: .unconditional
         )
         XCTAssertEqual(completion.outcome, .committed)
         XCTAssertEqual(completion.committedTab?.tab.selection, discovered)
@@ -185,7 +185,7 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
         let failedCommit = await fixture.window.mcpServer.commitContextBuilderTabContext(
             connectionID: fixture.connectionID,
             expectedRunID: fixture.runID,
-            isStillCurrent: { true }
+            authority: .unconditional
         )
 
         guard case .missingFinalContext = failedCommit.outcome else {
@@ -297,7 +297,7 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
         let result = await fixture.window.mcpServer.commitContextBuilderTabContext(
             connectionID: fixture.connectionID,
             expectedRunID: fixture.runID,
-            isStillCurrent: { true }
+            authority: .unconditional
         )
 
         XCTAssertEqual(result.outcome, .committed)
@@ -305,8 +305,160 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
         XCTAssertEqual(fixture.canonicalSelection, newer)
     }
 
+    /// A run that loses its tab while the commit is suspended at its last step before the write
+    /// writes nothing. The run still owns the tab at every earlier check, so only the check made
+    /// in the turn of the write can refuse it.
+    func testCommitWritesNothingForRunThatLostItsTabBeforeTheWrite() async throws {
+        let fixture = try await makeFixture(name: "authority-before-write")
+        defer { fixture.cleanup() }
+        let source = StoredSelection(selectedPaths: [fixture.fileA.path])
+        let discovered = StoredSelection(selectedPaths: [fixture.fileB.path])
+        try await fixture.seedCanonical(source)
+        let revisionBefore = fixture.selectionRevision
+        _ = try fixture.installContext(selection: discovered)
+
+        let run = CommittingRun()
+        let result = await fixture.window.mcpServer.commitContextBuilderTabContext(
+            connectionID: fixture.connectionID,
+            expectedRunID: fixture.runID,
+            authority: run.authority,
+            progressReporter: { phase in
+                run.reportedPhases.append(phase)
+                if phase == .tabContextCommit {
+                    run.ownsTab = false
+                }
+            }
+        )
+
+        XCTAssertEqual(run.reportedPhases.last, .tabContextCommit, "The run lost its tab at the last step before the write")
+        XCTAssertEqual(result.outcome, .staleOrNoLongerCurrent)
+        XCTAssertNil(result.committedTab)
+        XCTAssertTrue(run.receipts.isEmpty)
+        XCTAssertEqual(fixture.canonicalSelection, source)
+        XCTAssertEqual(fixture.selectionRevision, revisionBefore)
+    }
+
+    /// A run that loses its tab in the turn that writes the tab is still told what was written,
+    /// and the commit reports that exact receipt instead of reporting the run as stale.
+    func testCommitKeepsItsReceiptWhenRunLosesItsTabAtTheWrite() async throws {
+        let fixture = try await makeFixture(name: "authority-at-write")
+        defer { fixture.cleanup() }
+        let source = StoredSelection(selectedPaths: [fixture.fileA.path])
+        let discovered = StoredSelection(selectedPaths: [fixture.fileB.path])
+        try await fixture.seedCanonical(source)
+        _ = try fixture.installContext(selection: discovered)
+
+        let run = CommittingRun()
+        run.losesTabAtTheWrite = true
+        let result = await fixture.window.mcpServer.commitContextBuilderTabContext(
+            connectionID: fixture.connectionID,
+            expectedRunID: fixture.runID,
+            authority: run.authority
+        )
+
+        XCTAssertFalse(run.ownsTab)
+        XCTAssertEqual(run.receipts.count, 1)
+        let receipt = try XCTUnwrap(run.receipts.first)
+        XCTAssertEqual(receipt.identity, fixture.identity)
+        XCTAssertEqual(receipt.nestedRunID, fixture.runID)
+        XCTAssertEqual(receipt.tab.selection, discovered)
+        XCTAssertEqual(receipt.selectionRevision, fixture.selectionRevision)
+        XCTAssertEqual(result.outcome, .committed)
+        let committed = try XCTUnwrap(result.committedTab)
+        XCTAssertEqual(committed.identity, receipt.identity)
+        XCTAssertEqual(committed.nestedRunID, receipt.nestedRunID)
+        XCTAssertEqual(committed.tab, receipt.tab)
+        XCTAssertEqual(committed.selectionRevision, receipt.selectionRevision)
+        XCTAssertEqual(fixture.canonicalSelection, discovered)
+    }
+
+    /// A commit based on a selection revision the tab has not reached writes the tab and then
+    /// cannot confirm that the tab holds the run's selection. The run is handed exactly what the
+    /// tab now holds, in the turn of the write, and the commit fails with that same receipt.
+    func testCommitThatCannotConfirmItsSelectionFailsWithReceiptOfWhatWasStored() async throws {
+        let fixture = try await makeFixture(name: "unconfirmed-revision")
+        defer { fixture.cleanup() }
+        let source = StoredSelection(selectedPaths: [fixture.fileA.path])
+        let discovered = StoredSelection(selectedPaths: [fixture.fileB.path])
+        try await fixture.seedCanonical(source)
+        let tabBefore = try XCTUnwrap(fixture.window.workspaceManager.composeTab(for: fixture.identity))
+        let revisionBefore = fixture.selectionRevision
+        var context = try fixture.makeContext(selection: discovered)
+        context.selectionRevision = revisionBefore + 1
+        context.promptText = "Prompt written by the run"
+        fixture.window.mcpServer.tabContextByConnectionID[fixture.connectionID] = context
+
+        let run = CommittingRun()
+        var storedAtTheWrite: ComposeTabState?
+        run.onReceipt = { storedAtTheWrite = fixture.window.workspaceManager.composeTab(for: fixture.identity) }
+        let result = await fixture.window.mcpServer.commitContextBuilderTabContext(
+            connectionID: fixture.connectionID,
+            expectedRunID: fixture.runID,
+            authority: run.authority
+        )
+
+        // The write happened: the prompt is the run's, and the selection the commit could not
+        // confirm is still the tab's own.
+        let stored = try XCTUnwrap(fixture.window.workspaceManager.composeTab(for: fixture.identity))
+        XCTAssertNotEqual(stored, tabBefore)
+        XCTAssertEqual(stored.promptText, "Prompt written by the run")
+        XCTAssertEqual(stored.selection, source)
+        XCTAssertEqual(fixture.selectionRevision, revisionBefore)
+
+        XCTAssertTrue(run.ownsTab)
+        XCTAssertEqual(run.receipts.count, 1)
+        let receipt = try XCTUnwrap(run.receipts.first)
+        XCTAssertEqual(receipt.identity, fixture.identity)
+        XCTAssertEqual(receipt.nestedRunID, fixture.runID)
+        XCTAssertEqual(receipt.tab, stored)
+        XCTAssertEqual(receipt.tab, storedAtTheWrite, "The receipt was handed over in the turn of the write")
+        XCTAssertEqual(receipt.selectionRevision, revisionBefore)
+
+        guard case .failed = result.outcome else {
+            XCTFail("A write the commit could not confirm was reported as \(result.outcome)")
+            return
+        }
+        let committed = try XCTUnwrap(result.committedTab)
+        XCTAssertEqual(committed.identity, receipt.identity)
+        XCTAssertEqual(committed.nestedRunID, receipt.nestedRunID)
+        XCTAssertEqual(committed.tab, receipt.tab)
+        XCTAssertEqual(committed.selectionRevision, receipt.selectionRevision)
+    }
+
     private func makeFixture(name: String) async throws -> Fixture {
         try await makeSelectionFixture(name: name)
+    }
+}
+
+/// Stands in for the run a final-context commit acts for, so a test decides when that run stops
+/// owning its tab and sees the receipts it is handed.
+@MainActor
+private final class CommittingRun {
+    var ownsTab = true
+    var losesTabAtTheWrite = false
+    var receipts: [MCPServerViewModel.ContextBuilderCommittedTabSnapshot] = []
+    var reportedPhases: [ContextBuilderMCPProgressPhase] = []
+    /// Runs in the turn that hands the run a receipt.
+    var onReceipt: (@MainActor () -> Void)?
+
+    var authority: MCPServerViewModel.ContextBuilderCommitAuthority {
+        .init(
+            ownsCommit: { self.ownsTab },
+            didWriteTab: { receipt in
+                self.receipts.append(receipt)
+                self.onReceipt?()
+                if self.losesTabAtTheWrite {
+                    self.ownsTab = false
+                }
+            }
+        )
+    }
+}
+
+private extension MCPServerViewModel.ContextBuilderCommitAuthority {
+    /// A run that owns its tab throughout and has no use for its receipt.
+    static var unconditional: Self {
+        .init(ownsCommit: { true }, didWriteTab: { _ in })
     }
 }
 
@@ -383,6 +535,10 @@ private struct Fixture {
 
     var canonicalSelection: StoredSelection? {
         window.workspaceManager.composeTab(for: identity)?.selection
+    }
+
+    var selectionRevision: UInt64 {
+        window.workspaceManager.selectionRevisionForMCP(workspaceID: workspaceID, tabID: tabID)
     }
 
     var boundContext: MCPServerViewModel.TabContextSnapshot? {

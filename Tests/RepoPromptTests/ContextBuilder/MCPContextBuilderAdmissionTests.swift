@@ -219,11 +219,9 @@ import XCTest
             cleanup: FixtureCleanup
         ) async throws -> (bound: PersistentMCPTestEndpoint, unbound: PersistentMCPTestEndpoint, drains: DrainCounter) {
             let server = fixture.window.mcpServer
-            await server.startServer()
-            XCTAssertTrue(server.windowToolsEnabled)
-            await fixture.manager.setEnabled(true)
+            await fixture.startWindowServer()
 
-            let bound = try await makeCaller("bound", fixture: fixture, cleanup: cleanup)
+            let bound = try await fixture.connectCaller("bound", cleanup: cleanup)
             let bind = try await bound.callTool(
                 name: "bind_context",
                 arguments: ["op": "bind", "context_id": slot.tabID.uuidString]
@@ -231,7 +229,7 @@ import XCTest
             XCTAssertFalse(bind.rawJSON.contains("\"isError\":true"), bind.rawJSON)
             await server.domainRoutingPublishTask?.value
             try await readFile(slot.fileURL, as: bound)
-            let unbound = try await makeCaller("unbound", fixture: fixture, cleanup: cleanup)
+            let unbound = try await fixture.connectCaller("unbound", cleanup: cleanup)
 
             let drains = DrainCounter()
             let windowID = fixture.window.windowID
@@ -255,44 +253,6 @@ import XCTest
         /// Every path under `directory`, so a file written anywhere in it shows.
         private static func contents(of directory: URL) throws -> Set<String> {
             try Set(FileManager.default.subpathsOfDirectory(atPath: directory.path))
-        }
-
-        /// An external client connection, admitted for protected calls as this process.
-        private static func makeCaller(
-            _ label: String,
-            fixture: ContextBuilderRunFixture,
-            cleanup: FixtureCleanup
-        ) async throws -> PersistentMCPTestEndpoint {
-            let manager = fixture.manager
-            let server = fixture.window.mcpServer
-            let caller = try await PersistentMCPTestEndpoint.make(
-                label: label,
-                networkManager: manager,
-                clientName: "context-builder-admission-\(label)-\(UUID().uuidString)",
-                requiredToolNames: [MCPWindowToolName.contextBuilder, MCPWindowToolName.readFile, "bind_context"]
-            )
-            cleanup.add {
-                await manager.debugSetDomainPeerIdentityForTesting(connectionID: caller.connectionID, identity: nil)
-                caller.client.close()
-                await caller.connectionManager.stop()
-                await manager.debugRemoveConnection(caller.connectionID)
-                await manager.clearClientConnectionPolicy(for: caller.clientName)
-                await manager.debugClearPersistedRoutingState(for: caller.clientName)
-                server.removeTabContext(
-                    forConnectionID: caller.connectionID,
-                    clientName: caller.clientName,
-                    windowID: nil,
-                    runID: nil
-                )
-            }
-            await manager.debugSetDomainPeerIdentityForTesting(
-                connectionID: caller.connectionID,
-                identity: .verified(
-                    processID: Int(getpid()),
-                    fingerprint: "test:verified:context-builder-admission"
-                )
-            )
-            return caller
         }
     }
 #endif

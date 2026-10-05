@@ -1743,9 +1743,12 @@ class WindowState: ObservableObject {
             return
         }
 
-        await contextBuilderAgentViewModel.cancelAllActiveRuns()
+        contextBuilderAgentViewModel.cancelRunsForWindowClose()
         await workspaceManager.cancelActiveSessions()
+        // Agent Mode closes before Context Builder's runs are joined, so a run still finishing
+        // its final-context commit cannot hold Agent Mode's close back.
         await agentModeViewModel.prepareForWindowClose()
+        await contextBuilderAgentViewModel.joinRunTeardownForWindowClose()
         WorkspaceApprovalManager.shared.cancelPending(forWindowID: windowID)
 
         // Stop the local MCP server
