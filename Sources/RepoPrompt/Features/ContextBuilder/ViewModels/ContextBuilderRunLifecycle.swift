@@ -198,6 +198,135 @@ enum ContextBuilderRunError: LocalizedError {
     }
 }
 
+/// Bounds on the two startup phases a run waits on without being able to finish them itself:
+/// the window's MCP readiness and the provider's MCP connection being routed to the run.
+/// Payload preparation is not covered.
+///
+/// Reaching a bound publishes the run's failure and starts its teardown. What that guarantees is
+/// independence from the provider: the run's tail runs and its tab is given back without waiting
+/// for a provider start or disposal still in progress, which stay owned by the run's record until
+/// they finish. The tail's own steps are still awaited first, among them delivery of the run's
+/// finalization progress report.
+struct ContextBuilderStartupPolicy {
+    /// Longest one run waits to join the window's MCP readiness.
+    let readinessTimeout: Duration
+    /// `noConnectionTimeout` bounds the wait for the provider's first matching MCP connection and
+    /// `observedConnectionGrace` the wait from that connection to its committed route, so a run
+    /// waits at most their sum from the moment its routing wait is enrolled.
+    let routingWait: MCPRoutingWaitPolicy
+    /// Monotonic time source for both bounds.
+    let clock: MCPRoutingWaitClock
+
+    static let standard = ContextBuilderStartupPolicy(
+        readinessTimeout: .seconds(30),
+        routingWait: MCPRoutingWaitPolicy(
+            noConnectionTimeout: .seconds(30),
+            observedConnectionGrace: .seconds(10)
+        ),
+        clock: .continuous()
+    )
+}
+
+/// A run's provider start, owned by the run's record so that the run can end without waiting
+/// for it.
+///
+/// The run's execution waits for the provider's stream through ``stream()``, and that wait ends
+/// as soon as the execution is cancelled or the record's teardown begins. Neither ends the start
+/// itself: a provider may ignore cancellation while it initializes. Whatever the start produces
+/// after its run has ended is kept here, unconsumed, until teardown has disposed the provider.
+@MainActor
+final class ContextBuilderProviderStart {
+    typealias Stream = AsyncThrowingStream<AIStreamResult, Error>
+
+    private var task: Task<Void, Never>?
+    private var result: Result<Stream, Error>?
+    private var waiter: CheckedContinuation<Stream, Error>?
+    private var isDetachedFromRun = false
+    private(set) var isFinished = false
+    /// Whether the start's result has been handed to the run's execution. Until it has, nothing
+    /// consumes the provider's stream.
+    private(set) var hasDeliveredResult = false
+
+    init(_ operation: @escaping @MainActor () async throws -> Stream) {
+        task = Task { @MainActor in
+            let result: Result<Stream, Error>
+            do {
+                result = try await .success(operation())
+            } catch {
+                result = .failure(error)
+            }
+            self.finish(with: result)
+        }
+    }
+
+    /// The provider's stream, or the error its start ended with, for the start's one consumer.
+    ///
+    /// The waiter is registered, resumed, and withdrawn on the main actor only, and each of those
+    /// takes it first, so it is resumed exactly once whichever of the result and a cancellation
+    /// comes first. A result delivered before a cancellation arrives is still returned, so the
+    /// caller checks cancellation and the run's ownership before it uses the stream.
+    ///
+    /// - Throws: `CancellationError` when the calling task is cancelled or the start is detached
+    ///   from its run before the result is delivered.
+    func stream() async throws -> Stream {
+        precondition(
+            waiter == nil && !hasDeliveredResult,
+            "ContextBuilderProviderStart supports exactly one stream consumer."
+        )
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if Task.isCancelled || isDetachedFromRun {
+                    continuation.resume(throwing: CancellationError())
+                } else if let result {
+                    self.result = nil
+                    hasDeliveredResult = true
+                    continuation.resume(with: result)
+                } else {
+                    waiter = continuation
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in
+                self.endWait()
+            }
+        }
+    }
+
+    /// Ends the run's claim on the start: its wait, if any, ends now, and a result that arrives
+    /// later is kept instead of delivered.
+    func detachFromRun() {
+        isDetachedFromRun = true
+        task?.cancel()
+        endWait()
+    }
+
+    func waitUntilFinished() async {
+        await task?.value
+    }
+
+    /// Releases a result nothing consumed. Called once the provider that produced it is disposed.
+    func discardUnconsumedResult() {
+        result = nil
+    }
+
+    private func endWait() {
+        guard let waiter else { return }
+        self.waiter = nil
+        waiter.resume(throwing: CancellationError())
+    }
+
+    private func finish(with result: Result<Stream, Error>) {
+        isFinished = true
+        guard !isDetachedFromRun, let waiter else {
+            self.result = result
+            return
+        }
+        self.waiter = nil
+        hasDeliveredResult = true
+        waiter.resume(with: result)
+    }
+}
+
 struct ContextBuilderMCPRunConfiguration {
     let identity: WorkspaceSelectionIdentity
     let nestedTabContext: MCPServerViewModel.TabContextSnapshot
@@ -221,6 +350,7 @@ final class ContextBuilderRunRecord {
 
     struct TeardownPayload {
         let provider: HeadlessAgentProvider?
+        let providerStart: ContextBuilderProviderStart?
         let executionTask: Task<Void, Never>?
     }
 
@@ -250,6 +380,7 @@ final class ContextBuilderRunRecord {
     private(set) var committedTabSnapshot: MCPServerViewModel.ContextBuilderCommittedTabSnapshot?
     private var continuation: CheckedContinuation<ContextBuilderAgentViewModel.MCPContextBuilderRunCompletion, Error>?
     private var provider: HeadlessAgentProvider?
+    private var providerStart: ContextBuilderProviderStart?
     private(set) var finalContextCommitClaimed = false
     private(set) var cancellationState = ContextBuilderRunCancellationState.none
     private(set) var deferredCancellationSettlementPolicy: ContextBuilderRunCancellationSettlementPolicy?
@@ -257,6 +388,8 @@ final class ContextBuilderRunRecord {
     private(set) var teardownStartedAt: Date?
     private(set) var teardownFinishedAt: Date?
     private(set) var providerDisposalFinished = false
+    private var isAwaitingProviderStartToDispose = false
+    private var hasStoppedAwaitingProviderStart = false
     private(set) var executionTaskFinished = false
     private var teardownSettlementWaiters: [CheckedContinuation<Void, Never>] = []
     private var didBeginProviderStreamProgress = false
@@ -373,6 +506,12 @@ final class ContextBuilderRunRecord {
         teardownStartedAt != nil && teardownFinishedAt == nil
     }
 
+    /// Whether the run's execution has yet to receive the result of its provider start. Until it
+    /// has, no consumer holds the provider's stream.
+    var isAwaitingProviderStartResult: Bool {
+        providerStart?.hasDeliveredResult == false
+    }
+
     @discardableResult
     func claimFinalContextCommit() -> Bool {
         guard terminalOutcome == nil,
@@ -434,6 +573,20 @@ final class ContextBuilderRunRecord {
         return true
     }
 
+    /// Starts `operation` as the run's provider start and makes the record its owner. Refused
+    /// once the run is terminal or its teardown has begun, as ``installProvider(_:)`` is: no
+    /// teardown would be left to dispose what the start produces.
+    func beginProviderStart(
+        _ operation: @escaping @MainActor () async throws -> ContextBuilderProviderStart.Stream
+    ) -> ContextBuilderProviderStart? {
+        guard terminalOutcome == nil, teardownStartedAt == nil, providerStart == nil else {
+            return nil
+        }
+        let start = ContextBuilderProviderStart(operation)
+        providerStart = start
+        return start
+    }
+
     func installCommittedTabSnapshot(
         _ snapshot: MCPServerViewModel.ContextBuilderCommittedTabSnapshot
     ) -> Bool {
@@ -458,13 +611,26 @@ final class ContextBuilderRunRecord {
     func beginTeardown(at date: Date = Date()) -> TeardownPayload? {
         guard teardownStartedAt == nil else { return nil }
         teardownStartedAt = date
-        let payload = TeardownPayload(provider: provider, executionTask: executionTask)
+        let payload = TeardownPayload(
+            provider: provider,
+            providerStart: providerStart,
+            executionTask: executionTask
+        )
         provider = nil
+        providerStart = nil
+        payload.providerStart?.detachFromRun()
         return payload
     }
 
     func markProviderDisposalFinished() {
         providerDisposalFinished = true
+        finishTeardownIfReady()
+    }
+
+    /// Teardown has disposed the provider once and now waits for a provider start that was still
+    /// running, so that it can dispose what that start leaves behind.
+    func markAwaitingProviderStartToDispose() {
+        isAwaitingProviderStartToDispose = true
         finishTeardownIfReady()
     }
 
@@ -481,6 +647,15 @@ final class ContextBuilderRunRecord {
         markExecutionTaskFinished()
     }
 
+    /// App termination joins the provider's first disposal, which ends whatever the provider had
+    /// started by then. Once its grace period expires, the app need not also wait for a provider
+    /// start that ignores cancellation. The disposal that follows such a start has not happened
+    /// and is not reported as finished; teardown counts as settled without it.
+    func stopAwaitingProviderStartForAppTermination() {
+        hasStoppedAwaitingProviderStart = true
+        finishTeardownIfReady()
+    }
+
     func awaitTeardownSettlement() async {
         if teardownFinishedAt != nil { return }
         await withCheckedContinuation { continuation in
@@ -493,7 +668,9 @@ final class ContextBuilderRunRecord {
     }
 
     private func finishTeardownIfReady() {
-        guard providerDisposalFinished, executionTaskFinished, teardownFinishedAt == nil else { return }
+        let providerSettled = providerDisposalFinished
+            || (isAwaitingProviderStartToDispose && hasStoppedAwaitingProviderStart)
+        guard providerSettled, executionTaskFinished, teardownFinishedAt == nil else { return }
         teardownFinishedAt = Date()
         let waiters = teardownSettlementWaiters
         teardownSettlementWaiters.removeAll()

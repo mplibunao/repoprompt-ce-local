@@ -85,5 +85,71 @@ import XCTest
                 XCTAssertEqual(fixture.slots.map { fixture.operationToken($0) }, [nil, nil])
             }
         }
+
+        /// Start state: the window's MCP tools are disabled. The first run's start begins the
+        /// enable transition and is held at window-tool registration; the second run's start joins
+        /// that transition.
+        ///
+        /// Cancelling the first run while both wait ends that run alone and at once, with the
+        /// transition still held. The transition it began is neither cancelled nor replaced, and the
+        /// second run goes on through it to a routed, committed discovery.
+        func testColdReadinessIsJoinedAndOneCancelledWaiterDoesNotCancelOther() async throws {
+            try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
+                let server = fixture.window.mcpServer
+                let cancelledSlot = fixture.slots[0]
+                let survivingSlot = fixture.slots[1]
+
+                XCTAssertFalse(server.windowToolsEnabled)
+                let enableGeneration = server.windowToolRegistrationIntentGenerationForTesting() + 1
+                let registrationGate = ContextBuilderTestGate()
+                server.setBeforeWindowToolRegistrationForTesting { await registrationGate.wait() }
+                cleanup.add {
+                    server.setBeforeWindowToolRegistrationForTesting(nil)
+                    await registrationGate.open()
+                }
+
+                let cancelledRun = fixture.startMCPRun(on: cancelledSlot)
+                try await fixture.waitFor("the first start to begin the enable transition") {
+                    await registrationGate.entered
+                }
+                let survivingRun = fixture.startMCPRun(on: survivingSlot)
+                try await fixture.waitFor("the second start to join that transition") {
+                    server.windowToolTransitionJoinsByGenerationForTesting()[enableGeneration] == 1
+                }
+                let survivingRunID = try XCTUnwrap(fixture.activeRunID(survivingSlot))
+
+                await fixture.viewModel.cancelMCPContextBuilderRun(forTabID: cancelledSlot.tabID)
+                try await fixture.waitFor("the cancelled run to return", allowingRunErrors: true) {
+                    cancelledRun.result != nil
+                }
+                XCTAssertThrowsError(try XCTUnwrap(cancelledRun.result).get()) { error in
+                    XCTAssertTrue(error is CancellationError, "Expected CancellationError, got \(error)")
+                }
+                // The cancelled run left its wait while readiness was still held for the other.
+                XCTAssertFalse(server.windowToolsEnabled)
+                XCTAssertNil(fixture.operationToken(cancelledSlot))
+                XCTAssertEqual(fixture.activeRunID(survivingSlot), survivingRunID)
+                XCTAssertNil(survivingRun.result)
+                XCTAssertEqual(server.windowToolRegistrationIntentGenerationForTesting(), enableGeneration)
+
+                await registrationGate.open()
+                try await fixture.waitFor("the surviving run to return", allowingRunErrors: true) {
+                    survivingRun.result != nil
+                }
+                let completion = try XCTUnwrap(survivingRun.result).get()
+                XCTAssertEqual(completion.runID, survivingRunID)
+                let child = try XCTUnwrap(fixture.child(forRunID: survivingRunID))
+                try fixture.assertCommitted(completion, by: child)
+
+                XCTAssertTrue(server.windowToolsEnabled)
+                XCTAssertEqual(server.windowToolRegistrationIntentGenerationForTesting(), enableGeneration)
+                XCTAssertEqual(server.windowToolTransitionStartsByGenerationForTesting()[enableGeneration], 1)
+                XCTAssertEqual(fixture.providerRequests.count, 1, "The cancelled run must not reach its provider.")
+                XCTAssertEqual(fixture.storedTab(cancelledSlot)?.promptText, "")
+                let leftoverPendingRunIDs = try await fixture.pendingPolicyRunIDs()
+                XCTAssertEqual(leftoverPendingRunIDs, [])
+                XCTAssertEqual(fixture.slots.map { fixture.operationToken($0) }, [nil, nil])
+            }
+        }
     }
 #endif

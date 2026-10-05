@@ -103,6 +103,8 @@ enum ContextBuilderFollowUpType: String, CaseIterable, Codable {
 private enum ContextBuilderMCPRoutingError: LocalizedError {
     case completedWithoutRoute(agentDisplayName: String, clientName: String)
     case routingFailed(agentDisplayName: String, clientName: String)
+    case routingTimedOutBeforeConnection(agentDisplayName: String, clientName: String, timeout: Duration)
+    case routingTimedOutAfterConnection(agentDisplayName: String, clientName: String, grace: Duration)
 
     var errorDescription: String? {
         switch self {
@@ -110,7 +112,16 @@ private enum ContextBuilderMCPRoutingError: LocalizedError {
             "mcp_completed_without_route: \(agentDisplayName) finished before opening the expected MCP client '\(clientName)'. No Context Builder selection was committed."
         case let .routingFailed(agentDisplayName, clientName):
             "mcp_routing_failed: \(agentDisplayName) lost ownership of the expected MCP client '\(clientName)' before routing committed. The run was terminated and MCP bootstrap state was released."
+        case let .routingTimedOutBeforeConnection(agentDisplayName, clientName, timeout):
+            "mcp_routing_timeout_before_connection: \(agentDisplayName) did not open the expected MCP client '\(clientName)' within \(Self.seconds(timeout)) seconds. The run was terminated and MCP bootstrap state was released."
+        case let .routingTimedOutAfterConnection(agentDisplayName, clientName, grace):
+            "mcp_routing_timeout_after_connection: \(agentDisplayName) opened the expected MCP client '\(clientName)', but its route to this run was not committed within \(Self.seconds(grace)) seconds of that connection. The run was terminated and MCP bootstrap state was released."
         }
+    }
+
+    private static func seconds(_ duration: Duration) -> String {
+        let components = duration.components
+        return String(format: "%g", Double(components.seconds) + Double(components.attoseconds) / 1e18)
     }
 }
 
@@ -712,6 +723,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             appTerminationFinalContextGraceNanoseconds = nanoseconds
         }
 
+        func setStartupPolicyForTesting(_ policy: ContextBuilderStartupPolicy) {
+            startupPolicy = policy
+        }
+
         func acceptsRunEventsForTesting(_ record: ContextBuilderRunRecord) -> Bool {
             acceptsEvents(from: record)
         }
@@ -1110,6 +1125,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Preserve a brief chance to reach the final-context safe boundary while leaving app
     /// termination enough time to dispose the provider process and its configuration lease.
     private var appTerminationFinalContextGraceNanoseconds: UInt64 = 500_000_000
+    private var startupPolicy = ContextBuilderStartupPolicy.standard
 
     // MARK: - Init / Deinit
 
@@ -2571,7 +2587,18 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
         let disposalTask = Task { @MainActor [record] in
             defer { record.markProviderDisposalFinished() }
+            // Disposing a provider whose start is still running does not end that start, which
+            // can go on to launch provider work. That work is disposed once the start has
+            // finished, and only then is the provider's disposal complete.
+            let startOutlivesDisposal = payload.providerStart?.isFinished == false
             await payload.provider?.dispose()
+            guard let providerStart = payload.providerStart else { return }
+            if startOutlivesDisposal {
+                record.markAwaitingProviderStartToDispose()
+                await providerStart.waitUntilFinished()
+                await payload.provider?.dispose()
+            }
+            providerStart.discardUnconsumedResult()
         }
         let executionJoinTask: Task<Void, Never>? = if joinExecution {
             Task { @MainActor [record] in
@@ -2611,6 +2638,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
         guard record.isTeardownPending else { return }
         record.stopAwaitingExecutionTaskForAppTermination()
+        record.stopAwaitingProviderStartForAppTermination()
     }
 
     /// If the main prompt area is empty but we have agent output,
@@ -2762,13 +2790,19 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             }
 
             debugLog("Starting MCP server for window")
-            await mcpServer.startServer()
-            guard acceptsEvents(from: record) else { return .cancelled }
-
-            guard mcpServer.windowToolsEnabled else {
-                debugLog("MCP server failed to start")
-                return .failed("Failed to start MCP server. Check Local Network permission in System Settings.")
+            do {
+                try await mcpServer.requireContextBuilderReadiness(
+                    timeout: startupPolicy.readinessTimeout,
+                    clock: startupPolicy.clock
+                )
+            } catch is CancellationError {
+                return .cancelled
+            } catch {
+                guard acceptsEvents(from: record) else { return .cancelled }
+                debugLog("MCP server failed to start: \(error)")
+                return .failed("Failed to start MCP server: \(error.localizedDescription)")
             }
+            guard acceptsEvents(from: record) else { return .cancelled }
 
             do {
                 try record.workspaceContext?.validateAvailability()
@@ -2900,8 +2934,40 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 debugLog("System prompt length: \(message.systemPrompt.count)")
                 debugLog("User message length: \(message.userMessage.count)")
                 await record.reportProgress(.providerProcessStarting)
-                let stream = try await provider.streamAgentMessage(message, runID: runID)
+                // The routing wait is created before the provider is asked to start, so its bound
+                // runs while the provider initializes. A connection observed before the wait is
+                // enrolled still counts, because the waiter keeps the run's first observation.
+                // Until the stream consumer takes the wait, each exit cancels it, so that it
+                // publishes no route once the execution has left, and does not join it, because
+                // it can be suspended in a progress report.
+                let routeSettlement = ContextBuilderRouteSettlementCoordinator(
+                    maxBufferedTextCharacters: ContextBuilderDefaults.mcpPreRouteBufferedTextCharacterLimit,
+                    maxBufferedEventCount: ContextBuilderDefaults.mcpPreRouteBufferedEventLimit
+                )
+                let routeTask = startContextBuilderRouteWait(
+                    record: record,
+                    lease: lease,
+                    coordinator: routeSettlement
+                )
+                // The record owns the start, so this wait ends with the run rather than with the
+                // provider. Returning cancelled when it does leaves in place a failure the routing
+                // wait already published: a run's terminal outcome is claimed once.
+                guard let providerStart = record.beginProviderStart({
+                    try await provider.streamAgentMessage(message, runID: runID)
+                }) else {
+                    routeTask.cancel()
+                    await lease.failAndCleanup()
+                    return .cancelled
+                }
+                let stream: AsyncThrowingStream<AIStreamResult, Error>
+                do {
+                    stream = try await providerStart.stream()
+                } catch {
+                    routeTask.cancel()
+                    throw error
+                }
                 guard !Task.isCancelled, acceptsEvents(from: record) else {
+                    routeTask.cancel()
                     await lease.failAndCleanup()
                     return .cancelled
                 }
@@ -2914,7 +2980,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 let streamOutcome = await consumeContextBuilderProviderStreamWhileAwaitingRoute(
                     stream,
                     record: record,
-                    lease: lease
+                    lease: lease,
+                    coordinator: routeSettlement,
+                    routeTask: routeTask
                 )
                 guard streamOutcome == .completed else {
                     return streamOutcome
@@ -2975,22 +3043,26 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
     }
 
-    private func consumeContextBuilderProviderStreamWhileAwaitingRoute(
-        _ stream: AsyncThrowingStream<AIStreamResult, Error>,
+    /// Starts the run's bounded wait for its provider's MCP connection to be routed to it.
+    ///
+    /// A route, a lost ownership, and a cancellation settle `coordinator` for the stream consumer.
+    /// That consumer exists only once the run's execution has its provider's stream, and when this
+    /// wait ends the run has no deadline left. So a timeout always fails the run from here, and a
+    /// lost ownership does while there is no consumer yet.
+    private func startContextBuilderRouteWait(
         record: ContextBuilderRunRecord,
-        lease: MCPBootstrapLease
-    ) async -> ContextBuilderRunTerminalOutcome {
-        let coordinator = ContextBuilderRouteSettlementCoordinator(
-            maxBufferedTextCharacters: ContextBuilderDefaults.mcpPreRouteBufferedTextCharacterLimit,
-            maxBufferedEventCount: ContextBuilderDefaults.mcpPreRouteBufferedEventLimit
-        )
-
-        let routeTask = Task { @MainActor [weak self, weak record] in
+        lease: MCPBootstrapLease,
+        coordinator: ContextBuilderRouteSettlementCoordinator
+    ) -> Task<Void, Never> {
+        let startupPolicy = startupPolicy
+        return Task { @MainActor [weak self, weak record] in
             guard let self, let record else {
                 _ = coordinator.settle(ContextBuilderRouteSettlementCoordinator.Settlement.cancelled)
                 return
             }
-            let outcome = await lease.releaseWhenRoutedIndefinitely(
+            let outcome = await lease.releaseWhenRouted(
+                waitPolicy: startupPolicy.routingWait,
+                clock: startupPolicy.clock,
                 progressReporter: { [weak record] progress in
                     guard let record else { return }
                     let phase: ContextBuilderMCPProgressPhase = switch progress {
@@ -3016,17 +3088,97 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             case .routed:
                 guard coordinator.settle(.routed) else { return }
                 await record.beginProviderStreamProgress()
+                // Reporting that progress suspends, and the run can end meanwhile. A route is
+                // published only for a run that is still current.
+                guard !Task.isCancelled, acceptsEvents(from: record) else { return }
                 await handleContextBuilderRouteCommitted(coordinator: coordinator, record: record)
             case .failed:
-                _ = coordinator.settle(.routingOwnershipLost)
+                // An execution that is already leaving cancels this task before its own lease
+                // cleanup signals this failure, and ends the run itself.
+                guard coordinator.settle(.routingOwnershipLost),
+                      !Task.isCancelled,
+                      record.isAwaitingProviderStartResult
+                else { return }
+                failContextBuilderRunAfterRoutingOwnershipLoss(record)
             case .cancelled:
                 _ = coordinator.settle(ContextBuilderRouteSettlementCoordinator.Settlement.cancelled)
             case .timedOutBeforeConnection, .timedOutAfterConnection:
-                // The indefinite Context Builder path never schedules elapsed-time deadlines.
-                _ = coordinator.settle(.routingOwnershipLost)
+                // A run that is being cancelled ends as cancelled even when its deadline elapsed
+                // first.
+                guard !Task.isCancelled else {
+                    _ = coordinator.settle(ContextBuilderRouteSettlementCoordinator.Settlement.cancelled)
+                    return
+                }
+                failContextBuilderRunAfterRoutingTimeout(
+                    record,
+                    connectionObserved: outcome == .timedOutAfterConnection,
+                    waitPolicy: startupPolicy.routingWait
+                )
             }
         }
+    }
 
+    private func failContextBuilderRunAfterRoutingTimeout(
+        _ record: ContextBuilderRunRecord,
+        connectionObserved: Bool,
+        waitPolicy: MCPRoutingWaitPolicy
+    ) {
+        let agentDisplayName = record.agentKind.displayName
+        let clientName = record.agentKind.mcpClientNameHint ?? agentDisplayName
+        let failure: ContextBuilderMCPRoutingError = if connectionObserved {
+            .routingTimedOutAfterConnection(
+                agentDisplayName: agentDisplayName,
+                clientName: clientName,
+                grace: waitPolicy.observedConnectionGrace
+            )
+        } else {
+            .routingTimedOutBeforeConnection(
+                agentDisplayName: agentDisplayName,
+                clientName: clientName,
+                timeout: waitPolicy.noConnectionTimeout
+            )
+        }
+        failContextBuilderRunFromRouteWait(record, failure: failure, source: "contextBuilder.routingTimeout")
+    }
+
+    private func failContextBuilderRunAfterRoutingOwnershipLoss(_ record: ContextBuilderRunRecord) {
+        let agentDisplayName = record.agentKind.displayName
+        failContextBuilderRunFromRouteWait(
+            record,
+            failure: .routingFailed(
+                agentDisplayName: agentDisplayName,
+                clientName: record.agentKind.mcpClientNameHint ?? agentDisplayName
+            ),
+            source: "contextBuilder.routingOwnershipLost"
+        )
+    }
+
+    /// Ends a run from its routing wait. The lease cleared the run's policy and routing state
+    /// before it reported the wait's outcome, so nothing can route to the run any more. Finalizing
+    /// publishes the failure without waiting for the provider, and the teardown it schedules
+    /// cancels the run's execution and disposes that provider.
+    private func failContextBuilderRunFromRouteWait(
+        _ record: ContextBuilderRunRecord,
+        failure: ContextBuilderMCPRoutingError,
+        source: String
+    ) {
+        finalizeContextBuilderRun(
+            record,
+            outcome: .failed(failure.localizedDescription),
+            waiterResolution: .snapshot,
+            cancelExecution: true,
+            saveHistory: true,
+            source: source
+        )
+    }
+
+    private func consumeContextBuilderProviderStreamWhileAwaitingRoute(
+        _ stream: AsyncThrowingStream<AIStreamResult, Error>,
+        record: ContextBuilderRunRecord,
+        lease: MCPBootstrapLease,
+        coordinator: ContextBuilderRouteSettlementCoordinator,
+        routeTask: Task<Void, Never>
+    ) async -> ContextBuilderRunTerminalOutcome {
         let streamTask = Task { @MainActor [weak self, weak record] in
             guard let self, let record else {
                 _ = coordinator.settle(ContextBuilderRouteSettlementCoordinator.Settlement.cancelled)
@@ -3040,38 +3192,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             )
         }
 
-        let watchdogTask = Task { @MainActor [weak self, weak record] in
-            do {
-                try await Task.sleep(for: .seconds(ContextBuilderDefaults.mcpRoutingWatchdogSeconds))
-            } catch {
-                return
-            }
-            guard let self, let record,
-                  coordinator.isPending,
-                  acceptsEvents(from: record)
-            else { return }
-            let connectionWasObserved = await MCPRoutingWaiter.connectionWasObserved(runID: record.runID)
-            guard !connectionWasObserved,
-                  coordinator.isPending,
-                  acceptsEvents(from: record)
-            else { return }
-
-            await record.reportProgress(.waitingForChildConnection)
-            if record.session.appendLogEntry(
-                AgentLogEntry(
-                    timestamp: Date(),
-                    type: .system,
-                    message: "Still waiting for \(record.agentKind.displayName) to open its MCP connection."
-                ),
-                dedupeKey: "context-builder-routing-watchdog-\(record.runID.uuidString)"
-            ) {
-                updateAgentLogBinding(from: record.session)
-            }
-        }
-
         return await withTaskCancellationHandler {
             let settlement = await coordinator.waitForSettlement()
-            watchdogTask.cancel()
 
             switch settlement {
             case .routed:
@@ -3121,7 +3243,6 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 return .cancelled
             }
         } onCancel: {
-            watchdogTask.cancel()
             streamTask.cancel()
             routeTask.cancel()
             Task { @MainActor in

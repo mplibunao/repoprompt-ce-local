@@ -107,6 +107,73 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
         XCTAssertNotNil(record.teardownFinishedAt)
     }
 
+    /// A provider start that ignores cancellation does not hold app termination. Shutdown joins
+    /// the provider's first disposal and then, once the grace expires, settles with the start
+    /// still held. The disposal that has to follow that start is not reported as finished until
+    /// the start has returned and the provider has been disposed again.
+    func testAppTerminationStopsWaitingForProviderStartAfterGrace() async {
+        let window = makeWindow()
+        let viewModel = window.contextBuilderAgentViewModel
+        viewModel.setAppTerminationFinalContextGraceForTesting(1)
+        let provider = GatedHeadlessAgentProvider()
+        let startGate = ContextBuilderTestGate()
+        let record = makeRecord()
+        XCTAssertTrue(record.installProvider(provider))
+        let start = record.beginProviderStart {
+            await startGate.wait()
+            return AsyncThrowingStream { $0.finish() }
+        }
+        XCTAssertNotNil(start)
+        record.executionTask = Task { @MainActor in
+            _ = try? await start?.stream()
+        }
+        XCTAssertTrue(viewModel.registerRunRecordForTesting(record, makeCurrent: true))
+
+        let shutdownFinished = ContextBuilderTestFlag()
+        let shutdown = ContextBuilderTestTaskHandle()
+        // Runs once the test has returned, so it opens neither hold while the expectations below
+        // are checked. When the test returns early it opens both before it joins shutdown, which
+        // can be waiting behind either.
+        addTeardownBlock { @MainActor in
+            await provider.allowDispose()
+            await startGate.open()
+            await shutdown.task?.value
+        }
+        shutdown.task = Task {
+            await viewModel.shutdownForAppTermination()
+            await shutdownFinished.set()
+        }
+        guard await waitUntil(condition: { await provider.disposeCallCount() > 0 }) else {
+            XCTFail("Shutdown did not start disposing the provider.")
+            return
+        }
+        guard await waitUntil(condition: { await startGate.entered }) else {
+            XCTFail("The provider start did not reach its hold.")
+            return
+        }
+        let finishedBeforeFirstDisposal = await shutdownFinished.current()
+        XCTAssertFalse(finishedBeforeFirstDisposal)
+        await provider.allowDispose()
+
+        let settledWithStartHeld = await waitUntil {
+            await shutdownFinished.current()
+        }
+        XCTAssertTrue(settledWithStartHeld)
+        XCTAssertEqual(record.terminalOutcome, .cancelled)
+        XCTAssertFalse(record.providerDisposalFinished)
+        let disposeCallsWithStartHeld = await provider.disposeCallCount()
+        XCTAssertEqual(disposeCallsWithStartHeld, 1)
+
+        await startGate.open()
+        await shutdown.task?.value
+        let disposedAfterStart = await waitUntil {
+            record.providerDisposalFinished
+        }
+        XCTAssertTrue(disposedAfterStart)
+        let disposeCallsAfterStart = await provider.disposeCallCount()
+        XCTAssertEqual(disposeCallsAfterStart, 2)
+    }
+
     func testWindowRegistrationIsRejectedAfterTerminationSignal() {
         let manager = WindowStatesManager.shared
         let window = makeWindow()
@@ -682,6 +749,12 @@ private actor ContextBuilderTestFirstEvent {
         if let firstEvent { return firstEvent }
         return await withCheckedContinuation { waiters.append($0) }
     }
+}
+
+/// Lets a cleanup registered before a task is started join that task.
+@MainActor
+private final class ContextBuilderTestTaskHandle {
+    var task: Task<Void, Never>?
 }
 
 private actor ContextBuilderTestFlag {
