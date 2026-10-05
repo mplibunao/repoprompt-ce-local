@@ -236,6 +236,9 @@ final class ContextBuilderRunRecord {
     let activityReporter: ContextBuilderMCPActivityReporter?
     let workspaceContext: ContextBuilderWorkspaceContext?
     let mcpConfiguration: ContextBuilderMCPRunConfiguration?
+    /// Working directory for the run's provider, fixed at admission so that startup never reads
+    /// whichever workspace the window shows by then.
+    let providerWorkspacePath: String?
 
     var output = ContextBuilderAssistantOutputAccumulator()
     var executionTask: Task<Void, Never>?
@@ -272,6 +275,7 @@ final class ContextBuilderRunRecord {
         modelParameterSelections: [ACPModelParameterSelection] = [],
         workspaceContext: ContextBuilderWorkspaceContext? = nil,
         mcpConfiguration: ContextBuilderMCPRunConfiguration? = nil,
+        providerWorkspacePath: String? = nil,
         continuation: CheckedContinuation<ContextBuilderAgentViewModel.MCPContextBuilderRunCompletion, Error>? = nil,
         restoreConfiguration: (() -> Void)? = nil,
         progressReporter: ContextBuilderMCPProgressReporter? = nil,
@@ -287,6 +291,9 @@ final class ContextBuilderRunRecord {
         self.modelParameterSelections = modelParameterSelections
         self.workspaceContext = workspaceContext
         self.mcpConfiguration = mcpConfiguration
+        self.providerWorkspacePath = mcpConfiguration?.providerWorkspacePath
+            ?? workspaceContext?.providerWorkspacePath
+            ?? providerWorkspacePath
         self.continuation = continuation
         self.restoreConfiguration = restoreConfiguration
         self.progressReporter = progressReporter

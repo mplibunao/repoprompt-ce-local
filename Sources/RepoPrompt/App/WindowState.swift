@@ -364,6 +364,18 @@ class WindowState: ObservableObject {
         }
 
         convenience init(
+            domainRuntime: MCPDomainRuntime,
+            contextBuilderProviderFactory: @escaping ContextBuilderAgentViewModel.ProviderFactory
+        ) {
+            self.init(
+                contextBuilderProviderFactory: Optional(contextBuilderProviderFactory),
+                loadStoredAPISettingsDataOnInit: true,
+                codexModelPollingService: .shared,
+                domainRuntimeOverride: domainRuntime
+            )
+        }
+
+        convenience init(
             codexModelPollingService: CodexModelPollingService,
             loadStoredAPISettingsDataOnInit: Bool
         ) {

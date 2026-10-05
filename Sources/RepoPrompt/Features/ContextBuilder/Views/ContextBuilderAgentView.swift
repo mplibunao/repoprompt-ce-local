@@ -106,6 +106,12 @@ struct ContextBuilderAgentView: View {
         return viewModel.tabsWithActiveContextBuilderRun.contains(tabID)
     }
 
+    /// Whether an earlier operation still holds this tab, so pressing Run could not start one yet
+    private var isTabHeldAgainstNewRun: Bool {
+        guard let tabID = subjectTabID else { return false }
+        return viewModel.tabsHeldAgainstNewRun.contains(tabID)
+    }
+
     private var activeRunBehavior: ContextBuilderRunBehavior? {
         guard isContextBuilderRunningForTab else { return nil }
         return viewModel.activeRunBehavior(for: subjectTabID)
@@ -922,7 +928,7 @@ struct ContextBuilderAgentView: View {
                 activeRunTokenBudget: activeRunBehavior?.tokenBudget,
                 resetBehaviorSettings: viewModel.resetContextBuilderBehaviorSettings,
                 isRunning: isContextBuilderRunningForTab,
-                isDisabled: !isContextBuilderRunningForTab && viewModel.isAgentBusy,
+                isDisabled: !isContextBuilderRunningForTab && (viewModel.isAgentBusy || isTabHeldAgainstNewRun),
                 isBusy: viewModel.isAgentBusy,
                 isCancelling: viewModel.isCancelling,
                 isMCPControlled: viewModel.isMCPControlledRun,

@@ -849,42 +849,14 @@ import XCTest
             admissionDecidedHook: (@Sendable (BootstrapHandshakeAdmission) async -> Void)? = nil,
             approval: @escaping ServerNetworkManager.ConnectionApprovalHandler = { _, _ in true }
         ) async throws -> PersistentMCPTestSocketClient {
-            var socketFDs = [Int32](repeating: -1, count: 2)
-            guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &socketFDs) == 0 else {
-                throw PersistentMCPTestSocketClient.ClientError.posix(operation: "socketpair", code: errno)
-            }
-            var noSigPipe: Int32 = 1
-            guard Darwin.setsockopt(
-                socketFDs[0],
-                SOL_SOCKET,
-                SO_NOSIGPIPE,
-                &noSigPipe,
-                socklen_t(MemoryLayout.size(ofValue: noSigPipe))
-            ) == 0 else {
-                let code = errno
-                Darwin.close(socketFDs[0])
-                Darwin.close(socketFDs[1])
-                throw PersistentMCPTestSocketClient.ClientError.posix(operation: "setsockopt(SO_NOSIGPIPE)", code: code)
-            }
-            let client = PersistentMCPTestSocketClient(fd: socketFDs[0])
-            let connectionManager: BootstrapSocketConnectionManager
-            do {
-                connectionManager = try BootstrapSocketConnectionManager(
-                    connectionID: connectionID,
-                    sessionToken: sessionToken,
-                    clientPid: Int(getpid()),
-                    observedKernelPeerPID: Int(getpid()),
-                    clientName: clientName,
-                    purpose: .unknown,
-                    codeMapsDisabled: false,
-                    connectedFD: socketFDs[1],
-                    parentManager: manager
-                )
-            } catch {
-                client.close()
-                Darwin.close(socketFDs[1])
-                throw error
-            }
+            let (client, connectionManager) = try BootstrapTestConnectionFactory.make(
+                connectionID: connectionID,
+                sessionToken: sessionToken,
+                clientName: clientName,
+                clientPid: Int(getpid()),
+                observedKernelPeerPID: Int(getpid()),
+                parentManager: manager
+            )
             let manager = manager
             cleanup.add {
                 client.close()
