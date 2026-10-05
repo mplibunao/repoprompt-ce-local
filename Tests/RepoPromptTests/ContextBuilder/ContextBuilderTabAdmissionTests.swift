@@ -1045,14 +1045,424 @@ import XCTest
             }
         }
 
+        /// A stored tab that two windows show admits one Context Builder operation between them.
+        /// While one window works in the tab, the other's MCP claim on it is the tab-busy error and
+        /// its Run press starts nothing and says why in the log its panel shows. Neither changes the
+        /// holder, and the refused window is left without a claim or a run. Each window holds once,
+        /// so the rule is shown in both directions. The workspace's other tabs stay free. A tab is
+        /// free again once its holder releases it. A holder whose window closes keeps the tab while
+        /// the window begins closing and after it has left the open windows, until that close has
+        /// retired its run.
+        func testSameTabInSecondWindowRefuses() async throws {
+            try await ContextBuilderRunFixture.withFixture { first, cleanup in
+                let second = try await first.openPeerWindow(cleanup: cleanup)
+                XCTAssertFalse(first.window === second.window)
+                XCTAssertEqual(second.storedTabIDs, first.storedTabIDs)
+                let tab = first.slots[0]
+                let otherTab = first.slots[1]
+                var providers: [ContextBuilderUnroutedProvider] = []
+                for fixture in [first, second] {
+                    fixture.providerScript = { _ in
+                        let provider = ContextBuilderUnroutedProvider()
+                        providers.append(provider)
+                        return provider
+                    }
+                    fixture.releaseOnSettle {
+                        for provider in providers {
+                            await provider.finish()
+                        }
+                    }
+                }
+
+                var pressed = await first.pressRun(on: tab)
+                let runID = try XCTUnwrap(pressed)
+                try await first.waitFor("the first window's provider to start its turn") {
+                    providers.first?.runID == runID
+                }
+                await assertRefused(tab, in: second, heldBy: first)
+
+                let claim = try second.viewModel.beginMCPControlledRun(
+                    forTabID: otherTab.tabID,
+                    workspaceID: second.workspaceID,
+                    responseType: nil,
+                    planModelName: nil
+                )
+                XCTAssertEqual(
+                    second.operationToken(otherTab),
+                    OperationToken(id: claim, origin: .mcp, workspaceID: second.workspaceID)
+                )
+                XCTAssertEqual(first.activeRunID(tab), runID)
+                await assertRefused(otherTab, in: first, heldBy: second)
+
+                await second.viewModel.clearMCPControlledRun(forTabID: otherTab.tabID, controlToken: claim)
+                try await assertClaimable(otherTab, in: first)
+                await providers[0].finish()
+                try await first.waitForRelease(of: tab)
+                try await assertClaimable(tab, in: second)
+
+                pressed = await second.pressRun(on: tab)
+                let closingRunID = try XCTUnwrap(pressed)
+                try await second.waitFor("the second window's provider to start its turn") {
+                    providers.last?.runID == closingRunID
+                }
+                // The close runs in the order the window's view runs it.
+                second.window.beginClose()
+                for unlisted in [false, true] {
+                    if unlisted {
+                        WindowStatesManager.shared.unregisterWindowState(second.window)
+                    }
+                    XCTAssertEqual(WindowStatesManager.shared.allWindows.contains { $0 === second.window }, !unlisted)
+                    XCTAssertThrowsError(
+                        try first.viewModel.beginMCPControlledRun(
+                            forTabID: tab.tabID,
+                            workspaceID: first.workspaceID,
+                            responseType: nil,
+                            planModelName: nil
+                        )
+                    ) { Self.assertTabBusy($0) }
+                    XCTAssertEqual(second.activeRunID(tab), closingRunID)
+                }
+
+                await second.window.tearDown()
+                try await second.waitForRelease(of: tab)
+                try await assertClaimable(tab, in: first)
+            }
+        }
+
+        /// A window closes while its run is committing: the commit is claimed and captured, and
+        /// nothing is written yet. From the moment the window leaves the open windows the other
+        /// window that shows the tab is refused it, because that commit could still write, and it
+        /// stays free to use the workspace's other tabs. The close gives the commit its grace and
+        /// then retires the run. The tab is free for the other window from then on, and the
+        /// commit, still held, writes nothing when it goes on.
+        func testClosingWindowKeepsItsTabFromAnotherWindowUntilItsCloseRetiresItsRun() async throws {
+            try await ContextBuilderRunFixture.withFixture { first, cleanup in
+                let closing = try await first.openPeerWindow(cleanup: cleanup)
+                let tab = first.slots[0]
+                let observed = CloseObservation()
+                let (run, beforeWrite) = try await Self.holdCommitBeforeItsWrite(on: tab, in: closing, observed: observed)
+
+                closing.window.beginClose()
+                WindowStatesManager.shared.unregisterWindowState(closing.window)
+                XCTAssertFalse(WindowStatesManager.shared.allWindows.contains { $0 === closing.window })
+                await assertRefused(tab, in: first, heldBy: closing)
+                try await assertClaimable(first.slots[1], in: first)
+
+                Task { @MainActor in
+                    await closing.window.tearDown()
+                    observed.returned = true
+                }
+                try await closing.waitFor("the window's close to return with the commit still held") {
+                    observed.returned
+                }
+                let completion = try await closing.completion(of: run)
+                XCTAssertEqual(completion.terminalDisposition, .cancelled)
+                XCTAssertNil(completion.committedTab)
+                try await closing.waitForRelease(of: tab)
+                try await assertClaimable(tab, in: first)
+
+                await beforeWrite.open()
+                try await closing.waitFor("the run to leave its commit") { observed.runLeftItsCommit }
+                XCTAssertEqual(closing.storedTab(tab)?.promptText, "")
+            }
+        }
+
+        /// The same close with a commit that gets through within the close's grace. The other
+        /// window is refused the tab while the closing window's teardown is waiting on that
+        /// commit, the commit then lands in the closing window's stored tab, and the tab is free
+        /// once the close has finished.
+        func testClosingWindowKeepsItsTabFromAnotherWindowWhileItsCommitLands() async throws {
+            try await ContextBuilderRunFixture.withFixture { first, cleanup in
+                let closing = try await first.openPeerWindow(cleanup: cleanup)
+                let tab = first.slots[0]
+                let observed = CloseObservation()
+                let viewModel = closing.viewModel
+                cleanup.add { viewModel.setCloseSettlementGraceForTesting(500_000_000) }
+                viewModel.setCloseSettlementGraceForTesting(600 * NSEC_PER_SEC)
+                let (run, beforeWrite) = try await Self.holdCommitBeforeItsWrite(on: tab, in: closing, observed: observed)
+
+                closing.window.beginClose()
+                WindowStatesManager.shared.unregisterWindowState(closing.window)
+                Task { @MainActor in
+                    await closing.window.tearDown()
+                    observed.returned = true
+                }
+                try await closing.waitFor("the closing window's teardown to ask the run to end") {
+                    closing.session(tab)?.isCancelling == true
+                }
+                XCTAssertFalse(observed.returned)
+                await assertRefused(tab, in: first, heldBy: closing)
+                try await assertClaimable(first.slots[1], in: first)
+                XCTAssertEqual(closing.storedTab(tab)?.promptText, "")
+
+                await beforeWrite.open()
+                let completion = try await closing.completion(of: run)
+                XCTAssertEqual(completion.terminalDisposition, .cancelled)
+                XCTAssertEqual(completion.committedTab?.tab.promptText, tab.agentOutput)
+                XCTAssertEqual(closing.storedTab(tab)?.promptText, tab.agentOutput)
+
+                try await closing.waitFor("the window's close to return") { observed.returned }
+                try await closing.waitForRelease(of: tab)
+                try await assertClaimable(tab, in: first)
+            }
+        }
+
+        /// A panel run's claim is released by the run's own task. A close stops waiting for a task
+        /// that outlasts its grace, and the claim is still there: the other window is refused the
+        /// tab after the close has returned, for as long as that task has not ended.
+        func testClosedWindowWhoseRunTaskHasNotEndedKeepsItsTabFromAnotherWindow() async throws {
+            try await ContextBuilderRunFixture.withFixture { first, cleanup in
+                let closing = try await first.openPeerWindow(cleanup: cleanup)
+                let tab = first.slots[0]
+                let execution = ContextBuilderTestGate()
+                let viewModel = closing.viewModel
+                cleanup.add {
+                    viewModel.installRunTestHooks(nil)
+                    viewModel.setCloseSettlementGraceForTesting(500_000_000)
+                }
+                closing.releaseOnSettle { await execution.open() }
+                viewModel.setCloseSettlementGraceForTesting(1)
+                viewModel.installRunTestHooks(.init(
+                    beforeProcessingProviderEvent: { _, _ in await execution.wait() },
+                    providerEventDisposition: nil,
+                    teardownCompleted: nil
+                ))
+                closing.providerScript = { _ in ContextBuilderUnroutedProvider(events: ["Looking around"]) }
+
+                let pressed = await closing.pressRun(on: tab)
+                let runID = try XCTUnwrap(pressed)
+                try await closing.waitFor("the run's execution to be held") { await execution.entered }
+                let held = OperationToken(id: runID, origin: .ui, workspaceID: closing.workspaceID)
+                XCTAssertEqual(closing.operationToken(tab), held)
+
+                closing.window.beginClose()
+                WindowStatesManager.shared.unregisterWindowState(closing.window)
+                let observed = CloseObservation()
+                let teardown = Task { @MainActor in
+                    await closing.window.tearDown()
+                    observed.returned = true
+                }
+                cleanup.add {
+                    await execution.open()
+                    await teardown.value
+                }
+                try await closing.waitFor("the window's close to return with the run's task still held") {
+                    observed.returned
+                }
+                XCTAssertNil(closing.activeRunID(tab))
+                XCTAssertEqual(closing.operationToken(tab), held)
+                await assertRefused(tab, in: first, heldBy: closing)
+
+                await execution.open()
+                try await closing.waitForRelease(of: tab)
+                try await assertClaimable(tab, in: first)
+            }
+        }
+
+        /// A claim refused because another window holds the tab changes nothing in the asking
+        /// window. Here that window has never shown the tab and has no session for it, and the
+        /// refused claim makes none.
+        func testClaimRefusedForTabHeldInAnotherWindowMakesNoSession() async throws {
+            try await ContextBuilderRunFixture.withFixture { first, cleanup in
+                let second = try await first.openPeerWindow(cleanup: cleanup)
+                let tab = first.slots[1]
+                let claim = try second.viewModel.beginMCPControlledRun(
+                    forTabID: tab.tabID,
+                    workspaceID: second.workspaceID,
+                    responseType: nil,
+                    planModelName: nil
+                )
+                let held = TabState(second, tab)
+                XCTAssertNil(first.session(tab))
+                let sessions = first.viewModel.sessions.mapValues(ObjectIdentifier.init)
+                let heldAgainstNewRun = first.viewModel.tabsHeldAgainstNewRun
+
+                XCTAssertThrowsError(
+                    try first.viewModel.beginMCPControlledRun(
+                        forTabID: tab.tabID,
+                        workspaceID: first.workspaceID,
+                        responseType: nil,
+                        planModelName: nil
+                    )
+                ) { Self.assertTabBusy($0) }
+                XCTAssertEqual(first.viewModel.sessions.mapValues(ObjectIdentifier.init), sessions)
+                XCTAssertNil(first.activeRunID(tab))
+                XCTAssertEqual(first.viewModel.tabsHeldAgainstNewRun, heldAgainstNewRun)
+                XCTAssertEqual(TabState(second, tab), held)
+
+                await second.viewModel.clearMCPControlledRun(forTabID: tab.tabID, controlToken: claim)
+                try await assertClaimable(tab, in: first)
+            }
+        }
+
+        /// A UI claim that only its follow-up still holds lets its own window's Run take the tab
+        /// over, which is why that window does not count the tab as held against a new run. No
+        /// other window can take the follow-up over, so there the tab is occupied until the
+        /// follow-up settles.
+        func testFollowUpOnlyHolderInAnotherWindowRefuses() async throws {
+            try await ContextBuilderRunFixture.withFixture { first, cleanup in
+                let second = try await first.openPeerWindow(cleanup: cleanup)
+                let tab = first.slots[0]
+                first.enableAutomaticFollowUp(cleanup: cleanup)
+                let followUps = Self.holdUIFollowUps(on: first, cleanup: cleanup)
+
+                let pressed = await first.pressRun(on: tab)
+                let runID = try XCTUnwrap(pressed)
+                try await first.waitFor("the follow-up to be all that still holds the tab") {
+                    followUps.entryCount == 1 && first.operationToken(tab)?.isHeldByFollowUpOnly == true
+                }
+                XCTAssertEqual(first.operationToken(tab)?.id, runID)
+                XCTAssertNil(first.activeRunID(tab))
+                XCTAssertFalse(first.viewModel.tabsHeldAgainstNewRun.contains(tab.tabID))
+
+                await assertRefused(tab, in: second, heldBy: first)
+                XCTAssertEqual(first.session(tab)?.isBackgroundPlanGenerating, true)
+
+                followUps.open()
+                try await first.waitForRelease(of: tab)
+                try await assertClaimable(tab, in: second)
+            }
+        }
+
+        /// An MCP claim outlives its window's switch to another workspace, and it still occupies
+        /// the tab of the workspace it was made for. The window that shows that workspace is
+        /// refused until the claim is released, although the holder's window now shows another.
+        func testHolderWhoseWindowSwitchedWorkspaceStillRefusesAnotherWindow() async throws {
+            try await ContextBuilderRunFixture.withFixture { first, cleanup in
+                let second = try await first.openPeerWindow(cleanup: cleanup)
+                let tab = first.slots[0]
+                let unclaimed = first.slots[1]
+                let manager = second.window.workspaceManager
+
+                let claim = try second.viewModel.beginMCPControlledRun(
+                    forTabID: tab.tabID,
+                    workspaceID: second.workspaceID,
+                    responseType: nil,
+                    planModelName: nil
+                )
+                // The switch drops every session that holds no MCP claim, which shows when the
+                // view model has handled it.
+                await second.window.promptManager.switchComposeTab(unclaimed.tabID)
+                second.viewModel.refreshActiveSessionBindings()
+                XCTAssertNotNil(second.session(unclaimed))
+
+                let elsewhereID = await Self.showAnotherWorkspace(in: second)
+                try await second.waitFor("the second window's Context Builder to follow the switch") {
+                    second.session(unclaimed) == nil
+                }
+                XCTAssertEqual(manager.activeWorkspaceID, elsewhereID)
+                XCTAssertEqual(
+                    second.operationToken(tab),
+                    OperationToken(id: claim, origin: .mcp, workspaceID: second.workspaceID)
+                )
+
+                await assertRefused(tab, in: first, heldBy: second)
+
+                await second.viewModel.clearMCPControlledRun(forTabID: tab.tabID, controlToken: claim)
+                try await assertClaimable(tab, in: first)
+            }
+        }
+
+        /// A panel run that its window's workspace switch cancelled keeps its claim until its task
+        /// has ended, on the session that took the place of the one the switch dropped. That claim
+        /// still occupies the tab of the workspace the run was admitted in, so the window that
+        /// shows that workspace is refused until the task ends.
+        func testPanelClaimMovedByItsWindowsWorkspaceSwitchStillRefusesAnotherWindow() async throws {
+            try await ContextBuilderRunFixture.withFixture { first, cleanup in
+                let second = try await first.openPeerWindow(cleanup: cleanup)
+                let tab = first.slots[0]
+                let execution = ContextBuilderTestGate()
+                let viewModel = second.viewModel
+                cleanup.add { viewModel.installRunTestHooks(nil) }
+                second.releaseOnSettle { await execution.open() }
+                viewModel.installRunTestHooks(.init(
+                    beforeProcessingProviderEvent: { _, _ in await execution.wait() },
+                    providerEventDisposition: nil,
+                    teardownCompleted: nil
+                ))
+                second.providerScript = { _ in ContextBuilderUnroutedProvider(events: ["Looking around"]) }
+
+                let pressed = await second.pressRun(on: tab)
+                let runID = try XCTUnwrap(pressed)
+                try await second.waitFor("the run's execution to be held") { await execution.entered }
+                let admitted = OperationToken(id: runID, origin: .ui, workspaceID: second.workspaceID)
+                let droppedSession = try XCTUnwrap(second.session(tab))
+                XCTAssertEqual(droppedSession.operationToken, admitted)
+
+                let elsewhereID = await Self.showAnotherWorkspace(in: second)
+                try await second.waitFor("the second window's Context Builder to follow the switch") {
+                    second.session(tab).map { $0 !== droppedSession } == true
+                }
+                XCTAssertEqual(second.window.workspaceManager.activeWorkspaceID, elsewhereID)
+                XCTAssertEqual(second.operationToken(tab), admitted)
+                XCTAssertNil(droppedSession.operationToken)
+                XCTAssertNil(second.activeRunID(tab))
+
+                await assertRefused(tab, in: first, heldBy: second)
+
+                await execution.open()
+                try await second.waitForRelease(of: tab)
+                try await assertClaimable(tab, in: first)
+            }
+        }
+
         // MARK: Support
 
+        private static let tabBusyMessage = "Context Builder is already running for this tab."
         private static let followUpAnswer = "Follow-up answer"
         private static let lateFollowUpAnswer = "Answer of a follow-up that outlived its session"
 
         @MainActor
         private final class CloseObservation {
             var returned = false
+            var runLeftItsCommit = false
+        }
+
+        /// Switches `fixture`'s window to a workspace of its own, which leaves the fixture's
+        /// workspace among those its workspace manager holds. Returns the new workspace's ID.
+        private static func showAnotherWorkspace(in fixture: ContextBuilderRunFixture) async -> UUID {
+            var elsewhere = WorkspaceModel(name: "Elsewhere", repoPaths: [])
+            elsewhere.isEphemeral = true
+            let elsewhereTab = ComposeTabState(name: "elsewhere")
+            elsewhere.composeTabs = [elsewhereTab]
+            elsewhere.activeComposeTabID = elsewhereTab.id
+            let manager = fixture.window.workspaceManager
+            manager.workspaces.append(elsewhere)
+            await manager.switchWorkspace(
+                to: elsewhere,
+                saveState: false,
+                reason: "ContextBuilderTabAdmissionTests"
+            )
+            return elsewhere.id
+        }
+
+        /// Starts an MCP run on `slot` and holds it at its last step before the tab is written:
+        /// the commit is claimed and captured and has changed nothing. The run's child leaves the
+        /// prompt empty, so the commit is what fills it, from the run's output, and the stored
+        /// prompt shows whether the commit wrote the tab.
+        private static func holdCommitBeforeItsWrite(
+            on slot: ContextBuilderRunFixture.TabSlot,
+            in fixture: ContextBuilderRunFixture,
+            observed: CloseObservation
+        ) async throws -> (run: ContextBuilderRunFixture.MCPRun, beforeWrite: ContextBuilderTestGate) {
+            let beforeWrite = ContextBuilderTestGate()
+            fixture.childWrites = .init(setsPrompt: false, setsSelection: true, repliesWithOutput: true)
+            fixture.releaseOnSettle { await beforeWrite.open() }
+            let run = fixture.startMCPRun(on: slot, progressReporter: { phase in
+                switch phase {
+                case .tabContextCommit:
+                    await beforeWrite.wait()
+                case .runFinalization:
+                    observed.runLeftItsCommit = true
+                default:
+                    break
+                }
+            })
+            try await fixture.waitFor("the run to reach its last step before the tab is written") {
+                await beforeWrite.entered
+            }
+            XCTAssertEqual(fixture.storedTab(slot)?.promptText, "")
+            return (run, beforeWrite)
         }
 
         /// What a refused attempt must leave as it found it.
@@ -1082,12 +1492,58 @@ import XCTest
             let refusal = error as NSError
             XCTAssertEqual(refusal.domain, "DiscoverAgent", file: file, line: line)
             XCTAssertEqual(refusal.code, 2, file: file, line: line)
+            XCTAssertEqual(refusal.localizedDescription, tabBusyMessage, file: file, line: line)
+        }
+
+        /// `asking` cannot take `slot` while `holder`, another window, works in it. Its MCP claim
+        /// is the tab-busy error and changes neither window. Its Run press starts nothing, leaves
+        /// the holder as it was, and adds the reason to the log the asking window's panel shows.
+        /// Each attempt is compared in the main-actor turn it ran in.
+        private func assertRefused(
+            _ slot: ContextBuilderRunFixture.TabSlot,
+            in asking: ContextBuilderRunFixture,
+            heldBy holder: ContextBuilderRunFixture,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async {
+            await asking.window.promptManager.switchComposeTab(slot.tabID)
+            asking.viewModel.refreshActiveSessionBindings()
+            let held = TabState(holder, slot)
+            let before = TabState(asking, slot)
+            let providerRequests = asking.providerRequests.count
+
+            XCTAssertThrowsError(
+                try asking.viewModel.beginMCPControlledRun(
+                    forTabID: slot.tabID,
+                    workspaceID: asking.workspaceID,
+                    responseType: nil,
+                    planModelName: nil
+                ),
+                file: file,
+                line: line
+            ) { Self.assertTabBusy($0, file: file, line: line) }
+            XCTAssertEqual(TabState(holder, slot), held, file: file, line: line)
+            XCTAssertEqual(TabState(asking, slot), before, file: file, line: line)
+
+            asking.viewModel.runContextBuilderAgent()
+            XCTAssertEqual(TabState(holder, slot), held, file: file, line: line)
+            let refused = TabState(asking, slot)
+            XCTAssertNil(refused.operationToken, file: file, line: line)
+            XCTAssertNil(refused.activeRunID, file: file, line: line)
+            XCTAssertEqual(refused.isBusy, false, file: file, line: line)
+            XCTAssertEqual(refused.toolCallCount, before.toolCallCount, file: file, line: line)
+            XCTAssertEqual(refused.runState, .failed(Self.tabBusyMessage), file: file, line: line)
             XCTAssertEqual(
-                refusal.localizedDescription,
-                "Context Builder is already running for this tab.",
+                refused.logMessages,
+                (before.logMessages ?? []) + [Self.tabBusyMessage],
                 file: file,
                 line: line
             )
+            XCTAssertEqual(asking.providerRequests.count, providerRequests, file: file, line: line)
+            XCTAssertFalse(asking.viewModel.tabsHeldAgainstNewRun.contains(slot.tabID), file: file, line: line)
+            XCTAssertEqual(asking.viewModel.agentLog.last?.message, Self.tabBusyMessage, file: file, line: line)
+            XCTAssertEqual(asking.viewModel.agentLog.last?.type, .system, file: file, line: line)
+            XCTAssertEqual(asking.viewModel.agentRunState, .failed(Self.tabBusyMessage), file: file, line: line)
         }
 
         /// The tab is free: a new claim succeeds and is released again.

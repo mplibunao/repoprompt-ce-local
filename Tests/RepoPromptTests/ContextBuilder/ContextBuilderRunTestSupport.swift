@@ -118,6 +118,40 @@ import XCTest
                 return TabSlot(name: name, tabID: UUID(), fileURL: fileURL)
             }
 
+            var workspace = WorkspaceModel(name: "Context Builder runs", repoPaths: [rootURL.path])
+            workspace.isEphemeral = true
+            workspace.composeTabs = slots.map { ComposeTabState(id: $0.tabID, name: $0.name) }
+            workspace.activeComposeTabID = slots[0].tabID
+            let fixture = try await open(workspace, rootURL: rootURL, slots: slots, cleanup: cleanup)
+
+            let manager = ServerNetworkManager.shared
+            let previousApproval = await manager.debugReplaceConnectionApprovalHandlerForTesting { _, _ in true }
+            cleanup.add {
+                _ = await manager.debugReplaceConnectionApprovalHandlerForTesting(previousApproval)
+            }
+            cleanup.add { await fixture.settleRuns() }
+            return fixture
+        }
+
+        /// Opens the fixture's workspace in a second window, as a second app window on an open
+        /// workspace does: the window loads the same stored tabs under the same IDs into a workspace
+        /// manager, a Context Builder view model, and an MCP server of its own, and is registered
+        /// with the window manager beside the first.
+        func openPeerWindow(cleanup: FixtureCleanup) async throws -> ContextBuilderRunFixture {
+            let workspace = try XCTUnwrap(window.workspaceManager.workspaces.first { $0.id == workspaceID })
+            let peer = try await Self.open(workspace, rootURL: rootURL, slots: slots, cleanup: cleanup)
+            cleanup.add { await peer.settleRuns() }
+            return peer
+        }
+
+        /// A registered window showing `workspace`, whose providers come from the fixture returned
+        /// for it.
+        private static func open(
+            _ workspace: WorkspaceModel,
+            rootURL: URL,
+            slots: [TabSlot],
+            cleanup: FixtureCleanup
+        ) async throws -> ContextBuilderRunFixture {
             let providers = ProviderSource()
             let domainRuntime = AppDomainRuntimeComposition.shared.runtime
             let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
@@ -135,10 +169,6 @@ import XCTest
             )
             GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
 
-            var workspace = WorkspaceModel(name: "Context Builder runs", repoPaths: [rootURL.path])
-            workspace.isEphemeral = true
-            workspace.composeTabs = slots.map { ComposeTabState(id: $0.tabID, name: $0.name) }
-            workspace.activeComposeTabID = slots[0].tabID
             let workspaceID = workspace.id
             var loadedRootID: UUID?
             cleanup.add {
@@ -167,12 +197,6 @@ import XCTest
             )
             window.promptManager.loadComposeTabsFromWorkspace(workspace, syncPromptText: true)
 
-            let manager = ServerNetworkManager.shared
-            let previousApproval = await manager.debugReplaceConnectionApprovalHandlerForTesting { _, _ in true }
-            cleanup.add {
-                _ = await manager.debugReplaceConnectionApprovalHandlerForTesting(previousApproval)
-            }
-
             let fixture = ContextBuilderRunFixture(
                 window: window,
                 workspaceID: workspaceID,
@@ -180,7 +204,6 @@ import XCTest
                 slots: slots
             )
             providers.fixture = fixture
-            cleanup.add { await fixture.settleRuns() }
             return fixture
         }
 

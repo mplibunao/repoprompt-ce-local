@@ -141,6 +141,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         _ modelParameterSelections: [ACPModelParameterSelection]
     ) -> HeadlessAgentProvider
 
+    /// Whether another window holds a claim or an active run for a workspace's tab.
+    typealias TabHeldInAnotherWindowCheck = @MainActor (_ workspaceID: UUID, _ tabID: UUID) -> Bool
+
     private func debugLog(_ message: @autoclosure () -> String) {
         #if DEBUG
             if AgentRuntimeProviderService.enableDebugLogging {
@@ -490,17 +493,22 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         /// The tab is closing, or its workspace no longer holds it.
         case tabUnavailable
         case tabBusy
+        /// Another window holds the tab. Nothing in this window's own state shows it, which is why
+        /// the Run entry reports this refusal.
+        case tabBusyInAnotherWindow
     }
 
     /// Tabs whose close is still retiring their work, counted because a stashed tab can be
     /// restored and closed again before its first close has finished.
     private var closingTabCounts: [UUID: Int] = [:]
 
+    private static let tabBusyMessage = "Context Builder is already running for this tab."
+
     private static var tabBusyError: NSError {
         NSError(
             domain: "DiscoverAgent",
             code: 2,
-            userInfo: [NSLocalizedDescriptionKey: "Context Builder is already running for this tab."]
+            userInfo: [NSLocalizedDescriptionKey: tabBusyMessage]
         )
     }
 
@@ -510,10 +518,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Admits at most one Context Builder operation per tab. The check and the claim share one
     /// main-actor turn, so two entry paths cannot both pass the check.
     ///
-    /// A tab that is closing, or that `workspaceID` no longer holds, is refused before a session
-    /// is made for it: tab close is what removes a tab's session, and it has either not finished
-    /// or already run for that tab. A caller's own check that the tab exists does not cover this
-    /// when the caller suspends between that check and the claim.
+    /// A refused claim leaves the set of sessions unchanged: a session is created only when the
+    /// claim is admitted. The tab's availability is checked here because a caller can suspend
+    /// between checking that the tab exists and claiming it. A tab whose close is still in
+    /// progress stays unavailable.
     private func claimOperationToken(
         _ id: UUID,
         origin: TabSession.OperationToken.Origin,
@@ -527,22 +535,41 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                   for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
               ) != nil
         else { return .tabUnavailable }
-        let session = session(for: tabID)
+        let existing = sessions[tabID]
         guard runRegistry.activeRecord(tabID: tabID) == nil,
-              !session.agentRunState.isRunning,
-              !session.isAgentBusy
+              existing?.agentRunState.isRunning != true,
+              existing?.isAgentBusy != true
         else { return .tabBusy }
 
-        if let held = session.operationToken {
+        if let held = existing?.operationToken {
             // A UI run restarts over its own tab's follow-up; every other holder keeps the tab.
             guard origin == .ui, held.admitsNewUIRun else { return .tabBusy }
-        } else if origin == .mcp, session.isBackgroundPlanGenerating || session.currentFollowUpID != nil {
+        } else if origin == .mcp, existing?.isBackgroundPlanGenerating == true || existing?.currentFollowUpID != nil {
             return .tabBusy
         }
 
+        // Windows that show one workspace have separate sessions for the same stored tabs.
+        guard isTabHeldInAnotherWindow?(workspaceID, tabID) != true else { return .tabBusyInAnotherWindow }
+
+        let session = session(for: tabID)
         session.operationToken = TabSession.OperationToken(id: id, origin: origin, workspaceID: workspaceID)
         publishOperationTokenHold(forTabID: tabID)
         return .claimed
+    }
+
+    /// Whether this window holds a claim or an active run for `tabID` of `workspaceID`. A UI claim
+    /// that only a follow-up still holds counts, because only its own window may take it over.
+    /// The workspace compared is the one the claim or the run was admitted for, which can differ
+    /// from the one the window shows. Other windows ask this while the window manager tracks this
+    /// window: while it is open, and afterwards through a closing-window reference that still
+    /// resolves.
+    func holdsOperation(onTab tabID: UUID, inWorkspace workspaceID: UUID) -> Bool {
+        if sessions[tabID]?.operationToken?.workspaceID == workspaceID { return true }
+        guard let record = runRegistry.activeRecord(tabID: tabID) else { return false }
+        // A UI run records no workspace of its own; the claim it runs under does.
+        let recordWorkspaceID = record.mcpConfiguration?.identity.workspaceID
+            ?? record.session.operationToken?.workspaceID
+        return recordWorkspaceID == workspaceID
     }
 
     @discardableResult
@@ -1125,6 +1152,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     private weak var workspaceManager: WorkspaceManagerViewModel?
     private let mcpServer: MCPServerViewModel
     private let providerFactory: ProviderFactory
+    /// `nil` when nothing injected a check: no other window is asked.
+    private let isTabHeldInAnotherWindow: TabHeldInAnotherWindowCheck?
 
     /// Chat VM used for headless plan generation from discovery.
     /// Weak to avoid accidental strong cycles with the view layer.
@@ -1181,7 +1210,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         oracleViewModel: OracleViewModel,
         settingsManager: GlobalSettingsStore = .shared,
         providerFactory: ProviderFactory? = nil,
-        codexModelPollingService: CodexModelPollingService = .shared
+        codexModelPollingService: CodexModelPollingService = .shared,
+        isTabHeldInAnotherWindow: TabHeldInAnotherWindowCheck? = nil
     ) {
         self.promptManager = promptManager
         self.workspaceManager = workspaceManager
@@ -1189,6 +1219,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         self.oracleViewModel = oracleViewModel
         self.settingsManager = settingsManager
         self.codexModelPollingService = codexModelPollingService
+        self.isTabHeldInAnotherWindow = isTabHeldInAnotherWindow
         self.providerFactory = providerFactory ?? { agent, modelString, workspacePath, modelParameterSelections in
             AgentRuntimeProviderService.shared.makeProvider(
                 for: agent,
@@ -2855,7 +2886,20 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         let workspace = workspace(owning: tabID)
 
         // The run ID doubles as the token, so the record's own identity is its release key.
-        guard claimOperationToken(runID, origin: .ui, forTabID: tabID, workspaceID: workspace?.id) == .claimed else {
+        switch claimOperationToken(runID, origin: .ui, forTabID: tabID, workspaceID: workspace?.id) {
+        case .claimed:
+            break
+        case .tabBusyInAnotherWindow:
+            // The Run button reflects this window's tabs only, so the press is answered in the
+            // tab's log instead of being dropped.
+            let session = session(for: tabID)
+            session.appendLogEntry(
+                AgentLogEntry(timestamp: Date(), type: .system, message: Self.tabBusyMessage)
+            )
+            session.agentRunState = .failed(Self.tabBusyMessage)
+            updateRuntimeBindings(from: session)
+            return
+        case .windowClosing, .tabUnavailable, .tabBusy:
             debugLog("Run ignored (busy or already running)")
             return
         }
@@ -4993,7 +5037,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             break
         case .windowClosing, .tabUnavailable:
             throw CancellationError()
-        case .tabBusy:
+        case .tabBusy, .tabBusyInAnotherWindow:
             throw Self.tabBusyError
         }
         let session = session(for: tabID)

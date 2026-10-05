@@ -449,6 +449,12 @@ class WindowStatesManager: ObservableObject {
         allWindows.count(where: { $0.workspaceManager.activeWorkspace?.id == workspaceId })
     }
 
+    /// Windows outside `allWindows` whose weak references still resolve. A window leaves the open
+    /// list before its teardown runs, so work it started can still be in progress.
+    var closingWindows: [WindowState] {
+        closingWindowReferences.compactMap(\.value)
+    }
+
     func loadWindowRestoreSessionIfNeeded() {
         guard !hasLoadedRestoreSession else { return }
         hasLoadedRestoreSession = true

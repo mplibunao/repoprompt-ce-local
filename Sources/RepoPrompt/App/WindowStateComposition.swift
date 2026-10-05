@@ -157,7 +157,9 @@ enum WindowStateCompositionFactory {
         )
         let closeCoordinator = WindowCloseCoordinator()
 
-        // 12) Context Builder agent (needs mcpServer reference)
+        // 12) Context Builder agent (needs mcpServer reference). A window that has left the open
+        // list has not necessarily released its Context Builder claims or retired its active runs,
+        // so a claim also asks it while the window manager still tracks it.
         let contextBuilderAgentViewModel = ContextBuilderAgentViewModel(
             promptManager: promptManager,
             workspaceManager: workspaceManager,
@@ -165,7 +167,14 @@ enum WindowStateCompositionFactory {
             oracleViewModel: oracleViewModel,
             settingsManager: settingsStore,
             providerFactory: contextBuilderProviderFactory,
-            codexModelPollingService: codexModelPollingService
+            codexModelPollingService: codexModelPollingService,
+            isTabHeldInAnotherWindow: { workspaceID, tabID in
+                let windows = WindowStatesManager.shared
+                return (windows.allWindows + windows.closingWindows).contains { window in
+                    window.windowID != windowID
+                        && window.contextBuilderAgentViewModel.holdsOperation(onTab: tabID, inWorkspace: workspaceID)
+                }
+            }
         )
 
         // 13) Agent mode (for minimal agent UI)

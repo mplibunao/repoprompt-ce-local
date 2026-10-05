@@ -89,6 +89,77 @@ import XCTest
             }
         }
 
+        /// A call for a tab that another window is working in is refused as early as one for a tab
+        /// with a run in its own window: before the handler binds the caller, drains the caller's
+        /// read-file auto-selection, creates a provider, or changes the tab.
+        ///
+        /// Only the asking window serves tools, so both callers reach its handler, and the holder
+        /// is a claim in the other window. The bound caller's call is repeated once that claim is
+        /// released, to show that the asking window admits it and that its drain is observable.
+        func testTabHeldInAnotherWindowIsRefusedBeforeBindingAndDrain() async throws {
+            try await ContextBuilderRunFixture.withFixture { holder, cleanup in
+                let fixture = try await holder.openPeerWindow(cleanup: cleanup)
+                let slot = fixture.slots[0]
+                let namesTab: [String: Any] = ["context_id": slot.tabID.uuidString, "instructions": "Find the entry point"]
+                let usesBinding: [String: Any] = ["instructions": "Find the entry point"]
+                let (bound, unbound, drains) = try await Self.connectCallers(to: slot, fixture: fixture, cleanup: cleanup)
+                fixture.providerScript = { _ in ContextBuilderUnroutedProvider(finishesImmediately: true) }
+
+                let claim = try holder.viewModel.beginMCPControlledRun(
+                    forTabID: slot.tabID,
+                    workspaceID: holder.workspaceID,
+                    responseType: nil,
+                    planModelName: nil
+                )
+                let held = holder.operationToken(slot)
+                XCTAssertEqual(held?.id, claim)
+
+                let before = Observed(fixture, slot, bound: bound, unbound: unbound, drains: drains)
+                XCTAssertEqual(before.unboundBinding.bindingKind, .unbound)
+                XCTAssertEqual(before.boundBinding.tabID, slot.tabID)
+                XCTAssertNil(before.operationToken)
+                XCTAssertNil(before.activeRunID)
+                XCTAssertEqual(before.providerCount, 0)
+                XCTAssertEqual(before.drainCount, 0)
+
+                for (caller, arguments) in [(unbound, namesTab), (bound, usesBinding)] {
+                    let refused = try await caller.callTool(
+                        name: MCPWindowToolName.contextBuilder,
+                        arguments: arguments,
+                        timeoutSeconds: 30
+                    )
+                    XCTAssertTrue(
+                        refused.rawJSON.contains("Context Builder is already running for this tab."),
+                        refused.rawJSON
+                    )
+                    XCTAssertEqual(Observed(fixture, slot, bound: bound, unbound: unbound, drains: drains), before)
+                    XCTAssertEqual(holder.operationToken(slot), held)
+                    XCTAssertNil(holder.activeRunID(slot))
+                }
+
+                await holder.viewModel.clearMCPControlledRun(forTabID: slot.tabID, controlToken: claim)
+
+                // Provider validation is skipped so that the admitted call ends promptly, either
+                // at run-authority resolution or with a provider that never connects.
+                let viewModel = fixture.viewModel
+                cleanup.add { viewModel.installRunTestHooks(nil) }
+                viewModel.installRunTestHooks(.init(
+                    beforeProcessingProviderEvent: nil,
+                    providerEventDisposition: nil,
+                    teardownCompleted: nil,
+                    validateContextBuilderProviders: {}
+                ))
+                _ = try await bound.callTool(
+                    name: MCPWindowToolName.contextBuilder,
+                    arguments: usesBinding,
+                    timeoutSeconds: 30
+                )
+                XCTAssertGreaterThan(drains.count, 0)
+                XCTAssertNil(fixture.operationToken(slot))
+                XCTAssertNil(holder.operationToken(slot))
+            }
+        }
+
         /// A call that is admitted and then loses its tab stops before its next step. Here the
         /// window starts closing in the main-actor turn that publishes the claim, the earliest a
         /// call can lose its tab, and the caller is already bound to the tab, so the first step the
