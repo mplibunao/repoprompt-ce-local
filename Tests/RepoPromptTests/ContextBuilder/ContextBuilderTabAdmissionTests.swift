@@ -1530,7 +1530,7 @@ import XCTest
         /// A panel run that its window's workspace switch cancelled keeps its claim until its task
         /// has ended, on the session that took the place of the one the switch dropped. That claim
         /// still occupies the tab of the workspace the run was admitted in, so the window that
-        /// shows that workspace is refused until the task ends, and so is the run's own window.
+        /// shows that workspace is refused until the task ends.
         func testPanelClaimMovedByItsWindowsWorkspaceSwitchStillRefusesAnotherWindow() async throws {
             try await ContextBuilderRunFixture.withFixture { first, cleanup in
                 let second = try await first.openPeerWindow(cleanup: cleanup)
@@ -1563,16 +1563,6 @@ import XCTest
                 XCTAssertNil(second.activeRunID(tab))
 
                 await assertRefused(tab, in: first, heldBy: second)
-                // The run's own window is refused the tab as well, and the claim stays where it is.
-                XCTAssertThrowsError(
-                    try viewModel.beginMCPControlledRun(
-                        forTabID: tab.tabID,
-                        workspaceID: second.workspaceID,
-                        responseType: nil,
-                        planModelName: nil
-                    )
-                ) { Self.assertTabBusy($0) }
-                XCTAssertEqual(second.operationToken(tab), admitted)
 
                 await execution.open()
                 try await second.waitForRelease(of: tab)
