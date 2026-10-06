@@ -11701,18 +11701,42 @@ actor ServerNetworkManager {
                             )
                         }
                         if let logicalBinding {
-                            dispatchTabContextHint = MCPServerViewModel.TabContextHint(
-                                tabID: logicalBinding.logicalContext.tabID,
-                                workspaceID: logicalBinding.logicalContext.workspaceID,
-                                windowID: logicalBinding.windowID
-                            )
+                            // A window route names a window, not a tab: the tab resolved from it is
+                            // whichever one that window shows, which the caller never asked for. A
+                            // connection holding an authoritative tab binding in that window keeps
+                            // its bound tab, so the shown tab is not passed on as a tab hint there.
+                            let routedWindowID = logicalBinding.windowID
+                            let tabCameFromWindowRoute = extractedContextID == nil && extractedTabID == nil
+                                && extractedWindowID != nil
+                            let boundTabOwnsWindowRoute = tabCameFromWindowRoute
+                                ? await MainActor.run {
+                                    guard let window = WindowStatesManager.shared.window(withID: routedWindowID) else {
+                                        return false
+                                    }
+                                    let binding = window.mcpServer.connectionBindingSnapshot(forConnection: connectionID)
+                                    return binding.explicitlyBound || binding.runID != nil
+                                }
+                                : false
+                            if !boundTabOwnsWindowRoute {
+                                dispatchTabContextHint = MCPServerViewModel.TabContextHint(
+                                    tabID: logicalBinding.logicalContext.tabID,
+                                    workspaceID: logicalBinding.logicalContext.workspaceID,
+                                    windowID: logicalBinding.windowID
+                                )
+                            }
                             preResolvedWindowID = logicalBinding.windowID
                             if Self.shouldPersistResolvedLogicalContextWindowMapping(for: toolName) {
                                 await setConnectionWindowMapping(connectionID, windowID: logicalBinding.windowID)
                             }
-                            connectionLog(
-                                "Tool call: resolved logical context_id=\(logicalBinding.logicalContext.tabID) workspace=\(logicalBinding.logicalContext.workspaceName) window=\(logicalBinding.windowID)"
-                            )
+                            if boundTabOwnsWindowRoute {
+                                connectionLog(
+                                    "Tool call: window route kept the connection's bound tab; shown context_id=\(logicalBinding.logicalContext.tabID) in window=\(logicalBinding.windowID) was not passed as a tab hint"
+                                )
+                            } else {
+                                connectionLog(
+                                    "Tool call: resolved logical context_id=\(logicalBinding.logicalContext.tabID) workspace=\(logicalBinding.logicalContext.workspaceName) window=\(logicalBinding.windowID)"
+                                )
+                            }
                         }
                     } catch {
                         let routePolicy = await effectivePolicyState(for: connectionID)
