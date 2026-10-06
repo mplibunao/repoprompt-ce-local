@@ -303,7 +303,7 @@ final class ContentReadCancellationTests: XCTestCase {
         guard await detach(read) else { return }
         XCTAssertEqual(registry.snapshot(windowID: windowID), .init(activeCount: 2, detachedCount: 1))
         let limiterWhileReadIsBlocked = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
-        XCTAssertEqual(limiterWhileReadIsBlocked.activePermitCount, 1)
+        XCTAssertEqual(limiterWhileReadIsBlocked.activePermitCountsByOwner[read.permitOwnerID], 1)
 
         XCTAssertEqual(overlappingLease.recordCompletion(.success), .deliver)
         XCTAssertEqual(registry.snapshot(windowID: windowID), .init(activeCount: 1, detachedCount: 1))
@@ -319,8 +319,8 @@ final class ContentReadCancellationTests: XCTestCase {
         XCTAssertEqual(pressure.releasedProviderCount, 0)
 
         read.physicalReadGate.release()
-        let limiterAfterPhysicalRead = await waitForLimiterIdle()
-        XCTAssertTrue(limiterAfterPhysicalRead.isIdle)
+        let permitReleasedAfterPhysicalRead = await waitForLimiterPermitRelease(ownerID: read.permitOwnerID)
+        XCTAssertTrue(permitReleasedAfterPhysicalRead)
         XCTAssertEqual(registry.snapshot(windowID: windowID), .init(activeCount: 1, detachedCount: 1))
         XCTAssertEqual(pressureOnOtherCaller()?.originInvocationID, read.invocationID)
 
@@ -378,8 +378,8 @@ final class ContentReadCancellationTests: XCTestCase {
 
         XCTAssertEqual(otherLease.recordCompletion(.success), .deliver)
         XCTAssertEqual(registry.snapshot(windowID: windowID), .init(activeCount: 0, detachedCount: 0))
-        let limiterSnapshot = await waitForLimiterIdle()
-        XCTAssertTrue(limiterSnapshot.isIdle)
+        let permitReleased = await waitForLimiterPermitRelease(ownerID: read.permitOwnerID)
+        XCTAssertTrue(permitReleased)
     }
 
     func testDomainHostAndRunToolCancellationChainSettlesBeforeBlockedPhysicalReadReturns() async throws {
@@ -2604,6 +2604,8 @@ final class ContentReadCancellationTests: XCTestCase {
         let sleeps: ControlledWatchdogSleeps
         let physicalReadGate: SynchronousPhysicalReadGate
         let providerRelease: AsyncSignal
+        /// The limiter is process-wide; this root's owner ID isolates the fixture's permit from unrelated reads.
+        let permitOwnerID: UUID
     }
 
     /// Starts a ``HeldRead`` in `windowID` and returns once its physical read is blocked. Returns
@@ -2626,6 +2628,10 @@ final class ContentReadCancellationTests: XCTestCase {
             return nil
         }
         let roots = await store.rootRefs(scope: .visibleWorkspace)
+        guard let permitOwnerID = await store.fileSystemServiceForTesting(rootID: root.id)?.diagnosticRootToken else {
+            XCTFail("Expected the loaded root's file service")
+            return nil
+        }
 
         let physicalReadGate = SynchronousPhysicalReadGate()
         let providerRelease = AsyncSignal()
@@ -2689,8 +2695,8 @@ final class ContentReadCancellationTests: XCTestCase {
                 registry.snapshot(windowID: windowID) == .init(activeCount: 0, detachedCount: 0)
             }
             XCTAssertTrue(leaseRemoved, "The held read's lease was still in the registry after teardown")
-            let limiterSnapshot = await self.waitForLimiterIdle()
-            XCTAssertTrue(limiterSnapshot.isIdle, "The held read's physical read did not finish during teardown")
+            let permitReleased = await self.waitForLimiterPermitRelease(ownerID: permitOwnerID)
+            XCTAssertTrue(permitReleased, "The held read's physical read did not finish during teardown")
         }
 
         guard await waitUntil({ physicalReadGate.isBlockedSnapshot() }) else {
@@ -2704,7 +2710,8 @@ final class ContentReadCancellationTests: XCTestCase {
             call: call,
             sleeps: sleeps,
             physicalReadGate: physicalReadGate,
-            providerRelease: providerRelease
+            providerRelease: providerRelease,
+            permitOwnerID: permitOwnerID
         )
     }
 
@@ -2739,6 +2746,13 @@ final class ContentReadCancellationTests: XCTestCase {
             await Task.yield()
         }
         return await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
+    }
+
+    private func waitForLimiterPermitRelease(ownerID: UUID) async -> Bool {
+        await waitUntil {
+            await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
+                .activePermitCountsByOwner[ownerID] == nil
+        }
     }
 
     private func waitForLimiterSnapshot(
