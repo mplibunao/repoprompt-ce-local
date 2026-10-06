@@ -163,7 +163,7 @@ import XCTest
         func testCodexExecRelaunchBeforeTheFirstConnectionUsesTheRunsOwnPolicy() async throws {
             try await ContextBuilderRunFixture.withFixture(seedsTabs: true) { fixture, cleanup in
                 let scenario = try await CodexRunScenario.start(in: fixture, cleanup: cleanup)
-                try scenario.cli.end(1, stdout: "", stderr: CodexCLIStandIn.modelNotFound, exitStatus: 1)
+                try await scenario.endProcess(1, stderr: CodexCLIStandIn.modelNotFound)
 
                 let relaunch = try await scenario.cli.waitForLaunch(2, in: fixture)
                 XCTAssertNotEqual(relaunch.processID, scenario.firstLaunch.processID)
@@ -250,7 +250,7 @@ import XCTest
                 let pendingWhileReserved = try await scenario.pendingPolicyRunIDs()
                 XCTAssertEqual(pendingWhileReserved, [scenario.runID])
 
-                try scenario.cli.end(1, stdout: "", stderr: CodexCLIStandIn.modelNotFound, exitStatus: 1)
+                try await scenario.endProcess(1, stderr: CodexCLIStandIn.modelNotFound)
                 try await fixture.waitFor("the run to return or a second process to start", allowingRunErrors: true) {
                     scenario.run.result != nil || scenario.cli.launch(2) != nil
                 }
@@ -300,7 +300,7 @@ import XCTest
                 let pendingOnceConsumed = try await scenario.pendingPolicyRunIDs()
                 XCTAssertEqual(pendingOnceConsumed, [])
 
-                try scenario.cli.end(1, stdout: "", stderr: CodexCLIStandIn.modelNotFound, exitStatus: 1)
+                try await scenario.endProcess(1, stderr: CodexCLIStandIn.modelNotFound)
                 let relaunch = try await scenario.cli.waitForLaunch(2, in: fixture)
                 let pendingAtLaunch = try await scenario.pendingPolicyRunIDs()
                 XCTAssertEqual(pendingAtLaunch, [scenario.runID], "The policy must be pending when its process is first seen.")
@@ -392,7 +392,7 @@ import XCTest
             try await ContextBuilderRunFixture.withFixture(seedsTabs: true) { fixture, cleanup in
                 let scenario = try await CodexRunScenario.start(in: fixture, cleanup: cleanup)
                 let first = await scenario.connectFirstHelper()
-                try scenario.cli.end(1, stdout: "", stderr: CodexCLIStandIn.modelNotFound, exitStatus: 1)
+                try await scenario.endProcess(1, stderr: CodexCLIStandIn.modelNotFound)
 
                 let relaunch = try await scenario.cli.waitForLaunch(2, in: fixture)
                 await scenario.showOtherTab()
@@ -436,7 +436,7 @@ import XCTest
             try await ContextBuilderRunFixture.withFixture(seedsTabs: true) { fixture, cleanup in
                 let scenario = try await CodexRunScenario.start(in: fixture, cleanup: cleanup)
                 let first = await scenario.connectFirstHelper()
-                try scenario.cli.end(1, stdout: "", stderr: CodexCLIStandIn.modelNotFound, exitStatus: 1)
+                try await scenario.endProcess(1, stderr: CodexCLIStandIn.modelNotFound)
 
                 let relaunch = try await scenario.cli.waitForLaunch(2, in: fixture)
                 await scenario.showOtherTab()
@@ -462,10 +462,9 @@ import XCTest
                     )
                 )
 
-                try scenario.cli.end(
+                try await scenario.endProcess(
                     2,
                     stdout: CodexCLIStandIn.reply(scenario.runSlot.agentOutput),
-                    stderr: "",
                     exitStatus: 0
                 )
                 let completion = try await fixture.completion(of: scenario.run)
@@ -611,6 +610,7 @@ import XCTest
         let run: ContextBuilderRunFixture.MCPRun
         let runID: UUID
         let firstLaunch: CodexCLIStandIn.Launch
+        private let providerEvents: ReceivedProviderEvents
 
         var runSlot: ContextBuilderRunFixture.TabSlot {
             fixture.slots[0]
@@ -629,6 +629,13 @@ import XCTest
             // The provider starts no process while the MCP server is not running.
             await fixture.manager.debugEnsureRunningLifecycleForSocketFixture()
             fixture.providerScript = { _ in cli.makeProvider() }
+            let providerEvents = ReceivedProviderEvents()
+            cleanup.add { fixture.viewModel.installRunTestHooks(nil) }
+            fixture.viewModel.installRunTestHooks(.init(
+                beforeProcessingProviderEvent: nil,
+                providerEventDisposition: { result, _, _ in providerEvents.record(result) },
+                teardownCompleted: nil
+            ))
             let run = fixture.startMCPRun(on: fixture.slots[0], agentKind: .codexExec)
             let firstLaunch = try await cli.waitForLaunch(1, in: fixture)
             return try CodexRunScenario(
@@ -637,7 +644,8 @@ import XCTest
                 clientName: XCTUnwrap(AgentProviderKind.codexExec.mcpClientNameHint),
                 run: run,
                 runID: XCTUnwrap(fixture.activeRunID(fixture.slots[0])),
-                firstLaunch: firstLaunch
+                firstLaunch: firstLaunch,
+                providerEvents: providerEvents
             )
         }
 
@@ -720,7 +728,50 @@ import XCTest
             line: UInt = #line
         ) async throws {
             try await dropConnection(of: helper, file: file, line: line)
-            try cli.end(number, stdout: stdout, stderr: stderr, exitStatus: exitStatus)
+            try await endProcess(number, stdout: stdout, stderr: stderr, exitStatus: exitStatus, file: file, line: line)
+        }
+
+        /// Lets the `number`th Codex process print its last output, and lets it exit with
+        /// `exitStatus` only once the run has received that output from its provider: each line of
+        /// `stderr`, or else the end of the reply in `stdout`. A process that prints `stderr` is
+        /// still running at that point. One that prints a reply is not checked, because the
+        /// provider stops it as soon as it has read the reply.
+        func endProcess(
+            _ number: Int,
+            stdout: String = "",
+            stderr: String = "",
+            exitStatus: Int32 = 1,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws {
+            let receivedBefore = providerEvents.received.count
+            try cli.printOutput(number, stdout: stdout, stderr: stderr)
+            let errorLines = stderr.split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            if !errorLines.isEmpty {
+                try await fixture.waitFor(
+                    "the run to receive the error output of Codex process \(number)",
+                    file: file,
+                    line: line
+                ) {
+                    let received = providerEvents.received.dropFirst(receivedBefore)
+                    return errorLines.allSatisfy { errorLine in
+                        received.contains { $0.type == "system" && $0.text == errorLine }
+                    }
+                }
+                XCTAssertTrue(
+                    cli.isRunning(number),
+                    "Codex process \(number) must still be running when the run has received its output.",
+                    file: file,
+                    line: line
+                )
+            } else if !stdout.isEmpty {
+                try await fixture.waitFor("the run to receive the reply of Codex process \(number)", file: file, line: line) {
+                    providerEvents.received.dropFirst(receivedBefore).contains { $0.type == "message_stop" }
+                }
+            }
+            try cli.allowExit(number, status: exitStatus)
         }
 
         func showOtherTab() async {
@@ -828,6 +879,16 @@ import XCTest
         }
     }
 
+    /// The events a Context Builder run has received from its provider, in order.
+    @MainActor
+    private final class ReceivedProviderEvents {
+        private(set) var received: [(type: String, text: String?)] = []
+
+        func record(_ result: AIStreamResult) {
+            received.append((result.type, result.text))
+        }
+    }
+
     /// A helper's connection whose admission the app holds partway, with its `initialize` still
     /// unanswered.
     @MainActor
@@ -898,7 +959,8 @@ import XCTest
 
     /// A stand-in for the `codex` executable, launched by the real ``CodexExecAgentProvider``
     /// through its own process runner. Each launch records its PID and the PID of a child that
-    /// stands in for the MCP helper Codex starts, then waits for the test to say how it ends.
+    /// stands in for the MCP helper Codex starts, then waits for the test to say what it prints
+    /// and, after that, when it exits.
     @MainActor
     private struct CodexCLIStandIn {
         struct Launch: Equatable {
@@ -972,11 +1034,24 @@ import XCTest
             return try XCTUnwrap(launch(number), file: file, line: line)
         }
 
-        /// Lets the `number`th launch print `stdout` and `stderr` and exit with `exitStatus`.
-        func end(_ number: Int, stdout: String, stderr: String, exitStatus: Int32) throws {
+        /// Lets the `number`th launch print `stdout` and `stderr`. It does not exit on its own
+        /// before ``allowExit(_:status:)``.
+        func printOutput(_ number: Int, stdout: String, stderr: String) throws {
             try stdout.write(to: file("stdout", number), atomically: true, encoding: .utf8)
             try stderr.write(to: file("stderr", number), atomically: true, encoding: .utf8)
-            try String(exitStatus).write(to: file("exit", number), atomically: true, encoding: .utf8)
+        }
+
+        /// Lets the `number`th launch exit with `status` once it has printed its output.
+        func allowExit(_ number: Int, status: Int32) throws {
+            try String(status).write(to: file("exit", number), atomically: true, encoding: .utf8)
+        }
+
+        /// Whether the `number`th launch's process has not exited. The process is a child of this
+        /// one, and the check leaves its exit status for the provider's runner to collect.
+        func isRunning(_ number: Int) -> Bool {
+            guard let launch = launch(number) else { return false }
+            var info = siginfo_t()
+            return waitid(P_PID, id_t(launch.processID), &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid == 0
         }
 
         private func file(_ name: String, _ number: Int) -> URL {
@@ -999,12 +1074,20 @@ import XCTest
         trap 'exit 1' TERM INT
         echo "$$ $helper" > "$dir/launch-$number.partial"
         /bin/mv "$dir/launch-$number.partial" "$dir/launch-$number"
-        until [ -e "$dir/exit-$number" ]; do
+        until [ -e "$dir/stdout-$number" ] && [ -e "$dir/stderr-$number" ]; do
             [ -d "$dir" ] || exit 1
             /bin/sleep 0.05
         done
         /bin/cat "$dir/stdout-$number"
         /bin/cat "$dir/stderr-$number" >&2
+        # Lets go of its output before it exits, so the provider reads it from a process that is
+        # still running: the provider's runner closes the pipes at exit before its readers may
+        # have drained them (#157).
+        exec > /dev/null 2>&1
+        until [ -e "$dir/exit-$number" ]; do
+            [ -d "$dir" ] || exit 1
+            /bin/sleep 0.05
+        done
         exit "$(/bin/cat "$dir/exit-$number")"
 
         """
