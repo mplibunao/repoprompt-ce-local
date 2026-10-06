@@ -74,6 +74,90 @@ Clients that omit `_meta.progressToken` receive the same final result but do not
 receive standard progress notifications. A host may also choose not to render
 notifications it receives.
 
+## Context Builder startup limits
+
+A Context Builder run waits on two things it can't finish itself: the window's
+MCP tools becoming ready, and its provider's MCP connection being routed to the
+run. Each wait has a fixed limit on monotonic time.
+
+| Wait | Limit |
+|---|---|
+| Joining the window's MCP readiness | 30 seconds for each run |
+| The provider's first matching MCP connection | 30 seconds from the start of the run's routing wait |
+| That connection's route being committed to the run | 10 seconds from the connection |
+
+The routing wait starts when the run starts its provider, so a run waits at
+most 40 seconds for routing. Only the first matching connection moves the run
+from the 30-second limit to the 10-second one. Heartbeats, unrelated
+connections, refused connections, and later observations of the same
+connection extend neither. A route committed at the deadline wins: the run
+continues as routed, even when it learns of the route after the deadline.
+
+Runs that start while the window's MCP tools are still being enabled join one
+readiness wait. A run that leaves the wait, at its limit or through
+cancellation, leaves alone, and the wait keeps serving the other runs.
+
+No tool argument or setting changes these limits. They don't cover payload
+preparation, which reports its own phases and ends through cancellation.
+Reaching a limit fails the run and gives its tab back without waiting for a
+provider start or disposal still in progress.
+
+## Context Builder refusals
+
+A tab runs one Context Builder operation at a time: a discovery run together
+with the follow-up it owns. Runs on different tabs of one window proceed
+together. A call for an occupied tab is refused at once. Nothing is queued or
+retried.
+
+| Situation | Result of the `context_builder` call |
+|---|---|
+| The tab already has a Context Builder operation in this window | Error `Context Builder is already running for this tab.` |
+| Another window that shows the same workspace holds the same tab | The same error |
+| The tab or its window is closing when the call claims the tab | Error `Tool execution was cancelled.` |
+| The call loses its tab after it was admitted | The same cancellation, before the call's next step |
+| A provider restarts its process inside a run and RepoPrompt CE can't prepare a connection policy for the new process | The run fails with `RepoPrompt could not prepare this run's MCP connection policy for a restarted agent process, so the process was not started.` |
+
+A call refused for an occupied tab changes nothing. It binds no caller
+connection and drains no read-file auto-selection, and it starts no provider
+and records no run. The operation that holds the tab keeps its state and its
+log. A cancelled run reports its cancellation, never the restart failure.
+
+One caller connection reaches two tabs only by rebinding between its
+requests. Each request keeps the tab it was admitted for, and a later rebind
+redirects neither an earlier request nor its result.
+
+## Reading Context Builder phases and errors
+
+A run's state is `running` from admission. Its lifecycle stage stays
+`preparingRuntime` while it joins the window's MCP readiness, installs its
+connection policy, and asks its provider to start. `running` with stage
+`preparingRuntime` isn't evidence that a provider process exists. Neither is
+`provider_process_starting`, which the run reports before it asks the provider
+to start. `child_connection_observed` is the first phase that shows a live
+provider process: its MCP helper connected under the run's policy.
+
+A startup failure names its cause in the run's error text:
+
+| Error text begins with | Meaning |
+|---|---|
+| `Failed to start MCP server:` | The window's MCP readiness failed or the run's 30-second readiness limit elapsed. The rest of the text is the cause, such as `RepoPrompt MCP tools for this window were not ready within the startup time limit.` |
+| `Failed to prepare MCP connection policy:` | The run couldn't install its connection policy. The rest of the text is the cause. |
+| `mcp_routing_timeout_before_connection:` | No matching provider connection arrived within 30 seconds |
+| `mcp_routing_timeout_after_connection:` | A matching connection arrived, and its route wasn't committed within 10 seconds of it |
+| `mcp_routing_failed:` | The run lost ownership of its expected connection before routing committed |
+| `mcp_completed_without_route:` | The provider finished before it opened the expected MCP connection |
+
+The two routing timeouts match the `routing_timeout_before_connection` and
+`routing_timeout_after_connection` phases. A readiness limit that elapses for
+one run says nothing about the window's readiness itself, which may still
+succeed for the runs that keep waiting. Cancellation is reported as
+cancellation, never as a timeout.
+
+A detached tool call owned by one run can make another run's tool call in the
+same window return `tool_execution_structure_settlement_busy`. That response
+is back-pressure on the one call. It doesn't cancel the other run, change its
+routing, or change its prompt or selection.
+
 ## `rpce-cli` behavior
 
 Non-interactive `rpce-cli -e` calls request a unique standard progress token and

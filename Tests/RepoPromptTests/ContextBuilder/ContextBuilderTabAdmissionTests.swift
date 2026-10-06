@@ -1045,6 +1045,195 @@ import XCTest
             }
         }
 
+        /// A UI run's automatic follow-up has created its chat and sent its prompt, and its reply is
+        /// pending, when the session it was started for goes: the user switches the window to
+        /// another workspace and back, or the tab is closed into the stash and restored. A switch
+        /// made without asking is refused while the follow-up's chat streams, so the user's switch,
+        /// which stops what is running once it is allowed, is the one that reaches such a
+        /// follow-up.
+        ///
+        /// What this shows is the cancellation and what it leaves in place, not a completion of the
+        /// follow-up that ran late. Both ways stop the follow-up's stream, and the follow-up ends
+        /// without its reply. Another holder then claims the tab and starts an answer of its own.
+        /// The fixture's provider stream does not end when the Oracle cancels it, so the provider's
+        /// reply still arrives and the Oracle's stream reader takes it. The follow-up has nothing
+        /// left to run by then, and what the Oracle does with the reply reaches nothing the holder
+        /// has: no chat is created, the stored tab keeps its chat, and the holder's session, claim,
+        /// and answer are as the holder left them.
+        func testAutomaticFollowUpDetachedWithItsReplyPendingLeavesItsTabsNextHolderUntouched() async throws {
+            for detachment in FollowUpDetachment.allCases {
+                try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
+                    let viewModel = fixture.viewModel
+                    let manager = fixture.window.workspaceManager
+                    let promptManager = fixture.window.promptManager
+                    let oracle = fixture.window.oracleViewModel
+                    let slot = fixture.slots[0]
+                    try await fixture.saveChatsInTemporaryDirectory()
+                    fixture.enableAutomaticFollowUp(cleanup: cleanup)
+
+                    // A completed UI run whose follow-up has sent its prompt and holds the tab.
+                    // Showing a tab restores its chat's own model, so the follow-up's model is
+                    // chosen once the tab is shown and before the run can complete.
+                    fixture.holdsChildConnections = true
+                    let pressed = await fixture.pressRun(on: slot)
+                    let runID = try XCTUnwrap(pressed)
+                    fixture.useFollowUpModelForUIFollowUps(cleanup: cleanup)
+                    try await fixture.childWithRegisteredProcess(forRunID: runID).allowConnection()
+                    fixture.holdsChildConnections = false
+                    try await fixture.waitFor("\(detachment): the follow-up to send its prompt or fail") {
+                        if await fixture.oracleReplies.requests.isEmpty == false { return true }
+                        return fixture.session(slot)?.backgroundPlanError != nil
+                    }
+                    let requests = await fixture.oracleReplies.requests
+                    let request = try XCTUnwrap(
+                        requests.first,
+                        "The follow-up failed before it sent: \(fixture.session(slot)?.backgroundPlanError ?? "no error")"
+                    )
+                    XCTAssertTrue(request.userPrompt.contains(slot.promptText), request.userPrompt)
+                    try await fixture.waitFor("\(detachment): the follow-up to be all that still holds the tab") {
+                        fixture.operationToken(slot)?.isHeldByFollowUpOnly == true
+                    }
+                    XCTAssertEqual(fixture.operationToken(slot)?.id, runID)
+                    let detached = try XCTUnwrap(fixture.session(slot))
+                    let detachedFollowUp = try XCTUnwrap(detached.backgroundPlanTask)
+                    let followUpChatID = try XCTUnwrap(detached.followUpOracleSessionID, "The follow-up had created its chat")
+                    XCTAssertTrue(oracle.isSessionStreaming(followUpChatID))
+                    let followUpQueryID = try XCTUnwrap(oracle.activeQueryId(for: followUpChatID))
+                    let followUpEnded = FollowUpEnd()
+                    Task { @MainActor in
+                        await detachedFollowUp.value
+                        followUpEnded.hasHappened = true
+                    }
+
+                    switch detachment {
+                    case .workspaceSwitch:
+                        let elsewhere = manager.createWorkspace(
+                            name: "Context Builder runs, other workspace",
+                            repoPaths: [fixture.rootURL.path],
+                            ephemeral: true
+                        )
+                        cleanup.add { manager.workspaces.removeAll { $0.id == elsewhere.id } }
+                        let unasked = await manager.switchWorkspace(
+                            to: elsewhere,
+                            saveState: false,
+                            reason: "ContextBuilderTabAdmissionTests"
+                        )
+                        XCTAssertEqual(unasked, .blocked("Cannot switch workspaces while chat is busy."))
+                        XCTAssertTrue(fixture.session(slot) === detached)
+                        XCTAssertFalse(followUpEnded.hasHappened)
+
+                        let userSwitch = Task { @MainActor in
+                            await manager.requestWorkspaceSwitch(
+                                to: elsewhere,
+                                saveState: false,
+                                reason: "ContextBuilderTabAdmissionTests"
+                            )
+                        }
+                        cleanup.add {
+                            userSwitch.cancel()
+                            _ = await userSwitch.value
+                        }
+                        try await fixture.waitFor("the switch to ask about what is running") {
+                            manager.pendingSwitchConfirmation != nil
+                        }
+                        let confirmation = try XCTUnwrap(manager.pendingSwitchConfirmation)
+                        manager.resolveSwitchConfirmation(id: confirmation.id, allow: true)
+                        let switched = await userSwitch.value
+                        XCTAssertEqual(switched, .switched)
+                        // Context Builder handles a switch in a later turn of the main actor.
+                        try await fixture.waitFor("the switch to drop the tab's session") {
+                            fixture.session(slot) == nil
+                        }
+                        let origin = try XCTUnwrap(manager.workspaces.first { $0.id == fixture.workspaceID })
+                        let returned = await manager.switchWorkspace(
+                            to: origin,
+                            saveState: false,
+                            reason: "ContextBuilderTabAdmissionTests"
+                        )
+                        XCTAssertEqual(returned, .switched)
+                        try await fixture.waitFor("the tab to be shown again") {
+                            viewModel.currentTabID == slot.tabID && fixture.session(slot) != nil
+                        }
+                    case .tabCloseAndRestore:
+                        _ = await promptManager.stashComposeTabs(withIDs: [slot.tabID])
+                        XCTAssertNil(fixture.storedTab(slot), "The tab closed")
+                        let restored = await promptManager.restoreStashedComposeTab(containingTabID: slot.tabID)
+                        XCTAssertEqual(restored?.id, slot.tabID)
+                    }
+                    try await fixture.waitFor("\(detachment): the tab to be shown again with a chat") {
+                        guard manager.activeWorkspaceID == fixture.workspaceID,
+                              let chatID = manager.activeChatSessionID(forTabID: slot.tabID)
+                        else { return false }
+                        return oracle.sessions.contains { $0.id == chatID }
+                    }
+
+                    // The tab's next holder, with an answer of its own under way.
+                    let claim = try viewModel.beginMCPControlledRun(
+                        forTabID: slot.tabID,
+                        workspaceID: fixture.workspaceID,
+                        responseType: "question",
+                        planModelName: nil
+                    )
+                    let holder = try XCTUnwrap(fixture.session(slot))
+                    XCTAssertFalse(holder === detached)
+                    viewModel.setBackgroundPlanGenerating(true, forTabID: slot.tabID)
+                    viewModel.setBackgroundPlanResponseText(Self.followUpAnswer, forTabID: slot.tabID)
+                    let holderState = TabState(fixture, slot)
+                    let storedChatID = manager.activeChatSessionID(forTabID: slot.tabID)
+                    let chats = oracle.sessions.map(\.id)
+                    let storedBefore = try XCTUnwrap(fixture.storedTab(slot))
+
+                    XCTAssertFalse(oracle.isSessionStreaming(followUpChatID), "\(detachment): the follow-up's stream was stopped")
+                    try await fixture.waitFor("\(detachment): the detached follow-up to end without its reply") {
+                        followUpEnded.hasHappened
+                    }
+
+                    // The late reply is synchronized on two observed points: the Oracle's
+                    // provider-stop observation and, when the query's message isn't already final,
+                    // the query's finalization. The tab is read after them to check the ownership
+                    // guard of the follow-up's progress callback. Other work the Oracle does with
+                    // the reply may still be under way.
+                    let lateReply = QueryActivity()
+                    let observerID = oracle.addMessageLifecycleActivityObserver(for: followUpQueryID) { event in
+                        lateReply.kinds.append(event.kind)
+                    }
+                    cleanup.add {
+                        oracle.removeMessageLifecycleActivityObserver(for: followUpQueryID, observerID: observerID)
+                    }
+                    let finalizesLateReply = oracle.getChatMessage(withId: followUpQueryID)?.isFinalized != true
+                    await request.complete(with: Self.lateFollowUpAnswer)
+                    try await fixture.waitFor("\(detachment): the Oracle to take the late reply") {
+                        lateReply.kinds.contains(.providerStopObserved)
+                    }
+                    if finalizesLateReply {
+                        try await fixture.waitFor("\(detachment): the Oracle to finalize the cancelled query") {
+                            lateReply.kinds.contains(.finalizationCompleted)
+                        }
+                    }
+
+                    XCTAssertTrue(fixture.session(slot) === holder, "\(detachment)")
+                    XCTAssertEqual(TabState(fixture, slot), holderState, "\(detachment)")
+                    XCTAssertEqual(holder.operationToken?.id, claim, "\(detachment)")
+                    XCTAssertTrue(holder.isBackgroundPlanGenerating, "\(detachment)")
+                    XCTAssertEqual(holder.backgroundPlanResponseText, Self.followUpAnswer, "\(detachment)")
+                    XCTAssertNil(holder.backgroundPlanError, "\(detachment)")
+                    XCTAssertNil(holder.generatedAnswerRoute, "\(detachment)")
+                    XCTAssertNil(holder.followUpOracleSessionID, "\(detachment)")
+                    XCTAssertEqual(manager.activeChatSessionID(forTabID: slot.tabID), storedChatID, "\(detachment)")
+                    XCTAssertEqual(oracle.sessions.map(\.id), chats, "\(detachment): no chat was created")
+                    // The stored tab also holds file-tree state, which a switch back goes on updating.
+                    let stored = try XCTUnwrap(fixture.storedTab(slot))
+                    XCTAssertEqual(stored.promptText, storedBefore.promptText, "\(detachment)")
+                    XCTAssertEqual(stored.selection, storedBefore.selection, "\(detachment)")
+                    XCTAssertEqual(stored.contextBuilder, storedBefore.contextBuilder, "\(detachment)")
+                    XCTAssertFalse(oracle.sessions.contains { oracle.isSessionPinnedForTesting($0.id) }, "\(detachment)")
+                    let requestCount = await fixture.oracleReplies.requests.count
+                    XCTAssertEqual(requestCount, 1, "\(detachment): the follow-up sent nothing more")
+                    await viewModel.clearMCPControlledRun(forTabID: slot.tabID, controlToken: claim)
+                }
+            }
+        }
+
         /// A stored tab that two windows show admits one Context Builder operation between them.
         /// While one window works in the tab, the other's MCP claim on it is the tab-busy error and
         /// its Run press starts nothing and says why in the log its panel shows. Neither changes the
@@ -1366,7 +1555,7 @@ import XCTest
         /// A panel run that its window's workspace switch cancelled keeps its claim until its task
         /// has ended, on the session that took the place of the one the switch dropped. That claim
         /// still occupies the tab of the workspace the run was admitted in, so the window that
-        /// shows that workspace is refused until the task ends.
+        /// shows that workspace is refused until the task ends, and so is the run's own window.
         func testPanelClaimMovedByItsWindowsWorkspaceSwitchStillRefusesAnotherWindow() async throws {
             try await ContextBuilderRunFixture.withFixture { first, cleanup in
                 let second = try await first.openPeerWindow(cleanup: cleanup)
@@ -1399,6 +1588,16 @@ import XCTest
                 XCTAssertNil(second.activeRunID(tab))
 
                 await assertRefused(tab, in: first, heldBy: second)
+                // The run's own window is refused the tab as well, and the claim stays where it is.
+                XCTAssertThrowsError(
+                    try viewModel.beginMCPControlledRun(
+                        forTabID: tab.tabID,
+                        workspaceID: second.workspaceID,
+                        responseType: nil,
+                        planModelName: nil
+                    )
+                ) { Self.assertTabBusy($0) }
+                XCTAssertEqual(second.operationToken(tab), admitted)
 
                 await execution.open()
                 try await second.waitForRelease(of: tab)
@@ -1463,6 +1662,24 @@ import XCTest
             }
             XCTAssertEqual(fixture.storedTab(slot)?.promptText, "")
             return (run, beforeWrite)
+        }
+
+        /// How a UI follow-up loses the session it was started for.
+        private enum FollowUpDetachment: CaseIterable {
+            case workspaceSwitch
+            case tabCloseAndRestore
+        }
+
+        /// Whether a follow-up's task has ended.
+        @MainActor
+        private final class FollowUpEnd {
+            var hasHappened = false
+        }
+
+        /// What the Oracle reported for one query, in order.
+        @MainActor
+        private final class QueryActivity {
+            var kinds: [OracleMessageLifecycleActivityEvent.Kind] = []
         }
 
         /// What a refused attempt must leave as it found it.

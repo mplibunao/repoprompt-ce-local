@@ -191,7 +191,7 @@ import XCTest
                 let survivorRun = fixture.startMCPRun(on: survivor)
                 try await waitForEnrolledRoutingWait(on: survivor, pendingDeadlines: 2, clock: clock, in: fixture)
                 let survivorRunID = try XCTUnwrap(fixture.activeRunID(survivor))
-                let survivorChild = try await childWithRegisteredProcess(forRunID: survivorRunID, in: fixture)
+                let survivorChild = try await fixture.childWithRegisteredProcess(forRunID: survivorRunID)
 
                 // The silent run's deadline is the older of the two pending ones.
                 try await clock.advanceNext(expected: bounds.routingWait.noConnectionTimeout)
@@ -217,7 +217,7 @@ import XCTest
                 try await waitForEnrolledRoutingWait(on: observed, pendingDeadlines: 2, clock: clock, in: fixture)
                 let observedRunID = try XCTUnwrap(fixture.activeRunID(observed))
                 XCTAssertEqual(fixture.operationToken(observed)?.origin, .mcp)
-                let observedChild = try await childWithRegisteredProcess(forRunID: observedRunID, in: fixture)
+                let observedChild = try await fixture.childWithRegisteredProcess(forRunID: observedRunID)
                 await observedChild.allowConnection()
                 try await fixture.waitFor("the observed tab's child to be held between its observation and its route") {
                     await manager.debugIsPendingPolicyRouteInstallationSuspended()
@@ -514,7 +514,9 @@ import XCTest
                 ))
                 fixture.holdsChildConnections = true
                 let heldProvider = HeldInitializationProvider(initialization: initialization)
-                fixture.providerScript = { _ in fixture.providerRequests.count == 1 ? heldProvider : nil }
+                fixture.providerScript = { [unowned fixture] _ in
+                    fixture.providerRequests.count == 1 ? heldProvider : nil
+                }
 
                 await fixture.window.promptManager.switchComposeTab(ended.tabID)
                 var mcpCall: MCPCall?
@@ -547,7 +549,7 @@ import XCTest
                 let otherRun = fixture.startMCPRun(on: other)
                 try await waitForEnrolledRoutingWait(on: other, pendingDeadlines: 2, clock: clock, in: fixture)
                 let otherRunID = try XCTUnwrap(fixture.activeRunID(other))
-                let otherChild = try await childWithRegisteredProcess(forRunID: otherRunID, in: fixture)
+                let otherChild = try await fixture.childWithRegisteredProcess(forRunID: otherRunID)
 
                 switch (ending, origin) {
                 case (.routingTimeout, _):
@@ -622,7 +624,7 @@ import XCTest
                 XCTAssertNotEqual(successorRunID, endedRunID)
                 let successorToken = try XCTUnwrap(fixture.operationToken(ended))
                 XCTAssertNotEqual(successorToken.id, endedToken.id)
-                let successorChild = try await childWithRegisteredProcess(forRunID: successorRunID, in: fixture)
+                let successorChild = try await fixture.childWithRegisteredProcess(forRunID: successorRunID)
                 try await assertStillWaitingForItsChild(otherRunID, on: other, child: otherChild, in: fixture)
                 XCTAssertLessThan(
                     clock.currentTime(),
@@ -813,18 +815,6 @@ import XCTest
                 let deadlines = await clock.sleeperCount()
                 return enrolledWaiters == 1 && deadlines == pendingDeadlines
             }
-        }
-
-        private func childWithRegisteredProcess(
-            forRunID runID: UUID,
-            in fixture: Fixture,
-            file: StaticString = #filePath,
-            line: UInt = #line
-        ) async throws -> ContextBuilderProviderChild {
-            try await fixture.waitFor("the run's provider to register its process", file: file, line: line) {
-                fixture.child(forRunID: runID)?.registeredProviderPID != nil
-            }
-            return try XCTUnwrap(fixture.child(forRunID: runID), file: file, line: line)
         }
 
         /// The failure the tab's last run published on its session.

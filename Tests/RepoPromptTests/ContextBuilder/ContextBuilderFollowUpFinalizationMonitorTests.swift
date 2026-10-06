@@ -244,6 +244,95 @@ final class ContextBuilderFollowUpFinalizationMonitorTests: XCTestCase {
         XCTAssertNil(fixture.tabSession.generatedAnswerRoute)
     }
 
+    /// A timed-out follow-up is saving its marked response when its owner loses the tab's session
+    /// to another holder. Nothing cancels the follow-up and the session still reads as generating
+    /// for the chat the follow-up created, because the new holder left both as they were, so the
+    /// owner's own check is all that tells the follow-up the session is no longer its to write.
+    /// The follow-up ends as cancelled and the session and the stored tab's chat stay the
+    /// holder's.
+    func testTimeoutSettlementWhoseOwnerLostItsSessionDuringPersistencePublishesNothing() async throws {
+        let partialText = "Partial answer"
+        let fixture = try await makeSettlementFixture(partialText: partialText)
+        let workspaceManager = fixture.composition.workspaceManager
+        let tabID = fixture.tabSession.tabID
+        let timeout = OraclePartialResponseTimeout(
+            partialText: partialText,
+            reason: .inactivity(seconds: 10),
+            errorMessage: "Timed out"
+        )
+        let saveGate = ContextBuilderTimeoutSaveGate()
+        let ownership = ContextBuilderFollowUpOwnership()
+        let settlement = ContextBuilderSettlementOutcome()
+
+        let settlementTask = Task { @MainActor in
+            do {
+                settlement.result = try await .success(
+                    fixture.composition.contextBuilderAgentViewModel.settleFollowUpFinalization(
+                        .timedOut(timeout),
+                        oracleViewModel: fixture.composition.oracleViewModel,
+                        queryID: fixture.queryID,
+                        oracleSession: fixture.oracleSession,
+                        originWorkspaceID: fixture.workspace.id,
+                        modeName: "plan",
+                        session: fixture.tabSession,
+                        ownerStillOwns: { ownership.isOwned },
+                        timeoutSessionSaver: { session in
+                            await saveGate.suspend()
+                            return try await fixture.composition.oracleViewModel.autosaveSession(session)
+                        }
+                    )
+                )
+            } catch {
+                settlement.result = .failure(error)
+            }
+        }
+        // A failed assertion can leave the save suspended, so the settlement is let go and joined
+        // however the test ends.
+        addTeardownBlock {
+            await saveGate.release()
+            settlementTask.cancel()
+            await settlementTask.value
+        }
+
+        // A settlement that ends without saving never reaches the gate, so its end is watched too.
+        let reachedItsSave = await waitUntil { await saveGate.hasSuspended || settlement.result != nil }
+        guard reachedItsSave, settlement.result == nil else {
+            return XCTFail("The settlement did not reach its save: \(String(describing: settlement.result))")
+        }
+        ownership.isOwned = false
+        let holderAnswer = "Answer held by the tab's new holder"
+        let holderRoute = ContextBuilderGeneratedAnswerRoute(
+            workspaceID: fixture.workspace.id,
+            tabID: tabID,
+            chatID: "holder-chat"
+        )
+        let holderChatID = UUID()
+        fixture.tabSession.backgroundPlanResponseText = holderAnswer
+        fixture.tabSession.backgroundPlanResponsePreviewText = holderAnswer
+        fixture.tabSession.generatedAnswerRoute = holderRoute
+        workspaceManager.setActiveChatSessionID(holderChatID, forTabID: tabID)
+        await saveGate.resume()
+
+        let ended = await waitUntil { settlement.result != nil }
+        XCTAssertTrue(ended, "The settlement did not end once its save was let go")
+        var endedAsCancelled = false
+        if case let .failure(error)? = settlement.result {
+            endedAsCancelled = error is CancellationError
+        }
+        XCTAssertTrue(
+            endedAsCancelled,
+            "Expected the follow-up to end as cancelled once its owner had lost the session, not "
+                + String(describing: settlement.result)
+        )
+
+        XCTAssertTrue(fixture.tabSession.isBackgroundPlanGenerating)
+        XCTAssertEqual(fixture.tabSession.followUpOracleSessionID, fixture.oracleSession.id)
+        XCTAssertEqual(fixture.tabSession.backgroundPlanResponseText, holderAnswer)
+        XCTAssertEqual(fixture.tabSession.backgroundPlanResponsePreviewText, holderAnswer)
+        XCTAssertEqual(fixture.tabSession.generatedAnswerRoute, holderRoute)
+        XCTAssertEqual(workspaceManager.activeChatSessionID(forTabID: tabID), holderChatID)
+    }
+
     func testNormalCompletionReturnsResponseUnchanged() async throws {
         let cancellationRecorder = ContextBuilderFollowUpCancellationRecorder()
         let (events, continuation) = AsyncStream<OracleMessageLifecycleActivityEvent>.makeStream()
@@ -271,6 +360,20 @@ final class ContextBuilderFollowUpFinalizationMonitorTests: XCTestCase {
         XCTAssertEqual(result, .completed(expected))
         let cancellationCount = await cancellationRecorder.count()
         XCTAssertEqual(cancellationCount, 0)
+    }
+
+    /// Polls `condition` until it holds or `timeout` passes, and returns whether it held.
+    private func waitUntil(
+        timeout: Duration = .seconds(10),
+        _ condition: () async -> Bool
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while true {
+            if await condition() { return true }
+            guard clock.now < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     private func makeSettlementFixture(partialText: String) async throws -> ContextBuilderTimeoutSettlementFixture {
@@ -356,18 +459,44 @@ private enum ContextBuilderTimeoutSaveTestError: Error {
     case failed
 }
 
+/// Whether a follow-up's owner still holds the session the follow-up writes to.
+@MainActor
+private final class ContextBuilderFollowUpOwnership {
+    var isOwned = true
+}
+
+/// How a settlement ended, once it has.
+@MainActor
+private final class ContextBuilderSettlementOutcome {
+    var result: Result<ChatSendReply, Error>?
+}
+
 private actor ContextBuilderTimeoutSaveGate {
     private var isSuspended = false
+    private var isReleased = false
     private var suspensionContinuation: CheckedContinuation<Void, Never>?
     private var waiterContinuation: CheckedContinuation<Void, Never>?
+
+    /// Whether a save has reached the gate.
+    var hasSuspended: Bool {
+        isSuspended
+    }
 
     func suspend() async {
         isSuspended = true
         waiterContinuation?.resume()
         waiterContinuation = nil
+        guard !isReleased else { return }
         await withCheckedContinuation { continuation in
             suspensionContinuation = continuation
         }
+    }
+
+    /// Lets a suspended save go on and keeps a later one from suspending, so that nothing is left
+    /// at the gate once a test is over.
+    func release() {
+        isReleased = true
+        resume()
     }
 
     func waitUntilSuspended() async {

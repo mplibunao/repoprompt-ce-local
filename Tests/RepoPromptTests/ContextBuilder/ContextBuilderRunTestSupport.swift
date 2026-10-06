@@ -55,6 +55,8 @@ import XCTest
         final class MCPRun {
             let slot: TabSlot
             fileprivate(set) var result: Result<Completion, Error>?
+            /// How the follow-up the run was started with ended, once it has.
+            fileprivate(set) var followUpResult: Result<ChatSendReply, Error>?
             fileprivate var task: Task<Void, Never>?
 
             fileprivate init(slot: TabSlot) {
@@ -65,41 +67,69 @@ import XCTest
         /// Ends the scenario after its cause was recorded as a test failure.
         struct ScenarioAborted: Error {}
 
+        /// A model the Oracle treats as available whatever providers the machine has configured.
+        static let followUpModel = AIModel.openaiCustom(name: "context-builder-run-fixture")
+
         let manager = ServerNetworkManager.shared
         let window: WindowState
         let workspaceID: UUID
         let rootURL: URL
         let slots: [TabSlot]
+        /// What the window's Oracle gets back for the prompts it sends to a provider.
+        let oracleReplies: ContextBuilderOracleReplies
 
         /// Supplies the provider for a request. Returning nil gives the run a routed child.
         var providerScript: ((ProviderRequest) -> HeadlessAgentProvider?)?
         /// Whether a new child waits for ``ContextBuilderProviderChild/allowConnection()`` before
         /// it connects.
         var holdsChildConnections = false
+        /// Whether a new child's disposal waits for ``ContextBuilderProviderChild/allowDisposal()``
+        /// before its process family ends.
+        var holdsChildDisposal = false
+        /// Whether a new child, once connected, waits for ``ContextBuilderProviderChild/allowTurn()``
+        /// before it makes its turn's tool calls.
+        var holdsChildTurns = false
         /// What a new child does on its run's tab once connected.
         var childWrites = ContextBuilderProviderChild.Writes()
+        /// When set, an MCP-origin run the fixture starts lets its child ask clarifying questions,
+        /// each of which times out after this long.
+        var clarifyingQuestionTimeoutSeconds: TimeInterval?
 
         private(set) var providerRequests: [ProviderRequest] = []
         private(set) var children: [ContextBuilderProviderChild] = []
         private(set) var runIDsByTabID: [UUID: UUID] = [:]
         private var mcpRuns: [MCPRun] = []
         private var holdReleases: [@MainActor () async -> Void] = []
+        private let chatStorage: ChatStorageRedirect
 
         var viewModel: ContextBuilderAgentViewModel {
             window.contextBuilderAgentViewModel
         }
 
-        private init(window: WindowState, workspaceID: UUID, rootURL: URL, slots: [TabSlot]) {
+        private init(
+            window: WindowState,
+            workspaceID: UUID,
+            rootURL: URL,
+            slots: [TabSlot],
+            oracleReplies: ContextBuilderOracleReplies,
+            chatStorage: ChatStorageRedirect
+        ) {
             self.window = window
             self.workspaceID = workspaceID
             self.rootURL = rootURL
             self.slots = slots
+            self.oracleReplies = oracleReplies
+            self.chatStorage = chatStorage
         }
 
         /// Runs `scenario` on a fresh fixture inside the shared MCP server lease. The fixture
         /// registers its cleanup first, so every cleanup the scenario adds runs before it.
         /// With `seedsTabs`, every tab starts with its slot's seeded prompt and selection instead of
         /// empty.
+        ///
+        /// Nothing may hold the fixture once its cleanup has run: a fixture that stays alive keeps
+        /// its window, and the services that window owns, for the rest of the test process. A
+        /// closure stored on the fixture has to capture it unowned.
         static func withFixture(
             tabNames: [String] = ["first", "second"],
             seedsTabs: Bool = false,
@@ -107,10 +137,14 @@ import XCTest
         ) async throws {
             try await MCPSharedServerTestLease.shared.withLease { _ in
                 let cleanup = FixtureCleanup()
-                try await cleanup.perform {
+                weak var settledFixture: ContextBuilderRunFixture?
+                try await cleanup.perform(operation: {
                     let fixture = try await make(cleanup: cleanup, tabNames: tabNames, seedsTabs: seedsTabs)
+                    settledFixture = fixture
                     try await scenario(fixture, cleanup)
-                }
+                }, afterCleanup: {
+                    XCTAssertNil(settledFixture, "The fixture is still held after its cleanup")
+                })
             }
         }
 
@@ -125,6 +159,10 @@ import XCTest
                 .appendingPathComponent("ContextBuilderRunFixture-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
             cleanup.add { try? FileManager.default.removeItem(at: rootURL) }
+            // Registered ahead of every window's cleanup, so chat storage is put back only once
+            // each window that could save a chat has been torn down.
+            let chatStorage = ChatStorageRedirect()
+            cleanup.add { await chatStorage.restore() }
             let slots = try tabNames.map { name in
                 let fileURL = rootURL.appendingPathComponent("\(name.capitalized).swift")
                 try "// \(name)\n".write(to: fileURL, atomically: true, encoding: .utf8)
@@ -149,7 +187,13 @@ import XCTest
                 )
             }
             workspace.activeComposeTabID = slots[0].tabID
-            let fixture = try await open(workspace, rootURL: rootURL, slots: slots, cleanup: cleanup)
+            let fixture = try await open(
+                workspace,
+                rootURL: rootURL,
+                slots: slots,
+                chatStorage: chatStorage,
+                cleanup: cleanup
+            )
 
             let manager = ServerNetworkManager.shared
             let previousApproval = await manager.debugReplaceConnectionApprovalHandlerForTesting { _, _ in true }
@@ -166,7 +210,13 @@ import XCTest
         /// with the window manager beside the first.
         func openPeerWindow(cleanup: FixtureCleanup) async throws -> ContextBuilderRunFixture {
             let workspace = try XCTUnwrap(window.workspaceManager.workspaces.first { $0.id == workspaceID })
-            let peer = try await Self.open(workspace, rootURL: rootURL, slots: slots, cleanup: cleanup)
+            let peer = try await Self.open(
+                workspace,
+                rootURL: rootURL,
+                slots: slots,
+                chatStorage: chatStorage,
+                cleanup: cleanup
+            )
             cleanup.add { await peer.settleRuns() }
             return peer
         }
@@ -177,9 +227,11 @@ import XCTest
             _ workspace: WorkspaceModel,
             rootURL: URL,
             slots: [TabSlot],
+            chatStorage: ChatStorageRedirect,
             cleanup: FixtureCleanup
         ) async throws -> ContextBuilderRunFixture {
             let providers = ProviderSource()
+            let oracleReplies = ContextBuilderOracleReplies()
             let domainRuntime = AppDomainRuntimeComposition.shared.runtime
             let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
             GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
@@ -192,6 +244,14 @@ import XCTest
                         workspacePath: workspacePath,
                         modelParameterSelections: modelParameterSelections
                     ))
+                },
+                aiQueriesServiceFactory: { keyManager in
+                    AIQueriesService(keyManager: keyManager, sendPromptOverride: { message, _ in
+                        await oracleReplies.open(
+                            userPrompt: message.conversationMessages.last { $0.role == .user }?.content ?? "",
+                            fileBlocks: message.fileBlocks
+                        )
+                    })
                 }
             )
             GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
@@ -206,6 +266,9 @@ import XCTest
                     await window.workspaceFileContextStore.unloadRoot(id: loadedRootID)
                 }
                 window.workspaceManager.workspaces.removeAll { $0.id == workspaceID }
+                // The window's Oracle saves a chat only for a workspace its manager holds, so it
+                // starts no save from here on, and the saves drained here are its last.
+                await window.oracleViewModel.drainTrackedAutosaves(for: workspaceID)
                 WindowStatesManager.shared.unregisterWindowState(window)
             }
             WindowStatesManager.shared.registerWindowState(window)
@@ -228,9 +291,13 @@ import XCTest
                 window: window,
                 workspaceID: workspaceID,
                 rootURL: rootURL,
-                slots: slots
+                slots: slots,
+                oracleReplies: oracleReplies,
+                chatStorage: chatStorage
             )
             providers.fixture = fixture
+            chatStorage.windows.append(fixture)
+            cleanup.add { await oracleReplies.finishAll() }
             return fixture
         }
 
@@ -240,7 +307,8 @@ import XCTest
         func mcpAuthority(
             for slot: TabSlot,
             agentKind: AgentProviderKind = .claudeCode,
-            modelParameterSelections: [ACPModelParameterSelection] = []
+            modelParameterSelections: [ACPModelParameterSelection] = [],
+            providerWorkspacePath: String? = nil
         ) throws -> ContextBuilderResolvedRunAuthority {
             let identity = identity(of: slot)
             let tab = try XCTUnwrap(window.workspaceManager.composeTab(for: identity))
@@ -265,12 +333,12 @@ import XCTest
                 configuration: ContextBuilderMCPRunConfiguration(
                     identity: identity,
                     nestedTabContext: nested,
-                    providerWorkspacePath: rootURL.path,
+                    providerWorkspacePath: providerWorkspacePath ?? rootURL.path,
                     runBehavior: ContextBuilderRunBehavior(
                         tokenBudget: 1000,
                         enhancementMode: .preserve,
-                        questionTimeoutSeconds: 1,
-                        allowClarifyingQuestions: false,
+                        questionTimeoutSeconds: clarifyingQuestionTimeoutSeconds ?? 1,
+                        allowClarifyingQuestions: clarifyingQuestionTimeoutSeconds != nil,
                         automaticFollowUp: nil
                     ),
                     responseType: nil,
@@ -283,12 +351,16 @@ import XCTest
             )
         }
 
-        /// Starts an MCP-origin run on `slot` without waiting for it.
+        /// Starts an MCP-origin run on `slot` without waiting for it. With `followUp`, a run that
+        /// completes goes on, still under its claim, to generate that follow-up from the tab it
+        /// committed, as the `context_builder` tool does for a response type.
         @discardableResult
         func startMCPRun(
             on slot: TabSlot,
             agentKind: AgentProviderKind = .claudeCode,
             modelParameterSelections: [ACPModelParameterSelection] = [],
+            providerWorkspacePath: String? = nil,
+            followUp: HeadlessMode? = nil,
             progressReporter: ContextBuilderMCPProgressReporter? = nil
         ) -> MCPRun {
             let run = MCPRun(slot: slot)
@@ -299,7 +371,8 @@ import XCTest
                     let authority = try self.mcpAuthority(
                         for: slot,
                         agentKind: agentKind,
-                        modelParameterSelections: modelParameterSelections
+                        modelParameterSelections: modelParameterSelections,
+                        providerWorkspacePath: providerWorkspacePath
                     )
                     let token = try viewModel.beginMCPControlledRun(
                         forTabID: slot.tabID,
@@ -310,11 +383,29 @@ import XCTest
                     run.result = try await .success(AsyncScope.withCleanup({}, cleanup: {
                         await viewModel.clearMCPControlledRun(forTabID: slot.tabID, controlToken: token)
                     }) {
-                        try await viewModel.runContextBuilderForMCP(
+                        let completion = try await viewModel.runContextBuilderForMCP(
                             authority: authority,
                             mcpControlToken: token,
                             progressReporter: progressReporter
                         )
+                        if let followUp,
+                           completion.terminalDisposition == .completed,
+                           let committed = completion.committedTab
+                        {
+                            do {
+                                run.followUpResult = try await .success(viewModel.runMCPPlanOrQuestion(
+                                    for: committed.identity,
+                                    oracleViewModel: self.window.oracleViewModel,
+                                    mode: followUp,
+                                    prompt: committed.tab.promptText,
+                                    selection: committed.tab.selection,
+                                    reviewGitContext: .automaticOnly()
+                                ))
+                            } catch {
+                                run.followUpResult = .failure(error)
+                            }
+                        }
+                        return completion
                     })
                 } catch {
                     run.result = .failure(error)
@@ -374,6 +465,65 @@ import XCTest
             var settings = previous
             settings.followUpAnalysisEnabled = true
             store.setContextBuilderBehaviorSettings(settings, commit: false)
+        }
+
+        /// Makes ``followUpModel`` the model a UI follow-up sends with, for this window only and
+        /// without writing it to settings.
+        func useFollowUpModelForUIFollowUps(cleanup: FixtureCleanup) {
+            let promptManager = window.promptManager
+            cleanup.add { promptManager.restorePreferredModelForSession(nil) }
+            promptManager.restorePreferredModelForSession(Self.followUpModel.rawValue)
+        }
+
+        /// Keeps the chats a scenario saves in a directory of its own. The fixture puts chat
+        /// storage back and removes the directory at the end of its own cleanup, after every
+        /// cleanup the scenario adds.
+        func saveChatsInTemporaryDirectory() async throws {
+            XCTAssertNil(chatStorage.directory, "Chat storage is redirected once for a fixture")
+            let chatsURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ContextBuilderRunFixture-chats-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: chatsURL, withIntermediateDirectories: true)
+            chatStorage.directory = chatsURL
+            await ChatDataService.test_setWorkspaceRootOverride(chatsURL)
+        }
+
+        /// What could still save one of this window's chats, as reasons. Empty once the window's
+        /// cleanup has run.
+        fileprivate func pendingChatWriters() async -> [String] {
+            var reasons: [String] = []
+            if !viewModel.tabsWithActivePlanGeneration.isEmpty {
+                reasons.append("a follow-up was still generating")
+            }
+            if mcpRuns.contains(where: { $0.result == nil }) {
+                reasons.append("a run the fixture started had not ended")
+            }
+            if await !oracleReplies.hasEndedEveryReply {
+                reasons.append("a provider reply was still pending")
+            }
+            if window.workspaceManager.isChatBusy {
+                reasons.append("a chat was still streaming")
+            }
+            if window.workspaceManager.workspaces.contains(where: { $0.id == workspaceID }) {
+                reasons.append("a window could still save a chat")
+            }
+            return reasons
+        }
+
+        /// The `index`th prompt the window's Oracle sent to a provider, once it has been sent.
+        func oracleRequest(
+            _ index: Int,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws -> ContextBuilderOracleReplies.Request {
+            try await waitFor(
+                "the Oracle to send prompt \(index + 1) to its provider",
+                allowingRunErrors: true,
+                file: file,
+                line: line
+            ) {
+                await self.oracleReplies.requests.count > index
+            }
+            return await oracleReplies.requests[index]
         }
 
         /// Lets the `context_builder` tool resolve a run's agent and model in this window
@@ -448,6 +598,30 @@ import XCTest
         func child(forRunID runID: UUID?) -> ContextBuilderProviderChild? {
             guard let runID else { return nil }
             return children.first { $0.runID == runID }
+        }
+
+        /// The run registered on `slot`, once there is one.
+        func registeredRunID(
+            on slot: TabSlot,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws -> UUID {
+            try await waitFor("the \(slot.name) tab's run to be registered", file: file, line: line) {
+                self.activeRunID(slot) != nil
+            }
+            return try XCTUnwrap(activeRunID(slot), file: file, line: line)
+        }
+
+        /// The routed child of `runID`, once its provider has registered a process for the run.
+        func childWithRegisteredProcess(
+            forRunID runID: UUID,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws -> ContextBuilderProviderChild {
+            try await waitFor("the run's provider to register its process", file: file, line: line) {
+                self.child(forRunID: runID)?.registeredProviderPID != nil
+            }
+            return try XCTUnwrap(child(forRunID: runID), file: file, line: line)
         }
 
         /// The unconsumed pending policies `clientName` holds for the fixture's runs, oldest first.
@@ -608,6 +782,8 @@ import XCTest
                 fixture: self,
                 clientName: request.agentKind.mcpClientNameHint ?? request.agentKind.rawValue,
                 waitsForConnectionRelease: holdsChildConnections,
+                waitsForTurnRelease: holdsChildTurns,
+                waitsForDisposalRelease: holdsChildDisposal,
                 writes: childWrites
             )
             children.append(child)
@@ -690,6 +866,8 @@ import XCTest
             }
             for child in children {
                 await child.allowConnection()
+                await child.allowTurn()
+                await child.allowDisposal()
             }
             await viewModel.cancelAllActiveRuns()
             for run in mcpRuns {
@@ -715,6 +893,81 @@ import XCTest
                 await MCPRoutingWaiter.cleanup(runID: runID)
             }
             await manager.debugRemoveRoutingSessionsForTesting(Set(children.map(\.sessionToken)))
+        }
+    }
+
+    /// The provider side of a fixture window's Oracle. The window's query service hands it every
+    /// prompt the Oracle would send to a provider and gets back a stream that a test answers
+    /// when it chooses, so a follow-up can be held with its reply pending and then completed.
+    ///
+    /// The provider pool, the API key lookup, the network, and the query service's own stream
+    /// buffering and cancellation bookkeeping are not exercised.
+    actor ContextBuilderOracleReplies {
+        /// One prompt the Oracle sent: what it carried, and where its reply comes from.
+        struct Request {
+            let userPrompt: String
+            let fileBlocks: [String]
+            fileprivate let stream: OracleControlledStream
+
+            /// Answers the prompt with `text` as a provider reply that completed.
+            func complete(with text: String) async {
+                await stream.yield(ChatStreamOutput(
+                    text: text,
+                    reasoning: nil,
+                    tokens: ChatTokenInfo(),
+                    terminalOutcome: .completed
+                ))
+                await stream.finish()
+            }
+        }
+
+        private(set) var requests: [Request] = []
+        /// Whether ``finishAll()`` has ended every reply and no prompt has been sent since.
+        fileprivate private(set) var hasEndedEveryReply = false
+
+        fileprivate func open(
+            userPrompt: String,
+            fileBlocks: [String]
+        ) async -> (id: ChatStreamID, stream: AsyncThrowingStream<ChatStreamOutput, Error>) {
+            let stream = OracleControlledStream()
+            requests.append(Request(userPrompt: userPrompt, fileBlocks: fileBlocks, stream: stream))
+            hasEndedEveryReply = false
+            return await stream.makeStream()
+        }
+
+        /// Ends every reply still pending, so nothing waits on one after a scenario.
+        fileprivate func finishAll() async {
+            for request in requests {
+                await request.stream.finish()
+            }
+            hasEndedEveryReply = true
+        }
+    }
+
+    /// Chat storage a scenario redirected, and the fixture windows that can save a chat into it.
+    @MainActor
+    private final class ChatStorageRedirect {
+        var directory: URL?
+        var windows: [ContextBuilderRunFixture] = []
+
+        /// Puts chat storage back and removes the scenario's directory.
+        ///
+        /// The override is process-wide, so a save that starts after it is reset goes to the real
+        /// chat storage. This step is registered before any window's cleanup and therefore runs
+        /// after all of it: by then each window's follow-ups are cancelled and joined, its provider
+        /// replies have ended, and the window is torn down with its last saves drained. Anything
+        /// still able to save a chat at that point fails the test.
+        func restore() async {
+            // Each fixture holds this redirect, so it lets go of them whichever way it returns.
+            defer { windows.removeAll() }
+            guard let directory else { return }
+            for window in windows {
+                for reason in await window.pendingChatWriters() {
+                    XCTFail("Chat storage was put back while \(reason)")
+                }
+            }
+            await ChatDataService.test_setWorkspaceRootOverride(nil)
+            try? FileManager.default.removeItem(at: directory)
         }
     }
 
@@ -882,6 +1135,9 @@ import XCTest
             var setsPrompt = true
             var setsSelection = true
             var repliesWithOutput = true
+            /// Whether the child's turn ends in ``ConnectionError/turnFailed`` once its tool calls
+            /// are done, as a provider that fails after it has worked on its tab does.
+            var failsAfterToolCalls = false
         }
 
         /// The raw tool responses a child got for its tab's prompt and selection.
@@ -894,6 +1150,7 @@ import XCTest
             case bootstrapRegistrationRefused
             case initializeRefused(String)
             case toolFailed(tool: String, response: String)
+            case turnFailed
 
             var errorDescription: String? {
                 switch self {
@@ -903,6 +1160,8 @@ import XCTest
                     "The app refused the child's initialize: \(message)"
                 case let .toolFailed(tool, response):
                     "The child's \(tool) call failed: \(response)"
+                case .turnFailed:
+                    "The child's provider failed after its tool calls."
                 }
             }
         }
@@ -915,10 +1174,15 @@ import XCTest
         private(set) var admission: Admission?
         private(set) var tabReadBeforeWriting: TabRead?
         private(set) var disposeCount = 0
+        private(set) var hasFinishedDisposal = false
         private weak var fixture: ContextBuilderRunFixture?
         private let waitsForConnectionRelease: Bool
+        private let waitsForTurnRelease: Bool
+        private let waitsForDisposalRelease: Bool
         private let writes: Writes
         private let connectionGate = ContextBuilderTestGate()
+        private let turnGate = ContextBuilderTestGate()
+        private let disposalGate = ContextBuilderTestGate()
         private var processFamily: ProviderProcessFamily?
         private var client: PersistentMCPTestSocketClient?
         private var connectionManager: BootstrapSocketConnectionManager?
@@ -927,16 +1191,40 @@ import XCTest
             fixture: ContextBuilderRunFixture,
             clientName: String,
             waitsForConnectionRelease: Bool,
+            waitsForTurnRelease: Bool = false,
+            waitsForDisposalRelease: Bool = false,
             writes: Writes
         ) {
             self.fixture = fixture
             self.clientName = clientName
             self.waitsForConnectionRelease = waitsForConnectionRelease
+            self.waitsForTurnRelease = waitsForTurnRelease
+            self.waitsForDisposalRelease = waitsForDisposalRelease
             self.writes = writes
         }
 
         func allowConnection() async {
             await connectionGate.open()
+        }
+
+        func allowTurn() async {
+            await turnGate.open()
+        }
+
+        /// Whether the child has connected and is waiting for ``allowTurn()``.
+        func isTurnHeld() async -> Bool {
+            guard waitsForTurnRelease else { return false }
+            return await turnGate.entered
+        }
+
+        func allowDisposal() async {
+            await disposalGate.open()
+        }
+
+        /// Whether the child's disposal was asked for and is waiting for ``allowDisposal()``.
+        func isDisposalHeld() async -> Bool {
+            guard waitsForDisposalRelease, !hasFinishedDisposal else { return false }
+            return await disposalGate.entered
         }
 
         fileprivate func discover(runID: UUID?) async throws -> String? {
@@ -973,6 +1261,10 @@ import XCTest
             )
             try client.sendNotification(method: "notifications/initialized", params: [:])
             await fixture.window.mcpServer.domainRoutingPublishTask?.value
+            if waitsForTurnRelease {
+                await turnGate.wait()
+                try Task.checkCancellation()
+            }
             if writes.readsTabFirst {
                 tabReadBeforeWriting = try await TabRead(
                     prompt: call(MCPWindowToolName.prompt, ["op": "get"], on: client),
@@ -989,6 +1281,9 @@ import XCTest
                     on: client
                 )
             }
+            if writes.failsAfterToolCalls {
+                throw ConnectionError.turnFailed
+            }
             return writes.repliesWithOutput ? slot.agentOutput : nil
         }
 
@@ -997,12 +1292,25 @@ import XCTest
         fileprivate func dispose() async {
             disposeCount += 1
             await connectionGate.open()
+            if waitsForDisposalRelease {
+                await disposalGate.wait()
+            }
+            defer { hasFinishedDisposal = true }
             client?.close()
             guard let family = processFamily else { return }
             family.terminate()
             if let runID, let fixture {
                 await fixture.manager.clearExpectedAgentPID(family.providerPID, for: clientName, runID: runID)
             }
+        }
+
+        /// A tool call on the child's connection, answered with whatever the app sent back for it:
+        /// a result or a tool error.
+        func callTool(_ tool: String, _ arguments: [String: Any]) async throws -> PersistentMCPTestRPCResponse {
+            try await XCTUnwrap(client).request(
+                method: "tools/call",
+                params: ["name": tool, "arguments": arguments]
+            )
         }
 
         /// Closes the child's socket, as the death of its helper process does.

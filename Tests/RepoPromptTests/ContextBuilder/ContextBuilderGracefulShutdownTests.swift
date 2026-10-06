@@ -781,7 +781,9 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
             ))
             let uiProvider = ContextBuilderUnroutedProvider(events: ["Looking around"])
             let mcpProvider = ContextBuilderUnroutedProvider()
-            fixture.providerScript = { _ in fixture.providerRequests.count == 1 ? uiProvider : mcpProvider }
+            fixture.providerScript = { [unowned fixture] _ in
+                fixture.providerRequests.count == 1 ? uiProvider : mcpProvider
+            }
             fixture.releaseOnSettle {
                 await uiProvider.finish()
                 await mcpProvider.finish()
@@ -1160,6 +1162,25 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
     /// closing window admits no successor. Only the wait has ended: the run's record stays until
     /// the execution really has.
     func testWindowCloseAnswersCallWhoseExecutionOutlastsItsGrace() async throws {
+        try await assertCallIsAnsweredWhileItsExecutionOutlastsTheGrace { fixture in
+            fixture.window.beginClose()
+            await fixture.window.tearDown()
+        }
+    }
+
+    /// App termination stops waiting for such an execution in the same way. The MCP call's
+    /// release of its tab waits for the run's execution, and the settlement termination forces
+    /// after its grace ends that wait, so the call answers and the shutdown returns with the
+    /// execution still held.
+    func testAppTerminationAnswersCallWhoseExecutionOutlastsItsGrace() async throws {
+        try await assertCallIsAnsweredWhileItsExecutionOutlastsTheGrace { fixture in
+            await fixture.viewModel.shutdownForAppTermination()
+        }
+    }
+
+    private func assertCallIsAnsweredWhileItsExecutionOutlastsTheGrace(
+        of close: @escaping @MainActor (ContextBuilderRunFixture) async -> Void
+    ) async throws {
         try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
             let viewModel = fixture.viewModel
             let slot = fixture.slots[0]
@@ -1179,8 +1200,7 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
             let runID = try XCTUnwrap(fixture.activeRunID(slot))
 
             Task { @MainActor in
-                fixture.window.beginClose()
-                await fixture.window.tearDown()
+                await close(fixture)
                 observed.closeReturned = true
             }
             try await fixture.waitFor("the call to answer with its execution still held", allowingRunErrors: true) {
@@ -1198,7 +1218,7 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
                 )
             ) { XCTAssertTrue($0 is CancellationError, "Refused as \($0)") }
             XCTAssertNil(fixture.operationToken(slot))
-            try await fixture.waitFor("the window's close to return", allowingRunErrors: true) {
+            try await fixture.waitFor("the close to return", allowingRunErrors: true) {
                 observed.closeReturned
             }
             XCTAssertFalse(observed.tornDownRunIDs.contains(runID), "The execution has not ended")
@@ -1442,6 +1462,242 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
                 await viewModel.clearMCPControlledRun(forTabID: slot.tabID, controlToken: claim)
             }
         }
+    }
+
+    /// An MCP follow-up started while the window showed another workspace has sent its prompt
+    /// without a chat and is waiting for the provider's reply. The window shows the tab's
+    /// workspace again, and the tab is closed, restored under the same ID, and claimed by another
+    /// holder, which starts an answer of its own. Closing a tab does not stop a reply that is not
+    /// streaming into a chat, so the reply then arrives, completed. The follow-up ends as
+    /// cancelled, and the holder's claim, controls, answer, and route, and the stored tab's chat,
+    /// are as the holder left them.
+    func testMCPHeadlessFollowUpWhoseTabChangedHandsBeforeItsReplyWritesNothing() async throws {
+        try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
+            let viewModel = fixture.viewModel
+            let manager = fixture.window.workspaceManager
+            let slot = fixture.slots[1]
+            try await fixture.saveChatsInTemporaryDirectory()
+            cleanup.add { viewModel.installRunTestHooks(nil) }
+            viewModel.installRunTestHooks(Self.hooksResolvingFollowUpModel)
+
+            let staleClaim = try viewModel.beginMCPControlledRun(
+                forTabID: slot.tabID,
+                workspaceID: fixture.workspaceID,
+                responseType: "plan",
+                planModelName: nil
+            )
+            let elsewhere = manager.createWorkspace(
+                name: "Context Builder runs, other workspace",
+                repoPaths: [fixture.rootURL.path],
+                ephemeral: true
+            )
+            cleanup.add { manager.workspaces.removeAll { $0.id == elsewhere.id } }
+            await manager.switchWorkspace(
+                to: elsewhere,
+                saveState: false,
+                reason: "ContextBuilderGracefulShutdownTests"
+            )
+            XCTAssertNotEqual(manager.activeWorkspaceID, fixture.workspaceID)
+
+            let followUp = Task { @MainActor in
+                try await viewModel.runMCPPlanOrQuestion(
+                    for: fixture.identity(of: slot),
+                    oracleViewModel: fixture.window.oracleViewModel,
+                    mode: .plan,
+                    prompt: Self.followUpPrompt,
+                    selection: StoredSelection(selectedPaths: [slot.fileURL.path]),
+                    reviewGitContext: .automaticOnly()
+                )
+            }
+            cleanup.add {
+                followUp.cancel()
+                _ = await followUp.result
+            }
+            let request = try await Self.firstRequest(sentBy: followUp, in: fixture)
+            XCTAssertTrue(request.userPrompt.contains(Self.followUpPrompt), request.userPrompt)
+            let staleSession = try XCTUnwrap(fixture.session(slot))
+            XCTAssertEqual(staleSession.operationToken?.id, staleClaim)
+            XCTAssertNil(staleSession.followUpOracleSessionID, "The reply is not streaming into a chat")
+
+            let origin = try XCTUnwrap(manager.workspaces.first { $0.id == fixture.workspaceID })
+            await manager.switchWorkspace(
+                to: origin,
+                saveState: false,
+                reason: "ContextBuilderGracefulShutdownTests"
+            )
+            XCTAssertTrue(fixture.session(slot) === staleSession)
+            let holder = try await Self.handTab(slot, toAnotherHolderIn: fixture)
+            XCTAssertFalse(fixture.session(slot) === staleSession)
+            await request.complete(with: Self.lateFollowUpReply)
+            let outcome = await followUp.result
+
+            XCTAssertThrowsError(try outcome.get()) { XCTAssertTrue($0 is CancellationError, "Ended with \($0)") }
+            XCTAssertEqual(HolderState(of: slot, in: fixture), holder.state)
+            let requestCount = await fixture.oracleReplies.requests.count
+            XCTAssertEqual(requestCount, 1)
+            await viewModel.clearMCPControlledRun(forTabID: slot.tabID, controlToken: holder.claim)
+        }
+    }
+
+    /// An MCP follow-up for a tab the window shows loses the tab at each of three points: as it
+    /// is about to create its chat, as it is about to send its prompt, and with its provider's
+    /// reply pending. Each time the tab is closed, restored under the same ID, and claimed by
+    /// another holder, which starts an answer of its own. From that point the follow-up writes
+    /// nothing. It creates no chat it had not created, sends nothing it had not sent, leaves no
+    /// chat pinned, and ends as cancelled. The holder's claim, controls, answer, and route, and
+    /// the stored tab's chat, are as the holder left them.
+    func testMCPStreamedFollowUpWhoseTabChangedHandsWritesNothingFromThenOn() async throws {
+        for point in HandoverPoint.allCases {
+            try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
+                let viewModel = fixture.viewModel
+                let oracle = fixture.window.oracleViewModel
+                let slot = fixture.slots[1]
+                let observed = HandoverObservations()
+                try await fixture.saveChatsInTemporaryDirectory()
+                cleanup.add { viewModel.installRunTestHooks(nil) }
+                viewModel.installRunTestHooks(Self.hooksResolvingFollowUpModel)
+
+                _ = try viewModel.beginMCPControlledRun(
+                    forTabID: slot.tabID,
+                    workspaceID: fixture.workspaceID,
+                    responseType: "plan",
+                    planModelName: nil
+                )
+                let staleSession = try XCTUnwrap(fixture.session(slot))
+                let handTabOver: @MainActor @Sendable () async throws -> Void = {
+                    observed.holder = try await Self.handTab(slot, toAnotherHolderIn: fixture)
+                    observed.chatsAtHandover = oracle.sessions.map(\.id)
+                }
+                let followUp = Task { @MainActor in
+                    try await viewModel.runMCPPlanOrQuestion(
+                        for: fixture.identity(of: slot),
+                        oracleViewModel: oracle,
+                        mode: .plan,
+                        prompt: Self.followUpPrompt,
+                        selection: StoredSelection(selectedPaths: [slot.fileURL.path]),
+                        reviewGitContext: .automaticOnly(),
+                        progressReporter: { phase in
+                            observed.phases.append(phase)
+                            if phase == point.phaseReportedJustBefore {
+                                try? await handTabOver()
+                            }
+                        }
+                    )
+                }
+                cleanup.add {
+                    followUp.cancel()
+                    _ = await followUp.result
+                }
+                if point == .replyPending {
+                    let request = try await Self.firstRequest(sentBy: followUp, in: fixture)
+                    XCTAssertTrue(request.userPrompt.contains(Self.followUpPrompt), request.userPrompt)
+                    try await handTabOver()
+                    await request.complete(with: Self.lateFollowUpReply)
+                }
+                let outcome = await followUp.result
+
+                XCTAssertThrowsError(try outcome.get(), "\(point)") {
+                    XCTAssertTrue($0 is CancellationError, "\(point): ended with \($0)")
+                }
+                let holder = try XCTUnwrap(observed.holder, "\(point): the tab was never handed over")
+                XCTAssertFalse(fixture.session(slot) === staleSession, "\(point)")
+                XCTAssertEqual(HolderState(of: slot, in: fixture), holder.state, "\(point)")
+                XCTAssertEqual(oracle.sessions.map(\.id), observed.chatsAtHandover, "\(point): no chat was created")
+                XCTAssertFalse(oracle.sessions.contains { oracle.isSessionPinnedForTesting($0.id) }, "\(point)")
+                let requestCount = await fixture.oracleReplies.requests.count
+                switch point {
+                case .beforeChatCreation:
+                    XCTAssertEqual(observed.phases.last, .sessionCreationAndPersist)
+                    XCTAssertEqual(requestCount, 0)
+                case .beforeSend:
+                    XCTAssertEqual(observed.phases.last, .messageSend)
+                    XCTAssertEqual(requestCount, 0, "Nothing was sent")
+                case .replyPending:
+                    XCTAssertTrue(observed.phases.contains(.streaming))
+                    XCTAssertEqual(requestCount, 1)
+                }
+                await viewModel.clearMCPControlledRun(forTabID: slot.tabID, controlToken: holder.claim)
+            }
+        }
+    }
+
+    private static let followUpPrompt = "Plan the change"
+    private static let lateFollowUpReply = "Plan from the follow-up that had lost its tab"
+
+    /// Hooks that give an MCP follow-up a model the Oracle can send with on any machine.
+    private static var hooksResolvingFollowUpModel: ContextBuilderAgentViewModel.RunTestHooks {
+        .init(
+            beforeProcessingProviderEvent: nil,
+            providerEventDisposition: nil,
+            teardownCompleted: nil,
+            resolveMCPFollowUpModel: { _ in
+                (model: ContextBuilderRunFixture.followUpModel, chatPresetID: nil, mcpControlInfo: nil)
+            }
+        )
+    }
+
+    /// The first prompt `followUp` sends to its provider. Fails with the follow-up's own outcome
+    /// when it ends without sending one.
+    private static func firstRequest(
+        sentBy followUp: Task<ChatSendReply, Error>,
+        in fixture: ContextBuilderRunFixture,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> ContextBuilderOracleReplies.Request {
+        let ended = ContextBuilderTestFlag()
+        Task {
+            _ = await followUp.result
+            await ended.set()
+        }
+        try await fixture.waitFor("the follow-up to send its prompt or end", file: file, line: line) {
+            if await fixture.oracleReplies.requests.isEmpty == false { return true }
+            return await ended.current()
+        }
+        guard let request = await fixture.oracleReplies.requests.first else {
+            let outcome = await followUp.result
+            XCTFail("The follow-up ended before it sent a prompt: \(outcome)", file: file, line: line)
+            throw ContextBuilderRunFixture.ScenarioAborted()
+        }
+        return request
+    }
+
+    /// Closes `slot` into the stash, restores it under the same ID, and claims it for another
+    /// holder, which starts an answer of its own on the tab's new session. A claim on the session
+    /// a follow-up is still generating on is refused, so this is how a tab changes hands under
+    /// one.
+    private static func handTab(
+        _ slot: ContextBuilderRunFixture.TabSlot,
+        toAnotherHolderIn fixture: ContextBuilderRunFixture
+    ) async throws -> (claim: UUID, state: HolderState) {
+        let viewModel = fixture.viewModel
+        let manager = fixture.window.workspaceManager
+        let promptManager = fixture.window.promptManager
+        let oracle = fixture.window.oracleViewModel
+        _ = await promptManager.stashComposeTabs(withIDs: [slot.tabID])
+        let restored = await promptManager.restoreStashedComposeTab(containingTabID: slot.tabID)
+        XCTAssertEqual(restored?.id, slot.tabID)
+        // The window gives the tab it now shows a chat of its own accord. Waiting for that chat
+        // leaves the window nothing more to create.
+        try await fixture.waitFor("the restored tab to be given its chat") {
+            guard let chatID = manager.activeChatSessionID(forTabID: slot.tabID) else { return false }
+            return oracle.sessions.contains { $0.id == chatID }
+        }
+        let claim = try viewModel.beginMCPControlledRun(
+            forTabID: slot.tabID,
+            workspaceID: fixture.workspaceID,
+            responseType: "question",
+            planModelName: "holder plan model"
+        )
+        let session = try XCTUnwrap(fixture.session(slot))
+        session.mcpPlanningModelRaw = "holder-planning-model"
+        viewModel.setBackgroundPlanGenerating(true, forTabID: slot.tabID)
+        viewModel.setBackgroundPlanResponseText("Answer held by the tab's new holder", forTabID: slot.tabID)
+        session.generatedAnswerRoute = ContextBuilderGeneratedAnswerRoute(
+            workspaceID: fixture.workspaceID,
+            tabID: slot.tabID,
+            chatID: "holder-chat"
+        )
+        return (claim, HolderState(of: slot, in: fixture))
     }
 
     /// A record that has lost its tab is retired without publishing into the tab's current
@@ -1852,6 +2108,63 @@ private final class SettlementWaits {
 private final class FollowUpObservations {
     var phases: [ContextBuilderMCPProgressPhase] = []
     var followUp: Task<ChatSendReply, Error>?
+}
+
+/// Where a streamed MCP follow-up is when its tab changes hands.
+private enum HandoverPoint: CaseIterable {
+    case beforeChatCreation
+    case beforeSend
+    case replyPending
+
+    /// The progress phase the follow-up reports immediately before the step the handover
+    /// precedes. A pending reply has no such phase: it is found by the prompt having been sent.
+    var phaseReportedJustBefore: ContextBuilderMCPProgressPhase? {
+        switch self {
+        case .beforeChatCreation: .sessionCreationAndPersist
+        case .beforeSend: .messageSend
+        case .replyPending: nil
+        }
+    }
+}
+
+/// What a handover scenario saw of the follow-up, and of the tab as its new holder took it.
+@MainActor
+private final class HandoverObservations {
+    var phases: [ContextBuilderMCPProgressPhase] = []
+    var holder: (claim: UUID, state: HolderState)?
+    var chatsAtHandover: [UUID] = []
+}
+
+/// What a tab's holder has on the tab: its session and claim, its MCP controls, the answer it is
+/// generating, and the stored tab's chat. A follow-up that lost the tab must leave all of it.
+private struct HolderState: Equatable {
+    let session: ObjectIdentifier?
+    let token: ContextBuilderRunFixture.OperationToken?
+    let responseType: String?
+    let planModel: String?
+    let planningModelRaw: String?
+    let isGenerating: Bool?
+    let answer: String?
+    let error: String?
+    let route: ContextBuilderGeneratedAnswerRoute?
+    let followUpChatID: UUID?
+    let storedChatID: UUID?
+
+    @MainActor
+    init(of slot: ContextBuilderRunFixture.TabSlot, in fixture: ContextBuilderRunFixture) {
+        let session = fixture.session(slot)
+        self.session = session.map(ObjectIdentifier.init)
+        token = session?.operationToken
+        responseType = session?.mcpResponseType
+        planModel = session?.mcpPlanModel
+        planningModelRaw = session?.mcpPlanningModelRaw
+        isGenerating = session?.isBackgroundPlanGenerating
+        answer = session?.backgroundPlanResponseText
+        error = session?.backgroundPlanError
+        route = session?.generatedAnswerRoute
+        followUpChatID = session?.followUpOracleSessionID
+        storedChatID = fixture.window.workspaceManager.activeChatSessionID(forTabID: slot.tabID)
+    }
 }
 
 private actor GatedHeadlessAgentProviderState {

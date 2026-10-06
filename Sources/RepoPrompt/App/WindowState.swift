@@ -365,10 +365,12 @@ class WindowState: ObservableObject {
 
         convenience init(
             domainRuntime: MCPDomainRuntime,
-            contextBuilderProviderFactory: @escaping ContextBuilderAgentViewModel.ProviderFactory
+            contextBuilderProviderFactory: @escaping ContextBuilderAgentViewModel.ProviderFactory,
+            aiQueriesServiceFactory: ((_ keyManager: KeyManager) -> AIQueriesService)? = nil
         ) {
             self.init(
                 contextBuilderProviderFactory: Optional(contextBuilderProviderFactory),
+                aiQueriesServiceFactory: aiQueriesServiceFactory,
                 loadStoredAPISettingsDataOnInit: true,
                 codexModelPollingService: .shared,
                 domainRuntimeOverride: domainRuntime
@@ -401,6 +403,7 @@ class WindowState: ObservableObject {
 
     private init(
         contextBuilderProviderFactory: ContextBuilderAgentViewModel.ProviderFactory?,
+        aiQueriesServiceFactory: ((_ keyManager: KeyManager) -> AIQueriesService)? = nil,
         loadStoredAPISettingsDataOnInit: Bool,
         codexModelPollingService: CodexModelPollingService,
         workspaceFileContextStore injectedWorkspaceFileContextStore: WorkspaceFileContextStore? = nil,
@@ -424,6 +427,7 @@ class WindowState: ObservableObject {
             sharedMCPService: Self.sharedMCPService,
             domainRuntime: domainRuntimeOverride,
             contextBuilderProviderFactory: contextBuilderProviderFactory,
+            aiQueriesServiceFactory: aiQueriesServiceFactory,
             workspaceFileContextStore: injectedWorkspaceFileContextStore,
             loadStoredAPISettingsDataOnInit: loadStoredAPISettingsDataOnInit,
             codexModelPollingService: codexModelPollingService

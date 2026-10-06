@@ -27,7 +27,7 @@ import XCTest
                 let (bound, unbound, drains) = try await Self.connectCallers(to: slot, fixture: fixture, cleanup: cleanup)
 
                 let incumbentProvider = ContextBuilderUnroutedProvider()
-                fixture.providerScript = { _ in
+                fixture.providerScript = { [unowned fixture] _ in
                     fixture.providerRequests.count == 1
                         ? incumbentProvider
                         : ContextBuilderUnroutedProvider(finishesImmediately: true)
@@ -223,6 +223,112 @@ import XCTest
             }
         }
 
+        /// One caller connection reaches two tabs only by rebinding between its requests. Here it
+        /// is bound to the first tab and calls, rebinds to the second tab while that call's run
+        /// still waits for its child, and calls again. Both runs go through production routing with
+        /// a child each.
+        ///
+        /// Each request keeps the tab it was admitted for. The first request's child binds to the
+        /// first tab and its answer is the first tab's, although the caller is bound to the second
+        /// by then. That request's cleanup, which runs while the second is still in flight, neither
+        /// puts the caller back on the first tab nor takes anything from the second request's run,
+        /// which then commits and answers for the second tab.
+        func testOneCallerConnectionKeepsTwoCapturedTargets() async throws {
+            try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
+                let server = fixture.window.mcpServer
+                let viewModel = fixture.viewModel
+                let earlier = fixture.slots[0]
+                let later = fixture.slots[1]
+                let usesBinding: [String: Any] = ["instructions": "Find the entry point"]
+                await fixture.startWindowServer()
+                fixture.makeRunAuthorityResolvable(cleanup: cleanup)
+                // Provider validation is skipped: the run's authority is already resolvable.
+                cleanup.add { viewModel.installRunTestHooks(nil) }
+                viewModel.installRunTestHooks(.init(
+                    beforeProcessingProviderEvent: nil,
+                    providerEventDisposition: nil,
+                    teardownCompleted: nil,
+                    validateContextBuilderProviders: {}
+                ))
+                fixture.holdsChildConnections = true
+                let caller = try await fixture.connectCaller("rebinding", cleanup: cleanup)
+
+                try await Self.bind(caller, to: earlier, in: fixture)
+                let earlierCall = Task { @MainActor in
+                    try await caller.callTool(
+                        name: MCPWindowToolName.contextBuilder,
+                        arguments: usesBinding,
+                        timeoutSeconds: 120
+                    )
+                }
+                fixture.releaseOnSettle { _ = await earlierCall.result }
+                let earlierRunID = try await fixture.registeredRunID(on: earlier)
+                let earlierChild = try await fixture.childWithRegisteredProcess(forRunID: earlierRunID)
+
+                try await Self.bind(caller, to: later, in: fixture)
+                XCTAssertEqual(server.connectionBindingSnapshot(forConnection: caller.connectionID).tabID, later.tabID)
+                let laterCall = Task { @MainActor in
+                    try await caller.callTool(
+                        name: MCPWindowToolName.contextBuilder,
+                        arguments: usesBinding,
+                        timeoutSeconds: 120
+                    )
+                }
+                fixture.releaseOnSettle { _ = await laterCall.result }
+                let laterRunID = try await fixture.registeredRunID(on: later)
+                let laterChild = try await fixture.childWithRegisteredProcess(forRunID: laterRunID)
+                let laterToken = try XCTUnwrap(fixture.operationToken(later))
+                XCTAssertNotEqual(earlierChild.registeredProviderPID, laterChild.registeredProviderPID)
+                XCTAssertEqual(fixture.activeRunID(earlier), earlierRunID)
+                XCTAssertEqual(fixture.providerRequests.count, 2)
+
+                await earlierChild.allowConnection()
+                let earlierAnswer = try await earlierCall.value
+                Self.assertAnswer(earlierAnswer, isFor: earlier, notFor: later)
+                XCTAssertEqual(
+                    earlierChild.admission,
+                    ContextBuilderProviderChild.Admission(
+                        routedRunID: earlierRunID,
+                        runConnectionID: earlierChild.connectionID,
+                        boundTabID: earlier.tabID
+                    )
+                )
+                fixture.assertStoredTabMatchesSlot(earlier)
+                XCTAssertNil(fixture.operationToken(earlier))
+
+                // The earlier request has answered and released its tab. The later one is as it was.
+                XCTAssertEqual(
+                    server.connectionBindingSnapshot(forConnection: caller.connectionID).tabID,
+                    later.tabID,
+                    "The earlier request's cleanup must leave the caller's present binding alone."
+                )
+                XCTAssertEqual(fixture.activeRunID(later), laterRunID)
+                XCTAssertEqual(fixture.operationToken(later), laterToken)
+                XCTAssertNil(laterChild.admission)
+                let laterPolicyIsPending = await fixture.manager.debugPendingPolicySnapshot(for: laterChild.clientName)
+                    .contains { $0.runID == laterRunID }
+                XCTAssertTrue(laterPolicyIsPending)
+                XCTAssertEqual(fixture.storedTab(later)?.promptText, "")
+                XCTAssertEqual(fixture.storedTab(later)?.selection.selectedPaths, [])
+
+                await laterChild.allowConnection()
+                let laterAnswer = try await laterCall.value
+                Self.assertAnswer(laterAnswer, isFor: later, notFor: earlier)
+                XCTAssertEqual(
+                    laterChild.admission,
+                    ContextBuilderProviderChild.Admission(
+                        routedRunID: laterRunID,
+                        runConnectionID: laterChild.connectionID,
+                        boundTabID: later.tabID
+                    )
+                )
+                fixture.assertStoredTabMatchesSlot(later)
+                fixture.assertStoredTabMatchesSlot(earlier)
+                XCTAssertEqual(server.connectionBindingSnapshot(forConnection: caller.connectionID).tabID, later.tabID)
+                XCTAssertEqual(fixture.slots.map { fixture.operationToken($0) }, [nil, nil])
+            }
+        }
+
         /// Everything a refused call must leave as it found it.
         private struct Observed: Equatable {
             let unboundBinding: MCPServerViewModel.ConnectionBindingSnapshot
@@ -289,16 +395,10 @@ import XCTest
             fixture: ContextBuilderRunFixture,
             cleanup: FixtureCleanup
         ) async throws -> (bound: PersistentMCPTestEndpoint, unbound: PersistentMCPTestEndpoint, drains: DrainCounter) {
-            let server = fixture.window.mcpServer
             await fixture.startWindowServer()
 
             let bound = try await fixture.connectCaller("bound", cleanup: cleanup)
-            let bind = try await bound.callTool(
-                name: "bind_context",
-                arguments: ["op": "bind", "context_id": slot.tabID.uuidString]
-            )
-            XCTAssertFalse(bind.rawJSON.contains("\"isError\":true"), bind.rawJSON)
-            await server.domainRoutingPublishTask?.value
+            try await bind(bound, to: slot, in: fixture)
             try await readFile(slot.fileURL, as: bound)
             let unbound = try await fixture.connectCaller("unbound", cleanup: cleanup)
 
@@ -311,6 +411,41 @@ import XCTest
                 }
             }
             return (bound, unbound, drains)
+        }
+
+        /// Binds `caller` to `slot` with an explicit `bind_context` request.
+        private static func bind(
+            _ caller: PersistentMCPTestEndpoint,
+            to slot: ContextBuilderRunFixture.TabSlot,
+            in fixture: ContextBuilderRunFixture,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws {
+            let bind = try await caller.callTool(
+                name: "bind_context",
+                arguments: ["op": "bind", "context_id": slot.tabID.uuidString]
+            )
+            XCTAssertFalse(bind.rawJSON.contains("\"isError\":true"), bind.rawJSON, file: file, line: line)
+            await fixture.window.mcpServer.domainRoutingPublishTask?.value
+        }
+
+        /// `answer` is a `context_builder` result that is no error and whose text has `slot`'s
+        /// prompt text and file name in it and neither of `other`'s. Each slot's prompt and file
+        /// name are its own, so these markers expose an answer built from the other tab. The check
+        /// goes no further: it compares no selection exactly and parses no `context_id`.
+        private static func assertAnswer(
+            _ answer: PersistentMCPTestRPCResponse,
+            isFor slot: ContextBuilderRunFixture.TabSlot,
+            notFor other: ContextBuilderRunFixture.TabSlot,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) {
+            let text = answer.rawJSON
+            XCTAssertFalse(text.contains("\"isError\":true"), text, file: file, line: line)
+            XCTAssertTrue(text.contains(slot.promptText), text, file: file, line: line)
+            XCTAssertTrue(text.contains(slot.fileURL.lastPathComponent), text, file: file, line: line)
+            XCTAssertFalse(text.contains(other.promptText), text, file: file, line: line)
+            XCTAssertFalse(text.contains(other.fileURL.lastPathComponent), text, file: file, line: line)
         }
 
         private static func readFile(_ fileURL: URL, as caller: PersistentMCPTestEndpoint) async throws {
