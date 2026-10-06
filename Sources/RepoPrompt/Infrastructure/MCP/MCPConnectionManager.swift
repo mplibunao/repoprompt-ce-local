@@ -7476,11 +7476,21 @@ actor ServerNetworkManager {
         windowID: Int? = nil
     ) -> Bool {
         let now = Date()
-        let pending = matchingClientKeys(for: clientName, in: Array(pendingPoliciesByClient.keys))
-            .flatMap { pendingPoliciesByClient[$0] ?? [] }
-            .filter { $0.runID == runID && (windowID == nil || $0.windowID == windowID) }
-            .filter { $0.prunesOnlyAfterSettlement || now.timeIntervalSince($0.createdAt) <= $0.ttl }
-        return pending.count == 1 && pending[0].reservationConnectionID == nil
+        let keys = matchingClientKeys(for: clientName, in: Array(pendingPoliciesByClient.keys))
+        var soleMatch: ClientConnectionPolicy?
+        for key in keys {
+            guard let queue = pendingPoliciesByClient[key] else { continue }
+            for policy in queue {
+                guard policy.runID == runID else { continue }
+                if let windowID, policy.windowID != windowID { continue }
+                guard policy.prunesOnlyAfterSettlement || now.timeIntervalSince(policy.createdAt) <= policy.ttl
+                else { continue }
+                guard soleMatch == nil else { return false }
+                soleMatch = policy
+            }
+        }
+        guard let soleMatch else { return false }
+        return soleMatch.reservationConnectionID == nil
     }
 
     #if DEBUG
