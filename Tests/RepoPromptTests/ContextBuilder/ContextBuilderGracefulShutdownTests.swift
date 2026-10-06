@@ -760,6 +760,193 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
         }
     }
 
+    /// An ordinary window close asks a run to end as the close begins, in that same turn and
+    /// before the window's teardown runs. Asking again changes nothing, and the teardown that
+    /// follows still returns only once the run's provider has been disposed, once.
+    func testWindowCloseRequestCancelsRunOnceAheadOfTeardown() async {
+        let window = makeWindow()
+        let viewModel = window.contextBuilderAgentViewModel
+        let provider = GatedHeadlessAgentProvider()
+        let record = makeRecord()
+        var tornDownRunIDs: [UUID] = []
+        defer { viewModel.installRunTestHooks(nil) }
+        viewModel.installRunTestHooks(.init(
+            beforeProcessingProviderEvent: nil,
+            providerEventDisposition: nil,
+            teardownCompleted: { tornDownRunIDs.append($0) }
+        ))
+        XCTAssertTrue(record.installProvider(provider))
+        XCTAssertTrue(viewModel.registerRunRecordForTesting(record, makeCurrent: true))
+        XCTAssertEqual(viewModel.activeRunIDForTesting(tabID: record.tabID), record.runID)
+
+        window.beginClose()
+
+        XCTAssertEqual(record.cancellationState, .requested)
+        XCTAssertEqual(record.terminalOutcome, .cancelled)
+        XCTAssertNil(viewModel.activeRunIDForTesting(tabID: record.tabID))
+
+        window.beginClose()
+
+        XCTAssertEqual(record.cancellationState, .requested)
+        XCTAssertEqual(record.terminalOutcome, .cancelled)
+
+        let close = Task { @MainActor in await window.tearDown() }
+        guard await waitUntil(condition: { await provider.disposeCallCount() > 0 }) else {
+            XCTFail("The window's close did not start disposing the provider.")
+            await provider.allowDispose()
+            await close.value
+            return
+        }
+        XCTAssertNil(record.teardownFinishedAt)
+        await provider.allowDispose()
+        await close.value
+
+        XCTAssertNotNil(record.teardownFinishedAt)
+        let disposeCallCount = await provider.disposeCallCount()
+        XCTAssertEqual(disposeCallCount, 1)
+        XCTAssertEqual(tornDownRunIDs, [record.runID])
+    }
+
+    /// As an ordinary window close begins it also asks to end what holds a tab outside a run and
+    /// what a run is waiting on: a follow-up whose reply is still streaming into its chat, and a
+    /// clarifying question that a run's child is waiting to have answered. Both are released from
+    /// their tab's state before the window's teardown runs, and their callers settle afterwards.
+    func testWindowCloseRequestCancelsFollowUpAndPendingQuestionAheadOfTeardown() async throws {
+        try await ContextBuilderRunFixture.withFixture(tabNames: ["following", "asking"]) { fixture, cleanup in
+            let viewModel = fixture.viewModel
+            let following = fixture.slots[0]
+            let asking = fixture.slots[1]
+            try await fixture.saveChatsInTemporaryDirectory()
+            cleanup.add { viewModel.installRunTestHooks(nil) }
+            viewModel.installRunTestHooks(Self.hooksResolvingFollowUpModel)
+
+            // Follow-up: an MCP answer whose reply is pending in the chat it streams into.
+            let followUpClaim = try viewModel.beginMCPControlledRun(
+                forTabID: following.tabID,
+                workspaceID: fixture.workspaceID,
+                responseType: "question",
+                planModelName: nil
+            )
+            let followUpEnded = ContextBuilderTestFlag()
+            let followUp = Task { @MainActor in
+                try await viewModel.runMCPPlanOrQuestion(
+                    for: fixture.identity(of: following),
+                    oracleViewModel: fixture.window.oracleViewModel,
+                    mode: .chat,
+                    prompt: Self.followUpPrompt,
+                    selection: StoredSelection(selectedPaths: [following.fileURL.path]),
+                    reviewGitContext: .automaticOnly()
+                )
+            }
+            Task {
+                _ = await followUp.result
+                await followUpEnded.set()
+            }
+            cleanup.add {
+                followUp.cancel()
+                _ = await followUp.result
+            }
+            _ = try await Self.firstRequest(sentBy: followUp, in: fixture)
+            let followingSession = try XCTUnwrap(fixture.session(following))
+            XCTAssertNotNil(followingSession.followUpOracleSessionID)
+            XCTAssertTrue(followingSession.isBackgroundPlanGenerating)
+
+            // Question: a run whose child is waiting for the user's answer.
+            fixture.clarifyingQuestionTimeoutSeconds = 300
+            fixture.holdsChildTurns = true
+            let askingRun = fixture.startMCPRun(on: asking)
+            let askingRunID = try await fixture.registeredRunID(on: asking)
+            let askingChild = try await fixture.childWithRegisteredProcess(forRunID: askingRunID)
+            fixture.releaseOnSettle { await askingChild.allowTurn() }
+            try await fixture.waitFor("the asking tab's child to hold its turn") {
+                await askingChild.isTurnHeld()
+            }
+            let askEnded = ContextBuilderTestFlag()
+            let ask = Task {
+                try await askingChild.callTool(
+                    MCPWindowToolName.askUser,
+                    ["question": "Which module does the asking tab mean?", "timeout_seconds": 300]
+                )
+            }
+            Task {
+                _ = await ask.result
+                await askEnded.set()
+            }
+            try await fixture.waitFor("the asking tab's question to be pending") {
+                fixture.session(asking)?.pendingAskUser != nil
+            }
+            let askingSession = try XCTUnwrap(fixture.session(asking))
+            XCTAssertEqual(askingSession.pendingAskUserRunID, askingRunID)
+
+            fixture.window.beginClose()
+
+            XCTAssertNil(followingSession.followUpOracleSessionID)
+            XCTAssertFalse(followingSession.isBackgroundPlanGenerating)
+            XCTAssertNil(askingSession.pendingAskUser)
+            XCTAssertNil(fixture.activeRunID(asking))
+
+            await fixture.window.tearDown()
+
+            // Each cancelled piece of work then ends for whoever was waiting on it.
+            try await fixture.waitFor("the follow-up to end", allowingRunErrors: true) {
+                await followUpEnded.current()
+            }
+            let followUpOutcome = await followUp.result
+            XCTAssertThrowsError(try followUpOutcome.get()) {
+                XCTAssertTrue($0 is CancellationError, "Ended with \($0)")
+            }
+            try await fixture.waitFor("the question's call to end", allowingRunErrors: true) {
+                await askEnded.current()
+            }
+            // The child's call ends with the tool's cancellation, unless the run's connection was
+            // closed before that reply could be written to it.
+            if case let .success(reply) = await ask.result {
+                XCTAssertTrue(reply.rawJSON.contains("Tool execution was cancelled."), reply.rawJSON)
+            }
+            try await fixture.waitFor("the asking tab's run to return", allowingRunErrors: true) {
+                askingRun.result != nil
+            }
+            XCTAssertThrowsError(try XCTUnwrap(askingRun.result).get()) { XCTAssertTrue($0 is CancellationError) }
+            XCTAssertEqual(fixture.child(forRunID: askingRunID)?.disposeCount, 1)
+            XCTAssertFalse(viewModel.isRunTeardownPendingForTesting(runID: askingRunID))
+            await viewModel.clearMCPControlledRun(forTabID: following.tabID, controlToken: followUpClaim)
+        }
+    }
+
+    /// While the app is terminating, a window's close request leaves the window's runs alone,
+    /// because ending them is the termination's to do. The window still stops admitting work.
+    func testWindowCloseRequestDuringAppTerminationLeavesRunsToTermination() async {
+        let manager = WindowStatesManager.shared
+        defer { manager.setTerminatingForTesting(false) }
+        let window = makeWindow()
+        let viewModel = window.contextBuilderAgentViewModel
+        let provider = GatedHeadlessAgentProvider()
+        await provider.allowDispose()
+        let record = makeRecord()
+        XCTAssertTrue(record.installProvider(provider))
+        XCTAssertTrue(viewModel.registerRunRecordForTesting(record, makeCurrent: true))
+        XCTAssertThrowsError(
+            try viewModel.requireMCPControlOwnership(forTabID: record.tabID, controlToken: UUID())
+        ) { XCTAssertFalse($0 is CancellationError, "The window is still open: \($0)") }
+        manager.setTerminatingForTesting(true)
+
+        window.beginClose()
+
+        XCTAssertEqual(record.cancellationState, .none)
+        XCTAssertNil(record.terminalOutcome)
+        XCTAssertEqual(viewModel.activeRunIDForTesting(tabID: record.tabID), record.runID)
+        XCTAssertThrowsError(
+            try viewModel.requireMCPControlOwnership(forTabID: record.tabID, controlToken: UUID())
+        ) { XCTAssertTrue($0 is CancellationError, "The window stopped admitting work: \($0)") }
+
+        await viewModel.shutdownForAppTermination()
+
+        XCTAssertEqual(record.terminalOutcome, .cancelled)
+        XCTAssertNotNil(record.teardownFinishedAt)
+        let disposeCallCount = await provider.disposeCallCount()
+        XCTAssertEqual(disposeCallCount, 1)
+    }
+
     /// Switching the window's workspace cancels a UI run and leaves an MCP run alone. The
     /// cancelled UI run keeps its tab claimed until its own tail has run: its execution is held
     /// past the switch here, and for that whole time the tab admits no other run. The tab's

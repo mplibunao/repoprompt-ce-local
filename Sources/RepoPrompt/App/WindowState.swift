@@ -320,7 +320,14 @@ class WindowState: ObservableObject {
         detachTitlebarAccessoryControllers(from: nsWindow)
         clearTitlebarAccessoryRequestsForClose()
         apiSettingsViewModel.prepareForWindowClose()
-        contextBuilderAgentViewModel.prepareForWindowClose()
+        // Context Builder's runs are asked to end synchronously here rather than in the
+        // view-disappearance teardown, where earlier awaits would delay the request. App
+        // termination has its own owner for that request.
+        if !manager.isTerminating {
+            contextBuilderAgentViewModel.cancelRunsForWindowClose()
+        } else {
+            contextBuilderAgentViewModel.prepareForWindowClose()
+        }
         workspaceManager.prepareForWindowClose()
         promptManager.gitViewModel.prepareForWindowClose()
     }

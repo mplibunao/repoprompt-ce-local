@@ -1239,9 +1239,7 @@ import XCTest
         /// its Run press starts nothing and says why in the log its panel shows. Neither changes the
         /// holder, and the refused window is left without a claim or a run. Each window holds once,
         /// so the rule is shown in both directions. The workspace's other tabs stay free. A tab is
-        /// free again once its holder releases it. A holder whose window closes keeps the tab while
-        /// the window begins closing and after it has left the open windows, until that close has
-        /// retired its run.
+        /// free again once its holder releases it.
         func testSameTabInSecondWindowRefuses() async throws {
             try await ContextBuilderRunFixture.withFixture { first, cleanup in
                 let second = try await first.openPeerWindow(cleanup: cleanup)
@@ -1263,7 +1261,7 @@ import XCTest
                     }
                 }
 
-                var pressed = await first.pressRun(on: tab)
+                let pressed = await first.pressRun(on: tab)
                 let runID = try XCTUnwrap(pressed)
                 try await first.waitFor("the first window's provider to start its turn") {
                     providers.first?.runID == runID
@@ -1288,33 +1286,6 @@ import XCTest
                 await providers[0].finish()
                 try await first.waitForRelease(of: tab)
                 try await assertClaimable(tab, in: second)
-
-                pressed = await second.pressRun(on: tab)
-                let closingRunID = try XCTUnwrap(pressed)
-                try await second.waitFor("the second window's provider to start its turn") {
-                    providers.last?.runID == closingRunID
-                }
-                // The close runs in the order the window's view runs it.
-                second.window.beginClose()
-                for unlisted in [false, true] {
-                    if unlisted {
-                        WindowStatesManager.shared.unregisterWindowState(second.window)
-                    }
-                    XCTAssertEqual(WindowStatesManager.shared.allWindows.contains { $0 === second.window }, !unlisted)
-                    XCTAssertThrowsError(
-                        try first.viewModel.beginMCPControlledRun(
-                            forTabID: tab.tabID,
-                            workspaceID: first.workspaceID,
-                            responseType: nil,
-                            planModelName: nil
-                        )
-                    ) { Self.assertTabBusy($0) }
-                    XCTAssertEqual(second.activeRunID(tab), closingRunID)
-                }
-
-                await second.window.tearDown()
-                try await second.waitForRelease(of: tab)
-                try await assertClaimable(tab, in: first)
             }
         }
 
@@ -1396,9 +1367,11 @@ import XCTest
             }
         }
 
-        /// A panel run's claim is released by the run's own task. A close stops waiting for a task
-        /// that outlasts its grace, and the claim is still there: the other window is refused the
-        /// tab after the close has returned, for as long as that task has not ended.
+        /// A panel run's claim is released by the run's own task. The other window is refused the
+        /// tab from the moment the close begins, while the closing window is still among the open
+        /// windows. A close stops waiting for a task that outlasts its grace, and the claim is
+        /// still there: the other window is refused the tab after the close has returned, for as
+        /// long as that task has not ended.
         func testClosedWindowWhoseRunTaskHasNotEndedKeepsItsTabFromAnotherWindow() async throws {
             try await ContextBuilderRunFixture.withFixture { first, cleanup in
                 let closing = try await first.openPeerWindow(cleanup: cleanup)
@@ -1425,6 +1398,8 @@ import XCTest
                 XCTAssertEqual(closing.operationToken(tab), held)
 
                 closing.window.beginClose()
+                XCTAssertTrue(WindowStatesManager.shared.allWindows.contains { $0 === closing.window })
+                await assertRefused(tab, in: first, heldBy: closing)
                 WindowStatesManager.shared.unregisterWindowState(closing.window)
                 let observed = CloseObservation()
                 let teardown = Task { @MainActor in
