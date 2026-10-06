@@ -4524,10 +4524,11 @@ extension MCPServerViewModel {
         guard connectionIDByRunID[runID] == connectionID,
               connectionIDToRunID[connectionID] == runID,
               let context = tabContextByConnectionID[connectionID],
-              context.runID == runID,
-              detachedContextBuilderTabContextByRunID[runID] == nil
+              context.runID == runID
         else { return false }
 
+        // A context already detached for the run was left by a connection the run was routed to
+        // before this one. This connection holds what the run did since, so it replaces that.
         detachedContextBuilderTabContextByRunID[runID] = DetachedContextBuilderTabContext(
             connectionID: connectionID,
             context: context

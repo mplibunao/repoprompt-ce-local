@@ -3039,11 +3039,12 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 connectionTTL: ContextBuilderDefaults.mcpBootstrapConnectionTTL
             )
 
+            let policyTabID = record.workspaceContext == nil && record.mcpConfiguration == nil ? record.tabID : nil
             let lease: MCPBootstrapLease
             do {
                 lease = try await AgentRunCoordinator.shared.prepareAndInstallPolicy(
                     spec,
-                    tabID: record.workspaceContext == nil && record.mcpConfiguration == nil ? record.tabID : nil,
+                    tabID: policyTabID,
                     additionalTools: additionalTools,
                     reason: "discover-run",
                     gateID: runID
@@ -3061,29 +3062,12 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             }
 
             activeAgentRuns.insert(runID)
-            if let workspaceContext = record.workspaceContext {
+            if record.workspaceContext != nil || record.mcpConfiguration != nil {
                 guard let clientName = record.agentKind.mcpClientNameHint else {
                     await lease.failAndCleanup()
                     return .failed("Failed to identify the nested Context Builder MCP client.")
                 }
-                _ = mcpServer.installFrozenTabContext(
-                    clientID: nil,
-                    clientName: clientName,
-                    context: workspaceContext.nestedDiscoveryTabContext(runID: runID)
-                )
-            } else if let configuration = record.mcpConfiguration {
-                guard let clientName = record.agentKind.mcpClientNameHint else {
-                    await lease.failAndCleanup()
-                    return .failed("Failed to identify the nested Context Builder MCP client.")
-                }
-                var nestedContext = configuration.nestedTabContext
-                nestedContext.runID = runID
-                nestedContext.frozenLookupContext = configuration.nestedTabContext.frozenLookupContext
-                _ = mcpServer.installFrozenTabContext(
-                    clientID: nil,
-                    clientName: clientName,
-                    context: nestedContext
-                )
+                queueFrozenTabContext(for: record, clientName: clientName)
             }
 
             do {
@@ -3104,6 +3088,19 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 await provider.dispose()
                 await lease.failAndCleanup()
                 return .cancelled
+            }
+            if let relaunchingProvider = provider as? RelaunchingHeadlessAgentProvider {
+                let relaunchAdmissions = ACPFollowUpRespawnAdmissions()
+                relaunchingProvider.setRelaunchAdmissionSource { [weak self, weak record] relaunchedRunID in
+                    guard let self, let record, relaunchedRunID == record.runID else { return .unavailable }
+                    return await armRelaunchAdmission(
+                        for: record,
+                        issuedBy: relaunchAdmissions,
+                        spec: spec,
+                        policyTabID: policyTabID,
+                        additionalTools: additionalTools
+                    )
+                }
             }
 
             do {
@@ -4199,6 +4196,75 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             outcome: .failed("Context Builder final context commit result is missing."),
             committedTab: nil
         )
+    }
+
+    /// Queues the run's frozen tab context for the next connection its policy admits.
+    private func queueFrozenTabContext(for record: ContextBuilderRunRecord, clientName: String) {
+        if let workspaceContext = record.workspaceContext {
+            _ = mcpServer.installFrozenTabContext(
+                clientID: nil,
+                clientName: clientName,
+                context: workspaceContext.nestedDiscoveryTabContext(runID: record.runID)
+            )
+        } else if let configuration = record.mcpConfiguration {
+            var nestedContext = configuration.nestedTabContext
+            nestedContext.runID = record.runID
+            nestedContext.frozenLookupContext = configuration.nestedTabContext.frozenLookupContext
+            _ = mcpServer.installFrozenTabContext(
+                clientID: nil,
+                clientName: clientName,
+                context: nestedContext
+            )
+        }
+    }
+
+    /// Arms the policy that admits the MCP helper of a process the run's provider is about to
+    /// start after its first, and queues the run's frozen tab context for that connection: the
+    /// helper of a new process shares neither the session token nor the binding of the one before
+    /// it.
+    ///
+    /// Nothing is armed while the run's own policy is its only pending one and no connection has
+    /// reserved it: that policy and the context queued with it serve whichever process connects
+    /// first. A policy a connection has reserved or consumed admits no other, so from then on the
+    /// new process starts only on a policy armed here. The policy table decides this, because a
+    /// run is told it was routed only after its policy is consumed.
+    private func armRelaunchAdmission(
+        for record: ContextBuilderRunRecord,
+        issuedBy admissions: ACPFollowUpRespawnAdmissions,
+        spec: AgentRunSpec,
+        policyTabID: UUID?,
+        additionalTools: Set<String>?
+    ) async -> HeadlessAgentRelaunchAdmission {
+        guard let clientName = record.agentKind.mcpClientNameHint else { return .unavailable }
+        let isCoveredByRunPolicy = await ServerNetworkManager.shared.hasSoleUnreservedPendingPolicy(
+            for: clientName,
+            runID: record.runID,
+            windowID: spec.windowID
+        )
+        guard acceptsEvents(from: record) else { return .unavailable }
+        guard !isCoveredByRunPolicy else { return .coveredByRunPolicy }
+        let relaunchLease = try? AgentRunCoordinator.shared.makeLease(
+            spec,
+            tabID: policyTabID,
+            additionalTools: additionalTools,
+            reason: "discover-run-relaunch"
+        )
+        guard let relaunchLease,
+              let admission = admissions.make(
+                  agentKind: record.agentKind,
+                  runID: record.runID,
+                  makeLease: { _ in relaunchLease }
+              )
+        else { return .unavailable }
+        // Arming suspends, and the run can be cancelled or lose its tab meanwhile. The context is
+        // queued only for a policy that is armed for a run that still owns its tab, so a failure
+        // here leaves nothing for a later connection to consume.
+        guard await admission.arm(), !Task.isCancelled, acceptsEvents(from: record) else {
+            await admission.settle(.failed)
+            return .unavailable
+        }
+        queueFrozenTabContext(for: record, clientName: clientName)
+        return .armed(admission)
     }
 
     private func clearTabContextForAgent(agent: AgentProviderKind, runID: UUID) async {

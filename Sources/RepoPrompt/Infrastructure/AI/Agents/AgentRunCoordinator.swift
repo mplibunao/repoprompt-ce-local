@@ -73,6 +73,19 @@ final class AgentRunCoordinator {
         reason: String? = nil,
         gateID: UUID? = nil
     ) async throws -> MCPBootstrapLease {
+        let lease = try makeLease(spec, tabID: tabID, additionalTools: additionalTools, reason: reason, gateID: gateID)
+        try await lease.requireAcquired()
+        return lease
+    }
+
+    /// The lease for a run's per-run client policy, not yet acquired.
+    func makeLease(
+        _ spec: AgentRunSpec,
+        tabID: UUID? = nil,
+        additionalTools: Set<String>? = nil,
+        reason: String? = nil,
+        gateID: UUID? = nil
+    ) throws -> MCPBootstrapLease {
         guard let clientName = spec.agentKind.mcpClientNameHint else {
             throw NSError(domain: "AgentRunCoordinator", code: -1, userInfo: [
                 NSLocalizedDescriptionKey: "Missing MCP client name hint for agent \(spec.agentKind)"
@@ -93,9 +106,7 @@ final class AgentRunCoordinator {
             requiresExpectedAgentPID: spec.agentKind.requiresExpectedPIDOwnedAgentModeMCPRouting
         )
 
-        let lease = MCPBootstrapLease(spec: leaseSpec)
-        try await lease.requireAcquired()
-        return lease
+        return MCPBootstrapLease(spec: leaseSpec)
     }
 
     /// Factory for headless agent providers (Claude Code, Codex Exec, etc.)

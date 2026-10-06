@@ -30,6 +30,15 @@ import XCTest
             var agentOutput: String {
                 "Discovery output for the \(name) tab"
             }
+
+            /// What the tab holds before any run, in a fixture made with seeded tabs.
+            var seededPromptText: String {
+                "Instructions the \(name) tab held before any run"
+            }
+
+            var seededFileURL: URL {
+                fileURL.deletingLastPathComponent().appendingPathComponent("\(name.capitalized)Seeded.swift")
+            }
         }
 
         /// What the window asked its provider factory for.
@@ -89,14 +98,17 @@ import XCTest
 
         /// Runs `scenario` on a fresh fixture inside the shared MCP server lease. The fixture
         /// registers its cleanup first, so every cleanup the scenario adds runs before it.
+        /// With `seedsTabs`, every tab starts with its slot's seeded prompt and selection instead of
+        /// empty.
         static func withFixture(
             tabNames: [String] = ["first", "second"],
+            seedsTabs: Bool = false,
             _ scenario: @MainActor (ContextBuilderRunFixture, FixtureCleanup) async throws -> Void
         ) async throws {
             try await MCPSharedServerTestLease.shared.withLease { _ in
                 let cleanup = FixtureCleanup()
                 try await cleanup.perform {
-                    let fixture = try await make(cleanup: cleanup, tabNames: tabNames)
+                    let fixture = try await make(cleanup: cleanup, tabNames: tabNames, seedsTabs: seedsTabs)
                     try await scenario(fixture, cleanup)
                 }
             }
@@ -104,7 +116,8 @@ import XCTest
 
         static func make(
             cleanup: FixtureCleanup,
-            tabNames: [String] = ["first", "second"]
+            tabNames: [String] = ["first", "second"],
+            seedsTabs: Bool = false
         ) async throws -> ContextBuilderRunFixture {
             try await AppGlobalMCPServiceComposition.shared.ensureRegistered()
 
@@ -118,9 +131,23 @@ import XCTest
                 return TabSlot(name: name, tabID: UUID(), fileURL: fileURL)
             }
 
+            if seedsTabs {
+                for slot in slots {
+                    try "// \(slot.name), seeded\n".write(to: slot.seededFileURL, atomically: true, encoding: .utf8)
+                }
+            }
+
             var workspace = WorkspaceModel(name: "Context Builder runs", repoPaths: [rootURL.path])
             workspace.isEphemeral = true
-            workspace.composeTabs = slots.map { ComposeTabState(id: $0.tabID, name: $0.name) }
+            workspace.composeTabs = slots.map { slot in
+                guard seedsTabs else { return ComposeTabState(id: slot.tabID, name: slot.name) }
+                return ComposeTabState(
+                    id: slot.tabID,
+                    name: slot.name,
+                    selection: StoredSelection(selectedPaths: [slot.seededFileURL.path]),
+                    promptText: slot.seededPromptText
+                )
+            }
             workspace.activeComposeTabID = slots[0].tabID
             let fixture = try await open(workspace, rootURL: rootURL, slots: slots, cleanup: cleanup)
 
@@ -212,6 +239,7 @@ import XCTest
         /// The frozen inputs the `context_builder` tool resolves for a run on `slot`.
         func mcpAuthority(
             for slot: TabSlot,
+            agentKind: AgentProviderKind = .claudeCode,
             modelParameterSelections: [ACPModelParameterSelection] = []
         ) throws -> ContextBuilderResolvedRunAuthority {
             let identity = identity(of: slot)
@@ -249,7 +277,7 @@ import XCTest
                     planningModelRaw: nil,
                     isSystemWorkspace: false
                 ),
-                agentKind: .claudeCode,
+                agentKind: agentKind,
                 modelRaw: AgentModel.defaultModel.rawValue,
                 modelParameterSelections: modelParameterSelections
             )
@@ -259,6 +287,7 @@ import XCTest
         @discardableResult
         func startMCPRun(
             on slot: TabSlot,
+            agentKind: AgentProviderKind = .claudeCode,
             modelParameterSelections: [ACPModelParameterSelection] = [],
             progressReporter: ContextBuilderMCPProgressReporter? = nil
         ) -> MCPRun {
@@ -267,7 +296,11 @@ import XCTest
             run.task = Task { @MainActor in
                 do {
                     let viewModel = self.viewModel
-                    let authority = try self.mcpAuthority(for: slot, modelParameterSelections: modelParameterSelections)
+                    let authority = try self.mcpAuthority(
+                        for: slot,
+                        agentKind: agentKind,
+                        modelParameterSelections: modelParameterSelections
+                    )
                     let token = try viewModel.beginMCPControlledRun(
                         forTabID: slot.tabID,
                         workspaceID: self.workspaceID,
@@ -428,6 +461,24 @@ import XCTest
                 .filter(runIDs.contains)
         }
 
+        /// The reasons the app recorded for refusing a connection to `runID`, oldest first.
+        func connectionRefusalReasons(forRunID runID: UUID) async -> [String] {
+            await routingEvents(forRunID: runID).compactMap { event in
+                guard event["event"] as? String == "policy_rejected" else { return nil }
+                return (event["fields"] as? [String: String])?["reason"]
+            }
+        }
+
+        /// The names of the routing events the app recorded for `runID`, oldest first.
+        func routingEventNames(forRunID runID: UUID) async -> [String] {
+            await routingEvents(forRunID: runID).compactMap { $0["event"] as? String }
+        }
+
+        private func routingEvents(forRunID runID: UUID) async -> [[String: Any]] {
+            let history = await manager.debugRunRoutingHistoryPayload(runID: runID, limit: 500)
+            return history["events"] as? [[String: Any]] ?? []
+        }
+
         // MARK: Waiting
 
         /// Polls `condition` until it holds. Fails and aborts at the deadline, and as soon as an
@@ -563,6 +614,53 @@ import XCTest
             return ContextBuilderRoutedProvider(child: child)
         }
 
+        /// A provider for `request` that starts its CLI twice inside one discovery turn. Its first
+        /// process connects and makes no tool call; its second waits for
+        /// ``ContextBuilderProviderChild/allowConnection()`` and then performs the turn.
+        func makeRelaunchingProvider(for request: ProviderRequest) -> ContextBuilderRelaunchingProvider {
+            let clientName = request.agentKind.mcpClientNameHint ?? request.agentKind.rawValue
+            let firstProcess = ContextBuilderProviderChild(
+                fixture: self,
+                clientName: clientName,
+                waitsForConnectionRelease: false,
+                writes: ContextBuilderProviderChild.Writes(
+                    setsPrompt: false,
+                    setsSelection: false,
+                    repliesWithOutput: false
+                )
+            )
+            let relaunchedProcess = ContextBuilderProviderChild(
+                fixture: self,
+                clientName: clientName,
+                waitsForConnectionRelease: true,
+                writes: childWrites
+            )
+            children.append(contentsOf: [firstProcess, relaunchedProcess])
+            let provider = ContextBuilderRelaunchingProvider(
+                firstProcess: firstProcess,
+                relaunchedProcess: relaunchedProcess
+            )
+            releaseOnSettle { await provider.exitFirstProcess() }
+            return provider
+        }
+
+        /// A child that does the MCP work of a provider process the fixture did not start. The
+        /// caller passes that process's helper to
+        /// ``ContextBuilderProviderChild/serve(runID:asHelperPID:)``.
+        func makeHelperChild(
+            for agentKind: AgentProviderKind,
+            writes: ContextBuilderProviderChild.Writes
+        ) -> ContextBuilderProviderChild {
+            let child = ContextBuilderProviderChild(
+                fixture: self,
+                clientName: agentKind.mcpClientNameHint ?? agentKind.rawValue,
+                waitsForConnectionRelease: false,
+                writes: writes
+            )
+            children.append(child)
+            return child
+        }
+
         private func noteRegisteredRunIDs() {
             for slot in slots {
                 if let runID = viewModel.activeRunIDForTesting(tabID: slot.tabID) {
@@ -578,8 +676,7 @@ import XCTest
                     lines.append("\(slot.name) tab: no run registered")
                     continue
                 }
-                let history = await manager.debugRunRoutingHistoryPayload(runID: runID, limit: 200)
-                let events = (history["events"] as? [[String: Any]] ?? []).compactMap { $0["event"] as? String }
+                let events = await routingEventNames(forRunID: runID)
                 lines.append("\(slot.name) tab run \(runID): \(events.joined(separator: " > "))")
             }
             return lines.joined(separator: "\n")
@@ -667,6 +764,58 @@ import XCTest
         }
     }
 
+    /// A provider that starts its CLI twice inside one discovery turn, as the Codex exec provider
+    /// does when it retries with a fallback model or without a broken MCP server. The first process
+    /// connects and, once ``exitFirstProcess()`` allows, exits without a reply. The second, a
+    /// process family and session token of its own registered for the same run, performs the turn.
+    @MainActor
+    final class ContextBuilderRelaunchingProvider: HeadlessAgentProvider {
+        let firstProcess: ContextBuilderProviderChild
+        let relaunchedProcess: ContextBuilderProviderChild
+        private let firstProcessExitGate = ContextBuilderTestGate()
+
+        fileprivate init(firstProcess: ContextBuilderProviderChild, relaunchedProcess: ContextBuilderProviderChild) {
+            self.firstProcess = firstProcess
+            self.relaunchedProcess = relaunchedProcess
+        }
+
+        func exitFirstProcess() async {
+            await firstProcessExitGate.open()
+        }
+
+        func streamAgentMessage(
+            _ message: AgentMessage,
+            runID: UUID?
+        ) async throws -> AsyncThrowingStream<AIStreamResult, Error> {
+            let firstProcess = firstProcess
+            let relaunchedProcess = relaunchedProcess
+            let firstProcessExitGate = firstProcessExitGate
+            return AsyncThrowingStream { continuation in
+                let turn = Task { @MainActor in
+                    do {
+                        _ = try await firstProcess.discover(runID: runID)
+                        await firstProcessExitGate.wait()
+                        await firstProcess.dispose()
+                        try Task.checkCancellation()
+                        if let output = try await relaunchedProcess.discover(runID: runID) {
+                            continuation.yield(AIStreamResult(type: "content", text: output))
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in turn.cancel() }
+            }
+        }
+
+        func dispose() async {
+            await firstProcessExitGate.open()
+            await firstProcess.dispose()
+            await relaunchedProcess.dispose()
+        }
+    }
+
     /// A provider that never opens an MCP connection, so its run ends as a routing failure. Its
     /// turn yields `events` and then, unless it `finishesImmediately`, stays open until
     /// ``finish()``, keeping its run active for as long as a test needs.
@@ -728,9 +877,17 @@ import XCTest
 
         /// The tool calls a child makes on its run's tab, and whether it replies with output.
         struct Writes {
+            /// Whether the child reads the tab's prompt and selection before it writes either.
+            var readsTabFirst = false
             var setsPrompt = true
             var setsSelection = true
             var repliesWithOutput = true
+        }
+
+        /// The raw tool responses a child got for its tab's prompt and selection.
+        struct TabRead: Equatable {
+            let prompt: String
+            let selection: String
         }
 
         enum ConnectionError: LocalizedError {
@@ -756,6 +913,7 @@ import XCTest
         private(set) var runID: UUID?
         private(set) var registeredProviderPID: pid_t?
         private(set) var admission: Admission?
+        private(set) var tabReadBeforeWriting: TabRead?
         private(set) var disposeCount = 0
         private weak var fixture: ContextBuilderRunFixture?
         private let waitsForConnectionRelease: Bool
@@ -785,7 +943,6 @@ import XCTest
             let fixture = try XCTUnwrap(fixture)
             let runID = try XCTUnwrap(runID)
             self.runID = runID
-            let slot = try fixture.slot(forRunID: runID)
 
             let family = try await ProviderProcessFamily.spawn()
             processFamily = family
@@ -796,8 +953,19 @@ import XCTest
                 await connectionGate.wait()
             }
             try Task.checkCancellation()
+            return try await serve(runID: runID, asHelperPID: family.helperPID)
+        }
 
-            let client = try await connect(as: family.helperPID, in: fixture)
+        /// The MCP side of a discovery turn, done as the helper process `helperPID` of a provider
+        /// process already registered for `runID`: connect through bootstrap admission, then call
+        /// tools on the run's tab.
+        @discardableResult
+        func serve(runID: UUID, asHelperPID helperPID: pid_t) async throws -> String? {
+            let fixture = try XCTUnwrap(fixture)
+            self.runID = runID
+            let slot = try fixture.slot(forRunID: runID)
+
+            let client = try await connect(as: helperPID, in: fixture)
             admission = await Admission(
                 routedRunID: fixture.manager.runIDForConnection(connectionID),
                 runConnectionID: fixture.window.mcpServer.connectionID(forRunID: runID),
@@ -805,6 +973,12 @@ import XCTest
             )
             try client.sendNotification(method: "notifications/initialized", params: [:])
             await fixture.window.mcpServer.domainRoutingPublishTask?.value
+            if writes.readsTabFirst {
+                tabReadBeforeWriting = try await TabRead(
+                    prompt: call(MCPWindowToolName.prompt, ["op": "get"], on: client),
+                    selection: call(MCPWindowToolName.manageSelection, ["op": "get", "view": "files"], on: client)
+                )
+            }
             if writes.setsPrompt {
                 try await call(MCPWindowToolName.prompt, ["op": "set", "text": slot.promptText], on: client)
             }
@@ -829,6 +1003,11 @@ import XCTest
             if let runID, let fixture {
                 await fixture.manager.clearExpectedAgentPID(family.providerPID, for: clientName, runID: runID)
             }
+        }
+
+        /// Closes the child's socket, as the death of its helper process does.
+        func closeAsProcessExit() {
+            client?.close()
         }
 
         fileprivate func closeConnection() async {
@@ -884,11 +1063,12 @@ import XCTest
             return client
         }
 
+        @discardableResult
         private func call(
             _ tool: String,
             _ arguments: [String: Any],
             on client: PersistentMCPTestSocketClient
-        ) async throws {
+        ) async throws -> String {
             let response = try await client.request(
                 method: "tools/call",
                 params: ["name": tool, "arguments": arguments]
@@ -896,6 +1076,7 @@ import XCTest
             guard try JSONRPCErrorBody(response) == nil, !response.rawJSON.contains("\"isError\":true") else {
                 throw ConnectionError.toolFailed(tool: tool, response: response.rawJSON)
             }
+            return response.rawJSON
         }
     }
 

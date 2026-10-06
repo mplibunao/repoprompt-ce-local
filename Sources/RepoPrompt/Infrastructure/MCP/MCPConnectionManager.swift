@@ -1409,6 +1409,9 @@ actor ServerNetworkManager {
         private var debugShouldSuspendNextPendingPolicyCommit = false
         private var debugPendingPolicyCommitIsSuspended = false
         private var debugPendingPolicyCommitResumeWaiters: [CheckedContinuation<Void, Never>] = []
+        private var debugShouldSuspendNextPendingPolicyRoutedNotification = false
+        private var debugPendingPolicyRoutedNotificationIsSuspended = false
+        private var debugPendingPolicyRoutedNotificationResumeWaiters: [CheckedContinuation<Void, Never>] = []
         private var debugShouldSuspendNextConfirmOrFence = false
         private var debugConfirmOrFenceIsSuspended = false
         private var debugConfirmOrFenceResumeWaiters: [CheckedContinuation<Void, Never>] = []
@@ -7463,6 +7466,23 @@ actor ServerNetworkManager {
         return armed
     }
 
+    /// Whether `runID` has exactly one pending policy and no connection has reserved it. A reserved
+    /// policy belongs to an admission that is in flight, and stays in the table until that admission
+    /// commits or rolls back, so it cannot cover a process the run relaunches meanwhile. A policy
+    /// past its lifetime is excluded, unless it is retained until settlement.
+    func hasSoleUnreservedPendingPolicy(
+        for clientName: String,
+        runID: UUID,
+        windowID: Int? = nil
+    ) -> Bool {
+        let now = Date()
+        let pending = matchingClientKeys(for: clientName, in: Array(pendingPoliciesByClient.keys))
+            .flatMap { pendingPoliciesByClient[$0] ?? [] }
+            .filter { $0.runID == runID && (windowID == nil || $0.windowID == windowID) }
+            .filter { $0.prunesOnlyAfterSettlement || now.timeIntervalSince($0.createdAt) <= $0.ttl }
+        return pending.count == 1 && pending[0].reservationConnectionID == nil
+    }
+
     #if DEBUG
         func debugSuspendNextPendingPolicyObservation() {
             debugShouldSuspendNextPendingPolicyObservation = true
@@ -7519,6 +7539,24 @@ actor ServerNetworkManager {
             debugPendingPolicyCommitIsSuspended = false
             let waiters = debugPendingPolicyCommitResumeWaiters
             debugPendingPolicyCommitResumeWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+
+        /// Holds the next admitted connection after its one-shot policy is consumed and its route
+        /// is committed, before the run's routing waiters are told it is routed.
+        func debugSuspendNextPendingPolicyRoutedNotification() {
+            debugShouldSuspendNextPendingPolicyRoutedNotification = true
+        }
+
+        func debugIsPendingPolicyRoutedNotificationSuspended() -> Bool {
+            debugPendingPolicyRoutedNotificationIsSuspended
+        }
+
+        func debugResumePendingPolicyRoutedNotification() {
+            debugShouldSuspendNextPendingPolicyRoutedNotification = false
+            debugPendingPolicyRoutedNotificationIsSuspended = false
+            let waiters = debugPendingPolicyRoutedNotificationResumeWaiters
+            debugPendingPolicyRoutedNotificationResumeWaiters.removeAll()
             waiters.forEach { $0.resume() }
         }
 
@@ -7582,6 +7620,16 @@ actor ServerNetworkManager {
                 debugPendingPolicyCommitResumeWaiters.append(continuation)
             }
             debugPendingPolicyCommitIsSuspended = false
+        }
+
+        private func debugSuspendPendingPolicyRoutedNotificationIfNeeded() async {
+            guard debugShouldSuspendNextPendingPolicyRoutedNotification else { return }
+            debugShouldSuspendNextPendingPolicyRoutedNotification = false
+            debugPendingPolicyRoutedNotificationIsSuspended = true
+            await withCheckedContinuation { continuation in
+                debugPendingPolicyRoutedNotificationResumeWaiters.append(continuation)
+            }
+            debugPendingPolicyRoutedNotificationIsSuspended = false
         }
 
         private func debugSuspendConfirmOrFenceIfNeeded() async {
@@ -10768,6 +10816,9 @@ actor ServerNetworkManager {
             )
         }
         if requireRunRouting, let runID = policy.runID {
+            #if DEBUG
+                await debugSuspendPendingPolicyRoutedNotificationIfNeeded()
+            #endif
             await MCPRoutingWaiter.notifyRouted(runID: runID)
         }
 
