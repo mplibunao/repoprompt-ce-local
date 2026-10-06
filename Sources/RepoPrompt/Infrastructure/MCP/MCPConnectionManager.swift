@@ -2763,7 +2763,13 @@ actor ServerNetworkManager {
             return nil
         }
 
-        runIDByConnectionID[connectionID] = resolved.runID
+        // A removal clears this connection's entry before the window lets go of the mapping read
+        // above, and clears it once. The mapping is cached only for a connection this manager
+        // still holds and is not removing, so a lookup that overlaps a removal leaves no entry
+        // behind, whether it resumes here during the removal or after it.
+        if connections[connectionID] != nil, !connectionsBeingRemoved.contains(connectionID) {
+            runIDByConnectionID[connectionID] = resolved.runID
+        }
         presentationWindowByRun[resolved.runID] = resolved.windowID
         return resolved.runID
     }

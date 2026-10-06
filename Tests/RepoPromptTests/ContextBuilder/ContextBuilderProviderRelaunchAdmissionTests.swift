@@ -541,6 +541,59 @@ import XCTest
                 XCTAssertNil(fixture.operationToken(slot))
             }
         }
+
+        /// Start state: a run whose provider's first process connected and exited, with the app
+        /// part-way through removing that process's connection: the connection manager has let
+        /// go of the connection's run, and the window still maps the run to the connection.
+        ///
+        /// Looking up the connection's run at that point leaves nothing behind. Once the removal
+        /// completes, the connection manager maps the connection to no run.
+        func testRunLookupWhileTheExitedProcesssConnectionIsBeingRemovedLeavesItUnmapped() async throws {
+            try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
+                let slot = fixture.slots[0]
+                var relaunchingProvider: ContextBuilderRelaunchingProvider?
+                fixture.providerScript = { [unowned fixture] request in
+                    let provider = fixture.makeRelaunchingProvider(for: request)
+                    relaunchingProvider = provider
+                    return provider
+                }
+
+                _ = fixture.startMCPRun(on: slot, agentKind: .codexExec)
+                try await fixture.waitFor("the first process to connect") {
+                    relaunchingProvider?.firstProcess.admission != nil
+                }
+                let provider = try XCTUnwrap(relaunchingProvider)
+                let firstConnectionID = provider.firstProcess.connectionID
+                let runID = try XCTUnwrap(fixture.activeRunID(slot))
+
+                // A removal scans for the connection's active tools right after the connection
+                // manager lets go of the connection's run and before the window is asked to.
+                let removal = ContextBuilderTestGate()
+                cleanup.add { await fixture.manager.debugSetBeforeActiveToolCancellationScanForTesting(nil) }
+                await fixture.manager.debugSetBeforeActiveToolCancellationScanForTesting { connectionID, _ in
+                    guard connectionID == firstConnectionID else { return }
+                    await removal.wait()
+                }
+                fixture.releaseOnSettle { await removal.open() }
+                cleanup.add { await removal.open() }
+
+                await provider.exitFirstProcess()
+                try await fixture.waitFor("the removal of the exited process's connection to be held") {
+                    await removal.entered
+                }
+                XCTAssertEqual(fixture.window.mcpServer.connectionID(forRunID: runID), firstConnectionID)
+                _ = await fixture.manager.runIDForConnection(firstConnectionID)
+
+                await removal.open()
+                try await fixture.waitFor("the removal to complete") {
+                    await fixture.routingEventNames(forRunID: runID)
+                        .contains("context_builder.tab_context_detach_published")
+                }
+                XCTAssertNil(fixture.window.mcpServer.connectionID(forRunID: runID))
+                let mappedRunID = await fixture.manager.runIDForConnection(firstConnectionID)
+                XCTAssertNil(mappedRunID)
+            }
+        }
     }
 
     /// A Codex run on the fixture's first tab whose provider is the real one, started and brought
