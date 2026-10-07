@@ -1314,10 +1314,15 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
             let runID = try XCTUnwrap(fixture.activeRunID(slot))
             let token = try XCTUnwrap(fixture.operationToken(slot))
 
+            let pinnedGraceNanoseconds: UInt64 = 100_000_000
+            cleanup.add { viewModel.setCloseSettlementGraceForTesting(500_000_000) }
+            viewModel.setCloseSettlementGraceForTesting(pinnedGraceNanoseconds)
             await viewModel.cancelMCPContextBuilderRun(runID: runID)
             XCTAssertNil(fixture.activeRunID(slot))
-            // Longer than the grace a closing tab or window gives an execution.
-            try await Task.sleep(for: .milliseconds(1200))
+            // A real-clock margin three times the pinned close grace, which an ordinary cancellation
+            // must not apply. Elapsed time cannot prove that no settlement timer exists; it shows that
+            // none took effect within the window.
+            try await Task.sleep(for: .nanoseconds(pinnedGraceNanoseconds * 3))
             XCTAssertNil(run.result, "The call's cleanup scope has not returned")
             XCTAssertEqual(fixture.operationToken(slot), token)
             XCTAssertThrowsError(
