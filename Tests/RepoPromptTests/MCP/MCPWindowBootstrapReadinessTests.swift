@@ -404,238 +404,6 @@ import XCTest
             }
         }
 
-        // MARK: - Bounded readiness
-
-        /// Two starts wait on one cold enable transition, each with its own bound. The bound that
-        /// elapses removes only its own start, while the transition is still held: the transition
-        /// is neither cancelled nor restarted, and the other start becomes ready through it.
-        func testContextBuilderReadinessExpiryRemovesOnlyThatWaiter() async throws {
-            try await withReadinessWindow { window, _ in
-                let server = window.mcpServer
-                let gate = ReadinessTestGate()
-                server.setBeforeWindowToolRegistrationForTesting {
-                    await gate.arriveAndWait()
-                }
-                let bound = Duration.seconds(30)
-                let expiringClock = MCPExportWatchdogManualClock()
-                let patientClock = MCPExportWatchdogManualClock()
-
-                let expiry = ReadinessOutcome()
-                Task { @MainActor in
-                    do {
-                        try await server.requireContextBuilderReadiness(
-                            timeout: bound,
-                            clock: Self.routingClock(expiringClock)
-                        )
-                        expiry.result = .success(())
-                    } catch {
-                        expiry.result = .failure(error)
-                    }
-                }
-                let generation = await awaitSharedTransition(at: gate, on: server, joiners: 0)
-                let patient = Task { @MainActor in
-                    try await server.requireContextBuilderReadiness(
-                        timeout: bound,
-                        clock: Self.routingClock(patientClock)
-                    )
-                }
-                let joined = await waitUntil {
-                    server.windowToolTransitionJoinsByGenerationForTesting()[generation, default: 0] == 1
-                }
-                XCTAssertTrue(joined, "The second start must join the transition the first one began.")
-
-                do {
-                    try await expiringClock.waitForSleeperCount(1)
-                    try await expiringClock.advanceNext(expected: bound)
-                } catch {
-                    await gate.release()
-                    throw error
-                }
-                // The transition is still held, so the start is waited for with a bound: one that
-                // stayed behind the transition would never return.
-                _ = await waitUntil { expiry.result != nil }
-                switch expiry.result {
-                case .failure(is MCPServerViewModel.ContextBuilderReadinessTimeout)?:
-                    // Expected: the start left with its own typed failure.
-                    break
-                case let .failure(error)?:
-                    XCTFail("Expected the readiness timeout, got \(error)")
-                case .success?:
-                    XCTFail("A start whose bound elapsed must not report readiness.")
-                case nil:
-                    XCTFail("A start whose bound elapsed must leave while the transition is still held.")
-                }
-                XCTAssertFalse(server.windowToolsEnabled, "The start must leave while the transition is still held.")
-                XCTAssertEqual(server.windowToolRegistrationIntentGenerationForTesting(), generation)
-
-                await gate.release()
-                try await patient.value
-                XCTAssertTrue(server.windowToolsEnabled)
-                XCTAssertEqual(server.windowToolRegistrationIntentGenerationForTesting(), generation)
-                XCTAssertEqual(server.windowToolTransitionStartsByGenerationForTesting()[generation], 1)
-                let patientDeadlines = await patientClock.sleeperCount()
-                XCTAssertEqual(patientDeadlines, 0, "A start that became ready must drop its deadline.")
-            }
-        }
-
-        /// A start whose wait was settled, with readiness or with a failure, and whose caller is
-        /// cancelled before it resumes reports cancellation.
-        ///
-        /// The cancellation is issued from the readiness checkpoint. That checkpoint runs in the
-        /// start's join, in the main-actor turn that goes on to settle the wait without suspending,
-        /// so the wait is settled with the join's result before the cancellation can settle it and
-        /// before the caller can resume.
-        func testContextBuilderReadinessCancelledAtDeliveryReportsCancellation() async throws {
-            for settlesWithFailure in [false, true] {
-                try await withReadinessWindow { window, _ in
-                    let server = window.mcpServer
-                    if settlesWithFailure {
-                        server.setBeforeWindowToolRegistrationForTesting {
-                            throw InjectedRegistrationFailure()
-                        }
-                    }
-                    let start = ReadinessStart()
-                    server.setBootstrapReadinessCheckpointForTesting { checkpoint in
-                        guard checkpoint == .transitionResultReceived else { return }
-                        start.task?.cancel()
-                    }
-                    let clock = MCPExportWatchdogManualClock()
-                    let task = Task { @MainActor in
-                        try await server.requireContextBuilderReadiness(
-                            timeout: .seconds(30),
-                            clock: Self.routingClock(clock)
-                        )
-                    }
-                    start.task = task
-
-                    await Self.assertCancelled(task)
-                    XCTAssertEqual(
-                        server.windowToolsEnabled,
-                        !settlesWithFailure,
-                        "The transition settles as it would for a start that was not cancelled."
-                    )
-                    let pendingDeadlines = await clock.sleeperCount()
-                    XCTAssertEqual(pendingDeadlines, 0)
-                }
-            }
-        }
-
-        // MARK: - Routing deadline
-
-        /// With no matching connection the wait ends at the absence bound: the one deadline it
-        /// scheduled is exactly that bound. The timeout consults route authority once and, with no
-        /// route committed, revokes the run's policy.
-        func testRoutingWaitWithoutConnectionEndsAtAbsenceBound() async throws {
-            try await MCPSharedServerTestLease.shared.withLease { _ in
-                let clock = MCPExportWatchdogManualClock()
-                let progress = RoutingProgressLog()
-                let fixture = Self.makeLeaseFixture(requiresExpectedAgentPID: true, routeAuthority: .revocationFenced)
-                try await Self.withRoutingWait(on: fixture, clock: clock, progress: progress) { wait in
-                    try await clock.advanceNext(expected: Self.routingWaitPolicy.noConnectionTimeout)
-                    let outcome = await wait.value
-
-                    XCTAssertEqual(outcome, .timedOutBeforeConnection)
-                    XCTAssertEqual(progress.phases, [.waitingForChildConnection, .routingTimeoutBeforeConnection])
-                    let authorityChecks = await fixture.policy.routeAuthorityCheckCount
-                    XCTAssertEqual(authorityChecks, 1)
-                    let clears = await fixture.policy.clearCount
-                    XCTAssertEqual(clears, 1)
-                    await Self.assertRoutingRemoved(for: fixture)
-                }
-            }
-        }
-
-        /// The first matching connection replaces the absence bound with one grace period. A
-        /// repeated observation four seconds later leaves that deadline where it was, so the wait
-        /// ends one grace period after the first observation.
-        func testFirstObservationStartsOneGraceThatLaterObservationsDoNotExtend() async throws {
-            try await MCPSharedServerTestLease.shared.withLease { _ in
-                let clock = MCPExportWatchdogManualClock()
-                let progress = RoutingProgressLog()
-                let fixture = Self.makeLeaseFixture(requiresExpectedAgentPID: true, routeAuthority: .revocationFenced)
-                let grace = Self.routingWaitPolicy.observedConnectionGrace
-                try await Self.withRoutingWait(on: fixture, clock: clock, progress: progress) { wait in
-                    let runID = fixture.spec.runID
-                    let wasFirstObservation = await MCPRoutingWaiter.notifyConnectionObserved(runID: runID)
-                    XCTAssertTrue(wasFirstObservation)
-                    // The absence deadline was dropped with that observation; this is the grace.
-                    try await clock.waitForSleeperCount(1)
-
-                    try await clock.advanceWithoutWakingSleepers(by: .seconds(4))
-                    let wasRepeatedObservation = await MCPRoutingWaiter.notifyConnectionObserved(runID: runID)
-                    XCTAssertFalse(wasRepeatedObservation)
-
-                    try await clock.advanceNext(expected: grace)
-                    let outcome = await wait.value
-
-                    XCTAssertEqual(outcome, .timedOutAfterConnection)
-                    XCTAssertEqual(
-                        clock.currentTime(),
-                        grace,
-                        "A grace restarted by the repeated observation would end four seconds later."
-                    )
-                    XCTAssertEqual(progress.phases, [
-                        .waitingForChildConnection,
-                        .childConnectionObserved,
-                        .waitingForRouting,
-                        .routingTimeoutAfterConnection
-                    ])
-                    let clears = await fixture.policy.clearCount
-                    XCTAssertEqual(clears, 1)
-                }
-            }
-        }
-
-        /// Cancelling the waiting caller ends the wait as cancelled, not as a timeout: its deadline
-        /// is dropped and route authority is never consulted.
-        func testCancellingRoutingWaitReportsCancellationAndDropsItsDeadline() async throws {
-            try await MCPSharedServerTestLease.shared.withLease { _ in
-                let clock = MCPExportWatchdogManualClock()
-                let progress = RoutingProgressLog()
-                let fixture = Self.makeLeaseFixture(requiresExpectedAgentPID: true, routeAuthority: .committed)
-                try await Self.withRoutingWait(on: fixture, clock: clock, progress: progress) { wait in
-                    wait.cancel()
-                    let outcome = await wait.value
-
-                    XCTAssertEqual(outcome, .cancelled)
-                    let pendingDeadlines = await clock.sleeperCount()
-                    XCTAssertEqual(pendingDeadlines, 0)
-                    XCTAssertEqual(progress.phases, [.waitingForChildConnection])
-                    let authorityChecks = await fixture.policy.routeAuthorityCheckCount
-                    XCTAssertEqual(authorityChecks, 0)
-                    let clears = await fixture.policy.clearCount
-                    XCTAssertEqual(clears, 1)
-                    await Self.assertRoutingRemoved(for: fixture)
-                }
-            }
-        }
-
-        /// A route committed before the deadline's revocation wins even though its routed signal
-        /// never reached the waiter: the wait reports the route and the policy is kept.
-        func testRouteCommittedBeforeRevocationWinsAtDeadline() async throws {
-            try await MCPSharedServerTestLease.shared.withLease { _ in
-                let clock = MCPExportWatchdogManualClock()
-                let progress = RoutingProgressLog()
-                let fixture = Self.makeLeaseFixture(requiresExpectedAgentPID: true, routeAuthority: .committed)
-                try await Self.withRoutingWait(on: fixture, clock: clock, progress: progress) { wait in
-                    try await clock.advanceNext(expected: Self.routingWaitPolicy.noConnectionTimeout)
-                    let outcome = await wait.value
-
-                    XCTAssertEqual(outcome, .routed)
-                    XCTAssertEqual(progress.phases, [
-                        .waitingForChildConnection,
-                        .childConnectionObserved,
-                        .waitingForRouting,
-                        .routingConfirmed
-                    ])
-                    let authorityChecks = await fixture.policy.routeAuthorityCheckCount
-                    XCTAssertEqual(authorityChecks, 1)
-                    let clears = await fixture.policy.clearCount
-                    XCTAssertEqual(clears, 0, "A committed route keeps its policy.")
-                }
-            }
-        }
-
         // MARK: - Routing refusal
 
         /// A bootstrap-ready window is not admission: a connection refused for joining an
@@ -776,14 +544,12 @@ import XCTest
         }
 
         /// A lease whose policy hooks are recorded locally; routing and gate state stay scoped to
-        /// its own run and gate IDs. A `routeAuthority` answers the lease's route-authority check in
-        /// place of the connection manager.
+        /// its own run and gate IDs.
         private static func makeLeaseFixture(
             requiresExpectedAgentPID: Bool = false,
             mcpServerEnabler: (@Sendable () async -> Bool)? = nil,
             expectedPIDPolicyArmer: (@Sendable () async -> Bool)? = nil,
-            policyClearGate: ReadinessTestGate? = nil,
-            routeAuthority: MCPRunRouteAuthorityDecision? = nil
+            policyClearGate: ReadinessTestGate? = nil
         ) -> LeaseFixture {
             let spec = MCPBootstrapLeaseSpec(
                 runID: UUID(),
@@ -810,58 +576,9 @@ import XCTest
                 policyClearer: { _ in
                     await policy.recordClear()
                     await policyClearGate?.arriveAndWait()
-                },
-                routeAuthorityResolver: routeAuthority.map { decision in
-                    { _ in
-                        await policy.recordRouteAuthorityCheck()
-                        return decision
-                    }
                 }
             )
             return LeaseFixture(lease: lease, spec: spec, policy: policy)
-        }
-
-        private static let routingWaitPolicy = ContextBuilderStartupPolicy.standard.routingWait
-
-        private static func routingClock(_ clock: MCPExportWatchdogManualClock) -> MCPRoutingWaitClock {
-            MCPRoutingWaitClock(
-                now: { clock.currentTime() },
-                sleep: { try await clock.sleep(for: $0) }
-            )
-        }
-
-        /// Acquires `fixture`'s lease, starts its bounded routing wait on `clock`, and runs `body`
-        /// once that wait's absence deadline is pending, so a signal or an advance made by `body`
-        /// reaches an enrolled waiter. The wait and the lease are settled however `body` ends.
-        private static func withRoutingWait(
-            on fixture: LeaseFixture,
-            clock: MCPExportWatchdogManualClock,
-            progress: RoutingProgressLog,
-            _ body: (Task<MCPRoutingWaitOutcome, Never>) async throws -> Void
-        ) async throws {
-            try await fixture.lease.requireAcquired()
-            let lease = fixture.lease
-            let wait = Task {
-                await lease.releaseWhenRouted(
-                    waitPolicy: routingWaitPolicy,
-                    clock: routingClock(clock),
-                    progressReporter: { progress.record($0) }
-                )
-            }
-            let result: Result<Void, Error>
-            do {
-                try await clock.waitForSleeperCount(1)
-                let enrolledWaiters = await MCPRoutingWaiter.debugContinuationCount(runID: fixture.spec.runID)
-                XCTAssertEqual(enrolledWaiters, 1)
-                try await body(wait)
-                result = .success(())
-            } catch {
-                result = .failure(error)
-            }
-            wait.cancel()
-            _ = await wait.value
-            await fixture.lease.cancelAndCleanup()
-            try result.get()
         }
 
         private static func assertAcquireFails(
@@ -956,7 +673,6 @@ import XCTest
     private actor LeasePolicyRecorder {
         private(set) var installCount = 0
         private(set) var clearCount = 0
-        private(set) var routeAuthorityCheckCount = 0
 
         func recordInstall() {
             installCount += 1
@@ -964,31 +680,6 @@ import XCTest
 
         func recordClear() {
             clearCount += 1
-        }
-
-        func recordRouteAuthorityCheck() {
-            routeAuthorityCheckCount += 1
-        }
-    }
-
-    /// Lets a hook installed before a start exists reach that start's task.
-    @MainActor
-    private final class ReadinessStart {
-        var task: Task<Void, Error>?
-    }
-
-    /// Where a readiness start leaves its outcome, so a test waits for it with a bound.
-    @MainActor
-    private final class ReadinessOutcome {
-        var result: Result<Void, Error>?
-    }
-
-    @MainActor
-    private final class RoutingProgressLog {
-        private(set) var phases: [MCPBootstrapRoutingProgress] = []
-
-        func record(_ phase: MCPBootstrapRoutingProgress) {
-            phases.append(phase)
         }
     }
 

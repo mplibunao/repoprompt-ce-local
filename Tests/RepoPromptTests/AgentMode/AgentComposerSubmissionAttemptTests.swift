@@ -197,12 +197,9 @@ final class AgentComposerSubmissionAttemptTests: XCTestCase {
         WindowStatesManager.shared.registerWindowState(window)
         GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
 
-        // Outside any repository: a root inside a git checkout starts Code Map indexing of that
-        // checkout, which closing the window does not end.
-        let workspaceRoot = try makeTestDirectory()
         let workspace = window.workspaceManager.createWorkspace(
             name: "Composer submission \(UUID().uuidString.prefix(8))",
-            repoPaths: [workspaceRoot.path],
+            repoPaths: [FileManager.default.currentDirectoryPath],
             ephemeral: true
         )
         await window.workspaceManager.switchWorkspace(
