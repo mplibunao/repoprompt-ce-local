@@ -1284,14 +1284,6 @@ import XCTest
                             responseTask = nil
                             formattingGate = nil
                             await manager.debugSetBeforeToolResultFormattingForTesting(nil)
-                            XCTAssertNil(
-                                MCPExportResponseDeliveryDeadlineRegistry.shared.deadlineForTesting(
-                                    connectionID: endpoint.connectionID.uuidString,
-                                    connectionGeneration: 1,
-                                    requestID: .number(Int64(requestID))
-                                ),
-                                testCase.requestedName
-                            )
 
                             let executionEvents = executionRecorder.snapshot().filter {
                                 $0.toolName == testCase.wireName
@@ -1347,6 +1339,15 @@ import XCTest
                             XCTAssertTrue(
                                 transportWriteCompleted,
                                 "\(testCase.requestedName): transport_write_completed trace was not recorded within 10 seconds"
+                            )
+                            // The server clears the deadline in the same stretch that then emits this trace.
+                            XCTAssertNil(
+                                MCPExportResponseDeliveryDeadlineRegistry.shared.deadlineForTesting(
+                                    connectionID: endpoint.connectionID.uuidString,
+                                    connectionGeneration: 1,
+                                    requestID: .number(Int64(requestID))
+                                ),
+                                testCase.requestedName
                             )
 
                             let deliveryEvents = MCPResponseDeliveryTracer.debugEventSnapshot()
