@@ -184,13 +184,13 @@ rpce-cli -w <window_id> -e 'builder "<task><user task, restated in the codebase'
 ```
 """))
 
-The tool returns `oracle_export_path`. The generated plan that follows the composed prompt and file dump is the baseline.
+The tool returns `oracle_export_path`. Read the export completely (`read_file`, in chunks if truncated); the generated plan that follows the composed prompt and file dump is the baseline.
 
 ### 4B: external-model route
 
 1. **Compose and export.** Follow `\(exportSkillName)` with the task restated in the codebase's terms and, in its `<context>`, the plan path plus the DECIDED items verbatim and labelled as givens, the OPEN questions, and the required output listed above. It runs \(builderName) with `response_type: "clarify"` and exports with the `plan` preset to `prompt-exports/<date>-<time>-plan-<slug>.md`. Then read the exported prompt section once to confirm every DECIDED item survived; if one is missing, \(promptAppend) it and export again. Decisions are never reframed as questions.
 2. **Hand off (manual today).** Tell the user the export path and ask them to paste it into ChatGPT Pro and return the response, as a file (by default `prompt-exports/<export name>-results.md`) or pasted into the chat. Wait. The returned response is input, not approval of the plan it proposes. A future automation replaces this step only; nothing before or after it changes.
-3. **Read the response** completely (`read_file`, in chunks if truncated). It is the baseline.
+3. **Read the response** completely (`read_file`, in chunks if truncated). If it was pasted into the chat, first save it unchanged to `prompt-exports/<export name>-results.md`, because the critique and the cleanup need a path. It is the baseline.
 
 ### Ledger and integration (both routes)
 
