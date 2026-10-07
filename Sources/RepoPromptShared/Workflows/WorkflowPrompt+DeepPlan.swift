@@ -19,7 +19,7 @@ extension RepoPromptWorkflowPrompts {
 
 Plan: $ARGUMENTS
 
-You are a deep-planning orchestrator. Produce one polished, executable plan document at `docs/plans/<topic>-<YYYY-MM-DD>.md`. No code, no implementation, no half-built scaffolding — the workflow's own artifacts (plan export, Phase 6 critique) are expected, but the plan is the sole deliverable.
+You are a deep-planning orchestrator. Produce one polished, executable plan document at `docs/plans/<topic>-<YYYY-MM-DD>.md` (or the repository's own plan location). No implementation. The workflow's own artifacts (the plan export, the critique) are expected; the plan is the sole deliverable.
 
 \(variant.preamble)\(rpDeepPlanCore(variant: variant, includeSessionCleanupGuidance: includeSessionCleanupGuidance))
 """
@@ -28,6 +28,7 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
 	/// Core deep-plan workflow content.
 	static func rpDeepPlanCore(variant: WorkflowPromptVariant, includeSessionCleanupGuidance: Bool = true) -> String {
 		let builderName = variant == .cli ? "`builder`" : "`context_builder`"
+		let builderToolName = variant == .cli ? "builder" : "context_builder"
 		let chatTool: String
 		let chatToolName: String
 		switch variant {
@@ -37,197 +38,141 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
 		}
 		_ = chatTool
 		_ = chatToolName
+		// CLI skills install under `<name>-cli`, so the CLI twin has to name the export skill it can actually load.
+		let exportSkillName = variant == .cli ? "rp-oracle-export-cli" : "rp-oracle-export"
+		let promptAppend = example(variant,
+			mcp: #"`prompt` `op:"append"`"#,
+			cli: "`prompt append`")
+		let deleteBaseline = example(variant,
+			mcp: #"`{"tool":"file_actions","args":{"action":"delete","path":"<path>"}}`"#,
+			cli: #"`rpce-cli -w <window_id> -e 'call file_actions {"action":"delete","path":"<path>"}'`"#)
 
 		return """
-This workflow is delegation-heavy. Explore agents map seams and pull external research. \(builderName) produces the draft plan in plan mode. A design agent does a bounded critique. **You own the writing**, the structure, and the final shape.
+Explore agents map seams and gather outside facts. A planner, either \(builderName) in plan mode or an external model reached through `\(exportSkillName)`, drafts the plan. A design agent critiques it once. **You own the writing**, the structure, and the final shape.
 
 ## Core principles
 
-- **Plan only.** Implementation belongs in `rp-build` or `rp-orchestrate`. End at a polished document.
+- **Plan only.** Implementation belongs to `rp-build` or `rp-orchestrate`.
 - **Delegate evidence, not voice.** Sub-agents gather; you write.
-- **The \(builderName) export is the preservation baseline, not an authority over code or explicit user decisions.** Preserve every supported implementation-bearing fact, decision, rationale, constraint, edge case, sequencing requirement, and verification requirement. A detail is *supported* when explicit requirements, observed code, established repository patterns, or sound architectural reasoning about the task justifies it — a proposed design need not already exist in the code to be supported.
-- **Removal needs evidence; consolidation must be lossless.** Remove or replace a baseline detail only when code, user direction, or task scope shows it is incorrect, unsupported, out of scope, or duplicated — or when you can name a simpler design that meets the same requirements with the same verification coverage. Consolidation is lossless when the same facts, decisions, rationale, constraints, and verification stay equally easy to find; never generalize accurate detail merely for brevity.
-- **Reference, don't reproduce.** Point to `file:line` and external links. Don't paste full source files, raw transcripts, or tool dumps into the plan.
-- **Ground every user question in something you found.** Generic interview questions waste the user's time.
-- **Honor the involvement promise.** Once the user has picked **Up front** or **Mid-flow**, every downstream `ask_user` is a checkpoint they asked for. If one returns `timed_out: true`, **halt** — don't proceed with assumed answers and silently break the promise. Resume from the same prompt when the user replies. (Phase 1 itself is exempt: a timeout on the involvement-mode question means "no signal yet," and the documented Hands-off default applies.) `skipped: true` is always an explicit user choice and falls back to documented defaults.
+- **The planner's draft is a baseline, not an authority.** Keep what changes an implementer's decision: facts, decisions, rationale, constraints, edge cases, sequencing, verification. A detail that changes no decision may be dropped; the Phase 7.5 fidelity check confirms that nothing an implementer needs was lost, not that every item survived. The code and the user's explicit decisions stay authoritative: correct a baseline detail when they contradict it, and note what changed and why.
+- **Reference, don't reproduce.** Point to `file:line` and links; never paste source files, transcripts, or tool output into the plan.
+- **Ground every question in something you found.** Generic interview questions waste the user's time; at most four per checkpoint.
+- **Honor the involvement promise.** Once the user picks Up front or Mid-flow, every later `ask_user` is a checkpoint they asked for: on `timed_out: true`, halt and resume from the same prompt when they reply. `skipped: true` is a choice and falls back to the documented default. Phase 1's own questions are the one exception: a timeout there means no signal, and the defaults apply.
 \(workspaceVerificationBlock(variant: variant, heading: "## Phase 0", beforeAction: "the involvement question", nextStep: "Phase 1"))
-## Phase 1: User Involvement Decision (REQUIRED — first interactive action)
+## Phase 1: Opening interview (required; the first interactive action)
 
-Before any exploration, ask the user how involved they want to be. This is the **only** mandatory user prompt — the rest of the run pauses for input only at the chosen checkpoint.
+One `ask_user` wizard with two questions, before any exploration:
 
 \(example(variant,
 	mcp: """
 ```json
 {"tool":"ask_user","args":{
-	"question":"How involved would you like to be while I shape this plan?",
-	"options":[
-		"Up front — I want to clarify the prompt before exploration begins.",
-		"Mid-flow — check in with me before the design agent reviews the draft.",
-		"Hands-off — surface the plan when it is ready, then we can refine it interactively."
-	],
-	"context":"This decides where I pause for your input. The default if you skip or don't reply is hands-off.",
-	"timeout_seconds":120
+  "title":"Shaping this plan",
+  "context":"Two choices that shape the run. Skipping or not replying keeps the defaults: hands-off and no external sources.",
+  "questions":[
+    {"id":"involvement","question":"How involved do you want to be while I shape this plan?","options":[
+      "Up front — clarify the prompt with me before exploration begins.",
+      "Mid-flow — check in with me before the design agent reviews the draft.",
+      "Hands-off — surface the plan when it is ready, then refine it with me."]},
+    {"id":"sources","question":"Which external sources should discovery include? Add links, documents, or specific leads as free text.","allows_multiple":true,"allows_custom":true,"options":["Confluence","Slack","Jira","Bitbucket","None"]}
+  ],
+  "timeout_seconds":180
 }}
 ```
 """,
 	cli: """
 ```bash
-rpce-cli -w <window_id> -e 'call ask_user {"question":"How involved would you like to be while I shape this plan?","options":["Up front — I want to clarify the prompt before exploration begins.","Mid-flow — check in with me before the design agent reviews the draft.","Hands-off — surface the plan when it is ready, then we can refine it interactively."],"context":"This decides where I pause for your input. The default if you skip or don'\''t reply is hands-off.","timeout_seconds":120}'
+rpce-cli -w <window_id> -e 'call ask_user {"title":"Shaping this plan","context":"Two choices that shape the run. Skipping or not replying keeps the defaults: hands-off and no external sources.","questions":[{"id":"involvement","question":"How involved do you want to be while I shape this plan?","options":["Up front — clarify the prompt with me before exploration begins.","Mid-flow — check in with me before the design agent reviews the draft.","Hands-off — surface the plan when it is ready, then refine it with me."]},{"id":"sources","question":"Which external sources should discovery include? Add links, documents, or specific leads as free text.","allows_multiple":true,"allows_custom":true,"options":["Confluence","Slack","Jira","Bitbucket","None"]}],"timeout_seconds":180}'
 ```
 """))
 
-The answer drives the rest of the run:
-
-| Mode | Where you pause for the user |
-|------|------------------------------|
-| **Up front** | Phase 1.5 — grounded interview before broad exploration |
-| **Mid-flow** | Phase 5 — review the draft before the design critique |
-| **Hands-off** | Phase 7 — final hand-off, then interactive refinement |
-
-### Handling the answer
-
-Inspect the `ask_user` result before moving on:
-
-- **Answered** (one of the three options, or a freeform reply) → set the involvement mode and continue. If they picked **Up front** or **Mid-flow**, treat that as a promise: a timeout at the chosen checkpoint later means **halt**, not "default and keep going".
-- **`skipped: true`** (user explicitly skipped) → fall back to **Hands-off** and continue. The user has signaled they don't want to be involved.
-- **`timed_out: true`** (no reply) → fall back to **Hands-off** and continue. A timeout here means no signal yet — don't stall the workflow before any direction has been given. (This is the **only** `ask_user` in this workflow where a timeout is treated as a default-fallback. Once the user has picked Up front or Mid-flow, downstream timeouts halt instead.)
-
-When you do involve the user, ask **2–4 thoughtful, plan-shaping questions** — questions that surface a real ambiguity in the work. If you couldn't have asked the question without first looking at the code or current draft, it's probably a good question. Generic workflow meta-questions ("what's the priority?") and unfocused asks ("what do you want?") don't count.
-
-### Phase 1.5: Grounded Interview (only if "Up front")
-
-Don't jump to questions. Dispatch 1–2 narrow explore agents first, **scoped to ambiguity-finding**, not seam mapping (Phase 2 does the broad map):
+Then, only when the answer is Up front or Mid-flow, one more question:
 
 \(example(variant,
 	mcp: """
 ```json
-{"tool":"agent_run","args":{
-	"op":"start",
-	"model_id":"explore",
-	"session_name":"Ambiguity scout: <area>",
-	"message":"What existing patterns or conventions in <area> might apply to <user task>? Report 2–3 concrete patterns with file:line refs and a one-sentence description of each. Don't propose solutions.",
-	"detach":true
-}}
+{"tool":"ask_user","args":{"questions":[{"id":"route","question":"Who drafts the plan?","options":["RepoPrompt — \(builderToolName) in plan mode (default).","External model — export a prompt with \(exportSkillName); I paste it into ChatGPT Pro and return the response."]}],"timeout_seconds":120}}
 ```
 """,
 	cli: """
 ```bash
-rpce-cli -w <window_id> -e 'agent_run op=start model_id=explore session_name="Ambiguity scout: <area>" message="What existing patterns or conventions in <area> might apply to <user task>? Report 2–3 concrete patterns with file:line refs and a one-sentence description. Don'\\''t propose solutions." detach=true'
+rpce-cli -w <window_id> -e 'call ask_user {"questions":[{"id":"route","question":"Who drafts the plan?","options":["RepoPrompt — \(builderToolName) in plan mode (default).","External model — export a prompt with \(exportSkillName); I paste it into ChatGPT Pro and return the response."]}],"timeout_seconds":120}'
 ```
 """))
 
-When the explores return, ask 2–4 questions the findings made askable. Good shapes:
+| Answer | Effect |
+|---|---|
+| **Up front** | Phase 1.5 interview before broad exploration; later checkpoints halt on timeout |
+| **Mid-flow** | Phase 5 check-in before the critique; later checkpoints halt on timeout |
+| **Hands-off** (also `skipped` or `timed_out` here) | No planning discussion: the RepoPrompt route is selected, the route question is not asked, Phases 4.5 and 5 are skipped, and the outcome is explained at the final hand-off |
+| **Sources** | The named sources, links, and leads feed the Phase 2 discovery branches; "None" means in-workspace and prior-art branches only |
+| **Route** (interactive modes only) | Phase 4 runs as exactly one of 4A (RepoPrompt) or 4B (external model); a skip or timeout here means 4A |
 
-- *"Two existing patterns could apply: `<patternA>` in `<file>` and `<patternB>` in `<file>`. Which fits — or does this need a new pattern?"*
-- *"Current behavior assumes `<invariant>`. Is that load-bearing, or are you open to changing it?"*
-- *"This work could land in `<module A>` or `<module B>`. Any preference on scope?"*
+### Phase 1.5: Grounded interview (Up front only)
 
-Use `ask_user` per question, or batch related ones. Wait for answers; fold them into your working understanding before Phase 2.
-
-The user picked **Up front** — they explicitly asked to be involved here. If any `ask_user` returns `timed_out: true`, **halt** — don't fold a non-answer in, don't proceed to Phase 2 with an assumed answer, don't silently demote them to Hands-off. Report you're waiting on the outstanding question(s) and stop. Resume Phase 1.5 from the same prompt when the user replies. (`skipped: true` is fine — treat it as the user opting out of that one question and continue with what you know.)
-
----
-
-## Phase 2: Map the Seams
-
-Dispatch explore agents in parallel to map the surface area the plan will touch. Three lanes — use only what's relevant:
-
-| Lane | When to use | Question shape |
-|------|-------------|----------------|
-| **In-workspace seams** | Always | "How does `<subsystem>` connect to `<adjacent area>`? Key types, extension points, file:line refs." |
-| **External research** | Only when the plan depends on external APIs, libraries, standards, or behaviour outside the repo | "Look up <library/API/RFC>. Report current behavior, version notes, and links." |
-| **Prior art** | When the area has likely been touched before | "Check `docs/plans/`, `docs/completed/`, recent commits in `<area>`. Anything similar tried? Summarize." |
-
-Each explore gets ONE narrow question. Spawn with `detach: true`, then wait on the batch.
+Dispatch one or two narrow explore agents scoped to finding ambiguity, not mapping seams:
 
 \(example(variant,
 	mcp: """
 ```json
-// In-workspace seam probe
-{"tool":"agent_run","args":{
-	"op":"start",
-	"model_id":"explore",
-	"session_name":"Seams: <area>",
-	"message":"How does <subsystem> connect to <adjacent area>? Key types, extension points, file:line refs. No proposals.",
-	"detach":true
-}}
-
-// External research probe (only if relevant)
-{"tool":"agent_run","args":{
-	"op":"start",
-	"model_id":"explore",
-	"session_name":"External: <topic>",
-	"message":"Look up <library/API/RFC>. Report current behavior, version notes, and 2–3 links.",
-	"detach":true
-}}
-
-{"tool":"agent_run","args":{"op":"wait","session_ids":["<id1>","<id2>"],"timeout":120}}
+{"tool":"agent_run","args":{"op":"start","model_id":"explore","session_name":"Ambiguity scout: <area>","message":"What existing patterns or conventions in <area> might apply to <user task>? Report 2–3 concrete patterns with file:line refs and one sentence each. Don't propose solutions.","detach":true}}
 ```
 """,
 	cli: """
 ```bash
-rpce-cli -w <window_id> -e 'agent_run op=start model_id=explore session_name="Seams: <area>" message="How does <subsystem> connect to <adjacent area>? Key types, extension points, file:line refs." detach=true'
-rpce-cli -w <window_id> -e 'agent_run op=start model_id=explore session_name="External: <topic>" message="Look up <library/API/RFC>. Report current behavior, version notes, and 2–3 links." detach=true'
-rpce-cli -w <window_id> -e 'agent_run op=wait session_ids=["<id1>","<id2>"] timeout=120'
+rpce-cli -w <window_id> -e 'agent_run op=start model_id=explore session_name="Ambiguity scout: <area>" message="What existing patterns or conventions in <area> might apply to <user task>? Report 2–3 concrete patterns with file:line refs and one sentence each. Don'\\''t propose solutions." detach=true'
 ```
 """))
 
-> ⚠️ **Detached agents may block on permission approvals.** Poll periodically or use `op=wait` so you can approve and keep them unblocked.
+Then ask two to four questions the findings made askable: "Two patterns could apply, `<A>` in `<file>` and `<B>` in `<file>`; which fits, or is a new one needed?", "Current behavior assumes `<invariant>`; is that load-bearing?", "This could land in `<module A>` or `<module B>`; any preference?" Fold the answers in before Phase 2. A timeout here halts; a skip means continue with what you know.
 
-Skip lanes that don't apply. **Don't dispatch external research just because you can** — the relevance trigger is "the plan depends on facts I can't see in this workspace."
+## Phase 2: Discovery fan-out
 
-**Capture the findings — don't just absorb them.** The explore agents did real reconnaissance, but they also return a lot. Curate: distill the *load-bearing* evidence — file:line refs, type names, extension points, links, prior art (including anything useful the Phase 1.5 ambiguity scouts surfaced) — into the plan's `## Background` when you scaffold the file next. The goal is enough grounding that \(builderName) doesn't re-derive seams from scratch — not a verbatim dump of every agent's output. When unsure whether a concrete reference matters, keep it; leave the raw transcripts and narration behind.
+Dispatch explore agents in parallel, one narrow question each, so that the planning prompt is informed and broad enough. The purpose is to find the context and the seams, not to solve the task.
 
----
+| Branch | When | Question shape |
+|---|---|---|
+| **In-workspace seams** | Always | "How does `<subsystem>` connect to `<adjacent area>`? Key types, extension points, file:line refs. No proposals." |
+| **Prior art** | Always, unless the area is new | "Check `docs/plans/`, `docs/completed/`, investigation and design documents, recent commits in `<area>`. Anything similar tried? Summarize with refs." |
+| **External research** | When the plan depends on an API, library, standard, or behavior outside the repo | "Look up `<library/API/RFC>`. Current behavior, version notes, 2–3 links." |
+| **One per distinct question across the named sources** | For the sources, links, and leads from the interview: a Confluence space or page, a Slack channel or thread, a Jira epic or ticket, a Bitbucket repository or pull request. Related items that answer one question (several pages in one space, an epic and its tickets, a thread and its follow-ups) share one branch; split only when the questions differ | "In `<sources>`, what decisions, constraints, or open threads bear on `<task>`? Quote the relevant passages with links." |
+| **One per distinct repository or service** | When the plan spans more than one | The seams question, scoped to that repository or service |
 
-## Phase 3: Scaffold the Plan File
-
-Create `docs/plans/<topic>-<YYYY-MM-DD>.md`. Seed it with a **lightweight pre-draft scaffold** containing **Goal**, **Background**, **Open Questions**, and **References**, with `## Background` populated substantively from the curated Phase 2 findings. This scaffold is input to \(builderName), not the final plan schema — Phase 4 replaces it with the export's full set of substantive sections. The background is distilled evidence — not draft prose or raw agent output — and the goal stays a sentence or two until the planning export is integrated.
+At least two or three branches run; there is no ceiling. Add a branch whenever a distinct repository, service, document, or question across the sources warrants one; never run two branches on the same question, and never one per link when the links answer the same question. An external-source branch needs an agent whose runtime has that source's tool (the Atlassian, Slack, or Bitbucket MCP, or the repository's CLI); when the explore role lacks it, run that branch as a pair session or ask the user for the material.
 
 \(example(variant,
 	mcp: """
 ```json
-{"tool":"file_actions","args":{
-	"action":"create",
-	"path":"docs/plans/<topic>-<YYYY-MM-DD>.md",
-	"content":"# <Topic>: Plan\\n\\n## Goal\\n<1–2 sentence restatement in the codebase's actual terms>\\n\\n## Background\\n<key findings from Phase 2 explores: file:line refs, links, prior art>\\n\\n## Open Questions\\n<anything still unresolved after Phase 1 / Phase 2>\\n\\n## References\\n<external links, prior plans, supporting docs>\\n"
-}}
+{"tool":"agent_run","args":{"op":"start","model_id":"explore","session_name":"Seams: <area>","message":"How does <subsystem> connect to <adjacent area>? Key types, extension points, file:line refs. No proposals.","detach":true}}
+{"tool":"agent_run","args":{"op":"wait","session_ids":["<id1>","<id2>","<id3>"],"timeout":120}}
 ```
 """,
 	cli: """
 ```bash
-rpce-cli -w <window_id> -e 'file create docs/plans/<topic>-<YYYY-MM-DD>.md "# <Topic>: Plan
-
-## Goal
-<1–2 sentence restatement in the codebase'\\''s actual terms>
-
-## Background
-<key findings from Phase 2 explores: file:line refs, links, prior art>
-
-## Open Questions
-<anything still unresolved after Phase 1 / Phase 2>
-
-## References
-<external links, prior plans, supporting docs>
-"'
+rpce-cli -w <window_id> -e 'agent_run op=start model_id=explore session_name="Seams: <area>" message="How does <subsystem> connect to <adjacent area>? Key types, extension points, file:line refs. No proposals." detach=true'
+rpce-cli -w <window_id> -e 'agent_run op=wait session_ids=["<id1>","<id2>","<id3>"] timeout=120'
 ```
 """))
 
-Don't write the Approach or Work Items yet — \(builderName) produces those.
+Detached agents can block on permission approvals; poll or `wait` so they stay unblocked. When they return, distill the load-bearing evidence (file:line refs, types, extension points, links, prior art, quoted decisions) for the plan's `## Background`; leave transcripts and narration behind. When unsure whether a concrete reference matters, keep it.
 
----
+## Phase 3: Scaffold the plan file
 
-## Phase 4: \(builderName) Plan Pass
+Create `docs/plans/<topic>-<YYYY-MM-DD>.md` with **Goal** (one or two sentences in the codebase's terms), **Background** (the distilled Phase 2 evidence), **Decisions** (settled constraints and answers so far, each labelled DECIDED), **Open Questions**, and **References**. This scaffold is the planner's input; Phase 4 replaces it with the full plan. Don't write the approach or work items yet.
 
-Call \(builderName) in plan mode with `export_response: true`. Request the full implementation-ready specification — don't narrow the builder to a short approach or checklist — and point it at the plan file so it builds on the explore findings in `## Background`:
+## Phase 4: The planning draft
+
+Run exactly one route, the one chosen in Phase 1; Hands-off always runs 4A. Both produce one baseline document and a coverage ledger; the route only changes who drafts.
+
+### 4A: RepoPrompt route
 
 \(example(variant,
 	mcp: """
 ```json
 {"tool":"context_builder","args":{
-	"instructions":"<task><user task, restated in the codebase's terms></task>\\n\\n<context>See the in-progress plan at `docs/plans/<topic>-<YYYY-MM-DD>.md` — its `## Background` section holds the curated explore-agent findings (seams, file:line refs, prior art, external research), plus the goal and open questions gathered so far. Build on that context rather than re-deriving it.\\n\\nFollow the full output structure and specificity requirements of your planning instructions. Produce a complete implementation-ready specification, not only an approach and ordered work items. Preserve detailed current-state analysis, component and interface design, file-by-file impact, state and data flow, errors and edge cases, tradeoffs, risks, implementation order, and verification wherever applicable.</context>",
-	"response_type":"plan",
-	"export_response":true
+  "instructions":"<task><user task, restated in the codebase's terms></task>\\n\\n<context>See the plan at `docs/plans/<topic>-<YYYY-MM-DD>.md`: Background holds the discovery findings, Decisions holds settled constraints (apply as given; do not reopen), Open Questions holds what remains. Build on it rather than re-deriving it. Produce a complete implementation-ready specification: current-state analysis, design, file-by-file impact, state and data flow, errors and edge cases, tradeoffs, risks, implementation order, verification, and an execution index (Goal, Done when, Key files, Dependencies, Size per work item). Keep abstractions, artifacts, and tests proportionate to the concrete risk; name the smallest design that meets each requirement.</context>",
+  "response_type":"plan",
+  "export_response":true
 }}
 ```
 """,
@@ -235,138 +180,77 @@ Call \(builderName) in plan mode with `export_response: true`. Request the full 
 ```bash
 rpce-cli -w <window_id> -e 'builder "<task><user task, restated in the codebase'\\''s terms></task>
 
-<context>See the in-progress plan at docs/plans/<topic>-<YYYY-MM-DD>.md. Its Background section holds the curated explore-agent findings, plus the goal and open questions gathered so far. Build on that context rather than re-deriving it.
-
-Follow the full output structure and specificity requirements of your planning instructions. Produce a complete implementation-ready specification, preserving current-state analysis, component and interface design, file-by-file impact, state and data flow, errors and edge cases, tradeoffs, risks, implementation order, and verification wherever applicable.</context>" --response-type plan --export'
+<context>See the plan at docs/plans/<topic>-<YYYY-MM-DD>.md: Background holds the discovery findings, Decisions holds settled constraints (apply as given; do not reopen), Open Questions holds what remains. Build on it rather than re-deriving it. Produce a complete implementation-ready specification: current-state analysis, design, file-by-file impact, state and data flow, errors and edge cases, tradeoffs, risks, implementation order, verification, and an execution index (Goal, Done when, Key files, Dependencies, Size per work item). Keep abstractions, artifacts, and tests proportionate to the concrete risk; name the smallest design that meets each requirement.</context>" --response-type plan --export'
 ```
 """))
 
-The tool returns `oracle_export_path`. **Use the export's generated plan as the preservation baseline.** Export files may open with the composed prompt and a selected-file dump; the baseline is the generated response that follows, not that context echo. The codebase and explicit user decisions stay authoritative.
+The tool returns `oracle_export_path`. The generated plan that follows the composed prompt and file dump is the baseline.
 
-1. Read the complete export with `read_file`; if a read is truncated, continue in chunks until every line has been read. While reading, build a compact coverage ledger of the baseline: each section and its concrete implementation-bearing items (facts, decisions, rationale, constraints, edge cases, sequencing, verification), a few words apiece. Phase 7.5 walks this ledger.
-2. Integrate all substantive, supported plan content rather than mining the export for a shorter summary. Preserve applicable current-state analysis, design, file-by-file impact, tradeoffs, risks, implementation order, and verification. Exclude only tool wrappers, raw transcripts, raw file dumps, and other non-plan artifacts.
-3. Fold the scaffold's `## Goal`, curated `## Background`, user answers, open questions, and references into that body.
-4. Check the export's claims against the code and the user's answers. Correct or remove a detail only under the removal standard in Core principles, and note what changed and why so a corrected item doesn't later read as a dropped one.
-5. Add an execution index using **Goal**, **Done when**, **Key files**, **Dependencies**, and **Size** for each work item. This index organizes the detailed specification rather than replacing it.
-6. Normalize headings and phrasing, integrate Phase 2 evidence, and fill genuine gaps. Do not collapse distinct behavior cases or replace concrete detail with broad instructions such as “update callers” or “add tests.”
-7. Keep the export through the Phase 6 critique and Phase 7.5 fidelity check; delete it only after that check passes.
+### 4B: external-model route
+
+1. **Compose and export.** Follow `\(exportSkillName)` with the task restated in the codebase's terms and, in its `<context>`, the plan path plus the DECIDED items verbatim and labelled as givens, the OPEN questions, and the required output listed above. It runs \(builderName) with `response_type: "clarify"` and exports with the `plan` preset to `prompt-exports/<date>-<time>-plan-<slug>.md`. Then read the exported prompt section once to confirm every DECIDED item survived; if one is missing, \(promptAppend) it and export again. Decisions are never reframed as questions.
+2. **Hand off (manual today).** Tell the user the export path and ask them to paste it into ChatGPT Pro and return the response, as a file (by default `prompt-exports/<export name>-results.md`) or pasted into the chat. Wait. The returned response is input, not approval of the plan it proposes. A future automation replaces this step only; nothing before or after it changes.
+3. **Read the response** completely (`read_file`, in chunks if truncated). It is the baseline.
+
+### Ledger and integration (both routes)
+
+While reading the baseline, build a compact coverage ledger: each section and its implementation-bearing items, a few words apiece. Then rewrite the plan file: integrate the substantive, supported content; fold in Goal, Background, Decisions, user answers, and references; check claims against the code and the user's decisions, correcting or dropping under the Core principles standard and noting what changed; add the execution index; normalize headings. Phrases such as "update callers", "handle errors", or "add tests" never replace named call sites, failure behavior, or verification cases. Keep the export, and the response on route 4B, until Phase 7.5.
+
+### Phase 4.5: Walk the user through the draft (route 4B; interactive modes only)
+
+The user has just returned the response, so this is a conversation, not a report. In plain language, with enough context to follow without having read the plan:
+
+1. The proposed approach, in a paragraph.
+2. Each important choice and its tradeoff, with the alternative the draft rejected.
+3. For every piece of machinery the draft proposes (abstractions, packages, harnesses, tests, process steps): keep, simplify, or defer, with the user need it serves and the smallest design that meets it. Name anything overbuilt or unnecessary.
+4. The questions whose answers change scope or order.
+
+Discuss, record the agreed trimming and decisions under `## Decisions` in the user's wording, apply them in the plan, and proceed only when the user confirms. This is the checkpoint the export route adds after the response: in Mid-flow it is the Phase 5 check-in, folded into one conversation; in Up front it is an added checkpoint at the same point, since the response cannot be discussed before it exists. A timeout halts, as at every checkpoint after Phase 1.
+
+## Phase 5: Mid-flow check-in (Mid-flow on route 4A)
+
+Read your draft. Identify two to four real ambiguities: hedged choices, tradeoffs without a pick, assumptions the user should weigh. Ask with `ask_user`; fold the answers in. A timeout halts; a skip means the draft stands on that point.
+
+## Phase 6: Bounded critique
+
+Dispatch a design agent once, as a critic, not a co-author:
 
 \(example(variant,
 	mcp: """
 ```json
-{"tool":"read_file","args":{"path":"<oracle_export_path>"}}
+{"tool":"agent_run","args":{"op":"start","model_id":"design","session_name":"Plan critique: <topic>","message":"Read the plan at `docs/plans/<topic>-<YYYY-MM-DD>.md` and the baseline at `<export or response path>` (the generated plan response only; any composed prompt or file dump is context). Write a focused critique under `docs/reviews/` covering only: 1. baseline content an implementer needs that the plan dropped, weakened, or generalized; 2. under-specified seams, unresolved material decisions, contradictions, wrong references, missing dependencies; 3. plan or baseline details the code disproves, the task does not need, or a named simpler design replaces, with the correction; 4. requirements, edge cases, or architectural problems absent from both (ownership, lifecycle, failure behavior, cancellation, testability); 5. questions that would change the design or order. Do not expand scope, rewrite the plan, or explore broadly beyond one named spot-check.","wait":true}}
 ```
 """,
 	cli: """
 ```bash
-rpce-cli -w <window_id> -e 'read <oracle_export_path>'
+rpce-cli -w <window_id> -e 'agent_run op=start model_id=design session_name="Plan critique: <topic>" message="Read the plan at docs/plans/<topic>-<YYYY-MM-DD>.md and the baseline at <export or response path> (the generated plan response only; any composed prompt or file dump is context). Write a focused critique under docs/reviews/ covering only: 1. baseline content an implementer needs that the plan dropped, weakened, or generalized; 2. under-specified seams, unresolved material decisions, contradictions, wrong references, missing dependencies; 3. plan or baseline details the code disproves, the task does not need, or a named simpler design replaces, with the correction; 4. requirements, edge cases, or architectural problems absent from both (ownership, lifecycle, failure behavior, cancellation, testability); 5. questions that would change the design or order. Do not expand scope, rewrite the plan, or explore broadly beyond one named spot-check." wait=true'
 ```
 """))
 
-The Phase 6 critique checks correctness, completeness, and preservation against this baseline.
+Apply verified findings; don't paste the critique in. Restore what the ledger shows was lost, resolve contradictions, and correct or remove under the same standard as Phase 4. A critique proposal outside the approved purpose is recorded for the user, not absorbed.
 
----
+## Phase 7: Polish and hand-off
 
-## Phase 5: Mid-flow Check-in (only if "Mid-flow")
+Make the plan clear and executable: remove filler, raw artifacts, and duplication; keep the rationale for the chosen approach and its most plausible rejected alternative where it guides implementation or review; verify every `file:line`, symbol, command, and link the plan relies on.
 
-Read your own draft. Identify 2–4 ambiguities — places where \(builderName) hedged ("could go either way"), tradeoffs without a pick, or assumptions the user might want to weigh in on. Ask via `ask_user`. Fold answers in before Phase 6.
+Done when the plan lives at its path; keeps every applicable substantive section (current state, design, file-by-file impact, tradeoffs, risks, order, verification); passes Phase 7.5; resolves every decision the evidence can resolve; names the checks that prove completion; contains no transcript dumps or generic advice; and can be executed by a reader without this conversation.
 
-The user picked **Mid-flow** — they explicitly asked to be involved here. If any `ask_user` returns `timed_out: true`, **halt** — don't push to Phase 6 (the design critique) with unresolved ambiguities, don't silently demote them to Hands-off. Report you're waiting on the outstanding question(s) and stop. Resume Phase 5 from the same prompt when the user replies. (`skipped: true` means the user is fine with your current draft on that point — continue.)
+### Phase 7.5: Fidelity check and cleanup
 
----
+Walk the Phase 4 ledger: each item is still explicit and discoverable, losslessly consolidated, or corrected or dropped under the Core principles standard. Restore anything that became weaker or merely implied. Then delete the export, and on route 4B the returned response: \(deleteBaseline).
 
-## Phase 6: Bounded Completeness and Design Critique
-
-Dispatch a design agent **once**, with tight scope, to check the plan against both the codebase and the original \(builderName) export. The design agent is a correctness and completeness critic, not a co-author.
-
-\(example(variant,
-	mcp: """
-```json
-{"tool":"agent_run","args":{
-	"op":"start",
-	"model_id":"design",
-	"session_name":"Plan critique: <topic>",
-	"message":"Read the plan at `docs/plans/<topic>-<YYYY-MM-DD>.md` and the complete original context_builder export at `<oracle_export_path>` — treat only its generated plan response as the baseline; any composed prompt or selected-file dump it opens with is context, not plan content. Produce a focused critique under `docs/reviews/`. Cover ONLY:\\n1. Implementation-bearing content from the export that is missing, weakened, or generalized in the plan\\n2. Under-specified seams, unresolved material decisions, contradictions, incorrect references, or missing dependencies\\n3. Plan or export details that the code disproves, the task does not require, or a named simpler design fully replaces — give the precise correction and its justification\\n4. Requirements, edge cases, dependencies, or architectural problems absent from both the export and the plan — ownership, lifecycle, failure behavior, cancellation, testability\\n5. Questions whose answers would materially change the design or implementation order\\n\\nDo not recommend removing accurate content merely because it is specific or low-level. Do not expand user scope, rewrite the plan, or perform broad codebase exploration unless one named seam needs a focused spot-check.",
-	"wait":true
-}}
-```
-""",
-	cli: """
-```bash
-rpce-cli -w <window_id> -e 'agent_run op=start model_id=design session_name="Plan critique: <topic>" message="Read the plan at docs/plans/<topic>-<YYYY-MM-DD>.md and the complete original builder export at <oracle_export_path> — treat only its generated plan response as the baseline; any composed prompt or selected-file dump is context, not plan content. Check for implementation-bearing content missing, weakened, or generalized; under-specified seams, contradictions, or incorrect references; details the code disproves, the task does not require, or a named simpler design replaces (give the correction); requirements or architectural problems absent from both — ownership, lifecycle, failure behavior, cancellation, testability; and material questions. Do not remove accurate content merely because it is specific or low-level, expand scope, rewrite the plan, or explore broadly." wait=true'
-```
-"""))
-
-Apply verified findings rather than pasting the critique into the plan. Restore supported omissions, resolve material ambiguities and contradictions, and correct or remove content under the same removal standard as Phase 4. Keep the export until the Phase 7.5 fidelity check passes.
-
----
-
-## Phase 7: Fidelity-Preserving Editorial Polish + Final Hand-off
-
-Make the plan clear and executable. Fidelity is about preserving supported content, not preserving wording or maximizing length.
-
-- Remove generic filler, raw artifacts, and semantic duplication; keep any consolidation lossless.
-- Preserve concise rationale for the chosen approach and its most plausible rejected alternative when that rationale guides implementation or review.
-- Verify every `file:line` reference, symbol name, command, and external link that the plan relies on.
-- Scan for accidental generalization: phrases such as “update callers,” “handle errors,” or “add tests” must not replace named call sites, failure behavior, or verification cases.
-
-**Acceptance criteria for the final plan:**
-
-- [ ] Lives at `docs/plans/<topic>-<YYYY-MM-DD>.md` and retains every applicable substantive section of the export — current-state analysis, detailed design, file-by-file impact, tradeoffs, risks, implementation order, verification — not collapsed into only a summary and work-item list
-- [ ] Passes the Phase 7.5 fidelity check against the export
-- [ ] Resolves every material design decision that current evidence makes resolvable and names the tests, commands, and manual checks that prove completion
-- [ ] Contains no transcript dumps, raw agent output, generic advice, or repeated narration
-- [ ] Retains only material open questions and can be executed by a reader without prior conversation context
-
-## Phase 7.5: Final Fidelity Check and Cleanup
-
-Walk the coverage ledger from Phase 4 — no need to reread both documents cold. Confirm the final plan keeps each ledger item equally explicit and discoverable, losslessly consolidated, or corrected or removed under the removal standard in Core principles. Restore anything that became weaker or merely implied, and spot-check the export directly wherever the ledger feels thin. This is a fidelity check, not a length target.
-
-Delete the export only after this check passes:
-
-\(example(variant,
-	mcp: """
-```json
-{"tool":"file_actions","args":{"action":"delete","path":"<oracle_export_path>"}}
-```
-""",
-	cli: """
-```bash
-rpce-cli -w <window_id> -e 'call file_actions {"action":"delete","path":"<oracle_export_path>"}'
-```
-"""))
-
-If the user picked **Hands-off**, surface the plan now and offer interactive refinement: *"Plan is at `<path>`. Want me to revise any section, expand scope, or trim anything?"* Treat each round as a focused edit pass on the file, not a re-plan.
-
-For **all** modes, report:
-
-- Plan path
-- 2–3 sentence summary
-- Any open questions that survived the polish pass
-- Suggested next workflow (`rp-build` for direct implementation, `rp-orchestrate` for multi-agent execution)
-
-The current Phase 4 export is not fully consumed until the Phase 7.5 fidelity check passes, so no earlier housekeeping rule may delete it.
+In Hands-off, surface the plan now with a plain-language explanation of the outcome (the approach, the important choices and their tradeoffs, and what was trimmed and why) and offer refinement ("Revise a section, expand, or trim?"), each round a focused edit. For all modes report the plan path, a two-sentence summary, surviving open questions, and the suggested next workflow (`rp-build` or `rp-orchestrate`). When the plan proposes wording for approval-protected text (global instruction files, governance documents), present each passage for exact-text approval at the user's checkpoint or at this hand-off; implementation is never the first time the user sees it.
 
 \(sharedSessionCleanupSection(variant: variant, heading: "### Housekeeping", includeSessionCleanupGuidance: includeSessionCleanupGuidance, includeStrayPlanExportCleanup: true))
----
+## Don't
 
-## Anti-patterns
-
-- 🚫 Skipping the involvement-level question — always ask first; the answer changes the run
-- 🚫 Asking generic or thin questions when in "Up front" / "Mid-flow" mode — questions must be informed by exploration findings or by the current draft's ambiguities
-- 🚫 More than 4 questions per checkpoint — interrogation isn't shaping
-- 🚫 Implementing code — this workflow ends at a plan
-- 🚫 Pasting full file contents into the plan — refer to `file:line`, don't reproduce
-- 🚫 Losing the Phase 2 findings or dumping raw explore-agent output into `## Background` — preserve distilled, load-bearing evidence
-- 🚫 Summarizing or generalizing supported implementation-bearing content merely for brevity — lossless consolidation is fine, lossy is not
-- 🚫 Letting the design critique reopen settled decisions without evidence, expand scope, or rewrite the plan
-- 🚫 Deleting the \(builderName) export before the Phase 7.5 fidelity check passes
-- 🚫 Dispatching external/web research when the plan only depends on in-repo facts — the trigger is real external dependency
-- 🚫 Doing broad codebase reading yourself instead of dispatching an explore agent — keep your context lean for writing
-- 🚫 Forgetting to poll dispatched agents — they may block on permission approvals
-- 🚫 Silently demoting an Up-front / Mid-flow user to Hands-off when their checkpoint `ask_user` times out — they asked to be involved; honor it. Halt and resume when they reply. (Phase 1's involvement-mode prompt is the one exception: a timeout there is treated as "no signal" and falls through to the Hands-off default.)\(variant == .cli ? "\n- 🚫 **CLI:** Forgetting to pass `-w <window_id>` — CLI invocations are stateless and require explicit window targeting" : "")
-
----
+- Skip the opening interview, ask generic or thin questions, or ask more than four per checkpoint.
+- Implement code, paste file contents, or dump raw agent output into the plan.
+- Cap discovery at three branches when the sources or repositories warrant more, run two branches on one question, or dispatch external research with no external dependency.
+- Reframe a DECIDED item as a question in the export, run both routes, offer the export route in Hands-off, or skip the walkthrough after an external response.
+- Let the critique reopen settled decisions, expand scope, or rewrite the plan.
+- Drop baseline detail an implementer needs, or delete the export or response before Phase 7.5 passes.
+- Read the codebase broadly yourself, forget to poll detached agents, or silently demote an Up-front or Mid-flow user to Hands-off on a timeout.\(variant == .cli ? "\n- **CLI:** Forget to pass `-w <window_id>` — CLI invocations are stateless and require explicit window targeting." : "")
 
 Now begin with Phase 0.\(variant == .cli ? " First run `rpce-cli -e 'windows'` to find the correct window." : "")
 """
