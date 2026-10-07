@@ -58,7 +58,7 @@ Explore agents map seams and gather outside facts. A planner, either \(builderNa
 - **Reference, don't reproduce.** Point to `file:line` and links; never paste source files, transcripts, or tool output into the plan.
 - **Ground every question in something you found.** Generic interview questions waste the user's time; at most four per checkpoint.
 - **Honor the involvement promise.** Once the user picks Up front or Mid-flow, every later `ask_user` is a checkpoint they asked for: on `timed_out: true`, halt and resume from the same prompt when they reply. `skipped: true` is a choice and falls back to the documented default. Phase 1's own questions are the one exception: a timeout there means no signal, and the defaults apply.
-\(workspaceVerificationBlock(variant: variant, heading: "## Phase 0", beforeAction: "the involvement question", nextStep: "Phase 1"))
+\(workspaceVerificationBlock(variant: variant, heading: "## Phase 0", beforeAction: "interview question", nextStep: "Phase 1"))
 ## Phase 1: Opening interview (required; the first interactive action)
 
 One `ask_user` wizard with two questions, before any exploration:
@@ -252,7 +252,7 @@ In Hands-off, surface the plan now with a plain-language explanation of the outc
 - Drop baseline detail an implementer needs, or delete the export or response before Phase 7.5 passes.
 - Read the codebase broadly yourself, forget to poll detached agents, or silently demote an Up-front or Mid-flow user to Hands-off on a timeout.\(variant == .cli ? "\n- **CLI:** Forget to pass `-w <window_id>` — CLI invocations are stateless and require explicit window targeting." : "")
 
-Now begin with Phase 0.\(variant == .cli ? " First run `rpce-cli -e 'windows'` to find the correct window." : "")
+Now begin with Phase \(variant == .agent ? "1" : "0").\(variant == .cli ? " First run `rpce-cli -e 'windows'` to find the correct window." : "")
 """
 	}
 
