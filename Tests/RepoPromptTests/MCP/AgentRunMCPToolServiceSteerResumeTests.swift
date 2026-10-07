@@ -934,9 +934,12 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
         WindowStatesManager.shared.registerWindowState(window)
         GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
 
+        // Outside any repository: a root inside a git checkout starts Code Map indexing of that
+        // checkout, which closing the window does not end.
+        let workspaceRoot = try makeTestDirectory()
         let workspace = window.workspaceManager.createWorkspace(
             name: "Steer Resume \(UUID().uuidString.prefix(8))",
-            repoPaths: [FileManager.default.currentDirectoryPath],
+            repoPaths: [workspaceRoot.path],
             ephemeral: true
         )
         await window.workspaceManager.switchWorkspace(

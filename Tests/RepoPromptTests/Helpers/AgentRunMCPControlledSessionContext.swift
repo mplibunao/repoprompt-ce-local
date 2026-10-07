@@ -8,17 +8,20 @@ final class AgentRunMCPControlledSessionContext {
     let sessionID: UUID
     let session: AgentModeViewModel.TabSession
     let service: AgentRunMCPToolService
+    private let workspaceRootURL: URL
 
     private init(
         window: WindowState,
         sessionID: UUID,
         session: AgentModeViewModel.TabSession,
-        service: AgentRunMCPToolService
+        service: AgentRunMCPToolService,
+        workspaceRootURL: URL
     ) {
         self.window = window
         self.sessionID = sessionID
         self.session = session
         self.service = service
+        self.workspaceRootURL = workspaceRootURL
     }
 
     static func make(
@@ -33,12 +36,20 @@ final class AgentRunMCPControlledSessionContext {
         settings.setMCPAutoStart(false, commit: false)
         defer { settings.setMCPAutoStart(previousAutoStart, commit: false) }
 
+        // The workspace's root is an empty directory outside any repository. A root inside a git
+        // checkout makes the process-wide Code Map engine index that checkout in the background,
+        // and closing the window does not end that work.
+        let workspaceRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RepoPromptTests", isDirectory: true)
+            .appendingPathComponent("AgentRunMCPControlledSessionContext-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceRootURL, withIntermediateDirectories: true)
+
         let window = WindowState()
         WindowStatesManager.shared.registerWindowState(window)
         do {
             let workspace = window.workspaceManager.createWorkspace(
                 name: "\(workspaceNamePrefix) \(UUID().uuidString.prefix(8))",
-                repoPaths: [FileManager.default.currentDirectoryPath],
+                repoPaths: [workspaceRootURL.path],
                 ephemeral: true
             )
             await window.workspaceManager.switchWorkspace(
@@ -103,12 +114,14 @@ final class AgentRunMCPControlledSessionContext {
                 window: window,
                 sessionID: sessionID,
                 session: session,
-                service: service
+                service: service,
+                workspaceRootURL: workspaceRootURL
             )
         } catch {
             window.beginClose()
             await window.tearDown()
             WindowStatesManager.shared.unregisterWindowState(window)
+            try? FileManager.default.removeItem(at: workspaceRootURL)
             throw error
         }
     }
@@ -117,5 +130,6 @@ final class AgentRunMCPControlledSessionContext {
         window.beginClose()
         await window.tearDown()
         WindowStatesManager.shared.unregisterWindowState(window)
+        try? FileManager.default.removeItem(at: workspaceRootURL)
     }
 }
