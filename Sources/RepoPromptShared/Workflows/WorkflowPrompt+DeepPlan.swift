@@ -29,15 +29,6 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
 	static func rpDeepPlanCore(variant: WorkflowPromptVariant, includeSessionCleanupGuidance: Bool = true) -> String {
 		let builderName = variant == .cli ? "`builder`" : "`context_builder`"
 		let builderToolName = variant == .cli ? "builder" : "context_builder"
-		let chatTool: String
-		let chatToolName: String
-		switch variant {
-		case .cli: chatTool = "`chat`"; chatToolName = "chat"
-		case .agent: chatTool = "`ask_oracle`"; chatToolName = "ask_oracle"
-		case .mcp: chatTool = "`oracle_send`"; chatToolName = "oracle_send"
-		}
-		_ = chatTool
-		_ = chatToolName
 		// CLI skills install under `<name>-cli`, so the CLI twin has to name the export skill it can actually load.
 		let exportSkillName = variant == .cli ? "rp-oracle-export-cli" : "rp-oracle-export"
 		let promptAppend = example(variant,
