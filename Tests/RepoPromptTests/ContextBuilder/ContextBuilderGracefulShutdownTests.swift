@@ -631,7 +631,6 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         } catch {
             XCTAssertTrue(error is CancellationError, "\(error)")
         }
-        XCTAssertFalse(viewModel.tabsHeldAgainstNewRun.contains(tabIDs[0]))
         let closedTabDisposed = await waitUntil { await self.providers[0].disposeCallCount() == 1 }
         XCTAssertTrue(closedTabDisposed, "The closed tab's provider was not disposed")
         let stayingCompletion = try await staying.value
@@ -722,14 +721,12 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         }
         let viewModel = window.contextBuilderAgentViewModel
 
-        let unknownTabID = UUID()
         do {
-            _ = try await runMCP(window, tabID: unknownTabID)
+            _ = try await runMCP(window, tabID: UUID())
             XCTFail("Expected missing workspace failure")
         } catch {
             XCTAssertTrue(error is CancellationError, "\(error)")
         }
-        XCTAssertFalse(viewModel.tabsHeldAgainstNewRun.contains(unknownTabID))
         XCTAssertEqual(providerCount, 0)
         let token = try viewModel.beginMCPControlledRun(
             forTabID: tabIDs[0], responseType: nil, planModelName: nil

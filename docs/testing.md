@@ -228,10 +228,7 @@ Run these rows before merging a change to Context Builder admission, its startup
 Deterministic coverage comes first:
 
 ```bash
-make dev-test FILTER=ContextBuilderCrossTabConcurrencyTests
-make dev-test FILTER=ContextBuilderTabAdmissionTests
-make dev-test FILTER=MCPContextBuilderAdmissionTests
-make dev-test FILTER=ContextBuilderRoutingOutcomeTests
+make dev-test FILTER=ContextBuilderWindowAdmissionTests
 make dev-test FILTER=ContextBuilderGracefulShutdownTests
 ```
 
@@ -317,7 +314,7 @@ A snapshot that reports `missing` was taken after its connection ended and is no
 
 Two CLI processes that were alive together don't show overlap. A row without that overlap, with ambiguous or unsupported evidence, or with cleanup that can't be attributed to one run, is incomplete, never a pass. A unit-test pass doesn't stand in for it.
 
-Two CLI invocations are two caller connections, so these rows don't cover one caller connection that rebinds between two calls. `MCPContextBuilderAdmissionTests` covers that case. A caller-side timeout is a safety bound for a failed row, not the app's routing limit, and ending a CLI process doesn't prove its provider stopped. Reconcile exact run IDs and provider process IDs from the diagnostics afterward, and never end processes by name. Keep raw results, progress output, the build identity, and the app's process ID and start time privately, and never record capability tokens.
+Two CLI invocations are two caller connections, so these rows don't cover one caller connection that rebinds between two calls. No automated test covers that case. A caller-side timeout is a safety bound for a failed row, not the app's routing limit, and ending a CLI process doesn't prove its provider stopped. Reconcile exact run IDs and provider process IDs from the diagnostics afterward, and never end processes by name. Keep raw results, progress output, the build identity, and the app's process ID and start time privately, and never record capability tokens.
 
 ## Live large-workspace worktree-startup diagnostic
 
