@@ -342,11 +342,9 @@ import XCTest
                 fixture.holdsChildConnections = true
                 pressed = await fixture.pressRun(on: cancelled)
                 let cancelledRunID = try XCTUnwrap(pressed)
-                try await fixture.waitFor("the third tab's provider to be ready to connect") {
-                    fixture.child(forRunID: cancelledRunID)?.registeredProviderPID != nil
-                }
+                let cancelledChild = try await fixture.childWithRegisteredProcess(forRunID: cancelledRunID)
                 XCTAssertTrue(viewModel.beginCancellation(forTabID: cancelled.tabID))
-                await fixture.child(forRunID: cancelledRunID)?.allowConnection()
+                await cancelledChild.allowConnection()
                 try await fixture.waitForRelease(of: cancelled)
                 XCTAssertEqual(fixture.session(cancelled)?.agentRunState, .completed)
                 fixture.holdsChildConnections = false
@@ -599,11 +597,11 @@ import XCTest
             }
         }
 
-        /// An MCP run that does not complete keeps its tab until the caller's cleanup scope releases
-        /// it, and that release waits for the run to clear its routing policy. Until then a
-        /// successor is refused.
+        /// An MCP run that fails keeps its tab until the caller's cleanup scope releases it. Until
+        /// then a successor is refused. Once released, the run has left no routing policy and the
+        /// tab can be claimed again.
         func testFailedMCPRunHoldsTokenUntilCleanupScope() async throws {
-            try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
+            try await ContextBuilderRunFixture.withFixture { fixture, _ in
                 let viewModel = fixture.viewModel
 
                 let failedSlot = fixture.slots[0]
@@ -631,70 +629,9 @@ import XCTest
 
                 await viewModel.clearMCPControlledRun(forTabID: failedSlot.tabID, controlToken: failedToken)
                 XCTAssertNil(fixture.operationToken(failedSlot))
-                var pendingRunIDs = try await fixture.pendingPolicyRunIDs()
+                let pendingRunIDs = try await fixture.pendingPolicyRunIDs()
                 XCTAssertFalse(pendingRunIDs.contains(failed.runID))
                 try await assertClaimable(failedSlot, in: fixture)
-
-                // A cancelled run whose provider event is still being processed has finished for
-                // its caller while its execution, which ends by clearing the policy, has not.
-                let cancelledSlot = fixture.slots[1]
-                let processingGate = ContextBuilderTestGate()
-                cleanup.add { viewModel.installRunTestHooks(nil) }
-                fixture.releaseOnSettle { await processingGate.open() }
-                viewModel.installRunTestHooks(.init(
-                    beforeProcessingProviderEvent: { _, _ in await processingGate.wait() },
-                    providerEventDisposition: nil,
-                    teardownCompleted: nil
-                ))
-                fixture.providerScript = { _ in ContextBuilderUnroutedProvider(events: ["Looking around"]) }
-                let cancelledToken = try viewModel.beginMCPControlledRun(
-                    forTabID: cancelledSlot.tabID,
-                    workspaceID: fixture.workspaceID,
-                    responseType: nil,
-                    planModelName: nil
-                )
-                let authority = try fixture.mcpAuthority(for: cancelledSlot)
-                let cancelledRun = Task { @MainActor in
-                    try await viewModel.runContextBuilderForMCP(authority: authority, mcpControlToken: cancelledToken)
-                }
-                try await fixture.waitFor("the second tab's run to be processing a provider event") {
-                    await processingGate.entered
-                }
-                let cancelledRunID = try XCTUnwrap(fixture.activeRunID(cancelledSlot))
-                await viewModel.cancelMCPContextBuilderRun(runID: cancelledRunID)
-                let cancelledResult = await cancelledRun.result
-                XCTAssertThrowsError(try cancelledResult.get()) { XCTAssertTrue($0 is CancellationError) }
-                XCTAssertNil(fixture.activeRunID(cancelledSlot))
-                XCTAssertEqual(fixture.operationToken(cancelledSlot)?.id, cancelledToken)
-
-                // The release runs on the main actor, as this test does, and enters the release call
-                // in the same turn that sets `releaseStarted`. The flag can therefore only be seen
-                // here once the release has stopped running: it has finished, or it is suspended at
-                // its first wait inside the call.
-                var releaseStarted = false
-                var released = false
-                let release = Task { @MainActor in
-                    releaseStarted = true
-                    await viewModel.clearMCPControlledRun(forTabID: cancelledSlot.tabID, controlToken: cancelledToken)
-                    released = true
-                }
-                try await fixture.waitFor("the release to run up to its first wait") { releaseStarted }
-                XCTAssertFalse(released)
-                XCTAssertEqual(fixture.operationToken(cancelledSlot)?.id, cancelledToken)
-                XCTAssertThrowsError(
-                    try viewModel.beginMCPControlledRun(
-                        forTabID: cancelledSlot.tabID,
-                        responseType: nil,
-                        planModelName: nil
-                    )
-                ) { Self.assertTabBusy($0) }
-
-                await processingGate.open()
-                await release.value
-                XCTAssertNil(fixture.operationToken(cancelledSlot))
-                pendingRunIDs = try await fixture.pendingPolicyRunIDs()
-                XCTAssertFalse(pendingRunIDs.contains(cancelledRunID))
-                try await assertClaimable(cancelledSlot, in: fixture)
             }
         }
 
@@ -794,11 +731,8 @@ import XCTest
 
                 fixture.holdsChildConnections = true
                 let otherRun = fixture.startMCPRun(on: other)
-                try await fixture.waitFor("the other tab's provider to be ready to connect") {
-                    fixture.child(forRunID: fixture.activeRunID(other))?.registeredProviderPID != nil
-                }
-                let otherRunID = try XCTUnwrap(fixture.activeRunID(other))
-                let otherChild = try XCTUnwrap(fixture.child(forRunID: otherRunID))
+                let otherRunID = try await fixture.registeredRunID(on: other)
+                let otherChild = try await fixture.childWithRegisteredProcess(forRunID: otherRunID)
                 let otherSession = try XCTUnwrap(fixture.session(other))
                 let otherToken = try XCTUnwrap(fixture.operationToken(other))
 

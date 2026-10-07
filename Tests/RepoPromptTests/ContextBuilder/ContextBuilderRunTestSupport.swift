@@ -55,6 +55,9 @@ import XCTest
         final class MCPRun {
             let slot: TabSlot
             fileprivate(set) var result: Result<Completion, Error>?
+            /// How discovery ended, set before the claim's release begins. `result` is set only
+            /// once that release has returned.
+            fileprivate(set) var discoveryResult: Result<Completion, Error>?
             /// How the follow-up the run was started with ended, once it has.
             fileprivate(set) var followUpResult: Result<ChatSendReply, Error>?
             fileprivate var task: Task<Void, Never>?
@@ -383,11 +386,18 @@ import XCTest
                     run.result = try await .success(AsyncScope.withCleanup({}, cleanup: {
                         await viewModel.clearMCPControlledRun(forTabID: slot.tabID, controlToken: token)
                     }) {
-                        let completion = try await viewModel.runContextBuilderForMCP(
-                            authority: authority,
-                            mcpControlToken: token,
-                            progressReporter: progressReporter
-                        )
+                        let completion: Completion
+                        do {
+                            completion = try await viewModel.runContextBuilderForMCP(
+                                authority: authority,
+                                mcpControlToken: token,
+                                progressReporter: progressReporter
+                            )
+                            run.discoveryResult = .success(completion)
+                        } catch {
+                            run.discoveryResult = .failure(error)
+                            throw error
+                        }
                         if let followUp,
                            completion.terminalDisposition == .completed,
                            let committed = completion.committedTab

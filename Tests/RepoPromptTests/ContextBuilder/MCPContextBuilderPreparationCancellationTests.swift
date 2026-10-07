@@ -65,11 +65,8 @@ import XCTest
 
                 fixture.holdsChildConnections = true
                 let otherRun = fixture.startMCPRun(on: other)
-                try await fixture.waitFor("the other tab's provider to be ready to connect") {
-                    fixture.child(forRunID: fixture.activeRunID(other))?.registeredProviderPID != nil
-                }
-                let otherRunID = try XCTUnwrap(fixture.activeRunID(other))
-                let otherChild = try XCTUnwrap(fixture.child(forRunID: otherRunID))
+                let otherRunID = try await fixture.registeredRunID(on: other)
+                let otherChild = try await fixture.childWithRegisteredProcess(forRunID: otherRunID)
                 let otherToken = try XCTUnwrap(fixture.operationToken(other))
 
                 let call = ToolCall(caller, tabID: closing.tabID)

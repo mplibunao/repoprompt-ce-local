@@ -573,16 +573,11 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
             fixture.holdsChildConnections = true
             let keptRun = fixture.startMCPRun(on: kept)
             let closingRun = fixture.startMCPRun(on: closing)
-            try await fixture.waitFor("both tabs' providers to be ready to connect") {
-                [kept, closing].allSatisfy {
-                    fixture.child(forRunID: fixture.activeRunID($0))?.registeredProviderPID != nil
-                }
-            }
-            let keptRunID = try XCTUnwrap(fixture.activeRunID(kept))
-            let keptChild = try XCTUnwrap(fixture.child(forRunID: keptRunID))
+            let keptRunID = try await fixture.registeredRunID(on: kept)
+            let keptChild = try await fixture.childWithRegisteredProcess(forRunID: keptRunID)
             let keptToken = try XCTUnwrap(fixture.operationToken(kept))
-            let closingRunID = try XCTUnwrap(fixture.activeRunID(closing))
-            let closingChild = try XCTUnwrap(fixture.child(forRunID: closingRunID))
+            let closingRunID = try await fixture.registeredRunID(on: closing)
+            let closingChild = try await fixture.childWithRegisteredProcess(forRunID: closingRunID)
 
             await fixture.window.promptManager.closeComposeTab(closing.tabID)
             await fixture.window.promptManager.closeComposeTab(sessionless.tabID)
@@ -1293,8 +1288,10 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
     }
 
     /// A cancelled MCP call keeps its tab until its run's execution has really ended, however
-    /// long that takes: no grace applies to an ordinary cancellation. Until then the call's
-    /// cleanup scope has not returned and a successor is refused as a busy tab.
+    /// long that takes: no grace applies to an ordinary cancellation. The run itself is answered
+    /// as cancelled at once. Until the execution ends the call's cleanup scope has not returned
+    /// and a successor is refused as a busy tab. Once it has ended the tab is free and no routing
+    /// policy is left for the run.
     func testCancelledMCPCallKeepsItsTabUntilItsExecutionEnds() async throws {
         try await ContextBuilderRunFixture.withFixture { fixture, cleanup in
             let viewModel = fixture.viewModel
@@ -1319,6 +1316,8 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
             viewModel.setCloseSettlementGraceForTesting(pinnedGraceNanoseconds)
             await viewModel.cancelMCPContextBuilderRun(runID: runID)
             XCTAssertNil(fixture.activeRunID(slot))
+            try await fixture.waitFor("the run's own waiter to be answered") { run.discoveryResult != nil }
+            XCTAssertThrowsError(try XCTUnwrap(run.discoveryResult).get()) { XCTAssertTrue($0 is CancellationError) }
             // A real-clock margin three times the pinned close grace, which an ordinary cancellation
             // must not apply. Elapsed time cannot prove that no settlement timer exists; it shows that
             // none took effect within the window.
@@ -1332,13 +1331,20 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
                     responseType: nil,
                     planModelName: nil
                 )
-            ) { XCTAssertEqual(($0 as NSError).code, 2) }
+            ) { error in
+                let refusal = error as NSError
+                XCTAssertEqual(refusal.domain, "DiscoverAgent")
+                XCTAssertEqual(refusal.code, 2)
+                XCTAssertEqual(refusal.localizedDescription, "Context Builder is already running for this tab.")
+            }
             XCTAssertEqual(fixture.operationToken(slot), token)
 
             await execution.open()
             try await fixture.waitFor("the cancelled call to return", allowingRunErrors: true) { run.result != nil }
             XCTAssertThrowsError(try XCTUnwrap(run.result).get()) { XCTAssertTrue($0 is CancellationError) }
             XCTAssertNil(fixture.operationToken(slot))
+            let pendingRunIDs = try await fixture.pendingPolicyRunIDs()
+            XCTAssertFalse(pendingRunIDs.contains(runID))
             let successor = try viewModel.beginMCPControlledRun(
                 forTabID: slot.tabID,
                 workspaceID: fixture.workspaceID,
@@ -1346,6 +1352,7 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
                 planModelName: nil
             )
             await viewModel.clearMCPControlledRun(forTabID: slot.tabID, controlToken: successor)
+            XCTAssertNil(fixture.operationToken(slot))
         }
     }
 
