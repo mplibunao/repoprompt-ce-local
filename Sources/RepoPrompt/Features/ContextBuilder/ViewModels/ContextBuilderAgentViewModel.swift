@@ -289,9 +289,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             operationToken?.origin == .mcp
         }
 
-        /// Cancels the MCP call that holds the tab while that call is still preparing: from its
-        /// claim until its run is registered, when there is no run to cancel yet. `tokenID` names
-        /// the claim that installed it, so it never acts for a later holder.
+        /// Cancels the MCP call that holds the tab, for as long as the call holds it: before its run
+        /// is registered there is no run to cancel, and after that run has ended the call can still
+        /// be working on the tab. `tokenID` names the claim that installed it, so it never acts for
+        /// a later holder.
         struct PreparationCancellation {
             let tokenID: UUID
             let cancel: @MainActor () -> Void
@@ -1338,8 +1339,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     /// The first half of an ordinary window close. Asks everything Context Builder still has in
     /// flight in the window to end: every run the window retains, whichever tab or session it
-    /// belongs to and whether or not it still owns its tab, every MCP call that is still
-    /// preparing, and every follow-up. It returns without waiting, so the rest of the close can
+    /// belongs to and whether or not it still owns its tab, every MCP call that holds a
+    /// tab, and every follow-up. It returns without waiting, so the rest of the close can
     /// start before ``joinRunTeardownForWindowClose()`` waits for the runs.
     func cancelRunsForWindowClose() {
         prepareForWindowClose()
@@ -1371,8 +1372,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         return records
     }
 
-    /// Requests cancellation of what holds a tab outside a registered run: a pending question, an
-    /// MCP call that is still preparing, and a follow-up, without waiting for any of it to stop.
+    /// Requests cancellation of what holds a tab outside a registered run: a pending question, the
+    /// MCP call that holds it, and a follow-up, without waiting for any of it to stop.
     /// Runs are cancelled through their records.
     private func cancelUnregisteredWork(for session: TabSession) {
         cancelPendingQuestion(for: session)
@@ -2381,10 +2382,6 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                     continuation.resume(throwing: Self.tabBusyError)
                     return
                 }
-                // The run now exists, so in this same turn the call's cancellation passes from
-                // the claim's action to the run.
-                removePreparationCancellation(installedBy: mcpControlToken, from: session)
-
                 captureRunStartState(
                     for: session,
                     workspaceContext: workspaceContext,
@@ -5131,10 +5128,12 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
     }
 
-    /// Runs an admitted MCP call as one piece of work and, until that call's run is registered,
-    /// gives the tab's claim an action that cancels it. No run exists before registration, so
-    /// nothing else could reach a call suspended in its preparation; from registration on the
-    /// call is cancelled through its run and the action is gone.
+    /// Runs an admitted MCP call as one piece of work and gives the tab's claim an action that
+    /// cancels it for as long as the claim holds the tab. Before the call's run is registered and
+    /// after that run has ended, the action is the only way a tab or window close reaches the
+    /// call. While the run is active, cancelling the work also cancels the run through the run's
+    /// cancellation handler, which does nothing more once the run's own cancellation has been
+    /// requested. Releasing the claim in the call's cleanup removes the action.
     ///
     /// The work runs in a task of its own so that it can be cancelled without cancelling the
     /// request. That task inherits the request's task-local context, and the request's own
@@ -5165,13 +5164,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             work.cancel()
         }
         guard let result = outcome.result else { throw CancellationError() }
-        // A cancelled call reports its cancellation, whichever error the step it was suspended in
-        // went on to surface.
-        if work.isCancelled, case .failure = result { throw CancellationError() }
+        // A cancelled call reports its cancellation whatever the step it was suspended in went on
+        // to return, so a call cut off by a tab or window close never answers for that tab.
+        if work.isCancelled { throw CancellationError() }
         return try result.get()
     }
 
-    /// Asks the MCP call that claimed the tab with `controlToken` to stop its preparation work.
+    /// Asks the MCP call that claimed the tab with `controlToken` to stop its work.
     /// Does nothing unless that claim still holds the tab and installed the action: a claim that
     /// was released or replaced cannot stop its successor's work.
     @MainActor

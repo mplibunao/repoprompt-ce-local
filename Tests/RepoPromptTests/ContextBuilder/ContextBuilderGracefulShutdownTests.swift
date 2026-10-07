@@ -709,6 +709,46 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         await viewModel.clearMCPControlledRun(forTabID: tabIDs[0], controlToken: successor)
     }
 
+    /// Closing a tab cancels the MCP call that holds it even after the call's discovery has ended,
+    /// so the call answers with a cancellation instead of finishing for a tab that is gone.
+    func testClosingATabCancelsTheAdmittedCallAfterItsDiscoveryEnded() async throws {
+        let (window, tabIDs) = await makeGatedWindow()
+        let viewModel = window.contextBuilderAgentViewModel
+        let tabID = tabIDs[0]
+        let postDiscovery = ContextBuilderTestGate()
+        addTeardownBlock { await postDiscovery.open() }
+        let authority = try makeAuthority(window, tabID: tabID)
+        let token = try viewModel.beginMCPControlledRun(forTabID: tabID, responseType: nil, planModelName: nil)
+        let call = Task {
+            try await AsyncScope.withCleanup({}, cleanup: {
+                await viewModel.clearMCPControlledRun(forTabID: tabID, controlToken: token)
+            }) {
+                try await viewModel.performAdmittedMCPCall(forTabID: tabID, controlToken: token) {
+                    _ = try await viewModel.runContextBuilderForMCP(authority: authority, mcpControlToken: token)
+                    await postDiscovery.wait()
+                    return "finished"
+                }
+            }
+        }
+        let registered = await waitUntil { viewModel.activeRunIDForTesting(tabID: tabID) != nil }
+        XCTAssertTrue(registered, "The call's discovery run never registered")
+        // Disposal is not under test, as in `startRun`.
+        await providers.last?.allowDispose()
+        await streamGate.open()
+        let discoveryEnded = await waitUntil { await postDiscovery.entered }
+        XCTAssertTrue(discoveryEnded, "The call never got past its discovery")
+
+        let report = await window.promptManager.closeComposeTab(tabID)
+        XCTAssertEqual(report.removedComposeTabIDs, [tabID])
+        await postDiscovery.open()
+        do {
+            let reply = try await call.value
+            XCTFail("Expected the closed tab's call to end cancelled, got \(reply)")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+    }
+
     func testFailureBeforeProviderCreationReleasesAdmission() async throws {
         var providerCount = 0
         let provider = GatedHeadlessAgentProvider()
@@ -776,6 +816,20 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         modelParameterSelections: [ACPModelParameterSelection] = []
     ) async throws -> ContextBuilderAgentViewModel.MCPContextBuilderRunCompletion {
         let viewModel = window.contextBuilderAgentViewModel
+        let authority = try makeAuthority(window, tabID: tabID, modelParameterSelections: modelParameterSelections)
+        let token = try viewModel.beginMCPControlledRun(forTabID: tabID, responseType: nil, planModelName: nil)
+        return try await AsyncScope.withCleanup({}, cleanup: {
+            await viewModel.clearMCPControlledRun(forTabID: tabID, controlToken: token)
+        }) {
+            try await viewModel.runContextBuilderForMCP(authority: authority, mcpControlToken: token)
+        }
+    }
+
+    private func makeAuthority(
+        _ window: WindowState,
+        tabID: UUID,
+        modelParameterSelections: [ACPModelParameterSelection] = []
+    ) throws -> ContextBuilderResolvedRunAuthority {
         let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
         let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID)
         var nested = MCPServerViewModel.TabContextSnapshot(
@@ -806,20 +860,12 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
             planningModelRaw: nil,
             isSystemWorkspace: false
         )
-        let token = try viewModel.beginMCPControlledRun(forTabID: tabID, responseType: nil, planModelName: nil)
-        return try await AsyncScope.withCleanup({}, cleanup: {
-            await viewModel.clearMCPControlledRun(forTabID: tabID, controlToken: token)
-        }) {
-            try await viewModel.runContextBuilderForMCP(
-                authority: ContextBuilderResolvedRunAuthority(
-                    configuration: configuration,
-                    agentKind: .claudeCode,
-                    modelRaw: AgentModel.defaultModel.rawValue,
-                    modelParameterSelections: modelParameterSelections
-                ),
-                mcpControlToken: token
-            )
-        }
+        return ContextBuilderResolvedRunAuthority(
+            configuration: configuration,
+            agentKind: .claudeCode,
+            modelRaw: AgentModel.defaultModel.rawValue,
+            modelParameterSelections: modelParameterSelections
+        )
     }
 
     /// A window whose every run gets a new provider that streams `event`, when given, and then
