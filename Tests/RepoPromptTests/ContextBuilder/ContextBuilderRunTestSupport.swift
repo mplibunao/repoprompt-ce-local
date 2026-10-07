@@ -162,8 +162,9 @@ import XCTest
                 .appendingPathComponent("ContextBuilderRunFixture-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
             cleanup.add { try? FileManager.default.removeItem(at: rootURL) }
-            // Registered ahead of every window's cleanup, so chat storage is put back only once
-            // each window that could save a chat has been torn down.
+            // Registered ahead of the cleanup of every window opened on this cleanup, so chat
+            // storage is put back only once each of those windows has been torn down. A peer
+            // window that another cleanup closes keeps it redirected until that cleanup has run.
             let chatStorage = ChatStorageRedirect()
             cleanup.add { await chatStorage.restore() }
             let slots = try tabNames.map { name in
@@ -273,6 +274,7 @@ import XCTest
                 // starts no save from here on, and the saves drained here are its last.
                 await window.oracleViewModel.drainTrackedAutosaves(for: workspaceID)
                 WindowStatesManager.shared.unregisterWindowState(window)
+                await chatStorage.releaseIfSettled()
             }
             WindowStatesManager.shared.registerWindowState(window)
             await window.workspaceManager.awaitInitialized()
@@ -487,13 +489,22 @@ import XCTest
 
         /// Keeps the chats a scenario saves in a directory of its own. The fixture puts chat
         /// storage back and removes the directory at the end of its own cleanup, after every
-        /// cleanup the scenario adds.
-        func saveChatsInTemporaryDirectory() async throws {
+        /// cleanup the scenario adds, once nothing can still save a chat there. While an earlier
+        /// scenario's redirect is still in place, the call fails the scenario instead.
+        func saveChatsInTemporaryDirectory(function: String = #function, fileID: String = #fileID) async throws {
             XCTAssertNil(chatStorage.directory, "Chat storage is redirected once for a fixture")
+            if let unresolved = ChatStorageRedirect.unresolved {
+                await unresolved.releaseIfSettled()
+            }
+            if let unresolved = ChatStorageRedirect.unresolved {
+                XCTFail("Chat storage is still redirected for \(unresolved.scenario): something could still save a chat there")
+                throw ScenarioAborted()
+            }
             let chatsURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ContextBuilderRunFixture-chats-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: chatsURL, withIntermediateDirectories: true)
             chatStorage.directory = chatsURL
+            chatStorage.scenario = "\(fileID) \(function)"
             await ChatDataService.test_setWorkspaceRootOverride(chatsURL)
         }
 
@@ -957,27 +968,67 @@ import XCTest
     /// Chat storage a scenario redirected, and the fixture windows that can save a chat into it.
     @MainActor
     private final class ChatStorageRedirect {
+        /// The redirect that something could still save a chat into when its scenario ended. It
+        /// stays in place until nothing can, and no later scenario redirects chat storage over it.
+        static var unresolved: ChatStorageRedirect?
+
         var directory: URL?
         var windows: [ContextBuilderRunFixture] = []
+        /// The test that redirected chat storage, as a failure names it.
+        var scenario = ""
 
         /// Puts chat storage back and removes the scenario's directory.
         ///
         /// The override is process-wide, so a save that starts after it is reset goes to the real
-        /// chat storage. This step is registered before any window's cleanup and therefore runs
-        /// after all of it: by then each window's follow-ups are cancelled and joined, its provider
-        /// replies have ended, and the window is torn down with its last saves drained. Anything
-        /// still able to save a chat at that point fails the test.
+        /// chat storage. This step is registered before the cleanup of every window opened on the
+        /// same fixture cleanup and therefore runs after all of it: by then each of those windows'
+        /// follow-ups are cancelled and joined, its provider replies have ended, and it is torn down
+        /// with its last saves drained. Anything still able to save a chat at that point, such as a
+        /// peer window that another cleanup closes, fails the test, and the redirect, with its
+        /// directory and the windows it watches, stays in place until ``releaseIfSettled()``
+        /// finds nothing that can.
         func restore() async {
-            // Each fixture holds this redirect, so it lets go of them whichever way it returns.
-            defer { windows.removeAll() }
-            guard let directory else { return }
-            for window in windows {
-                for reason in await window.pendingChatWriters() {
-                    XCTFail("Chat storage was put back while \(reason)")
-                }
+            guard directory != nil else {
+                windows.removeAll()
+                return
             }
-            await ChatDataService.test_setWorkspaceRootOverride(nil)
-            try? FileManager.default.removeItem(at: directory)
+            let reasons = await pendingChatWriters()
+            guard reasons.isEmpty else {
+                for reason in reasons {
+                    XCTFail("Chat storage stays redirected while \(reason)")
+                }
+                Self.unresolved = self
+                return
+            }
+            await release()
+        }
+
+        /// Releases a redirect that ``restore()`` left in place, once nothing can still save a chat
+        /// into it. Each window it watches asks once its own cleanup has run.
+        func releaseIfSettled() async {
+            guard Self.unresolved === self, await pendingChatWriters().isEmpty else { return }
+            await release()
+        }
+
+        private func pendingChatWriters() async -> [String] {
+            var reasons: [String] = []
+            for window in windows {
+                await reasons.append(contentsOf: window.pendingChatWriters())
+            }
+            return reasons
+        }
+
+        private func release() async {
+            if let directory {
+                await ChatDataService.test_setWorkspaceRootOverride(nil)
+                try? FileManager.default.removeItem(at: directory)
+            }
+            directory = nil
+            // Each fixture holds this redirect, so it lets go of them here.
+            windows.removeAll()
+            if Self.unresolved === self {
+                Self.unresolved = nil
+            }
         }
     }
 

@@ -1899,6 +1899,128 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
         return (claim, HolderState(of: slot, in: fixture))
     }
 
+    /// A scenario's chat storage stays redirected while a window that can save a chat into it is
+    /// still open, also once the scenario's own cleanup has run and reported that window, and a
+    /// chat saved then lands in the scenario's directory. Once that window's cleanup has run, chat
+    /// storage is put back and the directory is removed.
+    func testChatStorageStaysRedirectedWhileAWindowCanStillSaveAChat() async throws {
+        // Only an idle peer's own cleanup ends its provider replies, so it reports a pending reply as well as itself.
+        let pendingWriters = ["a window could still save a chat", "a provider reply was still pending"]
+        let reported = XCTExpectedFailure.Options()
+        reported.issueMatcher = { issue in pendingWriters.contains { issue.compactDescription.contains($0) } }
+        XCTExpectFailure("The scenario's cleanup reports the window that can still save a chat", options: reported)
+
+        try await MCPSharedServerTestLease.shared.withLease { _ in
+            weak var releasedFixture: ContextBuilderRunFixture?
+            weak var releasedPeer: ContextBuilderRunFixture?
+            var chatsRoot: URL?
+            // The peer window watches the scenario's chat storage like the scenario's own window,
+            // and a cleanup of its own closes it after the scenario's cleanup has run.
+            let peerCleanup = FixtureCleanup()
+            try await peerCleanup.perform(operation: {
+                var workspace: WorkspaceModel?
+                let cleanup = FixtureCleanup()
+                try await cleanup.perform(operation: {
+                    let fixture = try await ContextBuilderRunFixture.make(cleanup: cleanup)
+                    releasedFixture = fixture
+                    let peer = try await fixture.openPeerWindow(cleanup: peerCleanup)
+                    releasedPeer = peer
+                    try await fixture.saveChatsInTemporaryDirectory()
+                    chatsRoot = ChatDataService.test_workspaceRootURL()
+                    workspace = fixture.window.workspaceManager.workspaces.first { $0.id == fixture.workspaceID }
+                })
+                let root = try XCTUnwrap(chatsRoot)
+                XCTAssertEqual(ChatDataService.test_workspaceRootURL(), root)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+
+                // Saved only where the scenario's chats go, never into the profile's own storage.
+                let resolvedRoot = ChatDataService.test_workspaceRootURL()
+                guard resolvedRoot == root else {
+                    return XCTFail("A chat saved now would go to \(resolvedRoot.path), so none is saved")
+                }
+                let saved = try await ChatDataService().saveChatSession(
+                    ChatSession(workspaceID: workspace?.id, name: "Saved after the scenario's cleanup"),
+                    for: XCTUnwrap(workspace)
+                )
+                let rootPath = root.standardizedFileURL.path
+                let savedPath = saved.standardizedFileURL.path
+                XCTAssertTrue(savedPath.hasPrefix(rootPath + "/"), savedPath)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: savedPath))
+                let profilePath = ChatDataService.defaultWorkspaceRootURL().standardizedFileURL.path
+                    + savedPath.dropFirst(rootPath.count)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: profilePath), profilePath)
+            }, afterCleanup: {
+                XCTAssertEqual(ChatDataService.test_workspaceRootURL(), ChatDataService.defaultWorkspaceRootURL())
+                if let chatsRoot {
+                    XCTAssertFalse(FileManager.default.fileExists(atPath: chatsRoot.path))
+                }
+                XCTAssertNil(releasedFixture, "The scenario's fixture is still held")
+                XCTAssertNil(releasedPeer, "The peer window's fixture is still held")
+            })
+        }
+    }
+
+    /// While an earlier scenario's chat storage stays redirected because a window could still
+    /// save a chat into it, a later scenario cannot redirect chat storage: the install fails,
+    /// naming the earlier scenario, and leaves chat storage where it was. Once that window's
+    /// cleanup has released the earlier redirect, the later scenario's install succeeds.
+    func testChatStorageInstallRefusesWhileAnEarlierScenarioStaysRedirected() async throws {
+        let pendingWriters = ["a window could still save a chat", "a provider reply was still pending"]
+        let reported = XCTExpectedFailure.Options()
+        reported.issueMatcher = { issue in pendingWriters.contains { issue.compactDescription.contains($0) } }
+        XCTExpectFailure("The earlier scenario's cleanup reports the window that can still save a chat", options: reported)
+        let earlierScenario = "earlierScenario"
+        let laterScenario = "laterScenario"
+        let refusal = "Chat storage is still redirected for \(#fileID) \(earlierScenario):"
+        let refused = XCTExpectedFailure.Options()
+        refused.issueMatcher = { issue in
+            issue.compactDescription.contains(refusal) && !issue.compactDescription.contains(laterScenario)
+        }
+        XCTExpectFailure("The later scenario's install names the earlier scenario", options: refused)
+
+        try await MCPSharedServerTestLease.shared.withLease { _ in
+            var earlierRoot: URL?
+            var laterRoot: URL?
+            let laterCleanup = FixtureCleanup()
+            try await laterCleanup.perform(operation: {
+                var later: ContextBuilderRunFixture?
+                // The peer window keeps the earlier redirect in place until a cleanup of its own,
+                // which runs after the earlier scenario's, closes it.
+                let peerCleanup = FixtureCleanup()
+                try await peerCleanup.perform(operation: {
+                    let earlierCleanup = FixtureCleanup()
+                    try await earlierCleanup.perform(operation: {
+                        let earlier = try await ContextBuilderRunFixture.make(cleanup: earlierCleanup)
+                        _ = try await earlier.openPeerWindow(cleanup: peerCleanup)
+                        try await earlier.saveChatsInTemporaryDirectory(function: earlierScenario)
+                        earlierRoot = ChatDataService.test_workspaceRootURL()
+                    })
+                    let root = try XCTUnwrap(earlierRoot)
+                    let laterFixture = try await ContextBuilderRunFixture.make(cleanup: laterCleanup)
+                    later = laterFixture
+                    do {
+                        try await laterFixture.saveChatsInTemporaryDirectory(function: laterScenario)
+                        XCTFail("The later scenario redirected chat storage over the earlier one")
+                    } catch is ContextBuilderRunFixture.ScenarioAborted {}
+                    XCTAssertEqual(ChatDataService.test_workspaceRootURL(), root)
+                    XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+                })
+                let releasedRoot = try XCTUnwrap(earlierRoot)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: releasedRoot.path))
+                try await XCTUnwrap(later).saveChatsInTemporaryDirectory(function: laterScenario)
+                let root = ChatDataService.test_workspaceRootURL()
+                laterRoot = root
+                XCTAssertNotEqual(root, releasedRoot)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+            }, afterCleanup: {
+                XCTAssertEqual(ChatDataService.test_workspaceRootURL(), ChatDataService.defaultWorkspaceRootURL())
+                if let laterRoot {
+                    XCTAssertFalse(FileManager.default.fileExists(atPath: laterRoot.path))
+                }
+            })
+        }
+    }
+
     /// A record that has lost its tab is retired without publishing into the tab's current
     /// session, and still hands its own waiter the exact tab it had committed. The run that took
     /// the tab over keeps its claim, its active slot, and its session untouched. A waiter that is
