@@ -1409,6 +1409,9 @@ actor ServerNetworkManager {
         private var debugShouldSuspendNextPendingPolicyCommit = false
         private var debugPendingPolicyCommitIsSuspended = false
         private var debugPendingPolicyCommitResumeWaiters: [CheckedContinuation<Void, Never>] = []
+        private var debugShouldSuspendNextPendingPolicyRoutedNotification = false
+        private var debugPendingPolicyRoutedNotificationIsSuspended = false
+        private var debugPendingPolicyRoutedNotificationResumeWaiters: [CheckedContinuation<Void, Never>] = []
         private var debugShouldSuspendNextConfirmOrFence = false
         private var debugConfirmOrFenceIsSuspended = false
         private var debugConfirmOrFenceResumeWaiters: [CheckedContinuation<Void, Never>] = []
@@ -2760,7 +2763,13 @@ actor ServerNetworkManager {
             return nil
         }
 
-        runIDByConnectionID[connectionID] = resolved.runID
+        // A removal clears this connection's entry before the window lets go of the mapping read
+        // above, and clears it once. The mapping is cached only for a connection this manager
+        // still holds and is not removing, so a lookup that overlaps a removal leaves no entry
+        // behind, whether it resumes here during the removal or after it.
+        if connections[connectionID] != nil, !connectionsBeingRemoved.contains(connectionID) {
+            runIDByConnectionID[connectionID] = resolved.runID
+        }
         presentationWindowByRun[resolved.runID] = resolved.windowID
         return resolved.runID
     }
@@ -7463,6 +7472,33 @@ actor ServerNetworkManager {
         return armed
     }
 
+    /// Whether `runID` has exactly one pending policy and no connection has reserved it. A reserved
+    /// policy belongs to an admission that is in flight, and stays in the table until that admission
+    /// commits or rolls back, so it cannot cover a process the run relaunches meanwhile. A policy
+    /// past its lifetime is excluded, unless it is retained until settlement.
+    func hasSoleUnreservedPendingPolicy(
+        for clientName: String,
+        runID: UUID,
+        windowID: Int? = nil
+    ) -> Bool {
+        let now = Date()
+        let keys = matchingClientKeys(for: clientName, in: Array(pendingPoliciesByClient.keys))
+        var soleMatch: ClientConnectionPolicy?
+        for key in keys {
+            guard let queue = pendingPoliciesByClient[key] else { continue }
+            for policy in queue {
+                guard policy.runID == runID else { continue }
+                if let windowID, policy.windowID != windowID { continue }
+                guard policy.prunesOnlyAfterSettlement || now.timeIntervalSince(policy.createdAt) <= policy.ttl
+                else { continue }
+                guard soleMatch == nil else { return false }
+                soleMatch = policy
+            }
+        }
+        guard let soleMatch else { return false }
+        return soleMatch.reservationConnectionID == nil
+    }
+
     #if DEBUG
         func debugSuspendNextPendingPolicyObservation() {
             debugShouldSuspendNextPendingPolicyObservation = true
@@ -7519,6 +7555,24 @@ actor ServerNetworkManager {
             debugPendingPolicyCommitIsSuspended = false
             let waiters = debugPendingPolicyCommitResumeWaiters
             debugPendingPolicyCommitResumeWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+
+        /// Holds the next admitted connection after its one-shot policy is consumed and its route
+        /// is committed, before the run's routing waiters are told it is routed.
+        func debugSuspendNextPendingPolicyRoutedNotification() {
+            debugShouldSuspendNextPendingPolicyRoutedNotification = true
+        }
+
+        func debugIsPendingPolicyRoutedNotificationSuspended() -> Bool {
+            debugPendingPolicyRoutedNotificationIsSuspended
+        }
+
+        func debugResumePendingPolicyRoutedNotification() {
+            debugShouldSuspendNextPendingPolicyRoutedNotification = false
+            debugPendingPolicyRoutedNotificationIsSuspended = false
+            let waiters = debugPendingPolicyRoutedNotificationResumeWaiters
+            debugPendingPolicyRoutedNotificationResumeWaiters.removeAll()
             waiters.forEach { $0.resume() }
         }
 
@@ -7582,6 +7636,16 @@ actor ServerNetworkManager {
                 debugPendingPolicyCommitResumeWaiters.append(continuation)
             }
             debugPendingPolicyCommitIsSuspended = false
+        }
+
+        private func debugSuspendPendingPolicyRoutedNotificationIfNeeded() async {
+            guard debugShouldSuspendNextPendingPolicyRoutedNotification else { return }
+            debugShouldSuspendNextPendingPolicyRoutedNotification = false
+            debugPendingPolicyRoutedNotificationIsSuspended = true
+            await withCheckedContinuation { continuation in
+                debugPendingPolicyRoutedNotificationResumeWaiters.append(continuation)
+            }
+            debugPendingPolicyRoutedNotificationIsSuspended = false
         }
 
         private func debugSuspendConfirmOrFenceIfNeeded() async {
@@ -10768,6 +10832,9 @@ actor ServerNetworkManager {
             )
         }
         if requireRunRouting, let runID = policy.runID {
+            #if DEBUG
+                await debugSuspendPendingPolicyRoutedNotificationIfNeeded()
+            #endif
             await MCPRoutingWaiter.notifyRouted(runID: runID)
         }
 
@@ -11634,18 +11701,42 @@ actor ServerNetworkManager {
                             )
                         }
                         if let logicalBinding {
-                            dispatchTabContextHint = MCPServerViewModel.TabContextHint(
-                                tabID: logicalBinding.logicalContext.tabID,
-                                workspaceID: logicalBinding.logicalContext.workspaceID,
-                                windowID: logicalBinding.windowID
-                            )
+                            // A window route names a window, not a tab: the tab resolved from it is
+                            // whichever one that window shows, which the caller never asked for. A
+                            // connection holding an authoritative tab binding in that window keeps
+                            // its bound tab, so the shown tab is not passed on as a tab hint there.
+                            let routedWindowID = logicalBinding.windowID
+                            let tabCameFromWindowRoute = extractedContextID == nil && extractedTabID == nil
+                                && extractedWindowID != nil
+                            let boundTabOwnsWindowRoute = tabCameFromWindowRoute
+                                ? await MainActor.run {
+                                    guard let window = WindowStatesManager.shared.window(withID: routedWindowID) else {
+                                        return false
+                                    }
+                                    let binding = window.mcpServer.connectionBindingSnapshot(forConnection: connectionID)
+                                    return binding.explicitlyBound || binding.runID != nil
+                                }
+                                : false
+                            if !boundTabOwnsWindowRoute {
+                                dispatchTabContextHint = MCPServerViewModel.TabContextHint(
+                                    tabID: logicalBinding.logicalContext.tabID,
+                                    workspaceID: logicalBinding.logicalContext.workspaceID,
+                                    windowID: logicalBinding.windowID
+                                )
+                            }
                             preResolvedWindowID = logicalBinding.windowID
                             if Self.shouldPersistResolvedLogicalContextWindowMapping(for: toolName) {
                                 await setConnectionWindowMapping(connectionID, windowID: logicalBinding.windowID)
                             }
-                            connectionLog(
-                                "Tool call: resolved logical context_id=\(logicalBinding.logicalContext.tabID) workspace=\(logicalBinding.logicalContext.workspaceName) window=\(logicalBinding.windowID)"
-                            )
+                            if boundTabOwnsWindowRoute {
+                                connectionLog(
+                                    "Tool call: window route kept the connection's bound tab; shown context_id=\(logicalBinding.logicalContext.tabID) in window=\(logicalBinding.windowID) was not passed as a tab hint"
+                                )
+                            } else {
+                                connectionLog(
+                                    "Tool call: resolved logical context_id=\(logicalBinding.logicalContext.tabID) workspace=\(logicalBinding.logicalContext.workspaceName) window=\(logicalBinding.windowID)"
+                                )
+                            }
                         }
                     } catch {
                         let routePolicy = await effectivePolicyState(for: connectionID)

@@ -134,7 +134,7 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
         let completion = await fixture.window.mcpServer.commitContextBuilderTabContext(
             connectionID: fixture.connectionID,
             expectedRunID: fixture.runID,
-            isStillCurrent: { true }
+            authority: .init(ownsCommit: { true }, didWriteTab: { _ in })
         )
         XCTAssertEqual(completion.outcome, .committed)
         XCTAssertEqual(completion.committedTab?.tab.selection, discovered)
@@ -185,7 +185,7 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
         let failedCommit = await fixture.window.mcpServer.commitContextBuilderTabContext(
             connectionID: fixture.connectionID,
             expectedRunID: fixture.runID,
-            isStillCurrent: { true }
+            authority: .init(ownsCommit: { true }, didWriteTab: { _ in })
         )
 
         guard case .missingFinalContext = failedCommit.outcome else {
@@ -297,7 +297,7 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
         let result = await fixture.window.mcpServer.commitContextBuilderTabContext(
             connectionID: fixture.connectionID,
             expectedRunID: fixture.runID,
-            isStillCurrent: { true }
+            authority: .init(ownsCommit: { true }, didWriteTab: { _ in })
         )
 
         XCTAssertEqual(result.outcome, .committed)

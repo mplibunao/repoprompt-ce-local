@@ -3307,6 +3307,73 @@ final class MCPServerViewModel: ObservableObject {
         }
     }
 
+    /// Join of ``requireServerReadyForAgentBootstrap()`` for one Context Builder start, which the
+    /// caller can leave.
+    ///
+    /// The caller leaves when readiness is delivered or when it is cancelled itself. Leaving cancels
+    /// only this caller's join. The enable transition is a separate task shared by every start that
+    /// joined it, so it keeps serving the others, and a join cancelled before it reached the
+    /// transition starts none once its caller has gone.
+    ///
+    /// - Throws: `CancellationError` when the caller is cancelled, including a caller cancelled
+    ///   after its wait was settled and before it resumed; otherwise whatever
+    ///   ``requireServerReadyForAgentBootstrap()`` throws.
+    func requireContextBuilderReadiness() async throws {
+        try Task.checkCancellation()
+        let waiter = ReadinessJoinWaiter()
+        let join = Task { @MainActor [weak self] in
+            do {
+                guard let self else { throw MCPBootstrapReadinessError.readinessHostUnavailable }
+                try await requireServerReadyForAgentBootstrap()
+                waiter.settle(.success(()))
+            } catch {
+                waiter.settle(.failure(error))
+            }
+        }
+        defer {
+            join.cancel()
+        }
+        let delivered: Result<Void, Error>
+        do {
+            try await withTaskCancellationHandler {
+                try await waiter.value()
+            } onCancel: {
+                Task { @MainActor in
+                    waiter.settle(.failure(CancellationError()))
+                }
+            }
+            delivered = .success(())
+        } catch {
+            delivered = .failure(error)
+        }
+        // The join can settle the wait before a cancellation that still reaches the caller ahead of
+        // its resumption. A cancelled start reports neither result.
+        try Task.checkCancellation()
+        try delivered.get()
+    }
+
+    /// One caller's place in a readiness join. The first settlement is the caller's result; later
+    /// ones are dropped.
+    @MainActor
+    private final class ReadinessJoinWaiter {
+        private var result: Result<Void, Error>?
+        private var continuation: CheckedContinuation<Void, Error>?
+
+        func settle(_ result: Result<Void, Error>) {
+            guard self.result == nil else { return }
+            self.result = result
+            continuation?.resume(with: result)
+            continuation = nil
+        }
+
+        func value() async throws {
+            if let result {
+                return try result.get()
+            }
+            try await withCheckedThrowingContinuation { continuation = $0 }
+        }
+    }
+
     /// Readiness for a window whose own catalog is already registered under the current intent
     /// still requires the application catalog, which a window transition would otherwise ensure.
     private func confirmApplicationCatalogForEnabledWindow() async throws {

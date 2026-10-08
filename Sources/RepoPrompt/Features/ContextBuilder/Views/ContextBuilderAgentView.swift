@@ -106,6 +106,12 @@ struct ContextBuilderAgentView: View {
         return viewModel.tabsWithActiveContextBuilderRun.contains(tabID)
     }
 
+    /// Whether an earlier operation still holds this tab, so pressing Run could not start one yet
+    private var isTabHeldAgainstNewRun: Bool {
+        guard let tabID = subjectTabID else { return false }
+        return viewModel.tabsHeldAgainstNewRun.contains(tabID)
+    }
+
     private var activeRunBehavior: ContextBuilderRunBehavior? {
         guard isContextBuilderRunningForTab else { return nil }
         return viewModel.activeRunBehavior(for: subjectTabID)
@@ -139,8 +145,8 @@ struct ContextBuilderAgentView: View {
         case .generating:
             return false
         default:
-            // Also block if Context Builder is running for this tab
-            return !isContextBuilderRunningForTab
+            // Also block if Context Builder is running for this tab or another operation holds it
+            return !isContextBuilderRunningForTab && viewModel.admitsManualFollowUp(forTabID: tabID)
         }
     }
 
@@ -159,6 +165,9 @@ struct ContextBuilderAgentView: View {
                     return "Will auto-generate when Context Builder completes"
                 }
                 return "Wait for Context Builder to complete"
+            }
+            if !viewModel.admitsManualFollowUp(forTabID: tabID) {
+                return "Wait for this tab's current operation to finish"
             }
             if !hasPromptForPlan {
                 return "Run Context Builder first to generate a prompt"
@@ -782,7 +791,9 @@ struct ContextBuilderAgentView: View {
     /// Always uses headless generation so we can offer "View in Chat" or "Use as Prompt" options.
     private func generatePlan() {
         guard let tabID = viewModel.currentTabID else { return }
-        guard viewModel.effectivePrompt(for: tabID) != nil else { return }
+        guard viewModel.effectivePrompt(for: tabID) != nil,
+              viewModel.admitsManualFollowUp(forTabID: tabID)
+        else { return }
 
         let mode = selectedFollowUpType.headlessMode
         let chatName = selectedFollowUpType.buttonLabel
@@ -922,7 +933,7 @@ struct ContextBuilderAgentView: View {
                 activeRunTokenBudget: activeRunBehavior?.tokenBudget,
                 resetBehaviorSettings: viewModel.resetContextBuilderBehaviorSettings,
                 isRunning: isContextBuilderRunningForTab,
-                isDisabled: !isContextBuilderRunningForTab && viewModel.isAgentBusy,
+                isDisabled: !isContextBuilderRunningForTab && (viewModel.isAgentBusy || isTabHeldAgainstNewRun),
                 isBusy: viewModel.isAgentBusy,
                 isCancelling: viewModel.isCancelling,
                 isMCPControlled: viewModel.isMCPControlledRun,

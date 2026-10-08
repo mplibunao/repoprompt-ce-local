@@ -1,6 +1,6 @@
 import Foundation
 
-final class CodexExecAgentProvider: HeadlessAgentProvider {
+final class CodexExecAgentProvider: RelaunchingHeadlessAgentProvider {
     private enum StreamRetryAction {
         case none
         case modelFallback(String)
@@ -16,6 +16,7 @@ final class CodexExecAgentProvider: HeadlessAgentProvider {
     private let toolTracking = AgentToolTrackingController()
     private var streamTask: Task<Void, Never>?
     private var codexItemInvocationIDs: [String: UUID] = [:]
+    private var relaunchAdmissionSource: HeadlessAgentRelaunchAdmissionSource?
 
     private var enableDebugLogging: Bool {
         config.enableDebugLogging
@@ -180,6 +181,10 @@ final class CodexExecAgentProvider: HeadlessAgentProvider {
 
     // MARK: - Streaming
 
+    func setRelaunchAdmissionSource(_ source: @escaping HeadlessAgentRelaunchAdmissionSource) {
+        relaunchAdmissionSource = source
+    }
+
     func streamAgentMessage(_ message: AgentMessage, runID: UUID? = nil) async throws -> AsyncThrowingStream<AIStreamResult, Error> {
         AsyncThrowingStream { continuation in
             // Cancel any previous lingering task (defensive)
@@ -193,6 +198,7 @@ final class CodexExecAgentProvider: HeadlessAgentProvider {
                     var attemptModelString = self.config.modelString
                     var didRetryBrokenServer = false
                     var didRetryModelFallback = false
+                    var relaunchAdmission: ACPFollowUpRespawnAdmission?
 
                     while attemptNumber < maxAttempts {
                         attemptNumber += 1
@@ -204,6 +210,26 @@ final class CodexExecAgentProvider: HeadlessAgentProvider {
                         do {
                             if self.enableDebugLogging {
                                 print("[DEBUG] CodexExec: Starting streamAgentMessage attempt \(attemptNumber) with runID: \(runID?.uuidString ?? "auto-generated"), model: \(selectedModelString ?? "default")")
+                            }
+
+                            if attemptNumber > 1, let runID, let relaunchAdmissionSource = self.relaunchAdmissionSource {
+                                // This attempt's process is a new one, so its MCP helper carries
+                                // no session token of the run and joins it only on a policy armed
+                                // here, before the process starts. The policy of the attempt
+                                // before it is settled first, so each admits one process.
+                                await relaunchAdmission?.settle(.failed)
+                                relaunchAdmission = nil
+                                switch await relaunchAdmissionSource(runID) {
+                                case .coveredByRunPolicy:
+                                    break
+                                case let .armed(admission):
+                                    relaunchAdmission = admission
+                                case .unavailable:
+                                    // A cancelled run reports its cancellation, not this.
+                                    try Task.checkCancellation()
+                                    throw HeadlessAgentRelaunchError.admissionUnavailable
+                                }
+                                try Task.checkCancellation()
                             }
 
                             let context = try await self.prepare(runID: runID)
@@ -493,18 +519,21 @@ final class CodexExecAgentProvider: HeadlessAgentProvider {
                                 continue
                             }
 
+                            await relaunchAdmission?.settle(.completed)
                             continuation.finish()
                             return
                         } catch is CancellationError {
                             if self.enableDebugLogging {
                                 print("[DEBUG] CodexExec: Task was cancelled")
                             }
+                            await relaunchAdmission?.settle(.cancelled)
                             continuation.finish(throwing: AIProviderError.invalidConfiguration(detail: "Codex Exec run cancelled."))
                             return
                         } catch {
                             if self.enableDebugLogging {
                                 print("[DEBUG] CodexExec: ERROR - \(error)")
                             }
+                            await relaunchAdmission?.settle(.failed)
                             continuation.finish(throwing: error)
                             return
                         }

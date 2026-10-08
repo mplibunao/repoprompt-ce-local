@@ -198,6 +198,40 @@ import XCTest
             }
         }
 
+        /// A Context Builder start cancelled while the shared enable transition is pending leaves at
+        /// once, and the transition goes on to serve the start that stayed.
+        func testCancelledContextBuilderReadinessJoinLeavesAloneWhileThePeerIsStillServed() async throws {
+            try await withReadinessWindow { window, _ in
+                let server = window.mcpServer
+                let transition = ReadinessTestGate()
+                server.setAfterWindowToolRegistrationBeforeRetentionForTesting {
+                    await transition.arriveAndWait()
+                }
+                // Released up front, so arriving only records that the cancelled start has left.
+                let left = ReadinessTestGate()
+                await left.release()
+                let cancelled = Task { @MainActor in
+                    do {
+                        try await server.requireContextBuilderReadiness()
+                        XCTFail("A cancelled start must not report readiness.")
+                    } catch {
+                        XCTAssertTrue(error is CancellationError, "\(error)")
+                    }
+                    await left.arriveAndWait()
+                }
+                let peer = Task { @MainActor in try await server.requireContextBuilderReadiness() }
+                _ = await awaitSharedTransition(at: transition, on: server, joiners: 1)
+
+                cancelled.cancel()
+                let leftWhileParked = await left.waitUntilEntered(timeout: .seconds(5))
+                XCTAssertTrue(leftWhileParked, "The cancelled start must leave while the transition is pending.")
+                await transition.release()
+                try await peer.value
+                XCTAssertTrue(server.windowToolsEnabled)
+                await cancelled.value
+            }
+        }
+
         func testRegistrationFailureReachesEveryJoinedCallerAndLaterEnsureRecovers() async throws {
             try await withReadinessWindow { window, _ in
                 let server = window.mcpServer

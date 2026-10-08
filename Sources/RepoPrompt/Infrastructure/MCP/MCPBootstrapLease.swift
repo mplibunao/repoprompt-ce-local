@@ -522,7 +522,7 @@ actor MCPBootstrapLease {
 
     private enum RoutingWaitSelection {
         case absolute(timeoutMs: Int)
-        case adaptive(MCPRoutingWaitPolicy)
+        case adaptive(MCPRoutingWaitPolicy, clock: MCPRoutingWaitClock?)
         case indefinite
     }
 
@@ -540,13 +540,15 @@ actor MCPBootstrapLease {
         return outcome.routed
     }
 
-    /// Typed adaptive API retained for callers that require bounded readiness.
+    /// Typed adaptive API for callers that require bounded readiness. `clock` drives this wait's
+    /// deadlines; `nil` uses the routing waiter's own clock.
     func releaseWhenRouted(
         waitPolicy: MCPRoutingWaitPolicy,
+        clock: MCPRoutingWaitClock? = nil,
         progressReporter: MCPBootstrapRoutingProgressReporter? = nil
     ) async -> MCPRoutingWaitOutcome {
         await releaseRouting(
-            selection: .adaptive(waitPolicy),
+            selection: .adaptive(waitPolicy, clock: clock),
             progressReporter: progressReporter
         )
     }
@@ -570,7 +572,7 @@ actor MCPBootstrapLease {
     }
 
     /// Resolves a provider-boundary race through the same route authority used by bounded waits.
-    /// Re-signaling a confirmed route prevents notification lag from parking the indefinite waiter.
+    /// Re-signaling a confirmed route prevents notification lag from parking the run's routing waiter.
     func resolveRouteAuthorityAtProviderCompletion() async -> MCPRunRouteAuthorityDecision {
         let decision = await routeAuthorityResolver(spec)
         if decision == .committed {
@@ -591,16 +593,20 @@ actor MCPBootstrapLease {
 
         let timeoutMs: Int
         let waitPolicy: MCPRoutingWaitPolicy?
+        let waitClock: MCPRoutingWaitClock?
         switch selection {
         case let .absolute(value):
             timeoutMs = value
             waitPolicy = nil
-        case let .adaptive(policy):
+            waitClock = nil
+        case let .adaptive(policy, clock):
             timeoutMs = 0
             waitPolicy = policy
+            waitClock = clock
         case .indefinite:
             timeoutMs = 0
             waitPolicy = nil
+            waitClock = nil
         }
 
         if case .indefinite = selection {
@@ -617,6 +623,7 @@ actor MCPBootstrapLease {
             gateID: spec.gateID,
             timeoutMs: timeoutMs,
             waitPolicy: waitPolicy,
+            waitClock: waitClock,
             progressLifecycle: progressLifecycle
         )
 

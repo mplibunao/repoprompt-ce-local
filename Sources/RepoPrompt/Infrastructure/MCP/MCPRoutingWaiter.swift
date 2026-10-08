@@ -63,8 +63,9 @@ actor MCPRoutingWaiter {
     private let clock: MCPRoutingWaitClock
     private let beforeWaiterEnrollment: (@Sendable () async -> Void)?
 
-    /// The shared production waiter uses ``ContinuousClock``. Manual timing and enrollment gates
-    /// are accepted only by explicitly constructed waiters used by deterministic tests.
+    /// The shared production waiter uses ``ContinuousClock``; an adaptive wait may name its own
+    /// deadline clock. Enrollment gates are accepted only by explicitly constructed waiters used by
+    /// deterministic tests.
     init(
         clock: MCPRoutingWaitClock = .continuous(),
         beforeWaiterEnrollment: (@Sendable () async -> Void)? = nil
@@ -87,6 +88,7 @@ actor MCPRoutingWaiter {
         let id: UUID
         let continuation: CheckedContinuation<MCPRoutingWaitOutcome, Never>
         let adaptiveGrace: Duration?
+        let deadlineSleep: @Sendable (Duration) async throws -> Void
         var deadlineGeneration: UInt64
         var timeoutTask: Task<Void, Never>?
         let progressLifecycle: MCPBootstrapRoutingProgressLifecycle?
@@ -142,15 +144,21 @@ actor MCPRoutingWaiter {
             initialTimeout: duration,
             adaptiveGrace: nil,
             initialPhase: .absolute,
+            deadlineSleep: clock.sleep,
             progressLifecycle: progressLifecycle
         )
     }
 
     /// Adaptive API. The first exact matching-connection observation replaces the absence
     /// deadline with one bounded grace deadline measured from that first observation.
+    ///
+    /// `deadlineClock` drives only this waiter's deadlines, through its `sleep`; `nil` uses the
+    /// waiter's own clock. The first observation is timestamped once for every waiter of the run,
+    /// so the time already elapsed since it is always measured on the waiter's own clock.
     func waitForRoutingOutcome(
         runID: UUID,
         policy: MCPRoutingWaitPolicy,
+        deadlineClock: MCPRoutingWaitClock? = nil,
         progressLifecycle: MCPBootstrapRoutingProgressLifecycle? = nil
     ) async -> MCPRoutingWaitOutcome {
         await waitForRoutingOutcome(
@@ -158,6 +166,7 @@ actor MCPRoutingWaiter {
             initialTimeout: policy.noConnectionTimeout,
             adaptiveGrace: policy.observedConnectionGrace,
             initialPhase: .beforeConnection,
+            deadlineSleep: (deadlineClock ?? clock).sleep,
             progressLifecycle: progressLifecycle
         )
     }
@@ -167,6 +176,7 @@ actor MCPRoutingWaiter {
         initialTimeout: Duration?,
         adaptiveGrace: Duration?,
         initialPhase: DeadlinePhase,
+        deadlineSleep: @escaping @Sendable (Duration) async throws -> Void,
         progressLifecycle: MCPBootstrapRoutingProgressLifecycle?
     ) async -> MCPRoutingWaitOutcome {
         if Task.isCancelled {
@@ -237,7 +247,8 @@ actor MCPRoutingWaiter {
                         waiterID: waiterID,
                         generation: generation,
                         phase: phase,
-                        after: deadline
+                        after: deadline,
+                        sleep: deadlineSleep
                     )
                 } else {
                     nil
@@ -247,6 +258,7 @@ actor MCPRoutingWaiter {
                         id: waiterID,
                         continuation: continuation,
                         adaptiveGrace: adaptiveGrace,
+                        deadlineSleep: deadlineSleep,
                         deadlineGeneration: generation,
                         timeoutTask: timeoutTask,
                         progressLifecycle: progressLifecycle
@@ -314,7 +326,8 @@ actor MCPRoutingWaiter {
                 waiterID: waiterID,
                 generation: generation,
                 phase: .afterConnection,
-                after: max(.zero, grace)
+                after: max(.zero, grace),
+                sleep: state.continuations[index].deadlineSleep
             )
         }
         waitersByRunID[runID] = state
@@ -383,10 +396,10 @@ actor MCPRoutingWaiter {
         waiterID: UUID,
         generation: UInt64,
         phase: DeadlinePhase,
-        after duration: Duration
+        after duration: Duration,
+        sleep: @escaping @Sendable (Duration) async throws -> Void
     ) -> Task<Void, Never> {
-        let sleep = clock.sleep
-        return Task { [weak self] in
+        Task { [weak self] in
             do {
                 try await sleep(duration)
                 await self?.handleDeadline(
@@ -518,11 +531,13 @@ extension MCPRoutingWaiter {
     static func waitForRoutingOutcome(
         runID: UUID,
         policy: MCPRoutingWaitPolicy,
+        deadlineClock: MCPRoutingWaitClock? = nil,
         progressLifecycle: MCPBootstrapRoutingProgressLifecycle? = nil
     ) async -> MCPRoutingWaitOutcome {
         await shared.waitForRoutingOutcome(
             runID: runID,
             policy: policy,
+            deadlineClock: deadlineClock,
             progressLifecycle: progressLifecycle
         )
     }

@@ -393,58 +393,8 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
         )
         let contextBuilderVM = targetWindow.contextBuilderAgentViewModel
 
-        if tabResolution.bindCaller, let connectionID {
-            let clientName = await ServerNetworkManager.shared.clientIdentifier(forConnection: connectionID)
-            try dependencies.execution.bindTabForConnection(
-                connectionID,
-                clientName,
-                finalTabID,
-                resolvedIdentity.workspaceID,
-                targetWindow.windowID
-            )
-        }
-
-        let targetMetadata = MCPServerViewModel.RequestMetadata(
-            connectionID: connectionID ?? metadata.connectionID,
-            clientName: metadata.clientName,
-            windowID: targetWindow.windowID,
-            runPurpose: metadata.runPurpose,
-            tabContextHint: MCPServerViewModel.TabContextHint(
-                tabID: resolvedIdentity.tabID,
-                workspaceID: resolvedIdentity.workspaceID,
-                windowID: targetWindow.windowID
-            ),
-            explicitWindowRoutingHint: metadata.explicitWindowRoutingHint
-        )
-        guard try await dependencies.files.drainReadFileAutoSelection(
-            targetMetadata,
-            .mirroredSelectionAndMetrics
-        ) == .completed else {
-            throw CancellationError()
-        }
-        let runAuthority = try await contextBuilderVM.resolveMCPRunAuthority(
-            identity: resolvedIdentity,
-            nestedTabContext: tabResolution.nestedTabContext,
-            workspaceContext: workspaceContext,
-            responseType: responseType?.rawValue
-        )
-
-        // swiftformat:disable conditionalAssignment
-        let capturedOracleExportDestination: OracleExportDestination?
-        if exportResponse {
-            // Export into the exact root scope selected by Context Builder's final tab resolution.
-            // Ambient request metadata may still describe a different active tab.
-            capturedOracleExportDestination = try dependencies.execution.makeOracleExportDestination(
-                workspace,
-                targetWindow.windowID,
-                finalTabID,
-                lookupContext
-            )
-        } else {
-            capturedOracleExportDestination = nil
-        }
-        // swiftformat:enable conditionalAssignment
-
+        // Everything above only reads. The claim comes before the first step that changes caller
+        // or tab state, so a call refused for a busy tab leaves both exactly as it found them.
         let tabIDForCleanup = finalTabID
         let mcpControlToken = try await MainActor.run {
             try contextBuilderVM.beginMCPControlledRun(
@@ -455,14 +405,82 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
             )
         }
 
-        return try await AsyncScope.withCleanup({}, cleanup: {
-            await MainActor.run {
-                contextBuilderVM.clearMCPControlledRun(
+        // Everything the admitted call does, run as one piece of work: until its run is registered,
+        // closing the tab or the window cancels that work wherever it is suspended. Cancelling only
+        // signals the step it is suspended in; the cleanup below runs once the work has unwound.
+        // The auto-selection drain ends when cancelled. Provider validation is shared with other
+        // callers and does not respond to this call's cancellation, and a stage-progress send has
+        // no cancellation-responsive delivery, so a call cancelled in either unwinds when that
+        // step returns.
+        let admittedCall: @MainActor () async throws -> ContextBuilderToolResult = {
+            // The tab can close, or the window can start closing, during any suspension, including
+            // the one between the claim and this work. Each step that changes state first confirms
+            // this call still owns the tab. The check is synchronous on the main actor, so nothing
+            // can run between it and a step that starts in the same turn.
+            let requireControlOwnership: @MainActor @Sendable () throws -> Void = {
+                try contextBuilderVM.requireMCPControlOwnership(
                     forTabID: tabIDForCleanup,
                     controlToken: mcpControlToken
                 )
             }
-        }) {
+            try requireControlOwnership()
+
+            if tabResolution.bindCaller, let connectionID {
+                let clientName = await ServerNetworkManager.shared.clientIdentifier(forConnection: connectionID)
+                try requireControlOwnership()
+                try dependencies.execution.bindTabForConnection(
+                    connectionID,
+                    clientName,
+                    finalTabID,
+                    resolvedIdentity.workspaceID,
+                    targetWindow.windowID
+                )
+            }
+
+            let targetMetadata = MCPServerViewModel.RequestMetadata(
+                connectionID: connectionID ?? metadata.connectionID,
+                clientName: metadata.clientName,
+                windowID: targetWindow.windowID,
+                runPurpose: metadata.runPurpose,
+                tabContextHint: MCPServerViewModel.TabContextHint(
+                    tabID: resolvedIdentity.tabID,
+                    workspaceID: resolvedIdentity.workspaceID,
+                    windowID: targetWindow.windowID
+                ),
+                explicitWindowRoutingHint: metadata.explicitWindowRoutingHint
+            )
+            try requireControlOwnership()
+            guard try await dependencies.files.drainReadFileAutoSelection(
+                targetMetadata,
+                .mirroredSelectionAndMetrics
+            ) == .completed else {
+                throw CancellationError()
+            }
+            try requireControlOwnership()
+            let runAuthority = try await contextBuilderVM.resolveMCPRunAuthority(
+                identity: resolvedIdentity,
+                nestedTabContext: tabResolution.nestedTabContext,
+                workspaceContext: workspaceContext,
+                responseType: responseType?.rawValue
+            )
+            try requireControlOwnership()
+
+            // swiftformat:disable conditionalAssignment
+            let capturedOracleExportDestination: OracleExportDestination?
+            if exportResponse {
+                // Export into the exact root scope selected by Context Builder's final tab resolution.
+                // Ambient request metadata may still describe a different active tab.
+                capturedOracleExportDestination = try dependencies.execution.makeOracleExportDestination(
+                    workspace,
+                    targetWindow.windowID,
+                    finalTabID,
+                    lookupContext
+                )
+            } else {
+                capturedOracleExportDestination = nil
+            }
+            // swiftformat:enable conditionalAssignment
+
             let wantsResponse = responseType?.wantsResponse ?? false
             let contextBuilderTokenBudget = runAuthority.configuration.effectiveTokenBudget
             let promptManager = targetWindow.promptManager
@@ -798,8 +816,11 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                             stage: "generating",
                             message: "Still generating \(modeLabel)...",
                             timeline: progressTimeline
-                        ) {
-                            try await dependencies.execution.runMCPPlanOrQuestion(
+                        ) { @MainActor in
+                            // The heartbeat suspends before it runs this, so the check belongs
+                            // here, in the turn that starts generation.
+                            try requireControlOwnership()
+                            return try await dependencies.execution.runMCPPlanOrQuestion(
                                 contextBuilderVM,
                                 resolvedIdentity,
                                 tabResolution.agentModeSessionID,
@@ -887,11 +908,13 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                     guard let capturedOracleExportDestination else {
                         throw MCPError.internalError("Missing captured Oracle export destination for context_builder export.")
                     }
+                    try await requireControlOwnership()
                     let exportPath = try await dependencies.execution.resolveDefaultOracleExportPath(
                         exportMode,
                         chatID,
                         capturedOracleExportDestination
                     )
+                    try await requireControlOwnership()
                     let resolvedPath = try await dependencies.execution.writeGeneratedOracleExportFile(
                         exportPath,
                         markdown,
@@ -909,6 +932,19 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                 )
             }
             return try await runContextBuilderAndPlan()
+        }
+
+        return try await AsyncScope.withCleanup({}, cleanup: {
+            await contextBuilderVM.clearMCPControlledRun(
+                forTabID: tabIDForCleanup,
+                controlToken: mcpControlToken
+            )
+        }) {
+            try await contextBuilderVM.performAdmittedMCPCall(
+                forTabID: tabIDForCleanup,
+                controlToken: mcpControlToken,
+                admittedCall
+            )
         }
     }
 

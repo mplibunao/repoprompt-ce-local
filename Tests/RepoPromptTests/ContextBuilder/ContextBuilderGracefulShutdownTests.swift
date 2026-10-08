@@ -80,7 +80,7 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
     func testAppTerminationStopsWaitingForCancellationIgnoringExecutionAfterGrace() async {
         let window = makeWindow()
         let viewModel = window.contextBuilderAgentViewModel
-        viewModel.setAppTerminationFinalContextGraceForTesting(1)
+        viewModel.setCloseSettlementGraceForTesting(1)
         let provider = GatedHeadlessAgentProvider()
         let executionGate = ContextBuilderTestGate()
         let record = makeRecord()
@@ -193,7 +193,7 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
         }
 
         let contextBuilderViewModel = window.contextBuilderAgentViewModel
-        contextBuilderViewModel.setAppTerminationFinalContextGraceForTesting(5_000_000_000)
+        contextBuilderViewModel.setCloseSettlementGraceForTesting(5_000_000_000)
         let provider = GatedHeadlessAgentProvider()
         let finalContextGate = ContextBuilderTestGate()
         let record = makeRecord()
@@ -395,7 +395,7 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
     func testAppTerminationForcesClaimedFinalContextAfterGrace() async {
         let window = makeWindow()
         let viewModel = window.contextBuilderAgentViewModel
-        viewModel.setAppTerminationFinalContextGraceForTesting(1)
+        viewModel.setCloseSettlementGraceForTesting(1)
         let provider = GatedHeadlessAgentProvider()
         let safeBoundaryGate = ContextBuilderTestGate()
         let record = makeRecord()
@@ -580,49 +580,181 @@ private actor ShutdownRecordingNativeController: NativeAgentRuntimeControlling {
 
 @MainActor
 final class ContextBuilderWindowAdmissionTests: XCTestCase {
-    func testSecondTabIsRefusedUntilFirstRunCompletes() async throws {
-        let gate = ContextBuilderTestGate()
-        var providers: [GatedHeadlessAgentProvider] = []
-        let (window, tabIDs) = await makeWindow { _, _, _, _ in
-            let provider = GatedHeadlessAgentProvider(streamGate: gate)
-            providers.append(provider)
-            return provider
-        }
-        addTeardownBlock { @MainActor in
-            _ = await window.mcpServer.setWindowToolsEnabled(false)
-        }
+    private let streamGate = ContextBuilderTestGate()
+    /// Providers in the order their runs started; see `startRun`.
+    private var providers: [GatedHeadlessAgentProvider] = []
+
+    /// Each compose tab admits its own run: two tabs in one window run together, and a tab that
+    /// already runs one refuses a second before it creates a provider.
+    func testTabsInOneWindowRunConcurrentlyAndABusyTabRefusesASecondRun() async throws {
+        let (window, tabIDs) = await makeGatedWindow()
         let viewModel = window.contextBuilderAgentViewModel
+        let first = try await startRun(window, tabID: tabIDs[0])
+        let second = try await startRun(window, tabID: tabIDs[1])
+        XCTAssertNotNil(viewModel.activeRunIDForTesting(tabID: tabIDs[0]))
 
-        let first = Task { try await self.runMCP(window, tabID: tabIDs[0]) }
-        let firstStarted = await waitUntil {
-            providers.count == 1 && viewModel.activeRunIDForTesting(tabID: tabIDs[0]) != nil
-        }
-        XCTAssertTrue(firstStarted)
-
-        let second = Task { try await self.runMCP(window, tabID: tabIDs[1]) }
         do {
-            _ = try await second.value
-            XCTFail("Expected window admission refusal")
+            _ = try await runMCP(window, tabID: tabIDs[0])
+            XCTFail("Expected the busy tab to refuse a second run")
         } catch {
-            XCTAssertTrue(error.localizedDescription.contains("already running in this window"))
+            XCTAssertEqual((error as NSError).code, 2, "Expected the busy-tab refusal, got \(error)")
         }
-        XCTAssertEqual(providers.count, 1)
+        XCTAssertEqual(providers.count, 2)
+        XCTAssertNotNil(viewModel.activeRunIDForTesting(tabID: tabIDs[0]))
 
-        await gate.open()
+        await streamGate.open()
         _ = try await first.value
+        _ = try await second.value
+        let successor = try viewModel.beginMCPControlledRun(forTabID: tabIDs[0], responseType: nil, planModelName: nil)
+        await viewModel.clearMCPControlledRun(forTabID: tabIDs[0], controlToken: successor)
+    }
+
+    /// Closing a tab cancels that tab's run and releases its claim, while the run in the window's
+    /// other tab keeps going to a normal finish.
+    func testClosingATabCancelsOnlyItsOwnRun() async throws {
+        let (window, tabIDs) = await makeGatedWindow()
+        let viewModel = window.contextBuilderAgentViewModel
+        let closing = try await startRun(window, tabID: tabIDs[0])
+        let staying = try await startRun(window, tabID: tabIDs[1])
+
+        let report = await window.promptManager.closeComposeTab(tabIDs[0])
+        XCTAssertEqual(report.removedComposeTabIDs, [tabIDs[0]])
         XCTAssertNil(viewModel.activeRunIDForTesting(tabID: tabIDs[0]))
-        let thirdToken = try viewModel.beginMCPControlledRun(
-            forTabID: tabIDs[1], responseType: nil, planModelName: nil
+        XCTAssertNotNil(viewModel.activeRunIDForTesting(tabID: tabIDs[1]))
+        let stayingDisposals = await providers[1].disposeCallCount()
+        XCTAssertEqual(stayingDisposals, 0)
+
+        await streamGate.open()
+        do {
+            _ = try await closing.value
+            XCTFail("Expected the closed tab's call to end cancelled")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        let closedTabDisposed = await waitUntil { await self.providers[0].disposeCallCount() == 1 }
+        XCTAssertTrue(closedTabDisposed, "The closed tab's provider was not disposed")
+        let stayingCompletion = try await staying.value
+        // This provider opens no MCP client, so its own finish is `mcp_completed_without_route`.
+        XCTAssertNotEqual(stayingCompletion.terminalDisposition, .cancelled)
+    }
+
+    /// Closing a window ends every run it holds: each is cancelled as the close begins, ahead of
+    /// the window's teardown, and the teardown disposes each run's provider once.
+    func testClosingAWindowEndsItsRuns() async throws {
+        let (window, tabIDs) = await makeGatedWindow()
+        let viewModel = window.contextBuilderAgentViewModel
+        var runs = try await [startRun(window, tabID: tabIDs[0])]
+        // A second run that does not start has already failed the test; the close is checked anyway.
+        if let second = try? await startRun(window, tabID: tabIDs[1]) { runs.append(second) }
+
+        window.beginClose()
+        let cancelledAsCloseBegan = await waitUntil {
+            tabIDs.allSatisfy { viewModel.activeRunIDForTesting(tabID: $0) == nil }
+        }
+        XCTAssertTrue(cancelledAsCloseBegan, "Runs were still active after the window's close began")
+
+        await streamGate.open()
+        for run in runs {
+            do {
+                _ = try await run.value
+                XCTFail("Expected the closed window's call to end cancelled")
+            } catch {
+                XCTAssertTrue(error is CancellationError, "\(error)")
+            }
+        }
+        await window.tearDown()
+        for provider in providers {
+            let disposals = await provider.disposeCallCount()
+            XCTAssertEqual(disposals, 1)
+        }
+    }
+
+    /// A cancelled MCP call keeps its tab until its run's execution has ended, so no new run can
+    /// claim the tab while the cancelled one is still unwinding.
+    func testCancelledCallKeepsItsTabUntilItsExecutionEnds() async throws {
+        let execution = ContextBuilderTestGate()
+        let (window, tabIDs) = await makeGatedWindow(event: "Looking around")
+        let viewModel = window.contextBuilderAgentViewModel
+        viewModel.installRunTestHooks(.init(
+            beforeProcessingProviderEvent: { _, _ in await execution.wait() },
+            providerEventDisposition: nil,
+            teardownCompleted: nil
+        ))
+        addTeardownBlock { await execution.open() }
+        let call = try await startRun(window, tabID: tabIDs[0])
+        let executionHeld = await waitUntil { await execution.entered }
+        XCTAssertTrue(executionHeld, "The run never reached its provider's event")
+
+        await viewModel.cancelMCPContextBuilderRun(forTabID: tabIDs[0])
+        let claimedWhileExecuting = await waitUntil(timeout: .milliseconds(200)) {
+            guard let probe = try? viewModel.beginMCPControlledRun(
+                forTabID: tabIDs[0], responseType: nil, planModelName: nil
+            ) else { return false }
+            await viewModel.clearMCPControlledRun(forTabID: tabIDs[0], controlToken: probe)
+            return true
+        }
+        XCTAssertFalse(claimedWhileExecuting, "The tab was claimable while the cancelled run was still executing")
+
+        await execution.open()
+        await streamGate.open()
+        do {
+            _ = try await call.value
+            XCTFail("Expected the cancelled call to end cancelled")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        let successor = try viewModel.beginMCPControlledRun(
+            forTabID: tabIDs[0], responseType: nil, planModelName: nil
         )
-        viewModel.clearMCPControlledRun(forTabID: tabIDs[1], controlToken: thirdToken)
-        await providers[0].allowDispose()
+        await viewModel.clearMCPControlledRun(forTabID: tabIDs[0], controlToken: successor)
+    }
+
+    /// Closing a tab cancels the MCP call that holds it even after the call's discovery has ended,
+    /// so the call answers with a cancellation instead of finishing for a tab that is gone.
+    func testClosingATabCancelsTheAdmittedCallAfterItsDiscoveryEnded() async throws {
+        let (window, tabIDs) = await makeGatedWindow()
+        let viewModel = window.contextBuilderAgentViewModel
+        let tabID = tabIDs[0]
+        let postDiscovery = ContextBuilderTestGate()
+        addTeardownBlock { await postDiscovery.open() }
+        let authority = try makeAuthority(window, tabID: tabID)
+        let token = try viewModel.beginMCPControlledRun(forTabID: tabID, responseType: nil, planModelName: nil)
+        let call = Task {
+            try await AsyncScope.withCleanup({}, cleanup: {
+                await viewModel.clearMCPControlledRun(forTabID: tabID, controlToken: token)
+            }) {
+                try await viewModel.performAdmittedMCPCall(forTabID: tabID, controlToken: token) {
+                    _ = try await viewModel.runContextBuilderForMCP(authority: authority, mcpControlToken: token)
+                    await postDiscovery.wait()
+                    return "finished"
+                }
+            }
+        }
+        let registered = await waitUntil { viewModel.activeRunIDForTesting(tabID: tabID) != nil }
+        XCTAssertTrue(registered, "The call's discovery run never registered")
+        // Disposal is not under test, as in `startRun`.
+        await providers.last?.allowDispose()
+        await streamGate.open()
+        let discoveryEnded = await waitUntil { await postDiscovery.entered }
+        XCTAssertTrue(discoveryEnded, "The call never got past its discovery")
+
+        let report = await window.promptManager.closeComposeTab(tabID)
+        XCTAssertEqual(report.removedComposeTabIDs, [tabID])
+        await postDiscovery.open()
+        do {
+            let reply = try await call.value
+            XCTFail("Expected the closed tab's call to end cancelled, got \(reply)")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
     }
 
     func testFailureBeforeProviderCreationReleasesAdmission() async throws {
         var providerCount = 0
+        let provider = GatedHeadlessAgentProvider()
         let (window, tabIDs) = await makeWindow { _, _, _, _ in
             providerCount += 1
-            return GatedHeadlessAgentProvider()
+            return provider
         }
         addTeardownBlock { @MainActor in
             _ = await window.mcpServer.setWindowToolsEnabled(false)
@@ -632,12 +764,15 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         do {
             _ = try await runMCP(window, tabID: UUID())
             XCTFail("Expected missing workspace failure")
-        } catch {}
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
         XCTAssertEqual(providerCount, 0)
         let token = try viewModel.beginMCPControlledRun(
             forTabID: tabIDs[0], responseType: nil, planModelName: nil
         )
-        viewModel.clearMCPControlledRun(forTabID: tabIDs[0], controlToken: token)
+        await viewModel.clearMCPControlledRun(forTabID: tabIDs[0], controlToken: token)
+        await provider.allowDispose()
     }
 
     /// The frozen model-parameter selections admitted with the run reach the provider factory
@@ -661,7 +796,9 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         var receivedSelections: [[ACPModelParameterSelection]] = []
         let (window, tabIDs) = await makeWindow { _, _, _, modelParameterSelections in
             receivedSelections.append(modelParameterSelections)
-            return GatedHeadlessAgentProvider()
+            let provider = GatedHeadlessAgentProvider()
+            Task { await provider.allowDispose() }
+            return provider
         }
         addTeardownBlock { @MainActor in
             _ = await window.mcpServer.setWindowToolsEnabled(false)
@@ -679,6 +816,20 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         modelParameterSelections: [ACPModelParameterSelection] = []
     ) async throws -> ContextBuilderAgentViewModel.MCPContextBuilderRunCompletion {
         let viewModel = window.contextBuilderAgentViewModel
+        let authority = try makeAuthority(window, tabID: tabID, modelParameterSelections: modelParameterSelections)
+        let token = try viewModel.beginMCPControlledRun(forTabID: tabID, responseType: nil, planModelName: nil)
+        return try await AsyncScope.withCleanup({}, cleanup: {
+            await viewModel.clearMCPControlledRun(forTabID: tabID, controlToken: token)
+        }) {
+            try await viewModel.runContextBuilderForMCP(authority: authority, mcpControlToken: token)
+        }
+    }
+
+    private func makeAuthority(
+        _ window: WindowState,
+        tabID: UUID,
+        modelParameterSelections: [ACPModelParameterSelection] = []
+    ) throws -> ContextBuilderResolvedRunAuthority {
         let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
         let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID)
         var nested = MCPServerViewModel.TabContextSnapshot(
@@ -709,20 +860,51 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
             planningModelRaw: nil,
             isSystemWorkspace: false
         )
-        let token = try viewModel.beginMCPControlledRun(forTabID: tabID, responseType: nil, planModelName: nil)
-        return try await AsyncScope.withCleanup({}, cleanup: {
-            await MainActor.run { viewModel.clearMCPControlledRun(forTabID: tabID, controlToken: token) }
-        }) {
-            try await viewModel.runContextBuilderForMCP(
-                authority: ContextBuilderResolvedRunAuthority(
-                    configuration: configuration,
-                    agentKind: .claudeCode,
-                    modelRaw: AgentModel.defaultModel.rawValue,
-                    modelParameterSelections: modelParameterSelections
-                ),
-                mcpControlToken: token
-            )
+        return ContextBuilderResolvedRunAuthority(
+            configuration: configuration,
+            agentKind: .claudeCode,
+            modelRaw: AgentModel.defaultModel.rawValue,
+            modelParameterSelections: modelParameterSelections
+        )
+    }
+
+    /// A window whose every run gets a new provider that streams `event`, when given, and then
+    /// waits for `streamGate` before it finishes. Teardown opens that gate and every provider's
+    /// disposal gate, so none stays closed after a failed test.
+    private func makeGatedWindow(event: String? = nil) async -> (WindowState, [UUID]) {
+        let (window, tabIDs) = await makeWindow { [unowned self] _, _, _, _ in
+            let provider = GatedHeadlessAgentProvider(streamGate: streamGate, event: event)
+            providers.append(provider)
+            return provider
         }
+        addTeardownBlock { @MainActor in
+            await self.streamGate.open()
+            for provider in self.providers {
+                await provider.allowDispose()
+            }
+            _ = await window.mcpServer.setWindowToolsEnabled(false)
+        }
+        return (window, tabIDs)
+    }
+
+    /// Starts an MCP run on `tabID` and returns once it is registered on the tab with its own
+    /// provider, so `providers` stays in start order. A run that never starts fails the test here.
+    private func startRun(
+        _ window: WindowState,
+        tabID: UUID
+    ) async throws -> Task<ContextBuilderAgentViewModel.MCPContextBuilderRunCompletion, Error> {
+        let providerCount = providers.count
+        let run = Task { try await self.runMCP(window, tabID: tabID) }
+        let started = await waitUntil {
+            self.providers.count > providerCount
+                && window.contextBuilderAgentViewModel.activeRunIDForTesting(tabID: tabID) != nil
+        }
+        // Disposal is not under test; leaving it gated would only stall a close that joins it.
+        await providers.last?.allowDispose()
+        return try XCTUnwrap(
+            started ? run : nil,
+            "The run on tab \(tabID) did not start after \(providerCount) earlier run(s) had started"
+        )
     }
 
     private func makeWindow(
@@ -747,8 +929,12 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         return (window, tabs.map(\.id))
     }
 
-    private func waitUntil(condition: @MainActor () async -> Bool) async -> Bool {
-        for _ in 0 ..< 200 {
+    private func waitUntil(
+        timeout: Duration = .seconds(10),
+        condition: @MainActor () async -> Bool
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
             if await condition() { return true }
             try? await Task.sleep(for: .milliseconds(5))
         }
@@ -760,13 +946,16 @@ private final class GatedHeadlessAgentProvider: HeadlessAgentProvider, @unchecke
     private let disposeGate = ContextBuilderTestGate()
     private let state = GatedHeadlessAgentProviderState()
     private let streamGate: ContextBuilderTestGate?
+    private let event: String?
     private let onDisposeStarted: @Sendable () async -> Void
 
     init(
         streamGate: ContextBuilderTestGate? = nil,
+        event: String? = nil,
         onDisposeStarted: @escaping @Sendable () async -> Void = {}
     ) {
         self.streamGate = streamGate
+        self.event = event
         self.onDisposeStarted = onDisposeStarted
     }
 
@@ -775,6 +964,9 @@ private final class GatedHeadlessAgentProvider: HeadlessAgentProvider, @unchecke
         runID: UUID?
     ) async throws -> AsyncThrowingStream<AIStreamResult, Error> {
         AsyncThrowingStream { continuation in
+            if let event {
+                continuation.yield(AIStreamResult(type: "content", text: event))
+            }
             guard let streamGate else {
                 continuation.finish()
                 return

@@ -221,6 +221,101 @@ Count by distinct cause, because a provider may retry a failed `initialize`; eve
 
 This validation proves the admission contract only. The cause of unexplained `Transport closed` and tool-watchdog failures remains unproven; it is not attributed to this refusal and is investigated separately.
 
+### Context Builder cross-tab rows
+
+Run these rows before merging a change to Context Builder admission, its startup or routing waits, its teardown, or MCP run routing. They exercise two Context Builder runs in one window at once, which the earlier arms don't. [`docs/mcp-progress.md`](mcp-progress.md) states the startup waits, the refusals, and how to read the phases and errors these rows produce.
+
+Deterministic coverage comes first:
+
+```bash
+make dev-test FILTER=ContextBuilderWindowAdmissionTests
+make dev-test FILTER=ContextBuilderGracefulShutdownTests
+```
+
+Use an already-running debug app and a dedicated workspace with two compose tabs, A and B, each with its own distinguishable fixture file selected. The rows never build, install, launch, stop, or relaunch the app. For a cold row, prepare the workspace and relaunch the debug app before starting, and label the row cold only when that boundary is true. List the window's tabs with their `context_id` values, and confirm the flag names with `rpce-cli-debug --help` before the first row:
+
+```bash
+rpce-cli-debug -e 'windows'
+```
+
+Each `rpce-cli-debug` invocation is its own caller connection, and `--context-id` binds it to one tab before its command runs. Start one call per tab together, and keep each call's result and its progress output:
+
+```bash
+rpce-cli-debug --context-id <A_CONTEXT_ID> --raw-json \
+    -e 'call context_builder {"instructions":"<question only fixture A answers>","response_type":"question"}' \
+    > a.json 2> a.progress &
+rpce-cli-debug --context-id <B_CONTEXT_ID> --raw-json \
+    -e 'call context_builder {"instructions":"<question only fixture B answers>","response_type":"question"}' \
+    > b.json 2> b.progress &
+wait
+```
+
+Send a follow-up on a returned chat with the `chat_id` its result names:
+
+```bash
+rpce-cli-debug --context-id <A_CONTEXT_ID> --raw-json \
+    -e 'call ask_oracle {"message":"<follow-up question>","chat_id":"<CHAT_ID>","new_chat":false}'
+```
+
+| Row | Exercise | Required result |
+|---|---|---|
+| Cold and warm starts | Start A and B together, once right after a relaunch and once on a warm app | Both complete, each with its own provider process, routing events, and commit |
+| Panel plus MCP | Press Run on tab A in the app and start B through the CLI, then the reverse | Both complete, and the window shows only the selected tab's run |
+| Same-tab overlap | Start a second call for A while A's run is in discovery | The second call returns `Context Builder is already running for this tab.`, A's run completes, and the refused call changes nothing in A |
+| Cancel A | Cancel A's call while B is in discovery | A ends as cancelled and its provider process exits; B completes |
+| Close A's tab | Close tab A while both runs are in discovery | Only A ends; B commits its own prompt and selection |
+| Close the window | Close the window while one run is in discovery and another is in its follow-up | Every run the window owns settles, and no provider process remains |
+| Follow-up on the chat | After a call with a `response_type` completes, send a follow-up on its chat | The follow-up answers in that chat with that tab's context; no refusal, including with OpenCode |
+| Two windows, one workspace | Open the workspace in a second window. Start A from each window, then A from one and B from the other | The second call for A is refused; A and B in different windows both complete |
+| Background question | Let B's run ask a clarifying question while tab A is shown | The question appears on B when B is shown, and A's panel is unchanged |
+| Late cleanup | Cancel A's run, then start a new run on A while the first run's provider is still exiting | The new run routes, commits, and keeps its controls |
+
+Record every row as passed, failed, or not run with its reason. For each run, keep these as evidence:
+
+- The result's `context_id`, which must be the tab the call bound. The bind step alone proves nothing.
+- The result's exact `prompt` and `selection`, which must be that tab's, and its `agent` and `model`.
+- The last progress line, and the returned `chat_id` when the call asked for a response.
+- The run's routing events and its child connection, from the debug app's run-routing history and connection list:
+
+```bash
+rpce-cli-debug -w <WINDOW_ID> -c __repoprompt_debug_diagnostics -j '{"op":"run_routing_history","limit":500}'
+rpce-cli-debug -w <WINDOW_ID> -c __repoprompt_debug_diagnostics -j '{"op":"connections"}'
+```
+
+A row with two runs needs overlap inside the app, shown in both directions by exact run ID in the run-routing history. A's `connection_observed` or `policy_applied` event comes before B's last `policy_cleared`, and B's `connection_observed` or `policy_applied` event comes before A's last `policy_cleared`. One direction alone also holds when one run finished before the other started. Admission isn't evidence in either direction. An admitted run is still preparing and may have no provider yet, so `policy_installed` or a `running` state doesn't show two providers at work.
+
+A run's last `policy_cleared` is the end of its routing-policy lifetime and nothing more. A run clears its policy last, after its discovery has ended and its result is committed. This check shows that two policy lifetimes overlapped. It doesn't show that two providers' work overlapped.
+
+The "Cold and warm starts" and "Panel plus MCP" rows need that direct evidence, by exact run ID. Overlapping admissions or policy lifetimes alone are insufficient for these rows. A run's `expected_pid_cleared` event is insufficient too. It's cleanup evidence only. The app records it some time after the provider process has exited, so an event that comes before it doesn't show the process was still running. The minimum for these rows is one of the two kinds of evidence that follow. Prefer the first.
+
+The first is interleaved tool calls. A snapshot of a run's child connection reports the child's tool-call count and the time of its latest call. The connection is the `connection_id` of the run's `policy_applied` event:
+
+```bash
+rpce-cli-debug -w <WINDOW_ID> -c __repoprompt_debug_diagnostics -j '{"op":"connection_snapshot","connection_id":"<CHILD_CONNECTION_ID>"}'
+```
+
+Take snapshots of both children at different times while both runs are in discovery. The row has overlap when a `last_tool_call_at_ms` of the second run's child falls between two `last_tool_call_at_ms` values of the first run's child.
+
+The second is the first run's provider process observed running across a tool call of the second run. The process ID is the `expected_pid` of the first run's `expected_pid_registered` event. Check it right after a snapshot of the second run's child shows a `total_tool_calls` of at least one, and keep the time, the state, and the start time:
+
+```bash
+date +%s; ps -p <PROVIDER_PID> -o pid=,stat=,lstart=
+```
+
+The row has overlap when all these hold:
+
+- `ps` lists the process at a time later than that snapshot's `last_tool_call_at_ms`, in a state other than zombie (`Z`).
+- The process started before that `last_tool_call_at_ms`.
+- The process started no later than the `timestamp_ms` of the `expected_pid_registered` event.
+
+Both diagnostics times are Unix milliseconds, and `lstart` has one-second resolution. The start time doesn't rule out a reused process ID. A start time that can't be told apart from a later start, or from a replacement process, is ambiguous and leaves the row incomplete.
+
+A snapshot that reports `missing` was taken after its connection ended and is no evidence. Neither is a zombie or a `ps` that lists no process. A missing event or a missing snapshot leaves the row incomplete.
+
+Two CLI processes that were alive together don't show overlap. A row without that overlap, with ambiguous or unsupported evidence, or with cleanup that can't be attributed to one run, is incomplete, never a pass. A unit-test pass doesn't stand in for it.
+
+Two CLI invocations are two caller connections, so these rows don't cover one caller connection that rebinds between two calls. No automated test covers that case. A caller-side timeout is a safety bound for a failed row, not the app's routing limit, and ending a CLI process doesn't prove its provider stopped. Reconcile exact run IDs and provider process IDs from the diagnostics afterward, and never end processes by name. Keep raw results, progress output, the build identity, and the app's process ID and start time privately, and never record capability tokens.
+
 ## Live large-workspace worktree-startup diagnostic
 
 `Scripts/worktree_startup_live_benchmark.py` is the reusable validation lane for

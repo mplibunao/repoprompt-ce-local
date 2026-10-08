@@ -320,7 +320,14 @@ class WindowState: ObservableObject {
         detachTitlebarAccessoryControllers(from: nsWindow)
         clearTitlebarAccessoryRequestsForClose()
         apiSettingsViewModel.prepareForWindowClose()
-        contextBuilderAgentViewModel.prepareForWindowClose()
+        // Context Builder's runs are asked to end synchronously here rather than in the
+        // view-disappearance teardown, where earlier awaits would delay the request. App
+        // termination has its own owner for that request.
+        if !manager.isTerminating {
+            contextBuilderAgentViewModel.cancelRunsForWindowClose()
+        } else {
+            contextBuilderAgentViewModel.prepareForWindowClose()
+        }
         workspaceManager.prepareForWindowClose()
         promptManager.gitViewModel.prepareForWindowClose()
     }
@@ -364,6 +371,20 @@ class WindowState: ObservableObject {
         }
 
         convenience init(
+            domainRuntime: MCPDomainRuntime,
+            contextBuilderProviderFactory: @escaping ContextBuilderAgentViewModel.ProviderFactory,
+            aiQueriesServiceFactory: ((_ keyManager: KeyManager) -> AIQueriesService)? = nil
+        ) {
+            self.init(
+                contextBuilderProviderFactory: Optional(contextBuilderProviderFactory),
+                aiQueriesServiceFactory: aiQueriesServiceFactory,
+                loadStoredAPISettingsDataOnInit: true,
+                codexModelPollingService: .shared,
+                domainRuntimeOverride: domainRuntime
+            )
+        }
+
+        convenience init(
             codexModelPollingService: CodexModelPollingService,
             loadStoredAPISettingsDataOnInit: Bool
         ) {
@@ -389,6 +410,7 @@ class WindowState: ObservableObject {
 
     private init(
         contextBuilderProviderFactory: ContextBuilderAgentViewModel.ProviderFactory?,
+        aiQueriesServiceFactory: ((_ keyManager: KeyManager) -> AIQueriesService)? = nil,
         loadStoredAPISettingsDataOnInit: Bool,
         codexModelPollingService: CodexModelPollingService,
         workspaceFileContextStore injectedWorkspaceFileContextStore: WorkspaceFileContextStore? = nil,
@@ -412,6 +434,7 @@ class WindowState: ObservableObject {
             sharedMCPService: Self.sharedMCPService,
             domainRuntime: domainRuntimeOverride,
             contextBuilderProviderFactory: contextBuilderProviderFactory,
+            aiQueriesServiceFactory: aiQueriesServiceFactory,
             workspaceFileContextStore: injectedWorkspaceFileContextStore,
             loadStoredAPISettingsDataOnInit: loadStoredAPISettingsDataOnInit,
             codexModelPollingService: codexModelPollingService
@@ -1731,9 +1754,12 @@ class WindowState: ObservableObject {
             return
         }
 
-        await contextBuilderAgentViewModel.cancelAllActiveRuns()
+        contextBuilderAgentViewModel.cancelRunsForWindowClose()
         await workspaceManager.cancelActiveSessions()
+        // Agent Mode closes before Context Builder's runs are joined, so a run still finishing
+        // its final-context commit cannot hold Agent Mode's close back.
         await agentModeViewModel.prepareForWindowClose()
+        await contextBuilderAgentViewModel.joinRunTeardownForWindowClose()
         WorkspaceApprovalManager.shared.cancelPending(forWindowID: windowID)
 
         // Stop the local MCP server

@@ -62,6 +62,9 @@ final class AgentRunCoordinator {
 
     /// Install a per-run client policy for the given agent, and acquire the global headless gate.
     /// - Returns: A lease that must be released via `lease.releaseWhenRouted(...)` or cleaned up via `lease.failAndCleanup()`.
+    /// - Throws: `CancellationError` when the calling task is cancelled; otherwise the
+    ///   ``MCPBootstrapReadinessError`` naming the acquisition phase that failed. The lease has
+    ///   cleaned up after itself by the time either is thrown.
     /// - Note: This prevents the "acquire gate without guaranteed release" footgun by centralizing gating.
     func prepareAndInstallPolicy(
         _ spec: AgentRunSpec,
@@ -70,6 +73,19 @@ final class AgentRunCoordinator {
         reason: String? = nil,
         gateID: UUID? = nil
     ) async throws -> MCPBootstrapLease {
+        let lease = try makeLease(spec, tabID: tabID, additionalTools: additionalTools, reason: reason, gateID: gateID)
+        try await lease.requireAcquired()
+        return lease
+    }
+
+    /// The lease for a run's per-run client policy, not yet acquired.
+    func makeLease(
+        _ spec: AgentRunSpec,
+        tabID: UUID? = nil,
+        additionalTools: Set<String>? = nil,
+        reason: String? = nil,
+        gateID: UUID? = nil
+    ) throws -> MCPBootstrapLease {
         guard let clientName = spec.agentKind.mcpClientNameHint else {
             throw NSError(domain: "AgentRunCoordinator", code: -1, userInfo: [
                 NSLocalizedDescriptionKey: "Missing MCP client name hint for agent \(spec.agentKind)"
@@ -90,10 +106,7 @@ final class AgentRunCoordinator {
             requiresExpectedAgentPID: spec.agentKind.requiresExpectedPIDOwnedAgentModeMCPRouting
         )
 
-        let lease = MCPBootstrapLease(spec: leaseSpec)
-        let acquired = await lease.acquire()
-        guard acquired else { throw CancellationError() }
-        return lease
+        return MCPBootstrapLease(spec: leaseSpec)
     }
 
     /// Factory for headless agent providers (Claude Code, Codex Exec, etc.)
@@ -148,6 +161,7 @@ final class AgentRunCoordinator {
     ///   - runID: The run identifier associated with routing state and waiter notifications.
     ///   - gateID: The gate ownership identifier to release when routing completes. Defaults to `runID`.
     ///   - timeoutMs: Maximum time to wait for routing before forcing release (default: 10,000 ms).
+    ///   - waitClock: Drives the deadlines of an adaptive wait; `nil` uses the routing waiter's own clock.
     /// - Returns: Routing and gate-release diagnostics for the run.
     @discardableResult
     func releaseGateWhenRouted(
@@ -155,6 +169,7 @@ final class AgentRunCoordinator {
         gateID: UUID? = nil,
         timeoutMs: Int = defaultRoutingTimeoutMs,
         waitPolicy: MCPRoutingWaitPolicy? = nil,
+        waitClock: MCPRoutingWaitClock? = nil,
         progressLifecycle: MCPBootstrapRoutingProgressLifecycle? = nil
     ) async -> GateRoutingReleaseResult {
         let timeoutSeconds = TimeInterval(timeoutMs) / 1000.0
@@ -162,6 +177,7 @@ final class AgentRunCoordinator {
             await MCPRoutingWaiter.waitForRoutingOutcome(
                 runID: runID,
                 policy: waitPolicy,
+                deadlineClock: waitClock,
                 progressLifecycle: progressLifecycle
             )
         } else {
