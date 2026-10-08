@@ -35,8 +35,8 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
 			mcp: #"`prompt` `op:"append"`"#,
 			cli: "`prompt append`")
 		let deleteBaseline = example(variant,
-			mcp: #"`{"tool":"file_actions","args":{"action":"delete","path":"<path>"}}`"#,
-			cli: #"`rpce-cli -w <window_id> -e 'call file_actions {"action":"delete","path":"<path>"}'`"#)
+			mcp: #"`{"tool":"file_actions","args":{"action":"delete","path":"<absolute path>"}}`"#,
+			cli: #"`rpce-cli -w <window_id> -e 'call file_actions {"action":"delete","path":"<absolute path>"}'`"#)
 		// RepoPrompt serves `ask_user` only to sessions it started itself: Context Builder and Agent Mode runs.
 		// Those sessions and external MCP hosts load the same MCP skill, so it asks conditionally; a CLI host never has the tool.
 		let openingInterviewLead: String
