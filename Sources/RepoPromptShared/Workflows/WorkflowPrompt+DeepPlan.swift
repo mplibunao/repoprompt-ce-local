@@ -67,7 +67,7 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
 		// Single-sourced so every variant asks the same questions with the same options.
 		let openingWizard = """
   "title":"Shaping this plan",
-  "context":"Two choices that shape the run. Skipping or not replying keeps the defaults: hands-off and no external sources.",
+  "context":"Two choices that shape the run. Skipping or not replying keeps the defaults: hands-off and no named sources.",
   "questions":[
     {"id":"involvement","question":"How involved do you want to be while I shape this plan?","options":[
       "Up front — clarify the prompt with me before exploration begins.",
