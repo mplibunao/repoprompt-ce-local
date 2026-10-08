@@ -33,7 +33,7 @@ public enum WorkflowPromptCatalog {
         ),
         WorkflowPromptDescriptor(
             id: .investigate,
-            description: "Deep investigation with RepoPrompt MCP tools. The agent gathers concrete evidence with tools, while chat/oracle synthesizes the selected context into hypotheses and architectural insight.",
+            description: "Deep investigation with RepoPrompt MCP tools. The agent gathers concrete evidence with tools; the in-app chat or oracle on the RepoPrompt route, or an external model reached through rp-oracle-export on the external route, synthesizes the selected context into hypotheses and architectural insight.",
             arguments: [
                 WorkflowPromptArgument(
                     name: "issue",
