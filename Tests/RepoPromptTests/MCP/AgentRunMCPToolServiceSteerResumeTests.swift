@@ -917,7 +917,7 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
         WindowStatesManager.shared.registerWindowState(window)
         addTeardownBlock { @MainActor in
             window.beginClose()
-            // Headless fixtures must unload their roots so indexing cannot outlive the test.
+            // Window teardown suppresses UI root unloading while closing.
             await window.workspaceFilesViewModel.unloadAllRootFolders()
             await window.tearDown()
             WindowStatesManager.shared.unregisterWindowState(window)

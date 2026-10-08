@@ -107,6 +107,7 @@ final class AgentRunMCPControlledSessionContext {
             )
         } catch {
             window.beginClose()
+            await window.workspaceFilesViewModel.unloadAllRootFolders()
             await window.tearDown()
             WindowStatesManager.shared.unregisterWindowState(window)
             throw error
@@ -115,6 +116,8 @@ final class AgentRunMCPControlledSessionContext {
 
     func cleanup() async {
         window.beginClose()
+        // Window teardown suppresses UI root unloading while closing.
+        await window.workspaceFilesViewModel.unloadAllRootFolders()
         await window.tearDown()
         WindowStatesManager.shared.unregisterWindowState(window)
     }
