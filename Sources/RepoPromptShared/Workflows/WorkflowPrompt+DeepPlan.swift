@@ -73,7 +73,7 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
       "Up front — clarify the prompt with me before exploration begins.",
       "Mid-flow — check in with me before the design agent reviews the draft.",
       "Hands-off — surface the plan when it is ready, then refine it with me."]},
-    {"id":"sources","question":"Which external sources should discovery include? Add links, documents, or specific leads as free text.","allows_multiple":true,"allows_custom":true,"options":["Confluence","Slack","Jira","Bitbucket","None"]}
+    {"id":"sources","question":"Any sources or leads to add for discovery? Add links, documents, or specific leads as free text.","allows_multiple":true,"allows_custom":true,"options":["Confluence","Slack","Jira","Bitbucket","Nothing to add"]}
   ]
 """
 		let routeQuestion = """
@@ -132,7 +132,7 @@ Then, only when the answer is Up front or Mid-flow, \(routeQuestionLead)
 | **Up front** | Phase 1.5 interview before broad exploration; later checkpoints halt on timeout |
 | **Mid-flow** | Phase 5 check-in before the critique; later checkpoints halt on timeout |
 | **Hands-off** (also \(noAnswerSignals) here) | No planning discussion: the RepoPrompt route is selected, the route question is not asked, Phases 4.5 and 5 are skipped, and the outcome is explained at the final hand-off |
-| **Sources** | Your sources, links, and leads are added to the Phase 2 discovery branches; "None" or no answer adds nothing, and discovery still runs every branch the task or your own judgment calls for |
+| **Sources** | The sources, links, and leads in the answer are added to the Phase 2 discovery branches; "Nothing to add" or no answer adds nothing, and discovery still runs every branch the task or the orchestrator's judgment calls for |
 | **Route** (interactive modes only) | Phase 4 runs as exactly one of 4A (RepoPrompt) or 4B (external model); a skip or timeout here means 4A |
 
 ### Phase 1.5: Grounded interview (Up front only)
