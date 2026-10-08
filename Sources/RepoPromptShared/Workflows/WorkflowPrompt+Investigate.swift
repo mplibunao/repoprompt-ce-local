@@ -23,6 +23,9 @@ extension RepoPromptWorkflowPrompts {
 		let sameConversation = example(variant,
 			mcp: "on the same `chat_id` from Phase 2",
 			cli: "in the same tab as Phase 2 (`-t <tab_id>`)")
+		let deleteExport = example(variant,
+			mcp: #"`{"tool":"file_actions","args":{"action":"delete","path":"<absolute path>"}}`"#,
+			cli: #"`rpce-cli -w <window_id> -e 'call file_actions {"action":"delete","path":"<absolute path>"}'`"#)
 		// RepoPrompt serves `ask_user` only to sessions it started itself: Context Builder and Agent Mode runs.
 		// Those sessions and external MCP hosts load the same MCP skill, so it asks conditionally; a CLI host never has the tool.
 		let interviewLead: String
@@ -172,7 +175,7 @@ Route B: when a synthesis question remains after the pair's findings, export aga
 
 Repeat Phases 3 and 4. For new evidence, steer the existing pair (it keeps its context) or dispatch one explore for a narrow lookup; don't spend an analysis call on what a tool call answers. Stop when the root cause has concrete file:line evidence, the alternatives are ruled out with specific counter-evidence, and the fixes point at exact locations.
 
-**Phase 4.5: walk the user through it (route B).** The user has just returned a response, so this is a conversation. In plain language, with enough context to follow without having read the report: the root cause and the evidence that carries it; what was ruled out and by what; each recommended fix with its cost, marked keep, simplify, or defer, naming anything overbuilt or unnecessary; and what is still unknown. Discuss, record the agreed changes, and write the report only after the user confirms.
+**Phase 4.5: walk the user through it (route B).** The user has just returned a response, so this is a conversation. In plain language, with enough context to follow without having read the report: the root cause and the evidence that carries it; what was ruled out and by what; each recommended fix with its cost, marked keep, simplify, or defer, naming anything overbuilt or unnecessary; and what is still unknown. Discuss, record the agreed changes, and write the report only after the user confirms. Once the walkthrough is done, delete each export and results file only when it is under `prompt-exports/` (\(deleteExport)); a response the user supplied at any other path is their file and stays.
 
 **Phase 5: report.** `## Investigator Findings` and `## Background / Prior Research` are the factual baseline. Verify line references as you fold them into Root cause (paths, lines, snippets), Eliminated hypotheses (with the evidence), Recommendations (specific, with locations, as agreed), and Preventive measures.
 
