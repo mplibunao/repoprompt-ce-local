@@ -223,7 +223,7 @@ This validation proves the admission contract only. The cause of unexplained `Tr
 
 ### Context Builder cross-tab rows
 
-Run these rows before merging a change to Context Builder admission, its startup or routing waits, its teardown, or MCP run routing. They exercise two Context Builder runs in one window at once, which the earlier arms don't. [`docs/mcp-progress.md`](mcp-progress.md) states the startup limits, the refusals, and how to read the phases and errors these rows produce.
+Run these rows before merging a change to Context Builder admission, its startup or routing waits, its teardown, or MCP run routing. They exercise two Context Builder runs in one window at once, which the earlier arms don't. [`docs/mcp-progress.md`](mcp-progress.md) states the startup waits, the refusals, and how to read the phases and errors these rows produce.
 
 Deterministic coverage comes first:
 

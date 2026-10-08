@@ -58,15 +58,19 @@ top-level setup stage.
 
 `child_connection_observed` means the connection matched the exact run-owned
 client-name/PID policy. It is intentionally sticky: if route installation later
-rolls back, the connection was still observed, so an unchanged routing deadline
-that subsequently expires is reported as `routing_timeout_after_connection`.
-Explicit routing failure or cancellation is not mislabeled as a timeout.
+rolls back, the connection was still observed. The run keeps waiting until the
+route commits, the run loses ownership of its expected connection, the provider
+finishes without opening that connection, or the run is cancelled.
 A connection refused for joining an established run by process ancestry alone
 (`expected_pid_without_pending_policy`) never matched a run-owned policy, so it
 is neither an observed child connection nor a routed one: it emits neither
-`child_connection_observed` nor `routing_confirmed`, and the waiting run's
-deadline, timeout classification, and cancellation proceed as if that
-connection had not arrived.
+`child_connection_observed` nor `routing_confirmed`, and the waiting run
+continues as if that connection had not arrived.
+The two `routing_timeout_*` phases apply only to callers that select a bounded
+routing wait. A Context Builder run's routing wait has no deadline, so its runs
+don't report them. In a bounded wait, a deadline that expires after a
+connection was observed is reported as `routing_timeout_after_connection`, and
+an explicit routing failure or cancellation isn't reported as a timeout.
 These phases are observations only and do not change provider launch, routing,
 timeout, cleanup, cancellation, or final-result behavior.
 
@@ -74,33 +78,24 @@ Clients that omit `_meta.progressToken` receive the same final result but do not
 receive standard progress notifications. A host may also choose not to render
 notifications it receives.
 
-## Context Builder startup limits
+## Context Builder startup waits
 
 A Context Builder run waits on two things it can't finish itself: the window's
 MCP tools becoming ready, and its provider's MCP connection being routed to the
-run. Each wait has a fixed limit on monotonic time.
-
-| Wait | Limit |
-|---|---|
-| Joining the window's MCP readiness | 30 seconds for each run |
-| The provider's first matching MCP connection | 30 seconds from the start of the run's routing wait |
-| That connection's route being committed to the run | 10 seconds from the connection |
-
-The routing wait starts when the run starts its provider, so a run waits at
-most 40 seconds for routing. Only the first matching connection moves the run
-from the 30-second limit to the 10-second one. Heartbeats, unrelated
-connections, refused connections, and later observations of the same
-connection extend neither. A route committed at the deadline wins: the run
-continues as routed, even when it learns of the route after the deadline.
+run. Neither wait has a time limit.
 
 Runs that start while the window's MCP tools are still being enabled join one
-readiness wait. A run that leaves the wait, at its limit or through
-cancellation, leaves alone, and the wait keeps serving the other runs.
+readiness wait. A cancelled run leaves the wait alone, and the wait keeps
+serving the other runs.
 
-No tool argument or setting changes these limits. They don't cover payload
-preparation, which reports its own phases and ends through cancellation.
-Reaching a limit fails the run and gives its tab back without waiting for a
-provider start or disposal still in progress.
+The routing wait starts when the run starts its provider. It ends only when the
+route commits, the run loses ownership of its expected connection, the provider
+finishes without opening that connection, or the run is cancelled.
+
+A window whose MCP tools never become ready, or a provider that never opens its
+connection, keeps the run waiting until the run is cancelled or a failure is
+reported. A startup that hangs shows up as a run that keeps waiting, not as an
+error.
 
 ## Context Builder refusals
 
@@ -140,18 +135,12 @@ A startup failure names its cause in the run's error text:
 
 | Error text begins with | Meaning |
 |---|---|
-| `Failed to start MCP server:` | The window's MCP readiness failed or the run's 30-second readiness limit elapsed. The rest of the text is the cause, such as `RepoPrompt MCP tools for this window were not ready within the startup time limit.` |
+| `Failed to start MCP server:` | The window's MCP readiness failed. The rest of the text is the cause. |
 | `Failed to prepare MCP connection policy:` | The run couldn't install its connection policy. The rest of the text is the cause. |
-| `mcp_routing_timeout_before_connection:` | No matching provider connection arrived within 30 seconds |
-| `mcp_routing_timeout_after_connection:` | A matching connection arrived, and its route wasn't committed within 10 seconds of it |
 | `mcp_routing_failed:` | The run lost ownership of its expected connection before routing committed |
 | `mcp_completed_without_route:` | The provider finished before it opened the expected MCP connection |
 
-The two routing timeouts match the `routing_timeout_before_connection` and
-`routing_timeout_after_connection` phases. A readiness limit that elapses for
-one run says nothing about the window's readiness itself, which may still
-succeed for the runs that keep waiting. Cancellation is reported as
-cancellation, never as a timeout.
+A cancelled run reports its cancellation, not one of these errors.
 
 A detached tool call owned by one run can make another run's tool call in the
 same window return `tool_execution_structure_settlement_busy`. That response

@@ -52,9 +52,8 @@ enum ContextBuilderDefaults {
     /// retry notifications are coalesced or dropped before ordered terminal/error/tool events.
     static let mcpPreRouteBufferedEventLimit = 256
 
-    /// Diagnostic age recorded on the policy. Context Builder policies are settlement-scoped, so
-    /// this interval never prunes one; a policy no connection claimed in time is revoked by the
-    /// run's routing deadline in ``ContextBuilderStartupPolicy``.
+    /// Diagnostic age recorded on the policy. Context Builder policies are settlement-scoped and
+    /// are never revoked because this interval elapsed.
     static let mcpBootstrapConnectionTTL: TimeInterval = 35
 
     /// Bounded handoff after response-drain failure while orderly peer-EOF teardown publishes final context ownership.

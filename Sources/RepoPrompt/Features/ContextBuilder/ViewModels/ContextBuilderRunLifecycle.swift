@@ -198,35 +198,6 @@ enum ContextBuilderRunError: LocalizedError {
     }
 }
 
-/// Bounds on the two startup phases a run waits on without being able to finish them itself:
-/// the window's MCP readiness and the provider's MCP connection being routed to the run.
-/// Payload preparation is not covered.
-///
-/// Reaching a bound publishes the run's failure and starts its teardown. What that guarantees is
-/// independence from the provider: the run's tail runs and its tab is given back without waiting
-/// for a provider start or disposal still in progress, which stay owned by the run's record until
-/// they finish. The tail's own steps are still awaited first, among them delivery of the run's
-/// finalization progress report.
-struct ContextBuilderStartupPolicy {
-    /// Longest one run waits to join the window's MCP readiness.
-    let readinessTimeout: Duration
-    /// `noConnectionTimeout` bounds the wait for the provider's first matching MCP connection and
-    /// `observedConnectionGrace` the wait from that connection to its committed route, so a run
-    /// waits at most their sum from the moment its routing wait is enrolled.
-    let routingWait: MCPRoutingWaitPolicy
-    /// Monotonic time source for both bounds.
-    let clock: MCPRoutingWaitClock
-
-    static let standard = ContextBuilderStartupPolicy(
-        readinessTimeout: .seconds(30),
-        routingWait: MCPRoutingWaitPolicy(
-            noConnectionTimeout: .seconds(30),
-            observedConnectionGrace: .seconds(10)
-        ),
-        clock: .continuous()
-    )
-}
-
 /// A run's provider start, owned by the run's record so that the run can end without waiting
 /// for it.
 ///

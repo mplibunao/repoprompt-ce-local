@@ -110,8 +110,6 @@ private final class MCPCallOutcome<Reply> {
 private enum ContextBuilderMCPRoutingError: LocalizedError {
     case completedWithoutRoute(agentDisplayName: String, clientName: String)
     case routingFailed(agentDisplayName: String, clientName: String)
-    case routingTimedOutBeforeConnection(agentDisplayName: String, clientName: String, timeout: Duration)
-    case routingTimedOutAfterConnection(agentDisplayName: String, clientName: String, grace: Duration)
 
     var errorDescription: String? {
         switch self {
@@ -119,16 +117,7 @@ private enum ContextBuilderMCPRoutingError: LocalizedError {
             "mcp_completed_without_route: \(agentDisplayName) finished before opening the expected MCP client '\(clientName)'. No Context Builder selection was committed."
         case let .routingFailed(agentDisplayName, clientName):
             "mcp_routing_failed: \(agentDisplayName) lost ownership of the expected MCP client '\(clientName)' before routing committed. The run was terminated and MCP bootstrap state was released."
-        case let .routingTimedOutBeforeConnection(agentDisplayName, clientName, timeout):
-            "mcp_routing_timeout_before_connection: \(agentDisplayName) did not open the expected MCP client '\(clientName)' within \(Self.seconds(timeout)) seconds. The run was terminated and MCP bootstrap state was released."
-        case let .routingTimedOutAfterConnection(agentDisplayName, clientName, grace):
-            "mcp_routing_timeout_after_connection: \(agentDisplayName) opened the expected MCP client '\(clientName)', but its route to this run was not committed within \(Self.seconds(grace)) seconds of that connection. The run was terminated and MCP bootstrap state was released."
         }
-    }
-
-    private static func seconds(_ duration: Duration) -> String {
-        let components = duration.components
-        return String(format: "%g", Double(components.seconds) + Double(components.attoseconds) / 1e18)
     }
 }
 
@@ -792,10 +781,6 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             closeSettlementGraceNanoseconds = nanoseconds
         }
 
-        func setStartupPolicyForTesting(_ policy: ContextBuilderStartupPolicy) {
-            startupPolicy = policy
-        }
-
         func acceptsRunEventsForTesting(_ record: ContextBuilderRunRecord) -> Bool {
             acceptsEvents(from: record)
         }
@@ -1200,7 +1185,6 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// tab or window, and app termination, enough time to dispose the provider process and its
     /// configuration lease.
     private var closeSettlementGraceNanoseconds: UInt64 = 500_000_000
-    private var startupPolicy = ContextBuilderStartupPolicy.standard
 
     // MARK: - Init / Deinit
 
@@ -2982,10 +2966,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
             debugLog("Starting MCP server for window")
             do {
-                try await mcpServer.requireContextBuilderReadiness(
-                    timeout: startupPolicy.readinessTimeout,
-                    clock: startupPolicy.clock
-                )
+                try await mcpServer.requireContextBuilderReadiness()
             } catch is CancellationError {
                 return .cancelled
             } catch {
@@ -3122,9 +3103,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 debugLog("System prompt length: \(message.systemPrompt.count)")
                 debugLog("User message length: \(message.userMessage.count)")
                 await record.reportProgress(.providerProcessStarting)
-                // The routing wait is created before the provider is asked to start, so its bound
-                // runs while the provider initializes. A connection observed before the wait is
-                // enrolled still counts, because the waiter keeps the run's first observation.
+                // The routing wait is created before the provider is asked to start. A connection
+                // observed before the wait is enrolled still counts, because the waiter keeps the
+                // run's first observation.
                 // Until the stream consumer takes the wait, each exit cancels it, so that it
                 // publishes no route once the execution has left, and does not join it, because
                 // it can be suspended in a progress report.
@@ -3231,26 +3212,22 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
     }
 
-    /// Starts the run's bounded wait for its provider's MCP connection to be routed to it.
+    /// Starts the run's wait for its provider's MCP connection to be routed to it.
     ///
     /// A route, a lost ownership, and a cancellation settle `coordinator` for the stream consumer.
-    /// That consumer exists only once the run's execution has its provider's stream, and when this
-    /// wait ends the run has no deadline left. So a timeout always fails the run from here, and a
-    /// lost ownership does while there is no consumer yet.
+    /// That consumer exists only once the run's execution has its provider's stream, so a lost
+    /// ownership fails the run from here while there is no consumer yet.
     private func startContextBuilderRouteWait(
         record: ContextBuilderRunRecord,
         lease: MCPBootstrapLease,
         coordinator: ContextBuilderRouteSettlementCoordinator
     ) -> Task<Void, Never> {
-        let startupPolicy = startupPolicy
-        return Task { @MainActor [weak self, weak record] in
+        Task { @MainActor [weak self, weak record] in
             guard let self, let record else {
                 _ = coordinator.settle(ContextBuilderRouteSettlementCoordinator.Settlement.cancelled)
                 return
             }
-            let outcome = await lease.releaseWhenRouted(
-                waitPolicy: startupPolicy.routingWait,
-                clock: startupPolicy.clock,
+            let outcome = await lease.releaseWhenRoutedIndefinitely(
                 progressReporter: { [weak record] progress in
                     guard let record else { return }
                     let phase: ContextBuilderMCPProgressPhase = switch progress {
@@ -3291,42 +3268,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             case .cancelled:
                 _ = coordinator.settle(ContextBuilderRouteSettlementCoordinator.Settlement.cancelled)
             case .timedOutBeforeConnection, .timedOutAfterConnection:
-                // A run that is being cancelled ends as cancelled even when its deadline elapsed
-                // first.
-                guard !Task.isCancelled else {
-                    _ = coordinator.settle(ContextBuilderRouteSettlementCoordinator.Settlement.cancelled)
-                    return
-                }
-                failContextBuilderRunAfterRoutingTimeout(
-                    record,
-                    connectionObserved: outcome == .timedOutAfterConnection,
-                    waitPolicy: startupPolicy.routingWait
-                )
+                // The indefinite Context Builder path never schedules elapsed-time deadlines.
+                _ = coordinator.settle(.routingOwnershipLost)
             }
         }
-    }
-
-    private func failContextBuilderRunAfterRoutingTimeout(
-        _ record: ContextBuilderRunRecord,
-        connectionObserved: Bool,
-        waitPolicy: MCPRoutingWaitPolicy
-    ) {
-        let agentDisplayName = record.agentKind.displayName
-        let clientName = record.agentKind.mcpClientNameHint ?? agentDisplayName
-        let failure: ContextBuilderMCPRoutingError = if connectionObserved {
-            .routingTimedOutAfterConnection(
-                agentDisplayName: agentDisplayName,
-                clientName: clientName,
-                grace: waitPolicy.observedConnectionGrace
-            )
-        } else {
-            .routingTimedOutBeforeConnection(
-                agentDisplayName: agentDisplayName,
-                clientName: clientName,
-                timeout: waitPolicy.noConnectionTimeout
-            )
-        }
-        failContextBuilderRunFromRouteWait(record, failure: failure, source: "contextBuilder.routingTimeout")
     }
 
     private func failContextBuilderRunAfterRoutingOwnershipLoss(_ record: ContextBuilderRunRecord) {
