@@ -132,7 +132,7 @@ Then, only when the answer is Up front or Mid-flow, \(routeQuestionLead)
 | **Up front** | Phase 1.5 interview before broad exploration; later checkpoints halt on timeout |
 | **Mid-flow** | Phase 5 check-in before the critique; later checkpoints halt on timeout |
 | **Hands-off** (also \(noAnswerSignals) here) | No planning discussion: the RepoPrompt route is selected, the route question is not asked, Phases 4.5 and 5 are skipped, and the outcome is explained at the final hand-off |
-| **Sources** | The named sources, links, and leads feed the Phase 2 discovery branches; "None" means in-workspace and prior-art branches only |
+| **Sources** | The named sources, links, and leads feed the Phase 2 discovery branches; "None" adds no named-source branches (Confluence, Slack, Jira, Bitbucket), and the other Phase 2 rows still run on their own conditions |
 | **Route** (interactive modes only) | Phase 4 runs as exactly one of 4A (RepoPrompt) or 4B (external model); a skip or timeout here means 4A |
 
 ### Phase 1.5: Grounded interview (Up front only)
