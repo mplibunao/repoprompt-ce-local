@@ -45,6 +45,9 @@ enum ContextBuilderDefaults {
     /// Default timeout (in seconds) for user responses to clarifying questions
     static let questionTimeoutSeconds = MCPTimeoutPolicy.askUserDefaultTimeoutSeconds
 
+    /// Report-only watchdog for a live run that has not yet opened its owned MCP connection.
+    static let mcpRoutingWatchdogSeconds: TimeInterval = 30
+
     /// Maximum buffered text while routing is pending. Control events are always preserved.
     static let mcpPreRouteBufferedTextCharacterLimit = 64000
 

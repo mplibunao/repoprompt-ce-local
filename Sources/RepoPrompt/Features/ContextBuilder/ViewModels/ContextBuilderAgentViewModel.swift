@@ -3227,26 +3227,75 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 _ = coordinator.settle(ContextBuilderRouteSettlementCoordinator.Settlement.cancelled)
                 return
             }
-            let outcome = await lease.releaseWhenRoutedIndefinitely(
-                progressReporter: { [weak record] progress in
-                    guard let record else { return }
-                    let phase: ContextBuilderMCPProgressPhase = switch progress {
-                    case .waitingForChildConnection:
-                        .waitingForChildConnection
-                    case .childConnectionObserved:
-                        .childConnectionObserved
-                    case .waitingForRouting:
-                        .waitingForRouting
-                    case .routingConfirmed:
-                        .routingConfirmed
-                    case .routingTimeoutBeforeConnection:
-                        .routingTimeoutBeforeConnection
-                    case .routingTimeoutAfterConnection:
-                        .routingTimeoutAfterConnection
-                    }
-                    await record.reportRoutingProgress(phase)
+            // The wait has no deadline, so a provider that never connects would otherwise leave
+            // a run that looks silent. This only reports; it never ends the wait.
+            let watchdogTask = Task { @MainActor [weak self, weak record] in
+                do {
+                    try await Task.sleep(for: .seconds(ContextBuilderDefaults.mcpRoutingWatchdogSeconds))
+                } catch {
+                    return
                 }
-            )
+                guard let self, let record,
+                      coordinator.isPending,
+                      acceptsEvents(from: record)
+                else { return }
+                let connectionWasObserved = await MCPRoutingWaiter.connectionWasObserved(runID: record.runID)
+                guard !Task.isCancelled,
+                      !connectionWasObserved,
+                      coordinator.isPending,
+                      acceptsEvents(from: record)
+                else { return }
+
+                await record.reportRoutingProgress(.waitingForChildConnection)
+                // Reporting that progress suspends, and the run can end, lose its route, or see its
+                // connection arrive meanwhile. A committed route also cleans up its waiter, which
+                // then reports no connection, so the lease's terminal outcome is checked too.
+                let connectionWasObservedNow = await MCPRoutingWaiter.connectionWasObserved(runID: record.runID)
+                let routingOutcome = await lease.currentRoutingTerminalOutcome()
+                guard !Task.isCancelled,
+                      !connectionWasObservedNow,
+                      routingOutcome == nil,
+                      acceptsEvents(from: record),
+                      coordinator.isPending
+                else { return }
+                if record.session.appendLogEntry(
+                    AgentLogEntry(
+                        timestamp: Date(),
+                        type: .system,
+                        message: "Still waiting for \(record.agentKind.displayName) to open its MCP connection."
+                    ),
+                    dedupeKey: "context-builder-routing-watchdog-\(record.runID.uuidString)"
+                ) {
+                    updateAgentLogBinding(from: record.session)
+                }
+            }
+            defer { watchdogTask.cancel() }
+            // A cancelled wait can stay suspended in a progress report, so cancellation stops the
+            // watchdog at once instead of when the wait returns.
+            let outcome = await withTaskCancellationHandler {
+                await lease.releaseWhenRoutedIndefinitely(
+                    progressReporter: { [weak record] progress in
+                        guard let record else { return }
+                        let phase: ContextBuilderMCPProgressPhase = switch progress {
+                        case .waitingForChildConnection:
+                            .waitingForChildConnection
+                        case .childConnectionObserved:
+                            .childConnectionObserved
+                        case .waitingForRouting:
+                            .waitingForRouting
+                        case .routingConfirmed:
+                            .routingConfirmed
+                        case .routingTimeoutBeforeConnection:
+                            .routingTimeoutBeforeConnection
+                        case .routingTimeoutAfterConnection:
+                            .routingTimeoutAfterConnection
+                        }
+                        await record.reportRoutingProgress(phase)
+                    }
+                )
+            } onCancel: {
+                watchdogTask.cancel()
+            }
             debugLog("Routing result for run \(record.runID): outcome=\(outcome)")
 
             switch outcome {

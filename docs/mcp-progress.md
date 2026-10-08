@@ -95,7 +95,10 @@ finishes without opening that connection, or the run is cancelled.
 A window whose MCP tools never become ready, or a provider that never opens its
 connection, keeps the run waiting until the run is cancelled or a failure is
 reported. A startup that hangs shows up as a run that keeps waiting, not as an
-error.
+error. After 30 seconds without an observed provider connection, the run logs
+`Still waiting for <provider> to open its MCP connection.` once and reports
+`waiting_for_child_connection` again; that entry is a warning, not a deadline,
+and the wait continues.
 
 ## Context Builder refusals
 
