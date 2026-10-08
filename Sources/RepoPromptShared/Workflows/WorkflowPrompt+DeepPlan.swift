@@ -37,6 +37,30 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
 		let deleteBaseline = example(variant,
 			mcp: #"`{"tool":"file_actions","args":{"action":"delete","path":"<path>"}}`"#,
 			cli: #"`rpce-cli -w <window_id> -e 'call file_actions {"action":"delete","path":"<path>"}'`"#)
+		// `ask_user` is served only inside Context Builder and Agent Mode runs, so a CLI host asks through its own question tool or in chat.
+		let openingInterviewLead = example(variant,
+			mcp: "One `ask_user` wizard with two questions, before any exploration:",
+			cli: "Two questions, asked together before any exploration. Ask them through your own question tool when you have one, otherwise in plain chat, with the title, context, question text, and options as written:")
+		let checkpointRule = example(variant,
+			mcp: "every later `ask_user` is a checkpoint they asked for: on `timed_out: true`, halt and resume from the same prompt when they reply. `skipped: true` is a choice and falls back to the documented default.",
+			cli: "every later question is a checkpoint they asked for: on a timeout, halt and resume from the same prompt when they reply. A skip is a choice and falls back to the documented default.")
+		let noAnswerSignals = example(variant, mcp: "`skipped` or `timed_out`", cli: "a skip or a timeout")
+		let midFlowAsk = example(variant, mcp: "Ask with `ask_user`", cli: "Ask the way Phase 1 does")
+		// Single-sourced so every variant asks the same questions with the same options.
+		let openingWizard = """
+  "title":"Shaping this plan",
+  "context":"Two choices that shape the run. Skipping or not replying keeps the defaults: hands-off and no external sources.",
+  "questions":[
+    {"id":"involvement","question":"How involved do you want to be while I shape this plan?","options":[
+      "Up front — clarify the prompt with me before exploration begins.",
+      "Mid-flow — check in with me before the design agent reviews the draft.",
+      "Hands-off — surface the plan when it is ready, then refine it with me."]},
+    {"id":"sources","question":"Which external sources should discovery include? Add links, documents, or specific leads as free text.","allows_multiple":true,"allows_custom":true,"options":["Confluence","Slack","Jira","Bitbucket","None"]}
+  ]
+"""
+		let routeQuestion = """
+"questions":[{"id":"route","question":"Who drafts the plan?","options":["RepoPrompt — \(builderToolName) in plan mode (default).","External model — export a prompt with \(exportSkillName); I paste it into ChatGPT Pro and return the response."]}]
+"""
 
 		return """
 Explore agents map seams and gather outside facts. A planner, either \(builderName) in plan mode or an external model reached through `\(exportSkillName)`, drafts the plan. A design agent critiques it once. **You own the writing**, the structure, and the final shape.
@@ -48,32 +72,26 @@ Explore agents map seams and gather outside facts. A planner, either \(builderNa
 - **The planner's draft is a baseline, not an authority.** Keep what changes an implementer's decision: facts, decisions, rationale, constraints, edge cases, sequencing, verification. A detail that changes no decision may be dropped; the Phase 7.5 fidelity check confirms that nothing an implementer needs was lost, not that every item survived. The code and the user's explicit decisions stay authoritative: correct a baseline detail when they contradict it, and note what changed and why.
 - **Reference, don't reproduce.** Point to `file:line` and links; never paste source files, transcripts, or tool output into the plan.
 - **Ground every question in something you found.** Generic interview questions waste the user's time; at most four per checkpoint.
-- **Honor the involvement promise.** Once the user picks Up front or Mid-flow, every later `ask_user` is a checkpoint they asked for: on `timed_out: true`, halt and resume from the same prompt when they reply. `skipped: true` is a choice and falls back to the documented default. Phase 1's own questions are the one exception: a timeout there means no signal, and the defaults apply.
+- **Honor the involvement promise.** Once the user picks Up front or Mid-flow, \(checkpointRule) Phase 1's own questions are the one exception: a timeout there means no signal, and the defaults apply.
 \(workspaceVerificationBlock(variant: variant, heading: "## Phase 0", beforeAction: "interview question", nextStep: "Phase 1"))
 ## Phase 1: Opening interview (required; the first interactive action)
 
-One `ask_user` wizard with two questions, before any exploration:
+\(openingInterviewLead)
 
 \(example(variant,
 	mcp: """
 ```json
 {"tool":"ask_user","args":{
-  "title":"Shaping this plan",
-  "context":"Two choices that shape the run. Skipping or not replying keeps the defaults: hands-off and no external sources.",
-  "questions":[
-    {"id":"involvement","question":"How involved do you want to be while I shape this plan?","options":[
-      "Up front — clarify the prompt with me before exploration begins.",
-      "Mid-flow — check in with me before the design agent reviews the draft.",
-      "Hands-off — surface the plan when it is ready, then refine it with me."]},
-    {"id":"sources","question":"Which external sources should discovery include? Add links, documents, or specific leads as free text.","allows_multiple":true,"allows_custom":true,"options":["Confluence","Slack","Jira","Bitbucket","None"]}
-  ],
+\(openingWizard),
   "timeout_seconds":180
 }}
 ```
 """,
 	cli: """
-```bash
-rpce-cli -w <window_id> -e 'call ask_user {"title":"Shaping this plan","context":"Two choices that shape the run. Skipping or not replying keeps the defaults: hands-off and no external sources.","questions":[{"id":"involvement","question":"How involved do you want to be while I shape this plan?","options":["Up front — clarify the prompt with me before exploration begins.","Mid-flow — check in with me before the design agent reviews the draft.","Hands-off — surface the plan when it is ready, then refine it with me."]},{"id":"sources","question":"Which external sources should discovery include? Add links, documents, or specific leads as free text.","allows_multiple":true,"allows_custom":true,"options":["Confluence","Slack","Jira","Bitbucket","None"]}],"timeout_seconds":180}'
+```json
+{
+\(openingWizard)
+}
 ```
 """))
 
@@ -82,12 +100,12 @@ Then, only when the answer is Up front or Mid-flow, one more question:
 \(example(variant,
 	mcp: """
 ```json
-{"tool":"ask_user","args":{"questions":[{"id":"route","question":"Who drafts the plan?","options":["RepoPrompt — \(builderToolName) in plan mode (default).","External model — export a prompt with \(exportSkillName); I paste it into ChatGPT Pro and return the response."]}],"timeout_seconds":120}}
+{"tool":"ask_user","args":{\(routeQuestion),"timeout_seconds":120}}
 ```
 """,
 	cli: """
-```bash
-rpce-cli -w <window_id> -e 'call ask_user {"questions":[{"id":"route","question":"Who drafts the plan?","options":["RepoPrompt — \(builderToolName) in plan mode (default).","External model — export a prompt with \(exportSkillName); I paste it into ChatGPT Pro and return the response."]}],"timeout_seconds":120}'
+```json
+{\(routeQuestion)}
 ```
 """))
 
@@ -95,7 +113,7 @@ rpce-cli -w <window_id> -e 'call ask_user {"questions":[{"id":"route","question"
 |---|---|
 | **Up front** | Phase 1.5 interview before broad exploration; later checkpoints halt on timeout |
 | **Mid-flow** | Phase 5 check-in before the critique; later checkpoints halt on timeout |
-| **Hands-off** (also `skipped` or `timed_out` here) | No planning discussion: the RepoPrompt route is selected, the route question is not asked, Phases 4.5 and 5 are skipped, and the outcome is explained at the final hand-off |
+| **Hands-off** (also \(noAnswerSignals) here) | No planning discussion: the RepoPrompt route is selected, the route question is not asked, Phases 4.5 and 5 are skipped, and the outcome is explained at the final hand-off |
 | **Sources** | The named sources, links, and leads feed the Phase 2 discovery branches; "None" means in-workspace and prior-art branches only |
 | **Route** (interactive modes only) | Phase 4 runs as exactly one of 4A (RepoPrompt) or 4B (external model); a skip or timeout here means 4A |
 
@@ -200,7 +218,7 @@ Discuss, record the agreed trimming and decisions under `## Decisions` in the us
 
 ## Phase 5: Mid-flow check-in (Mid-flow on route 4A)
 
-Read your draft. Identify two to four real ambiguities: hedged choices, tradeoffs without a pick, assumptions the user should weigh. Ask with `ask_user`; fold the answers in. A timeout halts; a skip means the draft stands on that point.
+Read your draft. Identify two to four real ambiguities: hedged choices, tradeoffs without a pick, assumptions the user should weigh. \(midFlowAsk); fold the answers in. A timeout halts; a skip means the draft stands on that point.
 
 ## Phase 6: Bounded critique
 

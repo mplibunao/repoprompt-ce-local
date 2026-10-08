@@ -23,6 +23,19 @@ extension RepoPromptWorkflowPrompts {
 		let sameConversation = example(variant,
 			mcp: "on the same `chat_id` from Phase 2",
 			cli: "in the same tab as Phase 2 (`-t <tab_id>`)")
+		// `ask_user` is served only inside Context Builder and Agent Mode runs, so a CLI host asks through its own question tool or in chat.
+		let interviewLead = example(variant,
+			mcp: "one `ask_user` wizard, before any discovery:",
+			cli: "two questions, asked together before any discovery. Ask them through your own question tool when you have one, otherwise in plain chat, with the title, context, question text, and options as written:")
+		// Single-sourced so every variant asks the same questions with the same options.
+		let interviewWizard = """
+  "title":"Shaping this investigation",
+  "context":"Skipping or not replying keeps the defaults: only the sources the task already names, and the RepoPrompt \(chatLabel) for analysis.",
+  "questions":[
+    {"id":"sources","question":"Which external sources should discovery include? Add links, documents, tickets, or specific leads as free text.","allows_multiple":true,"allows_custom":true,"options":["Confluence","Slack","Jira","Bitbucket","None"]},
+    {"id":"route","question":"Who analyzes the evidence?","options":["RepoPrompt \(chatLabel) (default).","External model — export a prompt with \(exportSkillName); I paste it into ChatGPT Pro and return the response."]}
+  ]
+"""
 		let sessionCleanup = includeSessionCleanupGuidance
 			? " Dismiss finished sessions you won't revisit with `agent_manage` `cleanup_sessions`: explore sessions at once, heavier ones when their output is recorded."
 			: ""
@@ -46,25 +59,22 @@ extension RepoPromptWorkflowPrompts {
 
 ## Phases
 \(workspaceVerificationBlock(variant: variant, heading: "### Phase 0", beforeAction: "investigation", nextStep: "Phase 1"))
-**Phase 1: triage and interview.** Read what the user supplied (traces, logs, reports). Summarize the symptoms and form first hypotheses. Then one `ask_user` wizard, before any discovery:
+**Phase 1: triage and interview.** Read what the user supplied (traces, logs, reports). Summarize the symptoms and form first hypotheses. Then \(interviewLead)
 
 \(example(variant,
 	mcp: """
 ```json
 {"tool":"ask_user","args":{
-  "title":"Shaping this investigation",
-  "context":"Skipping or not replying keeps the defaults: only the sources the task already names, and the RepoPrompt \(chatLabel) for analysis.",
-  "questions":[
-    {"id":"sources","question":"Which external sources should discovery include? Add links, documents, tickets, or specific leads as free text.","allows_multiple":true,"allows_custom":true,"options":["Confluence","Slack","Jira","Bitbucket","None"]},
-    {"id":"route","question":"Who analyzes the evidence?","options":["RepoPrompt \(chatLabel) (default).","External model — export a prompt with \(exportSkillName); I paste it into ChatGPT Pro and return the response."]}
-  ],
+\(interviewWizard),
   "timeout_seconds":120
 }}
 ```
 """,
 	cli: """
-```bash
-rpce-cli -w <window_id> -e 'call ask_user {"title":"Shaping this investigation","context":"Skipping or not replying keeps the defaults: only the sources the task already names, and the RepoPrompt \(chatLabel) for analysis.","questions":[{"id":"sources","question":"Which external sources should discovery include? Add links, documents, tickets, or specific leads as free text.","allows_multiple":true,"allows_custom":true,"options":["Confluence","Slack","Jira","Bitbucket","None"]},{"id":"route","question":"Who analyzes the evidence?","options":["RepoPrompt \(chatLabel) (default).","External model — export a prompt with \(exportSkillName); I paste it into ChatGPT Pro and return the response."]}],"timeout_seconds":120}'
+```json
+{
+\(interviewWizard)
+}
 ```
 """))
 
