@@ -44,7 +44,7 @@ public enum WorkflowPromptCatalog {
         ),
         WorkflowPromptDescriptor(
             id: .deepPlan,
-            description: "Deep planning workflow that ends at a polished `docs/plans/<topic>-<YYYY-MM-DD>.md` document (no implementation). First action asks the user how involved they want to be (up front / mid-flow / hands-off). Explore agents map seams and optional external research; context_builder produces a complete implementation-ready specification as the preservation baseline; the orchestrator preserves supported implementation-bearing detail while allowing evidence-backed correction and lossless consolidation; a design agent performs a bounded completeness and correctness critique; and a final fidelity check confirms coverage before cleanup.",
+            description: "Deep planning workflow that ends at a polished `docs/plans/<topic>-<YYYY-MM-DD>.md` document (no implementation). It opens by asking how involved the user wants to be (up front / mid-flow / hands-off) and which external sources to include. Explore agents map seams and gather outside facts; context_builder in plan mode or an external model reached through rp-oracle-export drafts a baseline; the orchestrator writes the plan from it, keeping what an implementer needs; a design agent critiques it once; and a final fidelity check runs before cleanup.",
             arguments: [
                 WorkflowPromptArgument(
                     name: "topic",
