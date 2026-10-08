@@ -2497,6 +2497,8 @@ import XCTest
             throw AdmissionTestError.fixtureSetup("durable workspace activation selected the wrong target")
         }
         window.promptManager.loadComposeTabsFromWorkspace(activeWorkspace, syncPromptText: true)
+        // Finish the scheduled chat writes before tests record their workspace baseline.
+        await window.oracleViewModel.loadSessionsFromWorkspace()
     }
 
     private final class AdmissionWorkspaceStorageOverride {
