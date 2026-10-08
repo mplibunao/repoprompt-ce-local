@@ -266,7 +266,7 @@ Done when the plan lives at its path; keeps every applicable substantive section
 
 ### Phase 7.5: Fidelity check and cleanup
 
-Walk the Phase 4 ledger: each item is still explicit and discoverable, losslessly consolidated, or corrected or dropped under the Core principles standard. Restore anything that became weaker or merely implied. Then delete the export, and on route 4B the returned response: \(deleteBaseline).
+Walk the Phase 4 ledger: each item is still explicit and discoverable, losslessly consolidated, or corrected or dropped under the Core principles standard. Restore anything that became weaker or merely implied. Then delete the export, and on route 4B the returned response when it is under `prompt-exports/`: \(deleteBaseline). A response the user supplied at any other path is their file; leave it.
 
 In Hands-off, surface the plan now with a plain-language explanation of the outcome (the approach, the important choices and their tradeoffs, and what was trimmed and why) and offer refinement ("Revise a section, expand, or trim?"), each round a focused edit. For all modes report the plan path, a two-sentence summary, surviving open questions, and the suggested next workflow (`rp-build` or `rp-orchestrate`). When the plan proposes wording for approval-protected text (global instruction files, governance documents), present each passage for exact-text approval at the user's checkpoint or at this hand-off; implementation is never the first time the user sees it.
 
@@ -278,7 +278,7 @@ In Hands-off, surface the plan now with a plain-language explanation of the outc
 - Cap discovery at three branches when the sources or repositories warrant more, run two branches on one question, or dispatch external research with no external dependency.
 - Reframe a DECIDED item as a question in the export, run both routes, offer the export route in Hands-off, or skip the walkthrough after an external response.
 - Let the critique reopen settled decisions, expand scope, or rewrite the plan.
-- Drop baseline detail an implementer needs, or delete the export or response before Phase 7.5 passes.
+- Drop baseline detail an implementer needs, delete the export or response before Phase 7.5 passes, or delete a response file the user supplied outside `prompt-exports/`.
 - Read the codebase broadly yourself, forget to poll detached agents, or silently demote an Up-front or Mid-flow user to Hands-off on a timeout.\(variant == .cli ? "\n- **CLI:** Forget to pass `-w <window_id>` — CLI invocations are stateless and require explicit window targeting." : "")
 
 Now begin with Phase \(variant == .agent ? "1" : "0").\(variant == .cli ? " First run `rpce-cli -e 'windows'` to find the correct window." : "")
