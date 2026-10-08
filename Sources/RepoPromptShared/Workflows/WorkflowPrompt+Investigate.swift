@@ -23,10 +23,14 @@ extension RepoPromptWorkflowPrompts {
 		let sameConversation = example(variant,
 			mcp: "on the same `chat_id` from Phase 2",
 			cli: "in the same tab as Phase 2 (`-t <tab_id>`)")
-		// `ask_user` is served only inside Context Builder and Agent Mode runs, so a CLI host asks through its own question tool or in chat.
-		let interviewLead = example(variant,
-			mcp: "one `ask_user` wizard, before any discovery:",
-			cli: "two questions, asked together before any discovery. Ask them through your own question tool when you have one, otherwise in plain chat, with the title, context, question text, and options as written:")
+		// RepoPrompt serves `ask_user` only to sessions it started itself: Context Builder and Agent Mode runs.
+		// Those sessions and external MCP hosts load the same MCP skill, so it asks conditionally; a CLI host never has the tool.
+		let interviewLead: String
+		switch variant {
+		case .agent: interviewLead = "one `ask_user` wizard, before any discovery:"
+		case .mcp: interviewLead = "one wizard, before any discovery. Ask it with `ask_user` when that tool is in your tool list. Otherwise ask it through your own question tool when you have one, or in plain chat, with the same title, context, questions, and options:"
+		case .cli: interviewLead = "two questions, asked together before any discovery. Ask them through your own question tool when you have one, otherwise in plain chat, with the title, context, question text, and options as written:"
+		}
 		// Single-sourced so every variant asks the same questions with the same options.
 		let interviewWizard = """
   "title":"Shaping this investigation",

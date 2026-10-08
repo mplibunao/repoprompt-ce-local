@@ -37,15 +37,33 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
 		let deleteBaseline = example(variant,
 			mcp: #"`{"tool":"file_actions","args":{"action":"delete","path":"<path>"}}`"#,
 			cli: #"`rpce-cli -w <window_id> -e 'call file_actions {"action":"delete","path":"<path>"}'`"#)
-		// `ask_user` is served only inside Context Builder and Agent Mode runs, so a CLI host asks through its own question tool or in chat.
-		let openingInterviewLead = example(variant,
-			mcp: "One `ask_user` wizard with two questions, before any exploration:",
-			cli: "Two questions, asked together before any exploration. Ask them through your own question tool when you have one, otherwise in plain chat, with the title, context, question text, and options as written:")
-		let checkpointRule = example(variant,
-			mcp: "every later `ask_user` is a checkpoint they asked for: on `timed_out: true`, halt and resume from the same prompt when they reply. `skipped: true` is a choice and falls back to the documented default.",
-			cli: "every later question is a checkpoint they asked for: on a timeout, halt and resume from the same prompt when they reply. A skip is a choice and falls back to the documented default.")
-		let noAnswerSignals = example(variant, mcp: "`skipped` or `timed_out`", cli: "a skip or a timeout")
-		let midFlowAsk = example(variant, mcp: "Ask with `ask_user`", cli: "Ask the way Phase 1 does")
+		// RepoPrompt serves `ask_user` only to sessions it started itself: Context Builder and Agent Mode runs.
+		// Those sessions and external MCP hosts load the same MCP skill, so it asks conditionally; a CLI host never has the tool.
+		let openingInterviewLead: String
+		let routeQuestionLead: String
+		let checkpointRule: String
+		let noAnswerSignals: String
+		let midFlowAsk: String
+		switch variant {
+		case .agent:
+			openingInterviewLead = "One `ask_user` wizard with two questions, before any exploration:"
+			routeQuestionLead = "one more question:"
+			checkpointRule = "every later `ask_user` is a checkpoint they asked for: on `timed_out: true`, halt and resume from the same prompt when they reply. `skipped: true` is a choice and falls back to the documented default."
+			noAnswerSignals = "`skipped` or `timed_out`"
+			midFlowAsk = "Ask with `ask_user`"
+		case .mcp:
+			openingInterviewLead = "One wizard with two questions, before any exploration. Ask it with `ask_user` when that tool is in your tool list. Otherwise ask it through your own question tool when you have one, or in plain chat, with the same title, context, questions, and options:"
+			routeQuestionLead = "one more question, asked the same way:"
+			checkpointRule = "every later question is a checkpoint they asked for. Asked with `ask_user`: on `timed_out: true`, halt and resume from the same prompt when they reply; `skipped: true` is a choice and falls back to the documented default. Asked any other way: wait for the reply, and treat a skipped question as that same choice."
+			noAnswerSignals = "a skip or a timeout"
+			midFlowAsk = "Ask the way Phase 1 does"
+		case .cli:
+			openingInterviewLead = "Two questions, asked together before any exploration. Ask them through your own question tool when you have one, otherwise in plain chat, with the title, context, question text, and options as written:"
+			routeQuestionLead = "one more question:"
+			checkpointRule = "every later question is a checkpoint they asked for: on a timeout, halt and resume from the same prompt when they reply. A skip is a choice and falls back to the documented default."
+			noAnswerSignals = "a skip or a timeout"
+			midFlowAsk = "Ask the way Phase 1 does"
+		}
 		// Single-sourced so every variant asks the same questions with the same options.
 		let openingWizard = """
   "title":"Shaping this plan",
@@ -95,7 +113,7 @@ Explore agents map seams and gather outside facts. A planner, either \(builderNa
 ```
 """))
 
-Then, only when the answer is Up front or Mid-flow, one more question:
+Then, only when the answer is Up front or Mid-flow, \(routeQuestionLead)
 
 \(example(variant,
 	mcp: """
