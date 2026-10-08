@@ -173,7 +173,7 @@ The pattern is a **verify-then-dispatch-fresh loop**:
 
 Do **not** fire-and-forget the full list. Catching drift early — before the next agent builds on a flawed foundation — is your value as the orchestrator.
 
-**Review per work item, not per branch.** When a run has more than one work item, each dispatched agent requests a `context_builder` review of its own item's diff and applies the verified findings before you dispatch the next item. Never defer to a single review of the whole branch: a multi-item diff does not fit a model's context window, and findings caught late compound across items. The small-task skip under *Writing the dispatch brief* is for a run with a single small item.
+**Review per work item, not per branch.** When a run has more than one work item, each dispatched agent requests a `context_builder` review of its own item's diff and applies the verified findings before you dispatch the next item. Independent items dispatched in parallel each run that review on their own diff before you dispatch anything that builds on them. Never defer to a single review of the whole branch: a multi-item diff does not fit a model's context window, and findings caught late compound across items. The small-task skip under *Writing the dispatch brief* is for a run with a single small item.
 
 \(example(variant,
 	mcp: """
