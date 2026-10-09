@@ -32,7 +32,6 @@ final class AgentComposerSubmissionAttemptTests: XCTestCase {
 
     func testNewSessionGoalControlPlaneSubmissionClearsSourceDraftAndPendingState() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
@@ -195,6 +194,13 @@ final class AgentComposerSubmissionAttemptTests: XCTestCase {
         GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
         let window = WindowState()
         WindowStatesManager.shared.registerWindowState(window)
+        addTeardownBlock { @MainActor in
+            window.beginClose()
+            // Window teardown suppresses UI root unloading while closing.
+            await window.workspaceFilesViewModel.unloadAllRootFolders()
+            await window.tearDown()
+            WindowStatesManager.shared.unregisterWindowState(window)
+        }
         GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
 
         let workspace = window.workspaceManager.createWorkspace(

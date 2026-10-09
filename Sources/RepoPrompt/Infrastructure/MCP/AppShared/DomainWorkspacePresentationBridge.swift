@@ -421,6 +421,14 @@ final class DomainWorkspacePresentationBridge {
         }
 
         var nextModels = projectedModels
+        // An unchanged authority document can lag the manager's pending local edits.
+        // Reusing the manager's model keeps the cached copy from overwriting those edits.
+        for workspace in snapshot.workspaces where !changedIDs.contains(workspace.document.workspaceID) {
+            let workspaceID = workspace.document.workspaceID
+            if let local = workspaceManager?.workspace(withID: workspaceID) {
+                nextModels[workspaceID] = local
+            }
+        }
         for workspaceID in removedIDs {
             nextModels.removeValue(forKey: workspaceID)
         }

@@ -46,6 +46,77 @@ import XCTest
             try await super.tearDown()
         }
 
+        func testProjectionKeepsPendingInactiveSelectionUntilItsOwnDocumentChanges() async throws {
+            let inactiveTab = ComposeTabState(
+                name: "Inactive",
+                selection: StoredSelection(selectedPaths: ["/tmp/old.swift"])
+            )
+            let activeTab = ComposeTabState(name: "Active")
+            let workspace = WorkspaceModel(
+                name: "Selection",
+                repoPaths: ["/tmp"],
+                composeTabs: [activeTab, inactiveTab],
+                activeComposeTabID: activeTab.id
+            )
+            try writeWorkspace(workspace)
+            try writeLegacyIndex([workspace])
+            let runtime = MCPDomainRuntime(configuration: .init(
+                mode: .app,
+                profileIdentifier: "inactive-selection-\(UUID().uuidString)",
+                storageDirectory: storageRoot.appendingPathComponent("runtime-state", isDirectory: true),
+                workspaceStorageDirectory: storageRoot,
+                eventDirectory: storageRoot.appendingPathComponent("events", isDirectory: true),
+                temporaryDirectory: storageRoot.appendingPathComponent("tmp", isDirectory: true),
+                externalReloadInterval: nil
+            ))
+            try await runtime.start()
+            defer { Task { _ = await runtime.shutdown() } }
+            let client = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -790)
+            let peer = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -791)
+            let manager = makeManager(windowID: -790, domainWorkspaceAuthorityClient: client)
+            await manager.awaitInitialized()
+            let bridge = DomainWorkspacePresentationBridge(workspaceManager: manager, client: client)
+            bridge.start()
+            defer { bridge.stop() }
+            await bridge.awaitInitialProjection()
+
+            let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: inactiveTab.id)
+            var updatedTab = try XCTUnwrap(manager.composeTab(for: identity))
+            let expectedSelection = StoredSelection(selectedPaths: ["/tmp/new.swift"])
+            updatedTab.selection = expectedSelection
+            XCTAssertTrue(manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspace.id))
+
+            let unrelated = WorkspaceModel(name: "Other", repoPaths: ["/tmp/other"])
+            let outcome = try await peer.create(unrelated, fileURL: workspaceFileURL(for: unrelated))
+            XCTAssertEqual(outcome.disposition, .applied)
+            let unrelatedSequence = await runtime.workspaceStore.snapshot().publicationSequence
+            let unrelatedProjected = await bridge.waitUntilProjected(through: unrelatedSequence)
+            XCTAssertTrue(unrelatedProjected)
+            XCTAssertEqual(manager.composeTab(for: identity)?.selection, expectedSelection)
+
+            let current = try XCTUnwrap(manager.workspace(withID: workspace.id))
+            let savedURL = try await manager.saveWorkspaceToFileAsync(current)
+            let saved = try JSONDecoder().decode(WorkspaceModel.self, from: Data(contentsOf: savedURL))
+            XCTAssertEqual(saved.composeTabs.first { $0.id == inactiveTab.id }?.selection, expectedSelection)
+
+            let remoteSelection = StoredSelection(selectedPaths: ["/tmp/remote.swift"])
+            var remote = saved
+            let tabIndex = try XCTUnwrap(remote.composeTabs.firstIndex { $0.id == inactiveTab.id })
+            remote.composeTabs[tabIndex].selection = remoteSelection
+            let baselineSnapshot = await peer.canonicalWorkspaceSnapshot(workspace.id)
+            let baseline = try XCTUnwrap(baselineSnapshot)
+            let remoteOutcome = try await peer.replaceWorking(
+                remote,
+                fileURL: savedURL,
+                expectedWorkspaceRevision: baseline.revisions.workingRevision
+            )
+            XCTAssertEqual(remoteOutcome.disposition, .applied)
+            let remoteSequence = await runtime.workspaceStore.snapshot().publicationSequence
+            let remoteProjected = await bridge.waitUntilProjected(through: remoteSequence)
+            XCTAssertTrue(remoteProjected)
+            XCTAssertEqual(manager.composeTab(for: identity)?.selection, remoteSelection)
+        }
+
         func testAuthoritativeRetirementSurvivesReloadPreservesSidecarsAndUnhideRestoresDetection() async throws {
             let mergedPromptID = UUID()
             let duplicateTabID = UUID()

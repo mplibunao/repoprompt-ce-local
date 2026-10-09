@@ -509,6 +509,7 @@ class OracleViewModel: ObservableObject {
     private let recentDisplayedSessionLimit = 2
     private var sessionSwitchGeneration: Int = 0
     private var workspaceChatSessionLoadGeneration: UInt64 = 0
+    private var workspaceChatSessionLoadTasks: [UUID: Task<Void, Never>] = [:]
     private let workspaceSwitchChatStubLoadConcurrency = 4
 
     /// Session management
@@ -1200,8 +1201,10 @@ class OracleViewModel: ObservableObject {
         // New code using multi-listener approach:
         self.workspaceManager.addWorkspaceDidSwitchListener(label: "chat") { [weak self] newWS in
             guard let self else { return }
-            Task { [weak self] in
+            let taskID = UUID()
+            workspaceChatSessionLoadTasks[taskID] = Task { [weak self] in
                 await self?.handleWorkspaceSwitched(to: newWS)
+                self?.workspaceChatSessionLoadTasks.removeValue(forKey: taskID)
             }
         }
 
@@ -2865,10 +2868,16 @@ class OracleViewModel: ObservableObject {
 
     // MARK: - Loading All Sessions
 
-    /// Load all chat sessions from all known workspaces.
-    /// (Used once at init, or if you want to refresh everything.)
+    /// Refresh the active workspace's chats after scheduled switch restoration completes.
     @MainActor
     func loadSessionsFromWorkspace() async {
+        // An older switch task can enter after this call and supersede its load generation.
+        // Join every scheduled restoration before starting the awaited refresh.
+        while !workspaceChatSessionLoadTasks.isEmpty {
+            for task in Array(workspaceChatSessionLoadTasks.values) {
+                await task.value
+            }
+        }
         await handleWorkspaceSwitched(to: workspaceManager.activeWorkspace)
     }
 

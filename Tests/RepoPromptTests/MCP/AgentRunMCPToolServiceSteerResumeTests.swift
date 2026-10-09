@@ -7,7 +7,6 @@ import XCTest
 final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
     func testSteerCompletedUserOwnedSessionWithoutControlContextReactivatesAndStartsFollowUp() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let sessionID = UUID()
@@ -49,7 +48,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerWaitForInactiveControlPlaneCommandDoesNotPrepareRunEpoch() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let sessionID = UUID()
@@ -104,7 +102,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerWaitReplacesExpiredPriorRunHandleBeforeWaiting() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let sessionID = UUID()
@@ -174,7 +171,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testReconstructedSteerAcceptsBeforeLaterBookkeepingFailure() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let sessionID = UUID()
@@ -233,7 +229,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerReactivationDispatchFailureCleansControlContext() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let sessionID = UUID()
@@ -269,7 +264,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerReactivationDispatchFailurePreservesReplacementControlContextButClearsPendingMask() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let sessionID = UUID()
@@ -330,7 +324,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerUnknownSessionIDStillFailsWithoutCreatingRegistration() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let unknownSessionID = UUID()
@@ -358,7 +351,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testReconstructedSteerRejectsWorkspaceDriftWhenSessionBecomesActiveDuringControlActivation() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let sessionID = UUID()
@@ -410,7 +402,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerActiveUncontrolledSessionIsRejected() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let sessionID = UUID()
@@ -445,7 +436,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerDuringQueuedCodexStartIsRejectedAndTheStartCompletes() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         // Codex keeps its start pending until the first native dispatch is accepted; the
         // readiness gate holds it inside the runner, short of that dispatch.
         let fixture = try makeQueuedStartFixture(gatedReadinessCalls: [1])
@@ -482,7 +472,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerDuringQueuedClaudeStartIsRejectedAndTheStartReachesItsProvider() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let claude = StartupTestClaudeRecorder()
         let fixture = try makeQueuedStartFixture(claude: claude)
         fixture.session.selectedAgent = .claudeCode
@@ -524,7 +513,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerAfterTheRunnerOwnsTheRunUsesTheExistingSteeringPath() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         for agent in [AgentProviderKind.codexExec, .claudeCode] {
             let claude = StartupTestClaudeRecorder()
             let fixture = try makeQueuedStartFixture(claude: claude)
@@ -549,7 +537,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerDuringPendingStartFlagBeforeSubmissionIsRejectedUntilTheFlagIsStale() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let fixture = try makeQueuedStartFixture()
         try await fixture.activateMCPControl(startPending: true)
         XCTAssertNil(fixture.session.unresolvedStartupTicket)
@@ -578,7 +565,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSteerOnUncontrolledSessionWithPendingStartIsRejectedBeforeReactivation() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let sessionID = UUID()
         let session = try await makeWorkspaceOwnedSession(in: window, sessionID: sessionID)
         session.isMCPOriginated = false
@@ -612,7 +598,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testManualStartAcceptedWhileSteerActivationIsSuspendedRefusesTheActivation() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         let sessionID = UUID()
         let session = try await makeWorkspaceOwnedSession(in: window, sessionID: sessionID)
@@ -670,7 +655,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testSlowExternalStartKeepsItsPendingFlagPastTheMaskExpiry() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let fixture = try makeQueuedStartFixture()
         let start = try await beginHeldExternalStart(on: fixture, message: "slow external start")
         let viewModel = fixture.viewModel
@@ -692,7 +676,6 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
     func testExpiredSupersedingMaskLeavesAPreparingStartsFlagAndOwner() async throws {
         let window = try await makeWindow()
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let fixture = try makeQueuedStartFixture()
         let start = try await beginHeldExternalStart(on: fixture, message: "start behind an expired mask")
         let owner = try XCTUnwrap(fixture.session.mcpPendingStartOwner)
@@ -932,6 +915,13 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
         GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
         let window = WindowState()
         WindowStatesManager.shared.registerWindowState(window)
+        addTeardownBlock { @MainActor in
+            window.beginClose()
+            // Window teardown suppresses UI root unloading while closing.
+            await window.workspaceFilesViewModel.unloadAllRootFolders()
+            await window.tearDown()
+            WindowStatesManager.shared.unregisterWindowState(window)
+        }
         GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
 
         let workspace = window.workspaceManager.createWorkspace(
