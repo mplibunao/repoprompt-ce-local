@@ -20,7 +20,7 @@ extension RepoPromptWorkflowPrompts {
 		let toolDesc = variant == .cli ? "rpce-cli" : "RepoPrompt MCP tools"
 
 		return """
-\(frontmatter(name: "rp-optimize", description: "Iterative performance optimization loop using \(toolDesc): instrument with debug-only metrics, establish a baseline, then plan → delegate one optimize+harden cycle → re-measure → ask oracle for next plan, looping until the oracle is satisfied or the target metric is met", variant: variant))
+\(frontmatter(name: "rp-optimize", description: "Performance optimization loop using \(toolDesc): instrument, baseline, measure. Use to make slow code measurably faster.", variant: variant))
 
 # \(title)\(suffix)
 
