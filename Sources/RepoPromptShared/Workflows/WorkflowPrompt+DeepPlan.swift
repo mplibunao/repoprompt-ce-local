@@ -344,7 +344,7 @@ On route 4B, apply these steps to the returned response.
 1. Read the complete export with `read_file`; if a read is truncated, continue in chunks until every line has been read. While reading, build a compact coverage ledger of the baseline: each section and its concrete implementation-bearing items (facts, decisions, rationale, constraints, edge cases, sequencing, verification), a few words apiece. Phase 7.5 walks this ledger.
 2. Integrate all substantive, supported plan content rather than mining the export for a shorter summary. Preserve applicable current-state analysis, design, file-by-file impact, tradeoffs, risks, implementation order, and verification.
 3. Fold the scaffold's `## Goal`, curated `## Background`, user answers, open questions, and references into that body.
-4. Check the export's claims against the code and the user's answers. Correct or remove a detail only under the standard in Core principles, and note what changed and why so a corrected item doesn't later read as a dropped one.
+4. Check the export's claims against the code and the user's answers. Correct or remove a detail only under the standard in Core principles, and note what changed and why so a corrected item doesn't later read as a dropped one. Before the critique, drop only detail that changes no decision. When a component or mechanism looks overbuilt, keep it and record it under Open Questions with your view, so the design critique weighs in first.
 5. Add an execution index using **Goal**, **Done when**, **Key files**, **Dependencies**, and **Size** for each work item. This index organizes the detailed specification rather than replacing it.
 6. Normalize headings and phrasing, integrate Phase 2 evidence, and fill genuine gaps. Do not collapse distinct behavior cases or replace concrete detail with broad instructions such as “update callers” or “add tests.”
 7. Keep the export, and the response on route 4B, through the Phase 6 critique and Phase 7.5 fidelity check; delete it only after that check passes.
@@ -378,7 +378,7 @@ Discuss, record the agreed trimming and decisions under `## Decisions` in the us
 
 ## Phase 5: Mid-flow Check-in (only if "Mid-flow" on route 4A)
 
-Read your own draft. Identify 2–4 ambiguities — places where \(builderName) hedged ("could go either way"), tradeoffs without a pick, or assumptions the user might want to weigh in on. \(midFlowAsk) Fold answers in before Phase 6.
+Read your own draft. Identify 2–4 ambiguities — places where \(builderName) hedged ("could go either way"), tradeoffs without a pick, or assumptions the user might want to weigh in on. \(midFlowAsk) Fold answers in before Phase 6. A cut that comes up here, whether from the user or from you, goes under Open Questions with each view rather than into the plan; the design critique weighs in first.
 
 The user picked **Mid-flow** — they explicitly asked to be involved here. \(anyTimesOut), **halt** — don't push to Phase 6 (the design critique) with unresolved ambiguities, don't silently demote them to Hands-off. Report you're waiting on the outstanding question(s) and stop. Resume Phase 5 from the same prompt when the user replies. (\(skipSignal) means the user is fine with your current draft on that point — continue.)
 
