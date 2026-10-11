@@ -43,12 +43,10 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
 		let promptAppend = example(variant,
 			mcp: #"`prompt` `op:"append"`"#,
 			cli: "`prompt append`")
-		// RepoPrompt serves `ask_user` only to sessions it started itself: Context Builder and Agent Mode runs.
-		// Those sessions and external MCP hosts load the same MCP skill, so it asks conditionally; a CLI host never has the tool.
+		// The MCP and Agent Mode variants ask with `ask_user`. A CLI host never has that tool, so the CLI twin asks through the host's own question tool or plain chat.
 		let openingInterviewLead: String
 		let routeQuestionLead: String
 		let noAnswerSignals: String
-		let askedAnotherWay: String
 		let askPerQuestion: String
 		let midFlowAsk: String
 		switch variant {
@@ -56,21 +54,18 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
 			openingInterviewLead = "One `ask_user` wizard with two questions, before any exploration:"
 			routeQuestionLead = "one more question:"
 			noAnswerSignals = "`skipped` or `timed_out`"
-			askedAnotherWay = ""
 			askPerQuestion = "Use `ask_user` per question, or batch related ones."
 			midFlowAsk = "Ask via `ask_user`."
 		case .mcp:
-			openingInterviewLead = "One wizard with two questions, before any exploration. Ask it with `ask_user` when that tool is in your tool list. Otherwise ask it through your own question tool when you have one, or in plain chat, with the same title, context, questions, and options:"
+			openingInterviewLead = "One wizard with two questions, before any exploration."
 			routeQuestionLead = "one more question, asked the same way:"
 			noAnswerSignals = "a skip or a timeout"
-			askedAnotherWay = " A checkpoint asked any other way: wait for the reply, and treat a skipped question as that same choice."
-			askPerQuestion = "Ask the way Phase 1 does, per question, or batch related ones."
-			midFlowAsk = "Ask the way Phase 1 does."
+			askPerQuestion = "Use `ask_user` per question, or batch related ones."
+			midFlowAsk = "Ask via `ask_user`."
 		case .cli:
 			openingInterviewLead = "Two questions, asked together before any exploration. Ask them through your own question tool when you have one, otherwise in plain chat, with the title, context, question text, and options as written:"
 			routeQuestionLead = "one more question:"
 			noAnswerSignals = "a skip or a timeout"
-			askedAnotherWay = ""
 			askPerQuestion = "Ask the way Phase 1 does, per question, or batch related ones."
 			midFlowAsk = "Ask the way Phase 1 does."
 		}
@@ -110,7 +105,7 @@ This workflow is delegation-heavy. Explore agents map seams and pull external re
 - **Consolidation must be lossless.** Consolidation is lossless when the same facts, decisions, rationale, constraints, and verification stay equally easy to find; never generalize accurate detail merely for brevity.
 - **Reference, don't reproduce.** Point to `file:line` and external links. Don't paste full source files, raw transcripts, or tool dumps into the plan.
 - **Ground every question in something you found.** Ask the user only for decisions, each with your recommended answer, worded so "yes" accepts it. Generic interview questions waste the user's time; at most four per checkpoint.
-- **Honor the involvement promise.** Once the user has picked **Up front** or **Mid-flow**, every downstream \(checkpointAsk) is a checkpoint they asked for. \(oneTimesOut), **halt** — don't proceed with assumed answers and silently break the promise. Resume from the same prompt when the user replies. (Phase 1 itself is exempt: a timeout on the involvement-mode question means "no signal yet," and the documented Hands-off default applies.) \(skipSignal) is always an explicit user choice and falls back to documented defaults.\(askedAnotherWay)
+- **Honor the involvement promise.** Once the user has picked **Up front** or **Mid-flow**, every downstream \(checkpointAsk) is a checkpoint they asked for. \(oneTimesOut), **halt** — don't proceed with assumed answers and silently break the promise. Resume from the same prompt when the user replies. (Phase 1 itself is exempt: a timeout on the involvement-mode question means "no signal yet," and the documented Hands-off default applies.) \(skipSignal) is always an explicit user choice and falls back to documented defaults.
 \(workspaceVerificationBlock(variant: variant, heading: "## Phase 0", beforeAction: "interview question", nextStep: "Phase 1"))
 ## Phase 1: User Involvement Decision (REQUIRED — first interactive action)
 

@@ -17,12 +17,11 @@ extension RepoPromptWorkflowPrompts {
 		let deleteExport = example(variant,
 			mcp: #"`{"tool":"file_actions","args":{"action":"delete","path":"<absolute path>"}}`"#,
 			cli: #"`rpce-cli -w <window_id> -e 'call file_actions {"action":"delete","path":"<absolute path>"}'`"#)
-		// RepoPrompt serves `ask_user` only to sessions it started itself: Context Builder and Agent Mode runs.
-		// Those sessions and external MCP hosts load the same MCP skill, so it asks conditionally; a CLI host never has the tool.
+		// The MCP and Agent Mode variants ask with `ask_user`. A CLI host never has that tool, so the CLI twin asks through the host's own question tool or plain chat.
 		let interviewLead: String
 		switch variant {
 		case .agent: interviewLead = "one `ask_user` wizard, before any discovery:"
-		case .mcp: interviewLead = "one wizard, before any discovery. Ask it with `ask_user` when that tool is in your tool list. Otherwise ask it through your own question tool when you have one, or in plain chat, with the same title, context, questions, and options:"
+		case .mcp: interviewLead = "one wizard, before any discovery."
 		case .cli: interviewLead = "two questions, asked together before any discovery. Ask them through your own question tool when you have one, otherwise in plain chat, with the title, context, question text, and options as written:"
 		}
 		// Single-sourced so every variant asks the same questions with the same options.
