@@ -358,7 +358,7 @@ The user has just returned the response, so this is a conversation, not a report
 
 1. The proposed approach, in a paragraph.
 2. Each important choice and its tradeoff, with the alternative the draft rejected.
-3. For every piece of machinery the draft proposes (abstractions, packages, harnesses, tests, process steps): keep, simplify, or defer, with the user need it serves and the smallest design that meets it. Name anything overbuilt or unnecessary.
+3. For every piece of machinery the draft proposes (abstractions, packages, harnesses, tests, process steps): keep, simplify, or defer, with the user need it serves and the simplest design that meets it. Name anything overbuilt or unnecessary.
 4. The questions whose answers change scope or order.
 
 Discuss, record the agreed trimming and decisions under `## Decisions` in the user's wording, apply them in the plan, and proceed only when the user confirms. This is the checkpoint the export route adds after the response: in Mid-flow it is the Phase 5 check-in, folded into one conversation; in Up front it is an added checkpoint at the same point, since the response cannot be discussed before it exists. A timeout halts, as at every checkpoint after Phase 1.
@@ -422,7 +422,7 @@ Make the plan clear and executable. Fidelity is about preserving supported conte
 
 Walk the coverage ledger from Phase 4 — no need to reread both documents cold. Confirm the final plan keeps each ledger item equally explicit and discoverable, losslessly consolidated, or corrected or removed under the standard in Core principles. Restore anything that became weaker or merely implied, and spot-check the export directly wherever the ledger feels thin. This is a fidelity check, not a length target.
 
-Delete the export, and on route 4B the returned response when it is under `prompt-exports/`, only after this check passes:
+Delete the export, and on route 4B the returned response, only after this check passes:
 
 \(example(variant,
 	mcp: """
@@ -435,8 +435,6 @@ Delete the export, and on route 4B the returned response when it is under `promp
 rpce-cli -w <window_id> -e 'call file_actions {"action":"delete","path":"<absolute path>"}'
 ```
 """))
-
-A response the user supplied at any other path is their file; leave it.
 
 If the user picked **Hands-off**, surface the plan now with a plain-language explanation of the outcome (the approach, the important choices and their tradeoffs, and what was trimmed and why) and offer interactive refinement: *"Plan is at `<path>`. Want me to revise any section, expand scope, or trim anything?"* Treat each round as a focused edit pass on the file, not a re-plan.
 
