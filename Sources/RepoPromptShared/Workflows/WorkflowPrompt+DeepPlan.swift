@@ -469,7 +469,6 @@ The current Phase 4 export is not fully consumed until the Phase 7.5 fidelity ch
 - 🚫 Summarizing or generalizing supported implementation-bearing content merely for brevity — lossless consolidation is fine, lossy is not
 - 🚫 Letting the design critique reopen settled decisions without evidence, expand scope, or rewrite the plan
 - 🚫 Deleting the \(builderName) export, or the response on route 4B, before the Phase 7.5 fidelity check passes
-- 🚫 Deleting a response file the user supplied outside `prompt-exports/`
 - 🚫 Folding distinct questions into one explore, splitting by repository before the scan has named the ones that matter, or splitting by document
 - 🚫 Dispatching external/web research when the plan only depends on in-repo facts — the trigger is real external dependency
 - 🚫 Doing broad codebase reading yourself instead of dispatching an explore agent — keep your context lean for writing
