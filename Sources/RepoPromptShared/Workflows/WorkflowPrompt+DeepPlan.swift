@@ -47,30 +47,24 @@ You are a deep-planning orchestrator. Produce one polished, executable plan docu
 		let openingInterviewLead: String
 		let routeQuestionLead: String
 		let noAnswerSignals: String
-		let askPerQuestion: String
-		let midFlowAsk: String
 		switch variant {
 		case .agent:
 			openingInterviewLead = "One `ask_user` wizard with two questions, before any exploration:"
 			routeQuestionLead = "one more question:"
 			noAnswerSignals = "`skipped` or `timed_out`"
-			askPerQuestion = "Use `ask_user` per question, or batch related ones."
-			midFlowAsk = "Ask via `ask_user`."
 		case .mcp:
 			openingInterviewLead = "One wizard with two questions, before any exploration."
 			routeQuestionLead = "one more question, asked the same way:"
 			noAnswerSignals = "a skip or a timeout"
-			askPerQuestion = "Use `ask_user` per question, or batch related ones."
-			midFlowAsk = "Ask via `ask_user`."
 		case .cli:
 			openingInterviewLead = "Two questions, asked together before any exploration. Ask them through your own question tool when you have one, otherwise in plain chat, with the title, context, question text, and options as written:"
 			routeQuestionLead = "one more question:"
 			noAnswerSignals = "a skip or a timeout"
-			askPerQuestion = "Ask the way Phase 1 does, per question, or batch related ones."
-			midFlowAsk = "Ask the way Phase 1 does."
 		}
-		// A CLI host asks through its own question tool or plain chat, so the CLI twin names no `ask_user` result field.
+		// A CLI host asks through its own question tool or plain chat, so the CLI twin names neither `ask_user` nor its result fields.
 		let hostAsks = variant == .cli
+		let askPerQuestion = hostAsks ? "Ask the way Phase 1 does, per question, or batch related ones." : "Use `ask_user` per question, or batch related ones."
+		let midFlowAsk = hostAsks ? "Ask the way Phase 1 does." : "Ask via `ask_user`."
 		let checkpointAsk = hostAsks ? "question" : "`ask_user`"
 		let oneTimesOut = hostAsks ? "If one times out" : "If one returns `timed_out: true`"
 		let anyTimesOut = hostAsks ? "If any question times out" : "If any `ask_user` returns `timed_out: true`"
