@@ -654,7 +654,7 @@
             "type" : "string"
           },
           "path" : {
-            "description" : "File path for export operation",
+            "description" : "File path for export operation. Under a session worktree binding, the file is written into the bound worktree and the reply reports its logical path.",
             "type" : "string"
           },
           "path_display" : {
@@ -702,7 +702,7 @@
             "type" : "string"
           },
           "path" : {
-            "description" : "File path (required for export)",
+            "description" : "File path (required for export). Under a session worktree binding, the file is written into the bound worktree and the reply reports its logical path.",
             "type" : "string"
           },
           "preset" : {

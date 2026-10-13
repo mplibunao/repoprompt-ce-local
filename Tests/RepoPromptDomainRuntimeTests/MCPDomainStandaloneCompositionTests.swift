@@ -48,7 +48,7 @@ final class MCPDomainStandaloneCompositionTests: XCTestCase {
         let snapshot = await runtime.toolRegistry.snapshot()
         XCTAssertEqual(snapshot.fingerprintsByToolName.count, 27)
         XCTAssertEqual(Set(snapshot.fingerprintsByToolName.keys), Set(canonicalNames))
-        XCTAssertEqual(snapshot.catalogFingerprint, "55dddefe1830383576cf11bf2c89b9a42208c1617b24a120575ccb5fc805a576")
+        XCTAssertEqual(snapshot.catalogFingerprint, "956bd5db815a16e6d4161f9cab1d5a6f1f502e4afd00b035b6f1a543b65de0db")
 
         let protectedCandidate = await runtime.toolRegistry.resolve(
             toolName: MCPWindowToolName.manageSelection,
