@@ -162,9 +162,13 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         let op = (args["op"]?.stringValue ?? "get").lowercased()
         let rawPaths = args["paths"]?.arrayValue?.compactMap(\.stringValue) ?? []
         let parsedInputs = dependencies.selection.parseManageSelectionInputs(rawPaths, args["slices"])
+        // Rejecting before the auto-selection drain and any mutation keeps a malformed slice from
+        // applying its valid siblings, and keeps `remove` from reading a dropped range as "remove all".
+        if !parsedInputs.sliceErrors.isEmpty {
+            throw MCPError.invalidParams("Invalid selection inputs: \(parsedInputs.sliceErrors.joined(separator: "; "))")
+        }
         let selectionPaths = parsedInputs.paths
         let sliceInputs = parsedInputs.sliceInputs
-        let sliceParseErrors = parsedInputs.sliceErrors
         let mode = args["mode"]?.stringValue?.lowercased() ?? "full"
         if await dependencies.context.promptVM.codeMapsGloballyDisabled, mode == "codemap_only" || op == "demote" {
             throw MCPError.invalidParams(MCPServerViewModel.codeMapsGloballyDisabledMCPMessage)
@@ -212,12 +216,12 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         let physicalParsedInputs = MCPServerViewModel.ManageSelectionInputs(
             paths: lookupContext.translateInputPaths(artifactResolution.ordinaryPaths),
             sliceInputs: lookupContext.translateSliceInputs(artifactResolution.ordinarySliceInputs),
-            sliceErrors: parsedInputs.sliceErrors,
+            sliceErrors: [],
             hadExplicitSliceSpec: parsedInputs.hadExplicitSliceSpec
         )
         let physicalSelectionPaths = physicalParsedInputs.paths
         let physicalSliceInputs = physicalParsedInputs.sliceInputs
-        let extraInvalid = sliceParseErrors + artifactResolution.invalidDiagnostics
+        let extraInvalid = artifactResolution.invalidDiagnostics
 
         switch op {
         case "get":
@@ -387,8 +391,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
                     sliceMutated = sliceResult.mutated
                     sliceInvalid = !sliceResult.result.invalidPaths.isEmpty
                 } else if parsedInputs.hadExplicitSliceSpec && strict {
-                    let detail = sliceParseErrors.isEmpty ? "No valid slices parsed from provided specification" : sliceParseErrors.joined(separator: "; ")
-                    throw MCPError.invalidParams(detail)
+                    throw MCPError.invalidParams("No valid slices parsed from provided specification")
                 }
                 let resolvedAnything = pathMutated || !resolvedMap.isEmpty || sliceResolved || sliceMutated
                     || artifactResolution.resolvedCount > 0
@@ -423,9 +426,6 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
             )
             var combinedInvalid = invalid
             for error in extraInvalid where !combinedInvalid.contains(error) {
-                combinedInvalid.append(error)
-            }
-            for error in sliceParseErrors where !combinedInvalid.contains(error) {
                 combinedInvalid.append(error)
             }
             for msg in codemapUnavailableMsgs where !combinedInvalid.contains(msg) {
@@ -478,8 +478,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
                     throw MCPError.invalidParams("Provided slices did not match any files")
                 }
             } else if parsedInputs.hadExplicitSliceSpec, strict {
-                let detail = sliceParseErrors.isEmpty ? "No valid slices parsed from provided specification" : sliceParseErrors.joined(separator: "; ")
-                throw MCPError.invalidParams(detail)
+                throw MCPError.invalidParams("No valid slices parsed from provided specification")
             }
             if strict, !(pathMutated || !resolvedMap.isEmpty || sliceResolved || sliceMutated), !selectionPaths.isEmpty {
                 if artifactResolution.resolvedCount > 0 {
@@ -500,9 +499,6 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
             )
             var combinedInvalid = invalid
             for error in extraInvalid where !combinedInvalid.contains(error) {
-                combinedInvalid.append(error)
-            }
-            for error in sliceParseErrors where !combinedInvalid.contains(error) {
                 combinedInvalid.append(error)
             }
             return try await persistAndReply(
