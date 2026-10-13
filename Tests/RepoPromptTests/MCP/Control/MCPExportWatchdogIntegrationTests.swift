@@ -1668,6 +1668,137 @@ import XCTest
             }
         }
 
+        func testPromptExportsUseBoundWorktreeDestinations() async throws {
+            try await withBoundWorktreeExportFixture { fixture, endpoint, boundFixture in
+                let promptVM = fixture.contextA.window.promptManager
+                let previousDisplay = promptVM.filePathDisplayOption
+                defer { promptVM.filePathDisplayOption = previousDisplay }
+                let physical = "prompt-exports/physical-absolute.md"
+                let logical = "prompt-exports/logical-absolute.md"
+                let relative = "prompt-exports/bare-relative.md"
+                let cases: [(tool: String, form: String, relativePath: String, destination: String, display: FilePathDisplay)] = [
+                    (
+                        MCPWindowToolName.workspaceContext,
+                        "physical absolute",
+                        physical,
+                        boundFixture.worktreeRoot.appendingPathComponent(physical).path,
+                        .relative
+                    ),
+                    (
+                        MCPWindowToolName.prompt,
+                        "logical absolute",
+                        logical,
+                        boundFixture.logicalRoot.appendingPathComponent(logical).path,
+                        .full
+                    ),
+                    (MCPWindowToolName.workspaceContext, "bare relative", relative, relative, .relative)
+                ]
+
+                for exportCase in cases {
+                    let label = "\(exportCase.tool), \(exportCase.form) destination, \(exportCase.display) display"
+                    let marker = "RPCE_BOUND_WORKTREE_EXPORT_\(UUID().uuidString)"
+                    let physicalURL = boundFixture.worktreeRoot.appendingPathComponent(exportCase.relativePath)
+                    let canonicalURL = boundFixture.logicalRoot.appendingPathComponent(exportCase.relativePath)
+                    let expectedReplyPath = exportCase.display == .full
+                        ? canonicalURL.path
+                        : "\(boundFixture.logicalRoot.lastPathComponent)/\(exportCase.relativePath)"
+                    promptVM.filePathDisplayOption = exportCase.display
+                    let set = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": marker]
+                    )
+                    XCTAssertFalse(set.rawJSON.contains("\"isError\":true"), "\(label): \(set.rawJSON)")
+
+                    let response = try await endpoint.callTool(
+                        name: exportCase.tool,
+                        arguments: [
+                            "op": "export",
+                            "path": exportCase.destination,
+                            "operation_id": "bound-worktree-export-\(UUID().uuidString)",
+                            "_rawJSON": true
+                        ]
+                    )
+                    let payload = try Self.toolResultObject(response)
+                    XCTAssertNotEqual(payload["is_error"] as? Bool, true, "\(label): \(response.rawJSON)")
+                    let export = payload["export"] as? [String: Any]
+                    XCTAssertEqual(export?["path"] as? String, expectedReplyPath, "\(label): reply path")
+                    let exported = try? String(contentsOf: physicalURL, encoding: .utf8)
+                    XCTAssertTrue(exported?.contains(marker) == true, "\(label): worktree file content")
+                    XCTAssertFalse(
+                        FileManager.default.fileExists(atPath: canonicalURL.path),
+                        "\(label): the canonical checkout must stay untouched"
+                    )
+
+                    let read = try await endpoint.callTool(
+                        name: MCPWindowToolName.readFile,
+                        arguments: ["path": expectedReplyPath, "_rawJSON": true]
+                    )
+                    let readPayload = try Self.toolResultObject(read)
+                    XCTAssertEqual(readPayload["content"] as? String, exported, "\(label): bound read-back \(read.rawJSON)")
+                }
+            }
+        }
+
+        func testPromptExportRejectsUnloadedBoundDestinationWithoutExternalFallback() async throws {
+            try await withBoundWorktreeExportFixture { fixture, endpoint, boundFixture in
+                let store = fixture.contextA.window.workspaceFileContextStore
+                let resume = MCPExecutionIgnoringCancellationGate()
+                var responseTask: Task<PersistentMCPTestRPCResponse, Error>?
+
+                @MainActor
+                func cleanup() async {
+                    await resume.release()
+                    _ = try? await responseTask?.value
+                    MCPAppPhysicalCapabilityAdapters.setPromptExportPhaseHookForTesting(nil)
+                }
+
+                do {
+                    let relativePath = "prompt-exports/unloaded-worktree.md"
+                    let physicalURL = boundFixture.worktreeRoot.appendingPathComponent(relativePath)
+                    let canonicalURL = boundFixture.logicalRoot.appendingPathComponent(relativePath)
+                    let worktreeRootPath = StandardizedPath.absolute(boundFixture.worktreeRoot.path)
+                    MCPAppPhysicalCapabilityAdapters.setPromptExportPhaseHookForTesting { phase in
+                        guard phase == .beforeDurableWrite else { return }
+                        await resume.enterAndWait()
+                    }
+                    responseTask = Task {
+                        try await endpoint.callTool(
+                            name: MCPWindowToolName.prompt,
+                            arguments: [
+                                "op": "export",
+                                "path": physicalURL.path,
+                                "operation_id": "unloaded-bound-worktree-\(UUID().uuidString)",
+                                "_rawJSON": true
+                            ]
+                        )
+                    }
+                    try await resume.waitUntilEntered(count: 1)
+
+                    let loadedRoots = await store.rootRefs(scope: .allLoaded)
+                    let worktreeRoot = try XCTUnwrap(loadedRoots.first { $0.standardizedFullPath == worktreeRootPath })
+                    await store.unloadRoot(id: worktreeRoot.id)
+                    let remainingRootPaths = await store.rootRefs(scope: .allLoaded).map(\.standardizedFullPath)
+                    XCTAssertFalse(
+                        remainingRootPaths.contains(worktreeRootPath),
+                        "Precondition: the worktree root must be unloaded before the durable write"
+                    )
+                    XCTAssertTrue(FileManager.default.fileExists(atPath: boundFixture.worktreeRoot.path))
+                    await resume.release()
+
+                    let response = try await XCTUnwrap(responseTask).value
+                    let payload = try Self.toolResultObject(response)
+                    XCTAssertEqual(payload["is_error"] as? Bool, true, response.rawJSON)
+                    XCTAssertFalse(FileManager.default.fileExists(atPath: physicalURL.path))
+                    XCTAssertFalse(FileManager.default.fileExists(atPath: canonicalURL.path))
+
+                    await cleanup()
+                } catch {
+                    await cleanup()
+                    throw error
+                }
+            }
+        }
+
         func testPipelinedSameToolDeadlinesFollowExactRequestIdentityWhenAdmissionReverses() async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
@@ -2341,6 +2472,130 @@ import XCTest
             let bindText = try toolResultText(bindResponse)
             XCTAssertFalse(bindText.contains("Error:"), bindText)
             await context.window.mcpServer.domainRoutingPublishTask?.value
+        }
+
+        private struct BoundWorktreeExportFixture {
+            let logicalRoot: URL
+            let worktreeRoot: URL
+            let logicalRootID: UUID
+            let sessionID: UUID
+            let store: WorkspaceFileContextStore
+
+            @MainActor
+            func release() async {
+                await WorkspaceRootBindingProjectionMaterializer(store: store).release(sessionID: sessionID)
+                await store.unloadRoot(id: logicalRootID)
+            }
+        }
+
+        /// Runs `body` on a leased fixture whose context A has a bound worktree prepared for
+        /// export. Shared cleanup runs after `body` returns or throws, so `body` must first
+        /// undo its own changes. `assertCleanedUp()` runs only when `body` succeeds.
+        private func withBoundWorktreeExportFixture(
+            _ body: @MainActor (
+                PersistentMCPTestFixture,
+                PersistentMCPTestEndpoint,
+                BoundWorktreeExportFixture
+            ) async throws -> Void
+        ) async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                var endpoint: PersistentMCPTestEndpoint?
+                var bound: BoundWorktreeExportFixture?
+
+                @MainActor
+                func cleanup() async {
+                    await bound?.release()
+                    if let endpoint {
+                        await fixture.networkManager.debugSetDomainPeerIdentityForTesting(
+                            connectionID: endpoint.connectionID,
+                            identity: nil
+                        )
+                    }
+                    await fixture.cleanup()
+                }
+
+                do {
+                    let leasedEndpoint = try fixture.endpointA()
+                    endpoint = leasedEndpoint
+                    let boundFixture = try await prepareBoundWorktreeExportFixture(fixture, endpoint: leasedEndpoint)
+                    bound = boundFixture
+                    try await body(fixture, leasedEndpoint, boundFixture)
+                } catch {
+                    await cleanup()
+                    throw error
+                }
+                await cleanup()
+                try await fixture.assertCleanedUp()
+            }
+        }
+
+        /// Adds a second visible root to context A and binds the tab's agent session to a
+        /// worktree of it through the window's binding-state closures, then prepares export.
+        private func prepareBoundWorktreeExportFixture(
+            _ fixture: PersistentMCPTestFixture,
+            endpoint: PersistentMCPTestEndpoint
+        ) async throws -> BoundWorktreeExportFixture {
+            let context = fixture.contextA
+            let workspaceManager = context.window.workspaceManager
+            let logicalRoot = fixture.rootURL.appendingPathComponent("bound-export-secondary", isDirectory: true)
+            let worktreeRoot = fixture.rootURL.appendingPathComponent("bound-export-worktree", isDirectory: true)
+            for root in [logicalRoot, worktreeRoot] {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            }
+            let logicalRootRecord = try await WorkspaceRootLoadTestSupport.loadRootMatchingCurrentFileSystemSettings(
+                in: context.window,
+                path: logicalRoot.path
+            )
+            let sessionID = UUID()
+            let workspaceIndex = try XCTUnwrap(workspaceManager.workspaces.firstIndex { $0.id == context.workspaceID })
+            let tabIndex = try XCTUnwrap(
+                workspaceManager.workspaces[workspaceIndex].composeTabs.firstIndex { $0.id == context.tabID }
+            )
+            workspaceManager.workspaces[workspaceIndex].repoPaths.append(logicalRoot.path)
+            workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = sessionID
+
+            let binding = AgentSessionWorktreeBinding(
+                id: "prompt-export-binding",
+                repositoryID: "prompt-export-repo",
+                repoKey: logicalRoot.path,
+                logicalRootPath: logicalRoot.path,
+                logicalRootName: logicalRoot.lastPathComponent,
+                worktreeID: "prompt-export-worktree",
+                worktreeRootPath: worktreeRoot.path,
+                worktreeName: worktreeRoot.lastPathComponent,
+                branch: "bugfix/prompt-export",
+                source: "test"
+            )
+            let server = context.window.mcpServer
+            let previousProvider = server.agentWorktreeBindingStateProvider
+            let previousResolver = server.agentWorktreeBindingStateResolver
+            server.agentWorktreeBindingStateProvider = { _, _ in .hydrated([binding]) }
+            server.agentWorktreeBindingStateResolver = { _, _ in .hydrated([binding]) }
+            addTeardownBlock { @MainActor in
+                server.agentWorktreeBindingStateProvider = previousProvider
+                server.agentWorktreeBindingStateResolver = previousResolver
+            }
+
+            try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+            let visibleRootPaths = await context.window.workspaceFileContextStore
+                .rootRefs(scope: .visibleWorkspace)
+                .map(\.standardizedFullPath)
+            XCTAssertEqual(
+                Set(visibleRootPaths),
+                Set([context.rootURL.path, logicalRoot.path].map { StandardizedPath.absolute($0) }),
+                "Both canonical roots must be visible before exporting"
+            )
+            return BoundWorktreeExportFixture(
+                logicalRoot: logicalRoot,
+                worktreeRoot: worktreeRoot,
+                logicalRootID: logicalRootRecord.id,
+                sessionID: sessionID,
+                store: context.window.workspaceFileContextStore
+            )
         }
 
         private static func assertPromptExportDelayedWatchdogCompletion(
