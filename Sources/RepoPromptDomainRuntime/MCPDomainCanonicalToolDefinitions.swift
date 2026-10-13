@@ -1182,7 +1182,7 @@ package enum MCPDomainCanonicalToolDefinitions {
     }
 
     private static let exportPathWorktreeDestination =
-        "Under a session worktree binding, the file is written into the bound worktree and the reply reports its logical path."
+        "When the destination resolves under a root bound to a session worktree, the file is written into that worktree and the reply reports its logical path."
 
     /// A client pays for this text on each `tools/list` that advertises `bind_context` to it, so
     /// it holds only what the schema cannot express: what a binding is, when listing is needed,
