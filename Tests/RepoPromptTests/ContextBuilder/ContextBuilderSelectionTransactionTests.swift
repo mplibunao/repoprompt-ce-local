@@ -331,14 +331,24 @@ final class ManageSelectionSliceValidationTests: XCTestCase {
             "path": .string(fixture.fileA.path),
             "ranges": .array([.object(["start_line": .int(5)])])
         ])])
+        // Removing a slice whose ranges end up empty clears every slice of the file.
+        let nonObjectRange: Value = .array([.object([
+            "path": .string(fixture.fileA.path),
+            "ranges": .array([.int(7)])
+        ])])
         let validSibling: Value = .array([.string(fixture.fileB.path)])
-        let rows: [(label: String, args: [String: Value])] = [
-            ("add beside a valid path", ["op": .string("add"), "paths": validSibling, "slices": missingEnd, "strict": .bool(false)]),
-            ("strict add beside a valid path", ["op": .string("add"), "paths": validSibling, "slices": missingEnd, "strict": .bool(true)]),
-            ("remove from a sliced file", ["op": .string("remove"), "slices": missingEnd, "strict": .bool(false)]),
-            ("get", ["op": .string("get"), "slices": missingEnd])
+        let missingEndMessage = "Invalid selection inputs: Invalid slice range for path '\(fixture.fileA.path)': end_line is required; expected ranges: [{start_line, end_line}]."
+        let rows: [(label: String, args: [String: Value], message: String)] = [
+            ("add beside a valid path", ["op": .string("add"), "paths": validSibling, "slices": missingEnd, "strict": .bool(false)], missingEndMessage),
+            ("strict add beside a valid path", ["op": .string("add"), "paths": validSibling, "slices": missingEnd, "strict": .bool(true)], missingEndMessage),
+            ("remove from a sliced file", ["op": .string("remove"), "slices": missingEnd, "strict": .bool(false)], missingEndMessage),
+            ("get", ["op": .string("get"), "slices": missingEnd], missingEndMessage),
+            (
+                "remove a non-object range",
+                ["op": .string("remove"), "slices": nonObjectRange, "strict": .bool(false)],
+                "Invalid selection inputs: Invalid slice range for path '\(fixture.fileA.path)': each range must be an object; expected ranges: [{start_line, end_line}]."
+            )
         ]
-        let expectedMessage = "Invalid selection inputs: Invalid slice range for path '\(fixture.fileA.path)': end_line is required; expected ranges: [{start_line, end_line}]."
 
         for row in rows {
             do {
@@ -346,7 +356,7 @@ final class ManageSelectionSliceValidationTests: XCTestCase {
                 XCTFail("Expected invalid params: \(row.label)")
             } catch let error as MCPError {
                 if case let .invalidParams(message) = error {
-                    XCTAssertEqual(message, expectedMessage, row.label)
+                    XCTAssertEqual(message, row.message, row.label)
                 } else {
                     XCTFail("Expected MCPError.invalidParams for \(row.label), got \(error)")
                 }

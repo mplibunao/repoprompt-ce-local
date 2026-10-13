@@ -14,7 +14,9 @@ final class MCPManageSelectionParsingTests: XCTestCase {
             ("fractional double end", ["start_line": .int(1), "end_line": .double(12.5)], "end_line must be an integer"),
             ("invalid end_line beside valid end", ["start_line": .int(1), "end_line": .string("abc"), "end": .int(5)], "end_line must be an integer"),
             ("invalid start alias", ["start": .string("abc"), "end_line": .int(5)], "start_line must be an integer"),
-            ("reversed", ["start_line": .int(20), "end_line": .int(10)], "end_line must be greater than or equal to start_line")
+            ("reversed", ["start_line": .int(20), "end_line": .int(10)], "end_line must be greater than or equal to start_line"),
+            ("zero start", ["start_line": .int(0), "end_line": .int(0)], "start_line must be at least 1"),
+            ("negative range", ["start_line": .int(-5), "end_line": .int(-3)], "start_line must be at least 1")
         ]
 
         for testCase in cases {
@@ -60,12 +62,58 @@ final class MCPManageSelectionParsingTests: XCTestCase {
         }
     }
 
+    func testMalformedSliceStructureIsRejected() {
+        let rangeError = "; expected ranges: [{start_line, end_line}]."
+        let cases: [(label: String, slices: Value, error: String)] = [
+            (
+                "non-object range item",
+                .array([.object(["path": .string("A.swift"), "ranges": .array([.int(7)])])]),
+                "Invalid slice range for path 'A.swift': each range must be an object\(rangeError)"
+            ),
+            (
+                "ranges object instead of an array",
+                .array([.object(["path": .string("A.swift"), "ranges": .object(["start_line": .int(1), "end_line": .int(2)])])]),
+                "Invalid slice for path 'A.swift': ranges must be an array\(rangeError)"
+            ),
+            (
+                "non-string lines",
+                .array([.object(["path": .string("A.swift"), "lines": .int(40)])]),
+                "Invalid slice for path 'A.swift': lines must be a string such as '10-20,40', or use ranges: [{start_line, end_line}]."
+            ),
+            (
+                "non-object slice",
+                .array([.string("A.swift")]),
+                "Invalid slice: each slice must be an object {path, ranges: [{start_line, end_line}]}."
+            ),
+            (
+                "slice without path",
+                .array([.object(["ranges": .array([.object(["start_line": .int(1), "end_line": .int(2)])])])]),
+                "Invalid slice: path is required; expected {path, ranges: [{start_line, end_line}]}."
+            ),
+            (
+                "slices object instead of an array",
+                .object(["path": .string("A.swift"), "ranges": .array([.object(["start_line": .int(1), "end_line": .int(2)])])]),
+                "Invalid slices: expected an array of {path, ranges: [{start_line, end_line}]}."
+            )
+        ]
+
+        for testCase in cases {
+            let parsed = MCPServerViewModel.parseManageSelectionInputs(rawPaths: [], slicesValue: testCase.slices)
+
+            XCTAssertEqual(parsed.sliceErrors, [testCase.error], testCase.label)
+            XCTAssertEqual(parsed.sliceInputs.flatMap(\.ranges), [], testCase.label)
+        }
+    }
+
     func testShorthandRequiresClosedRanges() {
         let cases: [(label: String, paths: [String], slices: [[String: Value]], token: String, path: String)] = [
             ("open dash", [], [["path": .string("A.swift"), "lines": .string("10-")]], "10-", "A.swift"),
             ("non-numeric end", [], [["path": .string("A.swift"), "lines": .string("10-x")]], "10-x", "A.swift"),
             ("reversed", [], [["path": .string("A.swift"), "lines": .string("20-10")]], "20-10", "A.swift"),
-            ("open dash path suffix", ["A.swift#L10-"], [], "10-", "A.swift#L10-")
+            ("zero line", [], [["path": .string("A.swift"), "lines": .string("0")]], "0", "A.swift"),
+            ("zero start", [], [["path": .string("A.swift"), "lines": .string("0-5")]], "0-5", "A.swift"),
+            ("open dash path suffix", ["A.swift#L10-"], [], "10-", "A.swift#L10-"),
+            ("zero path suffix", ["A.swift#L0"], [], "0", "A.swift#L0")
         ]
 
         for testCase in cases {
@@ -73,7 +121,7 @@ final class MCPManageSelectionParsingTests: XCTestCase {
 
             XCTAssertEqual(
                 parsed.sliceErrors,
-                ["Invalid slice '\(testCase.token)' for path '\(testCase.path)': use a single line or a closed range, or ranges: [{start_line, end_line}]."],
+                ["Invalid slice '\(testCase.token)' for path '\(testCase.path)': use a 1-based line or a closed range, or ranges: [{start_line, end_line}]."],
                 testCase.label
             )
             XCTAssertEqual(parsed.sliceInputs.flatMap(\.ranges), [], testCase.label)

@@ -69,14 +69,24 @@ extension MCPServerViewModel {
             }
         }
 
+        if let slicesValue, !slicesValue.isNull, slicesValue.arrayValue == nil {
+            sliceErrors.append("Invalid slices: expected an array of {path, ranges: [{start_line, end_line}]}.")
+        }
+
         if let slicesArray = slicesValue?.arrayValue {
             if !slicesArray.isEmpty {
                 hadExplicitSlices = true
             }
             for entry in slicesArray {
-                guard let obj = entry.objectValue else { continue }
+                guard let obj = entry.objectValue else {
+                    sliceErrors.append("Invalid slice: each slice must be an object {path, ranges: [{start_line, end_line}]}.")
+                    continue
+                }
                 let rawPath = obj["path"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                guard !rawPath.isEmpty else { continue }
+                guard !rawPath.isEmpty else {
+                    sliceErrors.append("Invalid slice: path is required; expected {path, ranges: [{start_line, end_line}]}.")
+                    continue
+                }
 
                 // A slice can hold several ranges and a `lines` string, so an endpoint beside `path`
                 // cannot be assigned to any one of them.
@@ -91,14 +101,34 @@ extension MCPServerViewModel {
                 var ranges: [LineRange] = []
                 var explicitRangeSpecified = false
 
+                if let rangesValue = obj["ranges"], !rangesValue.isNull, rangesValue.arrayValue == nil {
+                    sliceErrors.append(
+                        "Invalid slice for path '\(rawPath)': ranges must be an array; expected ranges: [{start_line, end_line}]."
+                    )
+                    continue
+                }
+                if let linesValue = obj["lines"], !linesValue.isNull, linesValue.stringValue == nil {
+                    sliceErrors.append(
+                        "Invalid slice for path '\(rawPath)': lines must be a string such as '10-20,40', or use ranges: [{start_line, end_line}]."
+                    )
+                    continue
+                }
+
                 if let rangesArray = obj["ranges"]?.arrayValue {
                     explicitRangeSpecified = true
                     for value in rangesArray {
-                        guard let rangeObj = value.objectValue else { continue }
+                        // A skipped item would leave `ranges` empty, which `remove` reads as every slice of the file.
+                        guard let rangeObj = value.objectValue else {
+                            sliceErrors.append(Self.sliceRangeDiagnostic(path: rawPath, problem: "each range must be an object"))
+                            continue
+                        }
                         let start = Self.sliceRangeEndpoint(rangeObj, key: "start_line", alias: "start")
                         let end = Self.sliceRangeEndpoint(rangeObj, key: "end_line", alias: "end")
-                        // A reversed range is rejected here because `LineRange` would clamp it to one line.
+                        // `LineRange` clamps a start below 1 to 1 and a reversed range to one line, so both are
+                        // rejected here.
                         switch (start, end) {
+                        case let (.line(startLine), _) where startLine < 1:
+                            sliceErrors.append(Self.sliceRangeDiagnostic(path: rawPath, problem: "start_line must be at least 1"))
                         case let (.line(startLine), .line(endLine)) where endLine >= startLine:
                             ranges.append(LineRange(start: startLine, end: endLine, description: Self.sliceRangeDescription(rangeObj)))
                         case (.line, .line):
@@ -163,7 +193,7 @@ extension MCPServerViewModel {
     }
 
     private nonisolated static func shorthandTokenDiagnostic(token: String, path: String) -> String {
-        "Invalid slice '\(token)' for path '\(path)': use a single line or a closed range, or ranges: [{start_line, end_line}]."
+        "Invalid slice '\(token)' for path '\(path)': use a 1-based line or a closed range, or ranges: [{start_line, end_line}]."
     }
 
     nonisolated static func parseLineRangeTokens(from text: String) -> ([LineRange], [String]) {
@@ -192,12 +222,12 @@ extension MCPServerViewModel {
             if let dashIndex = token.firstIndex(of: "-") {
                 let startPart = String(token[..<dashIndex])
                 let endPart = String(token[token.index(after: dashIndex)...])
-                if let start = Int(startPart), let end = Int(endPart), end >= start {
+                if let start = Int(startPart), let end = Int(endPart), start >= 1, end >= start {
                     ranges.append(LineRange(start: start, end: end))
                 } else {
                     invalid.append(String(rawToken))
                 }
-            } else if let value = Int(token) {
+            } else if let value = Int(token), value >= 1 {
                 ranges.append(LineRange(start: value, end: value))
             } else {
                 invalid.append(String(rawToken))
