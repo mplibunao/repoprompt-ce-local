@@ -1,24 +1,17 @@
 import Darwin
-import Foundation
 
 actor ProcessRegistry {
-    private var children: [pid_t: SpawnedProcess] = [:]
+    private var children: [pid_t: RunnerProcess] = [:]
 
-    func add(_ process: SpawnedProcess) {
+    func add(_ process: RunnerProcess) {
         children[process.pid] = process
     }
 
-    func remove(pid: pid_t) -> SpawnedProcess? {
+    func remove(pid: pid_t) -> RunnerProcess? {
         children.removeValue(forKey: pid)
     }
 
-    func removeAll() -> [SpawnedProcess] {
-        let current = Array(children.values)
-        children.removeAll()
-        return current
-    }
-
-    func current() -> [SpawnedProcess] {
+    func current() -> [RunnerProcess] {
         Array(children.values)
     }
 }

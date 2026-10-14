@@ -25,7 +25,11 @@ enum PipeEndpointError: Error, Equatable {
 /// with `EBADF`. Dropping the parent's reference to the pipe also gives the child EOF on stdin or
 /// `EPIPE` on its output.
 ///
-/// The lock covers only `dup2`, `fcntl`, `ioctl`, and `close`, none of which waits on the child.
+/// An output endpoint also tracks its backlog: the bytes the pipe held when the drain recorded it,
+/// against the bytes the owner has read since.
+///
+/// The lock covers only `dup2`, `fcntl`, `ioctl`, `close`, and the backlog counters, none of which
+/// waits on the child.
 final class PipeEndpoint: @unchecked Sendable {
     enum Role {
         /// The parent's write end of the child's stdin.
@@ -41,10 +45,11 @@ final class PipeEndpoint: @unchecked Sendable {
     }
 
     let fd: Int32
-    let role: Role
     private let devNull: Int32
     private let lock = NSLock()
     private var state = State.open
+    private var backlog: Int?
+    private var backlogBytesRead = 0
 
     private static let logger = Logger(subsystem: "com.repoprompt.process", category: "PipeEndpoint")
     private static let devNullLock = NSLock()
@@ -77,7 +82,6 @@ final class PipeEndpoint: @unchecked Sendable {
             throw PipeEndpointError.noSigPipeFailed(errno: failure)
         }
         fd = duplicate
-        self.role = role
         handle.closeFile()
     }
 
@@ -123,12 +127,42 @@ final class PipeEndpoint: @unchecked Sendable {
     /// The pipe's unread byte count, or nil once the endpoint is retired or closed. `FIONREAD`
     /// fails with `ENODEV` on a retired descriptor.
     func bufferedByteCount() -> Int? {
+        lock.withLock { unreadBytesLocked() }
+    }
+
+    /// Records the pipe's unread bytes as its backlog, which the owner's later reads count against.
+    /// Does nothing once the endpoint is retired or closed.
+    func recordBacklog() {
         lock.withLock {
-            guard state == .open else { return nil }
-            var count: Int32 = 0
-            guard ioctl(fd, Self.fionread, &count) != -1 else { return nil }
-            return Int(count)
+            backlog = unreadBytesLocked()
+            backlogBytesRead = 0
         }
+    }
+
+    /// Asked by the owner before each read. Only a read that begins after the backlog was recorded
+    /// counts toward it: an earlier read may have taken its bytes from the pipe before the backlog
+    /// was measured. Missing such a read makes the count err high, never low.
+    func nextReadCountsTowardBacklog() -> Bool {
+        lock.withLock { backlog != nil }
+    }
+
+    /// Called by the owner after a read that returned `count` bytes.
+    func recordRead(_ count: Int, countsTowardBacklog: Bool) {
+        guard countsTowardBacklog else { return }
+        lock.withLock { backlogBytesRead += count }
+    }
+
+    /// Backlog bytes the owner has not read yet: 0 once it has read them all, and nil when no
+    /// backlog was recorded.
+    var unreadBacklog: Int? {
+        lock.withLock { backlog.map { max($0 - backlogBytesRead, 0) } }
+    }
+
+    private func unreadBytesLocked() -> Int? {
+        guard state == .open else { return nil }
+        var count: Int32 = 0
+        guard ioctl(fd, Self.fionread, &count) != -1 else { return nil }
+        return Int(count)
     }
 
     private static func openSharedDevNull() throws -> Int32 {
@@ -141,44 +175,5 @@ final class PipeEndpoint: @unchecked Sendable {
             sharedDevNull = descriptor
             return descriptor
         }
-    }
-}
-
-/// Lets cancellation end a run's post-exit output drain early.
-///
-/// The cancellation is sticky, because a run can be cancelled before its drain starts: both
-/// streaming consumers cancel the runner at `message_stop` while the child is still running.
-final class DrainControl: @unchecked Sendable {
-    private let lock = NSLock()
-    private var cancelled = false
-    private var wakeUp: (@Sendable () -> Void)?
-
-    var isCancelled: Bool {
-        lock.withLock { cancelled }
-    }
-
-    /// Marks the drain cancelled and fires the current wait's wake-up, if one is registered.
-    func cancel() {
-        let pendingWakeUp = lock.withLock { () -> (@Sendable () -> Void)? in
-            cancelled = true
-            defer { wakeUp = nil }
-            return wakeUp
-        }
-        pendingWakeUp?()
-    }
-
-    /// Registers the wake-up for one wait. Returns false, registering nothing, when the drain is
-    /// already cancelled; the wait then ends at once instead of suspending.
-    func registerWakeUp(_ wakeUp: @escaping @Sendable () -> Void) -> Bool {
-        lock.withLock {
-            guard !cancelled else { return false }
-            self.wakeUp = wakeUp
-            return true
-        }
-    }
-
-    /// Removes the wake-up once its wait has resumed.
-    func clearWakeUp() {
-        lock.withLock { wakeUp = nil }
     }
 }

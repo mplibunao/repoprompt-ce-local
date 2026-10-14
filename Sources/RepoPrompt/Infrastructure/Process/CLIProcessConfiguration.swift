@@ -73,6 +73,9 @@ struct CLIProcessRunnerTestHooks {
 
     enum DrainEvent: Equatable {
         case started
+        /// A check past the caller's deadline kept the pipe open, because its reader has not yet
+        /// read the bytes the pipe held when the drain started.
+        case heldForBacklog(channel: OutputChannel, unreadBacklog: Int)
         case checked(channel: OutputChannel, bufferedBytes: Int?, retired: Bool, reason: RetirementReason?)
         case finished
     }
@@ -83,7 +86,4 @@ struct CLIProcessRunnerTestHooks {
     /// runner's permit, held for the rest of the test process.
     var beforeOutputReaderStarts: (@Sendable (OutputChannel) -> Void)?
     var onDrainEvent: (@Sendable (DrainEvent) -> Void)?
-    /// Runs right after the runner closes its stdout and stderr handles once the root child has
-    /// exited normally, before it waits for the readers.
-    var afterOutputHandlesClosed: (@Sendable () -> Void)?
 }
