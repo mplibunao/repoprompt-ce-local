@@ -76,6 +76,16 @@ final class MCPManageSelectionParsingTests: XCTestCase {
                 "Invalid slice for path 'A.swift': ranges must be an array\(rangeError)"
             ),
             (
+                "lines without tokens",
+                .array([.object(["path": .string("A.swift"), "lines": .string(" , ;")])]),
+                "Invalid slice for path 'A.swift': lines must list at least one line or range, such as '10-20,40'."
+            ),
+            (
+                "empty lines",
+                .array([.object(["path": .string("A.swift"), "lines": .string("")])]),
+                "Invalid slice for path 'A.swift': lines must list at least one line or range, such as '10-20,40'."
+            ),
+            (
                 "non-string lines",
                 .array([.object(["path": .string("A.swift"), "lines": .int(40)])]),
                 "Invalid slice for path 'A.swift': lines must be a string such as '10-20,40', or use ranges: [{start_line, end_line}]."

@@ -148,6 +148,13 @@ extension MCPServerViewModel {
                 if let linesString = obj["lines"]?.stringValue {
                     explicitRangeSpecified = true
                     let (parsed, invalidTokens) = Self.parseLineRangeTokens(from: linesString)
+                    // A `lines` value with no tokens, such as "," or " ", would also reach `remove` as an
+                    // empty range list.
+                    if parsed.isEmpty, invalidTokens.isEmpty {
+                        sliceErrors.append(
+                            "Invalid slice for path '\(rawPath)': lines must list at least one line or range, such as '10-20,40'."
+                        )
+                    }
                     ranges.append(contentsOf: parsed)
                     sliceErrors.append(contentsOf: invalidTokens.map { Self.shorthandTokenDiagnostic(token: $0, path: rawPath) })
                 }

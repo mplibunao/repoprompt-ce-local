@@ -165,7 +165,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         // Rejecting before the auto-selection drain and any mutation keeps a malformed slice from
         // applying its valid siblings, and keeps `remove` from reading a dropped range as "remove all".
         if !parsedInputs.sliceErrors.isEmpty {
-            throw MCPError.invalidParams("Invalid selection inputs: \(parsedInputs.sliceErrors.joined(separator: "; "))")
+            throw MCPError.invalidParams("Invalid selection inputs: \(parsedInputs.sliceErrors.joined(separator: " "))")
         }
         let selectionPaths = parsedInputs.paths
         let sliceInputs = parsedInputs.sliceInputs

@@ -1187,8 +1187,9 @@ package enum MCPDomainCanonicalToolDefinitions {
     private static let exportPathWorktreeDestination =
         "Under a worktree-bound root, the file is written into the worktree and the reply shows its logical path."
 
-    /// The app's slice parser rejects a range that lacks either endpoint and fails the whole call
-    /// on malformed slice input. The advertised schema states both rules.
+    /// The app's slice parser rejects a range that lacks either endpoint, so the advertised schema
+    /// requires both. Rules that the parser's errors state, such as a malformed slice failing the
+    /// whole call, stay out of the property texts.
     private static func requireClosedSliceRanges(
         _ definition: MCPDomainToolDefinition
     ) -> MCPDomainToolDefinition {
