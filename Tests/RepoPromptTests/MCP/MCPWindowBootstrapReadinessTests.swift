@@ -99,7 +99,7 @@ import XCTest
                 let disabling = Task { @MainActor in
                     await server.stopServer()
                 }
-                let disableObserved = await waitUntil {
+                let disableObserved = await MCPWindowTestSupport.waitUntil {
                     server.windowToolRegistrationIntentGenerationForTesting() == enableGeneration + 1
                 }
                 XCTAssertTrue(disableObserved)
@@ -141,14 +141,14 @@ import XCTest
                 let disabling = Task { @MainActor in
                     await server.stopServer()
                 }
-                let disableObserved = await waitUntil {
+                let disableObserved = await MCPWindowTestSupport.waitUntil {
                     server.windowToolRegistrationIntentGenerationForTesting() == originalGeneration + 1
                 }
                 XCTAssertTrue(disableObserved)
                 let reEnable = Task { @MainActor in
                     try await server.requireServerReadyForAgentBootstrap()
                 }
-                let reEnableObserved = await waitUntil {
+                let reEnableObserved = await MCPWindowTestSupport.waitUntil {
                     server.windowToolRegistrationIntentGenerationForTesting() == originalGeneration + 2
                 }
                 XCTAssertTrue(reEnableObserved, "An ensure after a disable must mint a new enable intent.")
@@ -458,7 +458,7 @@ import XCTest
                         waiter.cancel()
                         _ = await waiter.value
                     }
-                    let waiterRegistered = await waitUntil {
+                    let waiterRegistered = await MCPWindowTestSupport.waitUntil {
                         await manager.debugConnectionWaiterCountForLifecycleFenceTest() == waitersBefore + 1
                     }
                     XCTAssertTrue(waiterRegistered)
@@ -503,7 +503,7 @@ import XCTest
                 try await AppGlobalMCPServiceComposition.shared.ensureRegistered()
                 let controllerServiceBefore = await ServerController.shared.mcpService
                 let windows = (0 ..< count).map { _ in
-                    let window = Self.makeWindowWithoutAutoStart()
+                    let window = MCPWindowTestSupport.makeWindowWithoutAutoStart()
                     WindowStatesManager.shared.registerWindowState(window)
                     return ReadinessWindow(window: window, service: window.mcpServer.service)
                 }
@@ -514,12 +514,12 @@ import XCTest
                     try await body(windows)
                 } catch {
                     for entry in windows {
-                        await Self.tearDown(entry.window)
+                        await MCPWindowTestSupport.tearDown(entry.window)
                     }
                     throw error
                 }
                 for entry in windows {
-                    await Self.tearDown(entry.window)
+                    await MCPWindowTestSupport.tearDown(entry.window)
                 }
                 // The shared service may finish installing itself as the real owner meanwhile.
                 let controllerServiceAfter = await ServerController.shared.mcpService
@@ -529,24 +529,6 @@ import XCTest
                     "The fixture must leave the controller wired to its existing MCP service."
                 )
             }
-        }
-
-        private static func tearDown(_ window: WindowState) async {
-            window.mcpServer.setBeforeWindowToolRegistrationForTesting(nil)
-            window.mcpServer.setAfterWindowToolRegistrationBeforeRetentionForTesting(nil)
-            window.mcpServer.setBootstrapReadinessCheckpointForTesting(nil)
-            // The disable reclaims this window's exact registration handle before teardown.
-            _ = await window.mcpServer.setWindowToolsEnabled(false)
-            window.beginClose()
-            await window.tearDown()
-            WindowStatesManager.shared.unregisterWindowState(window)
-        }
-
-        private static func makeWindowWithoutAutoStart() -> WindowState {
-            let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
-            GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-            defer { GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false) }
-            return WindowState()
         }
 
         private static func windowScopeIsActive(_ window: WindowState) async -> Bool {
@@ -680,25 +662,11 @@ import XCTest
             let entered = await gate.waitUntilEntered(timeout: .seconds(5))
             XCTAssertTrue(entered, "The shared transition must reach its gate.", file: file, line: line)
             let generation = server.windowToolRegistrationIntentGenerationForTesting()
-            let joined = await waitUntil {
+            let joined = await MCPWindowTestSupport.waitUntil {
                 server.windowToolTransitionJoinsByGenerationForTesting()[generation, default: 0] == joiners
             }
             XCTAssertTrue(joined, "\(joiners) callers must join the shared transition.", file: file, line: line)
             return generation
-        }
-
-        /// Polls a condition that another task makes true; the timeout bounds a broken fixture.
-        private func waitUntil(
-            timeout: Duration = .seconds(5),
-            _ condition: @MainActor () async -> Bool
-        ) async -> Bool {
-            let clock = ContinuousClock()
-            let deadline = clock.now.advanced(by: timeout)
-            while clock.now < deadline {
-                if await condition() { return true }
-                try? await clock.sleep(for: .milliseconds(5))
-            }
-            return await condition()
         }
     }
 
