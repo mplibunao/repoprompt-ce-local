@@ -1182,7 +1182,7 @@ package enum MCPDomainCanonicalToolDefinitions {
     }
 
     private static let exportPathWorktreeDestination =
-        "Under a worktree-bound root, the file is written into the worktree and the reply shows its logical path."
+        "In the app, under a worktree-bound root, the file is written into the worktree and the reply shows its logical path."
 
     /// A client pays for this text on each `tools/list` that advertises `bind_context` to it, so
     /// it holds only what the schema cannot express: what a binding is, when listing is needed,
