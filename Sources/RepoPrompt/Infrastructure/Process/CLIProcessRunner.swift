@@ -247,10 +247,12 @@ final class CLIProcessRunner {
                 let group = DispatchGroup()
                 var stdoutData = Data()
                 var stderrData = Data()
+                let beforeOutputReaderStarts = config.testHooks?.beforeOutputReaderStarts
 
                 group.enter()
                 DispatchQueue.global(qos: .userInitiated).async {
                     defer { group.leave() }
+                    beforeOutputReaderStarts?(.stdout)
                     let chunkSize = 64 * 1024
                     while true {
                         guard let chunk = try? spawned.stdout.read(upToCount: chunkSize), !chunk.isEmpty else { break }
@@ -261,6 +263,7 @@ final class CLIProcessRunner {
                 group.enter()
                 DispatchQueue.global(qos: .utility).async {
                     defer { group.leave() }
+                    beforeOutputReaderStarts?(.stderr)
                     let chunkSize = 64 * 1024
                     while true {
                         guard let chunk = try? spawned.stderr.read(upToCount: chunkSize), !chunk.isEmpty else { break }
@@ -337,6 +340,7 @@ final class CLIProcessRunner {
                 // Proactively close FDs and wait for readers to finish
                 spawned.stdout.closeFile()
                 spawned.stderr.closeFile()
+                config.testHooks?.afterOutputHandlesClosed?()
                 await Self.waitForGroup(group)
                 if !stdoutData.isEmpty {
                     config.logCollector?.appendDataSection(title: "STDOUT", data: stdoutData)
@@ -495,12 +499,14 @@ final class CLIProcessRunner {
             let stderrTailLimit = config.captureStderrTailBytes
             var stdoutTail = Data()
             var stderrTail = Data()
+            let beforeOutputReaderStarts = config.testHooks?.beforeOutputReaderStarts
 
             let gateCoordinator = GateReleaseCoordinator()
 
             group.enter()
             DispatchQueue.global(qos: .userInitiated).async {
                 defer { group.leave() }
+                beforeOutputReaderStarts?(.stdout)
                 let chunkSize = 64 * 1024
                 while true {
                     guard let chunk = try? spawned.stdout.read(upToCount: chunkSize), !chunk.isEmpty else { break }
@@ -514,6 +520,7 @@ final class CLIProcessRunner {
             group.enter()
             DispatchQueue.global(qos: .utility).async {
                 defer { group.leave() }
+                beforeOutputReaderStarts?(.stderr)
                 let chunkSize = 64 * 1024
                 while true {
                     guard let chunk = try? spawned.stderr.read(upToCount: chunkSize), !chunk.isEmpty else { break }
@@ -576,6 +583,7 @@ final class CLIProcessRunner {
                     ProcessDiagnostics.log("🔒 [FD] Closing FDs for pid=\(spawned.pid)")
                     spawned.stdout.closeFile()
                     spawned.stderr.closeFile()
+                    config.testHooks?.afterOutputHandlesClosed?()
 
                     let groupFinished = await Self.waitForGroup(group, timeout: 5.0, pid: spawned.pid) { msg in
                         ProcessDiagnostics.log(msg)

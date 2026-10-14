@@ -23,6 +23,10 @@ struct CLIProcessConfiguration {
     var captureStderrTailBytes: Int
     /// Limit how many bytes of stdin we sample for logs (0 disables sampling).
     var logStdinSampleBytes: Int
+    /// After the root child exits, how long the runner waits between checks of an output pipe
+    /// that has not reached EOF.
+    var outputDrainCheckInterval: TimeInterval = 5
+    var testHooks: CLIProcessRunnerTestHooks?
 
     init(
         command: String = "claude",
@@ -51,4 +55,35 @@ struct CLIProcessConfiguration {
         self.captureStderrTailBytes = captureStderrTailBytes
         self.logStdinSampleBytes = logStdinSampleBytes
     }
+}
+
+/// Ordering and observation points inside `CLIProcessRunner` for tests. Production configurations
+/// leave `testHooks` nil.
+struct CLIProcessRunnerTestHooks {
+    enum OutputChannel: Equatable {
+        case stdout
+        case stderr
+    }
+
+    enum RetirementReason: Equatable {
+        case idle
+        case cancelled
+        case deadline
+    }
+
+    enum DrainEvent: Equatable {
+        case started
+        case checked(channel: OutputChannel, bufferedBytes: Int?, retired: Bool, reason: RetirementReason?)
+        case finished
+    }
+
+    /// Runs on an output reader's own thread before its first read. Nothing else runs on that
+    /// thread, so a test may block here to hold the reader back. A test that blocks a reader must
+    /// also release it from a teardown block: a reader that never finishes keeps the run, and the
+    /// runner's permit, held for the rest of the test process.
+    var beforeOutputReaderStarts: (@Sendable (OutputChannel) -> Void)?
+    var onDrainEvent: (@Sendable (DrainEvent) -> Void)?
+    /// Runs right after the runner closes its stdout and stderr handles once the root child has
+    /// exited normally, before it waits for the readers.
+    var afterOutputHandlesClosed: (@Sendable () -> Void)?
 }
