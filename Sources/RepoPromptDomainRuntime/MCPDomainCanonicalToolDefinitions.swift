@@ -1188,8 +1188,7 @@ package enum MCPDomainCanonicalToolDefinitions {
         "In the app, under a worktree-bound root, the file is written into the worktree and the reply shows its logical path."
 
     /// The app's slice parser rejects a range that lacks either endpoint, so the advertised schema
-    /// requires both. Rules that the parser's errors state, such as a malformed slice failing the
-    /// whole call, stay out of the property texts.
+    /// requires both.
     private static func requireClosedSliceRanges(
         _ definition: MCPDomainToolDefinition
     ) -> MCPDomainToolDefinition {
@@ -1254,8 +1253,10 @@ package enum MCPBindContextPropertyDescriptions {
     package static let tabName = "App-backed: name for the workspace create_if_missing creates."
 }
 
-/// Single source for the slice property descriptions of `manage_selection`. The canonical schema
-/// override and the app-side raw Tool registration both publish them.
+/// Single source for the `manage_selection` property descriptions that the canonical schema
+/// override and the app-side raw Tool registration both publish. Rules that the app's slice
+/// parser states in its errors, such as a malformed slice failing the whole call, stay out of
+/// these texts.
 package enum MCPManageSelectionPropertyDescriptions {
     package static let slices = "App slice inputs. Put endpoints inside ranges: [{start_line, end_line}], never beside path."
     package static let ranges = "Explicit inclusive line ranges."

@@ -98,9 +98,6 @@ extension MCPServerViewModel {
                     continue
                 }
 
-                var ranges: [LineRange] = []
-                var explicitRangeSpecified = false
-
                 if let rangesValue = obj["ranges"], !rangesValue.isNull, rangesValue.arrayValue == nil {
                     sliceErrors.append(
                         "Invalid slice for path '\(rawPath)': ranges must be an array; expected ranges: [{start_line, end_line}]."
@@ -113,6 +110,9 @@ extension MCPServerViewModel {
                     )
                     continue
                 }
+
+                var ranges: [LineRange] = []
+                var explicitRangeSpecified = false
 
                 if let rangesArray = obj["ranges"]?.arrayValue {
                     explicitRangeSpecified = true
