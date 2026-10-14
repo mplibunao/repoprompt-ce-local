@@ -655,7 +655,7 @@
             "type" : "string"
           },
           "path" : {
-            "description" : "File path for export operation. When the destination resolves under a root bound to a session worktree, the file is written into that worktree and the reply reports its logical path.",
+            "description" : "File path for export operation. Under a worktree-bound root, the file is written into the worktree and the reply shows its logical path.",
             "type" : "string"
           },
           "path_display" : {
@@ -703,7 +703,7 @@
             "type" : "string"
           },
           "path" : {
-            "description" : "File path (required for export). When the destination resolves under a root bound to a session worktree, the file is written into that worktree and the reply reports its logical path.",
+            "description" : "File path (required for export). Under a worktree-bound root, the file is written into the worktree and the reply shows its logical path.",
             "type" : "string"
           },
           "preset" : {
