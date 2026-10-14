@@ -288,11 +288,11 @@
             "type" : "array"
           },
           "slices" : {
-            "description" : "App slice inputs. Put endpoints inside ranges: [{start_line, end_line}], never beside path. Malformed slice input rejects the entire app request, regardless of op or strict.",
+            "description" : "App slice inputs. Put endpoints inside ranges: [{start_line, end_line}], never beside path.",
             "items" : {
               "properties" : {
                 "lines" : {
-                  "description" : "Comma- or semicolon-separated single lines or closed ranges, such as '10-20,40'. A dash requires both endpoints.",
+                  "description" : "Comma-separated single lines or closed ranges, such as '10-20,40'.",
                   "type" : "string"
                 },
                 "path" : {
@@ -308,7 +308,7 @@
                         "type" : "string"
                       },
                       "end_line" : {
-                        "description" : "1-based inclusive end line; must be greater than or equal to start_line. Use equal endpoints for one line.",
+                        "description" : "Set equal to start_line for one line.",
                         "type" : "integer"
                       },
                       "start_line" : {

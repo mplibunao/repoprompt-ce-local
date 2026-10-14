@@ -1256,10 +1256,10 @@ package enum MCPBindContextPropertyDescriptions {
 /// Single source for the slice property descriptions of `manage_selection`. The canonical schema
 /// override and the app-side raw Tool registration both publish them.
 package enum MCPManageSelectionPropertyDescriptions {
-    package static let slices = "App slice inputs. Put endpoints inside ranges: [{start_line, end_line}], never beside path. Malformed slice input rejects the entire app request, regardless of op or strict."
+    package static let slices = "App slice inputs. Put endpoints inside ranges: [{start_line, end_line}], never beside path."
     package static let ranges = "Explicit inclusive line ranges."
     package static let startLine = "1-based start line."
-    package static let endLine = "1-based inclusive end line; must be greater than or equal to start_line. Use equal endpoints for one line."
-    package static let lines = "Comma- or semicolon-separated single lines or closed ranges, such as '10-20,40'. A dash requires both endpoints."
+    package static let endLine = "Set equal to start_line for one line."
+    package static let lines = "Comma-separated single lines or closed ranges, such as '10-20,40'."
     package static let strict = "Throw when no paths resolve."
 }
