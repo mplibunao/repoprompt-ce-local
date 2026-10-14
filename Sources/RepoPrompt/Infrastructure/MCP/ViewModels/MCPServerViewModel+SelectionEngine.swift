@@ -68,7 +68,6 @@ extension MCPServerViewModel {
         let result = await service.buildSelection(
             paths: inputs.paths,
             slices: inputs.sliceInputs.map(\.self),
-            sliceErrors: inputs.sliceErrors,
             mode: mode,
             existing: existing,
             rootScope: lookupRootScope
@@ -91,7 +90,6 @@ extension MCPServerViewModel {
         let result = await mcpSelectionMutationService().buildManageSelectionSet(
             paths: inputs.paths,
             slices: inputs.sliceInputs.map(\.self),
-            sliceErrors: inputs.sliceErrors,
             mode: mode,
             existing: existing,
             hasFullFileArtifactInputs: hasFullFileArtifactInputs,

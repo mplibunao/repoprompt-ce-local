@@ -311,6 +311,93 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
 }
 
 @MainActor
+final class ManageSelectionSliceValidationTests: XCTestCase {
+    func testMalformedSliceFailsTheCallAndLeavesSelectionUnchanged() async throws {
+        let fixture = try await makeSelectionFixture(name: "malformed-slice")
+        defer { fixture.cleanup() }
+        let seed = StoredSelection(
+            selectedPaths: [fixture.fileA.path],
+            slices: [fixture.fileA.path: [LineRange(start: 1, end: 2), LineRange(start: 4, end: 6)]]
+        )
+        try await fixture.seedCanonical(seed)
+        _ = try fixture.installContext(selection: seed)
+        let seedRevision = fixture.selectionRevision
+        fixture.window.mcpServer.setRequestMetadataOverrideForTesting(fixture.metadata)
+        defer { fixture.window.mcpServer.setRequestMetadataOverrideForTesting(nil) }
+        let tools = await fixture.window.mcpServer.windowMCPToolCatalogService.tools
+        let tool = try XCTUnwrap(tools.first { $0.name == MCPWindowToolName.manageSelection })
+
+        let missingEnd: Value = .array([.object([
+            "path": .string(fixture.fileA.path),
+            "ranges": .array([.object(["start_line": .int(5)])])
+        ])])
+        // Removing a slice whose ranges end up empty clears every slice of the file.
+        let nonObjectRange: Value = .array([.object([
+            "path": .string(fixture.fileA.path),
+            "ranges": .array([.int(7)])
+        ])])
+        let validSibling: Value = .array([.string(fixture.fileB.path)])
+        let missingEndMessage = "Invalid selection inputs: Invalid slice range for path '\(fixture.fileA.path)': end_line is required; expected ranges: [{start_line, end_line}]."
+        let rows: [(label: String, args: [String: Value], message: String)] = [
+            ("add beside a valid path", ["op": .string("add"), "paths": validSibling, "slices": missingEnd, "strict": .bool(false)], missingEndMessage),
+            ("strict add beside a valid path", ["op": .string("add"), "paths": validSibling, "slices": missingEnd, "strict": .bool(true)], missingEndMessage),
+            ("remove from a sliced file", ["op": .string("remove"), "slices": missingEnd, "strict": .bool(false)], missingEndMessage),
+            ("get", ["op": .string("get"), "slices": missingEnd], missingEndMessage),
+            (
+                "remove a non-object range",
+                ["op": .string("remove"), "slices": nonObjectRange, "strict": .bool(false)],
+                "Invalid selection inputs: Invalid slice range for path '\(fixture.fileA.path)': each range must be an object; expected ranges: [{start_line, end_line}]."
+            )
+        ]
+
+        for row in rows {
+            do {
+                _ = try await tool(row.args)
+                XCTFail("Expected invalid params: \(row.label)")
+            } catch let error as MCPError {
+                if case let .invalidParams(message) = error {
+                    XCTAssertEqual(message, row.message, row.label)
+                } else {
+                    XCTFail("Expected MCPError.invalidParams for \(row.label), got \(error)")
+                }
+            } catch {
+                XCTFail("Expected MCPError.invalidParams for \(row.label), got \(error)")
+            }
+            XCTAssertEqual(fixture.canonicalSelection, seed, row.label)
+            XCTAssertEqual(fixture.boundContext?.selection, seed, row.label)
+            XCTAssertEqual(fixture.selectionRevision, seedRevision, row.label)
+        }
+    }
+
+    func testValidRangeIsPublishedCanonically() async throws {
+        let fixture = try await makeSelectionFixture(name: "valid-slice", gitBacked: true)
+        defer { fixture.cleanup() }
+        try (1 ... 10).map { "// line \($0)" }.joined(separator: "\n")
+            .write(to: fixture.fileA, atomically: true, encoding: .utf8)
+        let seed = StoredSelection(selectedPaths: [fixture.fileB.path])
+        try await fixture.seedCanonical(seed)
+        _ = try fixture.installContext(selection: seed)
+        fixture.window.mcpServer.setRequestMetadataOverrideForTesting(fixture.metadata)
+        defer { fixture.window.mcpServer.setRequestMetadataOverrideForTesting(nil) }
+        let tools = await fixture.window.mcpServer.windowMCPToolCatalogService.tools
+        let tool = try XCTUnwrap(tools.first { $0.name == MCPWindowToolName.manageSelection })
+
+        _ = try await tool([
+            "op": .string("add"),
+            "slices": .array([.object([
+                "path": .string(fixture.fileA.path),
+                "ranges": .array([.object(["start_line": .int(3), "end_line": .int(7), "description": .string("focus")])])
+            ])])
+        ])
+        let getResult = try await tool(["op": .string("get"), "view": .string("files")])
+        let reply = try JSONDecoder().decode(ToolResultDTOs.SelectionReply.self, from: JSONEncoder().encode(getResult))
+
+        XCTAssertEqual(fixture.canonicalSelection?.slices, [fixture.fileA.path: [LineRange(start: 3, end: 7, description: "focus")]])
+        XCTAssertEqual(reply.fileSlices?.map(\.ranges), [[ToolResultDTOs.LineRangeDTO(startLine: 3, endLine: 7, description: "focus")]])
+    }
+}
+
+@MainActor
 private func makeSelectionFixture(name: String, gitBacked: Bool = false) async throws -> Fixture {
     let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
     GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
@@ -389,6 +476,10 @@ private struct Fixture {
         window.mcpServer.tabContextByConnectionID[connectionID]
     }
 
+    var selectionRevision: UInt64 {
+        window.workspaceManager.selectionRevisionForMCP(workspaceID: workspaceID, tabID: tabID)
+    }
+
     func seedCanonical(_ selection: StoredSelection) async throws {
         _ = await window.selectionCoordinator.persistSelection(
             selection,
@@ -413,10 +504,7 @@ private struct Fixture {
             workspaceID: workspaceID,
             promptText: tab.promptText,
             selection: selection,
-            selectionRevision: window.workspaceManager.selectionRevisionForMCP(
-                workspaceID: workspaceID,
-                tabID: tabID
-            ),
+            selectionRevision: selectionRevision,
             selectedMetaPromptIDs: tab.selectedMetaPromptIDs,
             selectedContextBuilderPromptIDs: tab.contextBuilder.selectedContextBuilderPromptIDs,
             tabName: tab.name,

@@ -288,11 +288,11 @@
             "type" : "array"
           },
           "slices" : {
-            "description" : "Selection slices to apply (path + line ranges)",
+            "description" : "App slice inputs. Put endpoints inside ranges: [{start_line, end_line}], never beside path.",
             "items" : {
               "properties" : {
                 "lines" : {
-                  "description" : "Comma-separated shorthand like '10-20,40'",
+                  "description" : "Comma-separated single lines or closed ranges, such as '10-20,40'.",
                   "type" : "string"
                 },
                 "path" : {
@@ -300,7 +300,7 @@
                   "type" : "string"
                 },
                 "ranges" : {
-                  "description" : "Explicit line ranges (inclusive)",
+                  "description" : "Explicit inclusive line ranges.",
                   "items" : {
                     "properties" : {
                       "description" : {
@@ -308,16 +308,17 @@
                         "type" : "string"
                       },
                       "end_line" : {
-                        "description" : "1-based end line",
+                        "description" : "Set equal to start_line for one line.",
                         "type" : "integer"
                       },
                       "start_line" : {
-                        "description" : "1-based start line",
+                        "description" : "1-based start line.",
                         "type" : "integer"
                       }
                     },
                     "required" : [
-                      "start_line"
+                      "start_line",
+                      "end_line"
                     ],
                     "type" : "object"
                   },
@@ -332,7 +333,7 @@
             "type" : "array"
           },
           "strict" : {
-            "description" : "Throw when no paths resolve (mutations)",
+            "description" : "Throw when no paths resolve.",
             "type" : "boolean"
           },
           "view" : {

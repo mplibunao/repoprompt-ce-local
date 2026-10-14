@@ -1129,6 +1129,9 @@ package enum MCPDomainCanonicalToolDefinitions {
                 isEnabledByDefault: definition.isEnabledByDefault
             )
         }
+        if definition.name == MCPWindowToolName.manageSelection {
+            return requireClosedSliceRanges(definition)
+        }
         guard definition.name == MCPGlobalToolName.bindContext,
               case var .object(schema) = definition.inputSchema,
               case var .object(properties)? = schema["properties"]
@@ -1184,6 +1187,53 @@ package enum MCPDomainCanonicalToolDefinitions {
     private static let exportPathWorktreeDestination =
         "In the app, under a worktree-bound root, the file is written into the worktree and the reply shows its logical path."
 
+    /// The app's slice parser rejects a range that lacks either endpoint, so the advertised schema
+    /// requires both.
+    private static func requireClosedSliceRanges(
+        _ definition: MCPDomainToolDefinition
+    ) -> MCPDomainToolDefinition {
+        guard case var .object(schema) = definition.inputSchema,
+              case var .object(properties)? = schema["properties"],
+              case var .object(slices)? = properties["slices"],
+              case var .object(slice)? = slices["items"],
+              case var .object(sliceProperties)? = slice["properties"],
+              case var .object(ranges)? = sliceProperties["ranges"],
+              case var .object(range)? = ranges["items"],
+              case var .object(rangeProperties)? = range["properties"],
+              case var .object(startLine)? = rangeProperties["start_line"],
+              case var .object(endLine)? = rangeProperties["end_line"],
+              case var .object(lines)? = sliceProperties["lines"],
+              case var .object(strict)? = properties["strict"]
+        else {
+            return definition
+        }
+        startLine["description"] = .string(MCPManageSelectionPropertyDescriptions.startLine)
+        endLine["description"] = .string(MCPManageSelectionPropertyDescriptions.endLine)
+        rangeProperties["start_line"] = .object(startLine)
+        rangeProperties["end_line"] = .object(endLine)
+        range["properties"] = .object(rangeProperties)
+        range["required"] = .array([.string("start_line"), .string("end_line")])
+        ranges["description"] = .string(MCPManageSelectionPropertyDescriptions.ranges)
+        ranges["items"] = .object(range)
+        lines["description"] = .string(MCPManageSelectionPropertyDescriptions.lines)
+        sliceProperties["ranges"] = .object(ranges)
+        sliceProperties["lines"] = .object(lines)
+        slice["properties"] = .object(sliceProperties)
+        slices["description"] = .string(MCPManageSelectionPropertyDescriptions.slices)
+        slices["items"] = .object(slice)
+        strict["description"] = .string(MCPManageSelectionPropertyDescriptions.strict)
+        properties["slices"] = .object(slices)
+        properties["strict"] = .object(strict)
+        schema["properties"] = .object(properties)
+        return MCPDomainToolDefinition(
+            name: definition.name,
+            description: definition.description,
+            inputSchema: .object(schema),
+            annotations: definition.annotations,
+            isEnabledByDefault: definition.isEnabledByDefault
+        )
+    }
+
     /// A client pays for this text on each `tools/list` that advertises `bind_context` to it, so
     /// it holds only what the schema cannot express: what a binding is, when listing is needed,
     /// and how the two backends differ. Each parameter fact lives once, in
@@ -1201,4 +1251,17 @@ package enum MCPBindContextPropertyDescriptions {
     package static let workingDirs = "Absolute workspace roots to bind, or one comma-separated string. Binds the active tab of the workspace with exactly these roots, else a strict superset; subpaths do not match. App-backed without window_id: a match no window shows opens in a new window."
     package static let createIfMissing = "App-backed, with working_dirs: if no workspace matches, create one in a new window after user approval."
     package static let tabName = "App-backed: name for the workspace create_if_missing creates."
+}
+
+/// Single source for the `manage_selection` property descriptions that the canonical schema
+/// override and the app-side raw Tool registration both publish. Rules that the app's slice
+/// parser states in its errors, such as a malformed slice failing the whole call, stay out of
+/// these texts.
+package enum MCPManageSelectionPropertyDescriptions {
+    package static let slices = "App slice inputs. Put endpoints inside ranges: [{start_line, end_line}], never beside path."
+    package static let ranges = "Explicit inclusive line ranges."
+    package static let startLine = "1-based start line."
+    package static let endLine = "Set equal to start_line for one line."
+    package static let lines = "Comma-separated single lines or closed ranges, such as '10-20,40'."
+    package static let strict = "Throw when no paths resolve."
 }

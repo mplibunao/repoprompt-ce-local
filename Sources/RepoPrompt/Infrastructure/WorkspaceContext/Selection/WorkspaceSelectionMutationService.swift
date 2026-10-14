@@ -186,7 +186,6 @@ struct WorkspaceSelectionMutationService {
     func buildSelection(
         paths: [String],
         slices sliceInputs: [WorkspaceSelectionSliceInput] = [],
-        sliceErrors: [String] = [],
         mode: String,
         existing: StoredSelection,
         rootScope: WorkspaceLookupRootScope = .visibleWorkspace
@@ -203,12 +202,12 @@ struct WorkspaceSelectionMutationService {
                     manualCodemapPaths: resolution.candidates.map(\.standardizedFullPath),
                     codemapAutoEnabled: false
                 ),
-                invalidPaths: sliceErrors + resolution.invalidPaths,
+                invalidPaths: resolution.invalidPaths,
                 codemapUnavailable: resolution.codemapUnavailable
             )
         }
 
-        var invalid = sliceErrors
+        var invalid: [String] = []
         let codemapUnavailable: [String] = []
         var selectedPaths: [String] = []
         var seenSelected = Set<String>()
@@ -255,7 +254,6 @@ struct WorkspaceSelectionMutationService {
     func buildManageSelectionSet(
         paths: [String],
         slices sliceInputs: [WorkspaceSelectionSliceInput] = [],
-        sliceErrors: [String] = [],
         mode: String,
         existing: StoredSelection,
         hasFullFileArtifactInputs: Bool = false,
@@ -264,7 +262,7 @@ struct WorkspaceSelectionMutationService {
         if mode == "codemap_only", !sliceInputs.isEmpty {
             return WorkspaceBuildSelectionResult(
                 selection: existing,
-                invalidPaths: sliceErrors + ["mode 'codemap_only' cannot be used with slices"],
+                invalidPaths: ["mode 'codemap_only' cannot be used with slices"],
                 codemapUnavailable: []
             )
         }
@@ -284,17 +282,14 @@ struct WorkspaceSelectionMutationService {
             if !pathsMissingRanges.isEmpty {
                 return WorkspaceBuildSelectionResult(
                     selection: existing,
-                    invalidPaths: sliceErrors + ["mode 'slices' requires line ranges for paths: \(pathsMissingRanges.joined(separator: ", ")). Use #L ranges, the slices array, or op='add' mode='full' for whole files."],
+                    invalidPaths: ["mode 'slices' requires line ranges for paths: \(pathsMissingRanges.joined(separator: ", ")). Use #L ranges, the slices array, or op='add' mode='full' for whole files."],
                     codemapUnavailable: []
                 )
             }
             if validSliceInputs.isEmpty {
-                let invalid = sliceErrors.isEmpty
-                    ? ["mode 'slices' requires a non-empty slices array or #L line ranges on paths."]
-                    : sliceErrors
                 return WorkspaceBuildSelectionResult(
                     selection: existing,
-                    invalidPaths: invalid,
+                    invalidPaths: ["mode 'slices' requires a non-empty slices array or #L line ranges on paths."],
                     codemapUnavailable: []
                 )
             }
@@ -308,7 +303,6 @@ struct WorkspaceSelectionMutationService {
             return await buildSelection(
                 paths: paths,
                 slices: sliceInputs,
-                sliceErrors: sliceErrors,
                 mode: mode,
                 existing: replacementSeed,
                 rootScope: rootScope
@@ -323,7 +317,7 @@ struct WorkspaceSelectionMutationService {
         )
         return WorkspaceBuildSelectionResult(
             selection: sliceResult.selection,
-            invalidPaths: sliceErrors + sliceResult.invalidPaths,
+            invalidPaths: sliceResult.invalidPaths,
             codemapUnavailable: []
         )
     }

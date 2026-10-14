@@ -1662,11 +1662,8 @@ final class MCPServerViewModel: ObservableObject {
     @MainActor
     private lazy var windowToolSelectionCapabilities = MCPAppPhysicalCapabilityAdapters.Selection(
         workspaceSearch: workspaceSearch,
-        parseManageSelectionInputs: { [weak self] rawPaths, slicesValue in
-            guard let self else {
-                return MCPServerViewModel.ManageSelectionInputs(paths: [], sliceInputs: [], sliceErrors: [], hadExplicitSliceSpec: false)
-            }
-            return parseManageSelectionInputs(rawPaths: rawPaths, slicesValue: slicesValue)
+        parseManageSelectionInputs: { rawPaths, slicesValue in
+            MCPServerViewModel.parseManageSelectionInputs(rawPaths: rawPaths, slicesValue: slicesValue)
         },
         resolveFileToolLookupContext: { [weak self] metadata in
             guard let self else { return .visibleWorkspace }
