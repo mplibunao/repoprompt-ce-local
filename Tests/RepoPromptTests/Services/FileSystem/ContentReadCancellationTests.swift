@@ -1957,46 +1957,43 @@ final class ContentReadCancellationTests: XCTestCase {
         let fingerprint = try await service.contentFingerprint(ofRelativePath: "Target.swift")
         let cacheCommitReached = AsyncSignal()
         let releaseCacheCommit = AsyncSignal()
+        guard let cleanup = await startOwnedContentReadScenario() else { return }
+        let probe = cleanup.probe
+        cleanup.addGateOpener { await releaseCacheCommit.signal() }
+        cleanup.addHookReset { await service.setContentReadCacheCommitHandlerForTesting(nil) }
         await service.setContentReadCacheCommitHandlerForTesting {
             await cacheCommitReached.signal()
             await releaseCacheCommit.wait()
         }
-        addTeardownBlock {
-            await releaseCacheCommit.signal()
-            await service.setContentReadCacheCommitHandlerForTesting(nil)
-        }
 
-        let readTask = Task {
-            try await service.loadValidatedContent(
-                ofRelativePath: "Target.swift",
-                expectedFingerprint: fingerprint,
-                workloadClass: .interactiveRead
-            )
-        }
-        addTeardownBlock {
-            await releaseCacheCommit.signal()
-            readTask.cancel()
-            let readResult = await self.waitForTaskResult(readTask)
-            XCTAssertNotNil(readResult, "Validated read did not settle during teardown")
-        }
-        guard await waitUntil({ await cacheCommitReached.isSignaledSnapshot() }) else {
-            return XCTFail("Validated read did not reach the cache-only commit boundary")
-        }
-        let beforeCommitSnapshot = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
-        XCTAssertEqual(beforeCommitSnapshot.activePermitCount, 1)
+        try await probe.observe {
+            let readTask = Task {
+                try await service.loadValidatedContent(
+                    ofRelativePath: "Target.swift",
+                    expectedFingerprint: fingerprint,
+                    workloadClass: .interactiveRead
+                )
+            }
+            cleanup.retain(readTask, "Validated read")
+            guard await waitUntil({ await cacheCommitReached.isSignaledSnapshot() }) else {
+                return XCTFail("Validated read did not reach the cache-only commit boundary; owned work: \(probe.snapshot())")
+            }
+            let atCommit = probe.snapshot()
+            XCTAssertEqual(atCommit.activeCount, 1, "Owned work at the cache commit: \(atCommit)")
 
-        await releaseCacheCommit.signal()
-        guard let observedReadResult = await waitForTaskResult(readTask) else {
-            return XCTFail("Validated read did not settle after cache commit")
+            await releaseCacheCommit.signal()
+            guard let observedReadResult = await waitForTaskResult(readTask) else {
+                return XCTFail("Validated read did not settle after cache commit")
+            }
+            let snapshot = try observedReadResult.get()
+            XCTAssertEqual(snapshot.content, contents)
+            let cachedEncoding = await service.cachedEncodingForTesting(relativePath: "Target.swift")
+            XCTAssertNotNil(cachedEncoding)
+            let afterRead = probe.snapshot()
+            XCTAssertEqual(afterRead.grantCount, atCommit.grantCount)
+            XCTAssertEqual(afterRead.queueFullCount, atCommit.queueFullCount)
+            await assertOwnedContentReadWorkSettles(probe)
         }
-        let snapshot = try observedReadResult.get()
-        XCTAssertEqual(snapshot.content, contents)
-        let afterReadSnapshot = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
-        XCTAssertEqual(afterReadSnapshot.grantCount, beforeCommitSnapshot.grantCount)
-        XCTAssertEqual(afterReadSnapshot.overloadCount, beforeCommitSnapshot.overloadCount)
-        let cachedEncoding = await service.cachedEncodingForTesting(relativePath: "Target.swift")
-        XCTAssertNotNil(cachedEncoding)
-        XCTAssertTrue(afterReadSnapshot.isIdle)
     }
 
     func testCacheCommitRejectsInvalidationAfterFinalFingerprint() async throws {
@@ -2060,11 +2057,11 @@ final class ContentReadCancellationTests: XCTestCase {
             interactiveReadTask.cancel()
             codeMapTask.cancel()
             try? await store.setContentPhysicalReadHandlerForTesting(rootID: root.id, nil)
-            let interactiveResult = await self.waitForTaskResult(interactiveReadTask)
-            let codeMapResult = await self.waitForTaskResult(codeMapTask)
+            let interactiveResult = await waitForTaskResult(interactiveReadTask)
+            let codeMapResult = await waitForTaskResult(codeMapTask)
             XCTAssertNotNil(interactiveResult, "Workspace read did not settle during teardown")
             XCTAssertNotNil(codeMapResult, "CodeMap permit task did not settle during teardown")
-            let teardownSnapshot = await self.waitForLimiterIdle()
+            let teardownSnapshot = await waitForLimiterIdle()
             XCTAssertTrue(teardownSnapshot.isIdle)
         }
         let codeMapQueued = await waitUntil {
@@ -2123,62 +2120,63 @@ final class ContentReadCancellationTests: XCTestCase {
         }
         let fingerprintResolved = AsyncSignal()
         let releaseStageGap = AsyncSignal()
+        guard let cleanup = await startOwnedContentReadScenario() else { return }
+        let probe = cleanup.probe
+        cleanup.addGateOpener { await releaseStageGap.signal() }
+        cleanup.addHookReset { await store.setInteractiveReadFingerprintDidResolveHandlerForTesting(nil) }
         await store.setInteractiveReadFingerprintDidResolveHandlerForTesting {
             await fingerprintResolved.signal()
             await releaseStageGap.wait()
         }
-        let interactiveReadTask = Task { try await store.interactiveReadSnapshot(for: record) }
-        guard await waitUntil({ await fingerprintResolved.isSignaledSnapshot() }) else {
-            interactiveReadTask.cancel()
-            await releaseStageGap.signal()
-            return XCTFail("Interactive read did not reach the post-fingerprint stage gap")
-        }
 
-        let codeMapGranted = AsyncSignal()
-        let codeMapTask = Task {
-            try await FileSystemService.withCodeMapArtifactBuildPermit(
-                ownerID: UUID(),
-                priority: .utility
-            ) {
-                await codeMapGranted.signal()
+        try await probe.observe {
+            let interactiveReadTask = Task { try await store.interactiveReadSnapshot(for: record) }
+            cleanup.retain(interactiveReadTask, "Interactive read")
+            guard await waitUntil({ await fingerprintResolved.isSignaledSnapshot() }) else {
+                return XCTFail("Interactive read did not reach the post-fingerprint stage gap")
             }
-        }
-        addTeardownBlock {
-            await releaseStageGap.signal()
-            interactiveReadTask.cancel()
-            codeMapTask.cancel()
-            await store.setInteractiveReadFingerprintDidResolveHandlerForTesting(nil)
-            _ = await self.waitForTaskResult(interactiveReadTask)
-            _ = await self.waitForTaskResult(codeMapTask)
-            let teardownSnapshot = await self.waitForLimiterIdle()
-            XCTAssertTrue(teardownSnapshot.isIdle)
-        }
-        guard await waitUntil({
-            let snapshot = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
-            return snapshot.queuedCodemapWaiterCount == 1
-        }) else {
-            return XCTFail("CodeMap work was not queued behind the fingerprint stage")
-        }
-        let grantedBetweenStages = await codeMapGranted.isSignaledSnapshot()
-        XCTAssertFalse(grantedBetweenStages)
-        let stageGapSnapshot = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
-        XCTAssertEqual(stageGapSnapshot.activePermitCount, 0)
-        XCTAssertEqual(stageGapSnapshot.foregroundActivityCountsByKind[.interactiveRead], 1)
-        XCTAssertEqual(stageGapSnapshot.activeCodemapPermitCount, 0)
-        XCTAssertEqual(stageGapSnapshot.queuedCodemapWaiterCount, 1)
 
-        await releaseStageGap.signal()
-        guard let interactiveResult = await waitForTaskResult(interactiveReadTask),
-              let codeMapResult = await waitForTaskResult(codeMapTask)
-        else {
-            return XCTFail("Foreground and CodeMap work did not settle after physical release")
+            let codeMapGranted = AsyncSignal()
+            let codeMapTask = Task {
+                try await FileSystemService.withCodeMapArtifactBuildPermit(
+                    ownerID: UUID(),
+                    priority: .utility
+                ) {
+                    await codeMapGranted.signal()
+                }
+            }
+            cleanup.retain(codeMapTask, "CodeMap permit request")
+            // A grant also ends the wait, so broken suppression fails the assertions below at once
+            // instead of timing out here.
+            guard await waitUntil({
+                if probe.snapshot().queuedCount(for: .codemap) == 1 { return true }
+                return await codeMapGranted.isSignaledSnapshot()
+            }) else {
+                return XCTFail("CodeMap work was not queued behind the fingerprint stage; owned work: \(probe.snapshot())")
+            }
+            let grantedBetweenStages = await codeMapGranted.isSignaledSnapshot()
+            XCTAssertFalse(grantedBetweenStages)
+            let stageGap = probe.snapshot()
+            // The fingerprint stage's permit was granted and already released, so the zero active
+            // count below describes observed work rather than an empty probe.
+            XCTAssertEqual(stageGap.grantCount, 1, "Owned work at the stage gap: \(stageGap)")
+            XCTAssertEqual(stageGap.activeCount, 0, "Owned work at the stage gap: \(stageGap)")
+            XCTAssertEqual(stageGap.foregroundCount(for: .interactiveRead), 1)
+            XCTAssertEqual(stageGap.activeCount(for: .codemap), 0)
+            XCTAssertEqual(stageGap.queuedCount(for: .codemap), 1)
+
+            await releaseStageGap.signal()
+            guard let interactiveResult = await waitForTaskResult(interactiveReadTask),
+                  let codeMapResult = await waitForTaskResult(codeMapTask)
+            else {
+                return XCTFail("Foreground and CodeMap work did not settle after the stage gap was released")
+            }
+            XCTAssertNotNil(try interactiveResult.get())
+            try codeMapResult.get()
+            let grantedAfterRead = await codeMapGranted.isSignaledSnapshot()
+            XCTAssertTrue(grantedAfterRead)
+            await assertOwnedContentReadWorkSettles(probe)
         }
-        XCTAssertNotNil(try interactiveResult.get())
-        try codeMapResult.get()
-        let grantedAfterRead = await codeMapGranted.isSignaledSnapshot()
-        XCTAssertTrue(grantedAfterRead)
-        let finalSnapshot = await waitForLimiterIdle()
-        XCTAssertTrue(finalSnapshot.isIdle)
     }
 
     func testCancelledAllowlistedExternalReadSuppressesCodeMapUntilPhysicalCompletion() async throws {
@@ -2218,11 +2216,11 @@ final class ContentReadCancellationTests: XCTestCase {
             physicalGate.release()
             externalReadTask.cancel()
             codeMapTask.cancel()
-            let externalResult = await self.waitForTaskResult(externalReadTask)
-            let codeMapResult = await self.waitForTaskResult(codeMapTask)
+            let externalResult = await waitForTaskResult(externalReadTask)
+            let codeMapResult = await waitForTaskResult(codeMapTask)
             XCTAssertNotNil(externalResult, "External read did not settle during teardown")
             XCTAssertNotNil(codeMapResult, "CodeMap permit task did not settle during teardown")
-            let teardownSnapshot = await self.waitForLimiterIdle()
+            let teardownSnapshot = await waitForLimiterIdle()
             XCTAssertTrue(teardownSnapshot.isIdle)
         }
         let codeMapQueued = await waitUntil {
@@ -2337,39 +2335,40 @@ final class ContentReadCancellationTests: XCTestCase {
         let fileURL = skillsURL.appendingPathComponent("External.md")
         try "external read\n".write(to: fileURL, atomically: true, encoding: .utf8)
         let physicalGate = SynchronousPhysicalReadGate()
-        addTeardownBlock { physicalGate.release() }
         let readableService = WorkspaceReadableFileService(
             store: WorkspaceFileContextStore(),
             homeDirectoryURL: homeURL,
             beforeExternalReadOpenForTesting: { _ in physicalGate.blockUntilReleased() }
         )
         let file = WorkspaceExternalReadableFile(absolutePath: fileURL.path, displayPath: "~/.agents/skills/External.md")
-        let task = Task { try await readableService.readAlwaysReadableExternalFile(file) }
-        let physicalReadDidBlock = await waitUntil { physicalGate.isBlockedSnapshot() }
-        guard physicalReadDidBlock else {
+        guard let cleanup = await startOwnedContentReadScenario() else { return }
+        let probe = cleanup.probe
+        cleanup.addGateOpener { physicalGate.release() }
+
+        await probe.observe {
+            let task = Task { try await readableService.readAlwaysReadableExternalFile(file) }
+            cleanup.retain(task, "External read caller")
+            guard await waitUntil({ physicalGate.isBlockedSnapshot() }) else {
+                return XCTFail("External read did not reach the controlled open gate")
+            }
+
             task.cancel()
-            physicalGate.release()
-            return XCTFail("External read did not reach the controlled open gate")
-        }
+            guard let taskResult = await waitForTaskResult(task) else {
+                return XCTFail("External read caller did not settle after cancellation")
+            }
+            do {
+                _ = try taskResult.get()
+                XCTFail("Expected external read cancellation")
+            } catch {
+                XCTAssertTrue(error is CancellationError)
+            }
+            let blocked = probe.snapshot()
+            XCTAssertEqual(blocked.activeCount, 1, "Owned work while the physical read is blocked: \(blocked)")
+            XCTAssertEqual(blocked.liveProducerCount, 1)
 
-        task.cancel()
-        guard let taskResult = await waitForTaskResult(task) else {
             physicalGate.release()
-            return XCTFail("External read caller did not settle after cancellation")
+            await assertOwnedContentReadWorkSettles(probe)
         }
-        do {
-            _ = try taskResult.get()
-            XCTFail("Expected external read cancellation")
-        } catch {
-            XCTAssertTrue(error is CancellationError)
-        }
-        let blockedSnapshot = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
-        XCTAssertEqual(blockedSnapshot.activePermitCount, 1)
-        XCTAssertFalse(blockedSnapshot.isIdle)
-
-        physicalGate.release()
-        let idleSnapshot = await waitForLimiterIdle()
-        XCTAssertTrue(idleSnapshot.isIdle)
     }
 
     func testStreamedDecodeUsesReadFileRecorderCapturedBeforeDetachment() async throws {
@@ -2473,72 +2472,18 @@ final class ContentReadCancellationTests: XCTestCase {
         )
     }
 
-    private func waitForLimiterIdle() async -> ContentReadAsyncLimiter.Snapshot {
-        for _ in 0 ..< 10000 {
-            let snapshot = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
-            if snapshot.isIdle { return snapshot }
-            await Task.yield()
-        }
-        return await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
-    }
-
     private func waitForLimiterSnapshot(
         _ limiter: ContentReadAsyncLimiter,
         matching predicate: (ContentReadAsyncLimiter.Snapshot) -> Bool
     ) async -> ContentReadAsyncLimiter.Snapshot {
-        for _ in 0 ..< 10000 {
-            let snapshot = await limiter.snapshotForTesting()
-            if predicate(snapshot) { return snapshot }
-            await Task.yield()
-        }
-        return await limiter.snapshotForTesting()
+        await pollContentReadState({ await limiter.snapshotForTesting() }, until: predicate)
     }
 
     private func waitForCacheSnapshot(
         _ cache: WorkspaceInteractiveReadCache,
         matching predicate: (WorkspaceInteractiveReadCache.Snapshot) -> Bool
     ) async -> WorkspaceInteractiveReadCache.Snapshot {
-        for _ in 0 ..< 10000 {
-            let snapshot = await cache.snapshotForTesting()
-            if predicate(snapshot) { return snapshot }
-            await Task.yield()
-        }
-        return await cache.snapshotForTesting()
-    }
-
-    private func waitUntil(
-        timeout: Duration = .seconds(5),
-        _ predicate: () async -> Bool
-    ) async -> Bool {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while clock.now < deadline {
-            if await predicate() { return true }
-            // A cancelled task makes every sleep throw immediately; stop instead of
-            // hot-polling until the deadline.
-            do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
-        }
-        return await predicate()
-    }
-
-    private func waitForTaskResult<Success: Sendable, Failure: Error & Sendable>(
-        _ task: Task<Success, Failure>
-    ) async -> Result<Success, Failure>? {
-        let recorder = TaskResultRecorder<Success, Failure>()
-        Task { await recorder.record(task.result) }
-        guard await waitUntil({ await recorder.hasResult() }) else { return nil }
-        return await recorder.snapshot()
-    }
-
-    private func waitForTaskResults<Success: Sendable, Failure: Error & Sendable>(
-        _ tasks: [Task<Success, Failure>]
-    ) async -> [Result<Success, Failure>]? {
-        let recorder = TaskResultsRecorder<Success, Failure>(expectedCount: tasks.count)
-        for (index, task) in tasks.enumerated() {
-            Task { await recorder.record(task.result, at: index) }
-        }
-        guard await waitUntil({ await recorder.isComplete() }) else { return nil }
-        return await recorder.snapshot()
+        await pollContentReadState({ await cache.snapshotForTesting() }, until: predicate)
     }
 
     private func makeInteractiveReadCacheKey() -> WorkspaceInteractiveReadCacheKey {
@@ -2740,32 +2685,340 @@ final class ApplyEditsBoundedPreviewReadTests: XCTestCase {
         XCTAssertEqual(recovered.editsApplied, 1)
         XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), "let updated = 0\n")
     }
+}
 
-    private func waitUntil(timeout: Duration = .seconds(5), _ predicate: () async -> Bool) async -> Bool {
-        let clock = ContinuousClock()
-        let deadline = clock.now + timeout
-        while clock.now < deadline {
-            if await predicate() { return true }
-            try? await Task.sleep(for: .milliseconds(1))
+/// Polls measure elapsed time rather than count `Task.yield()` calls, because runner load can
+/// delay the awaited work by any number of yields. The timeouts guard against hangs; gates and
+/// controlled watchdog sleepers order the events under test.
+private let contentReadPollTimeout: Duration = .seconds(30)
+private let contentReadPollInterval: Duration = .milliseconds(1)
+
+/// Returns the first read that matches, or one final read once the deadline passes or the
+/// waiting task is cancelled. The deadline is checked between reads, so it can't interrupt a
+/// read that never returns.
+private func pollContentReadState<State>(
+    timeout: Duration = contentReadPollTimeout,
+    _ read: () async -> State,
+    until predicate: (State) -> Bool
+) async -> State {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+        let state = await read()
+        if predicate(state) { return state }
+        // A cancelled task makes every sleep throw immediately; stop instead of hot-polling.
+        do { try await Task.sleep(for: contentReadPollInterval) } catch { break }
+    }
+    return await read()
+}
+
+private func waitUntil(
+    timeout: Duration = contentReadPollTimeout,
+    _ predicate: () async -> Bool
+) async -> Bool {
+    await pollContentReadState(timeout: timeout, predicate, until: { $0 })
+}
+
+private func waitForTaskResult<Success: Sendable, Failure: Error & Sendable>(
+    _ task: Task<Success, Failure>
+) async -> Result<Success, Failure>? {
+    let recorder = TaskResultRecorder<Success, Failure>()
+    Task { await recorder.record(task.result) }
+    guard await waitUntil({ await recorder.hasResult() }) else { return nil }
+    return await recorder.snapshot()
+}
+
+private func waitForTaskResults<Success: Sendable, Failure: Error & Sendable>(
+    _ tasks: [Task<Success, Failure>]
+) async -> [Result<Success, Failure>]? {
+    let recorder = TaskResultsRecorder<Success, Failure>(expectedCount: tasks.count)
+    for (index, task) in tasks.enumerated() {
+        Task { await recorder.record(task.result, at: index) }
+    }
+    guard await waitUntil({ await recorder.isComplete() }) else { return nil }
+    return await recorder.snapshot()
+}
+
+private func waitForLimiterIdle() async -> ContentReadAsyncLimiter.Snapshot {
+    await pollContentReadState(
+        { await FileSystemService.contentReadWorkerLimiterSnapshotForTesting() },
+        until: \.isIdle
+    )
+}
+
+/// Waits for content-read work that already occupies the process-wide limiter, such as detached
+/// producers left by earlier tests, so the scenario starts with the limiter's full capacity.
+/// This prepares the environment; the probe's owned assertions carry the scenario's contract.
+/// On timeout the scenario must not start, and the failure names the leftover work.
+private func sharedContentReadLimiterDrained(
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async -> Bool {
+    let snapshot = await waitForLimiterIdle()
+    guard !snapshot.isIdle else { return true }
+    XCTFail(
+        """
+        Pre-existing shared content-read work did not drain before the scenario started: \
+        capacity \(snapshot.capacity), active \(snapshot.activePermitCount), \
+        queued \(snapshot.queuedWaiterCount), active by workload \(snapshot.activePermitCountsByWorkload), \
+        foreground by kind \(snapshot.foregroundActivityCountsByKind), \
+        active by owner \(snapshot.activePermitCountsByOwner)
+        """,
+        file: file,
+        line: line
+    )
+    return false
+}
+
+private extension XCTestCase {
+    /// Drains leftover shared-limiter work, then gives the test a fresh probe and registers its
+    /// cleanup for teardown. Returns nil, after recording the failure, when the drain times out.
+    func startOwnedContentReadScenario(
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> ContentReadScenarioCleanup? {
+        guard await sharedContentReadLimiterDrained(file: file, line: line) else { return nil }
+        let cleanup = ContentReadScenarioCleanup(probe: ContentReadTestProbe())
+        addTeardownBlock { await cleanup.run(file: file, line: line) }
+        return cleanup
+    }
+}
+
+/// Waits until the probe's own producers, permits, waiters, and foreground tokens have all
+/// finished, then requires that every observed event formed a valid sequence.
+private func assertOwnedContentReadWorkSettles(
+    _ probe: ContentReadTestProbe,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    let snapshot = await pollContentReadState({ probe.snapshot() }, until: \.isSettled)
+    XCTAssertTrue(snapshot.isSettled, "Owned content-read work did not settle: \(snapshot)", file: file, line: line)
+    XCTAssertEqual(snapshot.violations, [], "Owned content-read events were out of sequence", file: file, line: line)
+}
+
+/// Tracks the content-read work one test starts, from the limiter's DEBUG observation events,
+/// so its assertions never count permits, waiters, or foreground activity that other tests
+/// left in the process-wide limiter.
+private final class ContentReadTestProbe: @unchecked Sendable {
+    struct Snapshot: CustomStringConvertible {
+        let liveProducerCount: Int
+        let activeCountsByWorkload: [ContentReadWorkloadClass: Int]
+        let queuedCountsByWorkload: [ContentReadWorkloadClass: Int]
+        let activeCountsByOwner: [UUID: Int]
+        let foregroundCountsByKind: [ContentReadForegroundActivityKind: Int]
+        let grantCount: Int
+        let queueFullCount: Int
+        let observedProducerCount: Int
+        let observedAttemptCount: Int
+        let violations: [String]
+
+        var activeCount: Int {
+            activeCountsByWorkload.values.reduce(0, +)
         }
-        return await predicate()
+
+        var queuedCount: Int {
+            queuedCountsByWorkload.values.reduce(0, +)
+        }
+
+        var foregroundCount: Int {
+            foregroundCountsByKind.values.reduce(0, +)
+        }
+
+        func activeCount(for workload: ContentReadWorkloadClass) -> Int {
+            activeCountsByWorkload[workload, default: 0]
+        }
+
+        func queuedCount(for workload: ContentReadWorkloadClass) -> Int {
+            queuedCountsByWorkload[workload, default: 0]
+        }
+
+        func foregroundCount(for kind: ContentReadForegroundActivityKind) -> Int {
+            foregroundCountsByKind[kind, default: 0]
+        }
+
+        /// An empty probe is never settled. If the sink stopped reaching the limiter, every
+        /// settlement check would otherwise pass without observing anything.
+        var isSettled: Bool {
+            observedProducerCount + observedAttemptCount > 0
+                && liveProducerCount == 0
+                && activeCount == 0
+                && queuedCount == 0
+                && foregroundCount == 0
+        }
+
+        var description: String {
+            """
+            producers live \(liveProducerCount) of \(observedProducerCount) observed; \
+            attempts observed \(observedAttemptCount); \
+            active \(Self.describe(activeCountsByWorkload)); \
+            queued \(Self.describe(queuedCountsByWorkload)); \
+            foreground \(Self.describe(foregroundCountsByKind)); \
+            grants \(grantCount); queue full \(queueFullCount); violations \(violations)
+            """
+        }
+
+        private static func describe<Key: RawRepresentable>(_ counts: [Key: Int]) -> String
+            where Key.RawValue == String
+        {
+            "[" + counts.map { "\($0.key.rawValue): \($0.value)" }.sorted().joined(separator: ", ") + "]"
+        }
     }
 
-    private func waitForTaskResult<Success: Sendable, Failure: Error & Sendable>(
-        _ task: Task<Success, Failure>
-    ) async -> Result<Success, Failure>? {
-        let recorder = TaskResultRecorder<Success, Failure>()
-        Task { await recorder.record(task.result) }
-        guard await waitUntil({ await recorder.hasResult() }) else { return nil }
-        return await recorder.snapshot()
+    private let lock = NSLock()
+    private var liveProducerIDs: Set<UUID> = []
+    private var observedProducerIDs: Set<UUID> = []
+    private var queuedAttempts: [UUID: ContentReadTestAttempt] = [:]
+    private var activeAttempts: [UUID: ContentReadTestAttempt] = [:]
+    private var observedAttemptIDs: Set<UUID> = []
+    private var foregroundKindsByID: [UUID: ContentReadForegroundActivityKind] = [:]
+    private var observedForegroundIDs: Set<UUID> = []
+    private var grantCount = 0
+    private var queueFullCount = 0
+    private var violations: [String] = []
+
+    /// Runs `body` with this probe as the task-local sink. Child tasks created inside `body`
+    /// inherit it, so open the scope before the scenario creates its first task.
+    func observe(_ body: () async throws -> Void) async rethrows {
+        try await ContentReadTestObservation.$sink.withValue({ [self] event in record(event) }, operation: body)
     }
 
-    private func waitForLimiterIdle() async -> ContentReadAsyncLimiter.Snapshot {
-        _ = await waitUntil {
-            let snapshot = await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
-            return snapshot.isIdle
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(
+            liveProducerCount: liveProducerIDs.count,
+            activeCountsByWorkload: Self.counts(activeAttempts.values, by: \.workloadClass),
+            queuedCountsByWorkload: Self.counts(queuedAttempts.values, by: \.workloadClass),
+            activeCountsByOwner: Self.counts(activeAttempts.values, by: \.ownerID),
+            foregroundCountsByKind: Dictionary(grouping: foregroundKindsByID.values, by: { $0 }).mapValues(\.count),
+            grantCount: grantCount,
+            queueFullCount: queueFullCount,
+            observedProducerCount: observedProducerIDs.count,
+            observedAttemptCount: observedAttemptIDs.count,
+            violations: violations
+        )
+    }
+
+    /// Records every transition, including impossible ones, as state or a violation. The sink
+    /// can run inside the limiter actor, so it only updates memory under the lock.
+    private func record(_ event: ContentReadTestEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        switch event {
+        case let .producerStarted(id):
+            if observedProducerIDs.insert(id).inserted {
+                liveProducerIDs.insert(id)
+            } else {
+                violations.append("producer \(id) started twice")
+            }
+        case let .producerFinished(id):
+            if liveProducerIDs.remove(id) == nil {
+                violations.append("producer \(id) finished without a live start")
+            }
+        case let .queued(attempt):
+            if observedAttemptIDs.insert(attempt.id).inserted {
+                queuedAttempts[attempt.id] = attempt
+            } else {
+                violations.append("attempt \(attempt.id) queued after an earlier transition")
+            }
+        case let .granted(attempt):
+            // A grant either dequeues a queued attempt or is the first transition of a direct grant.
+            if queuedAttempts.removeValue(forKey: attempt.id) != nil || observedAttemptIDs.insert(attempt.id).inserted {
+                activeAttempts[attempt.id] = attempt
+                grantCount += 1
+            } else {
+                violations.append("attempt \(attempt.id) granted while neither queued nor new")
+            }
+        case let .cancelledWhileQueued(attempt):
+            if queuedAttempts.removeValue(forKey: attempt.id) == nil {
+                violations.append("attempt \(attempt.id) cancelled while not queued")
+            }
+        case let .released(attempt):
+            if activeAttempts.removeValue(forKey: attempt.id) == nil {
+                violations.append("attempt \(attempt.id) released while not active")
+            }
+        case let .queueFull(attempt, _):
+            if observedAttemptIDs.insert(attempt.id).inserted {
+                queueFullCount += 1
+            } else {
+                violations.append("attempt \(attempt.id) rejected as queue full after an earlier transition")
+            }
+        case let .foregroundBegan(id, kind):
+            if observedForegroundIDs.insert(id).inserted {
+                foregroundKindsByID[id] = kind
+            } else {
+                violations.append("foreground activity \(id) began twice")
+            }
+        case let .foregroundEnded(id):
+            if foregroundKindsByID.removeValue(forKey: id) == nil {
+                violations.append("foreground activity \(id) ended without a live start")
+            }
         }
-        return await FileSystemService.contentReadWorkerLimiterSnapshotForTesting()
+    }
+
+    private static func counts<Key: Hashable>(
+        _ attempts: Dictionary<UUID, ContentReadTestAttempt>.Values,
+        by key: KeyPath<ContentReadTestAttempt, Key>
+    ) -> [Key: Int] {
+        Dictionary(grouping: attempts, by: { $0[keyPath: key] }).mapValues(\.count)
+    }
+}
+
+/// Cleanup for one test's shared-limiter scenario. Teardown runs it on every exit path, and a
+/// test may also run it after its last assertion, so every step is safe to repeat. It opens
+/// gates before joining tasks, because a retained task can be blocked on a gate, and it resets
+/// test hooks only after the probe's detached producers have finished with them.
+private final class ContentReadScenarioCleanup: @unchecked Sendable {
+    private struct RetainedTask {
+        let description: String
+        let cancel: @Sendable () -> Void
+        let settles: @Sendable () async -> Bool
+    }
+
+    let probe: ContentReadTestProbe
+    private let lock = NSLock()
+    private var gateOpeners: [@Sendable () async -> Void] = []
+    private var retainedTasks: [RetainedTask] = []
+    private var hookResets: [@Sendable () async -> Void] = []
+
+    init(probe: ContentReadTestProbe) {
+        self.probe = probe
+    }
+
+    func addGateOpener(_ open: @escaping @Sendable () async -> Void) {
+        lock.withLock { gateOpeners.append(open) }
+    }
+
+    func retain(_ task: Task<some Sendable, some Error & Sendable>, _ description: String) {
+        let retained = RetainedTask(
+            description: description,
+            cancel: { task.cancel() },
+            settles: { await waitForTaskResult(task) != nil }
+        )
+        lock.withLock { retainedTasks.append(retained) }
+    }
+
+    func addHookReset(_ reset: @escaping @Sendable () async -> Void) {
+        lock.withLock { hookResets.append(reset) }
+    }
+
+    func run(file: StaticString = #filePath, line: UInt = #line) async {
+        let (openers, tasks, resets) = lock.withLock { (gateOpeners, retainedTasks, hookResets) }
+
+        for open in openers {
+            await open()
+        }
+        for task in tasks {
+            task.cancel()
+        }
+        for task in tasks {
+            let settled = await task.settles()
+            XCTAssertTrue(settled, "\(task.description) did not settle during cleanup", file: file, line: line)
+        }
+        await assertOwnedContentReadWorkSettles(probe, file: file, line: line)
+        for reset in resets {
+            await reset()
+        }
     }
 }
 
