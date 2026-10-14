@@ -356,6 +356,7 @@ enum MCPAppPhysicalCapabilityAdapters {
     typealias WritePromptExportFile = @MainActor @Sendable (
         _ path: String,
         _ content: String,
+        _ lookupRootScope: WorkspaceLookupRootScope,
         _ mutationRootMappings: [DomainMutationPhysicalRootMapping]
     ) async throws -> String
     typealias LatestTokenBreakdown = @MainActor @Sendable () -> TokenCountingViewModel.TokenBreakdown

@@ -323,6 +323,7 @@ final class MCPPromptContextToolProvider {
                 store: dependencies.context.promptVM.workspaceFileContextStore
             )
             return (
+                lookupContext: lookupContext,
                 physicalPath: lookupContext.translateInputPath(rawPath),
                 mutationRootMappings: mutationRootMappings
             )
@@ -334,6 +335,7 @@ final class MCPPromptContextToolProvider {
             let path = try await dependencies.prompt.writePromptExportFile(
                 destination.physicalPath,
                 text,
+                destination.lookupContext.rootScope,
                 destination.mutationRootMappings
             )
             await dependencies.prompt.reachExportPhaseHook(.afterDurableWrite)
@@ -348,12 +350,20 @@ final class MCPPromptContextToolProvider {
         }
 
         return try await withPromptExportPhase(.promptExportReplyAssembly) {
-            let exportPath = exportMetadata.pathDisplay == .full
-                ? resolvedPath
-                : MCPWindowWorkspaceToolHelpers.prefixedRelativePath(
+            // A destination under a bound worktree reports its logical path. The ingress
+            // wait above keeps the physical path so the store picks the worktree root.
+            let exportPath: String = if let logicalPath = destination.lookupContext.bindingProjection?
+                .projectedLogicalDisplayPath(forPhysicalPath: resolvedPath, display: exportMetadata.pathDisplay)
+            {
+                logicalPath
+            } else if exportMetadata.pathDisplay == .full {
+                resolvedPath
+            } else {
+                MCPWindowWorkspaceToolHelpers.prefixedRelativePath(
                     forPath: resolvedPath,
                     rootRefs: exportMetadata.rootRefs
                 )
+            }
             let envelope = ToolResultDTOs.PromptToolEnvelope.forExport(ToolResultDTOs.PromptExportReply(
                 path: exportPath,
                 tokens: exportMetadata.tokens,

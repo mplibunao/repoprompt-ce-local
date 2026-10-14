@@ -1110,6 +1110,25 @@ package enum MCPDomainCanonicalToolDefinitions {
                 isEnabledByDefault: definition.isEnabledByDefault
             )
         }
+        if [MCPWindowToolName.prompt, MCPWindowToolName.workspaceContext].contains(definition.name) {
+            guard case var .object(schema) = definition.inputSchema,
+                  case var .object(properties)? = schema["properties"],
+                  case var .object(path)? = properties["path"],
+                  case let .string(pathDescription)? = path["description"]
+            else {
+                return definition
+            }
+            path["description"] = .string(pathDescription + ". " + exportPathWorktreeDestination)
+            properties["path"] = .object(path)
+            schema["properties"] = .object(properties)
+            return MCPDomainToolDefinition(
+                name: definition.name,
+                description: definition.description,
+                inputSchema: .object(schema),
+                annotations: definition.annotations,
+                isEnabledByDefault: definition.isEnabledByDefault
+            )
+        }
         guard definition.name == MCPGlobalToolName.bindContext,
               case var .object(schema) = definition.inputSchema,
               case var .object(properties)? = schema["properties"]
@@ -1161,6 +1180,9 @@ package enum MCPDomainCanonicalToolDefinitions {
             isEnabledByDefault: definition.isEnabledByDefault
         )
     }
+
+    private static let exportPathWorktreeDestination =
+        "In the app, under a worktree-bound root, the file is written into the worktree and the reply shows its logical path."
 
     /// A client pays for this text on each `tools/list` that advertises `bind_context` to it, so
     /// it holds only what the schema cannot express: what a binding is, when listing is needed,

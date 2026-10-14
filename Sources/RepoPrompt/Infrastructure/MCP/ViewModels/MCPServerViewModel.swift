@@ -1965,11 +1965,12 @@ final class MCPServerViewModel: ObservableObject {
             guard let self else { return "" }
             return await buildTabClipboardContent(cfg: cfg, context: context)
         },
-        writePromptExportFile: { [weak self] path, content, mutationRootMappings in
+        writePromptExportFile: { [weak self] path, content, lookupRootScope, mutationRootMappings in
             guard let self else { throw MCPError.internalError("Window deallocated while exporting prompt") }
             return try await writePromptExportFile(
                 path: path,
                 content: content,
+                lookupRootScope: lookupRootScope,
                 mutationRootMappings: mutationRootMappings
             )
         },
@@ -7324,6 +7325,7 @@ final class MCPServerViewModel: ObservableObject {
     private func writePromptExportFile(
         path rawPath: String,
         content: String,
+        lookupRootScope: WorkspaceLookupRootScope,
         mutationRootMappings: [DomainMutationPhysicalRootMapping]
     ) async throws -> String {
         let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -7331,29 +7333,37 @@ final class MCPServerViewModel: ObservableObject {
         let standardizedPath = (expandedPath as NSString).standardizingPath
         let resolvedPath = expandedPath.hasPrefix("/") ? standardizedPath : trimmed
 
-        // Relative paths should continue to be resolved inside the workspace.
-        guard resolvedPath.hasPrefix("/") else {
+        let isWorkspaceDestination: Bool
+        if resolvedPath.hasPrefix("/") {
+            // Roots the request scope declares stay workspace destinations even after they
+            // unload. The mutation service then rejects an unavailable worktree, and the
+            // external branch never writes into it. These paths only classify the destination.
+            // `writeFile` still resolves and authorizes it through `lookupRootScope`.
+            let declaredSessionRootPaths: [String] = switch lookupRootScope {
+            case let .sessionBoundWorkspace(canonicalRootPaths, physicalRootPaths):
+                canonicalRootPaths.union(physicalRootPaths).map { StandardizedPath.absolute($0) }
+            case let .validatedSessionBoundWorkspace(canonicalRoots, physicalRoots):
+                canonicalRoots.union(physicalRoots).map(\.standardizedFullPath)
+            case .visibleWorkspace, .visibleWorkspacePlusGitData, .allLoaded, .allLoadedExcludingGitData:
+                []
+            }
+            let loadedRootPaths = await promptVM.workspaceFileContextStore.rootRefs(scope: .allLoaded)
+                .map(\.standardizedFullPath)
+            isWorkspaceDestination = (loadedRootPaths + declaredSessionRootPaths).contains { rootPath in
+                StandardizedPath.isDescendant(resolvedPath, of: rootPath)
+            }
+        } else {
+            // Relative paths should continue to be resolved inside the workspace.
+            isWorkspaceDestination = true
+        }
+
+        if isWorkspaceDestination {
             try await writeFile(
                 path: resolvedPath,
                 content: content,
                 overwrite: false,
                 addToSelection: false,
-                mutationRootMappings: mutationRootMappings
-            )
-            return resolvedPath
-        }
-
-        let roots = await promptVM.workspaceFileContextStore.rootRefs(scope: .allLoaded)
-        let isUnderRoot = roots.contains { root in
-            resolvedPath == root.standardizedFullPath || StandardizedPath.isDescendant(resolvedPath, of: root.standardizedFullPath)
-        }
-
-        if isUnderRoot {
-            try await writeFile(
-                path: resolvedPath,
-                content: content,
-                overwrite: false,
-                addToSelection: false,
+                lookupRootScope: lookupRootScope,
                 mutationRootMappings: mutationRootMappings
             )
             return resolvedPath
