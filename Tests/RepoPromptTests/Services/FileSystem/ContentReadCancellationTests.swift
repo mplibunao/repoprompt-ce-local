@@ -41,12 +41,7 @@ final class ContentReadCancellationTests: XCTestCase {
             guard let readResult = await waitForTaskResult(readTask) else {
                 return XCTFail("Cooperative chunk read did not settle after cancellation")
             }
-            do {
-                _ = try readResult.get()
-                XCTFail("Expected cooperative chunk read cancellation")
-            } catch {
-                XCTAssertTrue(error is CancellationError)
-            }
+            assertCancellation(readResult, "Expected cooperative chunk read cancellation")
             await assertOwnedContentReadWorkSettles(probe)
         }
     }
@@ -193,12 +188,8 @@ final class ContentReadCancellationTests: XCTestCase {
 
         guard let cleanup = await startOwnedContentReadScenario() else { return }
         let probe = cleanup.probe
-        cleanup.addGateOpener { physicalReadGate.release() }
         cleanup.addSleeperRelease { await sleeps.releaseAll() }
-        cleanup.addHookReset { try? await store.setContentPhysicalReadHandlerForTesting(rootID: root.id, nil) }
-        try await store.setContentPhysicalReadHandlerForTesting(rootID: root.id) {
-            physicalReadGate.blockUntilReleased()
-        }
+        try await cleanup.blockPhysicalReads(in: store, rootID: root.id, at: physicalReadGate)
 
         try await probe.observe {
             let watchdogTask = Task { () -> Result<Void, Error> in
@@ -287,12 +278,8 @@ final class ContentReadCancellationTests: XCTestCase {
 
         guard let cleanup = await startOwnedContentReadScenario() else { return }
         let probe = cleanup.probe
-        cleanup.addGateOpener { physicalReadGate.release() }
         cleanup.addSleeperRelease { await sleeps.releaseAll() }
-        cleanup.addHookReset { try? await store.setContentPhysicalReadHandlerForTesting(rootID: root.id, nil) }
-        try await store.setContentPhysicalReadHandlerForTesting(rootID: root.id) {
-            physicalReadGate.blockUntilReleased()
-        }
+        try await cleanup.blockPhysicalReads(in: store, rootID: root.id, at: physicalReadGate)
 
         await probe.observe {
             let watchdogTask = Task { () -> Result<Void, Error> in
@@ -482,12 +469,8 @@ final class ContentReadCancellationTests: XCTestCase {
         // Started after the runtime registers its shutdown, so teardown joins owned reads first.
         guard let cleanup = await startOwnedContentReadScenario() else { return }
         let probe = cleanup.probe
-        cleanup.addGateOpener { physicalReadGate.release() }
         cleanup.addSleeperRelease { await sleeps.releaseAll() }
-        cleanup.addHookReset { try? await store.setContentPhysicalReadHandlerForTesting(rootID: root.id, nil) }
-        try await store.setContentPhysicalReadHandlerForTesting(rootID: root.id) {
-            physicalReadGate.blockUntilReleased()
-        }
+        try await cleanup.blockPhysicalReads(in: store, rootID: root.id, at: physicalReadGate)
 
         await probe.observe {
             let watchdogTask = Task { () -> Result<Value, Error> in
@@ -946,11 +929,7 @@ final class ContentReadCancellationTests: XCTestCase {
         let roots = await store.rootRefs(scope: .visibleWorkspace)
         let physicalGate = SynchronousPhysicalReadGate()
         guard let cleanup = await startOwnedContentReadScenario() else { return }
-        cleanup.addGateOpener { physicalGate.release() }
-        cleanup.addHookReset { try? await store.setContentPhysicalReadHandlerForTesting(rootID: root.id, nil) }
-        try await store.setContentPhysicalReadHandlerForTesting(rootID: root.id) {
-            physicalGate.blockUntilReleased()
-        }
+        try await cleanup.blockPhysicalReads(in: store, rootID: root.id, at: physicalGate)
 
         try await cleanup.probe.observe {
             let materializationTask = Task {
@@ -997,11 +976,7 @@ final class ContentReadCancellationTests: XCTestCase {
         XCTAssertNil(ignoredCatalogFile)
         let physicalGate = SynchronousPhysicalReadGate()
         guard let cleanup = await startOwnedContentReadScenario() else { return }
-        cleanup.addGateOpener { physicalGate.release() }
-        cleanup.addHookReset { try? await store.setContentPhysicalReadHandlerForTesting(rootID: ignoredRoot.id, nil) }
-        try await store.setContentPhysicalReadHandlerForTesting(rootID: ignoredRoot.id) {
-            physicalGate.blockUntilReleased()
-        }
+        try await cleanup.blockPhysicalReads(in: store, rootID: ignoredRoot.id, at: physicalGate)
 
         try await cleanup.probe.observe {
             let resolutionTask = Task {
@@ -1142,411 +1117,49 @@ final class ContentReadCancellationTests: XCTestCase {
     }
 
     func testSuccessiveDomainProviderExactResolutionPathStateStallsSettleAndRecover() async throws {
-        let parentURL = try makeTemporaryRoot()
-        let rootURLs = ["catalog-hit", "catalog-miss-a", "catalog-miss-b"].map {
-            parentURL.appendingPathComponent($0, isDirectory: true)
-        }
-        for rootURL in rootURLs {
-            try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
-        }
-        try "cataloged target\n".write(
-            to: rootURLs[0].appendingPathComponent("Target.swift"),
-            atomically: true,
-            encoding: .utf8
-        )
-
-        let store = WorkspaceFileContextStore()
-        for rootURL in rootURLs {
-            _ = try await store.loadRoot(path: rootURL.path)
-        }
-        let roots = await store.rootRefs(scope: .visibleWorkspace)
-        guard let catalogRoot = roots.first(where: {
-            $0.standardizedFullPath == StandardizedPath.absolute(rootURLs[0].path)
-        }), let record = await store.file(rootID: catalogRoot.id, relativePath: "Target.swift")
-        else {
-            return XCTFail("Expected cataloged target record")
-        }
-        let namespace = WorkspaceExactFileNamespace.identity(roots: roots)
-        let missingRootIDs = roots
-            .filter { $0.standardizedFullPath != StandardizedPath.absolute(rootURLs[0].path) }
-            .map(\.id)
-        XCTAssertEqual(missingRootIDs.count, 2)
-
-        let physicalReadGates = PeriodicPhysicalReadGates(interval: 2, count: 2)
-        let physicalReadHandler: @Sendable () -> Void = {
-            physicalReadGates.reachNextProbe()
-        }
-        guard let cleanup = await startOwnedContentReadScenario() else { return }
-        let probe = cleanup.probe
-        cleanup.addGateOpener { physicalReadGates.releaseAll() }
-        cleanup.addHookReset {
-            for rootID in missingRootIDs {
-                try? await store.setContentPhysicalReadHandlerForTesting(rootID: rootID, nil)
-            }
-        }
-        for rootID in missingRootIDs {
-            try await store.setContentPhysicalReadHandlerForTesting(
-                rootID: rootID,
-                physicalReadHandler
-            )
-        }
-
-        let registry = MCPCodeStructureSettlementRegistry()
-        let clock = SynchronousDurationClock()
-        func startWatchdogAttempt(
-            _ attempt: Int,
-            sleeps: ControlledWatchdogSleeps
-        ) -> Task<Result<Void, Error>, Never>? {
-            let admission = registry.admit(
-                windowID: 949,
-                connectionID: UUID(),
-                invocationID: UUID(),
-                toolName: MCPWindowToolName.readFile,
-                now: clock.now(),
-                handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
-            )
-            guard case let .admitted(settlementSlot) = admission else {
-                XCTFail("Exact-resolution attempt \(attempt) was blocked before execution")
-                return nil
-            }
-            return Task { () -> Result<Void, Error> in
-                do {
-                    try await MCPToolExecutionWatchdog.execute(
-                        deadline: .seconds(30),
-                        cancellationGrace: .seconds(5),
-                        cleanupDisposition: .detachAndSettle,
-                        settlementSlot: settlementSlot,
-                        environment: MCPToolExecutionWatchdogEnvironment(
-                            now: { clock.now() },
-                            sleep: { duration in try await sleeps.sleep(for: duration) }
-                        )
-                    ) {
-                        try await runDomainReadProviderTask(
-                            store: store,
-                            record: record,
-                            roots: roots
-                        )
-                    }
-                    return .success(())
-                } catch {
-                    return .failure(error)
-                }
-            }
-        }
-
-        func finishWatchdogAttempt(
-            _ task: Task<Result<Void, Error>, Never>,
-            sleeps: ControlledWatchdogSleeps
-        ) async -> Result<Void, Error>? {
-            let deadlineDidRegister = await waitUntil {
-                await sleeps.pendingCountSnapshot() >= 1
-            }
-            guard deadlineDidRegister else {
-                task.cancel()
-                await sleeps.releaseAll()
-                return nil
-            }
-            guard await sleeps.releaseNext() else {
-                XCTFail("Exact-resolution deadline sleeper disappeared before release")
-                return nil
-            }
-            if let observedResult = await waitForTaskResult(task) {
-                return observedResult.get()
-            }
-            let graceDidRegister = await waitUntil {
-                await sleeps.pendingCountSnapshot() >= 1
-            }
-            guard graceDidRegister else { return nil }
-            guard await sleeps.releaseNext() else {
-                XCTFail("Exact-resolution grace sleeper disappeared before release")
-                return nil
-            }
-            guard let observedResult = await waitForTaskResult(task) else { return nil }
-            return observedResult.get()
-        }
-
-        try await probe.observe {
-            let firstSleeps = ControlledWatchdogSleeps(clock: clock)
-            cleanup.addSleeperRelease { await firstSleeps.releaseAll() }
-            guard let firstTask = startWatchdogAttempt(1, sleeps: firstSleeps) else { return }
-            cleanup.retain(firstTask, "Exact-resolution attempt 1")
-            guard await waitUntil({ physicalReadGates.isBlocked(at: 0) }) else {
+        try await assertSuccessiveExactResolutionStallsSettleAndRecover(
+            gateInterval: 2,
+            windowID: 949,
+            attemptLabel: "Exact-resolution",
+            provider: { store, record, roots in
+                try await runDomainReadProviderTask(store: store, record: record, roots: roots)
+            },
+            firstProbeDidNotBlock: { firstTask in
                 firstTask.cancel()
                 let earlyResult = await waitForTaskResult(firstTask)
-                return XCTFail("First exact-resolution path-state probe did not block; result=\(String(describing: earlyResult))")
+                XCTFail("First exact-resolution path-state probe did not block; result=\(String(describing: earlyResult))")
+            },
+            secondProbeQueuedMessage: "The second provider remained queued behind the first actor-pinning probe",
+            thirdAdmissionMessage: "Two detached providers exhausted the released-provider allowance",
+            recoveryFailureMessage: "Expected exact resolution to recover after both physical reads returned",
+            afterRecovery: { probe in
+                // A successful read releases its permit and ends its producer before returning.
+                let afterRecovery = probe.snapshot()
+                XCTAssertTrue(afterRecovery.isSettled, "Owned work after the recovered resolution: \(afterRecovery)")
             }
-            let firstResult = await finishWatchdogAttempt(firstTask, sleeps: firstSleeps)
-
-            // The settlement registry's recovery horizon admits a replacement provider even
-            // while the first cancellation-ignoring producer still owns its physical work.
-            clock.advance(by: .seconds(30))
-            let secondSleeps = ControlledWatchdogSleeps(clock: clock)
-            cleanup.addSleeperRelease { await secondSleeps.releaseAll() }
-            guard let secondTask = startWatchdogAttempt(2, sleeps: secondSleeps) else { return }
-            cleanup.retain(secondTask, "Exact-resolution attempt 2")
-            let secondPhysicalReadDidBlock = await waitUntil { physicalReadGates.isBlocked(at: 1) }
-            let secondResult = await finishWatchdogAttempt(secondTask, sleeps: secondSleeps)
-
-            let thirdAdmission = registry.admit(
-                windowID: 949,
-                connectionID: UUID(),
-                invocationID: UUID(),
-                toolName: MCPWindowToolName.readFile,
-                now: clock.now(),
-                handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
-            )
-            let thirdAdmissionSucceeded: Bool
-            switch thirdAdmission {
-            case let .admitted(slot):
-                thirdAdmissionSucceeded = true
-                _ = slot.closeBeforeExecutionExit()
-            case .busy:
-                thirdAdmissionSucceeded = false
-            }
-
-            XCTAssertTrue(secondPhysicalReadDidBlock, "The second provider remained queued behind the first actor-pinning probe")
-            for (attempt, result) in [firstResult, secondResult].enumerated() {
-                guard case let .failure(error) = result else {
-                    XCTFail("Exact-resolution attempt \(attempt + 1) did not time out")
-                    continue
-                }
-                XCTAssertEqual(
-                    error as? MCPToolExecutionWatchdogError,
-                    .executionTimedOut(settlement: .cancellation),
-                    "Exact-resolution attempt \(attempt + 1) detached instead of settling cancellation"
-                )
-            }
-            XCTAssertTrue(thirdAdmissionSucceeded, "Two detached providers exhausted the released-provider allowance")
-            XCTAssertEqual(
-                registry.snapshot(windowID: 949),
-                .init(activeCount: 0, detachedCount: 0, releasedCount: 0)
-            )
-
-            physicalReadGates.releaseAll()
-            await firstSleeps.releaseAll()
-            await secondSleeps.releaseAll()
-            _ = await waitForTaskResult(firstTask)
-            _ = await waitForTaskResult(secondTask)
-            await assertOwnedContentReadWorkSettles(probe)
-
-            let recovered = try await store.resolveExactExistingWorkspaceFile(
-                WorkspaceExactFileInput.parse("Target.swift"),
-                namespace: namespace
-            )
-            guard case let .matched(match) = recovered else {
-                return XCTFail("Expected exact resolution to recover after both physical reads returned")
-            }
-            XCTAssertEqual(match.file.standardizedFullPath, StandardizedPath.absolute(rootURLs[0].appendingPathComponent("Target.swift").path))
-            // A successful read releases its permit and ends its producer before returning.
-            let afterRecovery = probe.snapshot()
-            XCTAssertTrue(afterRecovery.isSettled, "Owned work after the recovered resolution: \(afterRecovery)")
-        }
+        )
     }
 
     func testSuccessiveExactResolutionMissingFileRechecksSettleAndRecover() async throws {
-        let parentURL = try makeTemporaryRoot()
-        let rootURLs = ["catalog-hit", "catalog-miss-a", "catalog-miss-b"].map {
-            parentURL.appendingPathComponent($0, isDirectory: true)
-        }
-        for rootURL in rootURLs {
-            try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
-        }
-        try "cataloged target\n".write(
-            to: rootURLs[0].appendingPathComponent("Target.swift"),
-            atomically: true,
-            encoding: .utf8
+        try await assertSuccessiveExactResolutionStallsSettleAndRecover(
+            gateInterval: 3,
+            windowID: 950,
+            attemptLabel: "Missing-file",
+            provider: { store, record, roots in
+                try await runMainActorProviderTask(store: store, record: record, roots: roots)
+            },
+            firstProbeDidNotBlock: { _ in
+                XCTFail("First exact-resolution missing-file recheck did not block")
+            },
+            secondProbeQueuedMessage: "The second provider remained queued behind the first actor-isolated regular-file probe",
+            thirdAdmissionMessage: "A released provider plus a second detachment exhausted admission",
+            whileBlocked: { probe in
+                let blocked = probe.snapshot()
+                XCTAssertEqual(blocked.activeCount, 2, "Owned work while both missing-file rechecks are blocked: \(blocked)")
+                XCTAssertEqual(blocked.queuedCount, 0)
+            },
+            recoveryFailureMessage: "Expected exact resolution to recover after both missing-file probes returned"
         )
-
-        let store = WorkspaceFileContextStore()
-        for rootURL in rootURLs {
-            _ = try await store.loadRoot(path: rootURL.path)
-        }
-        let roots = await store.rootRefs(scope: .visibleWorkspace)
-        guard let catalogRoot = roots.first(where: {
-            $0.standardizedFullPath == StandardizedPath.absolute(rootURLs[0].path)
-        }), let record = await store.file(rootID: catalogRoot.id, relativePath: "Target.swift")
-        else {
-            return XCTFail("Expected cataloged target record")
-        }
-        let namespace = WorkspaceExactFileNamespace.identity(roots: roots)
-        let missingRootIDs = roots
-            .filter { $0.standardizedFullPath != StandardizedPath.absolute(rootURLs[0].path) }
-            .map(\.id)
-        XCTAssertEqual(missingRootIDs.count, 2)
-
-        let physicalReadGates = PeriodicPhysicalReadGates(interval: 3, count: 2)
-        let physicalReadHandler: @Sendable () -> Void = {
-            physicalReadGates.reachNextProbe()
-        }
-        guard let cleanup = await startOwnedContentReadScenario() else { return }
-        let probe = cleanup.probe
-        cleanup.addGateOpener { physicalReadGates.releaseAll() }
-        cleanup.addHookReset {
-            for rootID in missingRootIDs {
-                try? await store.setContentPhysicalReadHandlerForTesting(rootID: rootID, nil)
-            }
-        }
-        for rootID in missingRootIDs {
-            try await store.setContentPhysicalReadHandlerForTesting(
-                rootID: rootID,
-                physicalReadHandler
-            )
-        }
-
-        let registry = MCPCodeStructureSettlementRegistry()
-        let clock = SynchronousDurationClock()
-        func startWatchdogAttempt(
-            _ attempt: Int,
-            sleeps: ControlledWatchdogSleeps
-        ) -> Task<Result<Void, Error>, Never>? {
-            let admission = registry.admit(
-                windowID: 950,
-                connectionID: UUID(),
-                invocationID: UUID(),
-                toolName: MCPWindowToolName.readFile,
-                now: clock.now(),
-                handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
-            )
-            guard case let .admitted(settlementSlot) = admission else {
-                XCTFail("Exact-resolution attempt \(attempt) was blocked before execution")
-                return nil
-            }
-            return Task { () -> Result<Void, Error> in
-                do {
-                    try await MCPToolExecutionWatchdog.execute(
-                        deadline: .seconds(30),
-                        cancellationGrace: .seconds(5),
-                        cleanupDisposition: .detachAndSettle,
-                        settlementSlot: settlementSlot,
-                        environment: MCPToolExecutionWatchdogEnvironment(
-                            now: { clock.now() },
-                            sleep: { duration in try await sleeps.sleep(for: duration) }
-                        )
-                    ) {
-                        try await runMainActorProviderTask(
-                            store: store,
-                            record: record,
-                            roots: roots
-                        )
-                    }
-                    return .success(())
-                } catch {
-                    return .failure(error)
-                }
-            }
-        }
-
-        func finishWatchdogAttempt(
-            _ task: Task<Result<Void, Error>, Never>,
-            sleeps: ControlledWatchdogSleeps
-        ) async -> Result<Void, Error>? {
-            let deadlineDidRegister = await waitUntil {
-                await sleeps.pendingCountSnapshot() >= 1
-            }
-            guard deadlineDidRegister else {
-                task.cancel()
-                await sleeps.releaseAll()
-                return nil
-            }
-            guard await sleeps.releaseNext() else {
-                XCTFail("Missing-file deadline sleeper disappeared before release")
-                return nil
-            }
-            if let observedResult = await waitForTaskResult(task) {
-                return observedResult.get()
-            }
-            let graceDidRegister = await waitUntil {
-                await sleeps.pendingCountSnapshot() >= 1
-            }
-            guard graceDidRegister else { return nil }
-            guard await sleeps.releaseNext() else {
-                XCTFail("Missing-file grace sleeper disappeared before release")
-                return nil
-            }
-            guard let observedResult = await waitForTaskResult(task) else { return nil }
-            return observedResult.get()
-        }
-
-        try await probe.observe {
-            let firstSleeps = ControlledWatchdogSleeps(clock: clock)
-            cleanup.addSleeperRelease { await firstSleeps.releaseAll() }
-            guard let firstTask = startWatchdogAttempt(1, sleeps: firstSleeps) else { return }
-            cleanup.retain(firstTask, "Missing-file attempt 1")
-            guard await waitUntil({ physicalReadGates.isBlocked(at: 0) }) else {
-                return XCTFail("First exact-resolution missing-file recheck did not block")
-            }
-            let firstResult = await finishWatchdogAttempt(firstTask, sleeps: firstSleeps)
-
-            clock.advance(by: .seconds(30))
-            let secondSleeps = ControlledWatchdogSleeps(clock: clock)
-            cleanup.addSleeperRelease { await secondSleeps.releaseAll() }
-            guard let secondTask = startWatchdogAttempt(2, sleeps: secondSleeps) else { return }
-            cleanup.retain(secondTask, "Missing-file attempt 2")
-            let secondPhysicalReadDidBlock = await waitUntil {
-                physicalReadGates.isBlocked(at: 1)
-            }
-            let secondResult = await finishWatchdogAttempt(secondTask, sleeps: secondSleeps)
-
-            let thirdAdmission = registry.admit(
-                windowID: 950,
-                connectionID: UUID(),
-                invocationID: UUID(),
-                toolName: MCPWindowToolName.readFile,
-                now: clock.now(),
-                handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
-            )
-            let thirdAdmissionSucceeded: Bool
-            switch thirdAdmission {
-            case let .admitted(slot):
-                thirdAdmissionSucceeded = true
-                _ = slot.closeBeforeExecutionExit()
-            case .busy:
-                thirdAdmissionSucceeded = false
-            }
-
-            XCTAssertTrue(
-                secondPhysicalReadDidBlock,
-                "The second provider remained queued behind the first actor-isolated regular-file probe"
-            )
-            for (attempt, result) in [firstResult, secondResult].enumerated() {
-                guard case let .failure(error) = result else {
-                    XCTFail("Exact-resolution attempt \(attempt + 1) did not time out")
-                    continue
-                }
-                XCTAssertEqual(
-                    error as? MCPToolExecutionWatchdogError,
-                    .executionTimedOut(settlement: .cancellation),
-                    "Exact-resolution attempt \(attempt + 1) detached instead of settling cancellation"
-                )
-            }
-            XCTAssertTrue(thirdAdmissionSucceeded, "A released provider plus a second detachment exhausted admission")
-            XCTAssertEqual(
-                registry.snapshot(windowID: 950),
-                .init(activeCount: 0, detachedCount: 0, releasedCount: 0)
-            )
-            let blocked = probe.snapshot()
-            XCTAssertEqual(blocked.activeCount, 2, "Owned work while both missing-file rechecks are blocked: \(blocked)")
-            XCTAssertEqual(blocked.queuedCount, 0)
-
-            physicalReadGates.releaseAll()
-            await firstSleeps.releaseAll()
-            await secondSleeps.releaseAll()
-            _ = await waitForTaskResult(firstTask)
-            _ = await waitForTaskResult(secondTask)
-            await assertOwnedContentReadWorkSettles(probe)
-
-            let recovered = try await store.resolveExactExistingWorkspaceFile(
-                WorkspaceExactFileInput.parse("Target.swift"),
-                namespace: namespace
-            )
-            guard case let .matched(match) = recovered else {
-                return XCTFail("Expected exact resolution to recover after both missing-file probes returned")
-            }
-            XCTAssertEqual(
-                match.file.standardizedFullPath,
-                StandardizedPath.absolute(rootURLs[0].appendingPathComponent("Target.swift").path)
-            )
-        }
     }
 
     func testLimiterReportsBackpressureAndRemovesCancelledQueuedRead() async throws {
@@ -1590,12 +1203,7 @@ final class ContentReadCancellationTests: XCTestCase {
             await releaseActiveRead.signal()
             return XCTFail("Queued limiter read did not settle after cancellation")
         }
-        do {
-            try queuedResult.get()
-            XCTFail("Expected queued read cancellation")
-        } catch {
-            XCTAssertTrue(error is CancellationError)
-        }
+        assertCancellation(queuedResult, "Expected queued read cancellation")
         let cancelledSnapshot = await limiter.snapshotForTesting()
         XCTAssertEqual(cancelledSnapshot.activePermitCount, 1)
         XCTAssertEqual(cancelledSnapshot.queuedWaiterCount, 0)
@@ -1675,7 +1283,7 @@ final class ContentReadCancellationTests: XCTestCase {
         }
     }
 
-    func testCancellingOnlyInteractiveCacheWaiterRemovesFlight() async throws {
+    func testCancellingOnlyInteractiveCacheWaiterRemovesFlight() async {
         let cache = WorkspaceInteractiveReadCache()
         let loaderStarted = AsyncSignal()
         let releaseLoader = AsyncSignal()
@@ -1702,12 +1310,7 @@ final class ContentReadCancellationTests: XCTestCase {
             await releaseLoader.signal()
             return XCTFail("Single cache waiter did not settle after cancellation")
         }
-        do {
-            _ = try taskResult.get()
-            XCTFail("Expected the only cache waiter to observe cancellation")
-        } catch {
-            XCTAssertTrue(error is CancellationError)
-        }
+        assertCancellation(taskResult, "Expected the only cache waiter to observe cancellation")
         let cancelledSnapshot = await waitForCacheSnapshot(cache) {
             $0.activeFlightCount == 0 && $0.cancellationCount == 1
         }
@@ -1751,12 +1354,7 @@ final class ContentReadCancellationTests: XCTestCase {
             await releaseLoader.signal()
             return XCTFail("Cancelled shared cache waiter did not settle")
         }
-        do {
-            _ = try firstResult.get()
-            XCTFail("Expected the cancelled waiter to settle independently")
-        } catch {
-            XCTAssertTrue(error is CancellationError)
-        }
+        assertCancellation(firstResult, "Expected the cancelled waiter to settle independently")
         let joinedSnapshot = await waitForCacheSnapshot(cache) {
             $0.waiterCount == 1 && $0.cancellationCount == 1
         }
@@ -1847,12 +1445,7 @@ final class ContentReadCancellationTests: XCTestCase {
             guard let taskResult = await waitForTaskResult(task) else {
                 return XCTFail("Cancellation-before-install did not settle promptly")
             }
-            do {
-                _ = try taskResult.get()
-                XCTFail("Expected cancellation before producer-handle installation")
-            } catch {
-                XCTAssertTrue(error is CancellationError)
-            }
+            assertCancellation(taskResult, "Expected cancellation before producer-handle installation")
             let blocked = probe.snapshot()
             XCTAssertEqual(blocked.activeCount, 1, "Owned work while the producer is blocked: \(blocked)")
 
@@ -1887,12 +1480,7 @@ final class ContentReadCancellationTests: XCTestCase {
             guard let taskResult = await waitForTaskResult(task) else {
                 return XCTFail("Caller did not settle before the late physical failure")
             }
-            do {
-                _ = try taskResult.get()
-                XCTFail("Expected caller cancellation to win the late physical failure race")
-            } catch {
-                XCTAssertTrue(error is CancellationError)
-            }
+            assertCancellation(taskResult, "Expected caller cancellation to win the late physical failure race")
             let blocked = probe.snapshot()
             XCTAssertEqual(blocked.activeCount, 1, "Owned work while the late failure is blocked: \(blocked)")
 
@@ -1916,11 +1504,7 @@ final class ContentReadCancellationTests: XCTestCase {
         let physicalGate = SynchronousPhysicalReadGate()
         guard let cleanup = await startOwnedContentReadScenario() else { return }
         let probe = cleanup.probe
-        cleanup.addGateOpener { physicalGate.release() }
-        cleanup.addHookReset { try? await store.setContentPhysicalReadHandlerForTesting(rootID: root.id, nil) }
-        try await store.setContentPhysicalReadHandlerForTesting(rootID: root.id) {
-            physicalGate.blockUntilReleased()
-        }
+        try await cleanup.blockPhysicalReads(in: store, rootID: root.id, at: physicalGate)
         let ownerIDs = await store.contentReadSchedulerOwnerIDsForTesting()
         XCTAssertNotEqual(ownerIDs.search, ownerIDs.interactive)
 
@@ -2043,11 +1627,7 @@ final class ContentReadCancellationTests: XCTestCase {
         let physicalGate = SynchronousPhysicalReadGate()
         guard let cleanup = await startOwnedContentReadScenario() else { return }
         let probe = cleanup.probe
-        cleanup.addGateOpener { physicalGate.release() }
-        cleanup.addHookReset { try? await store.setContentPhysicalReadHandlerForTesting(rootID: root.id, nil) }
-        try await store.setContentPhysicalReadHandlerForTesting(rootID: root.id) {
-            physicalGate.blockUntilReleased()
-        }
+        try await cleanup.blockPhysicalReads(in: store, rootID: root.id, at: physicalGate)
 
         try await probe.observe {
             let interactiveReadTask = Task { try await store.interactiveReadSnapshot(for: record) }
@@ -2071,12 +1651,7 @@ final class ContentReadCancellationTests: XCTestCase {
             guard let cancelledResult = await waitForTaskResult(interactiveReadTask) else {
                 return XCTFail("Cancelled workspace caller did not settle before physical completion")
             }
-            do {
-                _ = try cancelledResult.get()
-                XCTFail("Expected workspace caller cancellation")
-            } catch {
-                XCTAssertTrue(error is CancellationError)
-            }
+            assertCancellation(cancelledResult, "Expected workspace caller cancellation")
             let cancelled = probe.snapshot()
             XCTAssertEqual(cancelled.activeCount, 1, "Owned work after caller cancellation: \(cancelled)")
             XCTAssertEqual(cancelled.foregroundCount(for: .interactiveRead), 1)
@@ -2199,12 +1774,7 @@ final class ContentReadCancellationTests: XCTestCase {
             guard let cancelledExternalResult = await waitForTaskResult(externalReadTask) else {
                 return XCTFail("Cancelled external caller did not settle before physical completion")
             }
-            do {
-                _ = try cancelledExternalResult.get()
-                XCTFail("Expected external caller cancellation")
-            } catch {
-                XCTAssertTrue(error is CancellationError)
-            }
+            assertCancellation(cancelledExternalResult, "Expected external caller cancellation")
             let cancelled = probe.snapshot()
             XCTAssertEqual(cancelled.activeCount, 1, "Owned work after caller cancellation: \(cancelled)")
             XCTAssertEqual(cancelled.foregroundCount(for: .interactiveRead), 1)
@@ -2318,12 +1888,7 @@ final class ContentReadCancellationTests: XCTestCase {
             guard let taskResult = await waitForTaskResult(task) else {
                 return XCTFail("External read caller did not settle after cancellation")
             }
-            do {
-                _ = try taskResult.get()
-                XCTFail("Expected external read cancellation")
-            } catch {
-                XCTAssertTrue(error is CancellationError)
-            }
+            assertCancellation(taskResult, "Expected external read cancellation")
             let blocked = probe.snapshot()
             XCTAssertEqual(blocked.activeCount, 1, "Owned work while the physical read is blocked: \(blocked)")
             XCTAssertEqual(blocked.liveProducerCount, 1)
@@ -2362,6 +1927,233 @@ final class ContentReadCancellationTests: XCTestCase {
         XCTAssertEqual(snapshots.first?.source, "disk")
         XCTAssertEqual(snapshots.first?.readBytes, contents.utf8.count)
         XCTAssertEqual(snapshots.first?.diskReadRecordCount, 2)
+    }
+
+    /// Runs two exact-resolution providers whose checks of the two catalog-miss roots stall in
+    /// physical reads, then requires that both time out with settled cancellation, that the
+    /// registry still admits a third provider, and that resolution recovers once the reads return.
+    /// `gateInterval` picks which physical-read probe blocks, and `attemptLabel` names the
+    /// attempts in cleanup and sleeper messages. Failures in these shared steps are reported at
+    /// the calling test's line.
+    private func assertSuccessiveExactResolutionStallsSettleAndRecover(
+        gateInterval: Int,
+        windowID: Int,
+        attemptLabel: String,
+        provider: @escaping @Sendable (
+            WorkspaceFileContextStore,
+            WorkspaceFileRecord,
+            [WorkspaceRootRef]
+        ) async throws -> Void,
+        firstProbeDidNotBlock: (Task<Result<Void, Error>, Never>) async -> Void,
+        secondProbeQueuedMessage: String,
+        thirdAdmissionMessage: String,
+        whileBlocked: (ContentReadTestProbe) -> Void = { _ in },
+        recoveryFailureMessage: String,
+        afterRecovery: (ContentReadTestProbe) -> Void = { _ in },
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let parentURL = try makeTemporaryRoot()
+        let rootURLs = ["catalog-hit", "catalog-miss-a", "catalog-miss-b"].map {
+            parentURL.appendingPathComponent($0, isDirectory: true)
+        }
+        for rootURL in rootURLs {
+            try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        }
+        try "cataloged target\n".write(
+            to: rootURLs[0].appendingPathComponent("Target.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let store = WorkspaceFileContextStore()
+        for rootURL in rootURLs {
+            _ = try await store.loadRoot(path: rootURL.path)
+        }
+        let roots = await store.rootRefs(scope: .visibleWorkspace)
+        guard let catalogRoot = roots.first(where: {
+            $0.standardizedFullPath == StandardizedPath.absolute(rootURLs[0].path)
+        }), let record = await store.file(rootID: catalogRoot.id, relativePath: "Target.swift")
+        else {
+            return XCTFail("Expected cataloged target record", file: file, line: line)
+        }
+        let namespace = WorkspaceExactFileNamespace.identity(roots: roots)
+        let missingRootIDs = roots
+            .filter { $0.standardizedFullPath != StandardizedPath.absolute(rootURLs[0].path) }
+            .map(\.id)
+        XCTAssertEqual(missingRootIDs.count, 2, file: file, line: line)
+
+        let physicalReadGates = PeriodicPhysicalReadGates(interval: gateInterval, count: 2)
+        let physicalReadHandler: @Sendable () -> Void = {
+            physicalReadGates.reachNextProbe()
+        }
+        guard let cleanup = await startOwnedContentReadScenario(file: file, line: line) else { return }
+        let probe = cleanup.probe
+        cleanup.addGateOpener { physicalReadGates.releaseAll() }
+        cleanup.addHookReset {
+            for rootID in missingRootIDs {
+                try? await store.setContentPhysicalReadHandlerForTesting(rootID: rootID, nil)
+            }
+        }
+        for rootID in missingRootIDs {
+            try await store.setContentPhysicalReadHandlerForTesting(
+                rootID: rootID,
+                physicalReadHandler
+            )
+        }
+
+        let registry = MCPCodeStructureSettlementRegistry()
+        let clock = SynchronousDurationClock()
+        func startWatchdogAttempt(
+            _ attempt: Int,
+            sleeps: ControlledWatchdogSleeps
+        ) -> Task<Result<Void, Error>, Never>? {
+            let admission = registry.admit(
+                windowID: windowID,
+                connectionID: UUID(),
+                invocationID: UUID(),
+                toolName: MCPWindowToolName.readFile,
+                now: clock.now(),
+                handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+            )
+            guard case let .admitted(settlementSlot) = admission else {
+                XCTFail("Exact-resolution attempt \(attempt) was blocked before execution", file: file, line: line)
+                return nil
+            }
+            return Task { () -> Result<Void, Error> in
+                do {
+                    try await MCPToolExecutionWatchdog.execute(
+                        deadline: .seconds(30),
+                        cancellationGrace: .seconds(5),
+                        cleanupDisposition: .detachAndSettle,
+                        settlementSlot: settlementSlot,
+                        environment: MCPToolExecutionWatchdogEnvironment(
+                            now: { clock.now() },
+                            sleep: { duration in try await sleeps.sleep(for: duration) }
+                        )
+                    ) {
+                        try await provider(store, record, roots)
+                    }
+                    return .success(())
+                } catch {
+                    return .failure(error)
+                }
+            }
+        }
+
+        func finishWatchdogAttempt(
+            _ task: Task<Result<Void, Error>, Never>,
+            sleeps: ControlledWatchdogSleeps
+        ) async -> Result<Void, Error>? {
+            let deadlineDidRegister = await waitUntil {
+                await sleeps.pendingCountSnapshot() >= 1
+            }
+            guard deadlineDidRegister else {
+                task.cancel()
+                await sleeps.releaseAll()
+                return nil
+            }
+            guard await sleeps.releaseNext() else {
+                XCTFail("\(attemptLabel) deadline sleeper disappeared before release", file: file, line: line)
+                return nil
+            }
+            if let observedResult = await waitForTaskResult(task) {
+                return observedResult.get()
+            }
+            let graceDidRegister = await waitUntil {
+                await sleeps.pendingCountSnapshot() >= 1
+            }
+            guard graceDidRegister else { return nil }
+            guard await sleeps.releaseNext() else {
+                XCTFail("\(attemptLabel) grace sleeper disappeared before release", file: file, line: line)
+                return nil
+            }
+            guard let observedResult = await waitForTaskResult(task) else { return nil }
+            return observedResult.get()
+        }
+
+        try await probe.observe {
+            let firstSleeps = ControlledWatchdogSleeps(clock: clock)
+            cleanup.addSleeperRelease { await firstSleeps.releaseAll() }
+            guard let firstTask = startWatchdogAttempt(1, sleeps: firstSleeps) else { return }
+            cleanup.retain(firstTask, "\(attemptLabel) attempt 1")
+            guard await waitUntil({ physicalReadGates.isBlocked(at: 0) }) else {
+                return await firstProbeDidNotBlock(firstTask)
+            }
+            let firstResult = await finishWatchdogAttempt(firstTask, sleeps: firstSleeps)
+
+            // The settlement registry's recovery horizon admits a replacement provider even
+            // while the first cancellation-ignoring producer still owns its physical work.
+            clock.advance(by: .seconds(30))
+            let secondSleeps = ControlledWatchdogSleeps(clock: clock)
+            cleanup.addSleeperRelease { await secondSleeps.releaseAll() }
+            guard let secondTask = startWatchdogAttempt(2, sleeps: secondSleeps) else { return }
+            cleanup.retain(secondTask, "\(attemptLabel) attempt 2")
+            let secondPhysicalReadDidBlock = await waitUntil { physicalReadGates.isBlocked(at: 1) }
+            let secondResult = await finishWatchdogAttempt(secondTask, sleeps: secondSleeps)
+
+            let thirdAdmission = registry.admit(
+                windowID: windowID,
+                connectionID: UUID(),
+                invocationID: UUID(),
+                toolName: MCPWindowToolName.readFile,
+                now: clock.now(),
+                handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+            )
+            let thirdAdmissionSucceeded: Bool
+            switch thirdAdmission {
+            case let .admitted(slot):
+                thirdAdmissionSucceeded = true
+                _ = slot.closeBeforeExecutionExit()
+            case .busy:
+                thirdAdmissionSucceeded = false
+            }
+
+            XCTAssertTrue(secondPhysicalReadDidBlock, secondProbeQueuedMessage, file: file, line: line)
+            for (attempt, result) in [firstResult, secondResult].enumerated() {
+                guard case let .failure(error) = result else {
+                    XCTFail("Exact-resolution attempt \(attempt + 1) did not time out", file: file, line: line)
+                    continue
+                }
+                XCTAssertEqual(
+                    error as? MCPToolExecutionWatchdogError,
+                    .executionTimedOut(settlement: .cancellation),
+                    "Exact-resolution attempt \(attempt + 1) detached instead of settling cancellation",
+                    file: file,
+                    line: line
+                )
+            }
+            XCTAssertTrue(thirdAdmissionSucceeded, thirdAdmissionMessage, file: file, line: line)
+            XCTAssertEqual(
+                registry.snapshot(windowID: windowID),
+                .init(activeCount: 0, detachedCount: 0, releasedCount: 0),
+                file: file,
+                line: line
+            )
+            whileBlocked(probe)
+
+            physicalReadGates.releaseAll()
+            await firstSleeps.releaseAll()
+            await secondSleeps.releaseAll()
+            _ = await waitForTaskResult(firstTask)
+            _ = await waitForTaskResult(secondTask)
+            await assertOwnedContentReadWorkSettles(probe, file: file, line: line)
+
+            let recovered = try await store.resolveExactExistingWorkspaceFile(
+                WorkspaceExactFileInput.parse("Target.swift"),
+                namespace: namespace
+            )
+            guard case let .matched(match) = recovered else {
+                return XCTFail(recoveryFailureMessage, file: file, line: line)
+            }
+            XCTAssertEqual(
+                match.file.standardizedFullPath,
+                StandardizedPath.absolute(rootURLs[0].appendingPathComponent("Target.swift").path),
+                file: file,
+                line: line
+            )
+            afterRecovery(probe)
+        }
     }
 
     /// Fills every permit and queue slot of the process-wide limiter. Call it after the drain
@@ -2665,6 +2457,22 @@ private func waitForTaskResult<Success: Sendable, Failure: Error & Sendable>(
     return await recorder.snapshot()
 }
 
+/// Asserts that `result` failed with `CancellationError`. A success or any other error is
+/// reported at the caller's line, after the caller's message.
+private func assertCancellation(
+    _ result: Result<some Any, some Error>,
+    _ message: @autoclosure () -> String = "Expected cancellation",
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    switch result {
+    case .success:
+        XCTFail("\(message()); the operation succeeded", file: file, line: line)
+    case let .failure(error):
+        XCTAssertTrue(error is CancellationError, "\(message()); got \(error)", file: file, line: line)
+    }
+}
+
 private func waitForLimiterIdle() async -> ContentReadAsyncLimiter.Snapshot {
     await pollContentReadState(
         { await FileSystemService.contentReadWorkerLimiterSnapshotForTesting() },
@@ -2932,6 +2740,21 @@ private final class ContentReadScenarioCleanup: @unchecked Sendable {
 
     func addHookReset(_ reset: @escaping @Sendable () async -> Void) {
         lock.withLock { hookResets.append(reset) }
+    }
+
+    /// Makes physical reads under `rootID` block on `gate`. It registers the gate opener and the
+    /// hook reset before installing the hook, so no read can block on the gate before cleanup
+    /// can release it.
+    func blockPhysicalReads(
+        in store: WorkspaceFileContextStore,
+        rootID: UUID,
+        at gate: SynchronousPhysicalReadGate
+    ) async throws {
+        addGateOpener { gate.release() }
+        addHookReset { try? await store.setContentPhysicalReadHandlerForTesting(rootID: rootID, nil) }
+        try await store.setContentPhysicalReadHandlerForTesting(rootID: rootID) {
+            gate.blockUntilReleased()
+        }
     }
 
     func run(file: StaticString = #filePath, line: UInt = #line) async {
