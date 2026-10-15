@@ -253,7 +253,6 @@ private final class ChildStatusReaperRegistry: @unchecked Sendable {
 
 enum ProcessTermination {
     private struct TerminationTiming {
-        let cooperativeWaitTimeout: TimeInterval
         let sigtermGrace: TimeInterval
         let sigkillGrace: TimeInterval
     }
@@ -263,10 +262,8 @@ enum ProcessTermination {
     private static let longPollThreshold: TimeInterval = 2.0
     private static let defaultSigtermGracePeriod: TimeInterval = 2.0
     private static let defaultSigkillGracePeriod: TimeInterval = 1.0
-    private static let defaultCooperativeWaitTimeout: TimeInterval = 3.0
     private static let appTerminationSigtermGracePeriod: TimeInterval = 0.2
     private static let appTerminationSigkillGracePeriod: TimeInterval = 0.2
-    private static let appTerminationCooperativeWaitTimeout: TimeInterval = 0.75
     private static let terminationModeLock = NSLock()
     private static var appTerminationFastPathEnabled = false
     static func beginAppTerminationFastPath() {
@@ -281,10 +278,6 @@ enum ProcessTermination {
         terminationModeLock.unlock()
     }
 
-    static func cooperativeCancellationWaitTimeout() -> TimeInterval {
-        currentTiming().cooperativeWaitTimeout
-    }
-
     private static func currentTiming() -> TerminationTiming {
         terminationModeLock.lock()
         let fastPathEnabled = appTerminationFastPathEnabled
@@ -292,14 +285,12 @@ enum ProcessTermination {
 
         if fastPathEnabled {
             return TerminationTiming(
-                cooperativeWaitTimeout: appTerminationCooperativeWaitTimeout,
                 sigtermGrace: appTerminationSigtermGracePeriod,
                 sigkillGrace: appTerminationSigkillGracePeriod
             )
         }
 
         return TerminationTiming(
-            cooperativeWaitTimeout: defaultCooperativeWaitTimeout,
             sigtermGrace: defaultSigtermGracePeriod,
             sigkillGrace: defaultSigkillGracePeriod
         )

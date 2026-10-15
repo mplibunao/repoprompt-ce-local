@@ -52,18 +52,16 @@ Work is tracked as issues and pull requests there.
    gh stack link <lower-pr-number> <this-pr-number>
    ```
 
-   A change under `Sources/` or `Packages/` opens as a draft whose description
-   says debug-app validation is pending, against `main` or, when stacked, the
-   lower branch as above. Build and launch the debug app from
-   the branch, exercise the changed behavior through `rpce-cli-debug` or the
-   app itself, and record the commands, what you observed, and the result in
-   the description before marking it ready. The debug app runs beside
-   production with its own profile and needs no approval to launch or
-   relaunch. A debug build packaged before the profile split still shares
-   production's state, so validate from a current build.
+   A change under `Sources/` or `Packages/` needs a debug-app run before MP
+   reviews it, and its description says that validation is pending until you
+   record the run. Build and launch the debug app from the branch, exercise
+   the changed behavior through `rpce-cli-debug` or the app itself, and record
+   the commands, what you observed, and the result in the description. The
+   debug app runs beside production with its own profile and needs no
+   approval to launch or relaunch. A debug build packaged before the profile
+   split still shares production's state, so validate from a current build.
 
    ```bash
-   gh pr create --base <main-or-lower-branch> --draft --label <type> --label area:<area>
    make dev-smoke-launch          # builds, launches the debug app, runs the smoke flow
    rpce-cli-debug -w 1 -e '<the check for this change>'
    ```
@@ -71,22 +69,18 @@ Work is tracked as issues and pull requests there.
 6. Before asking for MP's review, run an independent review and a separate
    refactor pass on the change, such as an orchestrated workflow's review and
    refactor gates, and fix what they find. The Codex review bot may also
-   review the pull request when it is ready for review. Its review is optional
-   input, never a merge gate: when it does not review, nothing waits for it or
-   asks it to review again. When it posts findings, assess each one. While
-   addressing them, convert the pull request to a draft so the open, non-draft
-   list stays a list of reviewable work; fix the findings that are real
+   review the pull request. Its review is optional input, never a merge gate:
+   when it does not review, nothing waits for it or asks it to review again.
+   When it posts findings, assess each one: fix the findings that are real
    defects, reply with the reason for any you decline, resolve each thread,
-   commit the fix through the commit preflight, push it through the push
-   preflight, and mark the pull request ready again.
+   commit the fix through the commit preflight, and push it through the push
+   preflight.
 
    ```bash
-   gh pr ready <number> --undo   # draft while fixing
    .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
    git commit
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
    git push
-   gh pr ready <number>          # ready again after the fix is pushed
    ```
 
 7. MP reads the pull request and approves it. Fetch `origin` first so `main`
