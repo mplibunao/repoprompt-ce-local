@@ -5,14 +5,14 @@ import XCTest
 final class LocalSigningIdentityRegistryTests: XCTestCase {
     private let team = "ABCDE12345"
     private let service = "com.pvncher.repoprompt.ce.local-apple-development.ABCDE12345.keychain.v7"
+    private var validRecord: LocalSigningIdentityRecord {
+        LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: team, keychainService: service)
+    }
 
     func testLoadsOwnerOnlyVersionedRecord() throws {
-        let url = try writeRegistry(LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: team, keychainService: service))
+        let url = try writeRegistry(validRecord)
 
-        XCTAssertEqual(
-            LocalSigningIdentityRegistry.load(from: url),
-            .success(LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: team, keychainService: service))
-        )
+        XCTAssertEqual(LocalSigningIdentityRegistry.load(from: url), .success(validRecord))
     }
 
     func testRejectsMissingWrongOwnerInsecureAndMalformedRegistry() throws {
@@ -20,10 +20,7 @@ final class LocalSigningIdentityRegistryTests: XCTestCase {
         let missing = directory.appendingPathComponent("missing.json")
         XCTAssertEqual(LocalSigningIdentityRegistry.load(from: missing), .failure(.missing))
 
-        let valid = try writeRegistry(
-            LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: team, keychainService: service),
-            in: directory
-        )
+        let valid = try writeRegistry(validRecord, in: directory)
         XCTAssertEqual(
             LocalSigningIdentityRegistry.load(from: valid, expectedOwnerID: getuid() + 1),
             .failure(.wrongOwner)
@@ -57,13 +54,11 @@ final class LocalSigningIdentityRegistryTests: XCTestCase {
     }
 
     func testSigningContextRequiresMatchingSignedMetadataAndRegistry() {
-        let record = LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: team, keychainService: service)
-
         XCTAssertEqual(
             RuntimeCodeSigningPolicy.localSigningContext(
                 bundleTeamIdentifier: team.lowercased(),
                 bundleKeychainService: service,
-                registryResult: .success(record)
+                registryResult: .success(validRecord)
             ),
             .valid(
                 RuntimeLocalSigningExpectation(
@@ -78,7 +73,7 @@ final class LocalSigningIdentityRegistryTests: XCTestCase {
             RuntimeCodeSigningPolicy.localSigningContext(
                 bundleTeamIdentifier: nil,
                 bundleKeychainService: service,
-                registryResult: .success(record)
+                registryResult: .success(validRecord)
             ),
             .invalid(.localIdentityMetadataUnavailable)
         )
@@ -86,7 +81,7 @@ final class LocalSigningIdentityRegistryTests: XCTestCase {
             RuntimeCodeSigningPolicy.localSigningContext(
                 bundleTeamIdentifier: team,
                 bundleKeychainService: "com.pvncher.repoprompt.ce.local-apple-development.ABCDE12345.keychain.v8",
-                registryResult: .success(record)
+                registryResult: .success(validRecord)
             ),
             .invalid(.localIdentityContinuityMismatch)
         )

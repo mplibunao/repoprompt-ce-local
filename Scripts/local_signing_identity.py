@@ -74,7 +74,8 @@ class SelfSignedRegistryRecord:
     certificateSHA256: str
     serviceGeneration: int
 
-    def keychain_service(self) -> str:
+    @property
+    def keychainService(self) -> str:
         return (
             "com.pvncher.repoprompt.ce.local-self-signed."
             f"{self.certificateSHA256.lower()}.keychain.v{self.serviceGeneration}"
@@ -240,7 +241,7 @@ def make_inventory(records: list[CertificateRecord], evaluated_at: datetime) -> 
     }
 
 
-def check_registry_file(path: Path) -> dict[str, Any] | None:
+def load_registry_payload(path: Path) -> dict[str, Any] | None:
     try:
         details = path.lstat()
     except FileNotFoundError:
@@ -261,7 +262,7 @@ def check_registry_file(path: Path) -> dict[str, Any] | None:
 
 
 def read_registry(path: Path) -> RegistryRecord | SelfSignedRegistryRecord | None:
-    payload = check_registry_file(path)
+    payload = load_registry_payload(path)
     if payload is None:
         return None
     try:
@@ -410,13 +411,11 @@ def resolve_plan(
     if isinstance(registry, SelfSignedRegistryRecord) and not rotate:
         # Builds signed by the team keep reading the secrets that self-signed builds stored.
         # macOS asks once per stored item before the first team-signed build may read it.
-        plan.update(action="adopt-from-self-signed", keychainService=registry.keychain_service())
+        plan.update(action="adopt-from-self-signed", keychainService=registry.keychainService)
         return plan
     plan.update(action="rotate" if rotate else "adopt", keychainService=new_keychain_service(team))
     if registry is not None:
-        plan["previousKeychainService"] = (
-            registry.keychainService if isinstance(registry, RegistryRecord) else registry.keychain_service()
-        )
+        plan["previousKeychainService"] = registry.keychainService
     return plan
 
 
@@ -479,7 +478,7 @@ def main() -> int:
             record = RegistryRecord(
                 schemaVersion=SCHEMA_VERSION,
                 teamIdentifier=normalize_team(arguments.team),
-                keychainService=validate_keychain_service(arguments.keychain_service),
+                keychainService=arguments.keychain_service,
             )
             write_registry(Path(arguments.path), record)
             emit(asdict(record))
