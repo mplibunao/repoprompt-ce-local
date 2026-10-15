@@ -270,9 +270,11 @@ sessions started with `rpce-cli-debug … agent_run`, each making at least one m
 a RepoPrompt tool call, whether the agent running the checklist is in RepoPrompt Agent Mode,
 Claude Code, or Codex.
 
-Production can run its Codex arm the same way. Start a session with `"$CLI" -w "$W1" -c
-agent_run` and a `codexExec` model, and tell it to make the `$W1` selection, roots, Context
-Builder, and Oracle rows through its own RepoPrompt tools. The operator then runs only the
+Production can run its Codex arm the same way. Start a session with
+`"$CLI" -w "$W1" -t "$T1" -c agent_run` and a `codexExec` model, and tell it to make the `$W1`
+selection, roots, Context Builder, and Oracle rows through its own RepoPrompt tools. Without
+`-t`, the session starts from the window's active tab instead of the background tab `$T1`
+described below. The operator then runs only the
 remaining rows with `$CLI`: the agent starts, the steer, the worktree run, and
 `list_sessions`. The session's transcript from
 `"$CLI" -w "$W1" -c agent_manage -j '{"op":"get_log","session_id":"<id>"}'` lists each of its
