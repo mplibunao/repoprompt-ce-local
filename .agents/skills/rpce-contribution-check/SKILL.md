@@ -66,7 +66,7 @@ Before a branch's first push there is nothing to unset. A green `push` lane is n
 
 ## Escalate before destructive operations
 
-Obtain explicit user approval immediately before force-push, history rewrite, branch deletion, fork deletion, credential rotation, any other GitHub-visible destructive mutation, production app launch/relaunch, or stopping the production app. Launching, stopping, or relaunching the debug app needs no approval. Do not bundle approval for a future destructive step into an earlier request.
+Follow the approval rules and exceptions in [`AGENTS.md`](../../../AGENTS.md#commit-preflight). Obtain explicit user approval immediately before each reserved action. Do not bundle approval for a future destructive step into an earlier request.
 
 ## Focused validation
 
