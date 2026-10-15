@@ -366,9 +366,9 @@ class LifecycleSurfaceTests(unittest.TestCase):
         self.assertIn("No uncoordinated fallback is provided", finder_launcher)
         self.assertNotIn("LAUNCH_MODE", finder_launcher)
         self.assertNotIn("direct mode", finder_launcher.lower())
-        agents = (SCRIPT_DIR.parent / "AGENTS.md").read_text(encoding="utf-8")
+        daemon_doc = (SCRIPT_DIR.parent / "docs" / "architecture" / "developer-daemon.md").read_text(encoding="utf-8")
         readme = (SCRIPT_DIR.parent / "README.md").read_text(encoding="utf-8")
-        self.assertIn("does not provide an uncoordinated no-Python fallback", agents)
+        self.assertIn("does not provide an uncoordinated no-Python fallback", daemon_doc)
         self.assertIn("does not provide an", readme)
         self.assertIn("uncoordinated no-Python fallback", readme)
 

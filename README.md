@@ -155,10 +155,14 @@ third-party notices in
 
 ## Contributor Documentation
 
-- [`AGENTS.md`](AGENTS.md): coordinated builds, tests, launches, live MCP
-  checks, source placement, and contribution preflight
+- [`AGENTS.md`](AGENTS.md): agent rules, the contribution preflight, and
+  pointers to the document that owns each topic
 - [`CONTRIBUTING.md`](CONTRIBUTING.md): contribution policy and pull request
   steps
+- [`docs/architecture/developer-daemon.md`](docs/architecture/developer-daemon.md):
+  coordinated builds, tests, launches, and style checks through `conductor`
+- [`docs/testing.md`](docs/testing.md): tests, the debug CLI, live MCP smoke
+  checks, and debug-app validation
 - [`docs/architecture/context-composer.md`](docs/architecture/context-composer.md): Context Composer architecture, invariants, and state ownership
 - [`docs/architecture/source-layout.md`](docs/architecture/source-layout.md):
   source ownership and placement rules

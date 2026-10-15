@@ -1,6 +1,6 @@
 # Testing RepoPrompt CE
 
-Use this guide for contributor-facing XCTest changes. Follow `AGENTS.md` for coordinated daemon use, style checks, and lifecycle approvals. Use `$rpce-test-quality` when deciding whether coverage is worth adding, retaining, consolidating, or removing.
+Use this guide for contributor-facing XCTest changes and live debug-app validation. Follow [`architecture/developer-daemon.md`](architecture/developer-daemon.md) for coordinated daemon use and style checks, and `AGENTS.md` for lifecycle approvals. Use `$rpce-test-quality` when deciding whether coverage is worth adding, retaining, consolidating, or removing.
 
 ## Quality gate before adding a test
 
@@ -42,7 +42,7 @@ make dev-provider-test FILTER=RepoPromptClaudeCompatibleProviderTests.ExampleTes
 make dev-provider-test FILTER=RepoPromptClaudeCompatibleProviderTests.ExampleTests/testBehavior
 ```
 
-Use the narrowest relevant filter while iterating. Broaden to the affected target or full suite when the change crosses shared infrastructure, package boundaries, generated surfaces, test harness behavior, or many unrelated suites:
+Use the narrowest relevant filter while iterating. Adding, renaming, consolidating, or removing a test needs the affected focused run. Broaden to the affected target or full suite when the change crosses shared infrastructure, package boundaries, generated surfaces, test harness behavior, or many unrelated suites:
 
 ```bash
 make dev-test
@@ -72,6 +72,8 @@ Use focused before/after measurements to attribute a change, then exercise the f
 
 ## Live debug app identity and lifecycle
 
+A debug package keeps the `RepoPrompt.app` directory and the `<bundle ID>.debug` identifier, but its GUI executable is `Contents/MacOS/RepoPromptDebug`, and it shows as `RepoPrompt CE Debug` with the debug icon and a blue DEBUG badge, top rule, and composer ring in its windows. Release packages keep `Contents/MacOS/RepoPrompt`. Conductor stop, status, and launch, and the archive and restore guards, also recognize a debug bundle packaged before that name, whose executable is still `RepoPrompt`, at the configured debug path.
+
 A change to debug packaging, conductor's debug lifecycle, or the archive and restore guards is validated against the packaged debug app while production keeps running, after `make conductor-selftest` and `make release-selftest` pass. Production's process is never stopped, launched, or relaunched by these steps.
 
 1. Record production's PID, executable path, and start time. The production guard prints the PID and path and exits 3 while production runs; `ps -o lstart= -p <pid>` gives the start time:
@@ -97,9 +99,74 @@ A change to debug packaging, conductor's debug lifecycle, or the archive and res
 
 These steps run the debug app against its own profile, which [Debug profile isolation](#debug-profile-isolation) describes.
 
+## Debug app signing and secure storage
+
+Debug packaging may auto-detect an Apple Development signing identity for a valid local app signature, but auto-detected debug signing still uses ephemeral in-memory secure storage to avoid macOS Keychain prompts. Set an explicit `SIGN_IDENTITY="Apple Development: ..."` to opt in to persistent debug Keychain storage; `DEBUG_SECURE_STORAGE_BACKEND=keychain` is also supported for explicit debug storage opt-in when the signed app has a TeamIdentifier. If no stable identity is available, set `ALLOW_ADHOC_SIGNING=1` to build an ad-hoc debug app; ad-hoc debug builds use ephemeral in-memory secure storage, so API keys and secure permission changes do not persist across launches. Release packaging requires `SIGN_IDENTITY` and continues to use real Keychain storage.
+
+## Debug CLI and live MCP smoke
+
+Test this app with the CE debug CLI, `rpce-cli-debug`. The production `rp-cli` and `rp-cli-debug` connection is only an analogue and may talk to the non-CE app.
+
+Install or inspect the debug CLI:
+
+```bash
+make debug-cli-status
+make install-debug-cli     # packages the debug app, then installs /usr/local/bin/rpce-cli-debug
+./Scripts/doctor.sh --install-debug-cli
+```
+
+`./conductor install-debug-cli` and `./conductor debug-cli-status` run the same installer through the [developer daemon](architecture/developer-daemon.md). The installer links:
+
+```text
+/usr/local/bin/rpce-cli-debug
+  -> ~/RepoPrompt/repoprompt_ce_cli_debug
+  -> ~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app/Contents/MacOS/repoprompt-mcp
+```
+
+If `/usr/local/bin` needs administrator privileges, run the install target from an interactive terminal so `sudo` can prompt, or install the CLI from Settings → MCP → CLI Tools. Without the PATH link, use the direct fallback:
+
+```bash
+"$HOME/RepoPrompt/repoprompt_ce_cli_debug" -e 'windows'
+```
+
+The debug CLI talks to the debug app and shares its profile, which [Debug profile isolation](#debug-profile-isolation) describes.
+
+After a change to packaging, the MCP server, the MCP CLI, Agent Mode, or any feature that depends on the running app, run the smallest relevant build or test and then the live smoke. `make dev-smoke` runs it against an already-running debug app, and `make dev-smoke-launch` builds and launches the debug app first. Both create the `repoprompt-ce` workspace once in a fresh debug profile and never recreate it. When creating it needs approval, the smoke stops within seconds and names the setting to change: Settings → Permissions → Workspace Approvals → Create workspace.
+
+The manual live flow:
+
+```bash
+make dev-run
+rpce-cli-debug -e 'windows'
+rpce-cli-debug -w 1 -e "workspace create repoprompt-ce --folder-path $PWD"   # only when 'workspace list' lacks it
+rpce-cli-debug -w 1 -e 'workspace switch repoprompt-ce'
+rpce-cli-debug -w 1 -e 'tree --type roots'
+rpce-cli-debug -w 1 -c agent_manage -j '{"op":"list_agents","roles_only":true}'
+```
+
+Then use `agent_run` for end-to-end Agent Mode behavior:
+
+```bash
+rpce-cli-debug -w 1 -c agent_run -j '{"op":"start","model_id":"explore","session_name":"CE debug CLI smoke","message":"Reply exactly with CE_AGENT_RUN_SMOKE_OK and stop. Do not edit files.","detach":true}'
+rpce-cli-debug -w 1 -c agent_run -j '{"op":"wait","session_id":"<session_id>","timeout":120}'
+```
+
+### DEBUG-only diagnostics
+
+Before live Agent Mode or Claude investigations, enable debug-only diagnostics through the CE debug app's MCP `app_settings` surface:
+
+```bash
+rpce-cli-debug -w 1 -c app_settings -j '{"op":"list","group":"agent_mode","detailed":true}'
+rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.claude_raw_event_logging_enabled","value":true}'
+rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.claude_raw_event_log_file_path","value":"/tmp/repoprompt-ce-claude-raw-events"}'
+rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.perf_diagnostics_enabled","value":true}'
+```
+
+These settings are intentionally DEBUG-only. If a key is unavailable, confirm `rpce-cli-debug --version` is resolving to the current CE debug build before falling back to lower-level defaults.
+
 ## Debug profile isolation
 
-The debug app, the debug CLI, and debug headless sessions keep runtime state in `~/Library/Application Support/RepoPrompt CE Debug` and `$TMPDIR/RepoPrompt CE Debug`. Developer infrastructure stays in the production profile's directory: the debug bundle under `DebugApps`, conductor state under `Conductor`, and the CLI links in `AGENTS.md`. Archive and restore keep excluding those entries and never touch the debug profile. A debug build packaged before the split still reads and writes production's profile.
+The debug app, the debug CLI, and debug headless sessions keep runtime state in `~/Library/Application Support/RepoPrompt CE Debug` and `$TMPDIR/RepoPrompt CE Debug`. Workspaces, chat and agent history, settings, presets, window sessions, saved prompts, and the managed Codex home live there, and production's `~/Library/Application Support/RepoPrompt CE` is neither read nor written. Developer infrastructure stays in the production profile's directory: the debug bundle under `DebugApps`, conductor state under `Conductor`, and the CLI links in [Debug CLI and live MCP smoke](#debug-cli-and-live-mcp-smoke). Archive and restore keep excluding those entries and never touch the debug profile. A debug build packaged before the split still reads and writes production's profile.
 
 Preferences stay in the debug app's own defaults domain. A debug build ignores a saved custom workspace storage location and the automatic `~/Downloads/RepoPrompt-Backup` restore without changing either preference, and it refuses to relocate workspace storage. Workspace metadata that points outside the debug profile's `Workspaces` directory, whether in the workspace index, the runtime catalog, or a working journal, stays on disk unchanged. The runtime reports that workspace unavailable with the reason `workspace_storage_boundary_violation`, and mutations against it fail with the same reason.
 
