@@ -131,8 +131,8 @@ import XCTest
             XCTAssertNotNil(manager.workspace(withID: singleWorkspace.id))
             XCTAssertFalse(FileManager.default.fileExists(atPath: bulkDirectory.path))
 
-            let singleDeleted = await manager.deleteWorkspaceAsync(singleWorkspace)
-            XCTAssertTrue(singleDeleted)
+            let singleOutcome = await manager.deleteWorkspaceAsync(singleWorkspace)
+            XCTAssertEqual(singleOutcome, .deleted)
             XCTAssertNil(manager.workspace(withID: singleWorkspace.id))
             XCTAssertFalse(FileManager.default.fileExists(atPath: singleDirectory.path))
 
@@ -236,8 +236,8 @@ import XCTest
             )
             await manager.awaitInitialized()
 
-            let didDelete = await manager.deleteWorkspaceAsync(pinnedWorkspace)
-            XCTAssertFalse(didDelete)
+            let outcome = await manager.deleteWorkspaceAsync(pinnedWorkspace)
+            XCTAssertEqual(outcome, .refused(reason: "Workspace has a tab with an agent session, or a pinned tab."))
             let authoritativeAfter = await runtime.workspaceStore.snapshot()
             XCTAssertTrue(authoritativeAfter.workspaces.contains {
                 $0.document.workspaceID == pinnedWorkspace.id

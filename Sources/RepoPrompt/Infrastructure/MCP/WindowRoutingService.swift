@@ -2896,9 +2896,11 @@ final class WindowRoutingService: Service {
                         }
                     }
 
-                    // Delete the workspace
-                    await MainActor.run {
-                        targetWindow.workspaceManager.deleteWorkspace(workspace)
+                    if case let .refused(reason) = await targetWindow.workspaceManager.deleteWorkspaceAsync(workspace) {
+                        let windowNote = closeWindow
+                            ? " Window \(targetWindow.windowID) stays open on the workspace it switched to."
+                            : ""
+                        throw MCPError.invalidRequest("Workspace '\(workspace.name)' was not deleted: \(reason)\(windowNote)")
                     }
 
                     if closeWindow {

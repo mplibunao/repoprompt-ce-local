@@ -143,6 +143,11 @@ struct WorkspaceBulkDeleteResult: Equatable {
     }
 }
 
+enum WorkspaceDeleteOutcome: Equatable {
+    case deleted
+    case refused(reason: String)
+}
+
 enum WorkspaceSelectionMutationResult: Equatable {
     case changed
     case unchanged

@@ -23,6 +23,7 @@ struct ManageWorkspacesView: View {
     @State private var showBulkDeleteConfirmation = false
     @State private var isRunningBulkDelete = false
     @State private var bulkDeleteResultMessage: String?
+    @State private var deleteRefusalMessage: String?
     @ObservedObject private var fontScale = FontScaleManager.shared
     private var fontPreset: FontScalePreset {
         fontScale.preset
@@ -149,14 +150,7 @@ struct ManageWorkspacesView: View {
         }
         .alert(
             "Workspace Cleanup",
-            isPresented: Binding(
-                get: { duplicateCleanupResultMessage != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        duplicateCleanupResultMessage = nil
-                    }
-                }
-            )
+            isPresented: messagePresentationBinding(for: $duplicateCleanupResultMessage)
         ) {
             Button("OK") {
                 duplicateCleanupResultMessage = nil
@@ -166,18 +160,19 @@ struct ManageWorkspacesView: View {
         }
         .alert(
             "Bulk Delete Workspaces",
-            isPresented: Binding(
-                get: { bulkDeleteResultMessage != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        bulkDeleteResultMessage = nil
-                    }
-                }
-            )
+            isPresented: messagePresentationBinding(for: $bulkDeleteResultMessage)
         ) {
             Button("OK") { bulkDeleteResultMessage = nil }
         } message: {
             Text(bulkDeleteResultMessage ?? "")
+        }
+        .alert(
+            "Delete Workspace",
+            isPresented: messagePresentationBinding(for: $deleteRefusalMessage)
+        ) {
+            Button("OK") { deleteRefusalMessage = nil }
+        } message: {
+            Text(deleteRefusalMessage ?? "")
         }
     }
 
@@ -594,7 +589,7 @@ struct ManageWorkspacesView: View {
                                 toggleHiddenState(for: ws)
                             },
                             onDelete: {
-                                workspaceManager.deleteWorkspace(ws)
+                                deleteWorkspace(ws)
                             }
                         )
                     }
@@ -630,7 +625,7 @@ struct ManageWorkspacesView: View {
                                 toggleHiddenState(for: workspace)
                             },
                             onDelete: {
-                                workspaceManager.deleteWorkspace(workspace)
+                                deleteWorkspace(workspace)
                             }
                         )
                     }
@@ -703,7 +698,7 @@ struct ManageWorkspacesView: View {
         }
         let protectedTabs = workspace.composeTabs + workspace.stashedTabs.map(\.tab)
         if protectedTabs.contains(where: { $0.activeAgentSessionID != nil || $0.isPinned }) {
-            return "Contains an active or pinned agent session."
+            return "Has a tab with an agent session, or a pinned tab."
         }
         return nil
     }
@@ -953,6 +948,25 @@ struct ManageWorkspacesView: View {
             ws,
             hidden: isRecoveryCopy ? false : !ws.isHiddenInMenus
         )
+    }
+
+    private func messagePresentationBinding(for message: Binding<String?>) -> Binding<Bool> {
+        Binding(
+            get: { message.wrappedValue != nil },
+            set: { isPresented in
+                if !isPresented {
+                    message.wrappedValue = nil
+                }
+            }
+        )
+    }
+
+    private func deleteWorkspace(_ workspace: WorkspaceModel) {
+        Task {
+            if case let .refused(reason) = await workspaceManager.deleteWorkspaceAsync(workspace) {
+                deleteRefusalMessage = "\"\(workspace.name)\" was not deleted. \(reason)"
+            }
+        }
     }
 
     // MARK: - Create New Workspace
