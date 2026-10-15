@@ -8,9 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_SOURCE_ROOT="${REPOPROMPT_RELEASE_SOURCE_ROOT:-$ROOT_DIR}"
 cd "$ROOT_DIR"
 
-LOCAL_SELF_SIGNED_CERTIFICATE_NAME="RepoPrompt CE Local Self-Signed Code Signing"
-LOCAL_CERTIFICATE_DAYS="${LOCAL_CERTIFICATE_DAYS:-3650}"
-LOCAL_SIGNING_IDENTITY_SHA256="${LOCAL_SIGNING_IDENTITY_SHA256:-}"
+LOCAL_SIGNING_TEAM_ID="${LOCAL_SIGNING_TEAM_ID:-}"
 ROTATE_LOCAL_SIGNING_IDENTITY="${ROTATE_LOCAL_SIGNING_IDENTITY:-0}"
 LOCAL_SIGNING_IDENTITY_TOOL="$ROOT_DIR/Scripts/local_signing_identity.py"
 FULL_XCODE_RESOLVER="$ROOT_DIR/Scripts/resolve_full_xcode_developer_dir.sh"
@@ -85,7 +83,6 @@ inventory_local_identities() {
     local output="$1"
     local -a args=(
         "$LOCAL_SIGNING_IDENTITY_TOOL" inventory
-        --certificate-name "$LOCAL_SELF_SIGNED_CERTIFICATE_NAME"
         --keychain "$LOGIN_KEYCHAIN"
     )
     if [[ -n "${LOCAL_SIGNING_IDENTITY_INVENTORY_FIXTURE:-}" ]]; then
@@ -95,49 +92,6 @@ inventory_local_identities() {
         args+=(--at "$LOCAL_SIGNING_IDENTITY_EVALUATED_AT")
     fi
     python3 "${args[@]}" > "$output"
-}
-
-mint_local_identity() {
-    local password
-    password="$(openssl rand -hex 24)"
-    printf 'Creating one user-local RepoPrompt CE self-signed code-signing identity. macOS may ask for confirmation when its trust policy is installed.\n'
-    cat > "$TMP_DIR/openssl.cnf" <<EOF
-[req]
-distinguished_name = distinguished_name
-x509_extensions = codesign_extensions
-prompt = no
-
-[distinguished_name]
-CN = $LOCAL_SELF_SIGNED_CERTIFICATE_NAME
-O = RepoPrompt CE Local
-OU = Local Build
-
-[codesign_extensions]
-basicConstraints = critical,CA:TRUE
-keyUsage = critical,digitalSignature
-extendedKeyUsage = codeSigning
-subjectKeyIdentifier = hash
-EOF
-    openssl req -new -newkey rsa:2048 -x509 -sha256 -days "$LOCAL_CERTIFICATE_DAYS" -nodes \
-        -config "$TMP_DIR/openssl.cnf" \
-        -out "$CERTIFICATE_PEM" \
-        -keyout "$TMP_DIR/repoprompt-ce-local-signing-key.pem"
-    local -a pkcs12_args=(-export)
-    if { openssl pkcs12 -help 2>&1 || true; } | grep -q -- '-legacy'; then
-        pkcs12_args+=(-legacy)
-    fi
-    openssl pkcs12 "${pkcs12_args[@]}" \
-        -out "$TMP_DIR/repoprompt-ce-local-signing.p12" \
-        -inkey "$TMP_DIR/repoprompt-ce-local-signing-key.pem" \
-        -in "$CERTIFICATE_PEM" \
-        -name "$LOCAL_SELF_SIGNED_CERTIFICATE_NAME" \
-        -passout "pass:$password"
-    security import "$TMP_DIR/repoprompt-ce-local-signing.p12" \
-        -k "$LOGIN_KEYCHAIN" \
-        -P "$password" \
-        -T /usr/bin/codesign \
-        -T /usr/bin/security
-    security add-trusted-cert -r trustRoot -p codeSign -k "$LOGIN_KEYCHAIN" "$CERTIFICATE_PEM"
 }
 
 rollback_transaction() {
@@ -198,7 +152,7 @@ rollback_transaction() {
 [[ "${CONFIRM_LOCAL_PRODUCTION_INSTALL:-}" == "1" ]] ||
     fail "Set CONFIRM_LOCAL_PRODUCTION_INSTALL=1 to build and replace the local production app in $LOCAL_PRODUCTION_INSTALL_DIR."
 
-for command in codesign ditto openssl plutil python3 security shasum swift; do
+for command in codesign ditto openssl plutil python3 security swift; do
     require_command "$command"
 done
 [[ -f "$LOCAL_SIGNING_IDENTITY_TOOL" ]] || fail "Missing local signing identity tool: $LOCAL_SIGNING_IDENTITY_TOOL"
@@ -226,81 +180,66 @@ chmod 700 "$REGISTRY_LOCK_DIR"
 printf '%s\n' "$$" > "$REGISTRY_LOCK_DIR/pid"
 chmod 600 "$REGISTRY_LOCK_DIR/pid"
 REGISTRY_BACKUP_PATH="$TMP_DIR/local-signing-identity-registry.backup"
-CERTIFICATE_PEM="$TMP_DIR/repoprompt-ce-local-signing.pem"
-INVENTORY_BEFORE="$TMP_DIR/identity-inventory-before.json"
-INVENTORY_AFTER="$TMP_DIR/identity-inventory-after.json"
+INVENTORY_PATH="$TMP_DIR/identity-inventory.json"
 PLAN_PATH="$TMP_DIR/identity-plan.json"
-SELECTED_CANDIDATE_PATH="$TMP_DIR/selected-candidate.json"
 
-inventory_local_identities "$INVENTORY_BEFORE"
+inventory_local_identities "$INVENTORY_PATH"
 PLAN_ARGS=(
     "$LOCAL_SIGNING_IDENTITY_TOOL" plan
-    --inventory "$INVENTORY_BEFORE"
+    --inventory "$INVENTORY_PATH"
     --registry "$LOCAL_SIGNING_IDENTITY_REGISTRY_PATH"
 )
-[[ -z "$LOCAL_SIGNING_IDENTITY_SHA256" ]] || PLAN_ARGS+=(--select "$LOCAL_SIGNING_IDENTITY_SHA256")
+[[ -z "$LOCAL_SIGNING_TEAM_ID" ]] || PLAN_ARGS+=(--team "$LOCAL_SIGNING_TEAM_ID")
 if [[ "$ROTATE_LOCAL_SIGNING_IDENTITY" == "1" || "$ROTATE_LOCAL_SIGNING_IDENTITY" == "true" ]]; then
     PLAN_ARGS+=(--rotate)
 fi
 python3 "${PLAN_ARGS[@]}" > "$PLAN_PATH"
 
 IDENTITY_ACTION="$(json_field "$PLAN_PATH" action)"
-LOCAL_SIGNING_SERVICE_GENERATION="$(json_field "$PLAN_PATH" serviceGeneration)"
+SIGN_IDENTITY="$(json_field "$PLAN_PATH" candidate.sha1)"
+SIGNING_CERTIFICATE_NAME="$(json_field "$PLAN_PATH" candidate.commonName)"
+RESOLVED_SIGNING_TEAM_ID="$(json_field "$PLAN_PATH" teamIdentifier)"
+LOCAL_KEYCHAIN_SERVICE="$(json_field "$PLAN_PATH" keychainService)"
 REGISTRY_NEEDS_WRITE="$(json_field "$PLAN_PATH" registryNeedsWrite)"
 
-if [[ "$IDENTITY_ACTION" == "mint" ]]; then
-    if [[ "$ROTATE_LOCAL_SIGNING_IDENTITY" == "1" || "$ROTATE_LOCAL_SIGNING_IDENTITY" == "true" ]]; then
-        printf 'WARNING: Rotating the local signing identity makes secrets in the prior local secure-storage generation inaccessible to the new app.\n' >&2
-        printf 'WARNING: The prior certificate and Keychain service are preserved for rollback; values are not copied automatically.\n' >&2
-    fi
-    mint_local_identity
-    inventory_local_identities "$INVENTORY_AFTER"
-    python3 "$LOCAL_SIGNING_IDENTITY_TOOL" select-new \
-        --before "$INVENTORY_BEFORE" \
-        --after "$INVENTORY_AFTER" > "$SELECTED_CANDIDATE_PATH"
-else
-    python3 - "$PLAN_PATH" "$SELECTED_CANDIDATE_PATH" <<'PY'
-import json
-import sys
+case "$IDENTITY_ACTION" in
+    rotate)
+        printf 'WARNING: Rotating the local signing identity makes secrets in the prior local Keychain service inaccessible to the new app.\n' >&2
+        printf 'WARNING: The prior Keychain service is preserved for rollback; values are not copied automatically.\n' >&2
+        ;;
+    adopt-from-self-signed)
+        printf 'Local production builds are now signed by Apple Development team %s.\n' "$RESOLVED_SIGNING_TEAM_ID"
+        printf 'Stored secrets stay in the Keychain service that self-signed builds used.\n'
+        printf 'On the first launch, macOS asks once for each stored secret. Choose Always Allow so later builds read them without asking.\n'
+        ;;
+esac
 
-plan = json.loads(open(sys.argv[1], encoding="utf-8").read())
-with open(sys.argv[2], "w", encoding="utf-8") as handle:
-    json.dump(plan["candidate"], handle)
-PY
-    if [[ "$IDENTITY_ACTION" == "rotate" ]]; then
-        printf 'WARNING: Rotating the local signing identity makes secrets in the prior local secure-storage generation inaccessible to the new app.\n' >&2
-        printf 'WARNING: The prior certificate and Keychain service are preserved for rollback; values are not copied automatically.\n' >&2
-    fi
-fi
-
-SIGN_IDENTITY="$(json_field "$SELECTED_CANDIDATE_PATH" sha1)"
-SELECTED_CERTIFICATE_SHA256="$(json_field "$SELECTED_CANDIDATE_PATH" sha256)"
-LOCAL_SIGNING_REQUIREMENT="identifier \"$BUNDLE_ID\" and certificate leaf = H\"$SIGN_IDENTITY\""
+LOCAL_SIGNING_REQUIREMENT="anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$RESOLVED_SIGNING_TEAM_ID\" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists"
 printf 'Local signing identity action: %s\n' "$IDENTITY_ACTION"
-printf 'Selected local certificate SHA-256: %s\n' "$SELECTED_CERTIFICATE_SHA256"
-printf 'Selected local secure-storage generation: v%s\n' "$LOCAL_SIGNING_SERVICE_GENERATION"
+printf 'Selected signing certificate: %s\n' "$SIGNING_CERTIFICATE_NAME"
+printf 'Selected local signing team: %s\n' "$RESOLVED_SIGNING_TEAM_ID"
+printf 'Selected local Keychain service: %s\n' "$LOCAL_KEYCHAIN_SERVICE"
 
-LOCAL_SELF_SIGNED_RELEASE=1 \
-    LOCAL_SIGNING_CERTIFICATE_SHA1="$SIGN_IDENTITY" \
-    LOCAL_SIGNING_CERTIFICATE_SHA256="$SELECTED_CERTIFICATE_SHA256" \
-    LOCAL_SIGNING_SERVICE_GENERATION="$LOCAL_SIGNING_SERVICE_GENERATION" \
+LOCAL_PRODUCTION_RELEASE=1 \
+    LOCAL_SIGNING_TEAM_ID="$RESOLVED_SIGNING_TEAM_ID" \
+    LOCAL_KEYCHAIN_SERVICE="$LOCAL_KEYCHAIN_SERVICE" \
     SIGN_IDENTITY="$SIGN_IDENTITY" \
     "$ROOT_DIR/Scripts/package_app.sh" release
 
 SOURCE_APP="$RELEASE_SOURCE_ROOT/.build/release/$APP_NAME.app"
 [[ -d "$SOURCE_APP" ]] || fail "Missing packaged local production app: $SOURCE_APP"
-[[ "$(plutil -extract RepoPromptSigningMode raw "$SOURCE_APP/Contents/Info.plist")" == "local-self-signed" ]] ||
-    fail "Packaged app is missing the local self-signed signing-mode marker."
-[[ "$(plutil -extract RepoPromptLocalSigningCertificateSHA256 raw "$SOURCE_APP/Contents/Info.plist")" == "$SELECTED_CERTIFICATE_SHA256" ]] ||
-    fail "Packaged app local signing fingerprint metadata does not match the selected identity."
-[[ "$(plutil -extract RepoPromptLocalSecureStorageGeneration raw "$SOURCE_APP/Contents/Info.plist")" == "$LOCAL_SIGNING_SERVICE_GENERATION" ]] ||
-    fail "Packaged app local secure-storage generation metadata does not match the registry plan."
+[[ "$(plutil -extract RepoPromptSigningMode raw "$SOURCE_APP/Contents/Info.plist")" == "local-apple-development" ]] ||
+    fail "Packaged app is missing the local Apple Development signing-mode marker."
+[[ "$(plutil -extract RepoPromptLocalSigningTeamIdentifier raw "$SOURCE_APP/Contents/Info.plist")" == "$RESOLVED_SIGNING_TEAM_ID" ]] ||
+    fail "Packaged app local signing team metadata does not match the selected team."
+[[ "$(plutil -extract RepoPromptLocalKeychainService raw "$SOURCE_APP/Contents/Info.plist")" == "$LOCAL_KEYCHAIN_SERVICE" ]] ||
+    fail "Packaged app local Keychain service metadata does not match the registry plan."
 codesign --verify --deep --strict --verbose=2 "$SOURCE_APP"
 codesign --verify --deep --strict --verbose=2 -R="$LOCAL_SIGNING_REQUIREMENT" "$SOURCE_APP"
 DESIGNATED_REQUIREMENT="$(codesign -d -r- "$SOURCE_APP" 2>&1 | sed -n 's/^designated => //p')"
 [[ -n "$DESIGNATED_REQUIREMENT" ]] || fail "Could not extract the packaged app designated requirement."
-grep -F -i -- "$SIGN_IDENTITY" <<< "$DESIGNATED_REQUIREMENT" >/dev/null ||
-    fail "Packaged app designated requirement is not pinned to the selected certificate."
+grep -F -- "$RESOLVED_SIGNING_TEAM_ID" <<< "$DESIGNATED_REQUIREMENT" >/dev/null ||
+    fail "Packaged app designated requirement is not anchored to the selected team."
 printf 'Packaged designated requirement: %s\n' "$DESIGNATED_REQUIREMENT"
 
 require_production_app_stopped "staging the replacement for $LOCAL_PRODUCTION_APP"
@@ -310,7 +249,7 @@ STAGED_APP="$STAGED_DIR/$DISPLAY_NAME.app"
 ditto "$SOURCE_APP" "$STAGED_APP"
 codesign --verify --deep --strict --verbose=2 "$STAGED_APP"
 codesign --verify --deep --strict --verbose=2 -R="$LOCAL_SIGNING_REQUIREMENT" "$STAGED_APP"
-printf 'Installing fingerprint %s with designated requirement: %s\n' "$SELECTED_CERTIFICATE_SHA256" "$DESIGNATED_REQUIREMENT"
+printf 'Installing team %s build with designated requirement: %s\n' "$RESOLVED_SIGNING_TEAM_ID" "$DESIGNATED_REQUIREMENT"
 if [[ "$REGISTRY_NEEDS_WRITE" == "1" ]]; then
     if [[ -e "$LOCAL_SIGNING_IDENTITY_REGISTRY_PATH" ]]; then
         cp -p "$LOCAL_SIGNING_IDENTITY_REGISTRY_PATH" "$REGISTRY_BACKUP_PATH"
@@ -335,9 +274,8 @@ if [[ "$REGISTRY_NEEDS_WRITE" == "1" ]]; then
     REGISTRY_MUTATION_STARTED=1
     if ! python3 "$LOCAL_SIGNING_IDENTITY_TOOL" write-registry \
         --path "$LOCAL_SIGNING_IDENTITY_REGISTRY_PATH" \
-        --certificate-name "$LOCAL_SELF_SIGNED_CERTIFICATE_NAME" \
-        --fingerprint "$SELECTED_CERTIFICATE_SHA256" \
-        --generation "$LOCAL_SIGNING_SERVICE_GENERATION" >/dev/null
+        --team "$RESOLVED_SIGNING_TEAM_ID" \
+        --keychain-service "$LOCAL_KEYCHAIN_SERVICE" >/dev/null
     then
         fail "Could not atomically update the local signing identity registry; transaction will restore the prior app and registry."
     fi
@@ -355,7 +293,7 @@ if [[ -n "$BACKUP_APP" ]]; then
 fi
 APP_INSTALLED=0
 
-printf 'Installed local self-signed production app: %s\n' "$LOCAL_PRODUCTION_APP"
-printf 'Registered local signing fingerprint: %s\n' "$SELECTED_CERTIFICATE_SHA256"
-printf 'Local secure-storage service generation: v%s\n' "$LOCAL_SIGNING_SERVICE_GENERATION"
+printf 'Installed local production app: %s\n' "$LOCAL_PRODUCTION_APP"
+printf 'Registered local signing team: %s\n' "$RESOLVED_SIGNING_TEAM_ID"
+printf 'Local Keychain service: %s\n' "$LOCAL_KEYCHAIN_SERVICE"
 printf 'This app is local-only, not notarized, and must not be distributed or uploaded to GitHub Releases.\n'

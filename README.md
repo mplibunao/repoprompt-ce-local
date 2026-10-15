@@ -66,8 +66,9 @@ SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./conductor app relaunch
 ```
 
 For a stable locally signed app under `/Applications`, use the local production
-installer below. Its self-signed identity is separate from the debug launcher's
-Apple Development signing path.
+installer below. It signs the production bundle identifier with your Apple
+Development certificate and keeps its secrets in its own Keychain service,
+separate from the debug app.
 
 > **Note:** If you use the debug app to modify RepoPrompt CE itself, validation
 > flows that launch the app or run live smoke checks may rebuild and relaunch it.
@@ -87,8 +88,9 @@ For a release-mode app under `/Applications`, install Python 3 and double-click
 in Finder. The Finder launcher uses the coordinated developer daemon.
 
 The installer builds RepoPrompt CE from source and replaces any existing
-`/Applications/RepoPrompt CE.app` using a dedicated self-signed certificate
-trusted only on your Mac. macOS may ask you to approve the certificate.
+`/Applications/RepoPrompt CE.app`, signing it with your Apple Development
+certificate. A free Personal Team certificate works; create one in Xcode under
+Settings > Accounts > Manage Certificates.
 It requires a full Xcode installation and selects a compatible installed Xcode
 for the installer process without changing your system-wide `xcode-select`
 setting.

@@ -291,19 +291,29 @@ final class KeychainServiceTests: XCTestCase {
     }
 
     func testPersistentServiceNamesAreIsolatedAndLegacyIsRepairOnly() throws {
-        let fingerprintA = String(repeating: "A", count: 64)
-        let fingerprintB = String(repeating: "B", count: 64)
-        let names = Set([
+        let sharedNames = [
             KeychainService.legacyCanonicalServiceName,
             KeychainService.officialV2ServiceName,
             KeychainService.identityMigrationBridgeServiceNamePrefix,
             KeychainService.identityMigrationLegacyStateServiceName,
-            KeychainService.localSelfSignedServiceName(fingerprint: fingerprintA, generation: 1),
-            KeychainService.localSelfSignedServiceName(fingerprint: fingerprintA, generation: 2),
-            KeychainService.localSelfSignedServiceName(fingerprint: fingerprintB, generation: 1),
             KeychainService.debugServiceName
-        ])
-        XCTAssertEqual(names.count, 8)
+        ]
+        let localNames = [
+            "com.pvncher.repoprompt.ce.local-apple-development.ABCDE12345.keychain.v1",
+            "com.pvncher.repoprompt.ce.local-apple-development.ABCDE12345.keychain.v2",
+            "com.pvncher.repoprompt.ce.local-self-signed.\(String(repeating: "a", count: 64)).keychain.v1"
+        ]
+        XCTAssertEqual(Set(sharedNames + localNames).count, 8)
+        // A local signing registry may only route a local production build into a local service.
+        XCTAssertTrue(localNames.allSatisfy(KeychainService.isLocalProductionServiceName))
+        for name in sharedNames + [
+            "com.pvncher.repoprompt.ce.local-apple-development.abcde12345.keychain.v1",
+            "com.pvncher.repoprompt.ce.local-apple-development.ABCDE12345.keychain.v0",
+            "com.pvncher.repoprompt.ce.local-self-signed.\(String(repeating: "A", count: 64)).keychain.v1",
+            "\(localNames[0]).extra"
+        ] {
+            XCTAssertFalse(KeychainService.isLocalProductionServiceName(name), name)
+        }
 
         let fake = FakeSecItemClient { _, _ in errSecItemNotFound }
         let legacy = KeychainService.legacyRepairSource(secItemClient: fake)

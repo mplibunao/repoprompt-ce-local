@@ -22,7 +22,7 @@ Ask MP for any missing or ambiguous input instead of inferring it.
 
 MP must be present throughout the promotion. Obtain immediate approval at every repository-required approval boundary, including production-app lifecycle changes and GitHub-visible mutations. Follow `$rpce-contribution-check` before any commit or push.
 
-The promoted artifact is the local self-signed production app. Do not distribute or upload the app artifact.
+The promoted artifact is the locally signed production app. Do not distribute or upload the app artifact.
 
 ## Stop conditions
 

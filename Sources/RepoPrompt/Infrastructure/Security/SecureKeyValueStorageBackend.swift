@@ -94,7 +94,7 @@ enum SecureKeyValueStorageFactory {
         switch domain {
         case .officialDeveloperID, .successorOfficialDeveloperID:
             true
-        case .localSelfSigned, .appleDevelopmentDebug, .ephemeral:
+        case .localAppleDevelopment, .appleDevelopmentDebug, .ephemeral:
             false
         }
     }
@@ -116,15 +116,9 @@ enum SecureKeyValueStorageFactory {
             // The successor identity has no legacy fallback service. It stays ephemeral
             // until bootstrap installs an authenticated committed-bridge override.
             EphemeralSecureKeyValueStore.shared
-        case .localSelfSigned:
-            if let fingerprint = decision.localCertificateFingerprint,
-               let generation = decision.localServiceGeneration,
-               generation > 0
-            {
-                KeychainService.localSelfSigned(fingerprint: fingerprint, generation: generation)
-            } else {
-                EphemeralSecureKeyValueStore.shared
-            }
+        case .localAppleDevelopment:
+            decision.localKeychainService.flatMap(KeychainService.localProduction(serviceName:))
+                ?? EphemeralSecureKeyValueStore.shared
         case .appleDevelopmentDebug:
             KeychainService.debugShared
         case .ephemeral:

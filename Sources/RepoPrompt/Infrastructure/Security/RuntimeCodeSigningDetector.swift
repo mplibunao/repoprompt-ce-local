@@ -1,36 +1,31 @@
-import CryptoKit
 import Foundation
 import Security
 
 struct RuntimeValidatedLocalSigningIdentity: Equatable {
-    let fingerprint: String
-    let serviceGeneration: Int
+    let teamIdentifier: String
+    let keychainService: String
 }
 
+/// What a local production bundle says about its signing team and Keychain service, next to
+/// what the installer registered. Both must agree before the build may use that service.
 struct RuntimeLocalSigningExpectation: Equatable {
-    let bundleLeafCertificateSHA256: String
-    let registeredLeafCertificateSHA256: String
-    let bundleServiceGeneration: Int
-    let registeredServiceGeneration: Int
+    let bundleTeamIdentifier: String
+    let registeredTeamIdentifier: String
+    let bundleKeychainService: String
+    let registeredKeychainService: String
 
     var validatedIdentity: RuntimeValidatedLocalSigningIdentity? {
-        let bundleFingerprint = Self.normalizedFingerprint(bundleLeafCertificateSHA256)
-        let registeredFingerprint = Self.normalizedFingerprint(registeredLeafCertificateSHA256)
-        guard bundleFingerprint.count == 64,
-              bundleFingerprint == registeredFingerprint,
-              bundleServiceGeneration > 0,
-              bundleServiceGeneration == registeredServiceGeneration
+        guard let teamIdentifier = LocalSigningIdentityRegistry.normalizedTeamIdentifier(bundleTeamIdentifier),
+              teamIdentifier == LocalSigningIdentityRegistry.normalizedTeamIdentifier(registeredTeamIdentifier),
+              KeychainService.isLocalProductionServiceName(bundleKeychainService),
+              bundleKeychainService == registeredKeychainService
         else {
             return nil
         }
         return RuntimeValidatedLocalSigningIdentity(
-            fingerprint: bundleFingerprint,
-            serviceGeneration: bundleServiceGeneration
+            teamIdentifier: teamIdentifier,
+            keychainService: bundleKeychainService
         )
-    }
-
-    private static func normalizedFingerprint(_ value: String) -> String {
-        value.filter(\.isHexDigit).uppercased()
     }
 }
 
@@ -90,7 +85,6 @@ enum RuntimeCodeSigningDetector {
         let isAdHoc = signingFlags.map {
             SecCodeSignatureFlags(rawValue: $0).contains(.adhoc)
         } ?? false
-        let leafCertificateSHA256 = leafCertificateFingerprint(from: dictionary)
 
         guard let developerIDRequirement = requirement(from: RuntimeCodeSigningPolicy.developerIDRequirement),
               let successorDeveloperIDRequirement = requirement(
@@ -103,7 +97,6 @@ enum RuntimeCodeSigningDetector {
                 teamIdentifier: teamIdentifier,
                 signingFlags: signingFlags,
                 isAdHoc: isAdHoc,
-                leafCertificateSHA256: leafCertificateSHA256,
                 validationResult: .invalid(.requirementUnavailable)
             )
         }
@@ -122,13 +115,13 @@ enum RuntimeCodeSigningDetector {
         if SecCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), debugRequirement) == errSecSuccess {
             validatedDomains.insert(.appleDevelopmentDebug)
         }
-        if let expectedFingerprint = localSigningExpectation?.validatedIdentity?.fingerprint,
-           !isAdHoc,
-           codeIdentifier == RuntimeCodeSigningPolicy.developerIDBundleIdentifier,
-           teamIdentifier == nil,
-           leafCertificateSHA256 == expectedFingerprint
+        if let expectedTeamIdentifier = localSigningExpectation?.validatedIdentity?.teamIdentifier,
+           let localRequirement = requirement(
+               from: RuntimeCodeSigningPolicy.localAppleDevelopmentRequirement(teamIdentifier: expectedTeamIdentifier)
+           ),
+           SecCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), localRequirement) == errSecSuccess
         {
-            validatedDomains.insert(.localSelfSigned)
+            validatedDomains.insert(.localAppleDevelopment)
         }
 
         return RuntimeCodeSigningInfo(
@@ -136,7 +129,6 @@ enum RuntimeCodeSigningDetector {
             teamIdentifier: teamIdentifier,
             signingFlags: signingFlags,
             isAdHoc: isAdHoc,
-            leafCertificateSHA256: leafCertificateSHA256,
             validationResult: .valid(domains: validatedDomains)
         )
     }
@@ -159,18 +151,6 @@ enum RuntimeCodeSigningDetector {
         return data as Data
     }
 
-    private static func leafCertificateFingerprint(from dictionary: [String: Any]) -> String? {
-        guard let certificates = dictionary[kSecCodeInfoCertificates as String] as? [SecCertificate],
-              let leafCertificate = certificates.first
-        else {
-            return nil
-        }
-        let certificateData = SecCertificateCopyData(leafCertificate) as Data
-        return SHA256.hash(data: certificateData)
-            .map { String(format: "%02X", $0) }
-            .joined()
-    }
-
     private static func normalizedString(_ value: Any?) -> String? {
         guard let string = value as? String else { return nil }
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -183,7 +163,6 @@ enum RuntimeCodeSigningDetector {
             teamIdentifier: nil,
             signingFlags: nil,
             isAdHoc: false,
-            leafCertificateSHA256: nil,
             validationResult: .invalid(category)
         )
     }

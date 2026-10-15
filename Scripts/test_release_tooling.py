@@ -72,8 +72,8 @@ class StagedReleasePlistTests(unittest.TestCase):
             "__BUILD_NUMBER__": "1",
             "__DEBUG_SECURE_STORAGE_BACKEND__": "alternate-in-memory",
             "__SIGNING_MODE__": "release-candidate-adhoc",
-            "__LOCAL_SIGNING_CERTIFICATE_SHA256__": "",
-            "__LOCAL_SECURE_STORAGE_GENERATION__": "",
+            "__LOCAL_SIGNING_TEAM_IDENTIFIER__": "",
+            "__LOCAL_KEYCHAIN_SERVICE__": "",
             "__IDENTITY_MIGRATION_PHASE__": "disabled",
             "<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>": (
                 f"<integer>{schema_version}</integer>"

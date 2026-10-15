@@ -494,21 +494,23 @@ final class KeychainService: SecureKeyValueStorageBackend, @unchecked Sendable {
     static let officialV2ServiceName = "com.pvncher.repoprompt.ce.developer-id.keychain.v2"
     static let identityMigrationBridgeServiceNamePrefix = "com.repoprompt.ce.identity-migration.keychain.v1."
     static let identityMigrationLegacyStateServiceName = "com.pvncher.repoprompt.ce.identity-migration.state.v2"
-    static let localSelfSignedServiceNamePrefix = "com.pvncher.repoprompt.ce.local-self-signed."
     static let debugServiceName = "com.pvncher.repoprompt.ce.debug.keychain"
 
     static let officialV2Shared = KeychainService(serviceName: officialV2ServiceName)
     static let debugShared = KeychainService(serviceName: debugServiceName)
 
-    static func localSelfSignedServiceName(fingerprint: String, generation: Int) -> String {
-        let normalizedFingerprint = fingerprint.filter(\.isHexDigit).lowercased()
-        precondition(normalizedFingerprint.count == 64, "Local certificate fingerprint must be SHA-256")
-        precondition(generation > 0, "Local secure-storage generation must be positive")
-        return "\(localSelfSignedServiceNamePrefix)\(normalizedFingerprint).keychain.v\(generation)"
+    /// Local production builds keep secrets in the service their signing registry names. The
+    /// installer registers the Team ID-scoped form, or keeps the certificate-scoped form that
+    /// self-signed builds created so their stored secrets stay in place.
+    static func isLocalProductionServiceName(_ name: String) -> Bool {
+        name.wholeMatch(
+            of: /com\.pvncher\.repoprompt\.ce\.local-(apple-development\.[0-9A-Z]{10}|self-signed\.[0-9a-f]{64})\.keychain\.v[1-9][0-9]*/
+        ) != nil
     }
 
-    static func localSelfSigned(fingerprint: String, generation: Int) -> KeychainService {
-        KeychainService(serviceName: localSelfSignedServiceName(fingerprint: fingerprint, generation: generation))
+    static func localProduction(serviceName: String) -> KeychainService? {
+        guard isLocalProductionServiceName(serviceName) else { return nil }
+        return KeychainService(serviceName: serviceName)
     }
 
     static func legacyRepairSource(secItemClient: SecItemClient = SystemSecItemClient()) -> KeychainService {

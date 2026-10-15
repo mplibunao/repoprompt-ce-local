@@ -1,13 +1,14 @@
 import Darwin
 import Foundation
 
+/// The installer's record of the Apple Development team that signs local production builds
+/// and the Keychain service those builds store secrets in.
 struct LocalSigningIdentityRecord: Codable, Equatable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     let schemaVersion: Int
-    let certificateName: String
-    let certificateSHA256: String
-    let serviceGeneration: Int
+    let teamIdentifier: String
+    let keychainService: String
 }
 
 enum LocalSigningIdentityRegistryError: Error, Equatable {
@@ -20,6 +21,8 @@ enum LocalSigningIdentityRegistryError: Error, Equatable {
 }
 
 enum LocalSigningIdentityRegistry {
+    /// The file keeps the name schema 1 introduced so archives and restores find it in one
+    /// place; `schemaVersion` inside the record versions its contents.
     static let filename = "local-signing-identity-v1.json"
 
     static func defaultURL(fileManager: FileManager = .default) -> URL? {
@@ -55,18 +58,22 @@ enum LocalSigningIdentityRegistry {
         }
         guard let record = try? JSONDecoder().decode(LocalSigningIdentityRecord.self, from: data),
               record.schemaVersion == LocalSigningIdentityRecord.currentSchemaVersion,
-              record.certificateName == RuntimeCodeSigningPolicy.localSelfSignedCertificateName,
-              normalizedFingerprint(record.certificateSHA256)?.count == 64,
-              record.serviceGeneration > 0
+              normalizedTeamIdentifier(record.teamIdentifier) == record.teamIdentifier,
+              KeychainService.isLocalProductionServiceName(record.keychainService)
         else {
             return .failure(.invalidRecord)
         }
         return .success(record)
     }
 
-    static func normalizedFingerprint(_ value: String) -> String? {
-        let normalized = value.filter(\.isHexDigit).uppercased()
-        guard normalized.count == 64, normalized.allSatisfy(\.isHexDigit) else { return nil }
+    /// Apple Team IDs are ten uppercase letters and digits.
+    static func normalizedTeamIdentifier(_ value: String) -> String? {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard normalized.count == 10,
+              normalized.allSatisfy({ ("A" ... "Z").contains($0) || ("0" ... "9").contains($0) })
+        else {
+            return nil
+        }
         return normalized
     }
 }

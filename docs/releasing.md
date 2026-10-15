@@ -1,6 +1,6 @@
 # Local promotion
 
-A promoted build is the self-signed production app at `/Applications/RepoPrompt CE.app`,
+A promoted build is the locally signed production app at `/Applications/RepoPrompt CE.app`,
 packaged from a pushed `main` commit, accepted against a live matrix, and recorded as an
 annotated `local/v<version>-b<build>` tag with a GitHub Release receipt. Promote with MP
 present; the previous install and its state are archived first so the step is reversible.
@@ -95,7 +95,7 @@ Before you start:
    the archive path. On fail, restore from the archive and keep the failed build's archive
    for diagnosis.
 
-## Install a local self-signed production build
+## Install a local production build
 
 The command-line paths are the coordinated alias and its direct fallback:
 
@@ -108,7 +108,7 @@ Double-clicking
 [`Install RepoPrompt CE Local Production.command`](../Install%20RepoPrompt%20CE%20Local%20Production.command)
 in Finder does the same thing. The Finder launcher requires Python 3, confirms replacement
 of any existing installed app, runs the coordinated developer daemon, and keeps the
-terminal window open so certificate approval prompts and build results stay visible.
+terminal window open so build results stay visible.
 
 Local production packaging requires a full Xcode installation. The installer preserves an
 explicit compatible `DEVELOPER_DIR`; otherwise it uses the selected full Xcode or discovers
@@ -118,49 +118,61 @@ packaging work. It checks again before staging the new bundle and before replaci
 installed app. These checks match only the installed app's executable, so a running debug
 app does not block installation.
 
-The installer uses the exact identity name `RepoPrompt CE Local Self-Signed Code Signing`,
-but continuity is anchored to the selected certificate's SHA-256 fingerprint rather than to
-that display name. It inventories every valid private-key-backed exact-name identity. On
-first use it mints and registers one identity only when no valid candidate exists, adopts
-the sole candidate when exactly one exists, and refuses ambiguous duplicates. When
-duplicates exist, select one explicitly:
+The installer signs the app with an Apple Development certificate from the login keychain.
+A free Personal Team certificate works; create one in Xcode under Settings > Accounts >
+Manage Certificates. The app's designated requirement anchors on Apple's certificate
+authority and the certificate's Team ID, so every build keeps the same code identity,
+including builds signed after the certificate is renewed. macOS also ties the app's
+Keychain items to the Team ID, so a newly installed build reads the secrets that earlier
+builds stored without asking. Once the first team-signed build has been approved, as
+described below for a self-signed install, installing and launching a new build needs
+nobody at the keyboard to answer a Keychain prompt.
+
+The installer selects the identity by Team ID. On first use it registers the only team
+with a valid Apple Development identity and refuses to choose between several teams.
+The Finder launcher cannot pass a team, so when several teams have identities, run the
+first install from the command line and select one explicitly:
 
 ```bash
-LOCAL_SIGNING_IDENTITY_SHA256=<64-hex-fingerprint> \
+LOCAL_SIGNING_TEAM_ID=<team> \
   CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make dev-install-local-production
 ```
+
+When the registered team has several valid identities, as after a renewal, the installer
+signs with the one that expires last. When the registered team has none, the installer
+stops; it never adopts another team on its own.
 
 The versioned registry is stored at
 `~/Library/Application Support/RepoPrompt CE/local-signing-identity-v1.json` with
-owner-only directory and file permissions. It records the exact certificate fingerprint and
-local secure-storage service generation. After a fingerprint is registered, a missing,
-expired, or private-keyless identity is a hard failure; the installer never silently adopts
-or mints a replacement. Packaging embeds the registered fingerprint and service generation
-in signed bundle metadata, verifies the packaged leaf certificate, and prints both the
-fingerprint and extracted designated requirement before replacing the installed app.
-Repeated installs with the same registry therefore retain the same designated requirement
-and Keychain service.
+owner-only directory and file permissions. It records the Team ID and the Keychain service
+the app keeps its secrets in. Packaging embeds both in signed bundle metadata, checks the
+signed app's Team ID and designated requirement, and prints both before replacing the
+installed app. At launch the app uses that Keychain service only when its bundle metadata,
+the registry, and its own signature agree; otherwise it keeps secrets in memory for that
+launch.
 
-Rotation is deliberately explicit. To mint and register a new identity:
+A registry written by a self-signed install moves to team signing on the next install.
+The installer registers the selected team and keeps the Keychain service the self-signed
+builds used, so stored secrets stay in place. On the first launch of the first
+team-signed build, macOS asks once for each stored secret; choose Always Allow. Later
+builds read the secrets without asking.
+
+Rotation is deliberately explicit. To move to another team:
 
 ```bash
-ROTATE_LOCAL_SIGNING_IDENTITY=1 \
+ROTATE_LOCAL_SIGNING_IDENTITY=1 LOCAL_SIGNING_TEAM_ID=<team> \
   CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make dev-install-local-production
 ```
 
-To rotate to another existing exact-name identity, combine rotation with
-`LOCAL_SIGNING_IDENTITY_SHA256`. Each local Keychain service name is scoped by both the
-registered certificate fingerprint and generation. First registration uses a high-entropy
-generation so deleting and recreating the registry cannot predictably reconnect to an old
-service; rotation increments the recorded generation instead of overwriting the prior
-service, and registry loss cannot route a different certificate into an earlier identity's
-service. Secrets in the prior local generation are not copied and are inaccessible to the
-newly signed app; the prior certificate and service remain available for rollback or manual
-re-entry. If app replacement or the atomic registry update fails, the installer restores the
-prior app and leaves the prior registry authoritative.
+Rotation registers a new Keychain service named by the team and a high-entropy generation,
+so deleting and recreating the registry cannot predictably reconnect to an old service.
+Secrets in the prior service are not copied and are inaccessible to the newly signed app;
+the prior service remains available for rollback or manual re-entry. If app replacement or
+the atomic registry update fails, the installer restores the prior app and leaves the prior
+registry authoritative.
 
-The resulting app is host-native, self-signed, and not notarized. Do not upload it to a
-GitHub Release and do not copy it to another Mac.
+The resulting app is host-native and not notarized. Do not upload it to a GitHub Release
+and do not copy it to another Mac.
 
 ## Rollback unit
 
@@ -399,7 +411,7 @@ native voice runtime under `codex-resources/voice/`. Its `bin/codex-voice-host` 
 its libraries and plugins are manifest-owned Mach-Os like the rest of the package, and their
 third-party components are listed in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
-The two signing paths treat this subtree differently. Debug and local self-signed packaging
+The two signing paths treat this subtree differently. Debug and local production packaging
 through `Scripts/package_app.sh` does **not** thin, mutate, or re-sign anything in it: the
 outer app signature seals the resource tree, and the exact-byte pin preserves the upstream
 signatures. The artifact verifier then rechecks every byte and architecture, plus the OpenAI

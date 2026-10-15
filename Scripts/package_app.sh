@@ -140,20 +140,22 @@ fi
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 ALLOW_ADHOC_SIGNING="${ALLOW_ADHOC_SIGNING:-0}"
 RELEASE_ALLOW_ADHOC_SIGNING="${RELEASE_ALLOW_ADHOC_SIGNING:-0}"
-LOCAL_SELF_SIGNED_RELEASE="${LOCAL_SELF_SIGNED_RELEASE:-0}"
-LOCAL_SELF_SIGNED_CERTIFICATE_NAME="RepoPrompt CE Local Self-Signed Code Signing"
-LOCAL_SIGNING_CERTIFICATE_SHA1="${LOCAL_SIGNING_CERTIFICATE_SHA1:-}"
-LOCAL_SIGNING_CERTIFICATE_SHA256="${LOCAL_SIGNING_CERTIFICATE_SHA256:-}"
-LOCAL_SIGNING_SERVICE_GENERATION="${LOCAL_SIGNING_SERVICE_GENERATION:-}"
-LOCAL_SELF_SIGNED_REQUIREMENT=""
+LOCAL_PRODUCTION_RELEASE="${LOCAL_PRODUCTION_RELEASE:-0}"
+LOCAL_SIGNING_TEAM_ID="${LOCAL_SIGNING_TEAM_ID:-}"
+LOCAL_KEYCHAIN_SERVICE="${LOCAL_KEYCHAIN_SERVICE:-}"
+LOCAL_KEYCHAIN_SERVICE_PATTERN='^com\.pvncher\.repoprompt\.ce\.local-(apple-development\.[0-9A-Z]{10}|self-signed\.[0-9a-f]{64})\.keychain\.v[1-9][0-9]*$'
+LOCAL_PRODUCTION_REQUIREMENT=""
+# Info.plist carries the local signing team and Keychain service only for a local production build.
+PLIST_LOCAL_SIGNING_TEAM_ID=""
+PLIST_LOCAL_KEYCHAIN_SERVICE=""
 PREFER_STABLE_DEBUG_SIGNING="${PREFER_STABLE_DEBUG_SIGNING:-1}"
 DEBUG_SECURE_STORAGE_BACKEND="${DEBUG_SECURE_STORAGE_BACKEND:-}"
 REPOPROMPT_PROVISIONING_PROFILE="${REPOPROMPT_PROVISIONING_PROFILE:-}"
 APP_ENTITLEMENTS_TEMPLATE="${APP_ENTITLEMENTS_TEMPLATE:-$ROOT_DIR/AppBundle/RepoPrompt.entitlements.template}"
-LOCAL_SELF_SIGNED_ENTITLEMENTS_TEMPLATE="$ROOT_DIR/AppBundle/RepoPrompt.local-self-signed.entitlements.template"
+LOCAL_PRODUCTION_ENTITLEMENTS_TEMPLATE="$ROOT_DIR/AppBundle/RepoPrompt.local-production.entitlements.template"
 APP_ENTITLEMENTS=""
 USE_ADHOC_SIGNING=0
-USE_LOCAL_SELF_SIGNED_RELEASE=0
+USE_LOCAL_PRODUCTION_RELEASE=0
 DEBUG_STORAGE_BACKEND_MARKER="alternate-in-memory"
 SIGNING_MODE_MARKER="debug-apple-development"
 warn_adhoc_signing(){
@@ -166,17 +168,18 @@ warn_release_candidate_signing(){
     echo "WARNING: Using explicit ad-hoc signing for a release-candidate package."
     echo "WARNING: This artifact exercises release packaging only. It is not notarizable, distributable, or suitable for GitHub Releases."
 }
-if [[ "$LOCAL_SELF_SIGNED_RELEASE" == "1" || "$LOCAL_SELF_SIGNED_RELEASE" == "true" ]]; then
-    (( IS_RELEASE )) || fail "LOCAL_SELF_SIGNED_RELEASE is only supported for release packaging."
-    [[ -n "$SIGN_IDENTITY" ]] || fail "LOCAL_SELF_SIGNED_RELEASE requires SIGN_IDENTITY pointing at the user-local self-signed code-signing identity."
-    [[ "$LOCAL_SIGNING_CERTIFICATE_SHA1" =~ ^[[:xdigit:]]{40}$ ]] || fail "LOCAL_SELF_SIGNED_RELEASE requires LOCAL_SIGNING_CERTIFICATE_SHA1 with the selected certificate SHA-1 fingerprint."
-    [[ "$LOCAL_SIGNING_CERTIFICATE_SHA256" =~ ^[[:xdigit:]]{64}$ ]] || fail "LOCAL_SELF_SIGNED_RELEASE requires LOCAL_SIGNING_CERTIFICATE_SHA256 with the selected certificate SHA-256 fingerprint."
-    [[ "$LOCAL_SIGNING_SERVICE_GENERATION" =~ ^[1-9][0-9]*$ ]] || fail "LOCAL_SELF_SIGNED_RELEASE requires a positive LOCAL_SIGNING_SERVICE_GENERATION."
-    LOCAL_SIGNING_CERTIFICATE_SHA1="$(tr '[:lower:]' '[:upper:]' <<< "$LOCAL_SIGNING_CERTIFICATE_SHA1")"
-    LOCAL_SIGNING_CERTIFICATE_SHA256="$(tr '[:lower:]' '[:upper:]' <<< "$LOCAL_SIGNING_CERTIFICATE_SHA256")"
-    LOCAL_SELF_SIGNED_REQUIREMENT="identifier \"$BUNDLE_ID\" and certificate leaf = H\"$LOCAL_SIGNING_CERTIFICATE_SHA1\""
-    USE_LOCAL_SELF_SIGNED_RELEASE=1
-    echo "WARNING: Building a local-only self-signed production app."
+if [[ "$LOCAL_PRODUCTION_RELEASE" == "1" || "$LOCAL_PRODUCTION_RELEASE" == "true" ]]; then
+    (( IS_RELEASE )) || fail "LOCAL_PRODUCTION_RELEASE is only supported for release packaging."
+    [[ -n "$SIGN_IDENTITY" ]] || fail "LOCAL_PRODUCTION_RELEASE requires SIGN_IDENTITY pointing at the user's Apple Development code-signing identity."
+    [[ "$LOCAL_SIGNING_TEAM_ID" =~ ^[0-9A-Z]{10}$ ]] || fail "LOCAL_PRODUCTION_RELEASE requires LOCAL_SIGNING_TEAM_ID with the signing certificate's Team ID."
+    [[ "$LOCAL_KEYCHAIN_SERVICE" =~ $LOCAL_KEYCHAIN_SERVICE_PATTERN ]] || fail "LOCAL_PRODUCTION_RELEASE requires LOCAL_KEYCHAIN_SERVICE naming a local production Keychain service."
+    # Anchoring on Apple's CA and the Team ID, not one certificate, keeps the designated
+    # requirement and the Keychain partition the same across builds and certificate renewals.
+    LOCAL_PRODUCTION_REQUIREMENT="anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$LOCAL_SIGNING_TEAM_ID\" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists"
+    USE_LOCAL_PRODUCTION_RELEASE=1
+    PLIST_LOCAL_SIGNING_TEAM_ID="$LOCAL_SIGNING_TEAM_ID"
+    PLIST_LOCAL_KEYCHAIN_SERVICE="$LOCAL_KEYCHAIN_SERVICE"
+    echo "WARNING: Building a local-only production app signed with an Apple Development certificate."
     echo "WARNING: This app is for installation on this Mac only. It is not notarized and must not be uploaded to GitHub Releases."
 fi
 if [[ -z "$SIGN_IDENTITY" ]] && (( ! IS_RELEASE )) && [[ "$PREFER_STABLE_DEBUG_SIGNING" == "1" || "$PREFER_STABLE_DEBUG_SIGNING" == "true" ]]; then
@@ -213,9 +216,9 @@ else
     fi
 fi
 
-if (( USE_LOCAL_SELF_SIGNED_RELEASE )); then
+if (( USE_LOCAL_PRODUCTION_RELEASE )); then
     DEBUG_STORAGE_BACKEND_MARKER="keychain"
-    SIGNING_MODE_MARKER="local-self-signed"
+    SIGNING_MODE_MARKER="local-apple-development"
 elif (( IS_RELEASE )) && (( ! USE_ADHOC_SIGNING )); then
     DEBUG_STORAGE_BACKEND_MARKER="keychain"
     if [[ -n "${REPOPROMPT_STABLE_RELEASE_CONTEXT:-}" ]]; then
@@ -248,7 +251,7 @@ if sentry_linking_enabled; then
 fi
 PUBLIC_UNIVERSAL_RELEASE=0
 ARCHITECTURE_POLICY="matching"
-if (( IS_RELEASE )) && (( ! USE_LOCAL_SELF_SIGNED_RELEASE )); then
+if (( IS_RELEASE )) && (( ! USE_LOCAL_PRODUCTION_RELEASE )); then
     PUBLIC_UNIVERSAL_RELEASE=1
     ARCHITECTURE_POLICY="arm64,x86_64"
 fi
@@ -373,8 +376,8 @@ for k, v in {
     '__DEBUG_SECURE_STORAGE_BACKEND__': '$DEBUG_STORAGE_BACKEND_MARKER',
     '__SIGNING_MODE__': '$SIGNING_MODE_MARKER',
     '<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>':'<integer>$WORKING_JOURNAL_SCHEMA_VERSION</integer>',
-    '__LOCAL_SIGNING_CERTIFICATE_SHA256__': '$LOCAL_SIGNING_CERTIFICATE_SHA256',
-    '__LOCAL_SECURE_STORAGE_GENERATION__': '$LOCAL_SIGNING_SERVICE_GENERATION',
+    '__LOCAL_SIGNING_TEAM_IDENTIFIER__': '$PLIST_LOCAL_SIGNING_TEAM_ID',
+    '__LOCAL_KEYCHAIN_SERVICE__': '$PLIST_LOCAL_KEYCHAIN_SERVICE',
     '__IDENTITY_MIGRATION_PHASE__': '$IDENTITY_MIGRATION_PHASE',
 }.items():
     s = s.replace(k, v)
@@ -400,13 +403,13 @@ PACKAGED_IDENTITY_MIGRATION_PHASE="$(
 [[ "$PACKAGED_IDENTITY_MIGRATION_PHASE" == "$IDENTITY_MIGRATION_PHASE" ]] ||
     fail "Packaged identity migration phase mismatch: requested $IDENTITY_MIGRATION_PHASE, got $PACKAGED_IDENTITY_MIGRATION_PHASE"
 
-if (( USE_LOCAL_SELF_SIGNED_RELEASE )); then
-    phase "Rendering local self-signed entitlements"
-    [[ -f "$LOCAL_SELF_SIGNED_ENTITLEMENTS_TEMPLATE" ]] || fail "Missing local self-signed entitlements template: $LOCAL_SELF_SIGNED_ENTITLEMENTS_TEMPLATE"
+if (( USE_LOCAL_PRODUCTION_RELEASE )); then
+    phase "Rendering local production entitlements"
+    [[ -f "$LOCAL_PRODUCTION_ENTITLEMENTS_TEMPLATE" ]] || fail "Missing local production entitlements template: $LOCAL_PRODUCTION_ENTITLEMENTS_TEMPLATE"
     APP_ENTITLEMENTS="$(mktemp)"
     run python3 - <<PY
 from pathlib import Path
-s=Path('$LOCAL_SELF_SIGNED_ENTITLEMENTS_TEMPLATE').read_text()
+s=Path('$LOCAL_PRODUCTION_ENTITLEMENTS_TEMPLATE').read_text()
 s=s.replace('__BUNDLE_ID__', '$BUNDLE_ID')
 Path('$APP_ENTITLEMENTS').write_text(s)
 PY
@@ -460,7 +463,7 @@ sign_path(){
     local args=(--force --sign "$SIGN_IDENTITY")
     if (( USE_ADHOC_SIGNING )); then
         args+=(--timestamp=none)
-    elif (( USE_LOCAL_SELF_SIGNED_RELEASE )); then
+    elif (( USE_LOCAL_PRODUCTION_RELEASE )); then
         args+=(--timestamp=none --options runtime)
     elif (( IS_RELEASE )); then
         args+=(--timestamp --options runtime)
@@ -478,7 +481,7 @@ sign_sparkle_framework(){
     sign_path "$framework"
 }
 verify_signed_app_identity(){
-    local details identifier team authorities designated_requirement certificate_dir certificate_prefix actual_fingerprint
+    local details identifier team authorities designated_requirement
     details="$(codesign -dv --verbose=4 "$APP_BUNDLE" 2>&1 || true)"
     identifier="$(awk -F= '/^Identifier=/{print $2; exit}' <<< "$details")"
     team="$(awk -F= '/^TeamIdentifier=/{print $2; exit}' <<< "$details")"
@@ -493,27 +496,14 @@ verify_signed_app_identity(){
     if (( USE_ADHOC_SIGNING )); then
         [[ -z "$team" || "$team" == "not set" ]] || echo "WARNING: Expected ad-hoc signing without a team identifier, but found team '$team'."
         echo "WARNING: Ad-hoc package created explicitly; do not use this artifact for release."
-    elif (( USE_LOCAL_SELF_SIGNED_RELEASE )); then
-        [[ -z "$team" || "$team" == "not set" ]] || fail "Local self-signed app unexpectedly has team identifier '$team'."
-        run codesign --verify --deep --strict --verbose=2 -R="$LOCAL_SELF_SIGNED_REQUIREMENT" "$APP_BUNDLE"
-        certificate_dir="$(mktemp -d)"
-        certificate_prefix="$certificate_dir/leaf"
-        codesign -d --extract-certificates="$certificate_prefix" "$APP_BUNDLE" >/dev/null 2>&1 || {
-            rm -rf "$certificate_dir"
-            fail "Could not extract the local signing certificate from the packaged app."
-        }
-        [[ -f "${certificate_prefix}0" ]] || {
-            rm -rf "$certificate_dir"
-            fail "Packaged app did not expose a leaf signing certificate."
-        }
-        actual_fingerprint="$(shasum -a 256 "${certificate_prefix}0" | awk '{print toupper($1)}')"
-        rm -rf "$certificate_dir"
-        [[ "$actual_fingerprint" == "$LOCAL_SIGNING_CERTIFICATE_SHA256" ]] || fail "Packaged app certificate fingerprint mismatch: expected $LOCAL_SIGNING_CERTIFICATE_SHA256, got ${actual_fingerprint:-<missing>}."
+    elif (( USE_LOCAL_PRODUCTION_RELEASE )); then
+        [[ "$team" == "$LOCAL_SIGNING_TEAM_ID" ]] || fail "Local production app team mismatch: expected $LOCAL_SIGNING_TEAM_ID, got ${team:-<missing>}."
+        run codesign --verify --deep --strict --verbose=2 -R="$LOCAL_PRODUCTION_REQUIREMENT" "$APP_BUNDLE"
         designated_requirement="$(codesign -d -r- "$APP_BUNDLE" 2>&1 | sed -n 's/^designated => //p')"
         [[ -n "$designated_requirement" ]] || fail "Could not extract the packaged app designated requirement."
-        grep -F -i -- "$LOCAL_SIGNING_CERTIFICATE_SHA1" <<< "$designated_requirement" >/dev/null || fail "Packaged app designated requirement is not pinned to the selected local certificate."
-        printf 'Selected local certificate SHA-256: %s\n' "$LOCAL_SIGNING_CERTIFICATE_SHA256"
-        printf 'Local secure-storage service generation: v%s\n' "$LOCAL_SIGNING_SERVICE_GENERATION"
+        grep -F -- "$LOCAL_SIGNING_TEAM_ID" <<< "$designated_requirement" >/dev/null || fail "Packaged app designated requirement is not anchored to team $LOCAL_SIGNING_TEAM_ID."
+        printf 'Local signing team: %s\n' "$LOCAL_SIGNING_TEAM_ID"
+        printf 'Local Keychain service: %s\n' "$LOCAL_KEYCHAIN_SERVICE"
         printf 'Extracted designated requirement: %s\n' "$designated_requirement"
     elif (( IS_RELEASE )); then
         [[ "$team" == "$SIGNING_TEAM_ID" ]] || fail "Signed app team mismatch: expected $SIGNING_TEAM_ID, got ${team:-<missing>}"
@@ -528,8 +518,8 @@ APP_SIGN_ARGS=()
 if (( IS_RELEASE )) && (( ! USE_ADHOC_SIGNING )); then
     APP_SIGN_ARGS+=(--entitlements "$APP_ENTITLEMENTS")
 fi
-if (( USE_LOCAL_SELF_SIGNED_RELEASE )); then
-    APP_SIGN_ARGS+=(--requirements "=designated => $LOCAL_SELF_SIGNED_REQUIREMENT")
+if (( USE_LOCAL_PRODUCTION_RELEASE )); then
+    APP_SIGN_ARGS+=(--requirements "=designated => $LOCAL_PRODUCTION_REQUIREMENT")
 fi
 if (( ${#APP_SIGN_ARGS[@]} )); then
     sign_path "$APP_BUNDLE" "${APP_SIGN_ARGS[@]}"
@@ -537,7 +527,7 @@ else
     sign_path "$APP_BUNDLE"
 fi
 run codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
-if (( IS_RELEASE )) && (( ! USE_ADHOC_SIGNING )) && (( ! USE_LOCAL_SELF_SIGNED_RELEASE )); then
+if (( IS_RELEASE )) && (( ! USE_ADHOC_SIGNING )) && (( ! USE_LOCAL_PRODUCTION_RELEASE )); then
     run python3 "$CONTROL_PLANE_SCRIPTS_DIR/embedded_provisioning_profile.py" validate \
         "$APP_BUNDLE/Contents/embedded.provisionprofile"
 fi
