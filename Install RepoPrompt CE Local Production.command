@@ -26,7 +26,6 @@ fi
 install_app() {
     echo
     echo "Building and installing RepoPrompt CE..."
-    echo "macOS may ask you to approve the dedicated local code-signing certificate."
     echo
     CONFIRM_LOCAL_PRODUCTION_INSTALL=1 "$CONDUCTOR" release local-install
 }

@@ -124,12 +124,14 @@ Manage Certificates. The app's designated requirement anchors on Apple's certifi
 authority and the certificate's Team ID, so every build keeps the same code identity,
 including builds signed after the certificate is renewed. macOS also ties the app's
 Keychain items to the Team ID, so a newly installed build reads the secrets that earlier
-builds stored without asking. Installing and launching a new build therefore needs nobody
-at the keyboard to answer a Keychain prompt.
+builds stored without asking. Once the first team-signed build has been approved, as
+described below for a self-signed install, installing and launching a new build needs
+nobody at the keyboard to answer a Keychain prompt.
 
 The installer selects the identity by Team ID. On first use it registers the only team
 with a valid Apple Development identity and refuses to choose between several teams.
-Select one explicitly:
+The Finder launcher cannot pass a team, so when several teams have identities, run the
+first install from the command line and select one explicitly:
 
 ```bash
 LOCAL_SIGNING_TEAM_ID=<team> \

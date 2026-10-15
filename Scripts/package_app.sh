@@ -145,6 +145,9 @@ LOCAL_SIGNING_TEAM_ID="${LOCAL_SIGNING_TEAM_ID:-}"
 LOCAL_KEYCHAIN_SERVICE="${LOCAL_KEYCHAIN_SERVICE:-}"
 LOCAL_KEYCHAIN_SERVICE_PATTERN='^com\.pvncher\.repoprompt\.ce\.local-(apple-development\.[0-9A-Z]{10}|self-signed\.[0-9a-f]{64})\.keychain\.v[1-9][0-9]*$'
 LOCAL_PRODUCTION_REQUIREMENT=""
+# Info.plist carries the local signing team and Keychain service only for a local production build.
+PLIST_LOCAL_SIGNING_TEAM_ID=""
+PLIST_LOCAL_KEYCHAIN_SERVICE=""
 PREFER_STABLE_DEBUG_SIGNING="${PREFER_STABLE_DEBUG_SIGNING:-1}"
 DEBUG_SECURE_STORAGE_BACKEND="${DEBUG_SECURE_STORAGE_BACKEND:-}"
 REPOPROMPT_PROVISIONING_PROFILE="${REPOPROMPT_PROVISIONING_PROFILE:-}"
@@ -174,6 +177,8 @@ if [[ "$LOCAL_PRODUCTION_RELEASE" == "1" || "$LOCAL_PRODUCTION_RELEASE" == "true
     # requirement and the Keychain partition the same across builds and certificate renewals.
     LOCAL_PRODUCTION_REQUIREMENT="anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$LOCAL_SIGNING_TEAM_ID\" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists"
     USE_LOCAL_PRODUCTION_RELEASE=1
+    PLIST_LOCAL_SIGNING_TEAM_ID="$LOCAL_SIGNING_TEAM_ID"
+    PLIST_LOCAL_KEYCHAIN_SERVICE="$LOCAL_KEYCHAIN_SERVICE"
     echo "WARNING: Building a local-only production app signed with an Apple Development certificate."
     echo "WARNING: This app is for installation on this Mac only. It is not notarized and must not be uploaded to GitHub Releases."
 fi
@@ -371,8 +376,8 @@ for k, v in {
     '__DEBUG_SECURE_STORAGE_BACKEND__': '$DEBUG_STORAGE_BACKEND_MARKER',
     '__SIGNING_MODE__': '$SIGNING_MODE_MARKER',
     '<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>':'<integer>$WORKING_JOURNAL_SCHEMA_VERSION</integer>',
-    '__LOCAL_SIGNING_TEAM_IDENTIFIER__': '$LOCAL_SIGNING_TEAM_ID',
-    '__LOCAL_KEYCHAIN_SERVICE__': '$LOCAL_KEYCHAIN_SERVICE',
+    '__LOCAL_SIGNING_TEAM_IDENTIFIER__': '$PLIST_LOCAL_SIGNING_TEAM_ID',
+    '__LOCAL_KEYCHAIN_SERVICE__': '$PLIST_LOCAL_KEYCHAIN_SERVICE',
     '__IDENTITY_MIGRATION_PHASE__': '$IDENTITY_MIGRATION_PHASE',
 }.items():
     s = s.replace(k, v)
