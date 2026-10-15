@@ -115,7 +115,7 @@ make install-debug-cli     # packages the debug app, then installs /usr/local/bi
 ./Scripts/doctor.sh --install-debug-cli
 ```
 
-`./conductor install-debug-cli` and `./conductor debug-cli-status` are the [developer daemon](architecture/developer-daemon.md) forms of the first two commands. The installer links:
+`./conductor debug-cli-status` and `./conductor install-debug-cli` are the [developer daemon](architecture/developer-daemon.md) forms of the first two commands. The installer links:
 
 ```text
 /usr/local/bin/rpce-cli-debug
@@ -133,7 +133,7 @@ The debug CLI talks to the debug app and shares its profile, which [Debug profil
 
 The [validation matrix](../.agents/skills/rpce-contribution-check/references/validation-matrix.md) says which changes need the live smoke. `make dev-smoke` runs it against an already-running debug app, and `make dev-smoke-launch` builds and launches the debug app first. Both create the `repoprompt-ce` workspace once in a fresh debug profile and never recreate it. When creating it needs approval, the smoke stops within seconds and names the setting to change: Settings → Permissions → Workspace Approvals → Create workspace.
 
-To run the same checks by hand, launch the debug app and drive it with the debug CLI:
+To check the live wiring by hand, launch the debug app and drive it with the debug CLI:
 
 ```bash
 make dev-run

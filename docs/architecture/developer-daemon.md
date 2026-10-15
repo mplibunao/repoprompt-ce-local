@@ -61,7 +61,7 @@ Every job gets a ticket and can run detached with `--async`. Start a build, keep
 ./conductor job wait --request-key debug-package
 ```
 
-`--request-key` is idempotent: a queued or running job with the same key is reused instead of enqueuing a duplicate. `./conductor job list` shows jobs by state, and `job status`, `job wait`, and `job cancel` each accept a ticket or `--request-key`.
+`--request-key` is idempotent: a queued or running job with the same key and a matching request is reused instead of enqueuing a duplicate. A different request under an active key fails with a request-key mismatch. `./conductor job list` shows jobs by state, and `job status`, `job wait`, and `job cancel` each accept a ticket or `--request-key`.
 
 ## Command output
 

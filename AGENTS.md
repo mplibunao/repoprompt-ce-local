@@ -27,7 +27,7 @@ Local `docs/investigations/*.md` reports are intentionally left unignored so Rep
 
 ## Branch model
 
-`main` is the integration branch and the only long-lived branch. Every change merges into `main` from a `bugfix/`, `port/`, or `chore/` branch cut from `main`, through a pull request on `mplibunao/repoprompt-ce-local` merged with a merge commit, so the review, the checks, and the diff stay auditable on GitHub. Nothing merges into `main` directly. The agent that owns a pull request takes it through the [`CONTRIBUTING.md`](CONTRIBUTING.md) flow: `pr-ready` and labels, the debug-app run for changes under `Sources/` or `Packages/`, an independent review and a separate refactor pass, then MP's approval and the merge. That document also covers stacked pull requests, the Codex review bot, and landing a batch, and [`docs/releasing.md`](docs/releasing.md) owns promotion and its `local/v<version>-b<build>` tags.
+`main` is the integration branch and the only long-lived branch. Every change merges into `main` from a `bugfix/`, `port/`, or `chore/` branch through a pull request on `mplibunao/repoprompt-ce-local` merged with a merge commit, so the review, the checks, and the diff stay auditable on GitHub. Nothing merges into `main` directly. The agent that owns a pull request takes it through the [`CONTRIBUTING.md`](CONTRIBUTING.md) flow: `pr-ready` and labels, the debug-app run for changes under `Sources/` or `Packages/`, an independent review and a separate refactor pass, then MP's approval and the merge. That document also covers stacked pull requests, the Codex review bot, and landing a batch, and [`docs/releasing.md`](docs/releasing.md) owns promotion and its `local/v<version>-b<build>` tags.
 
 ## Upstream is read-only
 
