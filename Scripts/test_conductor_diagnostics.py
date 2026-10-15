@@ -610,14 +610,35 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
         self.output = io.StringIO()
         enter_context(self, contextlib.redirect_stdout(self.output))
         enter_context(self, mock.patch.object(conductor, "require_debug_cli", return_value="rpce-cli-debug"))
+        # Retry waits advance a fake clock, and a runaway retry fails here instead of hanging the suite.
+        self.clock = 1_000.0
+        self.sleeps = 0
 
-    def run_smoke(self, responses: dict[str, Tuple[int, str, str]]) -> int:
+        def sleep(seconds: float) -> None:
+            self.sleeps += 1
+            if self.sleeps > 50:
+                raise AssertionError("the smoke kept retrying")
+            self.clock += seconds
+
+        enter_context(self, mock.patch.object(conductor, "now", side_effect=lambda: self.clock))
+        enter_context(self, mock.patch.object(conductor.time, "sleep", side_effect=sleep))
+
+    def run_smoke(
+        self,
+        responses: dict[str, Tuple[int, str, str] | list[Tuple[int, str, str]]],
+        args: dict[str, object] | None = None,
+    ) -> int:
+        """A list answers successive calls in order and repeats its last entry."""
+
         def respond(label: str, argv: list[object], _cwd: Path, **kwargs: object) -> Tuple[int, str, str]:
             self.calls.append((label, [str(arg) for arg in argv], kwargs.get("timeout")))
-            return responses.get(label, (0, "", ""))
+            response = responses.get(label, (0, "", ""))
+            if isinstance(response, list):
+                return response.pop(0) if len(response) > 1 else response[0]
+            return response
 
         with mock.patch.object(conductor, "run_operation_command", side_effect=respond):
-            return conductor.operation_smoke(self.tmp, {})
+            return conductor.operation_smoke(self.tmp, args or {})
 
     @staticmethod
     def minimal_listing(*names: str) -> Tuple[int, str, str]:
@@ -677,13 +698,43 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
         self.assertEqual(self.labels(), ["workspace list"])
         self.assertIn("could not read the workspace list", self.output.getvalue())
 
-    def run_switch(self, switch_response: Tuple[int, str, str]) -> int:
+    def run_switch(
+        self,
+        switch_response: Tuple[int, str, str] | list[Tuple[int, str, str]],
+        args: dict[str, object] | None = None,
+    ) -> int:
         self.calls.clear()
         self.output.truncate(0)
         self.output.seek(0)
         return self.run_smoke(
-            {"workspace list": self.minimal_listing("repoprompt-ce"), "workspace switch": switch_response}
+            {"workspace list": self.minimal_listing("repoprompt-ce"), "workspace switch": switch_response}, args
         )
+
+    @staticmethod
+    def blocked_switch(state: str = "active", reason: str = "restore") -> Tuple[int, str, str]:
+        """The debug CLI's answer while another switch holds the window, as recorded from a smoke launch."""
+        return (
+            1,
+            "",
+            'Error:\nError: Invalid Request: Workspace switch to "repoprompt-ce" is blocked by a '
+            f'{state} switch to "repoprompt-ce" (reason: {reason}, phase: hydrating roots, '
+            "total age: 4.2s, phase age: 3.8s).",
+        )
+
+    def test_switch_waits_for_the_startup_restore_to_finish(self) -> None:
+        code = self.run_switch([self.blocked_switch(), self.blocked_switch(), (0, "", "")])
+
+        self.assertEqual(code, 0, self.output.getvalue())
+        self.assertEqual(self.labels().count("workspace switch"), 3)
+        self.assertEqual(self.labels()[-3:], ["tree roots", "manage_worktree list", "agent_manage roles"])
+
+    def test_restore_that_outlasts_the_smoke_deadline_fails_the_smoke(self) -> None:
+        code = self.run_switch(self.blocked_switch(), {"operationTimeout": 10})
+
+        self.assertEqual(code, 1)
+        self.assertGreaterEqual(self.clock, 1_010.0)
+        self.assertIn("FAILED stage 'workspace switch' with status 1", self.output.getvalue())
+        self.assertEqual(self.labels()[-1], "workspace switch")
 
     def test_switch_to_the_already_selected_workspace_continues_the_smoke(self) -> None:
         current = 'Error:\nError: Invalid Request: Already on workspace "repoprompt-ce".'
@@ -705,6 +756,8 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
             ("name ending with the smoke workspace", (1, "", 'Error: Invalid Request: Already on workspace "my-repoprompt-ce".')),
             ("name starting with the smoke workspace", (1, 'Already on workspace "repoprompt-ce-old".', "")),
             ("unrelated error", (1, "", "Error:\nError: Invalid Request: Window 1 not found.")),
+            ("stale restore", self.blocked_switch(state="stale")),
+            ("active switch that is not a restore", self.blocked_switch(reason="userOrInternal")),
         ):
             with self.subTest(case=label):
                 code = self.run_switch(switch_response)
@@ -712,6 +765,7 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("FAILED stage 'workspace switch' with status 1", self.output.getvalue())
                 self.assertEqual(self.labels()[-1], "workspace switch")
+                self.assertEqual(self.labels().count("workspace switch"), 1)
 
 
 class SmokeWorkspaceListingContractTests(unittest.TestCase):

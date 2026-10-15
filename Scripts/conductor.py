@@ -7317,6 +7317,36 @@ def is_already_on_workspace(stdout: str, stderr: str, workspace: str) -> bool:
     return False
 
 
+def is_blocked_by_active_restore(stdout: str, stderr: str) -> bool:
+    # A freshly launched app restores its saved windows and refuses switches until that finishes. The app
+    # labels a restore past its stale threshold "stale" instead of "active", so a stuck restore stays fatal.
+    return re.search(r'is blocked by an? active switch to ".*" \(reason: restore,', stdout + "\n" + stderr) is not None
+
+
+def switch_smoke_workspace(
+    cli: str,
+    window_id: int,
+    workspace: str,
+    repo_root: Path,
+    env: Dict[str, str],
+    deadline: float,
+) -> int:
+    argv = [cli, "-w", str(window_id), "-e", f"workspace switch {workspace}"]
+    while True:
+        code, stdout, stderr = run_operation_command("workspace switch", argv, repo_root, env=env, allow_exit_codes={0, 1})
+        if code != 1:
+            return code
+        if is_already_on_workspace(stdout, stderr, workspace):
+            print(f'Already on workspace "{workspace}"; continuing smoke flow.', flush=True)
+            return 0
+        if is_blocked_by_active_restore(stdout, stderr) and now() < deadline:
+            print("The debug app is still restoring its windows; retrying the workspace switch.", flush=True)
+            time.sleep(2.0)
+            continue
+        print(f"FAILED stage 'workspace switch' with status {code}", flush=True)
+        return code
+
+
 def routed_structured_cli_argv(cli: str, window_id: int, command: str, payload: Dict[str, Any]) -> List[str]:
     routed_payload = dict(payload)
     routed_payload["_windowID"] = window_id
@@ -7892,9 +7922,14 @@ def operation_smoke(repo_root: Path, args: Dict[str, Any]) -> int:
     if code != 0:
         return code
 
+    code, _stdout, _stderr = run_operation_command("windows", [cli, "-e", "windows"], repo_root, env=env)
+    if code != 0:
+        return code
+    code = switch_smoke_workspace(cli, window_id, workspace, repo_root, env, deadline)
+    if code != 0:
+        return code
+
     stages = [
-        ("windows", [cli, "-e", "windows"]),
-        ("workspace switch", [cli, "-w", str(window_id), "-e", f"workspace switch {workspace}"]),
         ("tree roots", [cli, "-w", str(window_id), "-e", "tree --type roots"]),
         ("manage_worktree list", [cli, "-w", str(window_id), "-e", "manage_worktree op=list"]),
         (
@@ -7903,14 +7938,8 @@ def operation_smoke(repo_root: Path, args: Dict[str, Any]) -> int:
         ),
     ]
     for name, argv in stages:
-        allow_exit_codes = {0, 1} if name == "workspace switch" else None
-        code, stdout, stderr = run_operation_command(name, argv, repo_root, env=env, allow_exit_codes=allow_exit_codes)
-        if name == "workspace switch" and code == 1 and is_already_on_workspace(stdout, stderr, workspace):
-            print(f'Already on workspace "{workspace}"; continuing smoke flow.', flush=True)
-            continue
+        code, _stdout, _stderr = run_operation_command(name, argv, repo_root, env=env)
         if code != 0:
-            if name == "workspace switch" and code == 1:
-                print(f"FAILED stage '{name}' with status {code}", flush=True)
             return code
 
     if args.get("executionLocationUI"):
