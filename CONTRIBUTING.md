@@ -85,11 +85,14 @@ Work is tracked as issues and pull requests there.
 
 7. MP reads the pull request and approves it. Fetch `origin` first so `main`
    is current for everything below. If the branch conflicts with `main`,
-   resolve that first: merge `origin/main` into the branch, commit the
-   resolution through the commit preflight, push it through the push
-   preflight, and let the checks run on the new head. MP's approval covers
-   that conflict-resolution commit; any other commit pushed after the
-   approval, such as a review fix, needs MP's approval again before the merge.
+   rebase it onto `origin/main` and resolve the conflicts first.
+   Run the push preflight, then push with a lease pinned to the head you
+   reviewed, so a newer push to the branch makes the push fail instead of
+   being overwritten:
+   `git push --force-with-lease=refs/heads/<branch>:<reviewed sha> origin HEAD:refs/heads/<branch>`.
+   Let the checks run on the new head. MP's approval covers the rebase.
+   Any other commit pushed after the approval, such as a review fix, needs
+   MP's approval again before the merge.
    Then, with every review thread resolved and the checks green, run the
    `pr-ready` lane on the final head with the upstream unset so it validates
    `origin/main..HEAD` rather than an empty range, restore the upstream,

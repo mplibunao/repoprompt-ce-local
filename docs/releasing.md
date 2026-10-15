@@ -75,14 +75,19 @@ Before you start:
    ```
 
 5. On pass, with `main` pushed at the promoted commit, tag the build and publish the
-   receipt:
+   receipt. The push preflight checks branches, not tags, and refuses a detached `HEAD`, so
+   before pushing the tag, run the commit preflight from the main checkout for the guardrails
+   and the remote allowlist, and confirm the promoted commit is on `origin/main`:
 
    ```bash
-   git tag -a local/v1.4.0-b38 -m "Local promotion: build 38"
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
+   git merge-base --is-ancestor <promoted commit> origin/main
+   git tag -a local/v1.4.0-b38 -m "Local promotion: build 38" <promoted commit>
    git push origin local/v1.4.0-b38
    gh release create local/v1.4.0-b38 \
      --repo mplibunao/repoprompt-ce-local \
      --verify-tag \
+     --title "RepoPrompt CE 1.4.0 build 38 (local)" \
      --notes-file <receipt>
    ```
 
@@ -265,12 +270,26 @@ sessions started with `rpce-cli-debug … agent_run`, each making at least one m
 a RepoPrompt tool call, whether the agent running the checklist is in RepoPrompt Agent Mode,
 Claude Code, or Codex.
 
+Production can run its Codex arm the same way. Start a session with
+`"$CLI" -w "$W1" -t "$T1" -c agent_run` and a `codexExec` model, and tell it to make the `$W1`
+selection, roots, Context Builder, and Oracle rows through its own RepoPrompt tools. Without
+`-t`, the session starts from the window's active tab instead of the background tab `$T1`
+described below. The operator then runs only the
+remaining rows with `$CLI`: the agent starts, the steer, the worktree run, and
+`list_sessions`. The session's transcript from
+`"$CLI" -w "$W1" -c agent_manage -j '{"op":"get_log","session_id":"<id>"}'` lists each of its
+calls as a `tool_call` entry, which is the evidence the receipt cites.
+
 Run against what production already has open; don't create workspaces, windows, or
 worktrees for acceptance. `$W1` is a window from the first arm. `$FILE` is a file in that
-window's workspace, and `$WT` is the path of any existing linked worktree of it. Select in a
-tab you can change, not one in active use; `$T1` is that tab's `context_id` from
-`"$CLI" -w "$W1" -c bind_context -j '{"op":"list"}'`. The two `$W2` lines run only when a
-second window is already open; otherwise the receipt records them as not run.
+window's workspace, and `$WT` is the path of any existing linked worktree of it. Select in
+background compose tabs made for the arms, so no tab in use changes:
+`"$CLI" -w "$W1" -c manage_workspaces -j '{"action":"create_tab","name":"acceptance"}'`
+creates one, and `$T1` is the `context_id` in its reply, which is also the tab's ID. The two
+`$W2` lines run only when a second window is already open; otherwise the receipt records them
+as not run. When they run, create `$T2` the same way with `-w "$W2"`. After the arms, close
+each tab in its own window with `{"action":"close_tab","tab":"<tab ID>"}`. Close them by ID
+rather than name, because Context Builder renames the tab it runs in.
 
 The Codex and Claude Code arms use `codexExec:gpt-6-luna-low` and
 `claudeCode:haiku:low`. Update these when a provider retires a model. If
@@ -291,9 +310,9 @@ Every arm must pass:
 ```bash
 "$CLI" -e 'windows'                                                              # window IDs
 "$CLI" -w "$W1" -t "$T1" -c manage_selection -j '{"op":"set","paths":["'"$FILE"'"]}'
-"$CLI" -w "$W2" -c manage_selection -j '{"op":"set","paths":["<another file>"]}'
+"$CLI" -w "$W2" -t "$T2" -c manage_selection -j '{"op":"set","paths":["<another file>"]}'
 "$CLI" -w "$W1" -t "$T1" -c manage_selection -j '{"op":"get","view":"files"}'     # still $FILE only
-"$CLI" -w "$W2" -c manage_selection -j '{"op":"get","view":"files"}'              # only the $W2 file
+"$CLI" -w "$W2" -t "$T2" -c manage_selection -j '{"op":"get","view":"files"}'     # only the $W2 file
 "$CLI" -w "$W1" -t "$T1" -c context_builder -j '{"instructions":"Reply with the selected file and its root.","response_type":"question"}' # names $FILE, never the $W2 file
 "$CLI" -w "$W1" -t "$T1" -c oracle_send -j '{"message":"Reply ORACLE_OK and identify the selected root."}' # terminal ORACLE_OK, reusable chat_id
 "$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"codexExec:gpt-6-luna-low","message":"Reply CODEX_OK.","detach":true}'
@@ -314,9 +333,15 @@ another Codex identifier or retry later. It is never a pass. A refusal naming
 any other model is a RepoPrompt failure to investigate.
 
 One arm stays outside the script: quit production and relaunch it, then confirm the
-long-running agent processes and their MCP descendants are gone and a new run starts.
-Quitting production needs MP's explicit approval immediately before it, so run this arm last
-and only once approved; a release candidate quits the debug app, which needs no approval.
+long-running agent processes and their MCP descendants are gone and a new run starts. Before
+the quit, start a Codex agent that calls `get_file_tree` with type `roots` and then runs
+`sleep 300` through its shell. Once the `sleep` process exists, record the production app's
+process ID and every descendant. After the quit, every recorded process must be gone. After the
+relaunch, a fresh Codex session's roots query must complete. The sleeping agent's session still
+shows `running` after the relaunch, with an expired handle and no processes. That marker isn't
+a failure. Quitting production needs MP's explicit approval
+immediately before it, so run this arm last and only once approved; a release candidate quits
+the debug app, which needs no approval.
 
 ## KeyboardShortcuts resource lookup workaround
 
