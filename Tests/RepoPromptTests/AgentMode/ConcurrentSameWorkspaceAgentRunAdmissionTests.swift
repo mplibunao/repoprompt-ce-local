@@ -28,18 +28,10 @@ import XCTest
         }
 
         func testInitialDefaultPersistenceCompletesBeforeActivation() async throws {
-            let container = try makeTemporaryDirectory(named: "DefaultPersistenceOrdering")
-            let authorityRoot = container.appendingPathComponent("state", isDirectory: true)
-            try FileManager.default.createDirectory(at: authorityRoot, withIntermediateDirectories: true)
-            let storageOverride = AdmissionWorkspaceStorageOverride(authorityRoot: authorityRoot)
-            let runtime = MCPDomainRuntime(configuration: .init(
-                mode: .app,
-                profileIdentifier: "default-persistence-ordering",
-                storageDirectory: authorityRoot,
-                eventDirectory: authorityRoot.appendingPathComponent("events", isDirectory: true),
-                temporaryDirectory: authorityRoot.appendingPathComponent("tmp", isDirectory: true),
-                externalReloadInterval: nil
-            ))
+            let (_, storageOverride, runtime) = try makeIsolatedRuntime(
+                container: makeTemporaryDirectory(named: "DefaultPersistenceOrdering"),
+                profileIdentifier: "default-persistence-ordering"
+            )
             try await runtime.start()
 
             let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
@@ -564,12 +556,39 @@ import XCTest
             let providerCount = await recorder.count()
             XCTAssertEqual(providerCount, 0)
             XCTAssertEqual(coordinator.snapshot().provisionalSessionCount, provisionalCountBefore)
+            XCTAssertFalse(manager.workspaces.contains { $0.id == fixture.workspaceID })
             let canonicalAfterValue = await fixture.runtime.workspaceStore
                 .canonicalWorkspaceSnapshot(fixture.workspaceID)
             let canonicalAfter = try XCTUnwrap(canonicalAfterValue)
+            let canonicalModelAfter = try JSONDecoder().decode(
+                WorkspaceModel.self,
+                from: canonicalAfter.document.documentBytes
+            )
+            // A save scheduled before the removal can still rewrite chat selection, expanded folders,
+            // or save timestamps. Those writes are unrelated to admission, so compare only the persisted
+            // agent identity the refusal must leave unchanged.
+            XCTAssertEqual(canonicalModelAfter.id, canonicalModelBefore.id)
+            XCTAssertEqual(canonicalModelAfter.composeTabs.map(\.id), canonicalModelBefore.composeTabs.map(\.id))
             XCTAssertEqual(
-                try JSONDecoder().decode(WorkspaceModel.self, from: canonicalAfter.document.documentBytes),
-                canonicalModelBefore
+                canonicalModelAfter.composeTabs.map(\.activeAgentSessionID),
+                canonicalModelBefore.composeTabs.map(\.activeAgentSessionID)
+            )
+            XCTAssertEqual(
+                canonicalModelAfter.composeTabs.map(\.isPinned),
+                canonicalModelBefore.composeTabs.map(\.isPinned)
+            )
+            XCTAssertEqual(canonicalModelAfter.activeComposeTabID, canonicalModelBefore.activeComposeTabID)
+            XCTAssertEqual(
+                canonicalModelAfter.stashedTabs.map(\.tab.id),
+                canonicalModelBefore.stashedTabs.map(\.tab.id)
+            )
+            XCTAssertEqual(
+                canonicalModelAfter.stashedTabs.map(\.tab.activeAgentSessionID),
+                canonicalModelBefore.stashedTabs.map(\.tab.activeAgentSessionID)
+            )
+            XCTAssertEqual(
+                canonicalModelAfter.stashedTabs.map(\.tab.isPinned),
+                canonicalModelBefore.stashedTabs.map(\.tab.isPinned)
             )
         }
 
@@ -748,18 +767,57 @@ import XCTest
         }
 
         func testCanonicalAdmissionRefreshRejectsDuplicateTabIDWithoutMutationOrDispatch() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup { await fixture.cleanup() }
-            let manager = fixture.window.workspaceManager
-            let workspaceBefore = try XCTUnwrap(manager.workspace(withID: fixture.workspaceID))
-            let canonicalValue = await fixture.runtime.workspaceStore
-                .canonicalWorkspaceSnapshot(fixture.workspaceID)
+            let (_, storageOverride, runtime) = try makeIsolatedRuntime(
+                container: makeTemporaryDirectory(named: "MalformedCanonicalIdentity"),
+                profileIdentifier: "malformed-canonical-admission"
+            )
+            let authority = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -882)
+            // The full-window fixture runs Oracle chat-session writers and switches to the workspace,
+            // which schedules saves this test never awaits, so the whole-model comparison below would
+            // depend on their timing. The manager-only fixture has no Oracle and never activates the
+            // target, so background saves, which resolve the active workspace, cannot reach it.
+            let manager = makeManagerFixture(
+                coordinator: WorkspaceAgentAdmissionCoordinator(),
+                domainWorkspaceAuthorityClient: authority
+            ).manager
+            trackCleanup {
+                manager.prepareForWindowClose()
+                _ = await runtime.shutdown()
+                storageOverride.restore()
+            }
+            try await runtime.start()
+
+            var tab = ComposeTabState(name: "Admission")
+            tab.activeChatSessionID = UUID()
+            let workspace = WorkspaceModel(
+                name: "Malformed canonical admission",
+                repoPaths: [],
+                composeTabs: [tab],
+                activeComposeTabID: tab.id
+            )
+            let workspaceFileURL = manager.workspaceFileURL(for: workspace)
+            try await createCommittedWorkspace(workspace, authority: authority, fileURL: workspaceFileURL)
+            let canonicalValue = await runtime.workspaceStore.canonicalWorkspaceSnapshot(workspace.id)
             let canonicalSnapshot = try XCTUnwrap(canonicalValue)
+            // Admission refuses an unhealthy or unsaved snapshot before it checks tab identity, so the
+            // malformed copy below must inherit a writable, saved state.
+            guard canonicalSnapshot.health == .writable, canonicalSnapshot.revisions.dirtyRevision == nil else {
+                throw AdmissionTestError.fixtureSetup("canonical workspace was not writable and saved")
+            }
+            manager.workspaces = [workspace]
+            guard manager.activeWorkspaceID != workspace.id else {
+                throw AdmissionTestError.fixtureSetup("target workspace became active during setup")
+            }
+            let workspaceBefore = try XCTUnwrap(manager.workspace(withID: workspace.id))
             var malformed = try JSONDecoder().decode(
                 WorkspaceModel.self,
                 from: canonicalSnapshot.document.documentBytes
             )
-            let duplicate = try XCTUnwrap(malformed.composeTabs.first)
+            // The canonical tab carries an agent identity the local tab lacks, so a refresh that wrote
+            // to the local model before refusing would fail the whole-model comparison below.
+            var duplicate = try XCTUnwrap(malformed.composeTabs.first)
+            duplicate.activeAgentSessionID = UUID()
+            malformed.composeTabs[0] = duplicate
             malformed.stashedTabs.append(StashedTab(tab: duplicate))
             let malformedSnapshot = try WorkspaceManagerViewModel.replacingWorkspaceProjectionForTesting(
                 malformed,
@@ -771,7 +829,7 @@ import XCTest
 
             do {
                 try await manager.withAgentSessionAdmission(
-                    workspaceID: fixture.workspaceID,
+                    workspaceID: workspace.id,
                     admissionID: UUID(),
                     refreshCanonicalState: true
                 ) {
@@ -788,7 +846,11 @@ import XCTest
             }
 
             XCTAssertFalse(operationRan)
-            XCTAssertEqual(manager.workspace(withID: fixture.workspaceID), workspaceBefore)
+            XCTAssertEqual(manager.workspace(withID: workspace.id), workspaceBefore)
+            XCTAssertNil(
+                manager.activeWorkspaceID,
+                "A workspace-list reload from another manager activated a workspace; that is not an admission mutation."
+            )
         }
 
         func testCanonicalAdmissionRefreshReportsLocalComposeAndStashDuplicateAsLocalState() async throws {
@@ -2008,7 +2070,8 @@ import XCTest
         }
 
         private func makeManagerFixture(
-            coordinator: WorkspaceAgentAdmissionCoordinator
+            coordinator: WorkspaceAgentAdmissionCoordinator,
+            domainWorkspaceAuthorityClient: DomainWorkspaceAuthorityClient? = nil
         ) -> (
             manager: WorkspaceManagerViewModel,
             prompt: PromptViewModel
@@ -2033,6 +2096,7 @@ import XCTest
             let manager = WorkspaceManagerViewModel(
                 fileManager: fileManager,
                 promptViewModel: prompt,
+                domainWorkspaceAuthorityClient: domainWorkspaceAuthorityClient,
                 workspaceAgentAdmissionCoordinator: coordinator,
                 performInitialWorkspaceActivation: false
             )
@@ -2226,14 +2290,14 @@ import XCTest
                 activeComposeTabID: originalTab.id
             )
             let workspaceFileURL = window.workspaceManager.workspaceFileURL(for: workspace)
-            let creation = try await DomainWorkspaceAuthorityClient(
-                store: runtime.workspaceStore,
-                windowID: window.windowID
-            ).create(workspace, fileURL: workspaceFileURL)
-            guard creation.disposition == .applied else {
-                throw AdmissionTestError.fixtureSetup("explicit workspace creation did not commit")
-            }
-            await WorkspaceManagerViewModel.WorkspaceDiskWriter.shared.flush(url: workspaceFileURL)
+            try await createCommittedWorkspace(
+                workspace,
+                authority: DomainWorkspaceAuthorityClient(
+                    store: runtime.workspaceStore,
+                    windowID: window.windowID
+                ),
+                fileURL: workspaceFileURL
+            )
             // A sibling window can publish a catalog projection while this synthetic workspace is
             // being created, so establish the local projection from the workspace just committed.
             if !window.workspaceManager.workspaces.contains(where: { $0.id == workspace.id }) {
@@ -2300,17 +2364,10 @@ import XCTest
                 "ConcurrentSameWorkspaceAgentRunAdmissionTests-Durable-\(UUID().uuidString)",
                 isDirectory: true
             )
-            let authorityRoot = container.appendingPathComponent("state", isDirectory: true)
-            try FileManager.default.createDirectory(at: authorityRoot, withIntermediateDirectories: true)
-            let storageOverride = AdmissionWorkspaceStorageOverride(authorityRoot: authorityRoot)
-            let runtime = MCPDomainRuntime(configuration: .init(
-                mode: .app,
-                profileIdentifier: "same-workspace-admission",
-                storageDirectory: authorityRoot,
-                eventDirectory: authorityRoot.appendingPathComponent("events", isDirectory: true),
-                temporaryDirectory: authorityRoot.appendingPathComponent("tmp", isDirectory: true),
-                externalReloadInterval: nil
-            ))
+            let (authorityRoot, storageOverride, runtime) = try makeIsolatedRuntime(
+                container: container,
+                profileIdentifier: "same-workspace-admission"
+            )
             do {
                 try await runtime.start()
             } catch {
@@ -2333,14 +2390,14 @@ import XCTest
                     activeComposeTabID: originalTab.id
                 )
                 let workspaceFileURL = window.workspaceManager.workspaceFileURL(for: workspace)
-                let creation = try await DomainWorkspaceAuthorityClient(
-                    store: runtime.workspaceStore,
-                    windowID: window.windowID
-                ).create(workspace, fileURL: workspaceFileURL)
-                guard creation.disposition == .applied else {
-                    throw AdmissionTestError.fixtureSetup("explicit workspace creation did not commit")
-                }
-                await WorkspaceManagerViewModel.WorkspaceDiskWriter.shared.flush(url: workspaceFileURL)
+                try await createCommittedWorkspace(
+                    workspace,
+                    authority: DomainWorkspaceAuthorityClient(
+                        store: runtime.workspaceStore,
+                        windowID: window.windowID
+                    ),
+                    fileURL: workspaceFileURL
+                )
                 // Catalog projection and fixture creation are independent publications; the test
                 // window must expose the workspace that the authority has already committed.
                 if !window.workspaceManager.workspaces.contains(where: { $0.id == workspace.id }) {
@@ -2455,6 +2512,46 @@ import XCTest
             await closeWindowAndRuntime()
             storageOverride.restore()
         }
+    }
+
+    /// Builds a runtime whose storage directory is `container/state`, without starting it, and points
+    /// workspace storage at `container/state/Workspaces`. Callers start the runtime themselves because
+    /// each registers its cleanup at a different point. Keep the returned override alive until cleanup:
+    /// its deinit restores the storage setting and deletes `container`.
+    @MainActor
+    private func makeIsolatedRuntime(
+        container: URL,
+        profileIdentifier: String
+    ) throws -> (
+        authorityRoot: URL,
+        storageOverride: AdmissionWorkspaceStorageOverride,
+        runtime: MCPDomainRuntime
+    ) {
+        let authorityRoot = container.appendingPathComponent("state", isDirectory: true)
+        try FileManager.default.createDirectory(at: authorityRoot, withIntermediateDirectories: true)
+        let storageOverride = AdmissionWorkspaceStorageOverride(authorityRoot: authorityRoot)
+        let runtime = MCPDomainRuntime(configuration: .init(
+            mode: .app,
+            profileIdentifier: profileIdentifier,
+            storageDirectory: authorityRoot,
+            eventDirectory: authorityRoot.appendingPathComponent("events", isDirectory: true),
+            temporaryDirectory: authorityRoot.appendingPathComponent("tmp", isDirectory: true),
+            externalReloadInterval: nil
+        ))
+        return (authorityRoot, storageOverride, runtime)
+    }
+
+    @MainActor
+    private func createCommittedWorkspace(
+        _ workspace: WorkspaceModel,
+        authority: DomainWorkspaceAuthorityClient,
+        fileURL: URL
+    ) async throws {
+        let creation = try await authority.create(workspace, fileURL: fileURL)
+        guard creation.disposition == .applied else {
+            throw AdmissionTestError.fixtureSetup("explicit workspace creation did not commit")
+        }
+        await WorkspaceManagerViewModel.WorkspaceDiskWriter.shared.flush(url: fileURL)
     }
 
     @MainActor
