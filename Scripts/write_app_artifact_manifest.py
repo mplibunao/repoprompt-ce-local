@@ -150,7 +150,7 @@ def collect_manifest(app: Path, expected_architectures: list[str] | None) -> dic
         fail("Info.plist is missing CFBundleExecutable")
     signing_mode = info.get("RepoPromptSigningMode")
     allow_adhoc_without_requirement = signing_mode == "release-candidate-adhoc"
-    require_leaf_certificate = signing_mode in {"developer-id", "local-self-signed"}
+    require_leaf_certificate = signing_mode in {"developer-id", "local-apple-development"}
     # Record only whether telemetry is enabled, never the DSN value itself (it is secret).
     sentry_dsn = info.get("RepoPromptSentryDSN")
     telemetry_enabled = isinstance(sentry_dsn, str) and bool(sentry_dsn.strip())

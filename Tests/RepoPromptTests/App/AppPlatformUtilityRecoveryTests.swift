@@ -41,40 +41,40 @@ final class AppPlatformUtilityRecoveryTests: XCTestCase {
         )
     }
 
-    func testSparkleUpdaterStartDecisionDisablesUpdatesForLocallySelfSignedBuilds() {
-        let selfSigned = SparkleUpdaterManager.selfSignedUpdatesDisabledMessage
-        XCTAssertFalse(selfSigned.localizedCaseInsensitiveContains("integrity"))
+    func testSparkleUpdaterStartDecisionDisablesUpdatesForLocalBuilds() {
+        let localBuild = SparkleUpdaterManager.localBuildUpdatesDisabledMessage
+        XCTAssertFalse(localBuild.localizedCaseInsensitiveContains("integrity"))
 
         XCTAssertEqual(
             SparkleUpdaterManager.startDecision(
                 sparkleConfigurationValid: true,
                 updaterStarted: false,
                 identityMigrationBlockedMessage: nil,
-                signingModeMarker: "local-self-signed"
+                signingModeMarker: "local-apple-development"
             ),
-            .selfSignedDisabled(selfSigned)
+            .localBuildDisabled(localBuild)
         )
-        // The self-signed build never receives appcast updates, so its message wins over the
+        // The local build never receives appcast updates, so its message wins over the
         // transient identity-migration block.
         XCTAssertEqual(
             SparkleUpdaterManager.startDecision(
                 sparkleConfigurationValid: true,
                 updaterStarted: false,
                 identityMigrationBlockedMessage: "migration blocked",
-                signingModeMarker: " local-self-signed\n"
+                signingModeMarker: " local-apple-development\n"
             ),
-            .selfSignedDisabled(selfSigned)
+            .localBuildDisabled(localBuild)
         )
         XCTAssertEqual(
             SparkleUpdaterManager.startDecision(
                 sparkleConfigurationValid: true,
                 updaterStarted: true,
                 identityMigrationBlockedMessage: nil,
-                signingModeMarker: "local-self-signed"
+                signingModeMarker: "local-apple-development"
             ),
             .ignore
         )
-        for marker in [nil, "", "developer-id", "successor-developer-id", "debug-apple-development", "local-self-signed-x"] as [String?] {
+        for marker in [nil, "", "developer-id", "successor-developer-id", "debug-apple-development", "local-apple-development-x"] as [String?] {
             XCTAssertEqual(
                 SparkleUpdaterManager.startDecision(
                     sparkleConfigurationValid: true,

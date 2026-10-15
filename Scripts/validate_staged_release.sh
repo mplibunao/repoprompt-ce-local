@@ -248,8 +248,8 @@ for key, value in {
     "__BUILD_NUMBER__": build,
     "__DEBUG_SECURE_STORAGE_BACKEND__": "alternate-in-memory",
     "__SIGNING_MODE__": "release-candidate-adhoc",
-    "__LOCAL_SIGNING_CERTIFICATE_SHA256__": "",
-    "__LOCAL_SECURE_STORAGE_GENERATION__": "",
+    "__LOCAL_SIGNING_TEAM_IDENTIFIER__": "",
+    "__LOCAL_KEYCHAIN_SERVICE__": "",
     "__IDENTITY_MIGRATION_PHASE__": identity_migration_phase,
     "<string>__WORKING_JOURNAL_SCHEMA_VERSION__</string>": (
         f"<integer>{working_journal_schema_version}</integer>"

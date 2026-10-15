@@ -61,9 +61,10 @@ IDENTITY_ARCHIVED=0
 rm -f "$ARCHIVE_DIR/$IDENTITY_ARCHIVE_NAME" "$ARCHIVE_DIR/$IDENTITY_ARCHIVE_NAME.sha256"
 if [[ -f "$LOCAL_SIGNING_IDENTITY_REGISTRY_PATH" ]]; then
     step "Archiving local signing identity record"
-    # The record is public identity metadata (certificate name, leaf SHA-256, service
-    # generation) and the private key stays in the Keychain, so it is copied whole. Refuse
-    # the copy if a future schema ever carries key material.
+    # The record is public identity metadata (the signing Team ID and Keychain service name,
+    # or for a self-signed install the certificate name, leaf SHA-256, and service generation)
+    # and the private key stays in the Keychain, so it is copied whole. Refuse the copy if a
+    # future schema ever carries key material.
     IDENTITY_PATH="$LOCAL_SIGNING_IDENTITY_REGISTRY_PATH" python3 - <<'PY'
 import json
 import os

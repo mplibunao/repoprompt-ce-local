@@ -171,7 +171,7 @@ private extension RuntimeSecureStorageDomain {
         switch self {
         case .officialDeveloperID: "legacy-official"
         case .successorOfficialDeveloperID: "successor-official"
-        case .localSelfSigned: "local-self-signed"
+        case .localAppleDevelopment: "local-apple-development"
         case .appleDevelopmentDebug: "apple-development"
         case .ephemeral: "ephemeral"
         }

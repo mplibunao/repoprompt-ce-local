@@ -28,7 +28,7 @@ Telemetry can send data only when all of the following are true:
 - **Share crash reports and diagnostics** is enabled in Settings,
 - `REPOPROMPT_TELEMETRY_DISABLED` is not set to a truthy value.
 
-Telemetry is normally inactive for DEBUG builds, self-compiled/local CE builds, locally self-signed
+Telemetry is normally inactive for DEBUG builds, self-compiled/local CE builds, locally signed
 production builds, release-candidate ad-hoc builds, UI-test launches, and stress-test launches.
 Local DEBUG builds may use `REPOPROMPT_SENTRY_DSN` only for integration testing; official release
 telemetry uses the signed bundle's `RepoPromptSentryDSN` instead.

@@ -4,7 +4,7 @@ enum RuntimeCodeSigningDomain: Hashable {
     case developerID
     case successorDeveloperID
     case appleDevelopmentDebug
-    case localSelfSigned
+    case localAppleDevelopment
 }
 
 enum RuntimeCodeSigningFailureCategory: Equatable {
@@ -29,14 +29,12 @@ struct RuntimeCodeSigningInfo: Equatable {
     let teamIdentifier: String?
     let signingFlags: UInt32?
     let isAdHoc: Bool
-    let leafCertificateSHA256: String?
     let validationResult: RuntimeCodeSigningValidationResult
 
     static func synthetic(
         codeIdentifier: String? = nil,
         teamIdentifier: String? = nil,
         isAdHoc: Bool = false,
-        leafCertificateSHA256: String? = nil,
         validatedDomains: Set<RuntimeCodeSigningDomain> = [],
         failure: RuntimeCodeSigningFailureCategory? = nil
     ) -> RuntimeCodeSigningInfo {
@@ -45,7 +43,6 @@ struct RuntimeCodeSigningInfo: Equatable {
             teamIdentifier: teamIdentifier,
             signingFlags: isAdHoc ? 0x2 : 0,
             isAdHoc: isAdHoc,
-            leafCertificateSHA256: leafCertificateSHA256,
             validationResult: failure.map(RuntimeCodeSigningValidationResult.invalid)
                 ?? .valid(domains: validatedDomains)
         )
@@ -55,7 +52,7 @@ struct RuntimeCodeSigningInfo: Equatable {
 enum RuntimeSecureStorageDomain: Equatable {
     case officialDeveloperID
     case successorOfficialDeveloperID
-    case localSelfSigned
+    case localAppleDevelopment
     case appleDevelopmentDebug
     case ephemeral
 }
@@ -88,19 +85,16 @@ enum RuntimeLocalSigningContext: Equatable {
 struct RuntimeSecureStorageDecision: Equatable {
     let domain: RuntimeSecureStorageDomain
     let rejectionReason: RuntimeSecureStorageRejectionReason?
-    let localCertificateFingerprint: String?
-    let localServiceGeneration: Int?
+    let localKeychainService: String?
 
     init(
         domain: RuntimeSecureStorageDomain,
         rejectionReason: RuntimeSecureStorageRejectionReason?,
-        localCertificateFingerprint: String? = nil,
-        localServiceGeneration: Int? = nil
+        localKeychainService: String? = nil
     ) {
         self.domain = domain
         self.rejectionReason = rejectionReason
-        self.localCertificateFingerprint = localCertificateFingerprint
-        self.localServiceGeneration = localServiceGeneration
+        self.localKeychainService = localKeychainService
     }
 }
 
@@ -110,7 +104,6 @@ enum RuntimeCodeSigningPolicy {
     static let signingTeamIdentifier = "648A27MST5"
     static let successorDeveloperIDBundleIdentifier = "com.repoprompt.ce"
     static let successorSigningTeamIdentifier = "69N6K965SF"
-    static let localSelfSignedCertificateName = "RepoPrompt CE Local Self-Signed Code Signing"
 
     static let developerIDRequirement =
         "anchor apple generic and identifier \"\(developerIDBundleIdentifier)\" and certificate leaf[subject.OU] = \"\(signingTeamIdentifier)\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
@@ -121,10 +114,18 @@ enum RuntimeCodeSigningPolicy {
     static let successorDeveloperIDRequirement =
         "anchor apple generic and identifier \"\(successorDeveloperIDBundleIdentifier)\" and certificate leaf[subject.OU] = \"\(successorSigningTeamIdentifier)\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
 
+    /// A local production build is signed with the installing user's Apple Development
+    /// certificate. Anchoring on the Team ID rather than one certificate keeps the build's
+    /// identity, and the Keychain partition macOS assigns it, the same across builds and
+    /// certificate renewals.
+    static func localAppleDevelopmentRequirement(teamIdentifier: String) -> String {
+        "anchor apple generic and identifier \"\(developerIDBundleIdentifier)\" and certificate leaf[subject.OU] = \"\(teamIdentifier)\" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists"
+    }
+
     private static let signingModePlistKey = "RepoPromptSigningMode"
     private static let debugStoragePlistKey = "RepoPromptDebugSecureStorageBackend"
-    private static let localSigningFingerprintPlistKey = "RepoPromptLocalSigningCertificateSHA256"
-    private static let localServiceGenerationPlistKey = "RepoPromptLocalSecureStorageGeneration"
+    private static let localSigningTeamPlistKey = "RepoPromptLocalSigningTeamIdentifier"
+    private static let localKeychainServicePlistKey = "RepoPromptLocalKeychainService"
 
     static func currentLocalSigningContext(
         bundle: Bundle = .main,
@@ -134,21 +135,20 @@ enum RuntimeCodeSigningPolicy {
             return .invalid(.localIdentityRegistryUnavailable)
         }
         return localSigningContext(
-            bundleFingerprint: bundle.object(forInfoDictionaryKey: localSigningFingerprintPlistKey) as? String,
-            bundleGenerationMarker: bundle.object(forInfoDictionaryKey: localServiceGenerationPlistKey) as? String,
+            bundleTeamIdentifier: bundle.object(forInfoDictionaryKey: localSigningTeamPlistKey) as? String,
+            bundleKeychainService: bundle.object(forInfoDictionaryKey: localKeychainServicePlistKey) as? String,
             registryResult: LocalSigningIdentityRegistry.load(from: registryURL, fileManager: fileManager)
         )
     }
 
     static func localSigningContext(
-        bundleFingerprint: String?,
-        bundleGenerationMarker: String?,
+        bundleTeamIdentifier: String?,
+        bundleKeychainService: String?,
         registryResult: Result<LocalSigningIdentityRecord, LocalSigningIdentityRegistryError>
     ) -> RuntimeLocalSigningContext {
-        guard let bundleFingerprint = LocalSigningIdentityRegistry.normalizedFingerprint(bundleFingerprint ?? ""),
-              let generationMarker = normalized(bundleGenerationMarker),
-              let bundleGeneration = Int(generationMarker),
-              bundleGeneration > 0
+        guard let bundleTeamIdentifier = LocalSigningIdentityRegistry.normalizedTeamIdentifier(bundleTeamIdentifier ?? ""),
+              let bundleKeychainService = bundleKeychainService?.trimmingCharacters(in: .whitespacesAndNewlines),
+              KeychainService.isLocalProductionServiceName(bundleKeychainService)
         else {
             return .invalid(.localIdentityMetadataUnavailable)
         }
@@ -156,10 +156,10 @@ enum RuntimeCodeSigningPolicy {
             return .invalid(.localIdentityRegistryUnavailable)
         }
         let expectation = RuntimeLocalSigningExpectation(
-            bundleLeafCertificateSHA256: bundleFingerprint,
-            registeredLeafCertificateSHA256: record.certificateSHA256,
-            bundleServiceGeneration: bundleGeneration,
-            registeredServiceGeneration: record.serviceGeneration
+            bundleTeamIdentifier: bundleTeamIdentifier,
+            registeredTeamIdentifier: record.teamIdentifier,
+            bundleKeychainService: bundleKeychainService,
+            registeredKeychainService: record.keychainService
         )
         guard expectation.validatedIdentity != nil else {
             return .invalid(.localIdentityContinuityMismatch)
@@ -212,7 +212,7 @@ enum RuntimeCodeSigningPolicy {
                 return ephemeral(.markerSignatureMismatch)
             }
             return RuntimeSecureStorageDecision(domain: .successorOfficialDeveloperID, rejectionReason: nil)
-        case "local-self-signed":
+        case "local-apple-development":
             guard let localSigningContext else {
                 return ephemeral(.localIdentityRegistryUnavailable)
             }
@@ -227,17 +227,16 @@ enum RuntimeCodeSigningPolicy {
             }
             guard matches(
                 signingInfo,
-                domain: .localSelfSigned,
+                domain: .localAppleDevelopment,
                 identifier: developerIDBundleIdentifier,
-                teamIdentifier: nil
+                teamIdentifier: validatedIdentity.teamIdentifier
             ) else {
                 return ephemeral(.markerSignatureMismatch)
             }
             return RuntimeSecureStorageDecision(
-                domain: .localSelfSigned,
+                domain: .localAppleDevelopment,
                 rejectionReason: nil,
-                localCertificateFingerprint: validatedIdentity.fingerprint,
-                localServiceGeneration: validatedIdentity.serviceGeneration
+                localKeychainService: validatedIdentity.keychainService
             )
         case "release-candidate-adhoc":
             return ephemeral(.releaseCandidate)

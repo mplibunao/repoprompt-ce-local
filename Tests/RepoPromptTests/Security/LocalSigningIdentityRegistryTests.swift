@@ -3,21 +3,15 @@ import Darwin
 import XCTest
 
 final class LocalSigningIdentityRegistryTests: XCTestCase {
-    private let fingerprint = String(repeating: "AB", count: 32)
+    private let team = "ABCDE12345"
+    private let service = "com.pvncher.repoprompt.ce.local-apple-development.ABCDE12345.keychain.v7"
 
     func testLoadsOwnerOnlyVersionedRecord() throws {
-        let url = try writeRegistry()
+        let url = try writeRegistry(LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: team, keychainService: service))
 
         XCTAssertEqual(
             LocalSigningIdentityRegistry.load(from: url),
-            .success(
-                LocalSigningIdentityRecord(
-                    schemaVersion: 1,
-                    certificateName: RuntimeCodeSigningPolicy.localSelfSignedCertificateName,
-                    certificateSHA256: fingerprint,
-                    serviceGeneration: 7
-                )
-            )
+            .success(LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: team, keychainService: service))
         )
     }
 
@@ -26,7 +20,10 @@ final class LocalSigningIdentityRegistryTests: XCTestCase {
         let missing = directory.appendingPathComponent("missing.json")
         XCTAssertEqual(LocalSigningIdentityRegistry.load(from: missing), .failure(.missing))
 
-        let valid = try writeRegistry(in: directory)
+        let valid = try writeRegistry(
+            LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: team, keychainService: service),
+            in: directory
+        )
         XCTAssertEqual(
             LocalSigningIdentityRegistry.load(from: valid, expectedOwnerID: getuid() + 1),
             .failure(.wrongOwner)
@@ -40,64 +37,72 @@ final class LocalSigningIdentityRegistryTests: XCTestCase {
         XCTAssertEqual(LocalSigningIdentityRegistry.load(from: valid), .failure(.invalidRecord))
     }
 
-    func testSigningContextRequiresMatchingSignedMetadataAndRegistryGeneration() {
-        let record = LocalSigningIdentityRecord(
-            schemaVersion: 1,
-            certificateName: RuntimeCodeSigningPolicy.localSelfSignedCertificateName,
-            certificateSHA256: fingerprint,
-            serviceGeneration: 7
-        )
+    func testRejectsSchemaOneAndRecordsThatRouteOutsideLocalServices() throws {
+        let directory = try temporaryDirectory()
+        // A self-signed build's record; the installer rewrites it before a team-signed build runs.
+        let schemaOne = directory.appendingPathComponent("schema-one.json")
+        try Data(
+            #"{"schemaVersion":1,"certificateName":"RepoPrompt CE Local Self-Signed Code Signing","certificateSHA256":"\#(String(repeating: "A", count: 64))","serviceGeneration":7}"#.utf8
+        ).write(to: schemaOne)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: schemaOne.path)
+        XCTAssertEqual(LocalSigningIdentityRegistry.load(from: schemaOne), .failure(.invalidRecord))
+
+        for record in [
+            LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: "abcde12345", keychainService: service),
+            LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: team, keychainService: KeychainService.officialV2ServiceName)
+        ] {
+            let url = try writeRegistry(record, in: directory)
+            XCTAssertEqual(LocalSigningIdentityRegistry.load(from: url), .failure(.invalidRecord), "\(record)")
+        }
+    }
+
+    func testSigningContextRequiresMatchingSignedMetadataAndRegistry() {
+        let record = LocalSigningIdentityRecord(schemaVersion: 2, teamIdentifier: team, keychainService: service)
 
         XCTAssertEqual(
             RuntimeCodeSigningPolicy.localSigningContext(
-                bundleFingerprint: fingerprint.lowercased(),
-                bundleGenerationMarker: "7",
+                bundleTeamIdentifier: team.lowercased(),
+                bundleKeychainService: service,
                 registryResult: .success(record)
             ),
             .valid(
                 RuntimeLocalSigningExpectation(
-                    bundleLeafCertificateSHA256: fingerprint,
-                    registeredLeafCertificateSHA256: fingerprint,
-                    bundleServiceGeneration: 7,
-                    registeredServiceGeneration: 7
+                    bundleTeamIdentifier: team,
+                    registeredTeamIdentifier: team,
+                    bundleKeychainService: service,
+                    registeredKeychainService: service
                 )
             )
         )
         XCTAssertEqual(
             RuntimeCodeSigningPolicy.localSigningContext(
-                bundleFingerprint: nil,
-                bundleGenerationMarker: "7",
+                bundleTeamIdentifier: nil,
+                bundleKeychainService: service,
                 registryResult: .success(record)
             ),
             .invalid(.localIdentityMetadataUnavailable)
         )
         XCTAssertEqual(
             RuntimeCodeSigningPolicy.localSigningContext(
-                bundleFingerprint: fingerprint,
-                bundleGenerationMarker: "8",
+                bundleTeamIdentifier: team,
+                bundleKeychainService: "com.pvncher.repoprompt.ce.local-apple-development.ABCDE12345.keychain.v8",
                 registryResult: .success(record)
             ),
             .invalid(.localIdentityContinuityMismatch)
         )
         XCTAssertEqual(
             RuntimeCodeSigningPolicy.localSigningContext(
-                bundleFingerprint: fingerprint,
-                bundleGenerationMarker: "7",
+                bundleTeamIdentifier: team,
+                bundleKeychainService: service,
                 registryResult: .failure(.insecurePermissions)
             ),
             .invalid(.localIdentityRegistryUnavailable)
         )
     }
 
-    private func writeRegistry(in directory: URL? = nil) throws -> URL {
+    private func writeRegistry(_ record: LocalSigningIdentityRecord, in directory: URL? = nil) throws -> URL {
         let directory = try directory ?? temporaryDirectory()
         let url = directory.appendingPathComponent("local-signing-identity-v1.json")
-        let record = LocalSigningIdentityRecord(
-            schemaVersion: 1,
-            certificateName: RuntimeCodeSigningPolicy.localSelfSignedCertificateName,
-            certificateSHA256: fingerprint,
-            serviceGeneration: 7
-        )
         let data = try JSONEncoder().encode(record)
         try data.write(to: url)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)

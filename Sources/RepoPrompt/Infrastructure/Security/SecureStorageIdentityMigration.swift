@@ -755,7 +755,7 @@ enum SecureStorageIdentityMigrationBootstrap {
             // The successor identity has no legacy storage fallback: without an
             // authenticated committed bridge it must stay ephemeral and say so.
             activateCommittedBridgeIfPresent(bridgeRequired: true, bundle: bundle)
-        case .localSelfSigned, .appleDevelopmentDebug, .ephemeral:
+        case .localAppleDevelopment, .appleDevelopmentDebug, .ephemeral:
             return
         }
     }

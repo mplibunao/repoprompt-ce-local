@@ -31,35 +31,53 @@ from script_test_support import (  # noqa: E402
 )
 
 ROOT_DIR = SCRIPT_DIR.parent
-PINNED_CERTIFICATE_NAME = "RepoPrompt CE Local Self-Signed Code Signing"
+TEAM_A = "AAAAA11111"
+TEAM_B = "BBBBB22222"
 SHA1_A = "1" * 40
 SHA1_B = "2" * 40
 SHA1_C = "3" * 40
-SHA256_A = "A" * 64
-SHA256_B = "B" * 64
-SHA256_C = "C" * 64
+SHA1_A_RENEWED = "4" * 40
+SELF_SIGNED_SHA256 = "A" * 64
+SERVICE_A = f"com.pvncher.repoprompt.ce.local-apple-development.{TEAM_A}.keychain.v{(1 << 61) + 5}"
+SELF_SIGNED_SERVICE = f"com.pvncher.repoprompt.ce.local-self-signed.{SELF_SIGNED_SHA256.lower()}.keychain.v7"
+FRESH_SERVICE = re.compile(
+    r"^com\.pvncher\.repoprompt\.ce\.local-apple-development\.(?P<team>[0-9A-Z]{10})\.keychain\.v(?P<generation>[0-9]+)$"
+)
 
 
 def certificate(
     sha1: str,
-    sha256: str,
+    team: str,
     *,
     private_key: bool = True,
     expired: bool = False,
-    name: str = PINNED_CERTIFICATE_NAME,
+    not_after: str = "2099-01-01T00:00:00Z",
 ) -> dict[str, Any]:
     return {
-        "certificateName": name,
+        "commonName": f"Apple Development: Fixture Developer ({team[:5]}ZZZZZ)",
+        "teamIdentifier": team,
         "sha1": sha1,
-        "sha256": sha256,
-        "notAfter": "2020-01-01T00:00:00Z" if expired else "2099-01-01T00:00:00Z",
+        "notAfter": "2020-01-01T00:00:00Z" if expired else not_after,
         "hasPrivateKey": private_key,
         "isExpired": expired,
     }
 
 
+def team_registry(team: str, service: str) -> dict[str, Any]:
+    return {"schemaVersion": 2, "teamIdentifier": team, "keychainService": service}
+
+
+def self_signed_registry(fingerprint: str, generation: int) -> dict[str, Any]:
+    return {
+        "schemaVersion": 1,
+        "certificateName": "RepoPrompt CE Local Self-Signed Code Signing",
+        "certificateSHA256": fingerprint,
+        "serviceGeneration": generation,
+    }
+
+
 class LocalProductionIdentityToolTests(unittest.TestCase):
-    def test_command_inventory_parses_all_exact_name_identities_independent_of_output_order(self) -> None:
+    def test_command_inventory_reads_apple_development_identities_independent_of_output_order(self) -> None:
         spec = importlib.util.spec_from_file_location("local_signing_identity", SCRIPT_DIR / "local_signing_identity.py")
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
@@ -71,28 +89,27 @@ class LocalProductionIdentityToolTests(unittest.TestCase):
         pem_a = b"-----BEGIN CERTIFICATE-----\nCERT-A\n-----END CERTIFICATE-----\n"
         pem_without_key = b"-----BEGIN CERTIFICATE-----\nCERT-C\n-----END CERTIFICATE-----\n"
         identity_output = (
-            f'  1) {SHA1_B} "{PINNED_CERTIFICATE_NAME}"\n'
-            f'  2) {SHA1_A} "{PINNED_CERTIFICATE_NAME}"\n'
-            f'  3) {SHA1_C} "{PINNED_CERTIFICATE_NAME} Copy"\n'
+            f'  1) {SHA1_B} "Apple Development: Dev B (B0B0B0B0B0)"\n'
+            f'  2) {SHA1_A} "Apple Development: Dev, A (A0A0A0A0A0)"\n'
+            f'  3) {SHA1_C} "Developer ID Application: Someone Else ({TEAM_A})"\n'
         ).encode()
+        subjects = {
+            "A": rf"subject=UID=A0A0A0A0A0,CN=Apple Development: Dev\, A (A0A0A0A0A0),OU={TEAM_A},O=Dev A,C=US",
+            "B": f"subject=CN=Apple Development: Dev B (B0B0B0B0B0),OU={TEAM_B},O=Dev B,C=US",
+            "C": f"subject=CN=Apple Development: Dev C (C0C0C0C0C0),OU={TEAM_A},O=Dev C,C=US",
+        }
 
         def fake_run_command(arguments: list[str], *, input_data: bytes | None = None) -> bytes:
             if arguments[:2] == ["security", "find-identity"]:
                 return identity_output
             self.assertEqual(arguments[:3], ["openssl", "x509", "-noout"])
             marker = "A" if b"CERT-A" in (input_data or b"") else "B" if b"CERT-B" in (input_data or b"") else "C"
-            values = {
-                "A": (SHA1_A, SHA256_A),
-                "B": (SHA1_B, SHA256_B),
-                "C": (SHA1_C, SHA256_C),
-            }
             if "-subject" in arguments:
-                return f"subject=O=RepoPrompt,CN={PINNED_CERTIFICATE_NAME}\n".encode()
+                return f"{subjects[marker]}\n".encode()
             if "-enddate" in arguments:
                 return b"notAfter=Jan  1 00:00:00 2099 GMT\n"
-            fingerprint = values[marker][0 if "-sha1" in arguments else 1]
-            label = "SHA1" if "-sha1" in arguments else "sha256"
-            return f"{label} Fingerprint={fingerprint}\n".encode()
+            fingerprint = {"A": SHA1_A, "B": SHA1_B, "C": SHA1_C}[marker]
+            return f"SHA1 Fingerprint={fingerprint}\n".encode()
 
         certificate_result = subprocess.CompletedProcess(
             ["security"],
@@ -106,28 +123,22 @@ class LocalProductionIdentityToolTests(unittest.TestCase):
             return_value=certificate_result,
         ):
             inventory = module.inventory_from_commands(
-                PINNED_CERTIFICATE_NAME,
                 "/fixture/login.keychain-db",
                 module.evaluation_time("2030-01-01T00:00:00Z"),
             )
 
-        self.assertEqual([item["sha256"] for item in inventory["candidates"]], [SHA256_A, SHA256_B])
-        by_fingerprint = {item["sha256"]: item for item in inventory["matchingCertificates"]}
-        self.assertFalse(by_fingerprint[SHA256_C]["hasPrivateKey"])
-
-
-
+        self.assertEqual(
+            sorted((item["teamIdentifier"], item["sha1"]) for item in inventory["candidates"]),
+            [(TEAM_A, SHA1_A), (TEAM_B, SHA1_B)],
+        )
+        by_sha1 = {item["sha1"]: item for item in inventory["matchingCertificates"]}
+        self.assertEqual(by_sha1[SHA1_A]["commonName"], "Apple Development: Dev, A (A0A0A0A0A0)")
+        self.assertFalse(by_sha1[SHA1_C]["hasPrivateKey"])
 
 
 class LocalProductionInstallerTests(unittest.TestCase):
-
-
-
-
-
-
-    def test_local_entitlements_and_packaging_require_fingerprint_metadata(self) -> None:
-        template = ROOT_DIR / "AppBundle" / "RepoPrompt.local-self-signed.entitlements.template"
+    def test_local_entitlements_and_packaging_require_team_and_service_metadata(self) -> None:
+        template = ROOT_DIR / "AppBundle" / "RepoPrompt.local-production.entitlements.template"
         with template.open("rb") as handle:
             entitlements = plistlib.load(handle)
         self.assertEqual(
@@ -143,30 +154,34 @@ class LocalProductionInstallerTests(unittest.TestCase):
             },
         )
         package_script = (SCRIPT_DIR / "package_app.sh").read_text(encoding="utf-8")
-        self.assertIn("LOCAL_SIGNING_CERTIFICATE_SHA256", package_script)
+        self.assertIn("LOCAL_SIGNING_TEAM_ID", package_script)
+        self.assertIn("LOCAL_KEYCHAIN_SERVICE", package_script)
         info_template = (ROOT_DIR / "AppBundle" / "Info.plist.template").read_text(encoding="utf-8")
-        self.assertIn("RepoPromptLocalSigningCertificateSHA256", info_template)
-        self.assertIn("RepoPromptLocalSecureStorageGeneration", info_template)
-        self.assertIn("--extract-certificates=\"$certificate_prefix\"", package_script)
+        self.assertIn("RepoPromptLocalSigningTeamIdentifier", info_template)
+        self.assertIn("RepoPromptLocalKeychainService", info_template)
         self.assertIn("Extracted designated requirement", package_script)
 
-    def test_first_use_adopts_sole_identity_and_writes_registry(self) -> None:
-        result, context = self.run_installer([certificate(SHA1_A, SHA256_A)], expected_sha1=SHA1_A)
+    def test_first_use_adopts_sole_team_and_writes_registry(self) -> None:
+        result, context = self.run_installer([certificate(SHA1_A, TEAM_A)], expected_team=TEAM_A)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_A)
-        generation = self.registry(context)["serviceGeneration"]
-        self.assertGreaterEqual(generation, 1 << 61)
+        registry = self.registry(context)
+        self.assertEqual(registry["schemaVersion"], 2)
+        self.assertEqual(registry["teamIdentifier"], TEAM_A)
+        match = FRESH_SERVICE.fullmatch(registry["keychainService"])
+        self.assertIsNotNone(match, registry)
+        self.assertEqual(match.group("team"), TEAM_A)
+        self.assertGreaterEqual(int(match.group("generation")), 1 << 61)
         self.assertEqual(context["registry"].stat().st_mode & 0o777, 0o600)
-        self.assertIn(f"Selected local certificate SHA-256: {SHA256_A}", result.stdout)
-        self.assertIn(f'certificate leaf = H"{SHA1_A}"', result.stdout)
+        self.assertIn(f"Selected local signing team: {TEAM_A}", result.stdout)
+        self.assertIn(f'certificate leaf[subject.OU] = "{TEAM_A}"', result.stdout)
         self.assertEqual(
             context["package_capture"].read_text(encoding="utf-8").strip(),
-            f"{SHA1_A}|{SHA256_A}|{generation}",
+            f"{SHA1_A}|{TEAM_A}|{registry['keychainService']}",
         )
         self.assertNotIn("find-identity", context["security_log"].read_text(encoding="utf-8"))
 
     def test_installer_uses_packager_output_without_reinvoking_swift(self) -> None:
-        result, context = self.run_installer([certificate(SHA1_A, SHA256_A)], expected_sha1=SHA1_A)
+        result, context = self.run_installer([certificate(SHA1_A, TEAM_A)], expected_team=TEAM_A)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(context["swift_log"].exists())
         self.assertEqual(
@@ -176,8 +191,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
 
     def test_installer_reads_packaged_app_from_split_release_source_root(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A)],
-            expected_sha1=SHA1_A,
+            [certificate(SHA1_A, TEAM_A)],
+            expected_team=TEAM_A,
             split_release_source_root=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -187,160 +202,174 @@ class LocalProductionInstallerTests(unittest.TestCase):
         )
         self.assertFalse((context["tooling_root"] / ".build" / "release" / "RepoPrompt.app").exists())
 
-    def test_multiple_first_use_candidates_fail_with_fingerprints_and_explicit_selection_succeeds(self) -> None:
-        failed, _ = self.run_installer(
-            [certificate(SHA1_B, SHA256_B), certificate(SHA1_A, SHA256_A)],
-            expected_sha1=SHA1_A,
-        )
+    def test_multiple_first_use_teams_fail_with_teams_and_explicit_selection_succeeds(self) -> None:
+        certificates = [certificate(SHA1_B, TEAM_B), certificate(SHA1_A, TEAM_A)]
+        failed, _ = self.run_installer(certificates, expected_team=TEAM_A)
         self.assertNotEqual(failed.returncode, 0)
-        self.assertIn(SHA256_A, failed.stderr)
-        self.assertIn(SHA256_B, failed.stderr)
-        self.assertIn("LOCAL_SIGNING_IDENTITY_SHA256=<fingerprint>", failed.stderr)
+        self.assertIn(TEAM_A, failed.stderr)
+        self.assertIn(TEAM_B, failed.stderr)
+        self.assertIn("LOCAL_SIGNING_TEAM_ID=<team>", failed.stderr)
 
-        selected, context = self.run_installer(
-            [certificate(SHA1_B, SHA256_B), certificate(SHA1_A, SHA256_A)],
-            selected=SHA256_B,
-            expected_sha1=SHA1_B,
-        )
+        selected, context = self.run_installer(certificates, selected_team=TEAM_B, expected_team=TEAM_B)
         self.assertEqual(selected.returncode, 0, selected.stderr)
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_B)
+        self.assertEqual(self.registry(context)["teamIdentifier"], TEAM_B)
 
-    def test_registered_missing_expired_or_private_keyless_identity_fails_without_reminting(self) -> None:
+    def test_no_valid_identity_on_first_use_points_to_xcode_without_writing_registry(self) -> None:
+        result, context = self.run_installer(
+            [certificate(SHA1_A, TEAM_A, private_key=False), certificate(SHA1_B, TEAM_B, expired=True)],
+            expected_team=TEAM_A,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Manage Certificates", result.stderr)
+        self.assertFalse(context["registry"].exists())
+        self.assert_no_install_mutation(context, packaged=False)
+
+    def test_registered_team_without_valid_identity_fails_without_adopting_another_team(self) -> None:
         scenarios = [
             ([], "is missing"),
-            ([certificate(SHA1_A, SHA256_A, expired=True)], "expired"),
-            ([certificate(SHA1_A, SHA256_A, private_key=False)], "does not have an available private key"),
+            ([certificate(SHA1_B, TEAM_B)], "is missing"),
+            ([certificate(SHA1_A, TEAM_A, expired=True)], "is expired"),
+            ([certificate(SHA1_A, TEAM_A, private_key=False)], "does not have an available private key"),
         ]
         for certificates, expected_message in scenarios:
-            with self.subTest(expected_message=expected_message):
+            with self.subTest(expected_message=expected_message, certificates=len(certificates)):
                 result, context = self.run_installer(
                     certificates,
-                    registry={"fingerprint": SHA256_A, "generation": 2},
-                    expected_sha1=SHA1_A,
+                    registry=team_registry(TEAM_A, SERVICE_A),
+                    expected_team=TEAM_A,
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected_message, result.stderr)
-                self.assertFalse(context["import_log"].exists())
-                self.assertEqual(self.registry(context)["serviceGeneration"], 2)
+                self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
+                self.assert_no_install_mutation(context, packaged=False)
 
-    def test_first_use_with_certificate_without_private_key_mints_exactly_one_identity(self) -> None:
+    def test_renewed_certificate_keeps_registered_team_service_and_requirement(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A, private_key=False)],
-            after_mint=[
-                certificate(SHA1_A, SHA256_A, private_key=False),
-                certificate(SHA1_C, SHA256_C),
+            [
+                certificate(SHA1_A, TEAM_A, expired=True),
+                certificate(SHA1_C, TEAM_A, not_after="2031-01-01T00:00:00Z"),
+                certificate(SHA1_A_RENEWED, TEAM_A, not_after="2032-01-01T00:00:00Z"),
             ],
-            expected_sha1=SHA1_C,
+            registry=team_registry(TEAM_A, SERVICE_A),
+            expected_team=TEAM_A,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_C)
-        self.assertTrue(context["import_log"].exists())
+        self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
+        self.assertEqual(
+            context["package_capture"].read_text(encoding="utf-8").strip(),
+            f"{SHA1_A_RENEWED}|{TEAM_A}|{SERVICE_A}",
+        )
 
-    def test_explicit_rotation_advances_generation_and_preserves_prior_service_generation(self) -> None:
+    def test_self_signed_registry_moves_to_team_signing_and_keeps_its_keychain_service(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A), certificate(SHA1_B, SHA256_B)],
-            registry={"fingerprint": SHA256_A, "generation": 4},
-            selected=SHA256_B,
-            rotate=True,
-            expected_sha1=SHA1_B,
+            [certificate(SHA1_A, TEAM_A)],
+            registry=self_signed_registry(SELF_SIGNED_SHA256, 7),
+            expected_team=TEAM_A,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_B)
-        self.assertEqual(self.registry(context)["serviceGeneration"], 5)
-        self.assertIn("prior local secure-storage generation inaccessible", result.stderr)
-        self.assertEqual(context["package_capture"].read_text(encoding="utf-8").strip(), f"{SHA1_B}|{SHA256_B}|5")
+        self.assertEqual(self.registry(context), team_registry(TEAM_A, SELF_SIGNED_SERVICE))
+        self.assertIn("Always Allow", result.stdout)
+        self.assertEqual(
+            context["package_capture"].read_text(encoding="utf-8").strip(),
+            f"{SHA1_A}|{TEAM_A}|{SELF_SIGNED_SERVICE}",
+        )
 
-    def test_rotation_without_selection_mints_one_new_identity(self) -> None:
+    def test_explicit_rotation_registers_a_fresh_service_and_leaves_the_prior_one(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A)],
-            registry={"fingerprint": SHA256_A, "generation": 1},
+            [certificate(SHA1_A, TEAM_A), certificate(SHA1_B, TEAM_B)],
+            registry=team_registry(TEAM_A, SERVICE_A),
+            selected_team=TEAM_B,
             rotate=True,
-            after_mint=[certificate(SHA1_A, SHA256_A), certificate(SHA1_C, SHA256_C)],
-            expected_sha1=SHA1_C,
+            expected_team=TEAM_B,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_C)
-        self.assertEqual(self.registry(context)["serviceGeneration"], 2)
+        registry = self.registry(context)
+        self.assertEqual(registry["teamIdentifier"], TEAM_B)
+        match = FRESH_SERVICE.fullmatch(registry["keychainService"])
+        self.assertIsNotNone(match, registry)
+        self.assertEqual(match.group("team"), TEAM_B)
+        self.assertIn("prior local Keychain service inaccessible", result.stderr)
 
-    def test_two_consecutive_installs_keep_fingerprint_generation_and_designated_requirement(self) -> None:
-        first, context = self.run_installer([certificate(SHA1_A, SHA256_A)], expected_sha1=SHA1_A)
+    def test_selecting_another_team_without_rotation_fails(self) -> None:
+        result, context = self.run_installer(
+            [certificate(SHA1_A, TEAM_A), certificate(SHA1_B, TEAM_B)],
+            registry=team_registry(TEAM_A, SERVICE_A),
+            selected_team=TEAM_B,
+            expected_team=TEAM_B,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ROTATE_LOCAL_SIGNING_IDENTITY=1", result.stderr)
+        self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
+
+    def test_two_consecutive_installs_keep_team_service_and_designated_requirement(self) -> None:
+        first, context = self.run_installer([certificate(SHA1_A, TEAM_A)], expected_team=TEAM_A)
         self.assertEqual(first.returncode, 0, first.stderr)
         first_requirement = self.requirement_line(first.stdout)
-        first_generation = self.registry(context)["serviceGeneration"]
+        first_registry = self.registry(context)
         second = self.invoke(context)
         self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_A)
-        self.assertEqual(self.registry(context)["serviceGeneration"], first_generation)
+        self.assertEqual(self.registry(context), first_registry)
         self.assertEqual(self.requirement_line(second.stdout), first_requirement)
-        self.assertFalse(context["import_log"].exists())
 
     def test_existing_install_lock_fails_closed_without_removing_other_owner_lock(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A)],
-            expected_sha1=SHA1_A,
+            [certificate(SHA1_A, TEAM_A)],
+            expected_team=TEAM_A,
             preexisting_lock=True,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Another local production install is active", result.stderr)
         self.assertTrue(Path(f"{context['registry']}.lock").is_dir())
 
+    ROTATION = {
+        "registry": team_registry(TEAM_A, SERVICE_A),
+        "selected_team": TEAM_B,
+        "rotate": True,
+        "expected_team": TEAM_B,
+    }
+
     def test_failed_registry_backup_preserves_prior_app_and_registry(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A), certificate(SHA1_B, SHA256_B)],
-            registry={"fingerprint": SHA256_A, "generation": 4},
-            selected=SHA256_B,
-            rotate=True,
-            expected_sha1=SHA1_B,
+            [certificate(SHA1_A, TEAM_A), certificate(SHA1_B, TEAM_B)],
             fail_registry_backup_copy=True,
+            **self.ROTATION,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "old\n")
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_A)
-        self.assertEqual(self.registry(context)["serviceGeneration"], 4)
+        self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
         self.assertEqual(context["registry"].stat().st_mode & 0o777, 0o600)
         self.assertEqual(list(context["install_dir"].glob(".RepoPrompt CE.app.backup.*")), [])
 
     def test_failed_registry_write_restores_prior_app_and_exact_registry(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A), certificate(SHA1_B, SHA256_B)],
-            registry={"fingerprint": SHA256_A, "generation": 4},
-            selected=SHA256_B,
-            rotate=True,
-            expected_sha1=SHA1_B,
+            [certificate(SHA1_A, TEAM_A), certificate(SHA1_B, TEAM_B)],
             fail_registry_write=True,
+            **self.ROTATION,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "old\n")
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_A)
-        self.assertEqual(self.registry(context)["serviceGeneration"], 4)
+        self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
         self.assertEqual(context["registry"].stat().st_mode & 0o777, 0o600)
         self.assertEqual(list(context["install_dir"].glob(".RepoPrompt CE.app.backup.*")), [])
 
     def test_failed_app_backup_preserves_prior_app_and_registry(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A), certificate(SHA1_B, SHA256_B)],
-            registry={"fingerprint": SHA256_A, "generation": 4},
-            selected=SHA256_B,
-            rotate=True,
-            expected_sha1=SHA1_B,
+            [certificate(SHA1_A, TEAM_A), certificate(SHA1_B, TEAM_B)],
             fail_app_backup_move=True,
             fail_registry_restore_copy=True,
+            **self.ROTATION,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "old\n")
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_A)
-        self.assertEqual(self.registry(context)["serviceGeneration"], 4)
+        self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
         self.assertEqual(list(context["install_dir"].glob(".RepoPrompt CE.app.backup.*")), [])
 
     def test_failed_registry_restore_preserves_snapshot_for_manual_recovery(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A), certificate(SHA1_B, SHA256_B)],
-            registry={"fingerprint": SHA256_A, "generation": 4},
-            selected=SHA256_B,
-            rotate=True,
-            expected_sha1=SHA1_B,
+            [certificate(SHA1_A, TEAM_A), certificate(SHA1_B, TEAM_B)],
             fail_registry_write=True,
             fail_registry_restore_copy=True,
+            **self.ROTATION,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "old\n")
@@ -351,46 +380,32 @@ class LocalProductionInstallerTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, preserved, True)
         snapshot = preserved / "local-signing-identity-registry.backup"
         self.assertTrue(snapshot.is_file())
-        self.assertEqual(json.loads(snapshot.read_text(encoding="utf-8"))["certificateSHA256"], SHA256_A)
+        self.assertEqual(json.loads(snapshot.read_text(encoding="utf-8")), team_registry(TEAM_A, SERVICE_A))
 
     def test_failed_postwrite_registry_verification_restores_prior_app_and_registry(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A), certificate(SHA1_B, SHA256_B)],
-            registry={"fingerprint": SHA256_A, "generation": 4},
-            selected=SHA256_B,
-            rotate=True,
-            expected_sha1=SHA1_B,
+            [certificate(SHA1_A, TEAM_A), certificate(SHA1_B, TEAM_B)],
             fail_registry_verification=True,
+            **self.ROTATION,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "old\n")
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_A)
-        self.assertEqual(self.registry(context)["serviceGeneration"], 4)
+        self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
 
     def test_failed_replacement_restores_prior_app_and_does_not_write_registry(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A)],
-            expected_sha1=SHA1_A,
+            [certificate(SHA1_A, TEAM_A)],
+            expected_team=TEAM_A,
             fail_final_install_move=True,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "old\n")
         self.assertFalse(context["registry"].exists())
 
-    def test_certificate_minting_omits_legacy_when_openssl_does_not_support_it(self) -> None:
-        result, _ = self.run_installer(
-            [],
-            after_mint=[certificate(SHA1_C, SHA256_C)],
-            expected_sha1=SHA1_C,
-            openssl_rejects_legacy=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-
     def test_running_production_app_stops_install_before_any_mutation(self) -> None:
         result, context = self.run_installer(
-            [],
-            after_mint=[certificate(SHA1_C, SHA256_C)],
-            expected_sha1=SHA1_C,
+            [certificate(SHA1_A, TEAM_A)],
+            expected_team=TEAM_A,
             processes=[{"pid": 4242, "name": "RepoPrompt", "path": "{production_executable}"}],
             record_pgrep_calls=True,
         )
@@ -405,8 +420,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
 
     def test_rollback_guard_override_does_not_redirect_the_production_guard(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A)],
-            expected_sha1=SHA1_A,
+            [certificate(SHA1_A, TEAM_A)],
+            expected_team=TEAM_A,
             processes=[{"pid": 4343, "name": "RepoPrompt", "path": "{production_executable}"}],
             extra_env={"LOCAL_RELEASE_GUARD_EXECUTABLES_JSON": '["/nonexistent/repoprompt-ce-guard-sentinel"]'},
         )
@@ -417,8 +432,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
 
     def test_other_installs_and_bundled_helpers_do_not_block_replacement(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A)],
-            expected_sha1=SHA1_A,
+            [certificate(SHA1_A, TEAM_A)],
+            expected_team=TEAM_A,
             processes=[
                 {"pid": 501, "name": "RepoPrompt", "path": "{temp}/Elsewhere/RepoPrompt CE.app/Contents/MacOS/RepoPrompt"},
                 {"pid": 502, "name": "RepoPrompt", "path": "{temp}/Applications/RepoPrompt CE.app.old/Contents/MacOS/RepoPrompt"},
@@ -450,8 +465,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
 
     def test_current_and_legacy_debug_apps_do_not_block_replacement(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A)],
-            expected_sha1=SHA1_A,
+            [certificate(SHA1_A, TEAM_A)],
+            expected_team=TEAM_A,
             processes=self.DEBUG_APP_PROCESSES,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -465,9 +480,9 @@ class LocalProductionInstallerTests(unittest.TestCase):
         ):
             with self.subTest(checkpoint=checkpoint):
                 result, context = self.run_installer(
-                    [certificate(SHA1_A, SHA256_A)],
-                    registry={"fingerprint": SHA256_A, "generation": 3},
-                    expected_sha1=SHA1_A,
+                    [certificate(SHA1_A, TEAM_A)],
+                    registry=team_registry(TEAM_A, SERVICE_A),
+                    expected_team=TEAM_A,
                     processes=[
                         *self.DEBUG_APP_PROCESSES,
                         {"pid": 514, "name": "RepoPrompt", "path": "{production_executable}", "from_call": checkpoint},
@@ -486,42 +501,38 @@ class LocalProductionInstallerTests(unittest.TestCase):
             ("deleted executable", {"processes": [{"pid": 602, "name": "RepoPrompt", "path": "{production_executable}", "error": "unlinked"}]}),
         ]:
             with self.subTest(scenario=scenario):
-                result, context = self.run_installer([certificate(SHA1_A, SHA256_A)], expected_sha1=SHA1_A, **kwargs)
+                result, context = self.run_installer([certificate(SHA1_A, TEAM_A)], expected_team=TEAM_A, **kwargs)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("process identity inspection failed", result.stderr)
                 self.assert_no_install_mutation(context, packaged=False)
 
     def test_production_opened_during_build_stops_before_staging(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A)],
-            registry={"fingerprint": SHA256_A, "generation": 3},
-            expected_sha1=SHA1_A,
+            [certificate(SHA1_A, TEAM_A)],
+            registry=team_registry(TEAM_A, SERVICE_A),
+            expected_team=TEAM_A,
             processes=[{"pid": 701, "name": "RepoPrompt", "path": "{production_executable}", "from_call": 2}],
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Quit RepoPrompt CE before staging", result.stderr)
         self.assert_no_install_mutation(context, packaged=True)
-        self.assertEqual(self.registry(context)["serviceGeneration"], 3)
+        self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
 
     def test_production_opened_during_staging_stops_before_replacement(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A), certificate(SHA1_B, SHA256_B)],
-            registry={"fingerprint": SHA256_A, "generation": 4},
-            selected=SHA256_B,
-            rotate=True,
-            expected_sha1=SHA1_B,
+            [certificate(SHA1_A, TEAM_A), certificate(SHA1_B, TEAM_B)],
             processes=[{"pid": 801, "name": "RepoPrompt", "path": "{production_executable}", "from_call": 3}],
+            **self.ROTATION,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Quit RepoPrompt CE before replacing", result.stderr)
         self.assert_no_install_mutation(context, packaged=True)
-        self.assertEqual(self.registry(context)["certificateSHA256"], SHA256_A)
-        self.assertEqual(self.registry(context)["serviceGeneration"], 4)
+        self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
 
     def test_absent_installation_installs_through_all_checkpoints(self) -> None:
         result, context = self.run_installer(
-            [certificate(SHA1_A, SHA256_A)],
-            expected_sha1=SHA1_A,
+            [certificate(SHA1_A, TEAM_A)],
+            expected_team=TEAM_A,
             installed=False,
             processes=[
                 {
@@ -546,24 +557,21 @@ class LocalProductionInstallerTests(unittest.TestCase):
         self.assertEqual(context["package_capture"].exists(), packaged)
         self.assertEqual(list(context["install_dir"].glob(".RepoPrompt CE.app.installing.*")), [])
         self.assertEqual(list(context["install_dir"].glob(".RepoPrompt CE.app.backup.*")), [])
-        self.assertFalse(context["import_log"].exists())
         self.assertFalse(Path(f"{context['registry']}.lock").exists())
 
     def run_installer(
         self,
         certificates: list[dict[str, Any]],
         *,
-        expected_sha1: str,
+        expected_team: str,
         registry: dict[str, Any] | None = None,
-        selected: str | None = None,
+        selected_team: str | None = None,
         rotate: bool = False,
-        after_mint: list[dict[str, Any]] | None = None,
         fail_final_install_move: bool = False,
         fail_app_backup_move: bool = False,
         fail_registry_backup_copy: bool = False,
         fail_registry_write: bool = False,
         fail_registry_restore_copy: bool = False,
-        openssl_rejects_legacy: bool = False,
         preexisting_lock: bool = False,
         fail_registry_verification: bool = False,
         split_release_source_root: bool = False,
@@ -650,22 +658,10 @@ class LocalProductionInstallerTests(unittest.TestCase):
         keychain.touch()
         fixture = temp_dir / "inventory.json"
         fixture.write_text(json.dumps({"certificates": certificates}), encoding="utf-8")
-        after_fixture = temp_dir / "inventory-after-mint.json"
-        after_fixture.write_text(json.dumps({"certificates": after_mint or certificates}), encoding="utf-8")
         registry_path = temp_dir / "Application Support" / "RepoPrompt CE" / "local-signing-identity-v1.json"
         if registry:
             registry_path.parent.mkdir(parents=True)
-            registry_path.write_text(
-                json.dumps(
-                    {
-                        "schemaVersion": 1,
-                        "certificateName": PINNED_CERTIFICATE_NAME,
-                        "certificateSHA256": registry["fingerprint"],
-                        "serviceGeneration": registry["generation"],
-                    }
-                ),
-                encoding="utf-8",
-            )
+            registry_path.write_text(json.dumps(registry), encoding="utf-8")
             registry_path.chmod(0o600)
         if preexisting_lock:
             lock_path = Path(f"{registry_path}.lock")
@@ -682,13 +678,13 @@ class LocalProductionInstallerTests(unittest.TestCase):
                 app="$FAKE_BUILD_DIR/RepoPrompt.app"
                 mkdir -p "$app/Contents"
                 printf 'new\\n' > "$app/payload.txt"
-                printf '%s|%s|%s\\n' "$LOCAL_SIGNING_CERTIFICATE_SHA1" "$LOCAL_SIGNING_CERTIFICATE_SHA256" "$LOCAL_SIGNING_SERVICE_GENERATION" >> "$PACKAGE_CAPTURE"
+                printf '%s|%s|%s\\n' "$SIGN_IDENTITY" "$LOCAL_SIGNING_TEAM_ID" "$LOCAL_KEYCHAIN_SERVICE" >> "$PACKAGE_CAPTURE"
                 cat > "$app/Contents/Info.plist" <<EOF
                 <?xml version="1.0" encoding="UTF-8"?>
                 <plist version="1.0"><dict>
-                  <key>RepoPromptSigningMode</key><string>local-self-signed</string>
-                  <key>RepoPromptLocalSigningCertificateSHA256</key><string>$LOCAL_SIGNING_CERTIFICATE_SHA256</string>
-                  <key>RepoPromptLocalSecureStorageGeneration</key><string>$LOCAL_SIGNING_SERVICE_GENERATION</string>
+                  <key>RepoPromptSigningMode</key><string>local-apple-development</string>
+                  <key>RepoPromptLocalSigningTeamIdentifier</key><string>$LOCAL_SIGNING_TEAM_ID</string>
+                  <key>RepoPromptLocalKeychainService</key><string>$LOCAL_KEYCHAIN_SERVICE</string>
                 </dict></plist>
                 EOF
                 """
@@ -698,7 +694,6 @@ class LocalProductionInstallerTests(unittest.TestCase):
         bin_dir = temp_dir / "bin"
         bin_dir.mkdir()
         security_log = temp_dir / "security.log"
-        import_log = temp_dir / "imported-identity"
         write_bash_stub(
             bin_dir,
             "security",
@@ -706,10 +701,6 @@ class LocalProductionInstallerTests(unittest.TestCase):
             printf '%s\\n' "$*" >> "$SECURITY_LOG"
             case "$1" in
                 default-keychain) printf '    "%s"\\n' "$FAKE_KEYCHAIN" ;;
-                import)
-                    cp "$FAKE_AFTER_MINT_FIXTURE" "$FAKE_INVENTORY_FIXTURE"
-                    : > "$FAKE_IMPORTED_IDENTITY"
-                    ;;
                 *) exit 0 ;;
             esac
             """,
@@ -732,23 +723,7 @@ class LocalProductionInstallerTests(unittest.TestCase):
             "codesign",
             """\
             if [[ "$1" == "-d" && "$2" == "-r-" ]]; then
-                printf 'designated => identifier "com.pvncher.repoprompt.ce" and certificate leaf = H"%s"\\n' "$FAKE_DESIGNATED_SHA1" >&2
-            fi
-            exit 0
-            """,
-        )
-        write_bash_stub(
-            bin_dir,
-            "openssl",
-            """\
-            if [[ "$1" == "rand" ]]; then
-                printf '0123456789abcdef0123456789abcdef0123456789abcdef\\n'
-            elif [[ "$1" == "pkcs12" && "${2:-}" == "-help" ]]; then
-                printf 'usage: pkcs12\\n'
-            elif [[ "$1" == "pkcs12" && "$OPENSSL_REJECTS_LEGACY" == "1" ]]; then
-                for argument in "$@"; do
-                    [[ "$argument" != "-legacy" ]] || exit 64
-                done
+                printf 'designated => anchor apple generic and identifier "com.pvncher.repoprompt.ce" and certificate leaf[subject.OU] = "%s" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists\\n' "$FAKE_DESIGNATED_TEAM" >&2
             fi
             exit 0
             """,
@@ -797,14 +772,10 @@ class LocalProductionInstallerTests(unittest.TestCase):
                 "FAKE_BUILD_DIR": str(build_dir),
                 "FAKE_DEVELOPER_DIR": str(fake_developer_dir),
                 "FAKE_KEYCHAIN": str(keychain),
-                "FAKE_INVENTORY_FIXTURE": str(fixture),
-                "FAKE_AFTER_MINT_FIXTURE": str(after_fixture),
-                "FAKE_IMPORTED_IDENTITY": str(import_log),
-                "FAKE_DESIGNATED_SHA1": expected_sha1,
+                "FAKE_DESIGNATED_TEAM": expected_team,
                 "SECURITY_LOG": str(security_log),
                 "SWIFT_LOG": str(swift_log),
                 "PACKAGE_CAPTURE": str(package_capture),
-                "OPENSSL_REJECTS_LEGACY": "1" if openssl_rejects_legacy else "0",
                 "FAIL_FINAL_INSTALL_MOVE": "1" if fail_final_install_move else "0",
                 "FAIL_APP_BACKUP_MOVE": "1" if fail_app_backup_move else "0",
                 "FAIL_REGISTRY_BACKUP_COPY": "1" if fail_registry_backup_copy else "0",
@@ -818,8 +789,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
                 "PGREP_LOG": str(pgrep_log),
             }
         )
-        if selected:
-            env["LOCAL_SIGNING_IDENTITY_SHA256"] = selected
+        if selected_team:
+            env["LOCAL_SIGNING_TEAM_ID"] = selected_team
         if rotate:
             env["ROTATE_LOCAL_SIGNING_IDENTITY"] = "1"
         if split_release_source_root:
@@ -834,7 +805,6 @@ class LocalProductionInstallerTests(unittest.TestCase):
             "registry": registry_path,
             "package_capture": package_capture,
             "security_log": security_log,
-            "import_log": import_log,
             "swift_log": swift_log,
             "tmp_root": installer_tmp,
             "tooling_root": root,

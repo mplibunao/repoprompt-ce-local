@@ -8,17 +8,18 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
             teamIdentifier: RuntimeCodeSigningPolicy.signingTeamIdentifier,
             validatedDomains: [.developerID]
         )
-        let localFingerprint = String(repeating: "A", count: 64)
+        let localTeam = "ABCDE12345"
+        let localService = "com.pvncher.repoprompt.ce.local-apple-development.ABCDE12345.keychain.v3"
         let localExpectation = RuntimeLocalSigningExpectation(
-            bundleLeafCertificateSHA256: localFingerprint,
-            registeredLeafCertificateSHA256: localFingerprint,
-            bundleServiceGeneration: 3,
-            registeredServiceGeneration: 3
+            bundleTeamIdentifier: localTeam,
+            registeredTeamIdentifier: localTeam,
+            bundleKeychainService: localService,
+            registeredKeychainService: localService
         )
         let local = RuntimeCodeSigningInfo.synthetic(
             codeIdentifier: RuntimeCodeSigningPolicy.developerIDBundleIdentifier,
-            leafCertificateSHA256: localFingerprint,
-            validatedDomains: [.localSelfSigned]
+            teamIdentifier: localTeam,
+            validatedDomains: [.localAppleDevelopment]
         )
         let debug = RuntimeCodeSigningInfo.synthetic(
             codeIdentifier: RuntimeCodeSigningPolicy.appleDevelopmentDebugBundleIdentifier,
@@ -33,13 +34,12 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
             expectedDomain: .officialDeveloperID
         )
         assertDecision(
-            marker: "local-self-signed",
+            marker: "local-apple-development",
             debugMarker: "keychain",
             signingInfo: local,
             localSigningContext: .valid(localExpectation),
-            expectedDomain: .localSelfSigned,
-            expectedLocalCertificateFingerprint: localFingerprint,
-            expectedLocalServiceGeneration: 3
+            expectedDomain: .localAppleDevelopment,
+            expectedLocalKeychainService: localService
         )
         assertDecision(
             marker: "debug-apple-development",
@@ -55,15 +55,20 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
         )
         let localSelection = SecureKeyValueStorageFactory.selection(
             for: RuntimeSecureStorageDecision(
-                domain: .localSelfSigned,
+                domain: .localAppleDevelopment,
                 rejectionReason: nil,
-                localCertificateFingerprint: localFingerprint,
-                localServiceGeneration: 3
+                localKeychainService: localService
             )
         )
-        XCTAssertEqual(
-            (localSelection.backend as? KeychainService)?.serviceName,
-            KeychainService.localSelfSignedServiceName(fingerprint: localFingerprint, generation: 3)
+        XCTAssertEqual((localSelection.backend as? KeychainService)?.serviceName, localService)
+        XCTAssertTrue(
+            SecureKeyValueStorageFactory.selection(
+                for: RuntimeSecureStorageDecision(
+                    domain: .localAppleDevelopment,
+                    rejectionReason: nil,
+                    localKeychainService: KeychainService.officialV2ServiceName
+                )
+            ).backend === EphemeralSecureKeyValueStore.shared
         )
         XCTAssertTrue(
             SecureKeyValueStorageFactory.selection(
@@ -137,7 +142,7 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
 
         XCTAssertTrue(SecureKeyValueStorageFactory.officialOverrideApplies(to: .officialDeveloperID))
         XCTAssertTrue(SecureKeyValueStorageFactory.officialOverrideApplies(to: .successorOfficialDeveloperID))
-        XCTAssertFalse(SecureKeyValueStorageFactory.officialOverrideApplies(to: .localSelfSigned))
+        XCTAssertFalse(SecureKeyValueStorageFactory.officialOverrideApplies(to: .localAppleDevelopment))
         XCTAssertFalse(SecureKeyValueStorageFactory.officialOverrideApplies(to: .appleDevelopmentDebug))
         XCTAssertFalse(SecureKeyValueStorageFactory.officialOverrideApplies(to: .ephemeral))
     }
@@ -166,7 +171,7 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
             ("debug-apple-development", "unknown", debug, .unknownDebugStorageMarker),
             ("developer-id", nil, invalid, .signingValidationFailed),
             ("developer-id", nil, debug, .markerSignatureMismatch),
-            ("local-self-signed", nil, official, .localIdentityRegistryUnavailable),
+            ("local-apple-development", nil, official, .localIdentityRegistryUnavailable),
             ("debug-apple-development", "keychain", official, .markerSignatureMismatch),
             ("developer-id", nil, RuntimeCodeSigningInfo.synthetic(
                 codeIdentifier: RuntimeCodeSigningPolicy.developerIDBundleIdentifier,
@@ -210,41 +215,51 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
         }
     }
 
-    func testLocalSigningExpectationRequiresMatchingFingerprintAndGeneration() {
-        let fingerprint = String(repeating: "AB", count: 32)
+    func testLocalSigningExpectationRequiresMatchingTeamAndService() {
+        let team = "ABCDE12345"
+        let service = "com.pvncher.repoprompt.ce.local-self-signed.\(String(repeating: "ab", count: 32)).keychain.v4"
         XCTAssertEqual(
             RuntimeLocalSigningExpectation(
-                bundleLeafCertificateSHA256: fingerprint.lowercased(),
-                registeredLeafCertificateSHA256: fingerprint,
-                bundleServiceGeneration: 4,
-                registeredServiceGeneration: 4
+                bundleTeamIdentifier: team.lowercased(),
+                registeredTeamIdentifier: team,
+                bundleKeychainService: service,
+                registeredKeychainService: service
             ).validatedIdentity,
-            RuntimeValidatedLocalSigningIdentity(fingerprint: fingerprint, serviceGeneration: 4)
+            RuntimeValidatedLocalSigningIdentity(teamIdentifier: team, keychainService: service)
         )
         XCTAssertNil(
             RuntimeLocalSigningExpectation(
-                bundleLeafCertificateSHA256: fingerprint,
-                registeredLeafCertificateSHA256: String(repeating: "CD", count: 32),
-                bundleServiceGeneration: 4,
-                registeredServiceGeneration: 4
+                bundleTeamIdentifier: team,
+                registeredTeamIdentifier: "VWXYZ67890",
+                bundleKeychainService: service,
+                registeredKeychainService: service
             ).validatedIdentity
         )
         XCTAssertNil(
             RuntimeLocalSigningExpectation(
-                bundleLeafCertificateSHA256: fingerprint,
-                registeredLeafCertificateSHA256: fingerprint,
-                bundleServiceGeneration: 4,
-                registeredServiceGeneration: 5
+                bundleTeamIdentifier: team,
+                registeredTeamIdentifier: team,
+                bundleKeychainService: service,
+                registeredKeychainService: "com.pvncher.repoprompt.ce.local-apple-development.ABCDE12345.keychain.v4"
+            ).validatedIdentity
+        )
+        XCTAssertNil(
+            RuntimeLocalSigningExpectation(
+                bundleTeamIdentifier: team,
+                registeredTeamIdentifier: team,
+                bundleKeychainService: KeychainService.debugServiceName,
+                registeredKeychainService: KeychainService.debugServiceName
             ).validatedIdentity
         )
     }
 
-    func testLocalPersistenceFailsClosedWithoutMatchingRegistryContext() {
-        let fingerprint = String(repeating: "A", count: 64)
+    func testLocalPersistenceFailsClosedWithoutMatchingRegistryContextOrTeam() {
+        let team = "ABCDE12345"
+        let service = "com.pvncher.repoprompt.ce.local-apple-development.ABCDE12345.keychain.v4"
         let signingInfo = RuntimeCodeSigningInfo.synthetic(
             codeIdentifier: RuntimeCodeSigningPolicy.developerIDBundleIdentifier,
-            leafCertificateSHA256: fingerprint,
-            validatedDomains: [.localSelfSigned]
+            teamIdentifier: team,
+            validatedDomains: [.localAppleDevelopment]
         )
 
         let rejectedContexts: [(RuntimeLocalSigningContext, RuntimeSecureStorageRejectionReason)] = [
@@ -254,7 +269,7 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
         ]
         for (context, reason) in rejectedContexts {
             assertDecision(
-                marker: "local-self-signed",
+                marker: "local-apple-development",
                 debugMarker: "keychain",
                 signingInfo: signingInfo,
                 localSigningContext: context,
@@ -262,6 +277,21 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
                 expectedReason: reason
             )
         }
+
+        let otherTeamExpectation = RuntimeLocalSigningExpectation(
+            bundleTeamIdentifier: "VWXYZ67890",
+            registeredTeamIdentifier: "VWXYZ67890",
+            bundleKeychainService: service,
+            registeredKeychainService: service
+        )
+        assertDecision(
+            marker: "local-apple-development",
+            debugMarker: "keychain",
+            signingInfo: signingInfo,
+            localSigningContext: .valid(otherTeamExpectation),
+            expectedDomain: .ephemeral,
+            expectedReason: .markerSignatureMismatch
+        )
     }
 
     func testCompileTimeTrustAnchorsIncludeExpectedCertificateClasses() {
@@ -273,6 +303,11 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
         XCTAssertTrue(RuntimeCodeSigningPolicy.developerIDRequirement.contains("1.2.840.113635.100.6.1.13"))
         XCTAssertTrue(RuntimeCodeSigningPolicy.appleDevelopmentDebugRequirement.contains("1.2.840.113635.100.6.1.12"))
         XCTAssertTrue(RuntimeCodeSigningPolicy.successorDeveloperIDRequirement.contains("1.2.840.113635.100.6.1.13"))
+        let localRequirement = RuntimeCodeSigningPolicy.localAppleDevelopmentRequirement(teamIdentifier: "ABCDE12345")
+        XCTAssertTrue(localRequirement.hasPrefix("anchor apple generic and identifier \"com.pvncher.repoprompt.ce\""))
+        XCTAssertTrue(localRequirement.contains("certificate leaf[subject.OU] = \"ABCDE12345\""))
+        XCTAssertTrue(localRequirement.contains("1.2.840.113635.100.6.1.12"))
+        XCTAssertNotNil(RuntimeCodeSigningDetector.requirement(from: localRequirement))
         XCTAssertEqual(
             RuntimeCodeSigningPolicy.successorDeveloperIDRequirement,
             "anchor apple generic and identifier \"com.repoprompt.ce\" and certificate leaf[subject.OU] = \"69N6K965SF\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
@@ -286,8 +321,7 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
         localSigningContext: RuntimeLocalSigningContext? = nil,
         expectedDomain: RuntimeSecureStorageDomain,
         expectedReason: RuntimeSecureStorageRejectionReason? = nil,
-        expectedLocalCertificateFingerprint: String? = nil,
-        expectedLocalServiceGeneration: Int? = nil
+        expectedLocalKeychainService: String? = nil
     ) {
         XCTAssertEqual(
             RuntimeCodeSigningPolicy.decision(
@@ -299,8 +333,7 @@ final class RuntimeCodeSigningPolicyTests: XCTestCase {
             RuntimeSecureStorageDecision(
                 domain: expectedDomain,
                 rejectionReason: expectedReason,
-                localCertificateFingerprint: expectedLocalCertificateFingerprint,
-                localServiceGeneration: expectedLocalServiceGeneration
+                localKeychainService: expectedLocalKeychainService
             )
         )
     }

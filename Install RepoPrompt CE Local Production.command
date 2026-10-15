@@ -32,14 +32,14 @@ install_app() {
 }
 
 clear 2>/dev/null || true
-echo "RepoPrompt CE - local self-signed production installer"
+echo "RepoPrompt CE - local production installer"
 echo
 echo "Project: $ROOT_DIR"
 echo "Mode:    coordinated (build and install run through the dev daemon)"
 echo
 echo "This builds a release-mode app and replaces any existing app at:"
 echo "$TARGET_APP"
-echo "using a dedicated self-signed certificate trusted only on this Mac."
+echo "signed with your Apple Development certificate from the login keychain."
 echo
 echo "The installed app is local-only: it is not notarized, must not be uploaded"
 echo "to GitHub Releases, and should not be copied to another Mac."

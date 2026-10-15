@@ -12,7 +12,7 @@ import SwiftUI
 enum SparkleUpdaterStartDecision: Equatable {
     case ignore
     case blocked(String)
-    case selfSignedDisabled(String)
+    case localBuildDisabled(String)
     case start
 }
 
@@ -108,16 +108,16 @@ final class SparkleUpdaterManager: ObservableObject {
     private static let passiveAppcastChecksKey = "RepoPromptPassiveAppcastChecksEnabled"
 
     /// Info.plist signing-mode marker written by `Scripts/package_app.sh`, and the value it
-    /// carries for a locally self-signed production build.
+    /// carries for a locally signed production build.
     private static let signingModePlistKey = "RepoPromptSigningMode"
-    private static let localSelfSignedSigningModeMarker = "local-self-signed"
+    private static let localBuildSigningModeMarker = "local-apple-development"
 
-    static let selfSignedUpdatesDisabledMessage =
-        "This build is self-signed locally and does not receive updates from the RepoPrompt appcast."
+    static let localBuildUpdatesDisabledMessage =
+        "This build is signed locally and does not receive updates from the RepoPrompt appcast."
 
     /// The gate reads the bundle marker rather than the resolved secure-storage domain: a missing
     /// or mismatched local signing registry downgrades that domain to `.ephemeral`, which would
-    /// leave a self-signed build polling the shared appcast.
+    /// leave a local build polling the shared appcast.
     private static var currentSigningModeMarker: String? {
         Bundle.main.object(forInfoDictionaryKey: signingModePlistKey) as? String
     }
@@ -200,8 +200,8 @@ final class SparkleUpdaterManager: ObservableObject {
             updatesDisabledMessage = blockedMessage
             canCheckForUpdates = false
             return
-        case let .selfSignedDisabled(selfSignedMessage):
-            disableUpdates(reason: selfSignedMessage)
+        case let .localBuildDisabled(localBuildMessage):
+            disableUpdates(reason: localBuildMessage)
             return
         case .start:
             break
@@ -230,8 +230,8 @@ final class SparkleUpdaterManager: ObservableObject {
         signingModeMarker: String?
     ) -> SparkleUpdaterStartDecision {
         guard sparkleConfigurationValid, !updaterStarted else { return .ignore }
-        if signingModeMarker?.trimmingCharacters(in: .whitespacesAndNewlines) == localSelfSignedSigningModeMarker {
-            return .selfSignedDisabled(selfSignedUpdatesDisabledMessage)
+        if signingModeMarker?.trimmingCharacters(in: .whitespacesAndNewlines) == localBuildSigningModeMarker {
+            return .localBuildDisabled(localBuildUpdatesDisabledMessage)
         }
         if let identityMigrationBlockedMessage {
             return .blocked(identityMigrationBlockedMessage)
