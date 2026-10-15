@@ -9888,12 +9888,8 @@ class WorkspaceManagerViewModel: ObservableObject {
                 result.skippedReasonsByWorkspaceID[workspaceID] = "Workspace no longer matches the reviewed test-fixture evidence."
                 continue
             }
-            if metadata.isSystemWorkspace {
-                result.skippedReasonsByWorkspaceID[workspaceID] = "System workspaces cannot be deleted."
-                continue
-            }
-            if metadata.agentIdentityClaims.contains(where: \.requiresProtection) {
-                result.skippedReasonsByWorkspaceID[workspaceID] = "Workspace contains an active or pinned agent session."
+            if let blockReason = Self.authoritativeDeletionBlockReason(metadata) {
+                result.skippedReasonsByWorkspaceID[workspaceID] = blockReason
                 continue
             }
 
@@ -9968,6 +9964,16 @@ class WorkspaceManagerViewModel: ObservableObject {
         return nil
     }
 
+    private static func authoritativeDeletionBlockReason(_ metadata: DomainWorkspaceMetadata) -> String? {
+        if metadata.isSystemWorkspace {
+            return "System workspaces cannot be deleted."
+        }
+        if metadata.agentIdentityClaims.contains(where: \.requiresProtection) {
+            return "Workspace contains an active or pinned agent session."
+        }
+        return nil
+    }
+
     private static func artifactCleanupWarning(from outcome: DomainCommandOutcome) -> String? {
         let prefix = "artifact_cleanup_incomplete:"
         guard let diagnostic = outcome.diagnostic,
@@ -9985,16 +9991,14 @@ class WorkspaceManagerViewModel: ObservableObject {
             ?? "Workspace deletion failed."
     }
 
-    func deleteWorkspace(_ workspace: WorkspaceModel) {
-        Task { @MainActor [weak self] in
-            _ = await self?.deleteWorkspaceAsync(workspace)
-        }
-    }
-
     @discardableResult
-    func deleteWorkspaceAsync(_ workspace: WorkspaceModel) async -> Bool {
+    func deleteWorkspaceAsync(_ workspace: WorkspaceModel) async -> WorkspaceDeleteOutcome {
         let deletionClaim = workspaceActivityCoordinator.claimDeletion(workspaceIDs: [workspace.id])
-        guard deletionClaim.lease.workspaceIDs.contains(workspace.id) else { return false }
+        guard deletionClaim.lease.workspaceIDs.contains(workspace.id) else {
+            return .refused(
+                reason: deletionClaim.blockedReasonsByWorkspaceID[workspace.id] ?? "Workspace deletion is blocked."
+            )
+        }
         defer { workspaceActivityCoordinator.releaseDeletion(deletionClaim.lease) }
 
         if let domainWorkspaceAuthorityClient {
@@ -10002,8 +10006,8 @@ class WorkspaceManagerViewModel: ObservableObject {
             guard let authoritative = snapshot.workspaces.first(where: {
                 $0.document.workspaceID == workspace.id
             }) else {
-                guard Self.localEphemeralDeletionBlockReason(workspace) == nil else {
-                    return false
+                if let blockReason = Self.localEphemeralDeletionBlockReason(workspace) {
+                    return .refused(reason: blockReason)
                 }
                 await finalizeWorkspaceDeletion(
                     workspace,
@@ -10011,12 +10015,11 @@ class WorkspaceManagerViewModel: ObservableObject {
                     saveLegacyIndex: false,
                     cleanupLocalArtifacts: true
                 )
-                return true
+                return .deleted
             }
-            let metadata = authoritative.document.metadata
-            guard !metadata.isSystemWorkspace,
-                  !metadata.agentIdentityClaims.contains(where: \.requiresProtection)
-            else { return false }
+            if let blockReason = Self.authoritativeDeletionBlockReason(authoritative.document.metadata) {
+                return .refused(reason: blockReason)
+            }
 
             let outcome = await domainWorkspaceAuthorityClient.delete(
                 workspaceID: workspace.id,
@@ -10026,21 +10029,21 @@ class WorkspaceManagerViewModel: ObservableObject {
             applyDomainAuthorityOutcome(outcome, workspaceID: workspace.id)
             guard Self.isSuccessfulDomainOutcome(outcome) else {
                 reportDomainAuthorityIssue(outcome, operation: "delete_workspace")
-                return false
+                return .refused(reason: Self.deleteFailureReason(from: outcome))
             }
             await finalizeWorkspaceDeletion(
                 workspace,
                 workspaceDirectory: authoritative.document.fileURL.deletingLastPathComponent(),
                 saveLegacyIndex: false
             )
-            return true
+            return .deleted
         }
         await finalizeWorkspaceDeletion(
             workspace,
             workspaceDirectory: workspaceDirectory(for: workspace),
             saveLegacyIndex: true
         )
-        return true
+        return .deleted
     }
 
     private func finalizeWorkspaceDeletion(

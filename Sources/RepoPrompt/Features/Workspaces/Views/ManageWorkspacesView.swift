@@ -23,6 +23,7 @@ struct ManageWorkspacesView: View {
     @State private var showBulkDeleteConfirmation = false
     @State private var isRunningBulkDelete = false
     @State private var bulkDeleteResultMessage: String?
+    @State private var deleteRefusalMessage: String?
     @ObservedObject private var fontScale = FontScaleManager.shared
     private var fontPreset: FontScalePreset {
         fontScale.preset
@@ -178,6 +179,21 @@ struct ManageWorkspacesView: View {
             Button("OK") { bulkDeleteResultMessage = nil }
         } message: {
             Text(bulkDeleteResultMessage ?? "")
+        }
+        .alert(
+            "Delete Workspace",
+            isPresented: Binding(
+                get: { deleteRefusalMessage != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        deleteRefusalMessage = nil
+                    }
+                }
+            )
+        ) {
+            Button("OK") { deleteRefusalMessage = nil }
+        } message: {
+            Text(deleteRefusalMessage ?? "")
         }
     }
 
@@ -594,7 +610,7 @@ struct ManageWorkspacesView: View {
                                 toggleHiddenState(for: ws)
                             },
                             onDelete: {
-                                workspaceManager.deleteWorkspace(ws)
+                                deleteWorkspace(ws)
                             }
                         )
                     }
@@ -630,7 +646,7 @@ struct ManageWorkspacesView: View {
                                 toggleHiddenState(for: workspace)
                             },
                             onDelete: {
-                                workspaceManager.deleteWorkspace(workspace)
+                                deleteWorkspace(workspace)
                             }
                         )
                     }
@@ -953,6 +969,14 @@ struct ManageWorkspacesView: View {
             ws,
             hidden: isRecoveryCopy ? false : !ws.isHiddenInMenus
         )
+    }
+
+    private func deleteWorkspace(_ workspace: WorkspaceModel) {
+        Task {
+            if case let .refused(reason) = await workspaceManager.deleteWorkspaceAsync(workspace) {
+                deleteRefusalMessage = "\"\(workspace.name)\" was not deleted. \(reason)"
+            }
+        }
     }
 
     // MARK: - Create New Workspace
