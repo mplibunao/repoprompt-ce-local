@@ -237,7 +237,7 @@ import XCTest
             await manager.awaitInitialized()
 
             let outcome = await manager.deleteWorkspaceAsync(pinnedWorkspace)
-            XCTAssertEqual(outcome, .refused(reason: "Workspace contains an active or pinned agent session."))
+            XCTAssertEqual(outcome, .refused(reason: "Workspace has a tab with an agent session, or a pinned tab."))
             let authoritativeAfter = await runtime.workspaceStore.snapshot()
             XCTAssertTrue(authoritativeAfter.workspaces.contains {
                 $0.document.workspaceID == pinnedWorkspace.id

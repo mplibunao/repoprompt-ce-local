@@ -150,14 +150,7 @@ struct ManageWorkspacesView: View {
         }
         .alert(
             "Workspace Cleanup",
-            isPresented: Binding(
-                get: { duplicateCleanupResultMessage != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        duplicateCleanupResultMessage = nil
-                    }
-                }
-            )
+            isPresented: messagePresentationBinding(for: $duplicateCleanupResultMessage)
         ) {
             Button("OK") {
                 duplicateCleanupResultMessage = nil
@@ -167,14 +160,7 @@ struct ManageWorkspacesView: View {
         }
         .alert(
             "Bulk Delete Workspaces",
-            isPresented: Binding(
-                get: { bulkDeleteResultMessage != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        bulkDeleteResultMessage = nil
-                    }
-                }
-            )
+            isPresented: messagePresentationBinding(for: $bulkDeleteResultMessage)
         ) {
             Button("OK") { bulkDeleteResultMessage = nil }
         } message: {
@@ -182,14 +168,7 @@ struct ManageWorkspacesView: View {
         }
         .alert(
             "Delete Workspace",
-            isPresented: Binding(
-                get: { deleteRefusalMessage != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        deleteRefusalMessage = nil
-                    }
-                }
-            )
+            isPresented: messagePresentationBinding(for: $deleteRefusalMessage)
         ) {
             Button("OK") { deleteRefusalMessage = nil }
         } message: {
@@ -719,7 +698,7 @@ struct ManageWorkspacesView: View {
         }
         let protectedTabs = workspace.composeTabs + workspace.stashedTabs.map(\.tab)
         if protectedTabs.contains(where: { $0.activeAgentSessionID != nil || $0.isPinned }) {
-            return "Contains an active or pinned agent session."
+            return "Has a tab with an agent session, or a pinned tab."
         }
         return nil
     }
@@ -968,6 +947,17 @@ struct ManageWorkspacesView: View {
         workspaceManager.setWorkspaceHidden(
             ws,
             hidden: isRecoveryCopy ? false : !ws.isHiddenInMenus
+        )
+    }
+
+    private func messagePresentationBinding(for message: Binding<String?>) -> Binding<Bool> {
+        Binding(
+            get: { message.wrappedValue != nil },
+            set: { isPresented in
+                if !isPresented {
+                    message.wrappedValue = nil
+                }
+            }
         )
     }
 

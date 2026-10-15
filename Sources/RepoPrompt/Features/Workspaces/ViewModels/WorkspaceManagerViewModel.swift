@@ -9812,7 +9812,7 @@ class WorkspaceManagerViewModel: ObservableObject {
             } else if protectedWorkspaceIDs.contains(metadata.workspaceID) {
                 "Workspace is active in an open window."
             } else if metadata.agentIdentityClaims.contains(where: \.requiresProtection) {
-                "Workspace contains an active or pinned agent session."
+                Self.agentTabDeletionBlockReason
             } else {
                 nil
             }
@@ -9959,17 +9959,19 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
         let protectedTabs = workspace.composeTabs + workspace.stashedTabs.map(\.tab)
         if protectedTabs.contains(where: { $0.activeAgentSessionID != nil || $0.isPinned }) {
-            return "Workspace contains an active or pinned agent session."
+            return agentTabDeletionBlockReason
         }
         return nil
     }
+
+    private static let agentTabDeletionBlockReason = "Workspace has a tab with an agent session, or a pinned tab."
 
     private static func authoritativeDeletionBlockReason(_ metadata: DomainWorkspaceMetadata) -> String? {
         if metadata.isSystemWorkspace {
             return "System workspaces cannot be deleted."
         }
         if metadata.agentIdentityClaims.contains(where: \.requiresProtection) {
-            return "Workspace contains an active or pinned agent session."
+            return agentTabDeletionBlockReason
         }
         return nil
     }
