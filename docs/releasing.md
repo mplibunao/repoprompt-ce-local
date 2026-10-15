@@ -280,14 +280,14 @@ calls as a `tool_call` entry, which is the evidence the receipt cites.
 
 Run against what production already has open; don't create workspaces, windows, or
 worktrees for acceptance. `$W1` is a window from the first arm. `$FILE` is a file in that
-window's workspace, and `$WT` is the path of any existing linked worktree of it. Select in a
-background compose tab made for the arms, so no tab in use changes:
+window's workspace, and `$WT` is the path of any existing linked worktree of it. Select in
+background compose tabs made for the arms, so no tab in use changes:
 `"$CLI" -w "$W1" -c manage_workspaces -j '{"action":"create_tab","name":"acceptance"}'`
-creates it, and `$T1` is the `context_id` in its reply, which is also the tab's ID. After the
-arms, close it with `{"action":"close_tab","tab":"<$T1>"}`. Close it by ID rather than name,
-because Context Builder renames the tab it runs in. The two `$W2`
-lines run only when a second window is already open; otherwise the receipt records them as
-not run.
+creates one, and `$T1` is the `context_id` in its reply, which is also the tab's ID. The two
+`$W2` lines run only when a second window is already open; otherwise the receipt records them
+as not run. When they run, create `$T2` the same way with `-w "$W2"`. After the arms, close
+each tab in its own window with `{"action":"close_tab","tab":"<tab ID>"}`. Close them by ID
+rather than name, because Context Builder renames the tab it runs in.
 
 The Codex and Claude Code arms use `codexExec:gpt-6-luna-low` and
 `claudeCode:haiku:low`. Update these when a provider retires a model. If
@@ -308,9 +308,9 @@ Every arm must pass:
 ```bash
 "$CLI" -e 'windows'                                                              # window IDs
 "$CLI" -w "$W1" -t "$T1" -c manage_selection -j '{"op":"set","paths":["'"$FILE"'"]}'
-"$CLI" -w "$W2" -c manage_selection -j '{"op":"set","paths":["<another file>"]}'
+"$CLI" -w "$W2" -t "$T2" -c manage_selection -j '{"op":"set","paths":["<another file>"]}'
 "$CLI" -w "$W1" -t "$T1" -c manage_selection -j '{"op":"get","view":"files"}'     # still $FILE only
-"$CLI" -w "$W2" -c manage_selection -j '{"op":"get","view":"files"}'              # only the $W2 file
+"$CLI" -w "$W2" -t "$T2" -c manage_selection -j '{"op":"get","view":"files"}'     # only the $W2 file
 "$CLI" -w "$W1" -t "$T1" -c context_builder -j '{"instructions":"Reply with the selected file and its root.","response_type":"question"}' # names $FILE, never the $W2 file
 "$CLI" -w "$W1" -t "$T1" -c oracle_send -j '{"message":"Reply ORACLE_OK and identify the selected root."}' # terminal ORACLE_OK, reusable chat_id
 "$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"codexExec:gpt-6-luna-low","message":"Reply CODEX_OK.","detach":true}'
