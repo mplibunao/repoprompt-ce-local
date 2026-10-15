@@ -610,14 +610,10 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
         self.output = io.StringIO()
         enter_context(self, contextlib.redirect_stdout(self.output))
         enter_context(self, mock.patch.object(conductor, "require_debug_cli", return_value="rpce-cli-debug"))
-        # Retry waits advance a fake clock, and a runaway retry fails here instead of hanging the suite.
+        # Retry waits advance a fake clock instead of sleeping.
         self.clock = 1_000.0
-        self.sleeps = 0
 
         def sleep(seconds: float) -> None:
-            self.sleeps += 1
-            if self.sleeps > 50:
-                raise AssertionError("the smoke kept retrying")
             self.clock += seconds
 
         enter_context(self, mock.patch.object(conductor, "now", side_effect=lambda: self.clock))
@@ -632,6 +628,9 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
 
         def respond(label: str, argv: list[object], _cwd: Path, **kwargs: object) -> Tuple[int, str, str]:
             self.calls.append((label, [str(arg) for arg in argv], kwargs.get("timeout")))
+            # A runaway retry fails here instead of hanging the suite.
+            if len(self.calls) > 50:
+                raise AssertionError("the smoke kept calling the debug CLI")
             response = responses.get(label, (0, "", ""))
             if isinstance(response, list):
                 return response.pop(0) if len(response) > 1 else response[0]
@@ -758,6 +757,7 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
             ("unrelated error", (1, "", "Error:\nError: Invalid Request: Window 1 not found.")),
             ("stale restore", self.blocked_switch(state="stale")),
             ("active switch that is not a restore", self.blocked_switch(reason="userOrInternal")),
+            ("reason that starts with restore", self.blocked_switch(reason="restoredWorkspaceReplacement")),
         ):
             with self.subTest(case=label):
                 code = self.run_switch(switch_response)
