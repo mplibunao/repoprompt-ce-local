@@ -611,7 +611,7 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
         enter_context(self, contextlib.redirect_stdout(self.output))
         enter_context(self, mock.patch.object(conductor, "require_debug_cli", return_value="rpce-cli-debug"))
         # Retry waits advance a fake clock instead of sleeping.
-        self.clock = 1_000.0
+        self.start = self.clock = 1_000.0
 
         def sleep(seconds: float) -> None:
             self.clock += seconds
@@ -624,7 +624,7 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
         responses: dict[str, Tuple[int, str, str] | list[Tuple[int, str, str]]],
         args: dict[str, object] | None = None,
     ) -> int:
-        """A list answers successive calls in order and repeats its last entry."""
+        """A list answers successive calls in order."""
 
         def respond(label: str, argv: list[object], _cwd: Path, **kwargs: object) -> Tuple[int, str, str]:
             self.calls.append((label, [str(arg) for arg in argv], kwargs.get("timeout")))
@@ -632,9 +632,7 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
             if len(self.calls) > 50:
                 raise AssertionError("the smoke kept calling the debug CLI")
             response = responses.get(label, (0, "", ""))
-            if isinstance(response, list):
-                return response.pop(0) if len(response) > 1 else response[0]
-            return response
+            return response.pop(0) if isinstance(response, list) else response
 
         with mock.patch.object(conductor, "run_operation_command", side_effect=respond):
             return conductor.operation_smoke(self.tmp, args or {})
@@ -731,7 +729,7 @@ class SmokeWorkspaceBootstrapTests(unittest.TestCase):
         code = self.run_switch(self.blocked_switch(), {"operationTimeout": 10})
 
         self.assertEqual(code, 1)
-        self.assertGreaterEqual(self.clock, 1_010.0)
+        self.assertGreaterEqual(self.clock, self.start + 10)
         self.assertIn("FAILED stage 'workspace switch' with status 1", self.output.getvalue())
         self.assertEqual(self.labels()[-1], "workspace switch")
 
