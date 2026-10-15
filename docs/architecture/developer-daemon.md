@@ -84,7 +84,7 @@ Neither `make dev-format-check` nor `make dev-lint` installs missing tools; `mak
 
 ## Build outputs
 
-`make dev-build` and `make build` package the debug app into the shared bundle at `~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app`, which launches run. `make dev-run` packages into a staging folder beside it and swaps the result into place. `.build/debug/RepoPrompt.app` is only a link to the last packaged bundle, and after `make dev-run` it points at a staging folder that no longer exists. SwiftPM's architecture-specific build output is usually under `.build/arm64-apple-macosx/debug/`. `make clean` removes `.build`.
+`make dev-build` and `make build` package the debug app into the shared bundle at `~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app`, which launches run. Commands that package and then launch (`make dev-run`, `make run`, `./conductor app relaunch`, `make dev-smoke-launch`, and the Finder launcher) package into a staging folder beside it and swap the result into place. `.build/debug/RepoPrompt.app` is only a link to the last packaged bundle, and after any of those commands it points at a staging folder that no longer exists. SwiftPM's architecture-specific build output is usually under `.build/arm64-apple-macosx/debug/`. `make clean` removes `.build`.
 
 When packaging fails or hangs, trace the packaging script directly:
 
