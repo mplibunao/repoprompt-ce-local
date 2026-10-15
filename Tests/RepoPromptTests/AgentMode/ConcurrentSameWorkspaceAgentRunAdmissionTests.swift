@@ -573,6 +573,10 @@ import XCTest
                 canonicalModelAfter.composeTabs.map(\.activeAgentSessionID),
                 canonicalModelBefore.composeTabs.map(\.activeAgentSessionID)
             )
+            XCTAssertEqual(
+                canonicalModelAfter.composeTabs.map(\.isPinned),
+                canonicalModelBefore.composeTabs.map(\.isPinned)
+            )
             XCTAssertEqual(canonicalModelAfter.activeComposeTabID, canonicalModelBefore.activeComposeTabID)
             XCTAssertEqual(
                 canonicalModelAfter.stashedTabs.map(\.tab.id),
@@ -581,6 +585,10 @@ import XCTest
             XCTAssertEqual(
                 canonicalModelAfter.stashedTabs.map(\.tab.activeAgentSessionID),
                 canonicalModelBefore.stashedTabs.map(\.tab.activeAgentSessionID)
+            )
+            XCTAssertEqual(
+                canonicalModelAfter.stashedTabs.map(\.tab.isPinned),
+                canonicalModelBefore.stashedTabs.map(\.tab.isPinned)
             )
         }
 
