@@ -228,6 +228,43 @@ struct ContentReadForegroundActivityToken: Hashable {
     let kind: ContentReadForegroundActivityKind
 }
 
+#if DEBUG
+    /// One limiter permit attempt as a test observation sink sees it. The id is unique per
+    /// attempt; every event for one attempt carries it.
+    // swiftformat:disable:next redundantSendable
+    struct ContentReadTestAttempt: Hashable, Sendable {
+        let id: UUID
+        let ownerID: UUID
+        let workloadClass: ContentReadWorkloadClass
+    }
+
+    /// Transitions reported to a test observation sink. An attempt's first event is `queued`,
+    /// `granted`, or `queueFull`; an attempt cancelled before it is queued reports nothing.
+    /// Producer events cover only the detached physical-read producer.
+    // swiftformat:disable:next redundantSendable
+    enum ContentReadTestEvent: Sendable {
+        case producerStarted(UUID)
+        case producerFinished(UUID)
+        case queued(ContentReadTestAttempt)
+        case granted(ContentReadTestAttempt)
+        case cancelledWhileQueued(ContentReadTestAttempt)
+        case released(ContentReadTestAttempt)
+        case queueFull(ContentReadTestAttempt, retryAfterMilliseconds: Int)
+        case foregroundBegan(id: UUID, kind: ContentReadForegroundActivityKind)
+        case foregroundEnded(id: UUID)
+    }
+
+    /// Lets a test observe only the content-read work its own task tree starts. Child tasks
+    /// inherit the sink, the detached physical-read producer restores it, and each attempt and
+    /// foreground token keeps the sink it started under. The sink runs synchronously, sometimes
+    /// inside the limiter actor, so it must not await, re-enter the limiter, or assert.
+    enum ContentReadTestObservation {
+        typealias Sink = @Sendable (ContentReadTestEvent) -> Void
+
+        @TaskLocal static var sink: Sink?
+    }
+#endif
+
 actor ContentReadAsyncLimiter {
     #if DEBUG
         struct Snapshot: Equatable {
@@ -272,6 +309,18 @@ actor ContentReadAsyncLimiter {
         let waited: Bool
         let queueDepth: Int
         let waiterCount: Int
+        #if DEBUG
+            var testObservation: TestAttemptObservation?
+
+            /// Reports the grant and attaches the attempt's observation, so its release reaches
+            /// the same sink.
+            func reportingTestGrant(_ observation: TestAttemptObservation) -> PermitAcquisition {
+                observation.report(ContentReadTestEvent.granted)
+                var observed = self
+                observed.testObservation = observation
+                return observed
+            }
+        #endif
     }
 
     private struct WaiterState {
@@ -282,7 +331,23 @@ actor ContentReadAsyncLimiter {
         let lifecycleCorrelation: EditFlowPerf.LifecycleCorrelation?
         let enqueueOrdinal: UInt64
         let enqueuedAtUptimeNanoseconds: UInt64
+        #if DEBUG
+            var testObservation: TestAttemptObservation?
+        #endif
     }
+
+    #if DEBUG
+        /// The sink an attempt started under. A queued waiter is granted in whichever task frees
+        /// capacity, which carries a different sink or none, so the attempt carries its own.
+        private struct TestAttemptObservation {
+            let attempt: ContentReadTestAttempt
+            let sink: ContentReadTestObservation.Sink
+
+            func report(_ event: (ContentReadTestAttempt) -> ContentReadTestEvent) {
+                sink(event(attempt))
+            }
+        }
+    #endif
 
     private let capacity: Int
     private let maxQueuedWaiterCount: Int
@@ -299,6 +364,7 @@ actor ContentReadAsyncLimiter {
     private var activePermitCountsByOwner: [UUID: Int] = [:]
     #if DEBUG
         private var activePermitCountsByWorkload: [String: Int] = [:]
+        private var foregroundTestSinksByTokenID: [UUID: ContentReadTestObservation.Sink] = [:]
     #endif
     private var lastGrantOrdinalByOwner: [UUID: UInt64] = [:]
     private var nextEnqueueOrdinal: UInt64 = 0
@@ -341,6 +407,12 @@ actor ContentReadAsyncLimiter {
     ) -> ContentReadForegroundActivityToken {
         let token = ContentReadForegroundActivityToken(id: UUID(), kind: kind)
         foregroundActivitiesByTokenID[token.id] = kind
+        #if DEBUG
+            if let sink = ContentReadTestObservation.sink {
+                foregroundTestSinksByTokenID[token.id] = sink
+                sink(.foregroundBegan(id: token.id, kind: kind))
+            }
+        #endif
         return token
     }
 
@@ -350,6 +422,11 @@ actor ContentReadAsyncLimiter {
             return
         }
         foregroundActivitiesByTokenID.removeValue(forKey: token.id)
+        #if DEBUG
+            if let sink = foregroundTestSinksByTokenID.removeValue(forKey: token.id) {
+                sink(.foregroundEnded(id: token.id))
+            }
+        #endif
         if foregroundActivitiesByTokenID.isEmpty {
             scheduleAvailablePermits()
         }
@@ -519,6 +596,19 @@ actor ContentReadAsyncLimiter {
         scheduleAvailablePermits()
         let priorityClass = Self.priorityClass(for: workloadClass)
         if waiterStates.isEmpty, canAllocatePermit(workloadClass: workloadClass) {
+            #if DEBUG
+                if let testObservation = Self.currentTestAttemptObservation(
+                    ownerID: ownerID,
+                    workloadClass: workloadClass
+                ) {
+                    return allocatePermit(
+                        ownerID: ownerID,
+                        workloadClass: workloadClass,
+                        priorityClass: priorityClass,
+                        waited: false
+                    ).reportingTestGrant(testObservation)
+                }
+            #endif
             return allocatePermit(
                 ownerID: ownerID,
                 workloadClass: workloadClass,
@@ -537,6 +627,10 @@ actor ContentReadAsyncLimiter {
                     waiterCount: waiterStates.count
                 )
             )
+            #if DEBUG
+                Self.currentTestAttemptObservation(ownerID: ownerID, workloadClass: workloadClass)?
+                    .report { .queueFull($0, retryAfterMilliseconds: retryAfterMilliseconds) }
+            #endif
             throw ContentReadSchedulerError.queueFull(retryAfterMilliseconds: retryAfterMilliseconds)
         }
 
@@ -578,6 +672,10 @@ actor ContentReadAsyncLimiter {
                     waiterCount: waiterStates.count
                 )
             )
+            #if DEBUG
+                Self.currentTestAttemptObservation(ownerID: ownerID, workloadClass: workloadClass)?
+                    .report { .queueFull($0, retryAfterMilliseconds: retryAfterMilliseconds) }
+            #endif
             continuation.resume(throwing: ContentReadSchedulerError.queueFull(
                 retryAfterMilliseconds: retryAfterMilliseconds
             ))
@@ -597,6 +695,13 @@ actor ContentReadAsyncLimiter {
             WorkspaceFileSearchDebugContext.coldStartCollector?.recordSchedulerEnqueue(
                 workload: workloadClass.rawValue
             )
+            if let testObservation = Self.currentTestAttemptObservation(
+                ownerID: ownerID,
+                workloadClass: workloadClass
+            ) {
+                waiterStates[id]?.testObservation = testObservation
+                testObservation.report(ContentReadTestEvent.queued)
+            }
         #endif
         EditFlowPerf.lifecycleEvent(
             EditFlowPerf.Lifecycle.FileSystem.contentReadWorkerPermitWaitBegan,
@@ -614,6 +719,9 @@ actor ContentReadAsyncLimiter {
         guard let state = waiterStates.removeValue(forKey: id) else { return }
         cancellationCount &+= 1
         cleanupOwnerIfIdle(state.ownerID)
+        #if DEBUG
+            state.testObservation?.report(ContentReadTestEvent.cancelledWhileQueued)
+        #endif
         EditFlowPerf.lifecycleEvent(
             EditFlowPerf.Lifecycle.FileSystem.contentReadWorkerPermitCancelled,
             correlation: state.lifecycleCorrelation,
@@ -662,6 +770,9 @@ actor ContentReadAsyncLimiter {
         #endif
         availablePermits = min(availablePermits + 1, capacity)
         cleanupOwnerIfIdle(acquisition.ownerID)
+        #if DEBUG
+            acquisition.testObservation?.report(ContentReadTestEvent.released)
+        #endif
         scheduleAvailablePermits()
     }
 
@@ -683,6 +794,12 @@ actor ContentReadAsyncLimiter {
                     waiterCount: waiterStates.count
                 )
             )
+            #if DEBUG
+                if let testObservation = state.testObservation {
+                    state.continuation.resume(returning: acquisition.reportingTestGrant(testObservation))
+                    continue
+                }
+            #endif
             state.continuation.resume(returning: acquisition)
         }
     }
@@ -859,6 +976,19 @@ actor ContentReadAsyncLimiter {
     }
 
     #if DEBUG
+        /// Reads the task-local sink, so call it only from the acquiring task, never at grant time.
+        private static func currentTestAttemptObservation(
+            ownerID: UUID,
+            workloadClass: ContentReadWorkloadClass
+        ) -> TestAttemptObservation? {
+            ContentReadTestObservation.sink.map {
+                TestAttemptObservation(
+                    attempt: ContentReadTestAttempt(id: UUID(), ownerID: ownerID, workloadClass: workloadClass),
+                    sink: $0
+                )
+            }
+        }
+
         func snapshotForTesting() -> Snapshot {
             let queuedOwners = Set(waiterStates.values.map(\.ownerID))
             let ownerLaneCount = queuedOwners.union(activePermitCountsByOwner.keys).count
@@ -1758,11 +1888,18 @@ extension FileSystemService {
         let lifecycleCorrelation = EditFlowPerf.currentLifecycleCorrelation
         #if DEBUG
             let benchmarkMetricTag = WorktreeStartupInstrumentation.currentBenchmarkMetricTag
+            let testObservationSink = ContentReadTestObservation.sink
+            let testProducerID = UUID()
         #endif
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 state.install(continuation)
+                #if DEBUG
+                    // Reported before launch, so a producer that hasn't requested its permit yet
+                    // still counts as outstanding work.
+                    testObservationSink?(.producerStarted(testProducerID))
+                #endif
                 let producer = Task.detached(priority: priority) {
                     let result: Result<Value, Error>
                     do {
@@ -1779,10 +1916,12 @@ extension FileSystemService {
                             #if DEBUG
                                 try await WorktreeStartupInstrumentation.$currentBenchmarkMetricTag
                                     .withValue(benchmarkMetricTag) {
-                                        try await contentReadWorkerLimiter.withPermit(
-                                            workloadClass: workloadClass,
-                                            ownerID: schedulerOwnerID
-                                        ) { try await admittedOperation() }
+                                        try await ContentReadTestObservation.$sink.withValue(testObservationSink) {
+                                            try await contentReadWorkerLimiter.withPermit(
+                                                workloadClass: workloadClass,
+                                                ownerID: schedulerOwnerID
+                                            ) { try await admittedOperation() }
+                                        }
                                     }
                             #else
                                 try await contentReadWorkerLimiter.withPermit(
@@ -1795,6 +1934,10 @@ extension FileSystemService {
                     } catch {
                         result = .failure(error)
                     }
+                    #if DEBUG
+                        // The permit and any foreground token are already released here.
+                        testObservationSink?(.producerFinished(testProducerID))
+                    #endif
                     state.finish(result)
                 }
                 #if DEBUG
