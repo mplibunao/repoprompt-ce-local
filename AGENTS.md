@@ -4,28 +4,22 @@ This is a Swift Package macOS app for RepoPrompt CE. This file states the rules 
 
 ## Documents by topic
 
-- **Builds, runs, tests, and style checks:** use the coordinated developer daemon, `make dev-*` or `./conductor`, so concurrent agents do not build, launch, or test over each other. The plain `make`, `swift`, and `./Scripts` commands are the uncoordinated fallback for when the daemon is unavailable. [`docs/architecture/developer-daemon.md`](docs/architecture/developer-daemon.md) covers lanes, heavy slots, the live-app lock, tickets, the commands, and the fallback.
+- **Builds, runs, tests, and style checks:** use the coordinated developer daemon, `make dev-*` or `./conductor`, and fall back to the plain `make`, `swift`, and `./Scripts` commands only when it is unavailable. [`docs/architecture/developer-daemon.md`](docs/architecture/developer-daemon.md) explains why and lists the commands.
 - **Validation for a change:** the [validation matrix](.agents/skills/rpce-contribution-check/references/validation-matrix.md) lists the evidence each changed boundary needs, including the live smoke for packaging, MCP, and Agent Mode changes.
-- **Swift style:** for Swift edits, run `make dev-format` before handoff. Run `make dev-lint` before handoff when Swift files or the style tooling changed. Do not run a full-repository formatting baseline unless the task explicitly asks for it.
+- **Swift style:** for Swift edits, run `make dev-format` before handoff, then `make dev-lint`, which the Swift row of the [validation matrix](.agents/skills/rpce-contribution-check/references/validation-matrix.md) requires. Run `make dev-lint` too when style tooling is relevant to the change. Do not run a full-repository formatting baseline unless the task explicitly asks for it.
 - **Tests:** [`docs/testing.md`](docs/testing.md) covers where tests go, focused and full runs, and the handoff checklist. `$rpce-test-quality` decides whether to add, keep, consolidate, or remove a test.
-- **Debug app and debug CLI:** test this app through the CE debug CLI, `rpce-cli-debug`. [`docs/testing.md`](docs/testing.md#debug-cli-and-live-mcp-smoke) covers installing it, the live MCP smoke flow, and the DEBUG-only diagnostic settings; the sections around it cover the debug app's identity, signing, and profile.
+- **Debug app and debug CLI:** test this app through the CE debug CLI, `rpce-cli-debug`, which [`docs/testing.md`](docs/testing.md#debug-cli-and-live-mcp-smoke) covers along with the live MCP smoke flow, the DEBUG-only diagnostics, and the debug app's identity, signing, and profile.
 - **MCP tools:** before changing an MCP tool's description, schema, output hints, or CLI help, read [`docs/architecture/mcp-tool-descriptions.md`](docs/architecture/mcp-tool-descriptions.md).
 - **Source placement:** [`docs/architecture/source-layout.md`](docs/architecture/source-layout.md) is the ownership map and lists the documented exceptions, and [`docs/architecture/provider-plugins.md`](docs/architecture/provider-plugins.md) covers the Agent Mode provider plugin seam. `make guardrails` enforces the layout.
 - **Generated Xcode workspace:** [`docs/architecture/xcode-workspace.md`](docs/architecture/xcode-workspace.md).
 
 ## Commit preflight
 
-Before every commit or push, read and run the repository-local `$rpce-contribution-check` skill. Its [`SKILL.md`](.agents/skills/rpce-contribution-check/SKILL.md) owns what each lane checks and which range it validates. Run each lane at this point:
+Before every commit or push, read and run the repository-local [`$rpce-contribution-check`](.agents/skills/rpce-contribution-check/SKILL.md) skill, which owns what each lane checks and which range it validates. Run a lane with `.agents/skills/rpce-contribution-check/scripts/preflight.sh <lane>` at these points:
 
 - `commit`: stage only the intended changes, then run it before creating a commit; rerun it after any staging change, including partial-staging updates.
 - `push`: run it after committing and before pushing the intended current branch.
-- `pr-ready`: the full local validation pass. Running it is mandatory before merging a branch into `main`.
-
-```bash
-.agents/skills/rpce-contribution-check/scripts/preflight.sh commit
-.agents/skills/rpce-contribution-check/scripts/preflight.sh push
-.agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
-```
+- `pr-ready`: run this full local validation pass before merging a branch into `main`. It is mandatory.
 
 Obtain explicit user approval immediately before force-pushing or rewriting `main` or a tag, deleting a remote branch, a fork, or a local branch that isn't merged into `origin/main`, rotating credentials, or making any other GitHub-visible destructive mutation. Rebasing a pull request's own branch and pushing it with `--force-with-lease` bound to the head last observed on the remote doesn't need approval. Neither does removing a local branch you created once it is merged into `origin/main`, or a worktree or debug-app workspace you created once its branch is merged and the worktree has no uncommitted changes. Stopping, launching, or relaunching the production RepoPrompt CE app also needs MP's approval, and the reason is the work inside it: an agent session or a Context Builder run that the stop would kill. When MP has said he is away or asleep, that nobody is using the app, or that a validation window is pre-approved, and the app is idle, meaning no agent session is running and no Context Builder run is active, stopping production for that window and relaunching it before MP returns to it is within that approval; record the stop and relaunch times in the run's note. The debug app runs beside production and holds none of that work, so launching, stopping, and relaunching it needs no approval.
 
@@ -33,7 +27,7 @@ Local `docs/investigations/*.md` reports are intentionally left unignored so Rep
 
 ## Branch model
 
-`main` is the integration branch and the only long-lived branch. Every change merges into `main` from a `bugfix/`, `port/`, or `chore/` branch cut from `main`, through a pull request on `mplibunao/repoprompt-ce-local` merged with a merge commit, so the review, the checks, and the diff stay auditable on GitHub. Nothing merges into `main` directly. The agent that owns a pull request takes it through the [`CONTRIBUTING.md`](CONTRIBUTING.md) flow: `pr-ready` and labels, the debug-app run for changes under `Sources/` or `Packages/`, an independent review and a separate refactor pass, then MP's approval and the merge. That document also covers stacked pull requests, the Codex review bot, and merging a batch of pull requests. [`docs/releasing.md`](docs/releasing.md) owns the promotion procedure, which records every promoted build as an annotated `local/v<version>-b<build>` tag on the promoted `main` commit.
+`main` is the integration branch and the only long-lived branch. Every change merges into `main` from a `bugfix/`, `port/`, or `chore/` branch cut from `main`, through a pull request on `mplibunao/repoprompt-ce-local` merged with a merge commit, so the review, the checks, and the diff stay auditable on GitHub. Nothing merges into `main` directly. The agent that owns a pull request takes it through the [`CONTRIBUTING.md`](CONTRIBUTING.md) flow: `pr-ready` and labels, the debug-app run for changes under `Sources/` or `Packages/`, an independent review and a separate refactor pass, then MP's approval and the merge. That document also covers stacked pull requests, the Codex review bot, and landing a batch, and [`docs/releasing.md`](docs/releasing.md) owns promotion and its `local/v<version>-b<build>` tags.
 
 ## Upstream is read-only
 
@@ -41,7 +35,7 @@ Three repositories share this code and each has a `main`; name them. *Upstream* 
 
 Write upstream issues and pull requests as plain text, for example `upstream issue 803` or `upstream PR 957`, never as `owner/repo#N` or a URL, in commit messages, pull request text, issues, and comments: GitHub posts a "mentioned this" event on the referenced item for every such reference from a public repository. A bare `#N` refers to the distribution's own tracker.
 
-Upstream is readable through the reference clone that [`docs/porting.md`](docs/porting.md) names, and is never a remote of this repository. The preflight's remote allowlist requires `origin` to be the only remote and requires every configured fetch and push URL to target `github.com/mplibunao/repoprompt-ce-local`, with or without the `.git` suffix. [`docs/porting.md`](docs/porting.md) owns the porting procedure, including the rule that an upstream change crosses into this repository only as hand-written source edits.
+Upstream is never a remote of this repository. The preflight's remote allowlist accepts only an `origin` whose fetch and push URLs target `github.com/mplibunao/repoprompt-ce-local`, with or without the `.git` suffix. [`docs/porting.md`](docs/porting.md) names the read-only reference clone for reading upstream and owns the porting procedure, including the rule that an upstream change crosses into this repository only as hand-written source edits.
 
 ## Changes to agent instructions
 

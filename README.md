@@ -160,7 +160,8 @@ third-party notices in
 - [`CONTRIBUTING.md`](CONTRIBUTING.md): contribution policy and pull request
   steps
 - [`docs/architecture/developer-daemon.md`](docs/architecture/developer-daemon.md):
-  coordinated builds, tests, launches, and style checks through `conductor`
+  the developer daemon, `conductor`, for coordinated builds, tests, launches,
+  and style checks
 - [`docs/testing.md`](docs/testing.md): tests, the debug CLI, live MCP smoke
   checks, and debug-app validation
 - [`docs/architecture/context-composer.md`](docs/architecture/context-composer.md): Context Composer architecture, invariants, and state ownership

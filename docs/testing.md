@@ -1,6 +1,6 @@
 # Testing RepoPrompt CE
 
-Use this guide for contributor-facing XCTest changes and live debug-app validation. Follow [`architecture/developer-daemon.md`](architecture/developer-daemon.md) for coordinated daemon use and style checks, and `AGENTS.md` for lifecycle approvals. Use `$rpce-test-quality` when deciding whether coverage is worth adding, retaining, consolidating, or removing.
+Use this guide for contributor-facing XCTest changes and live debug-app validation. Follow [`architecture/developer-daemon.md`](architecture/developer-daemon.md) for coordinated daemon use and style checks, and [`AGENTS.md`](../AGENTS.md#commit-preflight) for which app actions need approval. Use `$rpce-test-quality` when deciding whether coverage is worth adding, retaining, consolidating, or removing.
 
 ## Quality gate before adding a test
 
@@ -115,7 +115,7 @@ make install-debug-cli     # packages the debug app, then installs /usr/local/bi
 ./Scripts/doctor.sh --install-debug-cli
 ```
 
-`./conductor install-debug-cli` and `./conductor debug-cli-status` run the same installer through the [developer daemon](architecture/developer-daemon.md). The installer links:
+`./conductor install-debug-cli` and `./conductor debug-cli-status` are the [developer daemon](architecture/developer-daemon.md) forms of the first two commands. The installer links:
 
 ```text
 /usr/local/bin/rpce-cli-debug
@@ -131,9 +131,9 @@ If `/usr/local/bin` needs administrator privileges, run the install target from 
 
 The debug CLI talks to the debug app and shares its profile, which [Debug profile isolation](#debug-profile-isolation) describes.
 
-After a change to packaging, the MCP server, the MCP CLI, Agent Mode, or any feature that depends on the running app, run the smallest relevant build or test and then the live smoke. `make dev-smoke` runs it against an already-running debug app, and `make dev-smoke-launch` builds and launches the debug app first. Both create the `repoprompt-ce` workspace once in a fresh debug profile and never recreate it. When creating it needs approval, the smoke stops within seconds and names the setting to change: Settings → Permissions → Workspace Approvals → Create workspace.
+The [validation matrix](../.agents/skills/rpce-contribution-check/references/validation-matrix.md) says which changes need the live smoke. `make dev-smoke` runs it against an already-running debug app, and `make dev-smoke-launch` builds and launches the debug app first. Both create the `repoprompt-ce` workspace once in a fresh debug profile and never recreate it. When creating it needs approval, the smoke stops within seconds and names the setting to change: Settings → Permissions → Workspace Approvals → Create workspace.
 
-The manual live flow:
+To run the same checks by hand, launch the debug app and drive it with the debug CLI:
 
 ```bash
 make dev-run
@@ -162,7 +162,7 @@ rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.claude_raw
 rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.perf_diagnostics_enabled","value":true}'
 ```
 
-These settings are intentionally DEBUG-only. If a key is unavailable, confirm `rpce-cli-debug --version` is resolving to the current CE debug build before falling back to lower-level defaults.
+If a key is unavailable, confirm that `rpce-cli-debug --version` resolves to the current CE debug build before falling back to lower-level defaults.
 
 ## Debug profile isolation
 
