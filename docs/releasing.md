@@ -281,10 +281,11 @@ calls as a `tool_call` entry, which is the evidence the receipt cites.
 Run against what production already has open; don't create workspaces, windows, or
 worktrees for acceptance. `$W1` is a window from the first arm. `$FILE` is a file in that
 window's workspace, and `$WT` is the path of any existing linked worktree of it. Select in a
-tab you can change, not one in active use; `$T1` is that tab's `context_id` from
-`"$CLI" -w "$W1" -c bind_context -j '{"op":"list"}'`. Before the arms, read `$T1`'s
-selection with `manage_selection` `{"op":"get","view":"files"}`, and afterwards restore it with
-`{"op":"set","paths":[...]}`. Context Builder also renames the tab it runs in. The two `$W2`
+background compose tab made for the arms, so no tab in use changes:
+`"$CLI" -w "$W1" -c manage_workspaces -j '{"action":"create_tab","name":"acceptance"}'`
+creates it, and `$T1` is the `context_id` in its reply, which is also the tab's ID. After the
+arms, close it with `{"action":"close_tab","tab":"<$T1>"}`. Close it by ID rather than name,
+because Context Builder renames the tab it runs in. The two `$W2`
 lines run only when a second window is already open; otherwise the receipt records them as
 not run.
 
