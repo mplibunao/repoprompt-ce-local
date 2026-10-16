@@ -321,6 +321,14 @@ class LocalExecutionTests(unittest.TestCase):
             with self.subTest(test_filter=test_filter):
                 self.assertIsNotNone(runner.select_xctest_specifiers(self.LISTED, test_filter))
 
+    def test_helper_listing_with_an_unexpected_shape_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "swiftpm-xctest-helper"
+            helper.write_text('#!/bin/sh\nprintf "[]" > "$2"\n', encoding="utf-8")
+            helper.chmod(0o755)
+
+            self.assertIsNone(runner.helper_bundle_lister(helper)(Path("/b/Tests.xctest"), {}))
+
     PACKAGE_BUNDLE = {"RepoPromptCEPackageTests": Path("/b/RepoPromptCEPackageTests.xctest")}
     # Swift Build, the default build system since Swift 6.4, builds one bundle per test target.
     TARGET_BUNDLES = {
@@ -341,6 +349,7 @@ class LocalExecutionTests(unittest.TestCase):
             environment=self.SANDBOXED,
             lister=self.list_by_module,
             bundle_discovery=lambda _swift, _cwd: self.PACKAGE_BUNDLE,
+            test_targets=lambda _swift, _cwd: set(self.TARGET_BUNDLES),
             xctest_binary=lambda: ("/x/xctest",),
         )
         options.update(overrides)
@@ -364,9 +373,18 @@ class LocalExecutionTests(unittest.TestCase):
             (tests / "SwiftTestingTests.swift").write_text("public import Testing\n", encoding="utf-8")
             self.assertIsNone(self.direct(root))
 
-    def test_direct_commands_launch_only_target_bundles_with_selected_tests(self) -> None:
+    def test_direct_commands_launch_only_declared_target_bundles_with_selected_tests(self) -> None:
+        # A bundle left behind by a deleted or renamed test target must not run, even though
+        # it still lists tests.
+        with_stale = {**self.TARGET_BUNDLES, "RemovedTests": Path("/b/RemovedTests.xctest")}
+
+        def lister(bundle: Path, environment) -> list[str]:
+            if bundle.stem == "RemovedTests":
+                return ["RemovedTests.RegexTests/testOld"]
+            return self.list_by_module(bundle, environment)
+
         with tempfile.TemporaryDirectory() as directory:
-            per_target = dict(bundle_discovery=lambda _swift, _cwd: self.TARGET_BUNDLES)
+            per_target = dict(bundle_discovery=lambda _swift, _cwd: with_stale, lister=lister)
             self.assertEqual(
                 self.direct(Path(directory), test_filter="Regex", **per_target),
                 [("/x/xctest", "-XCTest", "RepoPromptRegexCoreTests.RegexTests", "/b/RepoPromptRegexCoreTests.xctest")],
@@ -378,6 +396,13 @@ class LocalExecutionTests(unittest.TestCase):
                     ("/x/xctest", "-XCTest", "All", "/b/RepoPromptTests.xctest"),
                 ],
             )
+            # A declared target without a bundle, or no target list at all, can't run directly.
+            self.assertIsNone(self.direct(
+                Path(directory),
+                test_targets=lambda _swift, _cwd: {*self.TARGET_BUNDLES, "NewTests"},
+                **per_target,
+            ))
+            self.assertIsNone(self.direct(Path(directory), test_targets=lambda _swift, _cwd: None, **per_target))
 
     def run_local(
         self,
@@ -426,6 +451,15 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertEqual(status, 3)
         self.assertIn("$ /x/xctest -XCTest S /b.xctest", output)
 
+    def test_run_local_tests_reports_a_crashed_bundle_like_swift_test(self) -> None:
+        status, _, output = self.run_local(
+            lambda **_kwargs: [("/x/xctest", "-XCTest", "S", "/a.xctest")],
+            bundle_statuses={"/a.xctest": -11},
+        )
+
+        self.assertEqual(status, -11)
+        self.assertIn("error: Exited with unexpected signal code 11", output)
+
     def test_run_local_tests_stops_after_failed_build(self) -> None:
         direct = mock.Mock()
 
@@ -446,12 +480,13 @@ class LocalExecutionTests(unittest.TestCase):
         _, calls, _ = self.run_local(lambda **_kwargs: None)
         self.assertEqual(calls[1], (("swift", "test", "--skip-build", "--filter", "S"), self.SANDBOXED))
 
+        # `--test-product` builds only that product, so it skips the separate full test build.
         direct = mock.Mock()
-        _, calls, _ = self.run_local(direct, test_product="RepoPromptPackageTests")
+        _, calls, _ = self.run_local(direct, test_product="RepoPromptRegexCoreTests")
         direct.assert_not_called()
         self.assertEqual(
-            calls[1][0],
-            ("swift", "test", "--skip-build", "--test-product", "RepoPromptPackageTests", "--filter", "S"),
+            calls,
+            [(("swift", "test", "--test-product", "RepoPromptRegexCoreTests", "--filter", "S"), self.SANDBOXED)],
         )
 
     def test_local_mode_takes_the_sandbox_out_of_its_own_environment(self) -> None:

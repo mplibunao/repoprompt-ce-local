@@ -348,11 +348,27 @@ def helper_bundle_lister(helper: Path) -> BundleTestLister:
                     capture_output=True,
                     env=dict(environment),
                 )
-                return flatten_listed_tests(json.loads(output.read_text(encoding="utf-8")))
+                document = json.loads(output.read_text(encoding="utf-8"))
             except (OSError, subprocess.CalledProcessError, ValueError):
                 return None
+        return flatten_listed_tests(document) if isinstance(document, Mapping) else None
 
     return list_tests
+
+
+def declared_test_targets(swift_binary: str, cwd: Path | None) -> set[str] | None:
+    try:
+        result = subprocess.run(
+            [swift_binary, "package", "dump-package"],
+            check=True,
+            capture_output=True,
+            cwd=cwd,
+            text=True,
+        )
+        targets = json.loads(result.stdout)["targets"]
+        return {target["name"] for target in targets if target.get("type") == "test"}
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def is_portable_filter(test_filter: str) -> bool:
@@ -424,14 +440,6 @@ def select_xctest_specifiers(
     return selectors
 
 
-def local_test_bundles(discovered: Mapping[str, Path]) -> list[Path]:
-    """The package bundle native SwiftPM builds, or Swift Build's one bundle per test target."""
-    package_bundle = package_test_bundle(discovered)
-    if package_bundle is not None:
-        return [package_bundle]
-    return [discovered[name] for name in sorted(discovered)]
-
-
 def direct_xctest_commands(
     *,
     swift_binary: str,
@@ -440,14 +448,23 @@ def direct_xctest_commands(
     environment: Mapping[str, str],
     lister: BundleTestLister | None = None,
     bundle_discovery: Callable[[str, Path | None], Mapping[str, Path]] = discover_test_bundles,
+    test_targets: Callable[[str, Path | None], set[str] | None] = declared_test_targets,
     xctest_binary: Callable[[], tuple[str, ...]] = xctest_binary_path,
 ) -> list[tuple[str, ...]] | None:
     """Return one `xctest` command per bundle with selected tests, or None to use `swift test`."""
     if package_uses_swift_testing(cwd or Path.cwd()):
         return None
-    bundles = local_test_bundles(bundle_discovery(swift_binary, cwd))
-    if not bundles:
-        return None
+    discovered = bundle_discovery(swift_binary, cwd)
+    package_bundle = package_test_bundle(discovered)
+    if package_bundle is not None:
+        bundles = [package_bundle]
+    else:
+        # Swift Build builds one bundle per test target and can leave the bundles of deleted
+        # or renamed targets in place, so only declared targets run.
+        targets = test_targets(swift_binary, cwd)
+        if not targets or any(name not in discovered for name in targets):
+            return None
+        bundles = [discovered[name] for name in sorted(targets)]
     if lister is None:
         helper = xctest_helper_path(swift_binary)
         if helper is None:
@@ -491,36 +508,37 @@ def run_local_tests(
         print(f"$ {shlex.join(command)}", flush=True)
         return executor(command, cwd, environment)
 
+    filter_args = ("--filter", test_filter) if test_filter else ()
     build_environment = dict(os.environ)
-    status = run((swift_binary, "build", "--build-tests"), build_environment)
-    if status != 0:
-        return status
     test_environment = {
         **build_environment,
         TEST_SANDBOX_ENV_KEY: sandbox_root,
         "NSUnbufferedIO": "YES",
     }
-    commands: list[tuple[str, ...]] | None = None
-    if test_product is None:
-        commands = direct_commands(
-            swift_binary=swift_binary,
-            cwd=cwd,
-            test_filter=test_filter,
-            environment=test_environment,
-        )
+    if test_product:
+        # `swift test` builds only this product. It sees the sandbox, so it re-evaluates the
+        # manifests, as before.
+        return run((swift_binary, "test", "--test-product", test_product, *filter_args), test_environment)
+    status = run((swift_binary, "build", "--build-tests"), build_environment)
+    if status != 0:
+        return status
+    commands = direct_commands(
+        swift_binary=swift_binary,
+        cwd=cwd,
+        test_filter=test_filter,
+        environment=test_environment,
+    )
     if commands == []:
         print("No matching test cases were run", flush=True)
         return 0
     if commands is None:
-        fallback = (swift_binary, "test", "--skip-build")
-        if test_product:
-            fallback += ("--test-product", test_product)
-        if test_filter:
-            fallback += ("--filter", test_filter)
-        commands = [fallback]
+        commands = [(swift_binary, "test", "--skip-build", *filter_args)]
     # Like `swift test`, run every bundle and report the first failure.
     for command in commands:
         result = run(command, test_environment)
+        if result < 0:
+            # `swift test` prints this line, and conductor's summary lists it as a test failure.
+            print(f"error: Exited with unexpected signal code {-result}", flush=True)
         status = status or result
     return status
 
