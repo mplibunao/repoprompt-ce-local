@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic hosted CI runner for RepoPrompt CE XCTest suites.
 
-`--local` is conductor's test path: build once, then run the built bundle with `xctest`.
+`--local` is conductor's test path: build once, then run the built test bundles with `xctest`.
 """
 
 from __future__ import annotations
@@ -425,14 +425,13 @@ def select_xctest_specifiers(
     if not is_portable_filter(test_filter):
         return None
     pattern = re.compile(test_filter)
-    selected = {specifier for specifier in specifiers if pattern.search(specifier)}
     by_suite: dict[str, list[str]] = {}
     for specifier in specifiers:
         by_suite.setdefault(specifier.split("/", 1)[0], []).append(specifier)
     selectors: list[str] = []
     for suite in sorted(by_suite):
         methods = by_suite[suite]
-        chosen = [method for method in methods if method in selected]
+        chosen = [method for method in methods if pattern.search(method)]
         if len(chosen) == len(methods):
             selectors.append(suite)
         else:
@@ -492,8 +491,8 @@ def run_local_tests(
     swift_binary: str,
     cwd: Path | None,
     sandbox_root: str,
-    test_filter: str | None = None,
-    test_product: str | None = None,
+    test_filter: str | None,
+    test_product: str | None,
     executor: CommandExecutor = execute_command,
     direct_commands: Callable[..., list[tuple[str, ...]] | None] = direct_xctest_commands,
 ) -> int:
@@ -517,7 +516,7 @@ def run_local_tests(
     }
     if test_product:
         # `swift test` builds only this product. It sees the sandbox, so it re-evaluates the
-        # manifests, as before.
+        # manifests.
         return run((swift_binary, "test", "--test-product", test_product, *filter_args), test_environment)
     status = run((swift_binary, "build", "--build-tests"), build_environment)
     if status != 0:

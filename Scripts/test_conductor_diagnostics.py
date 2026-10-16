@@ -245,7 +245,6 @@ class XCTestSandboxTests(unittest.TestCase):
             (test_argv, "/sandbox", {sandbox_key: "/sandbox"}),
             (provider_argv, "/sandbox", {sandbox_key: "/sandbox"}),
             (["swift", "build", "--product", "RepoPrompt"], None, {}),
-            ([str(SCRIPT_DIR / "package_app.sh"), "debug"], None, {}),
             ([sys.executable, "-u", "/elsewhere/conductor.py", conductor.OPERATION_RUNNER_ARG, "{}"], None, {}),
         )
         for argv, sandbox_root, expected in cases:

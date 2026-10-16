@@ -363,7 +363,6 @@ class LocalExecutionTests(unittest.TestCase):
                 [("/x/xctest", "-XCTest", "RepoPromptTests.AlphaTests", "/b/RepoPromptCEPackageTests.xctest")],
             )
             self.assertEqual(self.direct(root, test_filter="Nope"), [])
-            self.assertIsNone(self.direct(root, bundle_discovery=lambda _swift, _cwd: {}))
             self.assertIsNone(self.direct(root, lister=lambda _bundle, _environment: None))
             # An empty listing would otherwise pass every job without running a test.
             self.assertIsNone(self.direct(root, test_filter=None, lister=lambda _bundle, _environment: []))

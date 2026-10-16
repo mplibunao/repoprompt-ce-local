@@ -177,7 +177,6 @@ TEST_SANDBOX_ENV_KEY = "REPOPROMPT_TEST_SANDBOX_ROOT"
 # a process that hands it to test code.
 CONDUCTOR_JOB_TICKET_ENV = "REPOPROMPT_CONDUCTOR_JOB_TICKET"
 OPERATION_RUNNER_ARG = "__operation_runner"
-LOCAL_TEST_RUNNER_SCRIPT = "ci_app_test_runner.py"
 TEST_SANDBOX_MARKER_FILENAME = ".conductor-owned-test-sandbox"
 TEST_SANDBOX_MARKER_CONTENT = "RepoPrompt CE conductor test sandbox v1\n"
 
@@ -3469,7 +3468,7 @@ class OperationRegistry:
         return [sys.executable, "-u", str(self.script_path), OPERATION_RUNNER_ARG]
 
     def _local_test_runner_argv(self) -> List[str]:
-        return [sys.executable, "-u", str(self.repo_root / "Scripts" / LOCAL_TEST_RUNNER_SCRIPT), "--local"]
+        return [sys.executable, "-u", str(self.repo_root / "Scripts" / "ci_app_test_runner.py"), "--local"]
 
     def process_environment(
         self,
