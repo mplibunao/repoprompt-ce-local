@@ -1,4 +1,4 @@
 interface:
-  display_name: "Merge RepoPrompt CE PR Batch"
-  short_description: "Safely integrate an authorized PR batch"
-  default_prompt: "Use $rpce-merge-pr-batch to integrate and normally merge this explicitly ordered RepoPrompt CE PR list while preserving my original checkout; stop before any force-push, admin bypass, branch deletion, app lifecycle change, or deployment I have not separately authorized."
+  display_name: "Land RepoPrompt CE Pull Requests"
+  short_description: "Land approved PRs through one release candidate"
+  default_prompt: "Use $rpce-merge-pr-batch to land this ordered list of approved RepoPrompt CE pull requests through one release candidate while preserving my original checkout; stop before any action that the 'Commit preflight' section of AGENTS.md reserves for my approval."

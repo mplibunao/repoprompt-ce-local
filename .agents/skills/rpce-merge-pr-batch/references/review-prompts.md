@@ -1,6 +1,6 @@
 # Review and cleanup prompts
 
-Start the step 4 sessions from these templates. Fill every `<placeholder>` from the ledger and the pull request, because a fresh session sees only the prompt.
+`CONTRIBUTING.md` step 6 starts the pre-approval review and cleanup sessions from these templates, in the pull request's own worktree. Fill every `<placeholder>` from the pull request, because a fresh session sees only the prompt.
 
 ## Engineer review
 
@@ -43,7 +43,7 @@ and list what you checked. Stop after reporting.
 ## Pair cleanup
 
 ```text
-Cleanup pass on pull request <number> before it merges. You may edit files only inside
+Cleanup pass on pull request <number> before MP reviews it. You may edit files only inside
 <worktree>. Do not commit, stage, push, switch branches, or run any other git command that
 changes state. Do not run builds, tests, or formatters; validation runs after you finish.
 No network or GitHub actions, and do not read or print credentials.
