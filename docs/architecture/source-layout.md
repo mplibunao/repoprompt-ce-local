@@ -192,16 +192,4 @@ The guardrail script verifies:
 
 ## Contributor validation commands
 
-Run the smallest focused validation that covers your change, then broaden as needed:
-
-```bash
-make dev-swift-build PRODUCT=RepoPrompt
-make dev-swift-build PRODUCT=repoprompt-mcp
-make dev-test
-make guardrails
-make doctor
-make dev-build
-make dev-test
-```
-
-Use `make run` only when it is safe to stop the existing debug app instance and launch the debug app.
+The [validation matrix](../../.agents/skills/rpce-contribution-check/references/validation-matrix.md) lists the checks a change needs. [`developer-daemon.md`](developer-daemon.md#commands) lists the commands and, under [Debug app lifecycle](developer-daemon.md#debug-app-lifecycle), says when stopping the debug app is safe.

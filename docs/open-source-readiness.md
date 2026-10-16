@@ -16,7 +16,8 @@ Release/debug packaging derives app identity from [`version.env`](../version.env
 The bundle identifier, Sparkle key pair, and appcast belong to CE's own release
 line and do not inherit the closed app's version history. Treat bundle IDs,
 signing team IDs, Sparkle keys, and release channels as deliberate,
-separately reviewed changes.
+separately reviewed changes. Change other release metadata or a signing
+identity only deliberately and with review.
 
 `./Scripts/package_app.sh release` produces a signed release `.app` bundle. A signed release requires `SIGN_IDENTITY` and a `REPOPROMPT_PROVISIONING_PROFILE` for `648A27MST5.com.pvncher.repoprompt.ce`, renders the CE entitlements template, uses timestamped hardened-runtime signing, verifies the signed bundle identifier/team, uses Keychain-backed secure storage, copies the root `LICENSE` and `THIRD_PARTY_NOTICES.md` files into `Contents/Resources/Legal`, and recursively copies root [`ThirdPartyLicenses/`](../ThirdPartyLicenses/) into `Contents/Resources/Legal/ThirdPartyLicenses/` in the packaged app.
 

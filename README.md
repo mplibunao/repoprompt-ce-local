@@ -1,6 +1,6 @@
 # RepoPrompt CE
 
-[![CI](https://github.com/repoprompt/repoprompt-ce/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/repoprompt/repoprompt-ce/actions/workflows/ci.yml?query=branch%3Amain)
+[![CI](https://github.com/mplibunao/repoprompt-ce-local/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mplibunao/repoprompt-ce-local/actions/workflows/ci.yml?query=branch%3Amain)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 ![Platform: macOS 26+](https://img.shields.io/badge/platform-macOS%2026%2B-black)
 
@@ -57,13 +57,16 @@ ad-hoc signing:
 ALLOW_ADHOC_SIGNING=1 ./conductor app relaunch
 ```
 
-Ad-hoc debug builds use in-memory secure storage, so saved API keys and secure
-permission changes do not persist across launches. For persistent debug
-Keychain storage, pass a stable Apple Development identity explicitly:
+For persistent debug Keychain storage, pass a stable Apple Development identity
+explicitly:
 
 ```bash
 SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./conductor app relaunch
 ```
+
+[Debug app signing and secure storage](docs/testing.md#debug-app-signing-and-secure-storage)
+says which debug builds keep saved API keys and secure permission changes across
+launches.
 
 For a stable locally signed app under `/Applications`, use the local production
 installer below. It signs the production bundle identifier with your Apple

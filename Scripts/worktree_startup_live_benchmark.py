@@ -1676,7 +1676,7 @@ def plan_command(args: argparse.Namespace) -> int:
             "environment": "REPOPROMPT_NAMESPACE_MANIFEST_SCALE_ENTRY_COUNT",
             "test_filter": "RepoPromptTests.WorkspaceRootNamespaceManifestTests/testSyntheticHundredThousandEntriesRemainWithinConfiguredBatchBytes",
         },
-        "scoreboard": "prompt-exports/optimize-worktree-interactive-readiness-runs.md",
+        "scoreboard": "docs/investigations/optimize-worktree-interactive-readiness-runs.md",
     }
     plan["plan_sha256"] = plan_digest(plan)
     output = Path(args.output).expanduser().resolve()
