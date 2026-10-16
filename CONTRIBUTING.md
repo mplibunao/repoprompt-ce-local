@@ -93,19 +93,20 @@ Work is tracked as issues and pull requests there.
 7. MP reads the pull request and approves it in chat. GitHub doesn't let an
    author approve a pull request opened from their own account, so its review
    state doesn't record the approval; the approved head is the pull request's
-   head when MP approves it. From here the pull request waits for a release
-   candidate ([Landing](#landing)), which merges every approved head onto
-   `origin/main`, validates that candidate once, and pushes it to `main`. The
-   pull request needs nothing more unless its head no longer merges cleanly or
-   the candidate fails on it. For a conflict with `main`, rebase it onto
-   `origin/main`, run the push preflight, and push with a lease pinned to the
-   head MP approved, so a newer push to the branch makes the push fail instead
-   of being overwritten; MP's approval covers the rebase. When a lower stack
-   layer is rebased, the upper layer is rebased onto the lower layer's new head
-   the same way, and its approval covers that rebase too. `main` is never merged
-   into a pull request branch. Any other commit pushed after the approval, such
-   as a review fix, needs MP's approval again before the pull request enters a
-   candidate.
+   head when MP approves it. Confirming an ordered landing list that shows each
+   head's SHA approves those heads the same way. From here the pull request
+   waits for a release candidate ([Landing](#landing)), which merges every
+   approved head onto `origin/main`, validates that candidate once, and pushes
+   it to `main`. The pull request needs nothing more unless its head no longer
+   merges cleanly or the candidate fails on it. For a conflict with `main`,
+   rebase it onto `origin/main`, run the push preflight, and push with a lease
+   pinned to the head MP approved, so a newer push to the branch makes the push
+   fail instead of being overwritten; MP's approval covers the rebase. When a
+   lower stack layer is rebased, the upper layer is rebased onto the lower
+   layer's new head the same way, and its approval covers that rebase too.
+   `main` is never merged into a pull request branch. Any other commit pushed
+   after the approval, such as a review fix, needs MP's approval again before
+   the pull request enters a candidate.
 
    ```bash
    git fetch origin
@@ -132,32 +133,29 @@ and checks. These are its steps.
    pull request branches are not rewritten. A head that conflicts with `main` is
    rebased per step 7 and its new head is merged instead. A head that conflicts
    with a pull request merged earlier in the same candidate leaves this
-   candidate; once that pull request lands, it rebases onto the new `main` per
-   step 7 and enters the next candidate.
+   candidate with anything stacked on it; once that pull request lands, it
+   rebases onto the new `main` per step 7 and enters the next candidate.
 2. **Push.** Run the push preflight and push the candidate. Hosted CI runs on
    the push.
 3. **Validate.** Run `preflight.sh candidate` on the candidate;
    [Candidate validation](.agents/skills/rpce-contribution-check/SKILL.md#candidate-validation)
-   says what it selects. Then run the checks it prints against the debug app it
+   says what it selects. Then run any checks it prints against the debug app it
    launched. The candidate passes when the hosted runs on its tip are green (CI,
    and Xcode Workspace Validation when the candidate touches that workflow's
    paths), the lane passed, and the printed checks passed.
 4. **Land.** Fetch; require `origin/main` to equal the candidate's base, each
    pull request's head to equal the head that was merged, and the local `HEAD`
    to equal the tip; retarget the upper layer of any stack in the candidate onto
-   `main`; run the push preflight; push the tip to `main` with
-   `git push origin HEAD:refs/heads/main`. A rejected push means `main` moved:
-   the candidate is void, and each retargeted upper layer goes back to its lower
-   branch. After the push, GitHub marks each pull request merged. Comment on
-   each with the candidate name, its tip, and the hosted run, then delete the
-   head branches. The candidate branch stays until the version is promoted.
-5. **Fail.** Fix on the pull request's branch (any fix other than a rebase needs
-   MP's approval again) or drop the pull request and anything stacked on it,
-   then cut rc<N+1> from `origin/main` with the current heads. To find the pull
-   request at fault, bisect the candidate's merges with
-   `git bisect --first-parent` between the base and the tip, running the failing
-   check's own command rather than the preflight script; the first failing merge
-   names it.
+   `main`; run the push preflight; push the tip to `main`. A rejected push means
+   `main` moved: the candidate is void, and each retargeted upper layer goes
+   back to its lower branch. After the push, GitHub marks each pull request
+   merged. Comment on each with the candidate name, its tip, and the hosted run,
+   then delete the head branches. The candidate branch stays until the version
+   is promoted.
+5. **Fail.** Fix on the pull request's branch (step 7 says which fixes need
+   approval again) or drop the pull request and anything stacked on it, then cut
+   rc<N+1> from `origin/main` with the current heads. Step 6 of
+   `$rpce-merge-pr-batch` finds the pull request at fault.
 
 New approvals enter the next candidate; MP may abandon an open candidate so the
 next one is cut now. Every `main` tip is a landed candidate, and promotion

@@ -99,9 +99,11 @@ Before you start:
 
    After the tag is pushed, delete the candidate branches the landings left as evidence, up
    to the candidate the promoted commit landed from, including their `-m<i>` bisect
-   branches. Leave any later candidate: it may still be open.
+   branches. Leave any later candidate: it may still be open. Candidate branches of an earlier
+   version are deleted by hand.
 
    ```bash
+   git fetch --prune origin
    landed="$(git branch -r --points-at <promoted commit> --list 'origin/release/*' | sed -n 's/.*-rc\([0-9]*\)$/\1/p')"
    git ls-remote --heads origin 'release/<version>-rc*' | cut -f2 | sed 's#refs/heads/##' \
      | awk -v n="$landed" '{ m = $0; sub(/.*-rc/, "", m); sub(/-m[0-9]+$/, "", m); if (m + 0 <= n + 0) print }' \
