@@ -106,4 +106,4 @@ swift package resolve
 cd Packages/RepoPromptAgentProviders && swift test
 ```
 
-When changes touch packaging, MCP runtime, debug CLI behavior, Agent Mode runtime behavior, or a running-app feature, run the live CE MCP smoke flow documented in the root [`README.md`](../README.md) after the smallest relevant build/test command.
+When changes touch packaging, MCP runtime, debug CLI behavior, Agent Mode runtime behavior, or a running-app feature, run the [live CE MCP smoke flow](testing.md#debug-cli-and-live-mcp-smoke) after the smallest relevant build/test command.

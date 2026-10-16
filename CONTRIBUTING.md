@@ -7,8 +7,12 @@ Work is tracked as issues and pull requests there.
 ## Flow
 
 1. Branch from `main` using a `bugfix/`, `port/`, or `chore/` prefix.
-2. Make the change and run the smallest relevant coordinated validation commands
-   from [`AGENTS.md`](AGENTS.md).
+2. Make the change and run the smallest relevant coordinated validation
+   commands: the
+   [validation matrix](.agents/skills/rpce-contribution-check/references/validation-matrix.md)
+   lists what each changed boundary needs, and
+   [`docs/architecture/developer-daemon.md`](docs/architecture/developer-daemon.md)
+   covers the commands.
 3. Stage only the intended files and run the commit preflight:
 
    ```bash
@@ -30,7 +34,8 @@ Work is tracked as issues and pull requests there.
    `main` on `mplibunao/repoprompt-ce-local`, with the `pr-ready` result from
    step 4 recorded in the description, one type label (`bug`, `port`,
    `tooling`, `agent-env`, `documentation`, or `cleanup`), and the `area:`
-   labels for the code it touches.
+   labels for the code it touches. Open it ready for review, not as a draft,
+   so the Codex review bot reviews it from the start.
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
@@ -56,7 +61,8 @@ Work is tracked as issues and pull requests there.
    reviews it, and its description says that validation is pending until you
    record the run. Build and launch the debug app from the branch, exercise
    the changed behavior through `rpce-cli-debug` or the app itself, and record
-   the commands, what you observed, and the result in the description. The
+   the commands, what you observed, and the result in the description. Unit
+   tests and `pr-ready` do not replace that run. The
    debug app runs beside production with its own profile and needs no
    approval to launch or relaunch. A debug build packaged before the profile
    split still shares production's state, so validate from a current build.

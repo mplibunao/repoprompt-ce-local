@@ -1,37 +1,33 @@
 # Agent Notes
 
-This is a Swift Package macOS app for RepoPrompt CE.
+This is a Swift Package macOS app for RepoPrompt CE. This file states the rules that appear in no other document, and for every other topic it links to the document that defines it. Read that document before acting on its topic.
 
-Prefer the coordinated developer daemon (`make dev-*`, see "Developer daemon / coordinated validation" below) for builds, runs, and tests. It runs every job through a lane-serialized queue so concurrent agents do not build, launch, or test over each other, and it returns a ticket for each job so long builds can be detached and checked on later instead of blocking. The plain `make` / `swift` / `./Scripts` commands shown below are the uncoordinated fallback for when the daemon is unavailable.
+## Documents by topic
+
+- **Builds, runs, tests, and style checks:** use the coordinated developer daemon, `make dev-*` or `./conductor`, and fall back to the plain `make`, `swift`, and `./Scripts` commands only when it is unavailable. [`docs/architecture/developer-daemon.md`](docs/architecture/developer-daemon.md) explains why and lists the commands.
+- **Validation for a change:** the [validation matrix](.agents/skills/rpce-contribution-check/references/validation-matrix.md) lists the evidence each changed boundary needs, including the live smoke for packaging, MCP, and Agent Mode changes.
+- **Swift style:** after any Swift edit, run `make dev-format` before handoff, then `make dev-lint`, which the Swift row of the [validation matrix](.agents/skills/rpce-contribution-check/references/validation-matrix.md) requires. Never run `make dev-format` on a change with no Swift edits. Run `make dev-lint` too when style tooling is relevant to the change. Do not run a full-repository formatting baseline unless the task explicitly asks for it.
+- **Tests:** [`docs/testing.md`](docs/testing.md) covers where tests go, focused and full runs, and the handoff checklist. `$rpce-test-quality` decides whether to add, keep, consolidate, or remove a test.
+- **Debug app and debug CLI:** test this app through the CE debug CLI, `rpce-cli-debug`, which [`docs/testing.md`](docs/testing.md#debug-cli-and-live-mcp-smoke) covers along with the live MCP smoke flow, the DEBUG-only diagnostics, and the debug app's identity, signing, and profile.
+- **MCP tools:** before changing an MCP tool's description, schema, output hints, or CLI help, read [`docs/architecture/mcp-tool-descriptions.md`](docs/architecture/mcp-tool-descriptions.md).
+- **Source placement:** [`docs/architecture/source-layout.md`](docs/architecture/source-layout.md) is the ownership map and lists the documented exceptions, and [`docs/architecture/provider-plugins.md`](docs/architecture/provider-plugins.md) covers the Agent Mode provider plugin seam. `make guardrails` enforces the layout.
+- **Generated Xcode workspace:** [`docs/architecture/xcode-workspace.md`](docs/architecture/xcode-workspace.md).
 
 ## Commit preflight
 
-Before every commit or push, read and run the repository-local `$rpce-contribution-check` skill:
-
-```bash
-.agents/skills/rpce-contribution-check/scripts/preflight.sh commit
-.agents/skills/rpce-contribution-check/scripts/preflight.sh push
-```
-
-The skill has three lanes:
+Before every commit or push, read and run the repository-local [`$rpce-contribution-check`](.agents/skills/rpce-contribution-check/SKILL.md) skill, which owns what each lane checks and which range it validates. Run a lane with `.agents/skills/rpce-contribution-check/scripts/preflight.sh <lane>` at these points:
 
 - `commit`: stage only the intended changes, then run it before creating a commit; rerun it after any staging change, including partial-staging updates.
-- `push`: run it after committing and before pushing the intended current branch. It resolves the outgoing range against the branch's configured upstream, falling back to `origin/main` for a topic branch without one, and scans that range.
-- `pr-ready`: the full local validation pass over the computed outgoing range, path-selected. Running it is mandatory before merging a branch into `main`; the skill owns the comparison-base mechanics that decide what the lane actually validates.
+- `push`: run it after committing and before pushing the intended current branch.
+- `pr-ready`: run this full local validation pass before merging a branch into `main`. It is mandatory.
 
-`commit` and `push` are mandatory safety gates: they enforce redacted staged-index and outgoing-range secret scanning, repository guardrails, an `origin`-only remote allowlist, and clean push boundaries. `push` does not run heavyweight lint/test/build lanes; `pr-ready` does:
-
-```bash
-.agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
-```
-
-Focused validation and release validation remain explicit; use the validation matrix plus commands such as `make dev-release-preflight` / `make dev-release-artifact` when the changed boundary requires them. Obtain explicit user approval immediately before force-pushing or rewriting `main` or a tag, deleting a remote branch, a fork, or a local branch that isn't merged into `origin/main`, rotating credentials, or making any other GitHub-visible destructive mutation. Rebasing a pull request's own branch and pushing it with `--force-with-lease` bound to the head last observed on the remote doesn't need approval. Neither does removing a local branch you created once it is merged into `origin/main`, or a worktree or debug-app workspace you created once its branch is merged and the worktree has no uncommitted changes. Stopping, launching, or relaunching the production RepoPrompt CE app also needs MP's approval, and the reason is the work inside it: an agent session or a Context Builder run that the stop would kill. When MP has said he is away or asleep, that nobody is using the app, or that a validation window is pre-approved, and the app is idle, meaning no agent session is running and no Context Builder run is active, stopping production for that window and relaunching it before MP returns to it is within that approval; record the stop and relaunch times in the run's note. The debug app runs beside production and holds none of that work, so launching, stopping, and relaunching it needs no approval.
+Obtain explicit user approval immediately before force-pushing or rewriting `main` or a tag, deleting a remote branch, a fork, or a local branch that isn't merged into `origin/main`, rotating credentials, or making any other GitHub-visible destructive mutation. Rebasing a pull request's own branch and pushing it with `--force-with-lease` bound to the head last observed on the remote doesn't need approval. Neither does removing a local branch you created once it is merged into `origin/main`, or a worktree or debug-app workspace you created once its branch is merged and the worktree has no uncommitted changes. Stopping, launching, or relaunching the production RepoPrompt CE app also needs MP's approval, and the reason is the work inside it: an agent session or a Context Builder run that the stop would kill. When MP has said he is away or asleep, that nobody is using the app, or that a validation window is pre-approved, and the app is idle, meaning no agent session is running and no Context Builder run is active, stopping production for that window and relaunching it before MP returns to it is within that approval; record the stop and relaunch times in the run's note. The debug app runs beside production and holds none of that work, so launching, stopping, and relaunching it needs no approval.
 
 Local `docs/investigations/*.md` reports are intentionally left unignored so RepoPrompt tooling can read them. Do not stage or merge these local investigation artifacts unless intentionally requested.
 
 ## Branch model
 
-`main` is the integration branch and the only long-lived branch. Cut a `bugfix/`, `port/`, or `chore/` branch from `main`, push it, and land it through a pull request on `mplibunao/repoprompt-ce-local` merged with a merge commit, so the review, the checks, and the diff stay auditable on GitHub. Nothing merges into `main` directly, and the `pr-ready` lane runs on the branch before the merge. The agent that owns a pull request opens it with one type label and the matching `area:` labels from the repository's label set, records the `pr-ready` result in its description, and runs an independent review and a separate refactor pass on the change before asking MP to review it. Open each pull request ready for review, so the Codex review bot reviews it from the start. The bot is optional input, never a merge gate. Step 6 of [`CONTRIBUTING.md`](CONTRIBUTING.md) covers handling its findings. A pull request that changes app code, anything under `Sources/` or `Packages/`, is validated in the debug app before MP reviews it: exercise the changed behavior through the debug CLI or the app itself and record the run and its result in the description, which says validation is pending until then. Unit tests and `pr-ready` do not stand in for that run. Then MP reads and approves it; the agent then rebases the branch onto `main` to resolve any conflict, through the same gates (the approval covers the rebase, while any other later commit needs a fresh approval), reruns `pr-ready` on the final head with the upstream unset, and merges that exact head with a merge commit once its checks pass. When a change depends on one still under review, cut its branch from that branch, open the pull request against it, link the pair as a GitHub stack, and add the `stacked` label; GitHub then shows the layer, scopes the diff to it, and retargets it onto `main` when the lower one merges, rewriting its commits as it does; MP's approval of the lower layer covers that rewrite. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the commands. Every promoted build is an annotated `local/v<version>-b<build>` tag on the promoted `main` commit; [`docs/releasing.md`](docs/releasing.md) owns the promotion procedure.
+`main` is the integration branch and the only long-lived branch. Every change merges into `main` from a `bugfix/`, `port/`, or `chore/` branch through a pull request on `mplibunao/repoprompt-ce-local` merged with a merge commit, so the review, the checks, and the diff stay auditable on GitHub. Nothing merges into `main` directly. The agent that owns a pull request takes it through the [`CONTRIBUTING.md`](CONTRIBUTING.md) flow: `pr-ready` and labels, the debug-app run for changes under `Sources/` or `Packages/`, an independent review and a separate refactor pass, then MP's approval and the merge. That document also covers stacked pull requests, the Codex review bot, and landing a batch, and [`docs/releasing.md`](docs/releasing.md) owns promotion and its `local/v<version>-b<build>` tags.
 
 ## Upstream is read-only
 
@@ -39,294 +35,8 @@ Three repositories share this code and each has a `main`; name them. *Upstream* 
 
 Write upstream issues and pull requests as plain text, for example `upstream issue 803` or `upstream PR 957`, never as `owner/repo#N` or a URL, in commit messages, pull request text, issues, and comments: GitHub posts a "mentioned this" event on the referenced item for every such reference from a public repository. A bare `#N` refers to the distribution's own tracker.
 
-Upstream RepoPrompt CE is readable through the reference clone at `/Users/mp/Projects/personal/repoprompt-ce-upstream-readonly` and is never a remote of this repository. The preflight's remote allowlist requires `origin` to be the only remote and requires every configured fetch and push URL to target `github.com/mplibunao/repoprompt-ce-local`, with or without the `.git` suffix. An upstream change crosses into this repository as hand-written source edits on a `port/` branch, never as a cherry-pick, patch, or merge. [`docs/porting.md`](docs/porting.md) owns the procedure.
+Upstream is never a remote of this repository. The preflight's remote allowlist accepts only an `origin` whose fetch and push URLs target `github.com/mplibunao/repoprompt-ce-local`, with or without the `.git` suffix. [`docs/porting.md`](docs/porting.md) names the read-only reference clone for reading upstream and owns the porting procedure, including the rule that an upstream change crosses into this repository only as hand-written source edits.
 
-## Run
+## Changes to skills and workflow prompts
 
-```bash
-make doctor     # verify Swift/Xcode command line tool setup, SDK, signing diagnostics, SwiftUI probe, and debug CLI status
-make dev-run    # coordinated build, package, stop the existing debug app, and launch the new build
-```
-
-`make dev-run` routes through the developer daemon (see "Developer daemon / coordinated validation") and remains the ordinary FIFO coordinated launch path. For a user-directed newest lifecycle action, use `./conductor app relaunch`; the Finder launcher uses that operation when `python3` is available. The uncoordinated equivalents are `make run` or `./Scripts/run.sh`.
-
-Debug packaging may auto-detect an Apple Development signing identity for a valid local app signature, but auto-detected debug signing still uses ephemeral in-memory secure storage to avoid macOS Keychain prompts. Set an explicit `SIGN_IDENTITY="Apple Development: ..."` to opt in to persistent debug Keychain storage; `DEBUG_SECURE_STORAGE_BACKEND=keychain` is also supported for explicit debug storage opt-in when the signed app has a TeamIdentifier. If no stable identity is available, set `ALLOW_ADHOC_SIGNING=1` to build an ad-hoc debug app; ad-hoc debug builds use ephemeral in-memory secure storage, so API keys and secure permission changes do not persist across launches. Release packaging requires `SIGN_IDENTITY` and continues to use real Keychain storage.
-
-## Debug
-
-Package without launching:
-
-```bash
-make dev-build                  # coordinated debug package (preferred)
-make dev-codex-schema-check     # coordinated bounded Codex app-server schema drift check
-# uncoordinated equivalents:
-make build
-./Scripts/package_app.sh debug
-```
-
-Use verbose shell tracing when packaging fails or hangs:
-
-```bash
-VERBOSE=1 ./Scripts/package_app.sh debug 2>&1 | tee /tmp/repoprompt-build.log
-```
-
-The debug app bundle is created through:
-
-```text
-.build/debug/RepoPrompt.app
-```
-
-A debug package keeps the `RepoPrompt.app` directory and the `<bundle ID>.debug` identifier, but its GUI executable is `Contents/MacOS/RepoPromptDebug`, and it shows as `RepoPrompt CE Debug` with the debug icon and a blue DEBUG badge, top rule, and composer ring in its windows. Release packages keep `Contents/MacOS/RepoPrompt`. Conductor stop, status, and launch, and the archive and restore guards, also recognize a debug bundle packaged before that name, whose executable is still `RepoPrompt`, at the configured debug path.
-
-SwiftPM’s architecture-specific build output is usually under:
-
-```text
-.build/arm64-apple-macosx/debug/
-```
-
-## Generated Xcode workspace
-
-The repository-owned workspace is a disposable developer convenience under
-`.build/xcode`; `Package.swift`, conductor, and `Scripts/package_app.sh` remain
-authoritative.
-
-```bash
-make xcode                  # generate and open
-make xcode-generate         # generate without opening
-make xcode-validate         # explicit full validation with xcodebuild -list
-make xcode-clean            # remove generated workspace metadata
-```
-
-`make xcode-validate` is the canonical generated-workspace check and runs through local `pr-ready` for Xcode workspace boundary changes or the dedicated `Xcode Workspace Validation` workflow.
-
-Xcode 26.3 exposes the native `RepoPrompt` and `repoprompt-mcp` product schemes.
-Use `RepoPrompt CE App` and `RepoPrompt CE MCP` for conductor-coordinated debug
-products. `RepoPrompt CE Tests` delegates to conductor because `RepoPromptMCP`
-is executable-only and cannot back a native Xcode unit-test dependency. Do not
-edit or commit `.build/xcode`, use these schemes for release/archive work, or
-assume canceling Xcode cancels a queued conductor job; inspect
-`./conductor job list` after cancellation. See
-[`docs/architecture/xcode-workspace.md`](docs/architecture/xcode-workspace.md).
-
-## Debug CLI / MCP
-
-Use the CE-specific debug CLI when testing this app. The production `rp-cli` / `rp-cli-debug` connection is only an analogue and may talk to the non-CE app.
-
-Install or inspect the debug CLI:
-
-```bash
-make debug-cli-status
-make install-debug-cli     # packages the debug app, then installs /usr/local/bin/rpce-cli-debug
-./Scripts/doctor.sh --install-debug-cli
-```
-
-The installer links:
-
-```text
-/usr/local/bin/rpce-cli-debug
-  -> ~/RepoPrompt/repoprompt_ce_cli_debug
-  -> ~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app/Contents/MacOS/repoprompt-mcp
-```
-
-If `/usr/local/bin` needs administrator privileges, run the install target from an interactive terminal so `sudo` can prompt, or install the CLI from Settings → MCP → CLI Tools. Without the PATH link, use the direct fallback:
-
-```bash
-"$HOME/RepoPrompt/repoprompt_ce_cli_debug" -e 'windows'
-```
-
-The debug app and the debug CLI keep their own runtime profile at `~/Library/Application Support/RepoPrompt CE Debug`, with runtime temporary files under `$TMPDIR/RepoPrompt CE Debug`. Workspaces, chat and agent history, settings, presets, window sessions, saved prompts, and the managed Codex home live there, and production's `~/Library/Application Support/RepoPrompt CE` is neither read nor written. A fresh debug profile starts empty. Nothing is copied from production, from the `~/Downloads/RepoPrompt-Backup` restore, or from a saved custom workspace storage location, and a debug build ignores that saved location without changing the preference. Developer tooling stays where it was: the debug bundle under `RepoPrompt CE/DebugApps`, conductor state, and the CLI links above. A debug build packaged before the profile split still shares production's profile, so rebuild before relying on the separation. When the profile resolves into production state, such as through a symlink, the debug app and CLI exit before opening any store and print the reason to stderr. [`docs/testing.md`](docs/testing.md#debug-profile-isolation) covers the details.
-
-`make dev-smoke` and `make dev-smoke-launch` create the `repoprompt-ce` workspace once in a fresh debug profile and never recreate it. When creating it needs approval, the smoke stops within seconds and names the setting to change: Settings → Permissions → Workspace Approvals → Create workspace.
-
-Live CE MCP smoke flow:
-
-```bash
-make run
-rpce-cli-debug -e 'windows'
-rpce-cli-debug -w 1 -e "workspace create repoprompt-ce --folder-path $PWD"   # only when 'workspace list' lacks it
-rpce-cli-debug -w 1 -e 'workspace switch repoprompt-ce'
-rpce-cli-debug -w 1 -e 'tree --type roots'
-rpce-cli-debug -w 1 -c agent_manage -j '{"op":"list_agents","roles_only":true}'
-```
-
-Then use `agent_run` for end-to-end Agent Mode behavior:
-
-```bash
-rpce-cli-debug -w 1 -c agent_run -j '{"op":"start","model_id":"explore","session_name":"CE debug CLI smoke","message":"Reply exactly with CE_AGENT_RUN_SMOKE_OK and stop. Do not edit files.","detach":true}'
-rpce-cli-debug -w 1 -c agent_run -j '{"op":"wait","session_id":"<session_id>","timeout":120}'
-```
-
-Before live Agent Mode or Claude investigations, enable debug-only diagnostics through the CE debug app's MCP `app_settings` surface:
-
-```bash
-rpce-cli-debug -w 1 -c app_settings -j '{"op":"list","group":"agent_mode","detailed":true}'
-rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.claude_raw_event_logging_enabled","value":true}'
-rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.claude_raw_event_log_file_path","value":"/tmp/repoprompt-ce-claude-raw-events"}'
-rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.perf_diagnostics_enabled","value":true}'
-```
-
-These settings are intentionally DEBUG-only. If a key is unavailable, confirm `rpce-cli-debug --version` is resolving to the current CE debug build before falling back to lower-level defaults.
-
-Before changing an MCP tool's description, schema, output hints, or CLI help, read [`docs/architecture/mcp-tool-descriptions.md`](docs/architecture/mcp-tool-descriptions.md).
-
-## Developer daemon / coordinated validation
-
-Prefer the developer daemon as the default way to build, run, and validate. Four properties are the whole reason it exists — and the reason to reach for it instead of a bare `swift build` / `swift test`:
-
-- **Lane-serialized job queue** — every job claims named lanes (`build`, `debugArtifact`, `liveApp`, `release`, `style`); the daemon runs jobs that share a lane one at a time while letting unrelated lanes proceed concurrently. That serial queue is what stops multiple agents from building, launching, or running style tooling over each other and corrupting `.build` or the live app.
-- **Machine-wide heavy-job slots** — Swift/Xcode-heavy daemon jobs acquire per-user global heavy admission under `/tmp/repoprompt-ce-dev-locks-<uid>/`, independent of daemon socket overrides. The default capacity is 1; set `REPOPROMPT_DEV_HEAVY_SLOTS=N` explicitly to allow more concurrent heavy jobs. If `job status` or `job wait` shows `global-wait` or "waiting for global heavy slot", another checkout/worktree is already running heavy work; wait on the ticket instead of bypassing conductor with direct `swift`/`xcodebuild` commands or starting duplicate jobs. Holder metadata is display-only and identifies the operation/ticket/repo/worktree when available.
-- **Machine-wide live-app lock** — debug app stop/launch/relaunch/smoke-launch lifecycle work acquires a separate per-user `live-app.lock`, so worktree-local daemons cannot mutate the singleton debug app at the same time.
-- **Tickets + async jobs** — every job gets a ticket and can run detached (`--async`). Fire a build, keep working, and query or wait on it later (`job status` / `job wait`) instead of blocking on a long compile. Jobs survive reconnects and are reusable by `--request-key`.
-
-`conductor` is repo-internal developer tooling for this checkout; the daemon auto-starts on first use.
-
-Happy path — daemon aliases:
-
-```bash
-make dev-status
-make dev-build
-make dev-swift-build PRODUCT=repoprompt-mcp         # focused product build (PRODUCT=RepoPrompt|repoprompt-mcp|all, default all)
-make dev-run
-make dev-launch-existing                         # launch current DebugApps bundle without building
-make dev-test                                       # full coordinated test suite
-make dev-test FILTER=WorkspaceFileContextStoreTests # focused coordinated test run
-make dev-provider-test                              # RepoPromptAgentProviders package tests (FILTER= also supported)
-make dev-smoke          # non-disruptive: requires an already-running CE debug app and installed debug CLI
-make dev-smoke-launch   # builds/launches the debug app, then runs the smoke flow
-make dev-format-check   # non-mutating coordinated SwiftFormat check
-make dev-lint           # non-mutating coordinated format-check + SwiftLint strict
-make dev-format         # mutates first-party Swift files; run only when intended
-make dev-format-tools-status
-make dev-check-format-tools
-make dev-install-format-tools
-make dev-codex-schema-check                         # unlaned generated-schema contract check
-```
-
-Lane detail: the mutating `format` daemon job also claims `build` (it rewrites files the compiler reads); non-mutating `format-check` and `lint` use only `style`; read-only `format-tools-status` is intentionally unlaned so it never queues behind a build.
-
-Daemon lanes coordinate daemon-submitted operations only; they do not freeze source files against editor changes, direct commands, or edits from another agent. Avoid starting a coordinated build or relaunch while another actor is editing the same checkout. If compilation fails because an input file was modified during the build, wait for edits/builds to settle before retrying; for stable compiler errors, fix them and retry. A compile/rebuild failure is not lifecycle supersession.
-
-Async/reconnectable jobs (so work survives reconnects and is shareable by key):
-
-```bash
-./conductor build --async --request-key debug-package
-./conductor job wait --request-key debug-package
-```
-
-`--request-key` is idempotent: a matching queued/running job is reused instead of enqueuing a duplicate. Track and reconnect to jobs with `./conductor job list`, `job status`, `job wait`, and `job cancel`, each addressable by ticket or `--request-key`. `make dev-stop-app` / `./conductor app stop` is an overriding interactive stop: it cancels older active or queued `liveApp` operations before confirming the app is stopped. `make dev-daemon-stop` stops the daemon itself.
-
-Daemon output defaults are intentionally concise for agent use: synchronous `dev-*` commands and `job wait` print progress highlights, a terminal summary, and the full log path instead of replaying raw build/test/style output. Full raw logs are still preserved under the daemon jobs directory and can be rendered with `--full-log`, for example `./conductor build --full-log` or `./conductor job wait --request-key debug-package --full-log`. `--verbose` is separate: it passes `VERBOSE=1` to delegated scripts where supported so more detail is captured in the stored log, but it does not by itself replay raw output. On failures, inspect the concise highlights first, then open the printed log path or rerun/wait with `--full-log` if the summary is insufficient.
-
-Behavior notes:
-
-- `make dev-run` (daemon `run`) builds/packages a unique staged app under heavy admission, releases that heavy slot, then takes the live-app lock for stop/staged-bundle activation/open/confirm against the shared `DebugApps/RepoPrompt.app` bundle. A build/package failure performs no lifecycle action and does not mutate the live bundle.
-- `./conductor app launch-existing` / `make dev-launch-existing` requires the shared debug app bundle to already exist, reports bundle provenance, never waits for heavy admission, and never falls back to building.
-- `./conductor app relaunch` is the overriding interactive relaunch used by the Finder launcher; like `app stop`, it can cancel older active or queued `liveApp` work. It builds/packages before replacing the debug app, so a failure before lifecycle work begins does not itself stop or reopen an already-running app.
-- Do not assume an in-flight `run`, `smoke`, or diagnostics job will complete if another operator issues `app stop` or interactive `app relaunch`.
-- `make dev-smoke` is the non-disruptive live-only check: it assumes the CE debug app is already running and the debug CLI is installed/resolvable.
-- `make dev-smoke-launch` (or `./conductor smoke --launch`) builds/packages and launches the debug app before smoke validation.
-- `./conductor smoke --agent-run` is opt-in, for when provider credentials and model access are available.
-- Style checks (`make dev-format-check`, `make dev-lint`) are non-mutating and do not auto-install tools; `make dev-install-format-tools` is the explicit install path.
-- Do not run `make dev-format` unless formatting mutation is intended. If a format job is canceled after starting, inspect `git diff` and rerun format or restore files as needed.
-
-Direct / uncoordinated commands — use only when the daemon is unavailable but required tooling, including `python3`, remains available:
-
-```bash
-make build
-make run
-make test
-```
-
-These do not claim daemon lanes or lifecycle supersession, so when multiple agents are active they can build, launch, or run style tooling over each other; a direct launch may reopen the app after a coordinated stop. The Finder launcher requires `python3` and does not provide an uncoordinated no-Python fallback because safe lifecycle actions require exact debug-executable identity checks. Prefer the `dev-*` aliases when the daemon is available. The manual `rpce-cli-debug` commands above remain valid for direct live MCP validation.
-
-## Source placement rules
-
-See `docs/architecture/source-layout.md` for the full ownership map and documented exceptions, and `docs/architecture/provider-plugins.md` for the Agent Mode provider plugin seam (Claude-compatible package, bridge/adapter layout, "add a new provider" recipe). In short:
-
-- The shipped `RepoPrompt` executable target lives under `Sources/RepoPromptExecutable` and must remain a one-file entry shell over the internal `RepoPromptApp` target; do not add implementation code there.
-- Product-flow code goes under `Sources/RepoPrompt/Features/<FeatureName>`.
-- App lifecycle, launch/configuration, command, and composition-root wiring stays under `Sources/RepoPrompt/App` in the `RepoPromptApp` target.
-- Cross-cutting service/platform substrate stays under `Sources/RepoPrompt/Infrastructure/<Area>` in the `RepoPromptApp` target.
-- App-wide notification names and root app views/view models belong under `Sources/RepoPrompt/App`.
-- Bridging-header-sensitive support stays under `Sources/RepoPrompt/Support` and is owned by `RepoPromptApp` unless `Package.swift` is updated in the same change.
-- Reusable UI, diffing, regex, networking, process, security, and utility substrate should use the narrowest `Sources/RepoPrompt/Infrastructure/<Area>` owner.
-- App-integrated diagnostics belong under `Sources/RepoPrompt/Features/Diagnostics` and need a documented entry point/purpose.
-- App/CLI protocol code shared by both products belongs under `Sources/RepoPromptShared`.
-- Test doubles, fixtures, parser inputs, sample projects, and XCTest-only helpers belong under `Tests/RepoPromptTests`, not `Sources/RepoPrompt`.
-- Do not recreate legacy top-level `Views`, `ViewModels`, `Services`, `Models`, `Utils`, or `Shared` buckets.
-- Do not put directories named `Tests`, `TestSupport`, or `Fixtures` under `Sources/RepoPrompt`.
-- Keep `MCPControlMessages.swift` single-sourced in `Sources/RepoPromptShared/MCP`.
-
-## Swift style workflow
-
-For Swift edits, run the formatter before handoff. Prefer the coordinated daemon alias so the mutating job is serialized with other daemon work:
-
-```bash
-make dev-format
-# uncoordinated equivalent:
-make format
-```
-
-Run the combined style check before handoff when style tooling is relevant or Swift files changed:
-
-```bash
-make dev-lint
-# uncoordinated equivalent:
-make lint
-```
-
-For a non-mutating formatter-only check, use `make dev-format-check` (or uncoordinated `make format-check`).
-
-If SwiftFormat or SwiftLint is missing, install them through the repo entrypoint:
-
-```bash
-make install-format-tools
-# or inspect first:
-make format-tools-status
-# daemon equivalents:
-make dev-install-format-tools
-make dev-format-tools-status
-```
-
-`make lint` and `make dev-lint` run `format-check` followed by `swiftlint lint --strict`. Do not perform a full repository formatting baseline unless the task explicitly asks for it; do not run `make dev-format` unless formatting mutation is intended.
-
-## Test
-
-Prefer the coordinated daemon so concurrent agents do not test over each other:
-
-```bash
-make dev-test                                        # full coordinated suite
-make dev-test FILTER=WorkspaceFileContextStoreTests   # focused coordinated run
-```
-
-Focused validation commands commonly used for this tree (all daemon-coordinated):
-
-```bash
-make dev-format-check
-make dev-lint
-make dev-test FILTER=CodexIntegrationConfigurationTests
-make dev-test FILTER=WorkspaceFileContextStoreTests
-make dev-swift-build PRODUCT=RepoPrompt
-make dev-swift-build PRODUCT=repoprompt-mcp
-make dev-provider-test
-make dev-codex-schema-check
-make guardrails
-make doctor
-make dev-build
-```
-
-Run the smallest relevant daemon build/test command above to validate a change. If the change affects packaging, the MCP server, the MCP CLI, Agent Mode, or any feature that depends on the running app, follow it with the live CE MCP smoke flow above.
-
-Direct `swift test --filter <name>` and `swift build --product <name>` still work and produce the same result, but they are uncoordinated — use them only when the daemon is unavailable (for example, no `python3`), and avoid them when other agents may be building.
-
-Use `make dev-run` (or `make run`) only when it is safe to stop the existing debug app instance and launch the local debug app.
-
-### XCTest optimization inventory and timing
-
-See [`docs/testing.md`](docs/testing.md) for the contributor workflow, test-quality guidance, exact focused-filter examples, and handoff checklist. Routine executable adds, renames, consolidations, and removals require the affected focused test plus broader target or full-suite validation when the changed boundary warrants it.
-
-## Cleanup
-
-```bash
-make clean    # removes .build
-```
+A plan that changes text agents follow, meaning skills under `.agents/skills/` and built-in workflow prompts under `Sources/RepoPromptShared/Workflows/`, states the exact new wording, and implementation starts only after the user approves it. A small wording change can weaken agent behavior, and no evals exist to catch it. MCP tool descriptions are exempt: their wording can change during implementation, and `docs/architecture/mcp-tool-descriptions.md` covers them.
