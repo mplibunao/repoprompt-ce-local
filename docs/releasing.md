@@ -180,8 +180,8 @@ One archive covers everything a promotion can break: the installed app bundle, t
 Application Support state, its preferences domain, and the local signing identity record.
 Both scripts refuse to run while any RepoPrompt process holds that state, so quit
 production, the debug app, and any attached CLI first. [Live debug app identity and
-lifecycle](testing.md#live-debug-app-identity-and-lifecycle) says how they recognize the
-debug app.
+lifecycle](testing.md#live-debug-app-identity-and-lifecycle) says how the scripts recognize
+the debug app.
 
 ```bash
 ./Scripts/local_release_archive.sh local/v1.4.0-b37

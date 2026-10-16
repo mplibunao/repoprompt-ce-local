@@ -3,7 +3,7 @@
 `Scripts/worktree_startup_live_benchmark.py` drives the large-root and
 linked-worktree startup benchmarks. This report records the two campaigns run
 with it in June 2026, worktree interactive readiness and content-addressed
-codemaps, together with the detailed checks its lanes apply. The commands for
+codemaps, together with the detailed checks the script's lanes apply. The commands for
 running the lanes today are in [Live large-workspace worktree-startup
 diagnostic](../testing.md#live-large-workspace-worktree-startup-diagnostic).
 Where this record and the script disagree, the script is current. Paths to the
@@ -356,9 +356,9 @@ The command passes only when all of these gates pass:
 
 ## Content-addressed codemaps production-enable gate
 
-This is the gate the content-addressed codemaps campaign used. Plans written
-today freeze a 30% projected p95 improvement and a 10% ceiling on other
-regressions, and the aggregate applies the plan's values.
+This is the gate the content-addressed codemaps campaign used. Its thresholds
+are that campaign's. The aggregate applies the thresholds the current plan
+freezes.
 
 The production-enable gate is all-or-nothing:
 

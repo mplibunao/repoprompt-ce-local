@@ -49,7 +49,7 @@ make dev-test
 make dev-provider-test
 ```
 
-A focused green run is evidence for the named contract, not a substitute for full-suite or CI coverage when the changed boundary is broad. The hosted root-test workflow discovers one current root XCTest population through `swift test list`, counts methods per suite, assigns every discovered suite to one of four shards with a deterministic, method-count-weighted longest-processing-time-first (LPT) assignment, and executes each suite in its own XCTest process. Root CI has no contract/integration tier split or contributor-maintained registry; provider-package tests remain a separate lane.
+A focused green run is evidence for the named contract, not a substitute for full-suite or CI coverage when the changed boundary is broad. The hosted root-test workflow discovers one current root XCTest population through `swift test list`, counts methods per suite, assigns every discovered suite to one of four shards by deterministic, method-count-weighted longest-processing-time-first (LPT) scheduling, and executes each suite in its own XCTest process. Root CI has no contract/integration tier split or contributor-maintained registry; provider-package tests remain a separate lane.
 
 ## Codemap-sensitive changes
 
@@ -72,9 +72,9 @@ Use focused before/after measurements to attribute a change, then exercise the f
 
 ## Live debug app identity and lifecycle
 
-A debug package keeps the `RepoPrompt.app` directory and the `<bundle ID>.debug` identifier, but its `CFBundleExecutable` is `Contents/MacOS/RepoPromptDebug`, and it shows as `RepoPrompt CE Debug` with the debug icon, `AppBundle/AppIconDebug.icns`, and a blue DEBUG badge, top rule, and composer ring in its windows. Release and local production packages keep `Contents/MacOS/RepoPrompt`, and production's install path, executable, bundle identifier, and signing are the release values. The packaging validators, the packaged MCP round-trip smoke, and conductor read the executable from `CFBundleExecutable` instead of assuming a name.
+A debug package keeps the `RepoPrompt.app` directory and the `<bundle ID>.debug` identifier, but its `CFBundleExecutable` is `RepoPromptDebug`, at `Contents/MacOS/RepoPromptDebug`, and it shows as `RepoPrompt CE Debug` with the debug icon (`AppBundle/AppIconDebug.icns`) and a blue DEBUG badge, top rule, and composer ring in its windows. Release and local production packages keep `RepoPrompt`, at `Contents/MacOS/RepoPrompt`, and production's install path, executable, bundle identifier, and signing are the release values. The packaging validators, the packaged MCP round-trip smoke, and conductor read the executable from `CFBundleExecutable` instead of assuming a name.
 
-Conductor stop, status, and launch also recognize a debug bundle packaged before that name, whose executable is still `RepoPrompt`, at the configured debug path. The archive and restore guards recognize the debug app by its executable path: `RepoPromptDebug`, or `RepoPrompt` in a debug bundle packaged before that name, inside `DebugApps` or a `DebugApps-*` directory of the Application Support directory, or in the bundle that `REPOPROMPT_DEBUG_APP_BUNDLE` or `REPOPROMPT_DEBUG_APP_ROOT` names.
+Conductor stop, status, and launch, and the archive and restore guards, also accept a debug bundle packaged before that name, whose executable is still `RepoPrompt`. Conductor looks for it at the configured debug path. The guards recognize the debug app by its executable path, `RepoPromptDebug` or that older `RepoPrompt`, inside `DebugApps` or a `DebugApps-*` directory of the Application Support directory, or in the bundle that `REPOPROMPT_DEBUG_APP_BUNDLE` or `REPOPROMPT_DEBUG_APP_ROOT` names.
 
 A change to debug packaging, conductor's debug lifecycle, or the archive and restore guards is validated against the packaged debug app while production keeps running, after `make conductor-selftest` and `make release-selftest` pass. Production's process is never stopped, launched, or relaunched by these steps.
 
@@ -401,16 +401,15 @@ behavioral tests or the broader suite validation required by the changed boundar
 
 The [June 2026 benchmark campaign
 report](investigations/worktree-startup-benchmark-campaigns-2026-06-26.md)
-records the interactive-readiness and content-addressed codemap campaigns, and
-lists every check the smoke lane, `codemap-gate`, and the aggregate apply.
+records the interactive-readiness and content-addressed codemaps campaigns and
+holds the full check lists this section summarizes.
 
 ### Dedicated workspace and plan
 
 Use a disposable workspace whose name starts with `RPCE 8E Bench ` or the
-established `RPCE Search Bench ` prefix. Never use
-the active development checkout: the driver rejects its own repository root.
-Create/open a separate disposable root with `rpce-cli-debug`, bind the benchmark
-tab, and record its exact window, workspace, context, and root IDs. A name or
+established `RPCE Search Bench ` prefix. Never use the active development
+checkout. Create/open a separate disposable root with `rpce-cli-debug`, bind
+the benchmark tab, and record its exact window, workspace, context, and root IDs. A name or
 current selection is not proof of isolation. Create an exclusive root marker
 with a new owner UUID after those stable IDs exist:
 
@@ -432,6 +431,14 @@ after the campaign. A missing, changed, renamed, system/current-only, or
 operator-named substitute is rejected. Workspace creation, root
 addition/removal, and visible window changes can request app approval; prepare
 the workspace before the campaign.
+
+The driver rejects its own repository root as a disposable root. To benchmark a
+dedicated checkout of this repository instead, run that checkout's copy of the
+script and pass `--confirm-real-repository-benchmark` and
+`--confirm-dedicated-workspace` to `create-marker` and `plan`, and
+`--confirm-dedicated-workspace` to `preflight` and `run`. The [campaign
+report](investigations/worktree-startup-benchmark-campaigns-2026-06-26.md#interactive-readiness-iteration-0-campaign)
+shows those commands.
 
 Write an immutable plan without contacting the app:
 
@@ -467,20 +474,19 @@ rejected.
 The plan freezes the ownership-marker digest; do not recreate or edit the marker
 between cohorts.
 The plan is the sole source of truth for required route/process/checkout/width
-cells and aggregate thresholds. Do not add requirements to the runner or
-aggregate that the plan does not state.
+cells and aggregate thresholds.
 
-Before any mutation, enable the DEBUG-only benchmark gate for the campaign. The
-harness verifies it but never changes this global setting on the operator's
-behalf:
+Before any mutation, enable the DEBUG-only benchmark gate for the campaign, and
+restore it to its prior value after all run and smoke cleanup completes. The
+harness verifies the gate but never changes this global setting on the
+operator's behalf:
 
 ```bash
 rpce-cli-debug -w 3 -c app_settings -j \
   '{"op":"set","key":"agent_mode.worktree_startup_benchmark_diagnostics_enabled","value":true}'
 ```
 
-Then run preflight, which discovers the CLI schemas and verifies the exact
-scope:
+Then run preflight:
 
 ```bash
 python3 Scripts/worktree_startup_live_benchmark.py preflight \
@@ -493,13 +499,12 @@ through the stored commit OID, freezes
 SHA-256 hashes for the relevant CLI schemas, and requires the DEBUG benchmark
 token plus `manage_workspaces.remove_folder`. A marker, schema, or scope change
 invalidates the campaign; do not silently substitute IDs.
-Restore the gate to its prior value after all run/smoke cleanup completes.
 
 ### Route and concurrency cohorts
 
 Run one route/process/checkout/width series at a time. Every retained series
-uses one excluded warmup and 3–5 normal samples; five is the release-gate
-default. The plan defaults to exactly three invocation artifacts per matrix
+uses one excluded warmup and five retained samples. `plan` and `run` reject
+other counts. The plan defaults to exactly three invocation artifacts per matrix
 cell. Valid slow samples remain included. A rerun gets a new invocation ID and
 never replaces the old artifact; an unplanned extra invocation makes the
 campaign incomplete rather than supplying replacement samples.
@@ -518,13 +523,15 @@ python3 Scripts/worktree_startup_live_benchmark.py run \
   --confirm-process-state
 ```
 
-Repeat for each route, process state, and width the plan requires: routes
-`baseline`, `forced-full`, and `projected`; process states `cold`, `warm`, and
-`aged`. Automated route samples are always app-created `linked-worktree`
-starts. `baseline` is the ordinary automatic full-crawl control, `forced-full`
-forces that route, and `projected` serves the worktree from its diff-seeded
-projection. The harness checks each cohort's actual route and fallbacks in the
-diagnostic export, so configured route names alone never satisfy it; the
+Repeat for every route, process state, and width the plan declares. `run`
+rejects any other value. Plans written today declare process states `warm` and
+`aged`, widths 1, 4, and 8, and three routes. `baseline` is the ordinary
+automatic full-crawl control, `forced-full` forces that route, and `projected`
+serves the worktree from its diff-seeded projection. Cold main-root numbers
+come from the external evidence described below. Automated route samples are
+always app-created `linked-worktree` starts. The harness checks each cohort's
+actual route and fallbacks in the diagnostic export, so configured route names
+alone never satisfy it; the
 [campaign report](investigations/worktree-startup-benchmark-campaigns-2026-06-26.md#route-accounting) gives the exact route accounting.
 
 The current DEBUG token does not measure initial main-workspace opening. Capture
@@ -571,9 +578,9 @@ python3 Scripts/worktree_startup_live_benchmark.py smoke \
 ```
 
 The smoke lane uses a script-owned app worktree and temporary roots. It checks
-Agent Mode tool use in a parent session and an inherited-worktree child,
-exact-root search, read, selection, and codemap results, non-Git handling,
-watcher convergence, and root add and remove during in-flight calls. The
+Agent Mode tool use in a parent session and an inherited-worktree child;
+exact-root search, read, selection, and codemap results; non-Git handling;
+watcher convergence; and root add and remove during in-flight calls. The
 [campaign report](investigations/worktree-startup-benchmark-campaigns-2026-06-26.md#smoke-lane-checks) lists each check.
 
 The harness records and checks parent and child terminal status, removes only
@@ -680,10 +687,10 @@ Only the separate derived `summary.json` shape is shareable: scenario IDs,
 hashed relative identifiers, content/presence hashes, statuses, issue codes,
 counters, and timings. Do not publish raw artifacts.
 
-The command passes only when every gate passes: sample counts and readiness,
+The command passes only when all eight gates pass: sample counts and readiness,
 the agent probes, root add and remove, non-Git and watcher behavior, the held
 timeout, regression against the retained baseline, and cleanup. The [campaign
-report](investigations/worktree-startup-benchmark-campaigns-2026-06-26.md#codemap-gate-pass-criteria) lists the eight gates.
+report](investigations/worktree-startup-benchmark-campaigns-2026-06-26.md#codemap-gate-pass-criteria) lists them.
 
 Any missing raw evidence, missing retry delay, stale path/content/marker,
 privacy leak, non-Git codemap work, latency/resource regression, nonterminal
@@ -709,14 +716,16 @@ python3 Scripts/worktree_startup_live_benchmark.py aggregate \
 
 The aggregate emits `summary.json` and a reviewable
 `scoreboard-section.md`. After reviewing evidence and paths, append—never
-rewrite—the candidate to
-`docs/investigations/optimize-content-addressed-codemaps-runs.md`. The explicit
-automation path is guarded and append-only:
+rewrite—the candidate to the scoreboard the plan's `scoreboard` field names,
+`docs/investigations/optimize-worktree-interactive-readiness-runs.md` for plans
+written today. `--append-scoreboard` appends only to an existing file, so
+create the scoreboard first if it is missing. The explicit automation path is
+guarded and append-only:
 
 ```bash
 python3 Scripts/worktree_startup_live_benchmark.py aggregate \
   ... \
-  --append-scoreboard docs/investigations/optimize-content-addressed-codemaps-runs.md \
+  --append-scoreboard docs/investigations/optimize-worktree-interactive-readiness-runs.md \
   --confirm-append-scoreboard
 ```
 

@@ -63,9 +63,9 @@ Work is tracked as issues and pull requests there.
    the changed behavior through `rpce-cli-debug` or the app itself, and record
    the commands, what you observed, and the result in the description. Unit
    tests and `pr-ready` do not replace that run. Validate from a current
-   build, as [Debug profile isolation](docs/testing.md#debug-profile-isolation)
-   explains; the approval rules in [`AGENTS.md`](AGENTS.md#commit-preflight)
-   cover launching the debug app.
+   build. [Debug profile isolation](docs/testing.md#debug-profile-isolation)
+   says why. [`AGENTS.md`](AGENTS.md#commit-preflight) says which app actions
+   need approval.
 
    ```bash
    make dev-smoke-launch          # builds, launches the debug app, runs the smoke flow
@@ -170,9 +170,10 @@ unless deliberately distilled into durable docs. [`AGENTS.md`](AGENTS.md#commit-
 covers local `docs/investigations/*.md` reports.
 
 The [validation matrix](.agents/skills/rpce-contribution-check/references/validation-matrix.md)
-lists the checks each changed boundary needs. Add focused
-`make dev-test FILTER=<SuiteName>` coverage for behavior changes.
+lists the checks each changed boundary needs, and
+[`AGENTS.md`](AGENTS.md#documents-by-topic) says when a style-tooling change
+needs `make dev-lint`. Add focused `make dev-test FILTER=<SuiteName>` coverage
+for behavior changes.
 
 [Release metadata and signing](docs/open-source-readiness.md#release-metadata-and-signing)
-covers changes to release metadata, signing identities, bundle IDs, Sparkle
-keys, and release channels.
+says which release and signing changes need deliberate review.
