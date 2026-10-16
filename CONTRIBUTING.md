@@ -92,27 +92,25 @@ Work is tracked as issues and pull requests there.
 
 7. MP reads the pull request and approves it in chat. GitHub doesn't let an
    author approve a pull request opened from their own account, so its review
-   state doesn't record the approval; the approved head is the pull request's
-   head when MP approves it. Confirming an ordered landing list that shows each
-   head's SHA approves those heads the same way. From here the pull request
-   waits for a release candidate ([Landing](#landing)), which merges every
-   approved head onto `origin/main`, validates that candidate once, and pushes
-   it to `main`. The pull request needs nothing more unless its head no longer
-   merges cleanly or the candidate fails on it. For a conflict with `main`,
-   rebase it onto `origin/main`, run the push preflight, and push with a lease
-   pinned to the head MP approved, so a newer push to the branch makes the push
-   fail instead of being overwritten; MP's approval covers the rebase. When a
-   lower stack layer is rebased, the upper layer is rebased onto the lower
-   layer's new head the same way, and its approval covers that rebase too.
-   `main` is never merged into a pull request branch. Any other commit pushed
-   after the approval, such as a review fix, needs MP's approval again before
-   the pull request enters a candidate.
+   state doesn't record the approval. Confirming an ordered landing list
+   approves the pull requests on it the same way. An approval stays valid when
+   more commits are pushed to the pull request afterwards, such as fixes for
+   review findings. From here the pull request waits for a release candidate
+   ([Landing](#landing)), which merges the head of every approved pull request
+   onto `origin/main`, validates that candidate once, and pushes it to `main`.
+   The pull request needs nothing more unless its head no longer merges
+   cleanly or the candidate fails on it. For a conflict with `main`, rebase it
+   onto `origin/main`, run the push preflight, and push with a lease pinned to
+   the head last observed on `origin`, so a newer push to the branch makes the
+   push fail instead of being overwritten. When a lower stack layer is
+   rebased, the upper layer is rebased onto the lower layer's new head the
+   same way. `main` is never merged into a pull request branch.
 
    ```bash
    git fetch origin
    git rebase origin/main
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
-   git push --force-with-lease=refs/heads/<branch>:<approved sha> origin HEAD:refs/heads/<branch>
+   git push --force-with-lease=refs/heads/<branch>:<observed sha> origin HEAD:refs/heads/<branch>
    ```
 
 ## Landing
@@ -153,8 +151,8 @@ and checks. These are its steps.
    request merged. Comment on each with the candidate name, its tip, and the
    hosted run, then delete the head branches. The candidate branch stays until
    the version is promoted.
-5. **Fail.** Fix on the pull request's branch (step 7 says which fixes need
-   approval again) or drop the pull request and anything stacked on it, then cut
+5. **Fail.** Fix on the pull request's branch or drop the pull request and
+   anything stacked on it, then cut
    rc<N+1> from `origin/main` with the current heads. Step 6 of
    `$rpce-merge-pr-batch` finds the pull request at fault.
 

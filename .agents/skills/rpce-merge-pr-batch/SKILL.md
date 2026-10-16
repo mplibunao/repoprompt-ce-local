@@ -29,8 +29,8 @@ and cleanup passes happen before MP's approval (`CONTRIBUTING.md` step 6, with t
    there.
 3. Confirm the ordered pull request list with MP. Without an order, land in ascending number.
    Show each pull request's current head SHA and newest commit subject with the list. When
-   MP's approval of a pull request isn't in this conversation, his confirmation of the list is
-   the approval of those heads (`CONTRIBUTING.md` step 7). Confirm separately any requested
+   MP's approval of a pull request isn't in this conversation, his confirmation of the list
+   approves it (`CONTRIBUTING.md` step 7). Confirm separately any requested
    action beyond landing.
 4. Follow the approval rules and exceptions in trusted-base `AGENTS.md`, "Commit preflight".
 5. Work in the candidate worktree, `/Users/mp/Projects/personal/repoprompt-ce-candidate`. When
@@ -57,7 +57,7 @@ gh api graphql -f query='{ repository(owner:"mplibunao", name:"repoprompt-ce-loc
 
 Require: base ref `main`, or, for an upper stack layer, the head branch of a pull request
 earlier in the same list; head in this repository; not a draft; every review thread resolved;
-and MP's approval of the current head (constraint 3). GitHub's `reviewDecision` doesn't record
+and MP's approval of the pull request (constraint 3). GitHub's `reviewDecision` doesn't record
 that approval and isn't checked. Record `headRefOid` as the approved head. A pull request that
 fails any of these does not enter the candidate, and neither does anything stacked on it:
 report it to MP and continue with the rest only when MP says so.
