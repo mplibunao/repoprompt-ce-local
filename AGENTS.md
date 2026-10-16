@@ -37,6 +37,6 @@ Write upstream issues and pull requests as plain text, for example `upstream iss
 
 Upstream is never a remote of this repository. The preflight's remote allowlist accepts only an `origin` whose fetch and push URLs target `github.com/mplibunao/repoprompt-ce-local`, with or without the `.git` suffix. [`docs/porting.md`](docs/porting.md) names the read-only reference clone for reading upstream and owns the porting procedure, including the rule that an upstream change crosses into this repository only as hand-written source edits.
 
-## Changes to agent instructions
+## Changes to skills and workflow prompts
 
 A plan that changes text agents follow, meaning skills under `.agents/skills/` and built-in workflow prompts under `Sources/RepoPromptShared/Workflows/`, states the exact new wording, and implementation starts only after the user approves it. A small wording change can weaken agent behavior, and no evals exist to catch it. MCP tool descriptions are exempt: their wording can change during implementation, and `docs/architecture/mcp-tool-descriptions.md` covers them.
