@@ -231,6 +231,43 @@ class XCTestSandboxTests(unittest.TestCase):
             self.assertFalse(owned.exists())
             self.assertTrue(caller_owned.exists())
 
+    def test_job_metadata_reaches_only_its_recipients(self) -> None:
+        registry = conductor.OperationRegistry(SCRIPT_DIR.parent)
+        ticket_key = conductor.CONDUCTOR_JOB_TICKET_ENV
+        sandbox_key = conductor.TEST_SANDBOX_ENV_KEY
+        # Values a caller exported are replaced or dropped, never passed through.
+        env = {"PATH": "/usr/bin", ticket_key: "exported", sandbox_key: "/exported"}
+        test_argv = registry.prepare({"operation": "test", "args": {"filter": "X"}})[0]
+        provider_argv, _, provider_cwd, _, _ = registry.prepare({"operation": "provider-test", "args": {}})
+        cases = (
+            (registry._internal_argv("cache_retry", {}), "/sandbox", {ticket_key: "ticket", sandbox_key: "/sandbox"}),
+            (registry._internal_argv("swift_build_all", {}), None, {ticket_key: "ticket"}),
+            (test_argv, "/sandbox", {sandbox_key: "/sandbox"}),
+            (provider_argv, "/sandbox", {sandbox_key: "/sandbox"}),
+            (["swift", "build", "--product", "RepoPrompt"], None, {}),
+            ([sys.executable, "-u", "/elsewhere/conductor.py", conductor.OPERATION_RUNNER_ARG, "{}"], None, {}),
+        )
+        for argv, sandbox_root, expected in cases:
+            with self.subTest(argv=argv[:4]):
+                process_env = registry.process_environment(
+                    argv,
+                    env,
+                    ticket="ticket",
+                    test_sandbox_root=sandbox_root,
+                )
+                self.assertEqual(
+                    {key: process_env[key] for key in (ticket_key, sandbox_key) if key in process_env},
+                    expected,
+                )
+                self.assertEqual(process_env["PATH"], "/usr/bin")
+        self.assertEqual(provider_cwd, SCRIPT_DIR.parent / "Packages" / "RepoPromptAgentProviders")
+
+        self.addCleanup(conductor.capture_job_ticket, {})
+        environ = {ticket_key: "ticket", "PATH": "/usr/bin"}
+        self.assertEqual(conductor.capture_job_ticket(environ), "ticket")
+        self.assertEqual(conductor.current_job_ticket(), "ticket")
+        self.assertEqual(environ, {"PATH": "/usr/bin"})
+
 
 class FocusedBuildDiagnosticTests(unittest.TestCase):
     def _make_fake_swift(self, output: str, exit_code: int = 0) -> Path:

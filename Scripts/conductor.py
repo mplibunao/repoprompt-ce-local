@@ -35,7 +35,7 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Deque, Dict, List, MutableMapping, Optional, Sequence, Tuple
 
 from debug_app_process import (
     DEBUG_APP_EXECUTABLE_NAME,
@@ -171,6 +171,12 @@ SMOKE_WORKSPACE_APPROVAL_MESSAGE = (
 
 XCTEST_OPERATIONS = frozenset({"test", "provider-test"})
 TEST_SANDBOX_ENV_KEY = "REPOPROMPT_TEST_SANDBOX_ROOT"
+# SwiftPM keys its manifest cache on the full process environment, so a value that changes
+# per job must never reach it, or every job re-evaluates every package manifest. The job
+# ticket goes only to the operation runner, which consumes it, and the test sandbox only to
+# a process that hands it to test code.
+CONDUCTOR_JOB_TICKET_ENV = "REPOPROMPT_CONDUCTOR_JOB_TICKET"
+OPERATION_RUNNER_ARG = "__operation_runner"
 TEST_SANDBOX_MARKER_FILENAME = ".conductor-owned-test-sandbox"
 TEST_SANDBOX_MARKER_CONTENT = "RepoPrompt CE conductor test sandbox v1\n"
 
@@ -723,6 +729,20 @@ def ensure_state_dirs(paths: Paths) -> None:
     ensure_private_dir(paths.jobs_dir)
     ensure_private_dir(paths.socket_path.parent)
     ensure_private_dir(machine_lock_dir())
+
+
+_CURRENT_JOB_TICKET: Optional[str] = None
+
+
+def capture_job_ticket(environ: MutableMapping[str, str]) -> Optional[str]:
+    """Take the job ticket out of the operation runner's environment so its children never get it."""
+    global _CURRENT_JOB_TICKET
+    _CURRENT_JOB_TICKET = environ.pop(CONDUCTOR_JOB_TICKET_ENV, None)
+    return _CURRENT_JOB_TICKET
+
+
+def current_job_ticket() -> Optional[str]:
+    return _CURRENT_JOB_TICKET
 
 
 def operation_runs_xctest(operation: str, args: Dict[str, Any]) -> bool:
@@ -3328,20 +3348,15 @@ class OperationRegistry:
             config = str(args.get("config"))
             lanes = ["build", "debugArtifact"] + (["release"] if config == "release" else [])
             return [script("package_app.sh"), config], lanes, cwd, env, effective_timeout
-        if operation == "test":
-            argv = ["swift", "test"]
+        if operation in {"test", "provider-test"}:
+            argv = self._local_test_runner_argv()
             if args.get("testProduct"):
                 argv.extend(["--test-product", str(args["testProduct"])])
             if args.get("filter"):
                 argv.extend(["--filter", str(args["filter"])])
+            if operation == "provider-test":
+                cwd = self.repo_root / "Packages" / "RepoPromptAgentProviders"
             return argv, ["build"], cwd, env, effective_timeout
-        if operation == "provider-test":
-            argv = ["swift", "test"]
-            if args.get("testProduct"):
-                argv.extend(["--test-product", str(args["testProduct"])])
-            if args.get("filter"):
-                argv.extend(["--filter", str(args["filter"])])
-            return argv, ["build"], self.repo_root / "Packages" / "RepoPromptAgentProviders", env, effective_timeout
         if operation == "install-debug-cli":
             return [script("install_debug_cli.sh"), "install", "--build"], ["build", "debugArtifact"], cwd, env, effective_timeout
         if operation == "debug-cli-status":
@@ -3447,7 +3462,36 @@ class OperationRegistry:
 
     def _internal_argv(self, kind: str, args: Dict[str, Any]) -> List[str]:
         payload = {"kind": kind, "args": args, "repoRoot": str(self.repo_root)}
-        return [sys.executable, "-u", str(self.script_path), "__operation_runner", json_dumps(payload)]
+        return [*self._operation_runner_argv_head(), json_dumps(payload)]
+
+    def _operation_runner_argv_head(self) -> List[str]:
+        return [sys.executable, "-u", str(self.script_path), OPERATION_RUNNER_ARG]
+
+    def _local_test_runner_argv(self) -> List[str]:
+        return [sys.executable, "-u", str(self.repo_root / "Scripts" / "ci_app_test_runner.py"), "--local"]
+
+    def process_environment(
+        self,
+        argv: Sequence[str],
+        env: Dict[str, str],
+        *,
+        ticket: str,
+        test_sandbox_root: Optional[str],
+    ) -> Dict[str, str]:
+        """Give the job ticket and test sandbox only to the processes that consume them."""
+        process_env = {
+            key: value
+            for key, value in env.items()
+            if key not in {CONDUCTOR_JOB_TICKET_ENV, TEST_SANDBOX_ENV_KEY}
+        }
+        head = list(argv[:4])
+        if head == self._operation_runner_argv_head():
+            process_env[CONDUCTOR_JOB_TICKET_ENV] = ticket
+            if test_sandbox_root is not None:
+                process_env[TEST_SANDBOX_ENV_KEY] = test_sandbox_root
+        elif test_sandbox_root is not None and head == self._local_test_runner_argv():
+            process_env[TEST_SANDBOX_ENV_KEY] = test_sandbox_root
+        return process_env
 
     def _default_timeout(self, operation: Any, args: Dict[str, Any]) -> float:
         if operation in {
@@ -4320,7 +4364,6 @@ class DaemonState:
                     self._append_system_line_locked(job, "job canceled before process start\n")
                     return
             argv, _lanes, cwd, env, effective_timeout = self.registry.prepare(request)
-            env["REPOPROMPT_CONDUCTOR_JOB_TICKET"] = job.ticket
             # The ticket exists only after enqueue, so the default path is assigned immediately before execution.
             test_sandbox_root = configure_xctest_sandbox(
                 job.operation,
@@ -4383,14 +4426,20 @@ class DaemonState:
             with self.condition:
                 job.progress_transport = output_transport.kind
             process_pass_fds: Tuple[int, ...] = ()
+            process_env = self.registry.process_environment(
+                argv,
+                env,
+                ticket=job.ticket,
+                test_sandbox_root=test_sandbox_root,
+            )
             if cache_context is not None and cache_context.seeded:
                 cache_wrapper_gate_read, cache_wrapper_gate_write = os.pipe()
-                env["REPOPROMPT_CONDUCTOR_CACHE_WRAPPER_GATE_FD"] = str(cache_wrapper_gate_read)
+                process_env["REPOPROMPT_CONDUCTOR_CACHE_WRAPPER_GATE_FD"] = str(cache_wrapper_gate_read)
                 process_pass_fds = (cache_wrapper_gate_read,)
             process = subprocess.Popen(
                 argv,
                 cwd=str(cwd),
-                env=env,
+                env=process_env,
                 stdin=subprocess.DEVNULL,
                 stdout=output_transport.popen_stdout,
                 stderr=output_transport.popen_stderr,
@@ -7649,7 +7698,7 @@ def package_debug_app_under_heavy(repo_root: Path, operation_label: str) -> Tupl
     staged_bundle = staging_parent / live_bundle.name
     metadata = display_lock_metadata(
         lock_kind="global-heavy",
-        ticket=os.environ.get("REPOPROMPT_CONDUCTOR_JOB_TICKET"),
+        ticket=current_job_ticket(),
         operation=operation_label,
         operation_label=operation_label,
         repo_root=repo_root,
@@ -7747,7 +7796,7 @@ def operation_app_launch_existing(repo_root: Path, args: Dict[str, Any]) -> int:
             return 1
     metadata = display_lock_metadata(
         lock_kind="live-app",
-        ticket=os.environ.get("REPOPROMPT_CONDUCTOR_JOB_TICKET"),
+        ticket=current_job_ticket(),
         operation="app launch-existing" if staged_bundle is None else "app activate-staged-and-launch",
         operation_label="app launch-existing" if staged_bundle is None else "app activate staged and launch",
         repo_root=repo_root,
@@ -7843,7 +7892,7 @@ def operation_app_status(repo_root: Path) -> int:
 def operation_app_stop(repo_root: Path, args: Dict[str, Any]) -> int:
     metadata = display_lock_metadata(
         lock_kind="live-app",
-        ticket=os.environ.get("REPOPROMPT_CONDUCTOR_JOB_TICKET"),
+        ticket=current_job_ticket(),
         operation="app stop",
         operation_label="app stop",
         repo_root=repo_root,
@@ -8642,9 +8691,10 @@ def handle_real_operation(paths: Paths, operation: str, argv: List[str]) -> int:
 def main(argv: List[str]) -> int:
     repo_root = resolve_repo_root()
 
-    if argv and argv[0] == "__operation_runner":
+    if argv and argv[0] == OPERATION_RUNNER_ARG:
         if len(argv) != 2:
             raise ConductorError("__operation_runner requires one JSON payload argument")
+        capture_job_ticket(os.environ)
         return run_operation_runner(argv[1])
     if argv and argv[0] == "__cache_attempt_gate":
         if len(argv) != 3:
