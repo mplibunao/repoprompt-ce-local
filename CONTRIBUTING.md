@@ -46,11 +46,10 @@ Work is tracked as issues and pull requests there.
    When the change depends on a pull request that is still open, branch from
    that branch instead of `main`, open the pull request against it, then link
    the two as a GitHub stack and add the `stacked` label. The stack view shows
-   only this layer's diff, and GitHub retargets the branch onto `main` once
-   the lower pull request merges, rewriting the upper branch's commits in the
-   process, so fetch and reset the local branch to `origin` before committing
-   to it again. The `gh stack` extension installs with
-   `gh extension install github/gh-stack`.
+   only this layer's diff. Both layers can land in the same candidate, lower
+   first. When the upper layer waits for a later candidate, the landing
+   retargets it onto `main` once the lower one lands. The `gh stack` extension
+   installs with `gh extension install github/gh-stack`.
 
    ```bash
    gh pr create --base <lower-branch> --label <type> --label area:<area> --label stacked
@@ -74,8 +73,10 @@ Work is tracked as issues and pull requests there.
 
 6. Before asking for MP's review, run an independent review and a separate
    refactor pass on the change, such as an orchestrated workflow's review and
-   refactor gates, and fix what they find. The Codex review bot may also
-   review the pull request. Its review is optional input, never a merge gate:
+   refactor gates or sessions started from the prompts in
+   [`review-prompts.md`](.agents/skills/rpce-merge-pr-batch/references/review-prompts.md),
+   and fix what they find. The Codex review bot may also review the pull
+   request. Its review is optional input, never a merge gate:
    when it does not review, nothing waits for it or asks it to review again.
    When it posts findings, assess each one: fix the findings that are real
    defects, reply with the reason for any you decline, resolve each thread,
@@ -89,75 +90,80 @@ Work is tracked as issues and pull requests there.
    git push
    ```
 
-7. MP reads the pull request and approves it. Fetch `origin` first so `main`
-   is current for everything below. If the branch conflicts with `main`,
-   rebase it onto `origin/main` and resolve the conflicts first.
-   Run the push preflight, then push with a lease pinned to the head you
-   reviewed, so a newer push to the branch makes the push fail instead of
-   being overwritten:
-   `git push --force-with-lease=refs/heads/<branch>:<reviewed sha> origin HEAD:refs/heads/<branch>`.
-   Let the checks run on the new head. MP's approval covers the rebase.
-   Any other commit pushed after the approval, such as a review fix, needs
-   MP's approval again before the merge.
-   Then, with every review thread resolved and the checks green, run the
-   `pr-ready` lane on the final head with the upstream unset so it validates
-   `origin/main..HEAD` rather than an empty range, restore the upstream,
-   confirm the local head is the pushed head, and merge with a merge commit
-   pinned to that commit so a head that moved in the meantime aborts the
-   merge. A pull request that is part of a stack merges through the stack
-   command after the same head check; merging a lower layer makes GitHub
-   retarget and rewrite the layers above it, and MP's approval of the lower
-   layer covers that rewrite.
+7. MP reads the pull request and approves it in chat. GitHub doesn't let an
+   author approve a pull request opened from their own account, so its review
+   state doesn't record the approval; the approved head is the pull request's
+   head when MP approves it. From here the pull request waits for a release
+   candidate ([Landing](#landing)), which merges every approved head onto
+   `origin/main`, validates that candidate once, and pushes it to `main`. The
+   pull request needs nothing more unless its head no longer merges cleanly or
+   the candidate fails on it. For a conflict with `main`, rebase it onto
+   `origin/main`, run the push preflight, and push with a lease pinned to the
+   head MP approved, so a newer push to the branch makes the push fail instead
+   of being overwritten; MP's approval covers the rebase. When a lower stack
+   layer is rebased, the upper layer is rebased onto the lower layer's new head
+   the same way, and its approval covers that rebase too. `main` is never merged
+   into a pull request branch. Any other commit pushed after the approval, such
+   as a review fix, needs MP's approval again before the pull request enters a
+   candidate.
 
    ```bash
    git fetch origin
-   git branch --unset-upstream
-   .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
-   git branch --set-upstream-to=origin/<branch>
-   test "$(git rev-parse HEAD)" = "$(git rev-parse origin/<branch>)"
-   gh pr merge <number> --merge --match-head-commit "$(git rev-parse HEAD)"
-   gh stack merge <number> --merge --yes   # when the pull request is in a stack
+   git rebase origin/main
+   .agents/skills/rpce-contribution-check/scripts/preflight.sh push
+   git push --force-with-lease=refs/heads/<branch>:<approved sha> origin HEAD:refs/heads/<branch>
    ```
 
-## Landing a batch
+## Landing
 
-`main` must stay promotable at every commit, because a hotfix build comes from
-it. Two paths land work there.
+Approved pull requests, one or many, reach `main` through one path: a release
+candidate. `$rpce-merge-pr-batch`
+(`.agents/skills/rpce-merge-pr-batch/SKILL.md`) runs it and holds the commands
+and checks. These are its steps.
 
-**One at a time.** With few open pull requests and no shared files, validate
-each app-code pull request in the debug app on its own branch, then merge it.
-This is the default path and the one the flow above describes. An urgent fix
-takes this path even while a release candidate is open, so `main` never waits
-on a batch.
+1. **Cut.** In the candidate worktree, a plain worktree kept across candidates
+   so its `.build` stays warm, start `release/<version>-rc<N>` from
+   `origin/main`. `<version>` is `MARKETING_VERSION` in
+   [`version.env`](version.env) on `origin/main`, and `N` is one more than the
+   highest candidate number that exists on `origin` for that version. Merge each
+   approved head with `git merge --no-ff` in the order MP gave. An upper stack
+   layer enters only after its lower layer in the same candidate. The candidate
+   contains only those merge commits: nothing else is committed on it and the
+   pull request branches are not rewritten. A head that conflicts with `main` is
+   rebased per step 7 and its new head is merged instead. A head that conflicts
+   with a pull request merged earlier in the same candidate leaves this
+   candidate; once that pull request lands, it rebases onto the new `main` per
+   step 7 and enters the next candidate.
+2. **Push.** Run the push preflight and push the candidate. Hosted CI runs on
+   the push.
+3. **Validate.** Run `preflight.sh candidate` on the candidate;
+   [Candidate validation](.agents/skills/rpce-contribution-check/SKILL.md#candidate-validation)
+   says what it selects. Then run the checks it prints against the debug app it
+   launched. The candidate passes when the hosted runs on its tip are green (CI,
+   and Xcode Workspace Validation when the candidate touches that workflow's
+   paths), the lane passed, and the printed checks passed.
+4. **Land.** Fetch; require `origin/main` to equal the candidate's base, each
+   pull request's head to equal the head that was merged, and the local `HEAD`
+   to equal the tip; retarget the upper layer of any stack in the candidate onto
+   `main`; run the push preflight; push the tip to `main` with
+   `git push origin HEAD:refs/heads/main`. A rejected push means `main` moved:
+   the candidate is void, and each retargeted upper layer goes back to its lower
+   branch. After the push, GitHub marks each pull request merged. Comment on
+   each with the candidate name, its tip, and the hosted run, then delete the
+   head branches. The candidate branch stays until the version is promoted.
+5. **Fail.** Fix on the pull request's branch (any fix other than a rebase needs
+   MP's approval again) or drop the pull request and anything stacked on it,
+   then cut rc<N+1> from `origin/main` with the current heads. To find the pull
+   request at fault, bisect the candidate's merges with
+   `git bisect --first-parent` between the base and the tip, running the failing
+   check's own command rather than the preflight script; the first failing merge
+   names it.
 
-**Release candidate.** When more than three app-code pull requests are waiting,
-or any two touch the same file, validate them together before anything merges:
+New approvals enter the next candidate; MP may abandon an open candidate so the
+next one is cut now. Every `main` tip is a landed candidate, and promotion
+follows [`docs/releasing.md`](docs/releasing.md).
 
-1. Cut `release/<version>-rc<N>` from `origin/main` in a dedicated worktree and
-   merge each pull request head into it with `git merge --no-ff`, in dependency
-   order, stacked pull requests through their tip. The candidate carries only
-   those merges; do not rebase or otherwise rewrite the pull request branches,
-   and do not commit fixes on the candidate.
-2. Build the candidate once, launch the debug app, and run each pull request's
-   own scenario plus the acceptance matrix in
-   [`docs/releasing.md`](docs/releasing.md) against that debug app, following
-   the matrix's release-candidate instructions so every call reaches the
-   candidate rather than the installed production build.
-3. On failure, fix on the pull request branch and cut the next candidate from
-   `origin/main` plus the current heads. To find the pull request at fault,
-   split the candidate along groups of pull requests that touch the same files
-   and build the halves.
-4. On pass, merge the pull requests into `main` one by one in the same order,
-   each through `pr-ready` and a merge commit, without relaunching the app.
-   After the last merge, run `git fetch origin` and require
-   `git diff <candidate tip> origin/main` to be empty: a non-empty diff means a
-   pull request changed after validation and the candidate is void.
-5. Promote from `main` per [`docs/releasing.md`](docs/releasing.md). The
-   candidate branch is never merged into `main` and may be deleted once the
-   promotion is tagged.
-
-Ports from upstream follow [`docs/porting.md`](docs/porting.md). Builds are
-promoted per [`docs/releasing.md`](docs/releasing.md).
+Ports from upstream follow [`docs/porting.md`](docs/porting.md).
 
 ## Validation
 
