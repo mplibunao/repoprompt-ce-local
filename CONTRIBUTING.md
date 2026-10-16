@@ -127,14 +127,15 @@ and checks. These are its steps.
    `origin/main`. `<version>` is `MARKETING_VERSION` in
    [`version.env`](version.env) on `origin/main`, and `N` is one more than the
    highest candidate number that exists on `origin` for that version. Merge each
-   approved head with `git merge --no-ff` in the order MP gave. An upper stack
-   layer enters only after its lower layer in the same candidate. The candidate
-   contains only those merge commits: nothing else is committed on it and the
-   pull request branches are not rewritten. A head that conflicts with `main` is
-   rebased per step 7 and its new head is merged instead. A head that conflicts
-   with a pull request merged earlier in the same candidate leaves this
-   candidate with anything stacked on it; once that pull request lands, it
-   rebases onto the new `main` per step 7 and enters the next candidate.
+   approved pull request's head with `git merge --no-ff` in the order MP gave.
+   An upper stack layer enters only after its lower layer in the same
+   candidate. The candidate contains only those merge commits: nothing else is
+   committed on it and the pull request branches are not rewritten. A head that
+   conflicts with `main` is rebased per step 7 and its new head is merged
+   instead. A head that conflicts with a pull request merged earlier in the
+   same candidate leaves this candidate with anything stacked on it; once that
+   pull request lands, it rebases onto the new `main` per step 7 and enters the
+   next candidate.
 2. **Push.** Run the push preflight and push the candidate. Hosted CI runs on
    the push.
 3. **Validate.** Run `preflight.sh candidate` on the candidate;
@@ -143,15 +144,15 @@ and checks. These are its steps.
    launched. The candidate passes when the hosted runs on its tip are green (CI,
    and Xcode Workspace Validation when the candidate touches that workflow's
    paths), the lane passed, and the printed checks passed.
-4. **Land.** Fetch; require `origin/main` to equal the candidate's base, each
-   pull request's head to equal the head that was merged, and the local `HEAD`
-   to equal the tip; retarget the upper layer of any stack in the candidate onto
-   `main`; run the push preflight; push the tip to `main`. A rejected push means
-   `main` moved: the candidate is void, and each retargeted upper layer goes
-   back to its lower branch. After the push, GitHub marks each pull request
-   merged. Comment on each with the candidate name, its tip, and the hosted run,
-   then delete the head branches. The candidate branch stays until the version
-   is promoted.
+4. **Land.** Fetch; require `origin/main` to equal the candidate's base and the
+   local `HEAD` to equal the tip; retarget the upper layer of any stack in the
+   candidate onto `main`; run the push preflight; require each pull request's
+   head to equal the head that was merged; push the tip to `main`. A rejected
+   push means `main` moved: the candidate is void, and each retargeted upper
+   layer goes back to its lower branch. After the push, GitHub marks each pull
+   request merged. Comment on each with the candidate name, its tip, and the
+   hosted run, then delete the head branches. The candidate branch stays until
+   the version is promoted.
 5. **Fail.** Fix on the pull request's branch (step 7 says which fixes need
    approval again) or drop the pull request and anything stacked on it, then cut
    rc<N+1> from `origin/main` with the current heads. Step 6 of
