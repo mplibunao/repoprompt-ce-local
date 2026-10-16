@@ -2,7 +2,7 @@
 
 `conductor` is RepoPrompt CE's developer daemon: repository-internal tooling that runs builds, tests, packaging, style checks, and debug-app launches for this checkout. The `make dev-*` targets are aliases for its commands, and the daemon starts on first use. `./conductor --help` lists every command and flag.
 
-Build, run, and validate through the daemon rather than a bare `swift build` or `swift test`. Agents in other checkouts and worktrees share the machine and the debug app, and the daemon keeps them from building, launching, testing, or running style tools over each other and corrupting `.build` or the live app.
+Agents in other checkouts and worktrees share the machine and the debug app, and the daemon keeps them from building, launching, testing, or running style tools over each other and corrupting `.build` or the live app. [Uncoordinated fallback](#uncoordinated-fallback) says when the direct commands are allowed instead.
 
 ## Commands
 
@@ -14,13 +14,13 @@ make dev-swift-build PRODUCT=repoprompt-mcp         # focused product build (PRO
 make dev-run                                        # build, package, stop the existing debug app, launch the new build
 make dev-launch-existing                            # launch the current DebugApps bundle without building
 make dev-test                                       # full coordinated test suite
-make dev-test FILTER=WorkspaceFileContextStoreTests # focused coordinated test run
+make dev-test FILTER=CodeMapGoldenTests             # focused coordinated test run
 make dev-provider-test                              # RepoPromptAgentProviders package tests (FILTER= also supported)
 make dev-smoke                                      # non-disruptive: requires a running CE debug app and installed debug CLI
 make dev-smoke-launch                               # ./conductor smoke --launch: builds and launches the debug app, then runs the smoke
 make dev-format-check                               # non-mutating SwiftFormat check
 make dev-lint                                       # non-mutating format-check, then SwiftLint strict
-make dev-format                                     # mutates first-party Swift files; run only when intended
+make dev-format                                     # rewrites first-party Swift files; run after any Swift edit, never otherwise
 make dev-format-tools-status
 make dev-check-format-tools
 make dev-install-format-tools
@@ -84,7 +84,7 @@ Neither `make dev-format-check` nor `make dev-lint` installs missing tools; `mak
 
 ## Build outputs
 
-`make dev-build` and `make build` package the debug app into the shared bundle at `~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app`, which launches run. Commands that package and then launch (`make dev-run`, `make run`, `./conductor app relaunch`, `make dev-smoke-launch`, and the Finder launcher) package into a staging folder beside it and swap the result into place. `.build/debug/RepoPrompt.app` is only a link to the last packaged bundle, and after any of those commands it points at a staging folder that no longer exists. SwiftPM's architecture-specific build output is usually under `.build/arm64-apple-macosx/debug/`. `make clean` removes `.build`.
+`make dev-build` and `make build` package the debug app into the shared bundle at `~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app`, the bundle every launch runs. Commands that package and then launch (`make dev-run`, `make run`, `./conductor app relaunch`, `make dev-smoke-launch`, and the Finder launcher) package into a staging folder beside it and swap the result into place. `.build/debug/RepoPrompt.app` is a link to the last packaged bundle. Right after `make dev-build` or `make build` it points at the shared bundle, which the Xcode `RepoPrompt CE App` scheme relies on; after a staged launch command it points at a staging folder that no longer exists. SwiftPM's architecture-specific build output is usually under `.build/arm64-apple-macosx/debug/`. `make clean` removes `.build`.
 
 When packaging fails or hangs, trace the packaging script directly:
 
@@ -96,7 +96,7 @@ VERBOSE=1 ./Scripts/package_app.sh debug 2>&1 | tee /tmp/repoprompt-build.log
 
 ## Uncoordinated fallback
 
-The direct commands below claim no lanes and are never superseded by a newer stop or relaunch. When several agents are active, they can build, launch, or run style tools over each other, and a direct launch can reopen the app after a coordinated stop. Use them only when the daemon is unavailable but the tooling they need, including `python3`, still works.
+The direct commands below claim no lanes and are never superseded by a newer stop or relaunch. When several agents are active, they can build, launch, or run style tools over each other, and a direct launch can reopen the app after a coordinated stop. Use them only when the daemon is unavailable, and avoid them while other agents may be building. The `make` targets still need their tooling, including `python3`; direct `swift test --filter <name>` and `swift build --product <name>` need no `python3` and produce the same results.
 
 ```bash
 make build                  # ./Scripts/package_app.sh debug
@@ -108,7 +108,5 @@ make lint
 make format-tools-status
 make install-format-tools
 ```
-
-Direct `swift test --filter <name>` and `swift build --product <name>` need no `python3` and produce the same results, but they are uncoordinated. Use them only when the daemon is unavailable, and avoid them when other agents may be building.
 
 The Finder launcher runs `./conductor app relaunch`, so it requires `python3`; it does not provide an uncoordinated no-Python fallback, because safe lifecycle actions require exact debug-executable identity checks. The `rpce-cli-debug` commands of the [manual live flow](../testing.md#debug-cli-and-live-mcp-smoke) remain valid for direct live MCP validation.

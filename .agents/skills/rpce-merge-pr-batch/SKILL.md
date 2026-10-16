@@ -51,7 +51,7 @@ Before executing contributor-controlled code:
 
 - perform a read-only diff review
 - remove GitHub, provider, signing, notarization, and release credentials from the execution environment
-- treat changes to `AGENTS.md` or a repository document it links to, such as `CONTRIBUTING.md`, `.agents/**`, `Makefile`, package/dependency manifests, `Scripts/**`, workflows, build plugins, macros, or other executable control-plane files as high risk
+- treat changes to `AGENTS.md`, any repository document it links to (such as `CONTRIBUTING.md`), `.agents/**`, `Makefile`, package/dependency manifests, `Scripts/**`, workflows, build plugins, macros, or other executable control-plane files as high risk
 - if those changes could alter validation or execute during build/test, use trusted tooling from `VALIDATED_BASE` in an appropriately isolated environment or stop for maintainer review; never let the PR weaken its own gate
 
 ### 3. Rebase
