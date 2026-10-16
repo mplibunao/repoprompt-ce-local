@@ -33,6 +33,8 @@ Do not use smoke as the only protection for deterministic logic. Without a prede
 
 Each root or provider test job gets a fresh conductor profile sandbox beside its job log, with the path shown in the summary until job retention removes the directory. Export a non-empty `REPOPROMPT_TEST_SANDBOX_ROOT` before invoking conductor to use a caller-owned sandbox instead. Inside the sandbox, a test's profile takes its build flavor's name, `profile/RepoPrompt CE Debug` for the debug test build. Its runtime temporary files sit in that profile's `Temporary` folder, so no test resolves a developer's real debug or production profile.
 
+A conductor test job runs `Scripts/ci_app_test_runner.py --local`. It builds with `swift build --build-tests`, lists each test bundle, and runs the selected tests with `xctest` directly. Only the listing and `xctest` get the sandbox: SwiftPM keys its manifest cache on the whole environment, so a per-job value would make every job re-evaluate the package manifests. The runner falls back to `swift test --skip-build`, which is slower, for `--test-product`, for packages whose tests import Swift Testing, and for a `--filter` that Python and SwiftPM's regex engine might read differently, such as one with `\d`, `(?i)` or `{n}`. The job log shows each command the runner starts.
+
 Focused daemon-coordinated examples:
 
 ```bash
