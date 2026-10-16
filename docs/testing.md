@@ -49,7 +49,9 @@ make dev-test
 make dev-provider-test
 ```
 
-A focused green run is evidence for the named contract, not a substitute for full-suite or CI coverage when the changed boundary is broad. The hosted root-test workflow discovers one current root XCTest population through `swift test list`, counts methods per suite, assigns every discovered suite to one of four shards by deterministic, method-count-weighted longest-processing-time-first (LPT) scheduling, and executes each suite in its own XCTest process. Root CI has no contract/integration tier split or contributor-maintained registry; provider-package tests remain a separate lane.
+A focused green run is evidence for the named contract, not a substitute for full-suite or CI coverage when the changed boundary is broad. The hosted root-test workflow discovers one current root XCTest population through `swift test list`, counts methods per suite, assigns every discovered suite to one of four shards by deterministic, method-count-weighted longest-processing-time-first (LPT) scheduling, and executes each suite in its own XCTest process. Root CI has no contract/integration tier split or contributor-maintained registry. Provider-package tests run inside the Style job.
+
+The Sentry-enabled build runs only on pushes to `main` and `release/**`. Its `SentryTelemetryPrivacyTests` filter matches no suite in this distribution, so the step passes without running a test and a green run isn't privacy-test coverage.
 
 ## Codemap-sensitive changes
 

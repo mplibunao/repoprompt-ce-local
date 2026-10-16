@@ -18,6 +18,7 @@ jobs:
   style:
     name: Style
     runs-on: macos-26
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -50,6 +51,12 @@ jobs:
       - name: Run release workflow tests
         run: make release-selftest
 
+      # Part of Style so each run starts one fewer macOS job. The package has no remote
+      # dependencies, so it needs no cache.
+      - name: Run provider package tests
+        working-directory: Packages/RepoPromptAgentProviders
+        run: swift test
+
   build-and-test:
     name: Build and Test (root shard ${{ matrix.shard }})
     runs-on: macos-26
@@ -64,15 +71,17 @@ jobs:
         with:
           persist-credentials: false
 
+      # Every run restores; only main pushes save (shard 1, below). A cache saved on any
+      # other branch is visible only to runs on that branch and pull requests targeting it.
       - name: Restore SwiftPM build cache
-        uses: actions/cache@v6
+        id: root-cache
+        uses: actions/cache/restore@v6
         with:
-          path: |
-            .build
-            Packages/RepoPromptAgentProviders/.build
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}
+          path: .build
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-
 
       - name: Build app product
         run: swift build --product RepoPrompt
@@ -91,24 +100,38 @@ jobs:
             --shard-count 4 \
             --shard-index "${{ matrix.shard }}"
 
+      # The path must match the restore step's: the cache version hashes the path list, so
+      # with a different path no restore could find what this step saves.
+      - name: Save SwiftPM build cache (main, shard 1)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.root-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .build
+          key: ${{ steps.root-cache.outputs.cache-primary-key }}
+
+  # Pushes only (main and release/**); pull requests show it as skipped. It stays in this
+  # workflow because a release candidate lands only when the CI run on its tip is green.
   sentry-enabled-build:
     name: Sentry-enabled Build
+    if: github.event_name == 'push'
     runs-on: macos-26
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
+      # Linking Sentry changes the build graph, so this cache is separate from the root one.
       - name: Restore SwiftPM build cache
-        uses: actions/cache@v6
+        id: sentry-cache
+        uses: actions/cache/restore@v6
         with:
-          path: |
-            .build
-            Packages/RepoPromptAgentProviders/.build
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}
+          path: .build
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-
 
       - name: Build app product with Sentry SDK linked
         env:
@@ -120,32 +143,16 @@ jobs:
           REPOPROMPT_ENABLE_SENTRY: "1"
         run: swift test --filter SentryTelemetryPrivacyTests
 
-  provider-tests:
-    name: Provider Tests
-    runs-on: macos-26
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - name: Save SwiftPM build cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.sentry-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
         with:
-          persist-credentials: false
-
-      - name: Restore SwiftPM build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            .build
-            Packages/RepoPromptAgentProviders/.build
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-provider-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-
-
-      - name: Run provider package tests
-        working-directory: Packages/RepoPromptAgentProviders
-        run: swift test
+          path: .build
+          key: ${{ steps.sentry-cache.outputs.cache-primary-key }}
 
   secret-scan:
     name: Secret Scan
-    runs-on: macos-26
+    runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -153,8 +160,17 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Install gitleaks
-        run: brew install gitleaks
+      - name: Install pinned gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -fsSL --connect-timeout 15 --max-time 120 \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            -o "$archive"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
       - name: Scan introduced commit range
         env:
@@ -174,6 +190,10 @@ jobs:
           else
             range="$CURRENT_SHA"
           fi
+          # gitleaks scans 0 commits and passes when an endpoint doesn't resolve, so fail here
+          # instead, for example after a force-push whose old head is no longer fetchable.
+          commit_count="$(git rev-list --count "$range")"
+          echo "Scanning range: $range, commit count: $commit_count"
           gitleaks_command=(gitleaks git)
           if [[ -f .gitleaks.toml ]]; then
             gitleaks_command+=(--config .gitleaks.toml)
