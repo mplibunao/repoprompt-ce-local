@@ -18,6 +18,7 @@ jobs:
   style:
     name: Style
     runs-on: macos-26
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -189,7 +190,10 @@ jobs:
           else
             range="$CURRENT_SHA"
           fi
-          echo "Scanning range: $range"
+          # gitleaks scans 0 commits and passes when an endpoint doesn't resolve, so fail here
+          # instead, for example after a force-push whose old head is no longer fetchable.
+          commit_count="$(git rev-list --count "$range")"
+          echo "Scanning range: $range, commit count: $commit_count"
           gitleaks_command=(gitleaks git)
           if [[ -f .gitleaks.toml ]]; then
             gitleaks_command+=(--config .gitleaks.toml)
