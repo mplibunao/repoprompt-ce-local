@@ -50,8 +50,8 @@ jobs:
       - name: Run release workflow tests
         run: make release-selftest
 
-      # The provider package has no remote dependencies, so compiling it here costs less
-      # than a separate job restoring a multi-gigabyte cache.
+      # Part of Style so each run starts one fewer macOS job. The package has no remote
+      # dependencies, so it needs no cache.
       - name: Run provider package tests
         working-directory: Packages/RepoPromptAgentProviders
         run: swift test
@@ -71,7 +71,7 @@ jobs:
           persist-credentials: false
 
       # Every run restores; only main pushes save (shard 1, below). A cache saved on any
-      # other branch is visible only to that branch.
+      # other branch is visible only to runs on that branch and pull requests targeting it.
       - name: Restore SwiftPM build cache
         id: root-cache
         uses: actions/cache/restore@v6
@@ -99,10 +99,10 @@ jobs:
             --shard-count 4 \
             --shard-index "${{ matrix.shard }}"
 
-      # The path must match the restore step's, or the cache version differs and every
-      # main push saves again.
+      # The path must match the restore step's: the cache version hashes the path list, so
+      # with a different path no restore could find what this step saves.
       - name: Save SwiftPM build cache (main, shard 1)
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.root-cache.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.root-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: .build

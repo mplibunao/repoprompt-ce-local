@@ -1,6 +1,6 @@
 name: CI (push checks)
 
-# Checks that pull requests skip: they run on pushes to main and release branches only.
+# Kept out of ci.yml so pull request runs neither start this macOS job nor list it as skipped.
 on:
   push:
     branches:
@@ -43,7 +43,7 @@ jobs:
         run: swift test --filter SentryTelemetryPrivacyTests
 
       - name: Save SwiftPM build cache (main only)
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.sentry-cache.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.sentry-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: .build
