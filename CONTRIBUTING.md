@@ -62,10 +62,10 @@ Work is tracked as issues and pull requests there.
    record the run. Build and launch the debug app from the branch, exercise
    the changed behavior through `rpce-cli-debug` or the app itself, and record
    the commands, what you observed, and the result in the description. Unit
-   tests and `pr-ready` do not replace that run. The
-   debug app runs beside production with its own profile and needs no
-   approval to launch or relaunch. A debug build packaged before the profile
-   split still shares production's state, so validate from a current build.
+   tests and `pr-ready` do not replace that run. Validate from a current
+   build, as [Debug profile isolation](docs/testing.md#debug-profile-isolation)
+   explains; the approval rules in [`AGENTS.md`](AGENTS.md#commit-preflight)
+   cover launching the debug app.
 
    ```bash
    make dev-smoke-launch          # builds, launches the debug app, runs the smoke flow
@@ -107,7 +107,7 @@ Work is tracked as issues and pull requests there.
    merge. A pull request that is part of a stack merges through the stack
    command after the same head check; merging a lower layer makes GitHub
    retarget and rewrite the layers above it, and MP's approval of the lower
-   layer covers that rewrite. Nothing merges into `main` directly.
+   layer covers that rewrite.
 
    ```bash
    git fetch origin
@@ -166,34 +166,13 @@ you should understand the code you submit and be able to explain its behavior.
 
 Do not check raw generated RP outputs into the repo; prompts, reviews,
 investigations, analysis, designs, and reference dumps are working artifacts
-unless deliberately distilled into durable docs. Local `docs/investigations/*.md`
-reports stay unignored so RepoPrompt tooling can read them; do not stage or merge
-them unless intentionally requested.
+unless deliberately distilled into durable docs. [`AGENTS.md`](AGENTS.md#commit-preflight)
+covers local `docs/investigations/*.md` reports.
 
-For every change, run the repository guardrails:
+The [validation matrix](.agents/skills/rpce-contribution-check/references/validation-matrix.md)
+lists the checks each changed boundary needs. Add focused
+`make dev-test FILTER=<SuiteName>` coverage for behavior changes.
 
-```bash
-make guardrails
-```
-
-For Swift or style-sensitive changes, also run:
-
-```bash
-make dev-lint
-```
-
-Add focused `make dev-test FILTER=<SuiteName>` coverage for behavior changes.
-Before merging into `main`, the `pr-ready` lane of
-[`$rpce-contribution-check`](.agents/skills/rpce-contribution-check/SKILL.md) is
-mandatory; that skill documents how to invoke it so it validates the whole
-branch.
-
-When changing the Xcode generator, workflow wrapper, or generated scheme
-contracts, also run:
-
-```bash
-make xcode-validate
-```
-
-Do not change release metadata, signing identities, bundle IDs, Sparkle keys, or
-release channels unless the change is deliberate and reviewed.
+[Release metadata and signing](docs/open-source-readiness.md#release-metadata-and-signing)
+covers changes to release metadata, signing identities, bundle IDs, Sparkle
+keys, and release channels.

@@ -179,10 +179,9 @@ and do not copy it to another Mac.
 One archive covers everything a promotion can break: the installed app bundle, the app's
 Application Support state, its preferences domain, and the local signing identity record.
 Both scripts refuse to run while any RepoPrompt process holds that state, so quit
-production, the debug app, and any attached CLI first. The debug app is recognized by its
-executable path: `RepoPromptDebug`, or `RepoPrompt` in a debug bundle packaged before that
-name, inside `DebugApps` or a `DebugApps-*` directory of the Application Support directory,
-or in the bundle that `REPOPROMPT_DEBUG_APP_BUNDLE` or `REPOPROMPT_DEBUG_APP_ROOT` names.
+production, the debug app, and any attached CLI first. [Live debug app identity and
+lifecycle](testing.md#live-debug-app-identity-and-lifecycle) says how they recognize the
+debug app.
 
 ```bash
 ./Scripts/local_release_archive.sh local/v1.4.0-b37
@@ -221,8 +220,8 @@ The debug profile, `~/Library/Application Support/RepoPrompt CE Debug`, sits bes
 production profile rather than inside it, so it is not part of the rollback unit: archive
 and restore neither include nor move it. Data that debug builds wrote into the shared profile
 before the split, including `Codex/Debug/`, stays in the production profile and is archived
-and restored with it. Rolling the debug app back to a build from before the split is unsafe,
-because that build reads and writes the production profile again.
+and restored with it. Rolling the debug app back to a build from before the split is unsafe;
+[Debug profile isolation](testing.md#debug-profile-isolation) explains why.
 
 `Scripts/seed_debug_profile.py` also reads these archives, without changing them, to copy
 production-scale workspaces and history into the debug profile. [Seed the debug profile from
@@ -251,11 +250,8 @@ commit with `dirty: false` and `git_status: "ok"`. The `untracked_files` field m
 the checkout contains local investigation files.
 
 Debug and release bundles share the `RepoPrompt.app` directory name but declare different
-executables in `CFBundleExecutable`: release and local production bundles use `RepoPrompt`,
-while debug bundles use `RepoPromptDebug` and display as `RepoPrompt CE Debug` with
-`AppBundle/AppIconDebug.icns`. Production's install path, executable, bundle identifier, and
-signing are the release values. The packaging validators, the packaged MCP round-trip smoke,
-and conductor read the executable from `CFBundleExecutable` instead of assuming a name.
+executables in `CFBundleExecutable`; [Live debug app identity and
+lifecycle](testing.md#live-debug-app-identity-and-lifecycle) describes both.
 
 ## Acceptance matrix
 
