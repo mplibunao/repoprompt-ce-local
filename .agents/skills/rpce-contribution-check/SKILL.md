@@ -1,11 +1,11 @@
 ---
 name: rpce-contribution-check
-description: Validate RepoPrompt CE contributions before committing or pushing. Use whenever an agent is about to create a commit, push the current branch, rewrite history, delete a branch or fork, or change GitHub-visible repository state. Enforces staged-index and outgoing-range secret scanning, repository guardrails, an origin-only remote allowlist, clean push boundaries, an explicit PR-ready lane for path-selected heavyweight validation, and explicit approval for destructive Git or production-app operations.
+description: Validate RepoPrompt CE contributions before any commit, push, release candidate, history rewrite, branch or fork deletion, or other GitHub-visible change; owns the commit, push, pr-ready, and candidate preflight lanes.
 ---
 
 # RepoPrompt CE Contribution Check
 
-Run the repository-local safety preflight before every commit and push. Read `AGENTS.md` first and use daemon-coordinated validation where available. Use the explicit `pr-ready` lane when computed-outgoing-range path-selected local validation evidence is required.
+Run the repository-local safety preflight before every commit and push. Read `AGENTS.md` first and use daemon-coordinated validation where available.
 
 ## Before committing
 
@@ -37,23 +37,23 @@ Default push mode validates whitespace, staged-index secrets, guardrails, the re
 
 Both `commit` and `push` check the repository's remotes after guardrails and before the mode-specific phases. `origin` is the only remote this repository may have; any other remote fails the preflight, and a checkout with no remotes passes. When `origin` exists, every configured fetch and push URL must target the distribution repository specified in `AGENTS.md`. Read upstream RepoPrompt CE through the reference clone described in `docs/porting.md` instead of adding a remote.
 
-Push mode validates only the current branch against its configured upstream. For a non-`main` topic branch without a configured upstream, it may use `origin/main` as an explicit comparison fallback. It does not validate tags, `--all`, `--mirror`, or arbitrary refspecs.
+Push mode validates only the current branch against the comparison base described below. It does not validate tags, `--all`, `--mirror`, or arbitrary refspecs.
 
 ## Full / PR-ready local validation
 
-When preparing computed-outgoing-range local PR evidence, when a maintainer requests it, or when the validation matrix calls for the path-selected lane, run:
+Run the `pr-ready` lane when `AGENTS.md` "Commit preflight" says to, and whenever a maintainer or the validation matrix asks for the path-selected lane:
 
 ```bash
 .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
 ```
 
-Run `pr-ready` before merging a branch into `main`; it is the mandatory pre-merge lane.
+[`AGENTS.md`](../../../AGENTS.md#commit-preflight) says when each lane runs.
 
 `pr-ready` reruns the push safety gate, then runs any matching path-selected heavyweight lanes for the computed outgoing range, such as conductor selftests, Swift lint, root/provider tests, product builds, and generated Xcode workspace validation for Xcode boundary changes. Heavy build/test/package lanes may wait on conductor's per-user global heavy slot when another worktree is already running Swift/Xcode-heavy work; treat that as coordination, not a reason to launch duplicate direct `swift`/`xcodebuild` commands. It does not replace explicit release validation, live smoke, already-pushed PR-base comparison, or destructive-operation approval requirements.
 
 ### Comparison base
 
-`push` and `pr-ready` resolve the same comparison base and no flag overrides it: the branch's configured upstream when it has one, otherwise `origin/main` for a non-`main` branch. Once a topic branch has been pushed, its upstream is its own remote branch, so the computed range is empty and both lanes exit successfully having validated nothing.
+`push`, `pr-ready`, and `candidate` resolve the same comparison base and no flag overrides it: the branch's configured upstream when it has one, otherwise `origin/main` for a non-`main` branch. Once a topic branch has been pushed, its upstream is its own remote branch, so the computed range is empty and `push` and `pr-ready` exit successfully having validated nothing.
 
 To validate a whole branch against `main`, run `pr-ready` while the branch has no configured upstream:
 
@@ -63,6 +63,16 @@ git branch --unset-upstream        # only needed once the branch has been pushed
 ```
 
 Before a branch's first push there is nothing to unset. A green `push` lane is not a substitute for this: it scans the same possibly empty range and never runs the heavyweight lanes.
+
+A candidate branch is cut with `--no-track` and pushed without `-u`, so it never gets an upstream and `candidate` always compares it against `origin/main`.
+
+## Candidate validation
+
+```bash
+.agents/skills/rpce-contribution-check/scripts/preflight.sh candidate
+```
+
+Run it in the candidate worktree on `release/<version>-rc<N>` (`CONTRIBUTING.md`, "Landing"). It runs everything `pr-ready` runs for `origin/main..HEAD`, which covers every pull request in the candidate. When any path in that range is outside `docs/`, `.agents/`, `.github/`, and `*.md`, it runs `make dev-smoke-launch`, which packages the candidate, replaces the running debug app with it, and runs the smoke flow. It then prints the checks that remain manual: each pull request's recorded scenario and the acceptance matrix in `docs/releasing.md`. Otherwise it prints that the debug app was not selected. A debug-app relaunch ends every Agent Mode session in the debug app, so finish those first. A candidate with no commits over `origin/main` fails the lane. The candidate's merge commits run no commit lane: a clean `--no-ff` merge of approved heads adds no content of its own, and the `push` and `candidate` lanes scan the whole `origin/main..HEAD` range.
 
 ## Escalate before destructive operations
 

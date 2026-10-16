@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() { echo "usage: $0 [commit|push|pr-ready]" >&2; }
+usage() { echo "usage: $0 [commit|push|pr-ready|candidate]" >&2; }
 
 if (( $# > 1 )); then
   usage
@@ -10,7 +10,7 @@ fi
 
 mode="${1:-commit}"
 case "$mode" in
-  commit|push|pr-ready) ;;
+  commit|push|pr-ready|candidate) ;;
   *)
     usage
     exit 2
@@ -335,12 +335,34 @@ run_pr_ready_path_validations() {
   fi
 }
 
+run_candidate_debug_app_validation() {
+  local file
+  local debug_app_exempt_paths_pattern='^(docs/|\.agents/|\.github/)|\.md$'
+  local has_debug_app_changes=0
+  # run_pr_ready_path_validations wrote the candidate's changed paths for the same range.
+  while IFS= read -r -d '' file; do
+    [[ "$file" =~ $debug_app_exempt_paths_pattern ]] || has_debug_app_changes=1
+  done < "$tmp_root/range-files.z"
+  if (( ! has_debug_app_changes )); then
+    log "Debug app not selected: the candidate changes only docs, skills, and workflows"
+    return
+  fi
+  log "Package the candidate, relaunch the debug app from it, and run the smoke flow"
+  make dev-smoke-launch
+  cat <<'EOF'
+
+The debug app now runs this candidate. Before it can land, run against that app:
+  - each pull request's recorded scenario, from the Validation section of its description
+  - the acceptance matrix in docs/releasing.md, under its release-candidate instructions
+EOF
+}
+
 push_success() {
   cat <<'EOF'
 
 Default push safety preflight passed.
 Heavyweight lint/test/build lanes were not run. Run `.agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready` for the full/PR-ready path-selected local lane.
-Release candidate validation remains `make dev-release-preflight` / `make dev-release-artifact`.
+Release artifact validation remains `make dev-release-preflight` / `make dev-release-artifact`.
 Push mode validated only the current branch against the computed range above. It does not validate tags, `--all`, `--mirror`, or arbitrary refspecs.
 EOF
 }
@@ -351,6 +373,15 @@ pr_ready_success() {
 PR-ready preflight passed.
 This included ordinary push safety checks and ran any matching path-selected heavyweight lanes for the computed outgoing range.
 Release validation, live smoke, destructive-operation approval, and any specialized matrix evidence may still require explicit commands for the changed boundary.
+EOF
+}
+
+candidate_success() {
+  cat <<'EOF'
+
+Candidate preflight passed.
+This included the push safety checks, the path-selected heavyweight lanes for the candidate, and the debug-app smoke when the candidate selected it.
+The candidate lands only after the hosted runs on its tip are green and the printed debug-app checks pass.
 EOF
 }
 
@@ -404,6 +435,8 @@ outgoing_count="$(git rev-list --count "$range_spec")"
 timing_record_provenance "$base_kind" "$outgoing_count"
 timing_phase_pass outgoing_range_resolution
 if [[ "$outgoing_count" == "0" ]]; then
+  [[ "$mode" != "candidate" ]] \
+    || fail "candidate has no commits over $base_ref; cut it again from origin/main with the approved heads"
   echo "No outgoing commits in $range_spec."
   if [[ "$mode" == "pr-ready" ]]; then
     pr_ready_success
@@ -432,4 +465,9 @@ fi
 
 timing_phase_start path_selection
 run_pr_ready_path_validations
-pr_ready_success
+if [[ "$mode" == "candidate" ]]; then
+  run_candidate_debug_app_validation
+  candidate_success
+else
+  pr_ready_success
+fi

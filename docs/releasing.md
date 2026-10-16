@@ -10,7 +10,9 @@ present; the previous install and its state are archived first so the step is re
 Before you start:
 
 - The [rollback unit](#rollback-unit) restore has been rehearsed at least once on this machine.
-- `main` is pushed at the commit to promote, and the tracked tree is clean, so [build provenance](#build-provenance) records that commit with `dirty: false`.
+- `main` is pushed at the commit to promote, which is the tip of a landed release candidate
+  ([`CONTRIBUTING.md`](../CONTRIBUTING.md), "Landing"), and the tracked tree is clean, so
+  [build provenance](#build-provenance) records that commit with `dirty: false`.
 - `BUILD_NUMBER` in [`version.env`](../version.env) is bumped for this build.
 
 1. Quit the debug app and production, then archive the current install:
@@ -94,6 +96,19 @@ Before you start:
    The receipt records the promoted commit, the build number, the acceptance results, and
    the archive path. On fail, restore from the archive and keep the failed build's archive
    for diagnosis.
+
+   After the tag is pushed, delete the candidate branches the landings left as evidence, up
+   to the candidate the promoted commit landed from, including their `-m<i>` bisect
+   branches. Leave any later candidate: it may still be open. Candidate branches of an earlier
+   version are deleted by hand.
+
+   ```bash
+   git fetch --prune origin
+   landed="$(git branch -r --points-at <promoted commit> --list 'origin/release/*' | sed -n 's/.*-rc\([0-9]*\)$/\1/p')"
+   git ls-remote --heads origin 'release/<version>-rc*' | cut -f2 | sed 's#refs/heads/##' \
+     | awk -v n="$landed" '{ m = $0; sub(/.*-rc/, "", m); sub(/-m[0-9]+$/, "", m); if (m + 0 <= n + 0) print }' \
+     | while read -r branch; do git push origin --delete "$branch"; done
+   ```
 
 ## Install a local production build
 
@@ -271,8 +286,8 @@ CLI="$HOME/RepoPrompt/repoprompt_ce_cli"
 `~/Library/Application Support/RepoPrompt CE/repoprompt_ce_cli` is a legacy link to the
 same executable; prefer the path above.
 
-A release candidate runs this matrix against the debug app instead, as described in "Landing
-a batch" in [`CONTRIBUTING.md`](../CONTRIBUTING.md): set `CLI=rpce-cli-debug` and read
+A release candidate runs this matrix against the debug app instead, as described in
+"Landing" in [`CONTRIBUTING.md`](../CONTRIBUTING.md): set `CLI=rpce-cli-debug` and read
 "production" in this section as the debug app. Run the client arms as Claude Code and Codex
 sessions started with `rpce-cli-debug … agent_run`, each making at least one matrix call as
 a RepoPrompt tool call, whether the agent running the checklist is in RepoPrompt Agent Mode,

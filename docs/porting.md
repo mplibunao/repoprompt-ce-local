@@ -27,14 +27,14 @@ Use the read-only reference clone at:
    ```
 
    Use `PRODUCT=repoprompt-mcp` for MCP or shared-protocol changes.
-6. Commit, open the pull request, and merge it through steps 3 to 7 of the [`CONTRIBUTING.md`](../CONTRIBUTING.md) flow, using the `port` type label. The commit message must name the upstream source as plain text (no `owner/repo#N` or URL, see [`AGENTS.md`](../AGENTS.md#upstream-is-read-only)), in one of these forms:
+6. Commit, open the pull request, and take it through steps 3 to 7 of the [`CONTRIBUTING.md`](../CONTRIBUTING.md) flow, using the `port` type label. The commit message must name the upstream source as plain text (no `owner/repo#N` or URL, see [`AGENTS.md`](../AGENTS.md#upstream-is-read-only)), in one of these forms:
 
    ```text
    Upstream-Ref: upstream PR <number> (<commit range>)
    Upstream-Ref: upstream commit <sha>
    ```
 
-   The port ends when the pull request merges. Promotion is a separate step that [`releasing.md`](releasing.md) owns.
+   The port ends when the pull request lands through a release candidate ([Landing](../CONTRIBUTING.md#landing)). Promotion is a separate step that [`releasing.md`](releasing.md) owns.
 
 ## Source-level boundary
 
