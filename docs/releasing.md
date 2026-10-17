@@ -363,8 +363,8 @@ process ID and every descendant. After the quit, every recorded process must be 
 relaunch, a fresh Codex session's roots query must complete. The sleeping agent's session still
 shows `running` after the relaunch, with an expired handle and no processes. That marker isn't
 a failure. Run this arm last. MP's go for the promotion covers this quit when production is
-idle (`AGENTS.md`, "Commit preflight"); a release candidate quits the debug app, which needs
-no approval.
+idle apart from this arm's own sleeping agent (`AGENTS.md`, "Commit preflight"); a release
+candidate quits the debug app, which needs no approval.
 
 ## KeyboardShortcuts resource lookup workaround
 
