@@ -362,9 +362,9 @@ the quit, start a Codex agent that calls `get_file_tree` with type `roots` and t
 process ID and every descendant. After the quit, every recorded process must be gone. After the
 relaunch, a fresh Codex session's roots query must complete. The sleeping agent's session still
 shows `running` after the relaunch, with an expired handle and no processes. That marker isn't
-a failure. Quitting production needs MP's explicit approval
-immediately before it, so run this arm last and only once approved; a release candidate quits
-the debug app, which needs no approval.
+a failure. Run this arm last. MP's go for the promotion covers this quit when production is
+idle apart from this arm's own sleeping agent (`AGENTS.md`, "Commit preflight"); a release
+candidate quits the debug app, which needs no approval.
 
 ## KeyboardShortcuts resource lookup workaround
 
