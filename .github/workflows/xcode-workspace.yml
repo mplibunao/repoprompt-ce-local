@@ -16,7 +16,6 @@ on:
       - 'Scripts/xcode_developer_workflow.sh'
       - 'Scripts/test_xcode_workspace_generator.py'
       - '.github/workflows/xcode-workspace.yml'
-      - 'docs/architecture/xcode-workspace.md'
   pull_request:
     paths:
       - 'Package.swift'
@@ -26,7 +25,6 @@ on:
       - 'Scripts/xcode_developer_workflow.sh'
       - 'Scripts/test_xcode_workspace_generator.py'
       - '.github/workflows/xcode-workspace.yml'
-      - 'docs/architecture/xcode-workspace.md'
 
 permissions:
   contents: read
