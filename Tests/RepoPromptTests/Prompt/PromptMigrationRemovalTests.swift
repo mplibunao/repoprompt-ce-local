@@ -150,10 +150,8 @@ final class ReviewPromptUpgradeTests: XCTestCase {
 
     private func loadReviewPrompt(
         seedingContent: String?
-    ) throws -> (loaded: PromptViewModel.StoredPrompt, persisted: PromptViewModel.StoredPrompt) {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ReviewPromptUpgradeTests-\(UUID().uuidString)", isDirectory: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+    ) throws -> (loaded: StoredPromptRecord, persisted: StoredPromptRecord) {
+        let directory = try makeTestDirectory()
         let storage = PromptStorage(fileURL: directory.appendingPathComponent("SavedPrompts.json"))
         if let seedingContent {
             let seeded = StoredPromptRecord(id: Self.reviewPromptID, title: "[Review]", content: seedingContent)
