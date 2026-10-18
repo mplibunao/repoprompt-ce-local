@@ -11,3 +11,22 @@ regexes = [
   '''^845kp9v5\+kp4U6no85H53cUdnbfN3NmE1PJHKwH8Pd4=$''',
   '''^KO2Pvcr7ORifYvT7yu2/db48PgzSNN/RG9dk9331iuQ=$''',
 ]
+
+# Investigation reports and run ledgers are written by agents and published
+# with this repository. An absolute home-directory path exposes the author's
+# account name and machine layout; write a repository-relative path or ~/
+# instead. Tracked sources and tests need such paths as fixtures, so the rule
+# covers only these two folders. The user name is the reported secret because
+# gitleaks' default allowlist drops a whole /home/<user>/ match. The character
+# before the path can't be part of a name, which keeps folders called "home"
+# inside other paths, such as a managed Codex home's sessions/ folder, from
+# matching. The optional backslashes catch JSON-escaped slashes. An escaped
+# newline, return, or tab can stand right before the path, but a lone
+# backslash can't, so an escaped folder called home inside another path
+# doesn't match either.
+[[rules]]
+id = "agent-doc-home-path"
+description = "Absolute home-directory path in an investigation report or run ledger"
+regex = '''(?:^|[^A-Za-z0-9_.\\-]|\\[nrt])\\?/(?:Users|home)\\?/([A-Za-z0-9_][A-Za-z0-9_.-]*)'''
+secretGroup = 1
+path = '''(?:^|/)docs/(?:investigations|ledgers)/'''

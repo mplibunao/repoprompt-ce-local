@@ -1,6 +1,6 @@
 # Migration inventory
 
-Store the live inventory in a task-specific plan or local `docs/investigations/` artifact. Do not commit investigation artifacts unless explicitly requested. Keep raw logs in conductor job storage and summarize only durable evidence.
+Store the live inventory in the task's plan, which stays local, or in an investigation report under `docs/investigations/`, which is committed after redaction ([`CONTRIBUTING.md`, Plans and committed records](../../../../CONTRIBUTING.md#plans-and-committed-records)). Keep raw logs in conductor job storage and summarize only durable evidence.
 
 ## Inventory schema
 

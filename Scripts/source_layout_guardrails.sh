@@ -766,8 +766,14 @@ print_matches \
   grep -R -n -E 'PresetBottomBar|SelectedFilesContentView|SelectedFilesPanelViewModel|PresetTwoPanePopover_Copy|CopyPresetPreviewView|PresetTwoPanePopover_Chat' \
     Sources/RepoPrompt
 
-# 8. Agent-authored reports and working notes stay local unless explicitly
-# promoted into the contributor-facing documentation set.
+# 8. Tracked docs are either listed below or Markdown records in the committed
+# record folders (CONTRIBUTING.md, "Plans and committed records"). Plans,
+# reviews, and other agent working notes stay local.
+allowed_tracked_doc_record_dirs=(
+  "docs/adr/"
+  "docs/investigations/"
+  "docs/ledgers/"
+)
 allowed_tracked_docs=(
   "docs/architecture/apple-identity-migration.md"
   "docs/architecture/codex-app-server-schema-gate.md"
@@ -800,20 +806,22 @@ allowed_tracked_docs=(
   "docs/spec/history-query-tools.md"
   "docs/spec/mcp-domain-canonical-tool-definitions.generated.json"
   "docs/worktrees.md"
-  "docs/investigations/mcp-tool-throughput-wi3-baseline-2026-06-11.md"
-  "docs/investigations/worktree-startup-benchmark-campaigns-2026-06-26.md"
 )
 existing_tracked_docs=()
 while IFS= read -r path; do
-  if [[ -e "$path" ]]; then
-    existing_tracked_docs+=("$path")
+  [[ -e "$path" ]] || continue
+  if [[ "$path" == *.md ]]; then
+    for dir in "${allowed_tracked_doc_record_dirs[@]}"; do
+      [[ "$path" == "$dir"* ]] && continue 2
+    done
   fi
-done < <(git ls-files docs)
+  existing_tracked_docs+=("$path")
+done < <(git -c core.quotePath=false ls-files docs)
 unexpected_tracked_docs="$(comm -23 \
   <(printf '%s\n' "${existing_tracked_docs[@]}" | sort) \
   <(printf '%s\n' "${allowed_tracked_docs[@]}" | sort))"
 if [[ -n "$unexpected_tracked_docs" ]]; then
-  fail "unexpected tracked docs found; keep agent-authored working documents local or add durable docs to the explicit allowlist"
+  fail "unexpected tracked docs found; commit Markdown records under docs/adr/, docs/investigations/, or docs/ledgers/, add durable docs to the explicit allowlist, and keep working documents local"
   printf '%s\n' "$unexpected_tracked_docs" >&2
 fi
 

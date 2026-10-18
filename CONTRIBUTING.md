@@ -162,15 +162,87 @@ follows [`docs/releasing.md`](docs/releasing.md).
 
 Ports from upstream follow [`docs/porting.md`](docs/porting.md).
 
+## Plans and committed records
+
+Plans are local working documents in `docs/plans/`, which git ignores. They are
+never committed. Three kinds of agent-written records are committed, because
+Context Builder and later agents can read files in the checkout but not git
+history or GitHub:
+
+| Folder | Holds | Edited after it lands |
+| --- | --- | --- |
+| `docs/ledgers/` | One ledger per orchestrated run: its work items with outcome, agent session, and commits, then each item's decisions with their sources, evidence, and deferrals as issue numbers. One scoreboard per built-in Optimize run: its baseline, each iteration's result, and its rejected candidates | Only to finish the run that wrote it |
+| `docs/adr/` | Architecture decision records: why a hard-to-reverse choice was made | No; a later ADR supersedes it |
+| `docs/investigations/` | Investigation reports: what was found, as of the report's date | No |
+
+`docs/architecture/` and `docs/spec/` describe how the system works now and are
+edited in place. GitHub issues and pull requests track open work.
+
+**Working files.** These stay local and are never committed:
+
+- plans, in `docs/plans/`;
+- prompt exports in `prompt-exports/` and other raw RepoPrompt output, such as
+  prompts and Context Builder or oracle responses;
+- reviews, designs, analysis, and reference dumps, in `docs/reviews/`,
+  `docs/designs/`, `docs/analysis/`, and `docs/references/`;
+- local configuration;
+- daemon logs, raw provider traces and events, transcripts, and generated
+  diagnostic artifacts.
+
+To keep something a working file found, write it into a committed record or a
+durable document. Under `docs/`, check 8 of
+`Scripts/source_layout_guardrails.sh` fails on any tracked file that is neither
+a Markdown record in the three folders above nor on the script's allowlist of
+durable documents; adding a document to that list is how a working document is
+promoted.
+
+**Run ledgers.** Run ledgers are committed in `docs/ledgers/`, as part of the
+run's pull request. The built-in Orchestrate workflow and the
+`rp-orchestrate-loop` skill from a separate toolkit repository write them and
+define the template. A ledger is named `<YYYY-MM-DD>-issue-<number>-<topic>.md`
+for the date the run started, without `issue-<number>-` when the run has no
+issue. Deferrals are recorded as GitHub issues. The built-in Optimize workflow
+writes its scoreboard here too, as `<YYYY-MM-DD>-optimize-<slug>.md`; the
+scoreboard is that run's record, so an Optimize run writes no separate ledger.
+The orchestrator deletes the run's plan only when the user says the work is
+done, after checking that the plan's decisions are in the ledger or an ADR.
+
+**ADRs.** A decision gets an ADR when it is hard to reverse, would surprise
+someone without the background, and involved a real trade-off. Other decisions
+stay in the run's ledger. Copy `docs/adr/template.md` to
+`docs/adr/<YYYY-MM-DD>-<topic>.md`, dated the day the decision is accepted. ADR
+drafts in a plan are approved with the plan, written during the run, and
+committed in the run's pull request. For decisions made during execution, the
+orchestrator lists ADR candidates in its final report and writes the ones the
+user approves, in the same pull request. To replace a decision, write a new ADR
+and change the old one's status line to `Status: superseded by <link>, <date>`.
+
+**Investigations.** Investigation reports are committed in
+`docs/investigations/`. Each report opens with the date of what it observed. It
+records what was true then. Where it disagrees with a current document, the
+current document is right.
+
+**Redaction.** Ledgers and investigation reports are public once pushed. Before
+committing one, apply the rules in
+[`.agents/skills/rpce-issue-creator/SKILL.md`](.agents/skills/rpce-issue-creator/SKILL.md):
+its private-data list, its limits on evidence, and its plain-text rule for
+upstream references. The commit preflight's gitleaks scan rejects absolute home
+paths under `docs/investigations/` and `docs/ledgers/`, and the rest is the
+author's job.
+
+**Citing records.** When you explain why something is the way it is, cite the
+ADR, ledger, or investigation by its repository path and say how old the
+evidence is. Plans and `prompt-exports/` files are local, so they are never
+cited.
+
 ## Validation
 
 Keep changes focused and explain what they do. AI-assisted work is welcome, but
 you should understand the code you submit and be able to explain its behavior.
 
-Do not check raw generated RP outputs into the repo; prompts, reviews,
-investigations, analysis, designs, and reference dumps are working artifacts
-unless deliberately distilled into durable docs. [`AGENTS.md`](AGENTS.md#commit-preflight)
-covers local `docs/investigations/*.md` reports.
+Commit the change and the records it produces, and nothing else:
+[Plans and committed records](#plans-and-committed-records) lists the working
+files that stay local.
 
 The [validation matrix](.agents/skills/rpce-contribution-check/references/validation-matrix.md)
 lists the checks each changed boundary needs, and

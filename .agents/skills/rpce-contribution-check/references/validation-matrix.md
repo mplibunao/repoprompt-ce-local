@@ -34,4 +34,4 @@ After timing initialization, `pr-ready` makes a best-effort attempt to write a l
 
 - Treat obfuscated, encoded, or split credentials as secrets. Do not print their decoded values.
 - Use `gitleaks` with `--redact` for materialized staged index blobs and outgoing commits.
-- Do not commit local configuration, prompt exports, daemon logs, raw provider traces, or generated diagnostic artifacts unless the repository explicitly allows the exact path.
+- Do not commit working files such as local configuration, prompt exports, daemon logs, or raw provider traces. [`CONTRIBUTING.md`](../../../../CONTRIBUTING.md#plans-and-committed-records) lists them, the records that are committed instead, and how a working document is promoted.
