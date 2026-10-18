@@ -47,8 +47,8 @@ A single unresponsive stdio MCP server blocks Claude Code headless startup befor
 - The first slow toolkit-repository session (Sep 26 07:47 UTC) predates the b45 install, so b44 was running. Other workspaces on b45 start instantly. **b45 is not the trigger.**
 - Claude Code 2.1.283 was installed 2026-09-25 22:19 UTC, but 2.1.281 hangs identically in the controlled tests. **The Claude Code version is not the trigger.**
 
-### Prior toolkit policy
-MP's own Claude launcher passes `--strict-mcp-config`, which is why Claude Code outside RepoPrompt is unaffected.
+### Claude Code outside RepoPrompt
+MP starts Claude Code outside RepoPrompt with `--strict-mcp-config`, which is why those sessions are unaffected.
 
 ## Investigator Findings
 
@@ -74,10 +74,10 @@ The trigger is the **"RepoPrompt Only (Strict MCP)" Claude setting being turned 
 
 `security dump-keychain` (item attributes only, no secret payload) returned:
 
-| Service (production local-self-signed) | Account | Created | **Last modified** |
-|---|---|---|---|
-| `…local-self-signed…` | `rp.agent.permissions.claude.v1` | 2026-09-08 04:37:31 | **2026-09-25 08:19:23** |
-| `…local-self-signed…` | `rp.agent.permissions.subagent.v1` | 2026-09-08 04:37:17 | 2026-09-23 11:44:59 |
+| Service (production local-self-signed) | Account | **Last modified** |
+|---|---|---|
+| `…local-self-signed…` | `rp.agent.permissions.claude.v1` | **2026-09-25 08:19:23** |
+| `…local-self-signed…` | `rp.agent.permissions.subagent.v1` | 2026-09-23 11:44:59 |
 
 **Current values: inferred, not read directly.** Reading the JSON payload needs `security find-generic-password -w`. That command is not in the item's access list, so it would show MP a Keychain access prompt, and I did not run it. The inference rests on runtime evidence:
 - `claude.mcpStrictModeEnabled == false`: every CE Agent Mode session since Sep 25 08:22 loads the user's other MCP servers (item 2). Bash is enabled in those sessions, so they are not on the Safe Managed path, and on the non–Safe Managed path strict mode can only come from this value. This investigator session, started from production CE today, runs as `claude -p … --allow-dangerously-skip-permissions --mcp-config <launch config> --disallowedTools Write,Edit,Glob,Grep,Task,Monitor,SlashCommand,NotebookEdit,TodoWrite` (from `ps`): no `--strict-mcp-config`, and Bash is not disallowed.
@@ -90,7 +90,7 @@ Method: sweep all 335 transcripts with a top-level `"entrypoint":"sdk-cli"`, kee
 - **Earliest session in the persistent strict-off period:** a `repoprompt-ce` session, 2026-09-25 08:22:57. It loaded `RepoPromptCE` and the user's other MCP servers, with Bash enabled and `bypassPermissions`. That is **3.5 min after the Claude-permissions Keychain write at 08:19:23**.
 - Every CE Agent Mode session from then through Sep 27 00:18 loads the user's other MCP servers, in this repository, another personal project, and two CE worktrees; that is about 40 sessions. Those folders have no Classic entry, so they start in 0.0–0.5 s. Every toolkit-repository session in the period (seven, from Sep 26 07:47) records no tool snapshot, which is the hung-startup signature.
 - **Earlier short strict-off window, same hang:** two sessions that started CE-only on Sep 23 received mid-session deltas: one gained a user MCP server at 2026-09-24 07:50:42 and the other at 07:51:02. The second then dropped it at 07:52:27, which fits a controller relaunch after the strict setting flipped (`ClaudeAgentModeCoordinator.swift:373–390`). A toolkit-repository session started at 07:51:32 inside that window. Its first user turn was recorded at 07:52:10 together with `[Request interrupted by user]`, and it has no tool snapshot. That is the "38 s outlier" in the timing table: a hang that was interrupted, then strict mode went back on, and three later Sep 24 toolkit-repository sessions, from 08:01, started CE-only in under 10 ms.
-- **The Classic entry is not new:** every backup of the user's Claude configuration back to 2026-05-08 contains it, and so does the live file. **This eliminates the open hypothesis** in "Open: why Sep 24 toolkit-repository sessions didn't hang": the entry was not added between Sep 24 and Sep 26.
+- **The Classic entry is not new:** every backup of the user's Claude configuration back to 2026-05-08 contains it, and so does the live file. **This eliminates the open hypothesis** that the entry was added between Sep 24 and Sep 26.
 
 Caveat: Keychain `mdat` keeps only the last write. The Sep 25 08:19:23 write is pinned to the strict-off flip by timing, not by reading the diff; permission mode or Bash could have changed in the same write.
 
@@ -151,14 +151,14 @@ Strict mode was **on** for the Sep 24 toolkit-repository sessions that started i
 ## Root Cause
 Two layers.
 
-**Trigger (configuration, works as designed).** "RepoPrompt Only (Strict MCP)" is off (Keychain item `rp.agent.permissions.claude.v1` last written 2026-09-25 08:19:23 UTC; the flip is tied to that write by transcript timing, not by reading the value). With strict off, `ClaudeNativeProcessSessionController.swift:1999–2003` omits `--strict-mcp-config`, so Claude also loads user-scope and project/local-scope servers for the cwd. The documented off-state text reads: "Other MCP servers from your Claude config will also be loaded" (`AgentProviderPermissionControlsComponents.swift:393–406`). MCP-started sessions follow the same setting unless the sub-agent policy is Safe Managed (`AgentModeProviderBindingService.swift:71–90`, `ClaudeControllerLaunchPolicy.swift:16–33`). For `personal-toolkit`, the cwd is the workspace's first repo path, the toolkit repository (`AgentModeViewModel.swift:2213–2218`). Its configuration loads the Classic proxy, which retries its socket connect forever while the Classic app is down. Claude Code never completes startup.
+**Trigger (configuration, works as designed).** "RepoPrompt Only (Strict MCP)" is off (Keychain item `rp.agent.permissions.claude.v1` last written 2026-09-25 08:19:23 UTC; the flip is tied to that write by transcript timing, not by reading the value). With strict off, `ClaudeNativeProcessSessionController.swift:1999–2003` omits `--strict-mcp-config`, so Claude also loads user-scope and project/local-scope servers for the cwd. The documented off-state text reads: "Other MCP servers from your Claude config will also be loaded" (`AgentProviderPermissionControlsComponents.swift:393–406`). MCP-started sessions follow the same setting unless the sub-agent policy is Safe Managed (`AgentModeProviderBindingService.swift:71–90`, `ClaudeControllerLaunchPolicy.swift:16–33`). For the personal toolkit's workspace, the cwd is the workspace's first repo path, the toolkit repository (`AgentModeViewModel.swift:2213–2218`). Its configuration loads the Classic proxy, which retries its socket connect forever while the Classic app is down. Claude Code never completes startup.
 
 **Defect (CE).** CE marks the run `.running` / "Thinking…" before the provider has initialized (`ClaudeIntegratedAgentModeRunner.swift:94–95`, before provider init at `:128–129`; label fallback `AgentModeView.swift:3322`). Nothing supervises the cold-start window. Startup control requests carry no timeout (`:648`, `:780–803`), `sdkConnectTimeoutSeconds` (`ClaudeCodeAgentConfig.swift:20`) is never read, and the only readiness gate (`MCPBootstrapLease.releaseWhenRouted`) runs after send and covers only CE's own server. A live Claude process that never emits `system/init` therefore shows "Thinking…" indefinitely, with no user-facing failure or diagnosis.
 
 ## Recommendations
 1. **Immediate unblock (MP's choice of one or both):**
    - Turn "RepoPrompt Only (Strict MCP)" back on (Settings → Agent providers → Claude, `AgentProviderPermissionControlsComponents.swift:393`), unless the Sep 25 change was made deliberately to give agents the user's other MCP servers.
-   - Remove the stale Classic entries from the user's Claude configuration. The toolkit policy already calls for one RepoPrompt edition per process. This keeps strict-off workable.
+   - Remove the stale Classic entries from the user's Claude configuration. This keeps strict-off workable.
 2. **CE defect: supervise Claude cold start.** For a newly spawned (cold or `--resume`) process, arm a startup watchdog from spawn through the first stream `system/init`. Per the Phase 4 probe, it must cover the post-user-message window, not only `initialize` (`ClaudeNativeProcessSessionController.swift:643–671`, `:780–803`). Scope it to the transport generation so it can't kill a replacement process. Leave warm sessions unaffected. Route timeout through the existing attempt/terminal-commit path, and don't auto-replay the user message. Use a soft "taking longer than expected" warning plus a generous or configurable hard limit, since Docker-backed servers can be slow but healthy. Either wire `sdkConnectTimeoutSeconds` into this or remove it.
 3. **CE defect: honest startup status.** Replace the initial "Thinking…" (`ClaudeIntegratedAgentModeRunner.swift:94`) with a startup status such as "Starting Claude Code…". Transition on an explicit stream-`system/init`-observed milestone, not on any `.runtimeInit` (session-ID and SDK-init events also emit it). On timeout, say which MCP servers were configured but never reported, where known.
 
@@ -166,7 +166,7 @@ Two layers.
 - Strict MCP stays off deliberately, so agents keep the user's other MCP servers.
 - The stale Classic entries were removed from the user's Claude configuration. A before-and-after comparison showed those removals and no other change.
 - Verified in production CE: a `pair` session with prompt `hi` in the personal toolkit's workspace started its turn 0.5 s after dequeue (previously 200–962 s) and replied 4.1 s later. It loaded `RepoPromptCE` and the user's other MCP servers.
-- Codex's Classic entry was already disabled. Claude Desktop still lists Classic, and its log shows the connect-retry loop daily; Desktop's behavior is outside this investigation.
+
 - The CE startup-supervision and status defects (Recommendations 2–3) are tracked in distribution issue #124, deferred.
 
 ## Preventive Measures

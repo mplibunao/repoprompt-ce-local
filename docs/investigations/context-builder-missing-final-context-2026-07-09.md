@@ -138,11 +138,9 @@ findings instead.
 ## Live reproduction evidence (2026-07-09 ~15:10–15:35 UTC, gathered by orchestrator)
 
 Environment discovered during this session — **two CE app instances running simultaneously**:
-- The installed release app, `/Applications/RepoPrompt CE.app` — **release 1.0.27 (build 28)**, started
-  Jul 9 09:50 UTC. It owned the user's working windows, including the affected ones, and
+- The installed release app, `/Applications/RepoPrompt CE.app` — **release 1.0.27 (build 28)**. It owned the user's working windows, including the affected ones, and
   served both the failing session and this one.
-- A debug build in `DebugApps` — **debug 1.0.24 (build 25)**, started Jul 8 15:00 UTC, on its own
-  socket. Not involved in the failures.
+- A debug build in `DebugApps` — **debug 1.0.24 (build 25)**, on its own socket. Not involved in the failures.
 - ⇒ The local patched branch (Codex provider only) is **exonerated twice
   over**: the failing app is the release 1.0.27 build, and the patch touches only the
   Codex app-server payload key.

@@ -23,7 +23,7 @@ The complete investigation confirmed a narrow mode-propagation defect rather tha
 The test used the owner's existing multi-root workspace and an inactive compose-tab context. No workspace or worktree was created.
 
 1. `rpce-cli-debug -w 1 --context-id <inactive-context> -e 'workspace_context ...'` returned the targeted inactive tab's empty prompt and selection.
-2. `rpce-cli-debug -w 1 --context-id <same-inactive-context> -c workspace_context ...` returned the active `CE fallback review` tab, including an unrelated prompt and four-file selection.
+2. `rpce-cli-debug -w 1 --context-id <same-inactive-context> -c workspace_context ...` returned the active tab, including an unrelated prompt and four-file selection.
 
 The result separates selector resolution from tool behavior: the same selector and target work through `-e`, while `-c` falls back to the active tab.
 

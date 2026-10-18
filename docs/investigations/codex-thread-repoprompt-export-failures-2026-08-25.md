@@ -9,7 +9,7 @@ Investigation complete. Two provider-independent boundaries are ready for redact
 ## Symptoms
 
 - Two Codex Explore sessions reported `Completed` despite producing no assistant turn; related recovery attempts failed with `session not ready` or a missing saved thread ID.
-- Reactivating one empty session returned an unrelated selection-mirror audit and renamed the session, despite the stored pre-reactivation log containing only the intended private-Codex-home prompt.
+- Reactivating one empty session returned content from an unrelated task and renamed the session, despite the stored pre-reactivation log containing only the intended prompt.
 - Context Builder completed after about 9 minutes 37 seconds with 32 selected items and 152,348 selection tokens.
 - MCP export attempts closed the RepoPrompt transport without writing a file; CLI export failed at the same connection boundary until its tool timeout was disabled.
 - One of six concurrent detached Explore starts rejected an already-bound workspace as not durably accepted, then succeeded after rebinding and retrying.
@@ -25,7 +25,7 @@ The task archive established the following chronology and controls:
 - The investigation freshly reproduced the same failure on current `main`: of three concurrent detached Explore starts from an explicitly bound tab, one started and two returned the durable-binding rejection. After explicit parent rebinding, the two failed lanes started successfully when retried sequentially.
 - Two accepted Codex Explore sessions reached `Completed` with `Turns: 1/1`, containing only the original user prompt and no assistant response or error.
 - Recovery attempts produced `Codex native send failed: session not ready` and `Cannot resume this Codex thread because its saved thread ID is missing`.
-- One reactivated session had correct pre-reactivation log and handoff content but returned an unrelated selection-mirror investigation under a changed session name. A fresh replacement session later completed the intended audit.
+- One reactivated session had correct pre-reactivation log and handoff content but returned content from an unrelated task under a changed session name. A fresh replacement session later completed the intended audit.
 - `context_builder(response_type:"clarify")` completed successfully; the builder was slow but did not crash.
 - Two MCP `prompt(op:"export", copy_preset:"plan")` attempts closed the task's RepoPrompt transport after roughly 32–34 seconds. RepoPrompt CE remained running, no file was written, and subsequent binding calls failed until Codex Desktop restarted.
 - CLI export first correctly rejected an ambiguous relative path in the four-root workspace. Root-qualified `prompt export` then failed with `[-32000] Connection closed` both with and without a preset. Canonical `workspace_context op=export` failed the same way, ruling out the shorthand and Plan preset as sole causes.
@@ -375,7 +375,7 @@ The ticket should require one owning-boundary fix: serialize/coalesce same-works
 1. Upstream issue 881: “Large app-backed prompt/workspace export can exceed the MCP watchdog and disconnect the transport.” Provider-independent MCP issue; upstream issue 170 and upstream PRs 171, 211, 567, 644, and 687 are adjacent history. The issue requires a deterministic real export that crosses the production deadline, redacted watchdog-phase evidence, explicit pre-write/post-write semantics, and a successful follow-up call when settlement is safe. It does not claim the historical call reached force-disconnect without a correlated trace.
 2. Upstream issue 882: “Concurrent same-workspace `agent_run.start` calls can lose durable workspace admission.” Provider-independent Agent Mode/MCP issue; upstream PR 742/upstream issue 743/upstream PRs 744 and 746 are adjacent rather than duplicates. The issue requires deterministic multi-start admission, exactly-once provider dispatch, typed conflict diagnostics, and rollback verified through canonical state, disk, projection, and restart. It does not claim that a successfully admitted session was later lost or that a durable orphan was observed.
 
-The filed upstream issues 881 and 882 carry the redacted title and body. GitHub created both issues without labels because the authenticated contributor account lacks label-assignment permission. The requested labels remain recorded for maintainer triage.
+The filed upstream issues 881 and 882 carry the redacted title and body. GitHub created both issues without labels because the authenticated contributor account lacks label-assignment permission.
 
 ### Investigate first
 
