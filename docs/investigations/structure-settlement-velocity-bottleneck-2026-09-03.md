@@ -76,7 +76,7 @@ The later incident occurred in the still-running packaged debug process `<debug 
 
 - Context Builder A started at 2026-09-03 19:22:46 UTC in tab `<tab A>`. Its outer CLI process is `<client A>`.
 - An Agent session, Codex conversation `<redacted>`, started at 19:23:14 in its session-bound worktree. Its initial disambiguated reads completed normally.
-- At 19:24:02 that Agent called `read_file` for the absolute path `<checkout>/docs/investigations/root-agent-replacement-handoff-2026-09-02/proposed-revised-goal.md`. At 19:24:37 it returned after 35.1736 seconds with `tool_execution_timeout` and `settlement: detached` semantics.
+- At 19:24:02 that Agent called `read_file` for the absolute path of an existing local working file. At 19:24:37 it returned after 35.1736 seconds with `tool_execution_timeout` and `settlement: detached` semantics.
 - At 19:24:46 the same Agent's next absolute `read_file` returned `tool_execution_structure_settlement_busy` in 204 milliseconds with the released-provider-limit message. Its further reads and a tree request were rejected synchronously.
 - This sequence proves that a released provider predated the Agent's goal read. That goal read was admitted only after the earlier blocker had reached the registry's 30-second recovery horizon; it then became the second blocking lease.
 - Working backward from the goal read's admission, the earlier call had to cross its 30-second execution deadline, five-second cancellation grace, and 30-second registry recovery horizon after Context Builder A began. Context Builder A is the only correlated surviving operation whose start time fits that window. This is strong attribution evidence, not proof of the exact nested invocation or file path.

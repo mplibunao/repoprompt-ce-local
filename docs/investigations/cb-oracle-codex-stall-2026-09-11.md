@@ -26,7 +26,7 @@ Unified log (`log show`) had no RepoPrompt entries for the window; the release b
 | --- | --- | --- |
 | 05:25:13 | Codex (RP home) | Turn 1 starts in a new Codex thread. Payload: developer 21,222 + 2,264 + 271 chars, user 32,009 chars (instructions), user 602,307 chars (selected files). Context window 258,400 tokens. |
 | 05:25:15 | RepoPrompt | Follow-up stream open; Context Builder finalization monitor starts (10-minute inactivity ceiling). |
-| 05:30:49 | Codex | `token_count` with rate limits only (no token usage, no items). Consistent with a fresh HTTP response after Codex's stream idle timeout and reconnect. Weekly quota at 92%. |
+| 05:30:49 | Codex | `token_count` with rate limits only (no token usage, no items). Consistent with a fresh HTTP response after Codex's stream idle timeout and reconnect. Weekly quota near its limit. |
 | 05:35:13 | RepoPrompt | Monitor fires at 600.3 s with zero activity events. `cancelStreaming`. `context_builder` returns the stall error. Rollout has no `turn_aborted`. |
 | 05:36:12 | Codex | Turn 2 (recovery `oracle_send`) starts another new thread. Same shape: user 32,009 + 603,080 chars (the full selection is re-sent). |
 | 05:41:47 | Codex | `token_count`, rate limits only. Reconnect 1. |
@@ -41,7 +41,7 @@ The gap between request and each `token_count` is 5 m 34 s, 5 m 35 s, 5 m 38 s a
 
 Two layers.
 
-**Provider stall (primary, external).** GPT-5.6 Sol at high effort returned nothing for the ~600 KB planning request across three connection attempts over 22 minutes. RepoPrompt's stream saw no text, no reasoning, and no completion. Whether the cause was load, the request size (roughly 150k+ input tokens against a 258k window), or quota pressure (92% of the weekly window) cannot be determined from the client side.
+**Provider stall (primary, external).** GPT-5.6 Sol at high effort returned nothing for the ~600 KB planning request across three connection attempts over 22 minutes. RepoPrompt's stream saw no text, no reasoning, and no completion. Whether the cause was load, the request size (roughly 150k+ input tokens against a 258k window), or quota pressure (the weekly quota was near its limit) cannot be determined from the client side.
 
 **RepoPrompt handling (secondary, ours).**
 
@@ -61,7 +61,7 @@ Two layers.
 
 ## Why no live reproduction
 
-The failure is a backend stall, not a deterministic client path. Reproducing it would mean sending another ~600 KB GPT-5.6 high request from production while the weekly quota is at 92% and production is in use. The RepoPrompt-side defects (status text as content, watchdog policy mismatch, liveness not counted) are deterministic and unit-testable without production: `OracleViewModel` and `ContextBuilderFollowUpFinalizationMonitor` already have injectable stream and clock seams.
+The failure is a backend stall, not a deterministic client path. Reproducing it would mean sending another ~600 KB GPT-5.6 high request from production while the weekly quota is near its limit and production is in use. The RepoPrompt-side defects (status text as content, watchdog policy mismatch, liveness not counted) are deterministic and unit-testable without production: `OracleViewModel` and `ContextBuilderFollowUpFinalizationMonitor` already have injectable stream and clock seams.
 
 ## Proposed fixes and regression tests
 
