@@ -2,6 +2,8 @@
 
 > Investigation report, observed 2026-09-03. It records what was true then. Where it disagrees with a current document, the current document is right.
 
+The later decision report, [issue-830-toml-parser-poc-decision-2026-09-05.md](issue-830-toml-parser-poc-decision-2026-09-05.md), came after this one and rejects every Swift TOML dependency, swift-toml 2.0.0 included.
+
 **Scope:** Dependency selection and isolated Swift Package Manager proof only. This work didn't integrate RepoPrompt CE product code or use a live Codex app server.
 
 ## Recommendation
