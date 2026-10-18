@@ -206,13 +206,18 @@ After all \(taskNoun)s complete, give the user a **final rollup**:
 
 	/// Monitor-and-verify pattern: verify each agent's output against the plan's "done when" criteria,
 	/// steer a correction if something's off, and summarize status to the user.
-	static func sharedMonitorAndVerifyBlock(variant: WorkflowPromptVariant) -> String {
+	/// - Parameter recordStep: Where the orchestrator records each verified item. The default is
+	///   rp-refactor's export-checklist wording; rp-orchestrate records items in its run ledger.
+	static func sharedMonitorAndVerifyBlock(
+		variant: WorkflowPromptVariant,
+		recordStep: String = "Mark the item as done (or note gaps) in the export file so you have a running record."
+	) -> String {
 		return """
 You own the plan. It's your job to ensure each phase respected it.
 
 As each agent completes:
 
-1. **Verify against the plan.** Check the agent's output against the "done when" criteria from the plan. Don't just skim — confirm the goal was actually met. A quick `read_file` or `file_search` on key deliverables costs little and catches drift before it compounds. If the plan said "add error handling to all three endpoints" and the agent only touched two, that's your catch. Mark the item as done (or note gaps) in the export file so you have a running record.
+1. **Verify against the plan.** Check the agent's output against the "done when" criteria from the plan. Don't just skim — confirm the goal was actually met. A quick `read_file` or `file_search` on key deliverables costs little and catches drift before it compounds. If the plan said "add error handling to all three endpoints" and the agent only touched two, that's your catch. \(recordStep)
 2. **If something's off**, steer a correction before moving on — never proceed with unresolved gaps:
 \(example(variant,
 	mcp: """
