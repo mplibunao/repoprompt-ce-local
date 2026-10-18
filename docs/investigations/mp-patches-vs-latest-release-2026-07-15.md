@@ -1,9 +1,9 @@
 # Investigation: MP patches versus the latest RepoPrompt CE release
 
-> Investigation report, observed 2026-07-15 on `release/mp-patches` at `96df8c52`, upstream `v1.0.29`, and upstream `main` at `f7b899d9`. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Investigation report, observed 2026-07-15 on the local patch branch, upstream `v1.0.29`, and upstream `main` at `f7b899d9`. It records what was true then. Where it disagrees with a current document, the current document is right.
 
 ## Summary
-Continue using the current personal build only as a temporary bridge: stock `v1.0.29` and pinned `upstream/main` both lack four runtime fixes from `release/mp-patches` (`cf129fa6`, `b8695ef8`, `f971e6a2`, and `96df8c52`). Replace it with a clean build based on official `v1.0.29`, carrying focused production-and-test ports in that order; `36caa174` is an optional XCTest-only companion. The affected paths are identical between the release and main refs, so current main offers no patching advantage and would add unrelated unreleased change.
+Continue using the current personal build only as a temporary bridge: stock `v1.0.29` and pinned `upstream/main` both lack four runtime fixes from the local patch branch (the wire-key, mirror-tail, waiter, and retry-drain patches). Replace it with a clean build based on official `v1.0.29`, carrying focused production-and-test ports in that order; the test-setup patch is an optional XCTest-only companion. The affected paths are identical between the release and main refs, so current main offers no patching advantage and would add unrelated unreleased change.
 
 ## Symptoms
 - The current `MP patches` branch contains personal fixes that may or may not have reached upstream.
@@ -12,13 +12,13 @@ Continue using the current personal build only as a temporary bridge: stock `v1.
 
 ## Background / Prior Research
 - The official newest release is [RepoPrompt CE v1.0.29](https://github.com/repoprompt/repoprompt-ce/releases/tag/v1.0.29), published 2026-07-15 at commit [`fe68009b`](https://github.com/repoprompt/repoprompt-ce/commit/fe68009b80aa97bd4e15ec6b11d1cfb2728073be). The local annotated tag and peeled commit match the live upstream tag, and local `upstream/main` at `f7b899d9` matched live upstream when checked.
-- The personal branch is `release/mp-patches` at `96df8c52`. It diverged from upstream at `dd8a14ed` and is five commits ahead and 54 commits behind current `upstream/main`; the same five commits are unique relative to v1.0.29.
+- The personal branch is the local patch branch. It diverged from upstream at `dd8a14ed` and is five commits ahead and 54 commits behind current `upstream/main`; the same five commits are unique relative to v1.0.29.
 - All five commits are `+` under cherry-aware comparison. None is an exact patch-ID equivalent already merged to upstream main:
-  1. `cf129fa6` — correct Codex app-server text payload handling.
-  2. `b8695ef8` — bound and repair the selection mirror tail.
-  3. `f971e6a2` — release invalidated auto-selection mirror waiters.
-  4. `36caa174` — synchronize selected-scope test setup.
-  5. `96df8c52` — drain MCP retry backoff cancellation safely.
+  1. Wire-key patch — correct Codex app-server text payload handling.
+  2. Mirror-tail patch — bound and repair the selection mirror tail.
+  3. Waiter patch — release invalidated auto-selection mirror waiters.
+  4. Test-setup patch — synchronize selected-scope test setup.
+  5. Retry-drain patch — drain MCP retry backoff cancellation safely.
 - Three selection-related changes have equivalents in open upstream PR 472, not in v1.0.29 or upstream main. Two are stable patch-ID matches and one differs only through current ledger context.
 - The Codex payload fix has a refined personal topic-branch equivalent but no upstream-main implementation. The retry-backoff fix has personal rebases and open upstream issue 513; a broader upstream PR 517 was proposed but is not present in either audited ref.
 - Release notes mention adjacent Context Builder, selection packaging, workspace authority, and process-lifecycle work, including upstream PR 529, upstream PR 520, upstream PR 538, and upstream PR 539. Commit/path archaeology does not show those changes subsuming the five personal patches.
@@ -29,35 +29,35 @@ Continue using the current personal build only as a temporary bridge: stock `v1.
 
 | Commit | Invariant | Classification | `v1.0.29` | `upstream/main` |
 | --- | --- | --- | --- | --- |
-| `cf129fa6` | Codex text input uses the generated `text_elements` wire key without dropping images | Runtime-required | Missing | Missing |
-| `b8695ef8` | One suspended selection mirror cannot wedge later window-scoped mutations indefinitely | Runtime-required | Missing | Missing |
-| `f971e6a2` | Context invalidation releases its mirror waiters and fences late worker generations | Runtime-required after `b8695ef8` | Missing | Missing |
-| `36caa174` | Selected-scope XCTest setup writes through canonical selection authority | Test-only synchronization | Optional test port | Optional test port |
-| `96df8c52` | MCP retry-backoff cancellation drains the suspended sleep outside the task-group child frame | Runtime-required workaround | Missing | Missing |
+| Wire-key patch | Codex text input uses the generated `text_elements` wire key without dropping images | Runtime-required | Missing | Missing |
+| Mirror-tail patch | One suspended selection mirror cannot wedge later window-scoped mutations indefinitely | Runtime-required | Missing | Missing |
+| Waiter patch | Context invalidation releases its mirror waiters and fences late worker generations | Runtime-required after the mirror-tail patch | Missing | Missing |
+| Test-setup patch | Selected-scope XCTest setup writes through canonical selection authority | Test-only synchronization | Optional test port | Optional test port |
+| Retry-drain patch | MCP retry-backoff cancellation drains the suspended sleep outside the task-group child frame | Runtime-required workaround | Missing | Missing |
 
-The four runtime fixes are independent except for the two selection patches: `f971e6a2` relies on `b8695ef8` to keep physical UI mirror attempts serialized when an invalidated outer worker and its replacement briefly coexist.
+The four runtime fixes are independent except for the two selection patches: the waiter patch relies on the mirror-tail patch to keep physical UI mirror attempts serialized when an invalidated outer worker and its replacement briefly coexist.
 
 ### Ref and path baseline
 
-- The audited refs resolve to `release/mp-patches` `96df8c5282e2d31e908dbb64ad3750625350e723`, `v1.0.29` `fe68009b80aa97bd4e15ec6b11d1cfb2728073be`, and `upstream/main` `f7b899d92e30217d7bec0e35aa993b779e59ffb9`.
+- The audited refs resolve to the local patch branch head, `v1.0.29` `fe68009b80aa97bd4e15ec6b11d1cfb2728073be`, and `upstream/main` `f7b899d92e30217d7bec0e35aa993b779e59ffb9`.
 - `git cherry` reports all five commits as unique against both target refs. This establishes absence by patch identity, not behavioral necessity.
 - The behavioral comparison is stronger: `git diff v1.0.29 upstream/main` is empty across every affected production file, regression-test file, and `Scripts/Fixtures/test-suite-contract-ledger.tsv`. The two target bases therefore have the same owning implementations and tests.
 - The MP stack is based at `dd8a14ed`. From `dd8a14ed` to `v1.0.29`, only the contract ledger and two unrelated lines in `Sources/RepoPromptMCP/main.swift` changed among the affected paths. The four runtime call sites and their test files did not move.
 - The current-main replay risk is consequently not higher than the release replay risk at these boundaries. The material risks are stale ledger context, the semantic coupling between the selection patches, and the retry workaround's narrow scope.
 
-### `cf129fa6` — Codex app-server text serialization
+### Wire-key patch — Codex app-server text serialization
 
 **Invariant and failure.** Both `turn/start` and `turn/steer` must pass text entries using the generated app-server key `text_elements`. The stale `textElements` shape is rejected by direct app-server probing and can leave RepoPrompt waiting for a terminal event because `turn/start` intentionally has no general reasoning timeout.
 
 **Production path.** On the MP branch, `startUserTurn` and `steerUserTurn` both call the sole dictionary encoder at `Sources/RepoPrompt/Infrastructure/AI/Providers/Codex/AppServer/CodexNativeSessionController.swift:1350-1419`; `turnInput` preserves URL and local-image entries and emits `text_elements` at `:1603-1636`. Both target refs retain the same calls at `:1350-1419` but emit `textElements` at `v1.0.29:Sources/RepoPrompt/Infrastructure/AI/Providers/Codex/AppServer/CodexNativeSessionController.swift:1603-1636` and `upstream/main:Sources/RepoPrompt/Infrastructure/AI/Providers/Codex/AppServer/CodexNativeSessionController.swift:1603-1636`.
 
-**Regression coverage.** The MP tests cover start and steer payloads at `Tests/RepoPromptTests/AI/CodexNativeSessionControllerTurnDispatchTests.swift:6-68`, mixed URL/local-image ordering at `:70-98`, and an exact negative assertion rejecting `textElements` at `:331-338`. This deterministic wire contract does not need a race test. The remaining gap is a live app-server schema smoke; the prior direct probe is recorded at `docs/investigations/repo-prompt-codex-agent-hang-2026-07-08.md:19-35`.
+**Regression coverage.** The MP tests cover start and steer payloads at `Tests/RepoPromptTests/AI/CodexNativeSessionControllerTurnDispatchTests.swift:6-68`, mixed URL/local-image ordering at `:70-98`, and an exact negative assertion rejecting `textElements` at `:331-338`. This deterministic wire contract does not need a race test. The remaining gap is a live app-server schema smoke; the prior direct probe is recorded at `docs/investigations/repo-prompt-codex-agent-hang-2026-07-08.md:22-38`.
 
 **Eliminated alternatives.** Commit `1ab555e6` changes Codex process startup, environment capture, and memory-mode readiness, not `turnInput`. No secondary encoder, generated request adapter, or normalization layer exists on either base.
 
-**Replay risk.** The one-line production change and focused tests have low textual and semantic risk on both bases. Replaying `cf129fa6` wholesale has medium repository risk because it includes a historical contract-ledger row. Use the ledger-free two-file content represented by `dbf69f55`, then add any required current ledger entry through the repository's authoritative test-list workflow.
+**Replay risk.** The one-line production change and focused tests have low textual and semantic risk on both bases. Replaying the wire-key patch wholesale has medium repository risk because it includes a historical contract-ledger row. Use the ledger-free two-file content represented by `dbf69f55`, then add any required current ledger entry through the repository's authoritative test-list workflow.
 
-### `b8695ef8` — Bounded, superseding selection mirror tail
+### Mirror-tail patch — Bounded, superseding selection mirror tail
 
 **Invariant and failure.** A suspended `applySelectionMirrorAttempt` must not make every later mutating selection request in the window await the same predecessor forever.
 
@@ -71,7 +71,7 @@ The four runtime fixes are independent except for the two selection patches: `f9
 
 **Replay risk.** Textual risk is low because the target refs contain identical coordinator and test files. Semantic risk is high because timeout, supersession, completion ownership, latest-target repair, and peer fencing form one state machine. Port the complete production-and-test behavior rather than the historical commit's ledger hunk.
 
-### `f971e6a2` — Invalidation-safe auto-selection waiters
+### Waiter patch — Invalidation-safe auto-selection waiters
 
 **Invariant and failure.** Invalidating a context must cancel only that context's ticket waiters, retire its worker generation, permit a replacement context to progress, and prevent late completion from advancing the replacement lane.
 
@@ -79,25 +79,25 @@ The four runtime fixes are independent except for the two selection patches: `f9
 
 **Regression coverage.** Existing positive and caller-cancellation coverage spans `Tests/RepoPromptTests/MCP/MCPReadFileAutoSelectionCoordinatorTests.swift:225-480`. The patch adds parked-waiter invalidation and full lane/worker reclamation at `:610-657`, plus a replacement context progressing while the old worker is parked and rejecting late old-generation completion at `:658-717`.
 
-**Remaining limit.** Replacement outer workers can briefly coexist when an invalidated apply ignores cancellation. Correctness depends on the worker-ID fence at `MCPReadFileAutoSelectionCoordinator.swift:1011-1014` and the inner serialization supplied by `b8695ef8`.
+**Remaining limit.** Replacement outer workers can briefly coexist when an invalidated apply ignores cancellation. Correctness depends on the worker-ID fence at `MCPReadFileAutoSelectionCoordinator.swift:1011-1014` and the inner serialization supplied by the mirror-tail patch.
 
 **Eliminated alternatives.** Canonical-selection and Context Builder packaging changes do not attach context ownership to mirror waiters. Removing the outer worker guard without the paired inner-tail fix would allow overlapping UI mutation and is unsafe.
 
-**Replay risk.** Textual risk is low and semantic risk is medium-high on both bases. Apply after `b8695ef8`; never reverse the order or port the waiter cleanup alone.
+**Replay risk.** Textual risk is low and semantic risk is medium-high on both bases. Apply after the mirror-tail patch; never reverse the order or port the waiter cleanup alone.
 
-### `36caa174` — Selected-scope test synchronization
+### Test-setup patch — Selected-scope test synchronization
 
-**Scope proof.** `git show 36caa174` changes only `Tests/RepoPromptTests/MCP/MCPCodeStructureWorktreeTests.swift` by 22 insertions and three deletions. No source, package, resource, or executable target changes.
+**Scope proof.** The test-setup patch changes only `Tests/RepoPromptTests/MCP/MCPCodeStructureWorktreeTests.swift` by 22 insertions and three deletions. No source, package, resource, or executable target changes.
 
 **Test behavior.** Both target refs directly mutate a compose-tab copy at `v1.0.29:Tests/RepoPromptTests/MCP/MCPCodeStructureWorktreeTests.swift:619-642` and the identical upstream-main lines. The MP test instead constructs a canonical identity, calls `persistSelection`, and asserts the snapshot before and after the selected-scope budget check at `Tests/RepoPromptTests/MCP/MCPCodeStructureWorktreeTests.swift:619-711`. The required production APIs already exist at `v1.0.29:Sources/RepoPrompt/Infrastructure/WorkspaceContext/Selection/WorkspaceSelectionCoordinator.swift:280-328` and the identical upstream-main lines.
 
 **Coverage classification.** The test positively verifies canonical fixture setup, negatively verifies `limit + 1` rejection without content/codemap work, and asserts selection remains unchanged. It removes detached-copy/timing ambiguity but does not add a runtime race or shipped behavior.
 
-**Replay risk and disposition.** Risk is low on both bases. Omit it from runtime builds. Port `36caa174` or its exact patch-equivalent `37047b39` only when carrying the affected selected-scope regression.
+**Replay risk and disposition.** Risk is low on both bases. Omit it from runtime builds. Port the test-setup patch or its exact patch-equivalent `37047b39` only when carrying the affected selected-scope regression.
 
-### `96df8c52` — MCP retry-backoff cancellation drain
+### Retry-drain patch — MCP retry-backoff cancellation drain
 
-**Invariant and failure.** When one `MCPService.run()` child wins, task-group cancellation must not tear down the transport child while its retry sleep frame is resuming. Historical crash-symbol mapping identifies the retry backoff as the `swift_task_dealloc` site; the evidence and confidence limits are recorded at `docs/investigations/codex-appserver-and-issue-triage-2026-07-12.md:85-100`.
+**Invariant and failure.** When one `MCPService.run()` child wins, task-group cancellation must not tear down the transport child while its retry sleep frame is resuming. Historical crash-symbol mapping identifies the retry backoff as the `swift_task_dealloc` site; the evidence and confidence limits are recorded at `docs/investigations/codex-appserver-and-issue-triage-2026-07-12.md:88-103`.
 
 **Production path.** Both target refs keep `runTransport()` inside the three-child throwing task group at `v1.0.29:Sources/RepoPromptMCP/main.swift:2113-2155` and suspend directly in `Task.sleep` at `:2263-2320`; upstream main is identical at those lines. Neither ref contains `MCPRetryBackoffWait.swift`. The MP branch retains the same enclosing group at `Sources/RepoPromptMCP/main.swift:2113-2155`, moves the sleep behind the helper at `:2263-2319`, and explicitly forwards cancellation to an owned sleep task while awaiting settlement at `Sources/RepoPromptMCP/MCPRetryBackoffWait.swift:3-21`.
 
@@ -111,11 +111,11 @@ The four runtime fixes are independent except for the two selection patches: `f9
 
 | Behavior | Historical commit | Refined/topic evidence | Safe source |
 | --- | --- | --- | --- |
-| Codex wire key | `cf129fa6`, patch ID `193a7a4f` including ledger | `cc4854ce` has the same patch ID; `dbf69f55` omits only the ledger row and has patch ID `c0e551f8` | `dbf69f55` production/test content |
-| Bounded mirror tail | `b8695ef8`, patch ID `3dc938dd` | `d8d47126` has identical source/test changes; its `69a4ed3c` patch-ID difference is ledger context only | Complete source/test state-machine port |
-| Waiter invalidation | `f971e6a2`, patch ID `df37001d` | `57a3f408` has the same patch ID | Complete source/test port after the bounded tail |
-| Selected-scope setup | `36caa174`, patch ID `4dbe6830` | `37047b39` has the same patch ID | Optional single-test port |
-| Retry drain | `96df8c52`, patch ID `8cda35ea` | `f356120f` and `c7c22367` have the same patch ID | Helper, call site, and tests without historical ledger replay |
+| Codex wire key | Wire-key patch, including ledger | A rebased topic commit has the same patch ID; `dbf69f55` omits only the ledger row | `dbf69f55` production/test content |
+| Bounded mirror tail | Mirror-tail patch | `d8d47126` has identical source/test changes; its patch-ID difference is ledger context only | Complete source/test state-machine port |
+| Waiter invalidation | Waiter patch | `57a3f408` has the same patch ID | Complete source/test port after the bounded tail |
+| Selected-scope setup | Test-setup patch | `37047b39` has the same patch ID | Optional single-test port |
+| Retry drain | Retry-drain patch | Two rebased topic commits have the same patch ID | Helper, call site, and tests without historical ledger replay |
 
 The MP stack is already rebased onto `dd8a14ed`, while the selection PR topic starts at older `6ceafd39`. The topic commits are useful semantic references, but they are not categorically safer cherry-picks. The safest method on either target is to port the named production-and-test behavior and update the current ledger surgically.
 
@@ -123,11 +123,11 @@ The MP stack is already rebased onto `dd8a14ed`, while the selection PR topic st
 
 | Commit | `v1.0.29` risk | `upstream/main` risk | Disposition |
 | --- | --- | --- | --- |
-| `cf129fa6` | Low source/test; medium whole-commit ledger risk | Same | Include ledger-free refined equivalent |
-| `b8695ef8` | Low textual; high concurrency/state-machine risk; medium whole-commit ledger risk | Same | Include complete source/test equivalent |
-| `f971e6a2` | Low textual; medium-high semantic dependency risk | Same | Include after `b8695ef8` |
-| `36caa174` | Low, test-only | Same | Exclude from runtime; optional test companion |
-| `96df8c52` | Low textual; medium narrow-workaround and ledger risk | Same | Include focused helper/call-site/test equivalent |
+| Wire-key patch | Low source/test; medium whole-commit ledger risk | Same | Include ledger-free refined equivalent |
+| Mirror-tail patch | Low textual; high concurrency/state-machine risk; medium whole-commit ledger risk | Same | Include complete source/test equivalent |
+| Waiter patch | Low textual; medium-high semantic dependency risk | Same | Include after the mirror-tail patch |
+| Test-setup patch | Low, test-only | Same | Exclude from runtime; optional test companion |
+| Retry-drain patch | Low textual; medium narrow-workaround and ledger risk | Same | Include focused helper/call-site/test equivalent |
 
 ### Minimal ordered patch recommendation
 
@@ -136,13 +136,13 @@ The MP stack is already rebased onto `dd8a14ed`, while the selection PR topic st
 Runtime patches:
 
 1. Port the ledger-free Codex production/test change from `dbf69f55`.
-2. Port the full bounded and superseding mirror-tail behavior from `b8695ef8`/`d8d47126`, preserving peer fences and latest-target repair.
-3. Port the context-owned waiter cancellation and worker-generation fencing from `f971e6a2`/`57a3f408`.
-4. Port the retry helper, call-site swap, and tests from `96df8c52`/`f356120f`.
+2. Port the full bounded and superseding mirror-tail behavior from the mirror-tail patch/`d8d47126`, preserving peer fences and latest-target repair.
+3. Port the context-owned waiter cancellation and worker-generation fencing from the waiter patch/`57a3f408`.
+4. Port the retry helper, call-site swap, and tests from the retry-drain patch or its rebased topic commit.
 
 Test-only companion:
 
-5. Port `36caa174`/`37047b39` only if the selected-scope test is carried.
+5. Port the test-setup patch/`37047b39` only if the selected-scope test is carried.
 
 Ledger-only handling:
 
@@ -159,7 +159,7 @@ Use the same four runtime ports in the same order. The affected paths are identi
 - **Authority:** generated Codex app-server schema, `WorkspaceSelectionCoordinator`, `MCPReadFileAutoSelectionCoordinator`, and `MCPService.run()/runTransport()`.
 - **State-safety risks:** the selection patches must stay ordered and preserve one-at-a-time UI mutation; stale ledger replay must not overwrite the curated test inventory.
 - **Scale and observability risks:** the bounded tail prevents one suspended apply from amplifying into a window-wide queue; the retry workaround remains narrow and needs integration-level crash observation.
-- **Recommended scope:** carry four focused runtime ports; keep `36caa174` test-only; do not introduce compatibility shims or parallel selection authorities.
+- **Recommended scope:** carry four focused runtime ports; keep the test-setup patch test-only; do not introduce compatibility shims or parallel selection authorities.
 - **Validation boundary:** focused wire, selection, waiter, and retry suites plus one live Codex schema smoke, one end-to-end selection lifecycle harness, and one MCP task-group cancellation harness.
 
 ## Investigation Log
@@ -189,7 +189,7 @@ Use the same four runtime ports in the same order. The affected paths are identi
 **Conclusion:** The tab-level ownership collision blocked that Context Builder attempt. It did not establish or refute behavioral equivalence.
 
 ### Phase 3 - Ref-specific production, test, and replay audit
-**Hypothesis:** The four runtime invariants remain absent on both target refs, while `36caa174` changes only test synchronization.
+**Hypothesis:** The four runtime invariants remain absent on both target refs, while the test-setup patch changes only test synchronization.
 
 **Findings:** Ref-specific reads found the stale Codex key, unbounded selection tail, invalidation-unaware waiters, and direct retry sleep on both targets. The affected paths are identical between `v1.0.29` and `upstream/main`. Commit and range comparison isolated ledger context from the production-and-test changes.
 
@@ -207,7 +207,7 @@ Use the same four runtime ports in the same order. The affected paths are identi
 **Conclusion:** Build the replacement from `v1.0.29`, port behavior rather than whole historical commits, and adopt it only after focused, full-suite, and live lifecycle validation.
 
 ### Phase 5 - Final validation
-**Findings:** RepoPrompt Git confirmed zero affected-path differences between `v1.0.29` and upstream main, the exact Codex key change, the focused retry helper/call-site delta, and the one-test-file scope of `36caa174`. Repository status shows no tracked or source modifications; only local investigation and transient workflow artifacts are untracked.
+**Findings:** RepoPrompt Git confirmed zero affected-path differences between `v1.0.29` and upstream main, the exact Codex key change, the focused retry helper/call-site delta, and the one-test-file scope of the test-setup patch. Repository status shows no tracked or source modifications.
 
 **Prose review:** The repository has no dedicated prose target. Vale reported numerous findings dominated by technical identifiers, commit terminology, code vocabulary, and generic style rules. Those rewrites were rejected because they would make the evidence less precise.
 
@@ -220,7 +220,7 @@ The target refs retain four distinct production defects: a stale Codex wire key,
 1. Keep the current personal build in daily use until a validated replacement exists; an unpatched official build would reintroduce the four runtime defects.
 2. Base the replacement on official `v1.0.29` at `fe68009b`, not current main, unless an unrelated post-release feature is explicitly required.
 3. Follow the existing minimal ordered patch list: Codex wire key, bounded selection tail, invalidation-safe waiters, then retry-backoff drain. Preserve the semantic coupling between the two selection patches.
-4. Treat `36caa174` as an optional test-only companion. Reconcile ledger entries from the target branch's authoritative test list rather than replaying historical ledger hunks.
+4. Treat the test-setup patch as an optional test-only companion. Reconcile ledger entries from the target branch's authoritative test list rather than replaying historical ledger hunks.
 5. Preserve `v1.0.29` release metadata, especially `CLI_VERSION`; port only the retry helper, call-site change, and focused tests.
 
 ## Preventive Measures

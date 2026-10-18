@@ -289,7 +289,7 @@ The CodeMap consolidation is declaration-count reduction, not fixture reduction.
 
 ### Scope boundary and merge rule
 
-This section merges **Item 3 candidate-gap confirmation only** from the four non-overlapping ignored reports. The named reports are incorporated by reference as the detailed evidence records. This merge resolves each apparent-gap row to an allowed disposition, records approved scenarios, target ownership, count delta, validation lane, and any minimal deterministic seam. It does **not** perform Item 4 retention freeze or batch planning, edit Swift or scripts, run validation lanes, or touch unrelated tracked administration work.
+This section merges **Item 3 candidate-gap confirmation only** from the four non-overlapping ignored reports, which were also working files and were not kept. The named reports are incorporated by reference as the detailed evidence records. This merge resolves each apparent-gap row to an allowed disposition, records approved scenarios, target ownership, count delta, validation lane, and any minimal deterministic seam. It does **not** perform Item 4 retention freeze or batch planning, edit Swift or scripts, run validation lanes, or touch unrelated tracked administration work.
 
 | Item 3 report | Reviewed candidate ownership | Counted root delta | Provider delta | Uncounted harness / live work |
 | --- | --- | ---: | ---: | --- |
@@ -759,7 +759,7 @@ The Item 1 census rows with a non-empty scenario or fixture note are listed here
 
 ## Exhaustive executable XCTest census
 
-The Item 1 census listed every counted declaration as one row: 497 in the root `RepoPromptTests` target and 5 in the nested `RepoPromptClaudeCompatibleProviderTests` target. Each row recorded the method, its file and declaration line, the target and domain, a suite-scoped primary contract ID, secondary traceability tags, a provisional validation class and layer, any scenario or fixture breadth note, and an Item 1 tentative disposition. Items 2 to 5 superseded every tentative disposition. The rows with breadth notes are in the scenario and fixture breadth index above. The manifest's SHA-256 is under "Recount evidence", and the recount script there lists the same methods from the checkout the audit counted. The full rows are in upstream commit `30d8ae319`.
+The Item 1 census listed every counted declaration as one row: 497 in the root `RepoPromptTests` target and 5 in the nested `RepoPromptClaudeCompatibleProviderTests` target. Each row recorded the method, its file and declaration line, the target and domain, a suite-scoped primary contract ID, secondary traceability tags, a provisional validation class and layer, any scenario or fixture breadth note, and an Item 1 tentative disposition. Items 2 to 5 superseded every tentative disposition. The rows with breadth notes are in the scenario and fixture breadth index above. The manifest's SHA-256 is under "Recount evidence", and the recount script there counts the same declarations from the checkout the audit counted. The full rows are in upstream commit `30d8ae319`.
 
 ## Item 1 reconciliation
 

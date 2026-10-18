@@ -3,10 +3,10 @@
 > Investigation report, observed 2026-07-28 on the RepoPrompt CE 1.1.0 Tip build. It records what was true then. Where it disagrees with a current document, the current document is right.
 
 ## Summary
-RepoPrompt CE's bundled-Codex change (upstream PR 612, 2026-07-23) moved the Codex runtime to an app-private `CODEX_HOME`. Codex 0.145.0 only runs repo-level PreToolUse hooks when the effective CODEX_HOME carries per-hook `[hooks.state]` `trusted_hash` approval entries, and silently fails OPEN without them. MP's approvals live in `~/.codex/config.toml` and were never migrated, so a private work repository's terraform guardrails are silently disabled in every RP Agent Mode session. Confirmed via six-probe differential bisection with minimal repro of both failure and fix.
+RepoPrompt CE's bundled-Codex change (upstream PR 612, 2026-07-23) moved the Codex runtime to an app-private `CODEX_HOME`. Codex 0.145.0 only runs repo-level PreToolUse hooks when the effective CODEX_HOME carries per-hook `[hooks.state]` `trusted_hash` approval entries, and silently fails OPEN without them. MP's approvals live in `~/.codex/config.toml` and were never migrated, so a private work repository's command guardrails are silently disabled in every RP Agent Mode session. Confirmed via six-probe differential bisection with minimal repro of both failure and fix.
 
 ## Symptoms
-- The work repository blocks destructive terraform commands through a repository-level Codex PreToolUse hook.
+- The work repository blocks destructive commands through a repository-level Codex PreToolUse hook.
 - Previously, RepoPrompt CE Agent Mode (Codex-backed) sessions in the work repository had these guardrails active.
 - Agents now report the guardrails are NOT functioning in RepoPrompt-created agent sessions.
 - Timing coincides with RepoPrompt CE (and the Tip builds channel) bundling/vendoring the Codex app server into the app bundle instead of using the system-installed codex-cli.
@@ -19,7 +19,7 @@ RepoPrompt CE's bundled-Codex change (upstream PR 612, 2026-07-23) moved the Cod
 
 ## Hypotheses
 1. The bundled Codex app server binary/runtime differs in version or behavior from the system codex-cli, and no longer loads repo-level `.codex` hooks / guardrail config (dropped feature, changed discovery, or changed defaults).
-2. The bundled runtime launches with a different environment (PATH, cwd, config home) so PATH shims or wrapper scripts that intercepted `terraform` are no longer on PATH inside agent shells.
+2. The bundled runtime launches with a different environment (PATH, cwd, config home) so PATH shims or wrapper scripts that intercepted guarded commands are no longer on PATH inside agent shells.
 3. RP's app-server launch code changed which config directories are passed/honored (e.g., CODEX_HOME or project config discovery) when switching to the bundled runtime.
 
 ## Background / Prior Research
@@ -28,9 +28,9 @@ RepoPrompt CE's bundled-Codex change (upstream PR 612, 2026-07-23) moved the Cod
 ### Local machine evidence (orchestrator, 2026-07-28)
 - Installed app: `/Applications/RepoPrompt CE.app`, version 1.1.0, build 31.12.0 (Tip channel).
 - Bundled runtime: `Contents/Resources/BundledRuntimes/Codex/<arch>/` with `bin/codex`, `bin/codex-code-mode-host`, `codex-resources/zsh`, `codex-path/rg`, `codex-package.json` (layoutVersion 1, entrypoint bin/codex, pathDir codex-path).
-- **Bundled codex version: `codex-cli 0.145.0` — IDENTICAL to system codex (`~/.npm-global/bin/codex`, 0.145.0).**
+- **Bundled codex version: `codex-cli 0.145.0` — IDENTICAL to system codex (0.145.0).**
 - Implication: version drift is ruled out. Regression vector must be launch-time differences: environment (PATH shims), config discovery (CODEX_HOME / repo-root trust), cwd, or sandbox/exec policy flags passed by RP to the bundled app-server.
-- `~/.codex/rules/default.rules` contains only `decision="allow"` prefix rules (approval learning cache) — no deny/guardrail rules live at user level. `~/.codex/config.toml` marks the work repository `trust_level = "trusted"`; approval_policy on-request, sandbox_mode workspace-write globally.
+- `~/.codex/rules/default.rules` contains only `decision="allow"` prefix rules (approval learning cache) — no deny/guardrail rules live at user level. `~/.codex/config.toml` marks the work repository trusted.
 
 ### Explore agent: git archaeology (2026-07-28)
 - Vendoring introduced `4fd888ed` (2026-07-22, "Bundle pinned Codex runtime artifact"), merged `d9af842f` 2026-07-23 via upstream PR 605. Bundled runtime staged into `RepoPrompt.app/Contents/Resources/BundledRuntimes/Codex/<target>/` (`Scripts/package_app.sh:306-312`).
@@ -45,7 +45,7 @@ RepoPrompt CE's bundled-Codex change (upstream PR 612, 2026-07-23) moved the Cod
 - Timing fits regression: MP moved to Tip channel 2026-07-24, immediately after bundling became authoritative upstream.
 
 ### Explore agent: work-repository guardrails mechanism (2026-07-28)
-The work repository blocks destructive terraform commands through a repository-level Codex PreToolUse hook. A nonzero hook exit denies the command.
+The work repository blocks destructive commands through a repository-level Codex PreToolUse hook. A nonzero hook exit denies the command.
 
 What the RepoPrompt finding depends on:
 - **The Codex runtime must discover and honor the repository-level PreToolUse hooks** for the session's project root.

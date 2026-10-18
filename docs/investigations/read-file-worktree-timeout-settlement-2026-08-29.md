@@ -1,6 +1,6 @@
 # Session-bound `read_file` timeout and settlement investigation
 
-> Investigation report, observed 2026-08-29, with an addition from 2026-09-01, on the packaged debug app built from `feature/local-rp-stability-stack` at `d4563c57`. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Investigation report, observed 2026-08-29, with an addition from 2026-09-01, on the packaged debug app built from a local stability branch. It records what was true then. Where it disagrees with a current document, the current document is right.
 
 Status: Packaged-runtime defect accepted; initiating phase and tracker lineage unresolved
 
@@ -24,8 +24,7 @@ window fence match the current settlement-registry design and tests.
 
 ## Runtime and controlled state
 
-- Packaged debug app source: `feature/local-rp-stability-stack` at
-  `d4563c57a2e1309eb6526fbe6f1f4f140e1ac933`.
+- Packaged debug app source: a local stability branch.
 - The package includes follow-up commit `863ea876` from the qualified-read work.
 - The app was relaunched from the existing package without rebuilding before the
   post-recovery controls.
@@ -173,7 +172,7 @@ stage attribution:
 ## Source boundaries
 
 The source references below describe the current checkout. That checkout contains later
-qualified-read work that was not rebuilt into packaged commit `d4563c57`. The references
+qualified-read work that was not rebuilt into the packaged commit. The references
 establish architecture, contracts, and diagnostic seams; they do not prove that every
 current branch detail executed in the packaged failure.
 

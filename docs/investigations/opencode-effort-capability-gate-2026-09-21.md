@@ -18,9 +18,9 @@ OpenCode `1.18.31+014614d` advertises and applies a non-default effort config ov
 
 ## Environment and evidence freeze
 
-- Executable invoked: `~/.local/bin/opencode acp`, installed through home-manager from the nix store. `--version` reported `1.18.31+014614d` at probe time (matches, not assumed).
+- Executable invoked: `opencode acp` from the user's installation. `--version` reported `1.18.31+014614d` at probe time (matches, not assumed).
 - Safe cwd: an empty disposable temporary directory created fresh for this run; no repo, no config. Ordinary user environment inherited; nothing dumped.
-- Distribution head: `e24df046` (`main`, clean tree except known untracked investigation/`.worktrees` entries). Upstream reference clone `repoprompt-ce-upstream-readonly` at `6f0e849a` (the plan's recorded refresh; left untouched per this task's no-git-mutation constraint). Port refs verified readable: `80622198` (upstream PR 1009 squash) and `7b19f7dc` (upstream PR 960 merge) are commits in the clone. The capability marker replicated below was read from upstream `ACPAgentSessionController.swift:550-558`.
+- Distribution head: `e24df046` (`main`, no tracked changes). Upstream reference clone `repoprompt-ce-upstream-readonly` at `6f0e849a` (left untouched per this task's no-git-mutation constraint). Port refs verified readable: `80622198` (upstream PR 1009 squash) and `7b19f7dc` (upstream PR 960 merge) are commits in the clone. The capability marker replicated below was read from upstream `ACPAgentSessionController.swift:550-558`.
 - Two pre-existing `opencode acp` processes (children of a live parent started before this run) were observed and left untouched; they are independent ACP sessions, not artifacts of this probe.
 - No OpenCode config, credentials, or persistent settings were read or modified.
 

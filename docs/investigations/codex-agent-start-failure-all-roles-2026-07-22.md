@@ -1,15 +1,15 @@
 # Investigation: Codex agent starts fail with "Codex app-server process is not running" (2026-07-22)
 
-> Investigation report, observed 2026-07-22 on the debug build of `release/mp-patches-2026-07-20` at `23e31e27`. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Investigation report, observed 2026-07-22 on a local debug build from the 2026-07-20 upstream sync. It records what was true then. Where it disagrees with a current document, the current document is right.
 > Current guidance: [docs/porting.md](../porting.md), Procedure.
 
 Date: 2026-07-22
 Status: complete — resolved same day
 
 ## Summary
-The reported "every Codex dispatch fails" was upstream issue 554 (worktree-bound Codex app-server starts failing) running unfixed in the local build: the 2026-07-20 upstream sync omitted the user's own fix, upstream PR 568 (`bugfix/codex-worktree-app-server-start`), so builds from `release/mp-patches-2026-07-20` regressed to the behavior before upstream PR 568. Worktree-bound Codex sub-agents in the work-repository workflows (bindings inherit by default) all failed, which presented as total Codex breakage; restarts, the codex-CLI upgrade, and a reboot were irrelevant. Resolution: merged the upstream PR 568 branch into the build branch (merge `bbe19ad2`), rebuilt and relaunched the debug app, and verified with a four-probe matrix — the previously deterministic work-repository worktree failure now passes (SMOKE4_OK). Durable prevention (local patch ledger + sync checklist) captured in the personal toolkit's RepoPrompt CE notes.
+The reported "every Codex dispatch fails" was upstream issue 554 (worktree-bound Codex app-server starts failing) running unfixed in the local build: the 2026-07-20 upstream sync omitted the user's own fix, upstream PR 568 (`bugfix/codex-worktree-app-server-start`), so builds from that sync regressed to the behavior before upstream PR 568. Worktree-bound Codex sub-agents in the work-repository workflows (bindings inherit by default) all failed, which presented as total Codex breakage; restarts, the codex-CLI upgrade, and a reboot were irrelevant. Resolution: merged the upstream PR 568 branch into the build branch, rebuilt and relaunched the debug app, and verified with a four-probe matrix — the previously deterministic work-repository worktree failure now passes (SMOKE4_OK). Durable prevention: a local patch ledger and an upstream-sync checklist.
 
-Live differential testing showed the failure is NOT environmental and NOT "all Codex dispatches": on the current app instance, unbound Codex dispatches succeed in both open workspaces, a worktree-bound dispatch succeeds for repoprompt-ce, and a worktree-bound dispatch on `<work repo>` fails deterministically with `Codex native start failed: Codex app-server process is not running.` The entire codex CLI / node / mise / PATH environment is exonerated by direct wire-level probes, including from inside the failed session's own worktree cwd. The defect is inside RepoPrompt's worktree-bound Codex session-start path (upstream issue 554 class), running build `23e31e27` (`release/mp-patches-2026-07-20`, built 2026-07-20T16:09Z, dirty).
+Live differential testing showed the failure is NOT environmental and NOT "all Codex dispatches": on the current app instance, unbound Codex dispatches succeed in both open workspaces, a worktree-bound dispatch succeeds for repoprompt-ce, and a worktree-bound dispatch on `<work repo>` fails deterministically with `Codex native start failed: Codex app-server process is not running.` The entire codex CLI / node / mise / PATH environment is exonerated by direct wire-level probes, including from inside the failed session's own worktree cwd. The defect is inside RepoPrompt's worktree-bound Codex session-start path (upstream issue 554 class), running the local build from the 2026-07-20 sync (built 2026-07-20T16:09Z, dirty).
 
 ## Symptoms
 - Reported (handoff, 2026-07-22): every Codex-role `agent_run` dispatch fails immediately with `Codex native start failed: Codex app-server process is not running.`; onset mid-session while a pair agent was spawning sub-agents; survived RepoPrompt restarts, codex CLI upgrade to 0.145.0 (03:23 UTC), and a machine reboot. Claude-backed roles and the MCP server unaffected.
@@ -22,7 +22,7 @@ Live differential testing showed the failure is NOT environmental and NOT "all C
 | work window, unbound | ✅ completed |
 | work window, worktree-bound, repo `<work repo>` (`worktree_create`) | ❌ exact reported error (the work reproduction session and its new worktree) |
 
-- Pre-existing failed sessions in the app: three `554 baseline` sessions (all codexExec, all the same error) — the failure class is filed as upstream issue 554 and its baselines all target work-repository worktrees.
+- Pre-existing failed sessions in the app: three baseline sessions (all codexExec, all the same error) — the failure class is filed as upstream issue 554 and its baselines all target work-repository worktrees.
 
 ## Background / Prior Research
 
@@ -31,31 +31,30 @@ Live differential testing showed the failure is NOT environmental and NOT "all C
 - `docs/investigations/worktree-bound-codex-app-server-start-failure-2026-07-15.md`: worktree binding projects the worktree path into BOTH app-server process launch cwd and protocol cwd; recommended separating launch cwd (logical root) from execution cwd (worktree) plus bounded stderr/exit-status retention. Whether those recommendations are implemented in the running build is an open question below.
 
 ### Environment exoneration (live wire-level probes, 2026-07-22, codex-cli 0.145.0)
-All probes used a harness that keeps stdin open (see pitfall below) and the same absolute binaries RepoPrompt uses (`~/.local/share/mise/installs/node/24/bin/node` + `~/.npm-global/bin/codex`):
-- `initialize` responds from: scratchpad cwd (×2), `<work repo>` main checkout cwd, the failed session's own worktree cwd `<worktree>` (×2), and with vite-plus's `vp`-as-node shim.
+All probes used a harness that keeps stdin open (see pitfall below) and the same absolute node and codex binaries RepoPrompt resolves:
+- `initialize` responds from: scratchpad cwd (×2), `<work repo>` main checkout cwd, the failed session's own worktree cwd `<worktree>` (×2), and with a second node shim.
 - `thread/start` with `cwd` = that worktree: thread starts, 12 `mcpServer/startupStatus/updated` notifications all `error:null`, identical to main-checkout cwd.
-- Therefore eliminated: codex 0.145.0 breakage, `~/.codex/config.toml` corruption, codex project/hook trust (`[projects."/"]` is trusted anyway), node resolution (mise or vite-plus), mise worktree trust (mise 2026.7.4 DOES fail `mise env`/shim-node inside the worktree — `Config files ... are not trusted` — but codex app-server does not depend on it at startup/thread-start), disk space, auth.
+- Therefore eliminated: codex 0.145.0 breakage, `~/.codex/config.toml` corruption, codex project/hook trust (the project was already trusted), node resolution (either node shim), mise worktree trust (mise 2026.7.4 DOES fail `mise env`/shim-node inside the worktree — `Config files ... are not trusted` — but codex app-server does not depend on it at startup/thread-start), disk space, auth.
 - Probe-harness pitfall (do not repeat): redirecting stdin from a file makes 0.145.0 app-server race `initialize` response against stdin EOF (`exit_reason="last_connection_closed"`, response dropped as "disconnected connection") — this produced false "silent failure" results until corrected. Real clients keep stdin open.
 
 ### Other live facts
-- Running app: PID 66548 since 04:31:34 UTC, provenance `RepoPromptDebugProvenance.json`: branch `release/mp-patches-2026-07-20`, commit `23e31e27` (== checkout HEAD), built 2026-07-20T16:09Z, dirty.
-- The app's discovery/warmup app-server (PID 66607, spawned 04:31:38 UTC) is healthy and long-lived; its argv shows RP resolves node to the absolute mise path and codex to the npm shim.
+- Running app: the debug app since 04:31:34 UTC; its provenance (`RepoPromptDebugProvenance.json`) names the local build branch at the checkout's HEAD, built 2026-07-20T16:09Z, dirty.
+- The app's discovery/warmup app-server (spawned 04:31:38 UTC) is healthy and long-lived; its argv shows RP resolves node to the absolute mise path and codex to the npm shim.
 - codex 0.145.0 added an app-server daemon subcommand and `~/.codex/app-server-daemon/` (lock files created 03:43:41 UTC, 0 bytes); no daemon process observed; not implicated by probes.
 - In the work window, `worktree_create` without explicit `worktree_repo_root` defaulted to another work repository and was rejected: "worktree binding currently supports the primary workspace root only... provider runtime cwd resolves from primary root `~/<work project>/<work repo>`" — i.e. "first loaded Git repo" and "primary root" disagree in the work multi-root workspace.
-- The `<work repo>` root carries its own tool-version files and a Codex project config with PreToolUse hooks; repoprompt-ce has neither. The two repos also differ in size and worktree container path (`~/<work project>/.repoprompt-worktrees/` vs `<worktree>/`).
+- The `<work repo>` root carries its own tool-version files and a repository-level Codex config; repoprompt-ce has neither. The two repos also differ in size and worktree container path (`~/<work project>/.repoprompt-worktrees/` vs `<worktree>/`).
 - Unified log has no RepoPrompt entries for the failure window (debug build prints to stdout, app launched via Finder).
 
-### Session-store failure timeline (on-disk `AgentSessions/*.json` containing the error text, times UTC)
-- 07-08 19:45 a second work workspace: one work session (first occurrence).
-- 07-15 06:59–07:38 work workspace: 12-session burst of probes and retries — the incident that produced the 07-15 investigation and upstream issue 554.
-- 07-16/07-17: one work session in the second work workspace, then the deliberate `554 baseline` sessions (the owner's workspace, targeting work-repository worktrees).
-- 07-21 06:56 work: a delegated guardrail probe.
-- **07-22 02:51 work: a guardrail probe session — the reported failure.**
-- 07-22 04:47 work workspace: the user's active work session, 04:48 the reproduction probe.
+### Session-store failure timeline (on-disk `AgentSessions/*.json` containing the error text)
+- 07-08: one work-repository session (first occurrence).
+- 07-15: a 12-session burst of probes and retries, the incident that produced the 07-15 investigation and upstream issue 554.
+- 07-16/07-17: one work-repository session, then the deliberate baseline sessions targeting work-repository worktrees.
+- 07-21: one work-repository session.
+- **07-22: the reported failure**, then two more work-repository sessions, one of them this investigation's reproduction probe.
 - Every one of these sessions has worktree-binding evidence in its JSON. Interpretation: the failure class has been continuous since 07-15 and repo/binding-conditional, not a machine-wide 07-22 onset; the 07-22 perception of "every dispatch fails" matches workflows whose Codex sub-agents are worktree-bound (children inherit worktree bindings by default).
-- Additional exoneration: non-interactive login fish env capture executed from inside the failed worktree succeeds cleanly (95 vars, mise-activated PATH, no stderr) — the app's env-capture input is not poisoned by the worktree cwd.
+- Additional exoneration: non-interactive login-shell env capture executed from inside the failed worktree succeeds cleanly (95 variables, no stderr) — the app's env-capture input is not poisoned by the worktree cwd.
 
-### Open questions (for code investigation at HEAD `23e31e27`)
+### Open questions (for code investigation at the build's HEAD)
 1. What is the exact worktree-bound Codex start sequence in this build, and which step emits `processNotRunning` for the `<work repo>` worktree while succeeding for repoprompt-ce?
 2. Were the 07-15 recommendations (launch-cwd/execution-cwd separation, stderr tail + exit status retention) implemented? Is there a fix that references upstream issue 554 in `git log`?
 3. What do the July-13 fail-closed Codex MCP readiness commits (`f80e2005`, `d39eebc6`, `0df1ef7f`) do on this path in this build — can a provisioning/validation failure surface as `processNotRunning`?
@@ -70,11 +69,11 @@ All probes used a harness that keeps stdin open (see pitfall below) and the same
 
 ### Upstream status (checked 2026-07-22 05:1x UTC)
 - Upstream issue 554 is OPEN with no fix; a maintainer invited a fast-tracked PR (2026-07-15 comment).
-- v1.1.0 (2026-07-21) ships the MCP watchdog upstream PRs 567 and 575 and MP's upstream PRs 450 and 532 — all already present in `release/mp-patches-2026-07-20`. The 27-commit `HEAD..upstream/main` delta contains no watchdog, worktree, or app-server-start changes; its only Codex commit is `c82143ce` (upstream PR 603 "Fix Codex app-server tool override policy", merged 2026-07-21T22:26Z), which prunes deprecated `-c features.*` overrides and adds `features.code_mode.direct_only_tool_namespaces=["mcp__RepoPromptCE"]` at thread start/resume — not a fix for upstream issue 554.
+- v1.1.0 (2026-07-21) ships the MCP watchdog upstream PRs 567 and 575 and MP's upstream PRs 450 and 532 — all already present in the local build branch. The 27-commit `HEAD..upstream/main` delta contains no watchdog, worktree, or app-server-start changes; its only Codex commit is `c82143ce` (upstream PR 603 "Fix Codex app-server tool override policy", merged 2026-07-21T22:26Z), which prunes deprecated `-c features.*` overrides and adds `features.code_mode.direct_only_tool_namespaces=["mcp__RepoPromptCE"]` at thread start/resume — not a fix for upstream issue 554.
 
 ### Upstream PR 568 status (the user's own fix for upstream issue 554)
 - upstream PR 568 "Fix worktree-bound Codex app-server startup" (OPEN upstream, base main) implements exactly the 07-15 recommendations: launch-cwd/execution-cwd separation, controller identity on the path pair, bounded startup stderr + structured exit status, repo-scoped worktree selectors.
-- **It is NOT in the running build.** Its head `96872f7f` (`bugfix/codex-worktree-app-server-start`, checked out at `.worktrees/codex-worktree-app-server-start`) is not an ancestor of `release/mp-patches-2026-07-20`; the three new files it adds (`CodexRuntimeWorkspacePaths.swift`, `CodexProcessStderrCapture.swift`, `ChildProcessExitObserver.swift`) are absent from the checkout; `docs/investigations/upstream-sync-mp-patches-2026-07-20.md` never mentions it. The 07-20 sync omitted it.
+- **It is NOT in the running build.** Its head `96872f7f` (`bugfix/codex-worktree-app-server-start`) is not an ancestor of the local build branch; the three new files it adds (`CodexRuntimeWorkspacePaths.swift`, `CodexProcessStderrCapture.swift`, `ChildProcessExitObserver.swift`) are absent from the checkout; `docs/investigations/upstream-sync-mp-patches-2026-07-20.md` never mentions it. The 07-20 sync omitted it.
 - Consequence: the running app is unfixed upstream issue 554 baseline; the live failures imply nothing about upstream PR 568's correctness.
 
 ## Investigator Findings
@@ -140,8 +139,8 @@ The capture command is the user's login shell with `["-l", "-c", "env"]`. The `P
 The successful watcher in the owner's workspace observed this interpreter-level argv:
 
 ```text
-~/.local/share/mise/installs/node/24/bin/node
-~/.npm-global/bin/codex
+<absolute node path>
+<absolute codex path>
 -c tool_output_token_limit=25000
 -c features.apps=false
 -c features.computer_use=false
@@ -184,15 +183,15 @@ Only the argv from the owner's workspace was captured. Source predicts the same 
 
 ### Q5 — Persisted session timelines
 
-All timestamps are UTC, converted from the persisted Apple-reference timestamps. Each record contains one transcript turn and one run span.
+Offsets are computed from the persisted Apple-reference timestamps. Each record contains one transcript turn and one run span.
 
 | Session | Binding and handoff | Persisted native sequence |
 |---|---|---|
-| Guardrail probe | Bound `02:51:50.473Z`; pending handoff created `02:51:51.525Z`; started by a parent session | Run starts `02:51:51.718Z`; error at `02:51:51.974Z`: `Codex native start failed: Codex app-server process is not running.`; failed; no Codex thread ID |
-| owner's worktree probe | Bound `04:45:55.699Z`; final record has no pending handoff because the accepted send cleared it | Run starts `04:45:58.962Z`; assistant returns `CODEX_WORKTREE_PROBE_OK` at `04:46:08.111Z`; completed; one Codex thread ID |
-| Work session | Bound `04:47:00.601Z`; pending handoff created `04:47:01.796Z` | Run starts `04:47:02.050Z`; identical start error at `04:47:02.363Z`; failed; no thread ID |
-| work reproduction | Bound `04:48:42.074Z`; pending handoff created `04:48:43.182Z` | Run starts `04:48:43.353Z`; identical start error at `04:48:43.569Z`; failed; no thread ID |
-| work reproduction 2 | Bound `05:05:28.834Z`; pending handoff created `05:05:29.932Z` | Run starts `05:05:30.109Z`; identical start error at `05:05:30.298Z`; failed; no thread ID |
+| Work-repository session started by a parent session (the reported failure) | Pending handoff created 1.052 s after binding | Run starts 1.245 s after binding; error 256 ms later: `Codex native start failed: Codex app-server process is not running.`; failed; no Codex thread ID |
+| owner's worktree probe | Final record has no pending handoff because the accepted send cleared it | Run starts 3.263 s after binding; assistant returns `CODEX_WORKTREE_PROBE_OK` 9.149 s later; completed; one Codex thread ID |
+| Work-repository session | Pending handoff created 1.195 s after binding | Run starts 1.449 s after binding; identical start error 313 ms later; failed; no thread ID |
+| work reproduction | Pending handoff created 1.108 s after binding | Run starts 1.279 s after binding; identical start error 216 ms later; failed; no thread ID |
+| work reproduction 2 | Pending handoff created 1.098 s after binding | Run starts 1.275 s after binding; identical start error 189 ms later; failed; no thread ID |
 
 Records live at `~/Library/Application Support/RepoPrompt CE/Workspaces/Workspace-<name>-<ID>/AgentSessions/AgentSession-<ID>.json`.
 
@@ -216,32 +215,32 @@ The 10 Hz watcher seeing no Codex child is consistent with a child lifetime belo
 ### Phase 1 — Environment triage (agent, live shell + live app probes)
 **Hypothesis:** on-disk environment breakage (config corruption, codex/node/mise/PATH, codex 0.145.0 daemon).
 **Findings:** all eliminated by wire-level probes (see Environment exoneration). Live app probes isolated the failing condition to worktree-bound Codex starts on `<work repo>`; matches pre-existing upstream issue 554 baselines.
-**Conclusion:** RP-side code defect on the worktree-bound Codex start path; proceed to source investigation at HEAD `23e31e27`.
+**Conclusion:** RP-side code defect on the worktree-bound Codex start path; proceed to source investigation at the build's HEAD.
 
 ## Root Cause
 
-**Operational root cause (the incident):** the 2026-07-20 upstream sync produced `release/mp-patches-2026-07-20` (upstream/main + two selection-mirror commits) without upstream PR 568's `bugfix/codex-worktree-app-server-start` branch, and the build of 2026-07-20 16:09 UTC and the relaunch that followed put that regressed code live. Nothing on the machine changed on 07-22; the failure class had been continuous since 07-15 and simply surfaced whenever workflows dispatched worktree-bound Codex children.
+**Operational root cause (the incident):** the 2026-07-20 upstream sync produced a local build branch (upstream/main + two selection-mirror commits) without upstream PR 568's `bugfix/codex-worktree-app-server-start` branch, and the build of 2026-07-20 16:09 UTC and the relaunch that followed put that regressed code live. Nothing on the machine changed on 07-22; the failure class had been continuous since 07-15 and simply surfaced whenever workflows dispatched worktree-bound Codex children.
 
 **Technical root cause (the underlying upstream issue 554 defect, per Investigator Findings):** the code without upstream PR 568 projects the bound worktree path into the app-server process launch cwd (as well as protocol/sandbox cwd) and collapses all transport-loss modes into `processNotRunning` with no retained stderr/exit status. Under RepoPrompt's exact launch inputs the app-server transport dies within ~250 ms of a `<work repo>` worktree-bound start (fresh controller, no replacement race, global env capture — all ruled out as differentiators; the effective cwd/sandbox root and cwd-sensitive repo-local discovery are the only workspace-derived inputs). The exact child-death submechanism remains unattributable on builds without upstream PR 568 precisely because of the diagnostics gap upstream PR 568 closes; the manual-probe evidence shows cwd alone is not sufficient, so the trigger is specific to the app's launch-input combination.
 
 ### Eliminated along the way
-- codex-cli 0.145.0, `~/.codex/config.toml`, auth, node resolution (mise and vite-plus's vp-node shim), mise worktree trust, disk space, the new app-server daemon, login-shell env capture poisoning, MCP provisioning/routing readiness (distinct error strings), controller replacement races, and any repo-identity branch in the start path.
+- codex-cli 0.145.0, `~/.codex/config.toml`, auth, node resolution (both node shims), mise worktree trust, disk space, the new app-server daemon, login-shell env capture poisoning, MCP provisioning/routing readiness (distinct error strings), controller replacement races, and any repo-identity branch in the start path.
 - The `<forked_session>` "restarted after a native resume failed" text as evidence of a failed first attempt — it is a synthetic continuity payload staged by worktree binding before any controller exists.
 - Probe-harness artifact: `codex app-server < file` silently exits on stdin EOF racing the response; all early "environment failures" were this.
 
 ## Resolution (verified 2026-07-22)
-1. Merged `bugfix/codex-worktree-app-server-start` (upstream PR 568, head `96872f7f`) into `release/mp-patches-2026-07-20` → merge `bbe19ad2`; one snapshot-test conflict resolved; commit preflight, RepoPrompt build, `AgentRunWorktreeStartTests` (47), `CodexNativeSessionControllerGoalConfigTests` (19) all green.
-2. Rebuilt and relaunched the debug app (`ALLOW_ADHOC_SIGNING=1 ./conductor app relaunch`; provenance now `bbe19ad2`).
+1. Merged `bugfix/codex-worktree-app-server-start` (upstream PR 568, head `96872f7f`) into the local build branch; one snapshot-test conflict resolved; commit preflight, RepoPrompt build, `AgentRunWorktreeStartTests` (47), `CodexNativeSessionControllerGoalConfigTests` (19) all green.
+2. Rebuilt and relaunched the debug app (`ALLOW_ADHOC_SIGNING=1 ./conductor app relaunch`; provenance now names the merge commit).
 3. Four-probe smoke matrix all green, including the previously deterministic failure: work + `<work repo>` `worktree_create` explore probe → SMOKE4_OK.
 
 Pre-existing, unrelated: the canonical ledger verifier reports missing=10/stale=1 for codemap/selection-mirror test IDs on this branch (present before the merge; untouched).
 
 ## Recommendations
 1. Attach the live verification evidence to upstream PR 568 (deterministic repro matrix, ~250 ms persisted failure timelines, session-record analysis) — a maintainer offered fast-tracked review on upstream issue 554 and this is the strongest possible support.
-2. Keep `bugfix/codex-worktree-app-server-start` in every local build until upstream PR 568 merges (ledger row in the personal toolkit's RepoPrompt CE notes).
+2. Keep `bugfix/codex-worktree-app-server-start` in every local build until upstream PR 568 merges.
 3. Optional cleanup: five throwaway probe worktrees under the RepoPrompt worktree folders of both repositories plus the probe tabs/sessions created during this investigation.
 
 ## Preventive Measures
-- Local patch ledger + upstream-sync checklist now live in the personal toolkit's RepoPrompt CE notes (linked from the global agent instructions): every sync/rebuild must pass a `git merge-base --is-ancestor` check per OPEN ledger row before relaunch, and the upstream issue 554 smoke matrix runs before handing the app back for real work.
+- A local patch ledger and upstream-sync checklist now exist: every sync/rebuild must pass a `git merge-base --is-ancestor` check per OPEN ledger row before relaunch, and the upstream issue 554 smoke matrix runs before handing the app back for real work.
 - Diagnose from the session store (`Workspaces/*/AgentSessions/*.json`) before trusting symptom recall — it reconstructs failure timelines across days and immediately falsified the "sudden 07-22 onset" framing.
 - When probing `codex app-server` manually, keep stdin open; file-redirect harnesses produce false failures.

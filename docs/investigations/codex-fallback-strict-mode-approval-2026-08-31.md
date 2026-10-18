@@ -12,7 +12,7 @@ The three `CodexFallbackFIFOTests` failures are a high-confidence test-isolation
 - `testIdlePumpFallbackWaitsForHookReviewBeforeClaimingHeadOrAttachments` throws the same error.
 - `testTerminalSuccessorFallbackWaitsForHookReviewBeforeSuccessorClaim` throws the same error.
 - An isolated class run reports exactly 3 failures out of 30 tests.
-- A source-clean detached control at commit `9d73421397e83e322aecb875786806e2342eb51c` reports the same three failures, excluding the patch under investigation as the cause. The control reused the same persisted user settings, so it doesn't independently isolate settings.
+- A source-clean detached control at a local commit reports the same three failures, excluding the patch under investigation as the cause. The control reused the same persisted user settings, so it doesn't independently isolate settings.
 
 ## Background / Prior Research
 
@@ -35,13 +35,13 @@ The context-builder conclusion is supported with high confidence: this is a test
 
 ### Current-checkout reproduction
 
-- Reproduction context at the start of this investigation: branch `bugfix/887-qualified-read-peer-stall`, `HEAD=2b8f630484f3c4159647dec4d1826262de6fae1e`. `git status` reported 69 pre-existing untracked entries and no tracked modification; this investigation report itself was already untracked.
-- Command: `./conductor test --filter CodexFallbackFIFOTests --async --request-key codex-fallback-fifo-investigation-20260831 --json`.
+- Reproduction context at the start of this investigation: branch `bugfix/887-qualified-read-peer-stall` at a local head. `git status` reported pre-existing untracked entries and no tracked modification.
+- Command: `./conductor test --filter CodexFallbackFIFOTests --async --request-key <key> --json`.
 - Result: 30 tests executed, exactly 3 unexpected failures, in 3.282 seconds. All three throw `strictModeRequiresApproval` at `Sources/RepoPrompt/Features/AgentMode/Runtime/Codex/CodexAgentModeCoordinator.swift:965`:
   - `testIdlePumpFallbackWaitsForHookReviewBeforeClaimingHeadOrAttachments`
   - `testFollowUpDuringInitialHookDiscoveryCoalescesGateAndPreservesRun`
   - `testTerminalSuccessorFallbackWaitsForHookReviewBeforeSuccessorClaim`
-- The previously recorded clean control at `9d73421397e83e322aecb875786806e2342eb51c` has the same exact 3/30 outcome, which excludes the changes under investigation as the trigger.
+- The previously recorded clean control has the same exact 3/30 outcome, which excludes the changes under investigation as the trigger.
 
 ### Settings and workspace resolution
 
@@ -98,7 +98,7 @@ Upstream PR 837 remained open with seven commits when checked on August 31, 2026
 - **Attachment-consumption race:** eliminated. The reservation is detached while queued, is reactivated only during claim, and is consumed only after provider start succeeds.
 - **Unexpected hook trust mutation:** eliminated. The failing decision never enters the trust-write function; the strict test also observes zero trust calls.
 - **Workspace override contamination:** eliminated for these fixtures because the effective workspace ID is nil; the current persisted override map is also absent.
-- **Regression from the patch under investigation:** eliminated by the pre-recorded clean control at `9d73421397e83e322aecb875786806e2342eb51c` with the same exact failures.
+- **Regression from the patch under investigation:** eliminated by the pre-recorded clean control with the same exact failures.
 - **Upstream PR 837 contract change already present locally:** eliminated. The PR is still open; checked-out code retains the conditional non-strict bypass and strict guard.
 
 ### Ownership, severity, scope, and recommendation

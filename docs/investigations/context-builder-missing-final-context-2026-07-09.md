@@ -18,7 +18,7 @@ enhancement that addresses the separate progress-visibility gap (whose purpose-b
 already exists as dead code).
 
 ## Symptoms
-Observed in a prior session (2026-07-09, in a work-repository window, RepoPrompt CE debug build from branch `bugfix/codex-app-server-text-elements`):
+Observed in a prior session (2026-07-09, in a work-repository window, RepoPrompt CE debug build from a local branch carrying the upstream PR 450 fix):
 
 - Every `context_builder` call (plan mode, `export_response: true`) failed with:
   `failed: Context Builder final context is missing for run <RUN_ID> (connection none).`
@@ -43,7 +43,7 @@ Observed in a prior session (2026-07-09, in a work-repository window, RepoPrompt
 2. Multi-window / wrong-active-tab routing causes the run to finalize against a tab whose
    connection isn't live (cf. stale `active_tab_published` token accounting note; possibly
    related to upstream issue 169's wrong-tab tripwire being swallowed).
-3. The local patched branch commit `bf9a0b82` ("fix: update Codex app-server text payload
+3. The local patched branch's one commit ("fix: update Codex app-server text payload
    key", touches only `CodexNativeSessionController.swift` + a Codex test) — plausible ONLY
    if the Context Builder discovery agent runs through the Codex app-server provider;
    otherwise unrelated. Needs verification of which provider backed the run.
@@ -57,8 +57,8 @@ Observed in a prior session (2026-07-09, in a work-repository window, RepoPrompt
 - GitHub viewer permission for `mplibunao`: **READ** → cannot push branches upstream;
   contributing requires creating a fork and adding it as a remote.
 - No existing fork of `repoprompt/repoprompt-ce` under `mplibunao`.
-- Local branch `bugfix/codex-app-server-text-elements` is 1 commit ahead of `main`
-  (`bf9a0b82`, 2026-07-09): changes `CodexNativeSessionController.swift` (1 line) +
+- The local patch branch is 1 commit ahead of `main`
+  (2026-07-09): changes `CodexNativeSessionController.swift` (1 line) +
   adds `CodexNativeSessionControllerTurnDispatchTests.swift`. Codex-provider-scoped.
 
 ### Upstream issues reviewed
@@ -103,11 +103,11 @@ Observed in a prior session (2026-07-09, in a work-repository window, RepoPrompt
 - Local branch is **54 commits behind `origin/main`**; only `ec186667` (Sentry telemetry
   spans, 2026-06-29) touches Context Builder files, and it is instrumentation-only —
   **no upstream fix exists that the local build is merely missing**.
-- Local branch delta vs main is exactly one Codex-provider commit (`bf9a0b82`).
+- Local branch delta vs main is exactly one Codex-provider commit.
 
 ### Explore agent: IDE view removal + CB visibility (2026-07-09)
-- CE is Agent-Mode-only **by design**: Classic has `WindowUIMode` `.ide`/`.agent` toggle
-  (`repoprompt-classic .../WindowState.swift:13,27,33`); CE has no such enum, and
+- CE is Agent-Mode-only **by design**: Classic has an IDE/Agent window-mode toggle;
+  CE has no such enum, and
   `docs/architecture/source-layout.md:75,126,166` + `Scripts/source_layout_guardrails.sh:245,270`
   enforce that IDE-era views stay removed.
 - CB progress today is visible only as (a) an inline chat tool card when CB is invoked as
@@ -143,16 +143,16 @@ Environment discovered during this session — **two CE app instances running si
   served both the failing session and this one.
 - A debug build in `DebugApps` — **debug 1.0.24 (build 25)**, started Jul 8 15:00 UTC, on its own
   socket. Not involved in the failures.
-- ⇒ The local patched branch (`bf9a0b82`, Codex provider only) is **exonerated twice
+- ⇒ The local patched branch (Codex provider only) is **exonerated twice
   over**: the failing app is the release 1.0.27 build, and the patch touches only the
   Codex app-server payload key.
 
 **Five orphaned Context Builder discovery agents** (headless `claude -p … --mcp-config
 …/MCP/LaunchConfigs/discovery-R-<UUID>.json`, each with a `repoprompt_ce_cli` child
 connecting back to the release app), all spawned by the release app, all sleeping, 0% CPU:
-- one spawned Jul 9 10:58 UTC (alive 4.5h; plausibly the user's failed session)
-- four spawned Jul 9 13:54:32–13:55:30 UTC, **four launches ~20s
-  apart within one minute** — pattern consistent with a discovery-launch retry loop where
+- one had been alive for about 4.5h (plausibly from the user's failed session)
+- four launched within one minute, **~20s
+  apart** — pattern consistent with a discovery-launch retry loop where
   the app fails to associate the child's inbound connection with the run and retries.
 - 10 `discovery-R-*.json` configs on disk total; 5 children exited, 5 leaked.
 - Discovery child MCP config points at `~/RepoPrompt/repoprompt_ce_cli`,
@@ -179,7 +179,7 @@ connecting back to the release app), all spawned by the release app, all sleepin
 ## Investigator Findings
 <!-- pair investigator appends here -->
 
-### Investigator pass — 2026-07-09 (static trace on branch `bugfix/codex-app-server-text-elements`)
+### Investigator pass — 2026-07-09 (static trace on the local patch branch)
 
 Read-only source trace of the failing pipeline. All file:line refs verified by direct read
 unless marked *(probe, spot-checked)*. Version skew noted where relevant (working tree is 1
@@ -412,7 +412,7 @@ The three load-bearing investigator claims were re-verified by direct source rea
 - `ContextBuilderAgentViewModel.swift:2718-2721`: constructor hard-codes
   `connectionID: nil`. **Confirmed.**
 
-Also verified: local Codex patch `bf9a0b82` (`"textElements"` → `"text_elements"`) is
+Also verified: the local Codex patch (`"textElements"` → `"text_elements"`) is
 NOT on `origin/main` — upstream `CodexNativeSessionController.swift:1629` still sends
 `"textElements"` even after `1ab555e6` "Fix Codex app-server startup stalls" (Jul 8) —
 so the local fix remains a valid upstream contribution candidate.
@@ -460,7 +460,7 @@ One shared root, three faults (full mechanism in `## Investigator Findings`):
    (noting the ready-made components) and let maintainers choose the surface before
    writing UI code.
 4. **Contribution setup**: fork `repoprompt/repoprompt-ce` (viewer permission is READ),
-   add the fork as a remote, and PR from there. The local Codex fix `bf9a0b82` is also
+   add the fork as a remote, and PR from there. The local Codex fix is also
    still unfixed upstream and can be PR'd.
 5. **Immediate remediation** (operator): quit/restart the installed release CE app
    to clear the affected window's wedge and reap nothing — the 5 zombie `claude -p`

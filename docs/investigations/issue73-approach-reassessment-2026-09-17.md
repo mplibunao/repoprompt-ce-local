@@ -1,6 +1,6 @@
 # Issue 73 approach reassessment
 
-> Investigation report, observed 2026-09-17 on `bugfix/73-queued-start-steering` against `main` at `37f16fbd`. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Investigation report, observed 2026-09-17 on a local candidate branch against `main` at `37f16fbd`. It records what was true then. Where it disagrees with a current document, the current document is right.
 > Current guidance: [docs/spec/headless-mcp-domain-runtime-m5-ai-agent-interaction.md](../spec/headless-mcp-domain-runtime-m5-ai-agent-interaction.md), Authority and compatibility ledger.
 
 ## Run abandoned
@@ -9,7 +9,7 @@ MP abandoned this implementation run. Issue 73 remains unresolved. Preserve the 
 
 ## Confirmed current scope
 
-The candidate is isolated on bugfix/73-queued-start-steering at distribution main 37f16fbd. Nine tracked files differ: 6,769 added lines and 191 deleted lines; most additions are tests (5,362 in the admission suite). Seven production files change. Repeated failures have concerned operation ownership across asynchronous startup, epoch changes, cancellation, routing and initial responses. The thirteenth review of the candidate identifies an initial-response stale-terminal race still unresolved. Passing tests do not establish packaged-runtime acceptance; debug smoke remains deferred while MP works.
+The candidate is isolated on a local branch at distribution main 37f16fbd. Nine tracked files differ: 6,769 added lines and 191 deleted lines; most additions are tests (5,362 in the admission suite). Seven production files change. Repeated failures have concerned operation ownership across asynchronous startup, epoch changes, cancellation, routing and initial responses. The thirteenth review of the candidate identifies an initial-response stale-terminal race still unresolved. Passing tests do not establish packaged-runtime acceptance; debug smoke remains deferred while MP works.
 
 ## Original issue and upstream comparison
 

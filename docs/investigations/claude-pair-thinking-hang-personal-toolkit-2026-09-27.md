@@ -1,19 +1,19 @@
-# Investigation: Claude Code pair agent stuck on "Thinking…" in the personal-toolkit workspace
+# Investigation: Claude Code pair agent stuck on "Thinking…" in the personal toolkit workspace
 
 > Investigation report, observed 2026-09-27 on local build 45. It records what was true then. Where it disagrees with a current document, the current document is right.
 
 ## Summary
-The Claude provider setting "RepoPrompt Only (Strict MCP)" was turned off in production CE on 2026-09-25 08:19 UTC. Since then, CE has launched Claude Code without `--strict-mcp-config`, so Claude loads the user's own MCP servers for the session cwd. For `personal-toolkit` sessions (cwd: the toolkit repository), those include a long-standing entry for the RepoPrompt Classic proxy. The Classic app isn't running, so the proxy never answers, and Claude Code never finishes startup or begins the turn. CE shows "Thinking…" with no timeout for the whole wait. The configuration exposed the hang; the silent, unbounded "Thinking…" is a CE startup-supervision defect. Neither b45 nor the Claude Code version is involved.
+The Claude provider setting "RepoPrompt Only (Strict MCP)" was turned off in production CE on 2026-09-25 08:19 UTC. Since then, CE has launched Claude Code without `--strict-mcp-config`, so Claude loads the user's own MCP servers for the session cwd. For sessions in the personal toolkit's workspace (cwd: the toolkit repository), those include a long-standing entry for the RepoPrompt Classic proxy. The Classic app isn't running, so the proxy never answers, and Claude Code never finishes startup or begins the turn. CE shows "Thinking…" with no timeout for the whole wait. The configuration exposed the hang; the silent, unbounded "Thinking…" is a CE startup-supervision defect. Neither b45 nor the Claude Code version is involved.
 
 ## Symptoms
-- A Claude Code `pair` session (Opus Latest 1M, High) in the RepoPrompt CE workspace `personal-toolkit` shows "Thinking…" for 30+ minutes on the prompt `hi`. Some sessions eventually respond.
+- A Claude Code `pair` session (Opus Latest 1M, High) in the personal toolkit's RepoPrompt CE workspace shows "Thinking…" for 30+ minutes on the prompt `hi`. Some sessions eventually respond.
 - The same role works in other workspaces (the owner's multi-root workspace, others). Plain Claude Code outside RepoPrompt works.
 - It persists across a RepoPrompt CE restart. It was first noticed the day after the b45 production promotion.
 
 ## Background / Prior Research
 
 ### Reproduction (2026-09-27 00:33 UTC)
-- An MCP `agent_run start model_id=pair message="hi"` bound to window 3 (`personal-toolkit`) produced a session that stayed at `Running · Thinking…`.
+- An MCP `agent_run start model_id=pair message="hi"` bound to the personal toolkit's window produced a session that stayed at `Running · Thinking…`.
 - Child process: `claude -p --verbose --output-format stream-json --input-format stream-json --permission-prompt-tool stdio --allow-dangerously-skip-permissions --mcp-config <launch config> --disallowedTools …`, with the toolkit repository as cwd. No `--strict-mcp-config`.
 - The children it spawned: the user's other MCP servers, **the RepoPrompt Classic proxy**, and `repoprompt_ce_cli --backend app` (from the RepoPrompt launch config). Every Claude child was at 0% CPU.
 - No transcript for the new session was written while it was stuck.
@@ -48,7 +48,7 @@ A single unresponsive stdio MCP server blocks Claude Code headless startup befor
 - Claude Code 2.1.283 was installed 2026-09-25 22:19 UTC, but 2.1.281 hangs identically in the controlled tests. **The Claude Code version is not the trigger.**
 
 ### Prior toolkit policy
-The toolkit's notes on RepoPrompt Classic coexistence call for one RepoPrompt edition per Claude or Codex process. MP's `clm` launcher enforces that with `--strict-mcp-config`, which is why Claude Code outside RepoPrompt is unaffected.
+MP's own Claude launcher passes `--strict-mcp-config`, which is why Claude Code outside RepoPrompt is unaffected.
 
 ## Investigator Findings
 
@@ -165,7 +165,7 @@ Two layers.
 ## Resolution (2026-09-27)
 - Strict MCP stays off deliberately, so agents keep the user's other MCP servers.
 - The stale Classic entries were removed from the user's Claude configuration. A before-and-after comparison showed those removals and no other change.
-- Verified in production CE: a `pair` session with prompt `hi` in `personal-toolkit` started its turn 0.5 s after dequeue (previously 200–962 s) and replied 4.1 s later. It loaded `RepoPromptCE` and the user's other MCP servers.
+- Verified in production CE: a `pair` session with prompt `hi` in the personal toolkit's workspace started its turn 0.5 s after dequeue (previously 200–962 s) and replied 4.1 s later. It loaded `RepoPromptCE` and the user's other MCP servers.
 - Codex's Classic entry was already disabled. Claude Desktop still lists Classic, and its log shows the connect-retry loop daily; Desktop's behavior is outside this investigation.
 - The CE startup-supervision and status defects (Recommendations 2–3) are tracked in distribution issue #124, deferred.
 

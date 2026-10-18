@@ -1,18 +1,18 @@
 # Structure settlement: upstream PR 822 adoption reconciliation
 
-> Investigation report, observed 2026-09-03 and 2026-09-04 on the packaged debug app built from `feature/local-rp-stability-stack` at `afb9096e` and later `682f392b`. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Investigation report, observed 2026-09-03 and 2026-09-04 on packaged debug apps built from two successive commits of a local stability branch. It records what was true then. Where it disagrees with a current document, the current document is right.
 
 ## Disposition
 
 The host reboot cleared the historical process and its two residual providers. The replacement debug process began with balanced `read_file`, `get_file_tree`, and `get_code_structure` counters and admitted an immediate roots canary. That clean baseline rules out survival of the earlier in-memory registry state across the reboot.
 
-The replacement process then reproduced the same terminal precondition while running the unchanged packaged commit `afb9096e7ef62c42c54ac90ec0238a0ffaec19c7`. Two current Agent sessions independently issued qualified `read_file` calls: one absolute path and one projected root-qualified path. Each reached the 30-second execution deadline and ignored the five-second cancellation grace. Both detached. The non-resetting `read_file` totals became `deadline_expired=2`, `cleanup_grace_expired=2`, `detached_for_settlement=2`, and `detached_settled=0`. An immediate roots canary returned `tool_execution_structure_settlement_busy`.
+The replacement process then reproduced the same terminal precondition while running the unchanged packaged commit. Two current Agent sessions independently issued qualified `read_file` calls: one absolute path and one projected root-qualified path. Each reached the 30-second execution deadline and ignored the five-second cancellation grace. Both detached. The non-resetting `read_file` totals became `deadline_expired=2`, `cleanup_grace_expired=2`, `detached_for_settlement=2`, and `detached_settled=0`. An immediate roots canary returned `tool_execution_structure_settlement_busy`.
 
-This evidence confirms upstream issue 887's qualified-read trigger and upstream PR 889's intended repair. It doesn't show a failure in upstream PR 822's one-released-provider fence or justify another public issue. The decisive replay remains gated on a clean packaged commit that contains both the then-current upstream and final upstream PR 889 head `4ff8036d0fdb4d675da0caa5a28eabfcd7d14fc2`. At this observation, current upstream is `f650a1babf9bd61ea8d0ba16fd47f268fe9d0837`. The packaged `afb9096e` runtime contains neither that upstream state nor final upstream PR 889.
+This evidence confirms upstream issue 887's qualified-read trigger and upstream PR 889's intended repair. It doesn't show a failure in upstream PR 822's one-released-provider fence or justify another public issue. The decisive replay remains gated on a clean packaged commit that contains both the then-current upstream and final upstream PR 889 head `4ff8036d0fdb4d675da0caa5a28eabfcd7d14fc2`. At this observation, current upstream is `f650a1babf9bd61ea8d0ba16fd47f268fe9d0837`. The packaged runtime contains neither that upstream state nor final upstream PR 889.
 
 ## Evidence
 
-- Upstream PR 822 merged as `99367c753c8da87c0b5568b64f5e4440efd90aa3` and is an ancestor of the refreshed packaged stability build `afb9096e7ef62c42c54ac90ec0238a0ffaec19c7`.
+- Upstream PR 822 merged as `99367c753c8da87c0b5568b64f5e4440efd90aa3` and is an ancestor of the refreshed packaged stability build.
 - Upstream PR 889 precursor `863ea8765ee0ed5039e3618dedae825cbac0aba6` is also an ancestor of that packaged build. Final PR head `4ff8036d0fdb4d675da0caa5a28eabfcd7d14fc2` isn't: later commits `9180e6041af8b09d88d589a86602d21bf856e72f` and `4ff8036d0fdb4d675da0caa5a28eabfcd7d14fc2` add exact-identity revalidation and qualified-path freshness isolation.
 - At the pre-reboot upstream snapshot `42fbfc770048ff4bd76d2f7b58c8ec0f36804318`, the registry and watchdog blobs were byte-identical at the upstream PR 822 merge, the refreshed packaged build, and that upstream commit:
   - `MCPDomainCodeStructureSettlementRegistry.swift`: `15ab8de417a26b9d6d5aa49e6bb2e4496ddbd739`
@@ -26,7 +26,7 @@ This evidence confirms upstream issue 887's qualified-read trigger and upstream 
 
 The fresh read-only triage used the existing physical window and contexts. It didn't create a window, workspace, `worktree`, or provider run, and it didn't reopen the canceled historical triage run.
 
-- The only RepoPrompt process was debug app `<debug app A>`, launched at 2026-09-04 01:31:59 UTC. Bundle provenance reported branch `feature/local-rp-stability-stack`, commit `afb9096e7ef62c42c54ac90ec0238a0ffaec19c7`, and `dirty: false`; no production process was present.
+- The only RepoPrompt process was debug app `<debug app A>`, launched at 2026-09-04 01:31:59 UTC. Bundle provenance reported the local stability branch and `dirty: false`; no production process was present.
 - The first non-resetting snapshot showed balanced counters. `get_file_tree` had three starts and three handler completions, while `read_file` had two starts and two handler completions. Neither tool had a deadline expiration, grace expiration, detachment, or residual settlement entry. `get_code_structure` had no residual detachment. An explicitly routed roots canary completed in 20 to 40 milliseconds.
 - The incident-correlation session for upstream issue 918 (heartbeat-only) called `read_file` at 01:40:52 with the absolute path `<checkout>/docs/investigations/context-builder-selection-construction-watchdog-2026-09-01.md`. The response arrived 35.259 seconds later with `tool_execution_timeout` and explicit detached-for-eventual-cleanup semantics.
 - Session `Upstream heartbeat coverage audit` called `read_file` at 01:42:40 with projected root-qualified path `repoprompt-ce/Sources/RepoPrompt/Features/Diagnostics/MCP/MCPToolExecutionDiagnostics.swift`. The response arrived 35.086 seconds later with the same timeout and detachment result. This is a projected workspace path, distinct from the explicit `root-alias//relative-path` token form.
@@ -34,7 +34,7 @@ The fresh read-only triage used the existing physical window and contexts. It di
 - A bounded roots canary then returned in 30 milliseconds with `tool_execution_structure_settlement_busy`, reporting the limit of one released cancellation-ignoring structure provider. The exact saved session records tie the two timeout outputs to their qualified input paths, so the new pair no longer has the historical incident's first-provider attribution gap.
 - A mandatory upstream issue 881 Context Builder was already active when the first Agent timed out. A separate stability-integration Context Builder began after the terminal fence already existed. Neither builder's owner interrupted or repurposed it for this triage. Their owning lanes retain the campaign's 20-minute continuous no-progress policy.
 
-This sequence proves process-local recurrence from a clean baseline on `afb9096e`; it doesn't prove persistence across reboot. Both failing forms are explicitly within upstream issue 887: an absolute existing-file path and a root-qualified existing-file path in a multi-root workspace.
+This sequence proves process-local recurrence from a clean baseline on that build; it doesn't prove persistence across reboot. Both failing forms are explicitly within upstream issue 887: an absolute existing-file path and a root-qualified existing-file path in a multi-root workspace.
 
 ## Current integration prerequisite
 
@@ -58,19 +58,19 @@ Upstream PR 936 can prevent a routed tool from combining an inactive workspace i
 
 ## Post-refresh packaged-runtime evidence
 
-Bundle provenance recorded branch `feature/local-rp-stability-stack`, commit `afb9096e7ef62c42c54ac90ec0238a0ffaec19c7`, and `dirty: false`. The replay used fresh `rpce-cli-debug` invocations with explicit window and context routing against temporary window 2 and context `<context A>`.
+Bundle provenance recorded the same clean stability commit. The replay used fresh `rpce-cli-debug` invocations with explicit window and context routing against a temporary window and context `<context A>`.
 
-- At 2026-09-03 11:56:20 UTC, the stability acceptance task issued `get_code_structure`, `read_file`, and `get_file_tree` concurrently in window 2. Code structure completed in 25.408 seconds and the read completed in 21.253 seconds. The tree request targeting `Sources/RepoPrompt/Infrastructure/MCP` reached the 30-second execution deadline, did not settle during the five-second cancellation grace, and returned `tool_execution_timeout` at 11:56:55.
+- At 2026-09-03 11:56:20 UTC, the stability acceptance task issued `get_code_structure`, `read_file`, and `get_file_tree` concurrently in the temporary window. Code structure completed in 25.408 seconds and the read completed in 21.253 seconds. The tree request targeting `Sources/RepoPrompt/Infrastructure/MCP` reached the 30-second execution deadline, did not settle during the five-second cancellation grace, and returned `tool_execution_timeout` at 11:56:55.
 - At 11:57:14, 18.8 seconds after the detached timeout completed, another tree request returned `tool_execution_structure_settlement_busy` with bounded-recovery guidance. This is the expected upstream PR 822 fence during its 30-second recovery horizon.
 - At 11:57:45, 50.3 seconds after the first detach, a fresh tree request was admitted. Admission proves the first provider stopped fencing on schedule. The fresh request independently reached the same 30-second deadline and five-second grace and returned `tool_execution_timeout` at 11:58:20.
 - No post-refresh response reported `released_provider_limit_reached`. The replay therefore did not exhaust the one-released-provider allowance and did not enter upstream PR 822's terminal safety state.
-- The two timed-out providers are attributable to the stability acceptance caller in window 2. Context `<context A>` projected reads into the upstream PR 472 worktree, but upstream PR 472 did not initiate these invocations.
+- The two timed-out providers are attributable to the stability acceptance caller in the temporary window. Context `<context A>` projected reads into the upstream PR 472 worktree, but upstream PR 472 did not initiate these invocations.
 - The timeout responses omitted invocation ID, connection ID, and last handler phase. Current code reports separate `get_file_tree` phases for request resolution, ingress wait, and tree construction, so this evidence cannot distinguish a worktree-ingress wait from tree construction.
 - MP retired the temporary physical window after this sequence. That retirement canceled the later tiny Context Builder availability canary and superseded its result; it did not cause the earlier tree timeouts and is not standalone provider evidence.
 
 ## Reopened packaged-runtime evidence
 
-The later incident occurred in the still-running packaged debug process `<debug app B>`, launched from clean commit `afb9096e7ef62c42c54ac90ec0238a0ffaec19c7`. It affects window 3 rather than the retired temporary window 2.
+The later incident occurred in the still-running packaged debug process `<debug app B>`, launched from the same clean commit. It affects a different window than the retired temporary one.
 
 ### Entry into the terminal fence
 
@@ -185,8 +185,8 @@ The closest prior owner is closed upstream issue 390. Its acceptance criteria re
 
 ### Runtime and invocation evidence
 
-- The sole debug app was `<debug app C>`, launched at 2026-09-04 02:36:38 UTC. Bundle provenance reported clean commit `682f392b36c0b12d6f3b58890d986d2663b6d383` on `feature/local-rp-stability-stack`. That commit contains final upstream PR 889 head `4ff8036d0fdb4d675da0caa5a28eabfcd7d14fc2`.
-- The existing context was `<tab A>` in physical window 1. It projected the `repoprompt-ce` root into its existing session-bound stability `worktree`. The triage made no changes to the window, workspace, context, or `worktree`.
+- The sole debug app was `<debug app C>`, launched at 2026-09-04 02:36:38 UTC. Bundle provenance reported a later clean commit on the local stability branch. That commit contains final upstream PR 889 head `4ff8036d0fdb4d675da0caa5a28eabfcd7d14fc2`.
+- The existing context was `<tab A>` in an existing physical window. It projected the `repoprompt-ce` root into its existing session-bound stability `worktree`. The triage made no changes to the window, workspace, context, or `worktree`.
 - At 02:43:28 UTC, a fresh packaged `repoprompt-mcp` process issued `tree Sources/RepoPrompt/Infrastructure/MCP` with explicit window and context routing. The bare relative path could resolve across the context's multi-root `namespace`.
 - At 02:44:04, after 35.685 seconds, the call returned `tool_execution_timeout`. It crossed the 30-second execution deadline and remained active through the five-second cleanup grace, so the watchdog detached it for eventual cleanup.
 - Immediately before the tree call, two `get_code_structure` requests returned code-graph-pending responses and a direct `read_file` for lines 1 to 20 completed in 3.7 seconds. Those sibling outcomes show that routing and basic file access were available. They don't identify the tree provider's blocked phase.

@@ -1,11 +1,11 @@
 # Skills audit 2026-10-16 (release-candidate landing)
 
-> Investigation report, observed 2026-10-16 on `chore/release-candidate-landing` at `627bd7d3d`. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Investigation report, observed 2026-10-16 on a local head of `chore/release-candidate-landing`. It records what was true then. Where it disagrees with a current document, the current document is right.
 > Current guidance: [.agents/skills/rpce-merge-pr-batch/SKILL.md](../../.agents/skills/rpce-merge-pr-batch/SKILL.md), the whole skill; [CONTRIBUTING.md](../../CONTRIBUTING.md), Landing.
 
 ## Scope
 
-Branch `chore/release-candidate-landing` in the worktree `<worktree>`, commits `a5ed7c5d4` (scripts, workflows, tests) and `627bd7d3d` (skill text) over `main` at `683d51ae4`, read at `627bd7d3d` (the worktree's `HEAD`, clean). The Markdown files the range touches, read whole:
+Branch `chore/release-candidate-landing` in the worktree `<worktree>`, commits `a5ed7c5d4` (scripts, workflows, tests) and a local skill-text commit over `main` at `683d51ae4`, read at the skill-text commit (the worktree's `HEAD`, clean). The Markdown files the range touches, read whole:
 
 - `AGENTS.md` (`CLAUDE.md` is a symlink to it)
 - `CONTRIBUTING.md`
@@ -29,11 +29,11 @@ Nothing in the worktree or the repository was changed. This report is the only f
 
 | Check | Command or method | Result |
 | --- | --- | --- |
-| Structure | The repository has no skill lint; `make guardrails` (source layout, contributor allowlist, Claude skill links, SwiftPM notices, Codex vendor, headless runtime, xcframework paths) run in the worktree at `627bd7d3d` | Exit 0. Both skills' `name:` match their folders and `.claude/skills/<name>` symlinks resolve. Merge-batch description: quoted, 198 characters. Contribution-check description: unquoted, no colon, 579 characters (finding 24) |
+| Structure | The repository has no skill lint; `make guardrails` (source layout, contributor allowlist, Claude skill links, SwiftPM notices, Codex vendor, headless runtime, xcframework paths) run in the worktree at that head | Exit 0. Both skills' `name:` match their folders and `.claude/skills/<name>` symlinks resolve. Merge-batch description: quoted, 198 characters. Contribution-check description: unquoted, no colon, 579 characters (finding 24) |
 | Usage and dependents | `skillUsage` in `~/.claude.json`; Claude Code transcripts under `~/.claude/projects` (1,435 files modified in the window); Codex logs under `~/.codex/sessions` and `archived_sessions` (80 files); RepoPrompt CE's Codex logs under `Codex/Release/home` (1,695 files); the toolkit's usage telemetry; dependents search over this repository and the personal toolkit. Counts only; the script that produced them is in the session scratchpad and was not kept | Two skills in scope, both used in the window: findings 36 and 37. No skill with zero recorded use |
 | Prose | `vale --config ~/.config/vale/.vale.ini` 3.15.1 on each file; the unslop skill's docs rules applied report-only; every relative link, anchor, and backticked path resolved against the worktree | Vale: 1,303 alerts over the eight files, 510 once `Readability.*` and `Vale.Spelling` are set aside (`docs/releasing.md` 206, merge-batch skill 83, `AGENTS.md` 67, matrix 59, contribution-check skill 41, `CONTRIBUTING.md` 41, `docs/porting.md` 12, `review-prompts.md` 1), mostly passive voice and `Microsoft.*`; left as review input in the session's saved tool output, not triaged into rows. Links and anchors: all resolve, including `CONTRIBUTING.md#landing`, `SKILL.md#candidate-validation`, `docs/testing.md#debug-profile-isolation`, `docs/open-source-readiness.md#release-metadata-and-signing`, and `version.env`. One path does not exist on disk: the candidate worktree (finding 4). Reader findings: 3 to 9, 25 to 28 |
 | Restated rules | Reading pass per the skills-audit skill's restated-rules guide: rules listed per file, compared within each file, between the two skills, and against `AGENTS.md`, `CONTRIBUTING.md`, and the neighbours | 14 pairs or groups, findings 1, 2, 10 to 18, 29, 30. PR 194 audit findings 2, 3, 4, 14, 17, and 18 are absorbed by the rewrite (see "Absorbed from the PR 194 audit") |
-| Platform claims | Vendor documentation per the skills-audit skill's platform-claims guide where the fetch completed; `gh` 2.102.0 and `git` 2.54.0 `--help` locally; the repository's own `preflight.sh`, workflows, and `version.env` at `627bd7d3d` for claims about this checkout | 19 claims: 13 hold, 0 changed, 6 not verified (findings 19 to 23, 31 to 33). Fetches of the `gh` manual pages, the GitHub page on approving one's own pull request, and a web search were cancelled after the session stalled; those claims are recorded as not verified with the local evidence that exists |
+| Platform claims | Vendor documentation per the skills-audit skill's platform-claims guide where the fetch completed; `gh` 2.102.0 and `git` 2.54.0 `--help` locally; the repository's own `preflight.sh`, workflows, and `version.env` at that head for claims about this checkout | 19 claims: 13 hold, 0 changed, 6 not verified (findings 19 to 23, 31 to 33). Fetches of the `gh` manual pages, the GitHub page on approving one's own pull request, and a web search were cancelled after the session stalled; those claims are recorded as not verified with the local evidence that exists |
 | Rigidity | Reading pass per the skills-audit skill's rigidity guide over `AGENTS.md`, the two skills, and `openai.yaml` | 4 lines quoted, all `keep` (findings 34, 35) |
 | Pruning | Reading pass per the skills-audit skill's pruning guide over the steering files in scope: `AGENTS.md` (audited once), both skills, `openai.yaml` | 3 lines quoted (findings 24, 29, 38); duplicated rules are under the restated-rules check |
 
@@ -41,7 +41,7 @@ Nothing in the worktree or the repository was changed. This report is the only f
 
 The earlier report (`2026-10-16-skills-audit-pr194.md`) proposed six merge-batch changes this rewrite was meant to absorb. All six are absorbed; two leave a residue.
 
-| PR 194 finding | Status at `627bd7d3d` |
+| PR 194 finding | Status at the reviewed head |
 | --- | --- |
 | 2 (`pr-ready` mandatory, five copies) | Absorbed: `CONTRIBUTING.md` "Validation" and step 7 no longer state it, the merge-batch skill no longer runs `pr-ready`, and contribution-check skill:50 cites `AGENTS.md` for when each lane runs. Residue: contribution-check skill:8 and :44 still give their own conditions (finding 11) |
 | 3 (commit lane restated in the merge-batch skill) | Absorbed: the restatement is gone. The candidate's merge commits now run no commit lane and nothing says so (finding 1) |
@@ -52,7 +52,7 @@ The earlier report (`2026-10-16-skills-audit-pr194.md`) proposed six merge-batch
 
 ## Findings
 
-Line numbers are at `627bd7d3d`. "Landing step N" means the numbered list under `CONTRIBUTING.md` "Landing"; "step N" alone means the "Flow" list.
+Line numbers are at the reviewed head. "Landing step N" means the numbered list under `CONTRIBUTING.md` "Landing"; "step N" alone means the "Flow" list.
 
 | # | Location | Check | Evidence | Disposition | Proposed change | Effect |
 | --- | --- | --- | --- | --- | --- | --- |

@@ -1,6 +1,6 @@
 # Investigation: Bundled vs local Codex app-server — should RepoPrompt support both?
 
-> Investigation report, observed 2026-09-05 on a local checkout at `2b8f6304` with bundled `codex-cli 0.149.0`. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Investigation report, observed 2026-09-05 on a local checkout with bundled `codex-cli 0.149.0`. It records what was true then. Where it disagrees with a current document, the current document is right.
 > Current guidance: [docs/releasing.md](../releasing.md), Bundled Codex artifact.
 
 ## Summary
@@ -121,8 +121,8 @@ Repo: `repoprompt/repoprompt-ce` (GitHub Discussions disabled; issues/PRs are th
 The commit exists in the local object database and on remote refs, but it is not an ancestor of this checkout:
 
 - `git log --all --oneline --grep='906' --grep='global instructions' --grep='AGENTS' -i` includes `13e9be2d fix(codex): project global instructions into managed state (#906)`.
-- `git merge-base --is-ancestor 13e9be2d HEAD` exits `1`. `HEAD` is `2b8f630484f3c4159647dec4d1826262de6fae1e` (`fix: isolate display-alias reads from peer roots`, 2026-08-29). The local branch is one commit ahead of and 46 commits behind `origin/bugfix/887-qualified-read-peer-stall`.
-- `git branch -r --contains 13e9be2d` includes `origin/bugfix/887-qualified-read-peer-stall`, `origin/bugfix/881-large-export-watchdog`, `origin/bugfix/882-same-workspace-admission`, `origin/feature/local-rp-diagnostics`, `upstream/main` (and `upstream/HEAD -> upstream/main`), plus multiple upstream feature/worktree refs. Thus the named remote tracking branch contains the fix even though the checked-out local HEAD does not.
+- `git merge-base --is-ancestor 13e9be2d HEAD` exits `1`. `HEAD` is a local commit (`fix: isolate display-alias reads from peer roots`, 2026-08-29). The local branch is one commit ahead of and 46 commits behind `origin/bugfix/887-qualified-read-peer-stall`.
+- `git branch -r --contains 13e9be2d` includes `origin/bugfix/887-qualified-read-peer-stall`, `origin/bugfix/881-large-export-watchdog`, `origin/bugfix/882-same-workspace-admission`, `upstream/main` (and `upstream/HEAD -> upstream/main`), plus multiple upstream feature/worktree refs. Thus the named remote tracking branch contains the fix even though the checked-out local HEAD does not.
 - `git cat-file -e HEAD:Sources/RepoPrompt/Infrastructure/AI/Providers/Codex/Shared/CodexGlobalInstructionsProjection.swift` fails because that path does not exist on HEAD. A HEAD-only Sources search for `AGENTS.override.md`, `AGENTS.md`, `instructions projection`, and `managed instructions` finds only unrelated project-instruction prompt text, not a projection implementation.
 
 The remote commit is unambiguous about what is missing here. Its commit-relative `CodexGlobalInstructionsProjection.swift:72-76` names `AGENTS.override.md`, `AGENTS.md`, and `.repoprompt-agents-projection.json`; lines 79-114 read the ordinary and managed homes, compute actions, apply them, and commit the ownership manifest. Its commit-relative `CodexRuntimeAuthority.swift:36-48` calls that projection from `Runtime.prepareState()`. None of those changes is on this HEAD.

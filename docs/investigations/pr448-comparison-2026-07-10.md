@@ -1,8 +1,8 @@
 # Comparison of upstream PR 448 and the local fix for upstream issue 444
 
-> Investigation report, observed 2026-07-10 on upstream PR 448 at `a3ab68ee` and the local branch `bugfix/context-builder-teardown-ownership`. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Investigation report, observed 2026-07-10 on upstream PR 448 at `a3ab68ee` and a local fix branch. It records what was true then. Where it disagrees with a current document, the current document is right.
 
-**Compared:** Upstream PR 448 at a3ab68eec51652e8d9b710a8981ac55156df0841. The other sources are upstream issue 444 and the range upstream/main..bugfix/context-builder-teardown-ownership.
+**Compared:** Upstream PR 448 at a3ab68eec51652e8d9b710a8981ac55156df0841. The other sources are upstream issue 444 and the local fix branch's commits since upstream/main.
 
 Line references below use the upstream PR 448 head.
 

@@ -1,6 +1,6 @@
 # Investigation: Worktree-bound Codex app-server startup failure
 
-> Investigation report, observed 2026-07-15 on the debug bundle built from `release/mp-patches` at `96df8c52`. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Investigation report, observed 2026-07-15 on the debug bundle built from the local patch branch. It records what was true then. Where it disagrees with a current document, the current document is right.
 
 Status: complete
 
@@ -33,7 +33,7 @@ Reusing a healthy root app-server is protocol-compatible but does not fit RepoPr
 
 ### Git archaeology
 
-- Three July 13 commits introduced a Codex-only fail-closed MCP readiness chain: `f80e2005` added throwing routing readiness, `d39eebc6` validated Codex MCP provisioning before app-server launch, and `0df1ef7f` converted an unconfirmed route into terminal startup failure. These commits could amplify a worktree-specific routing mismatch, but the installed debug bundle reports provenance commit `96df8c52`, which does not contain them by ancestry; the bundle's dirty marker prevents treating that provenance as absolute exclusion.
+- Three July 13 commits introduced a Codex-only fail-closed MCP readiness chain: `f80e2005` added throwing routing readiness, `d39eebc6` validated Codex MCP provisioning before app-server launch, and `0df1ef7f` converted an unconfirmed route into terminal startup failure. These commits could amplify a worktree-specific routing mismatch, but the installed debug bundle's provenance commit does not contain them by ancestry; the bundle's dirty marker prevents treating that provenance as absolute exclusion.
 - No July 9–15 commit changed the existing cwd projection itself: `CodexNativeSessionController` passes the selected workspace path to `CodexAppServerClient`, which uses it both as process cwd and thread cwd. The bound worktree therefore changes app-server process cwd even though Codex protocol does not require a separate cwd-bound server.
 - `48e1171b` later improved process-launch error classification without changing Codex cwd, environment construction, or executable resolution. The debug bundle predates this diagnostic hardening by ancestry.
 - The July 9 `text_elements` protocol correction occurs after startup and does not explain the worktree-only provider-start boundary.
@@ -132,7 +132,7 @@ For multi-root workspaces, always using `repoPaths.first` would preserve the cur
 
 The stderr reader drains output but retains it only as optional debug printing (`CodexAppServerClient.swift:1025-1050`). Teardown discards the result of `ProcessTermination.terminateAndReap` (`CodexAppServerClient.swift:681-699`). The incident left no exit code, signal, or stderr tail from which to identify the launcher failure.
 
-The installed debug bundle's retained provenance reports branch `release/mp-patches`, commit `96df8c5282e2d31e908dbb64ad3750625350e723`, build time `2026-07-13T02:52:27Z`, and `dirty: true`. The current checkout is also at `96df8c52`; its tracked source has no current modifications, while investigation and prompt-export files are untracked. The provenance format records only a Boolean dirty flag, not the files or diff present at build time (`Scripts/package_app.sh:344-384`). Byte-for-byte correspondence between the installed artifact and commit `96df8c52` cannot be established.
+The installed debug bundle's retained provenance reports the local patch branch, build time `2026-07-13T02:52:27Z`, and `dirty: true`. The current checkout is at the same commit; its tracked source has no current modifications. The provenance format records only a Boolean dirty flag, not the files or diff present at build time (`Scripts/package_app.sh:344-384`). Byte-for-byte correspondence between the installed artifact and that commit cannot be established.
 
 Mise remains plausible because the app-server wrapper is launched under the worktree cwd and cwd-sensitive tool selection can fail before JSON-RPC initialization. The same evidence also fits any other cwd-sensitive wrapper, shim, trust rule, runtime lookup, or repository-local tool configuration. Without retained startup stderr or an incident-time wrapper trace, mise cannot be elevated above that class of explanations.
 
@@ -164,7 +164,7 @@ Mise remains plausible because the app-server wrapper is launched under the work
 
 **Findings:** Codex app-server supports per-thread and per-turn cwd overrides, so process reuse across working directories is protocol-compatible. Mise configuration and shim resolution are cwd-sensitive, but current mise versions can share trust from a main checkout to linked worktrees. Git history showed later Codex-only fail-closed MCP readiness changes, while the installed dirty debug provenance predates them by ancestry.
 
-**Evidence:** Codex app-server protocol and mise documentation linked under Background / Prior Research; commits `f80e2005`, `d39eebc6`, `0df1ef7f`, and installed provenance `96df8c52`.
+**Evidence:** Codex app-server protocol and mise documentation linked under Background / Prior Research; commits `f80e2005`, `d39eebc6`, `0df1ef7f`, and the installed provenance.
 
 **Conclusion:** A separate app-server is an integration ownership choice, not a Codex cwd requirement. Mise remains a plausible trigger class, not a proven cause.
 
@@ -192,7 +192,7 @@ Mise remains plausible because the app-server wrapper is launched under the work
 
 **Hypothesis:** The investigation may be routed to the wrong RepoPrompt window or an inactive app state.
 
-**Findings:** The running RepoPrompt CE window is the owner's multi-root workspace on `release/mp-patches`. The pair investigator and its three focused probes are visibly completed in the active investigation task.
+**Findings:** The running RepoPrompt CE window is the owner's multi-root workspace on the local patch branch. The pair investigator and its three focused probes are visibly completed in the active investigation task.
 
 **Evidence:** RepoPrompt accessibility state for an investigation window.
 
@@ -220,7 +220,7 @@ Mise is therefore a plausible mechanism within a broader class of cwd-sensitive 
 
 ### Remaining uncertainty
 
-- The installed debug bundle reports commit `96df8c52` with `dirty: true`, so byte-for-byte correspondence with the selected checkout is unproven.
+- The installed debug bundle reports its commit with `dirty: true`, so byte-for-byte correspondence with the selected checkout is unproven.
 - The exact incident path among immediate exit, EOF, liveness invalidation, and teardown races is unknown.
 - Secondary-root worktree creation remains outside the current product scope, but inherited multi-root bindings require the cwd model to derive both paths from the same owning root.
 

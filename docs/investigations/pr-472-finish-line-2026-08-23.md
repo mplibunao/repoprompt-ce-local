@@ -25,8 +25,8 @@ Upstream PR 472 addresses a real, still-open provider-level liveness defect: cur
 - Static inspection still finds the pre-fix mirror tail and invalidation-insensitive waiter behavior; no upstream equivalent of `MCPSelectionMirrorWaitSignal`, `mcpSelectionMirrorTimeout`, `cancelMirrorWaiters`, or a context-bearing `SequenceWaiter` exists.
 
 ### Local branch archaeology (explore agent, 2026-08-23)
-- GitHub PR head: `origin/bugfix/selection-mirror-wedge` = local `bugfix/selection-mirror-wedge-rebase-pr472` at `37047b3900d9b49eed277e0a7fe6481d4c738ade`.
-- Do not confuse it with stale local `bugfix/selection-mirror-wedge` at `2ca83e9703c930221d0e682349e464b64a70408f`; that is the pre-rebase series. A clean linked worktree still exists for that older branch.
+- GitHub PR head: `origin/bugfix/selection-mirror-wedge` at `37047b3900d9b49eed277e0a7fe6481d4c738ade`, matching a local rebase branch.
+- Do not confuse it with stale local `bugfix/selection-mirror-wedge` at `2ca83e9703c930221d0e682349e464b64a70408f`; that is the pre-rebase series.
 - PR commits are `d8d47126` (bounded selection mirror tail), `57a3f408` (released auto-selection waiters), and `37047b39` (selected-scope test setup). Aggregate delta: six files, +535/-97.
 - The first two commits add the substantive implementation and five regression tests. The third only synchronized a selected-scope test setup; its current relevance is uncertain because that test was later rewritten.
 
@@ -250,12 +250,12 @@ Canonical compose-tab selection is already durable before UI mirroring. The fix 
 8. **PR update strategy.** Prefer updating the existing PR only after the reconstructed series is reviewed locally. Any history rewrite/`--force-with-lease` requires explicit user approval immediately beforehand. If the existing PR proves impractical, open a replacement before closing upstream PR 472; do not close upstream issue 457 without current-head evidence that the provider-level wedge is fixed.
 
 ## Execution Outcome (Orchestrate Loop, 2026-08-24)
-- Implemented in isolated worktree `<worktree>` on branch `bugfix/pr472-selection-mirror-recovery`, based at `44774ffafc74dc22696cd9bf6189f6650a9cc1a0`.
+- Implemented in isolated worktree `<worktree>` on a local recovery branch, based at `44774ffafc74dc22696cd9bf6189f6650a9cc1a0`.
 - Final uncommitted diff: 10 files, +1171/-153. No commit, push, force-push, branch deletion, GitHub mutation, or visible app launch occurred.
 - Correctness review converged after three passes; a separate refactor review found no worthwhile simplification.
 - Validation passed: build; `WorkspaceSelectionCoordinatorTests` 34/34; `MCPReadFileAutoSelectionCoordinatorTests` 27/27; persistent MCP connection integration 24/24; unchanged code-structure suite 9/9; formatter; strict lint; and `git diff --check`.
 - Full suite executed 4,715 tests. Two transient diff/stdio failures passed focused reruns. Three consistently failing Codex fallback tests exercise local `strictModeRequiresApproval` behavior outside the changed paths and remain an external baseline issue.
-- Live CE MCP validation completed after explicit relaunch approval. On window 2, authoritative read auto-selection advanced sequence 6→7 in 84.5 ms, an immediate `manage_selection clear` completed within two seconds, and probe drain completed in 0.1 ms with idle worker, no pending work, and zero waiters. Two replacement connections also drained in 0.2 ms and left all canonical/mirror lane, worker, pending, and closing-context counts at zero after exit. Sibling window 1 remained responsive (selection snapshot 0.09 s; indexed search 2.01 s). A truly cancellation-ignoring physical mirror park was not injectable through the live diagnostics surface; the XCTest-only gate remains the deterministic evidence for that path. Structural-file reads separately encountered `tool_execution_structure_settlement_busy` while auto-selection counts were all zero, confirming an unrelated pre-auto-selection settlement issue rather than upstream issue 457.
+- Live CE MCP validation completed after explicit relaunch approval. In the debug app window, authoritative read auto-selection advanced sequence 6→7 in 84.5 ms, an immediate `manage_selection clear` completed within two seconds, and probe drain completed in 0.1 ms with idle worker, no pending work, and zero waiters. Two replacement connections also drained in 0.2 ms and left all canonical/mirror lane, worker, pending, and closing-context counts at zero after exit. Sibling window 1 remained responsive (selection snapshot 0.09 s; indexed search 2.01 s). A truly cancellation-ignoring physical mirror park was not injectable through the live diagnostics surface; the XCTest-only gate remains the deterministic evidence for that path. Structural-file reads separately encountered `tool_execution_structure_settlement_busy` while auto-selection counts were all zero, confirming an unrelated pre-auto-selection settlement issue rather than upstream issue 457.
 - Proposed commit split remains: (1) `fix: bound workspace selection mirror ownership`; (2) `fix: retire invalidated auto-selection mirror owners`; (3) `test: stress selection mirror recovery lifecycle`.
 
 ## Preventive Measures
@@ -270,7 +270,7 @@ Canonical compose-tab selection is already durable before UI mirroring. The fix 
 
 ### Local publication state
 
-- Branch: `bugfix/pr472-selection-mirror-recovery`
+- Branch: the local recovery branch
 - Exact base: `44774ffafc74dc22696cd9bf6189f6650a9cc1a0` (`upstream/main` at reconstruction time)
 - Exact local head: `9ab7c673821d86c1241621cfc66e913b09f07bd6`
 - Clean tracked/untracked worktree at handoff.
@@ -303,9 +303,9 @@ Canonical compose-tab selection is already durable before UI mirroring. The fix 
 ### Live upstream issue 457 receipt
 
 - Smoke launch/packaging had already been explicitly approved and completed; the smoke passed using `/usr/local/bin/rpce-cli-debug`.
-- Strong capture: window 2, one workspace, tab, and connection, binding generation 12.
+- Strong capture: one window, workspace, tab, and connection, binding generation 12.
 - Authoritative read sequence advanced 6 -> 7; the probed read changed selection in 84.5 ms. Immediate `manage_selection clear` returned inside 2 s. Drain target 7 completed in 0.1 ms (settle 0 ms) with no pending work, no waiters, and idle worker.
-- After connection exit, both windows reached zero canonical/mirror lanes, workers, pending/closing state within 1 s and the limiter record disappeared. Sibling window 1 remained healthy: selection snapshot 0.09 s, indexed search 2.01 s.
+- After connection exit, both windows reached zero canonical/mirror lanes, workers, pending/closing state within 1 s and the limiter record disappeared. The sibling window remained healthy: selection snapshot 0.09 s, indexed search 2.01 s.
 - The live MCP diagnostics surface does not expose the XCTest-only cancellation-ignoring mirror gate (`setReadFileAutoSelectionMirrorGateForTesting`), so live testing proves bounded ordinary read/mutation/drain/replacement/teardown and sibling health, not a truly cancellation-ignoring physical park. The deterministic XCTest gates provide that proof.
 
 ### Current PR and lease expectation

@@ -6,7 +6,7 @@ Local triage report, read-only against the running production app. No debug app 
 
 ## Report
 
-External Codex Desktop agent, window 4 (the work workspace), `context_builder` with `response_type: plan`, `export_response: true`, 51-file selection, Oracle `CLI GPT-5.6 Sol High`.
+External Codex Desktop agent in the work workspace's window, `context_builder` with `response_type: plan`, `export_response: true`, 51-file selection, Oracle `CLI GPT-5.6 Sol High`.
 
 1. `context_builder` returned: "Follow-up response stalled for 600.3s with no streaming/finalization activity during Oracle response streaming. Last event: waiting for Oracle stream activity."
 2. Same-chat recovery via `oracle_send` (`mode: plan`, `export_response: true`, `new_chat: false`) returned: "The Context Builder query was finalized by the interactive inactivity watchdog."
@@ -48,7 +48,7 @@ Two layers.
 1. `CodexCLIProvider` forwards Codex's retriable error notifications ("Reconnecting... n/5") as `AIStreamResult(type: "status", text:)`. `AIQueriesService.sendPrompt` treats every non-empty `text` as assistant content, so the status string is written into the message, the UI, and the saved chat, and it counts as first content for the interactive watchdog. That watchdog then applies the 10-second post-content grace to a stream that is, by Codex's own account, waiting on a reconnect. This is what turned the recovery into "finalized by the interactive inactivity watchdog" and left `Reconnecting... 2/5` as the only assistant message.
 2. The MCP `oracle_send` path (`OracleViewModel+MCP.swift`, `tool_chatSend`) calls `sendMessage` with the default `.interactive` completion policy and then waits with `waitForContextBuilderCompletion`. The Context Builder follow-up path uses `.contextBuilderStrict`, which disables the interactive watchdog and relies on the 10-minute monitor instead. So a same-chat recovery through `oracle_send` runs under a stricter, 10-second watchdog than the call it is recovering.
 3. The Context Builder finalization monitor counts only `OracleMessageLifecycleActivityEvent`s. `CodexCLIProvider` drops `.livenessActivity` (`continue`) and the app never emits transport activity for Codex, so a Codex turn that is alive but silent, or reconnecting, looks identical to a dead one. The 600-second ceiling therefore cuts the turn during Codex's own retry budget (5 attempts, roughly 5.5 minutes each).
-4. Neither rollout contains `turn_aborted`, while another RepoPrompt-originated rollout today does, so it is not established that `cancelStreaming` interrupted the Codex turns. The shared Oracle app-server (pid 69012, alive since 2026-09-10 09:48) may have kept retrying after both calls returned. At 06:50 that process held no established network connections, so nothing is retrying now; whether the interrupt landed or Codex exhausted its retries on its own is not established. Confirming it needs `thread/read` against that app-server.
+4. Neither rollout contains `turn_aborted`, while another RepoPrompt-originated rollout today does, so it is not established that `cancelStreaming` interrupted the Codex turns. The shared Oracle app-server (alive since 2026-09-10 09:48) may have kept retrying after both calls returned. At 06:50 that process held no established network connections, so nothing is retrying now; whether the interrupt landed or Codex exhausted its retries on its own is not established. Confirming it needs `thread/read` against that app-server.
 
 ## Answers to the handoff questions
 

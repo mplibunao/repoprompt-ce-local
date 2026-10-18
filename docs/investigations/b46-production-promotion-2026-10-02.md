@@ -24,7 +24,7 @@ The owning procedure is [docs/releasing.md](../releasing.md). Prepared source va
 | GPT-6.1 Sol model execution and MCP call | Passed; `SOL61_PRODUCTION_OK` |
 | Sonnet 5.5 execution and MCP call | Passed; `SONNET55_PRODUCTION_OK` |
 | Pre-upgrade Codex thread resumed on the new runtime | Passed; `OLD_CODEX_THREAD_RESUME_OK` |
-| Existing linked worktree routing | Passed; an existing linked worktree on branch `release/v1.4.0-b46-rc1` |
+| Existing linked worktree routing | Passed; an existing linked worktree on the release-candidate branch |
 | Context Builder selection/root | Passed; selected distribution `README.md` and exact absolute distribution root |
 | Oracle terminal response and chat reuse | Passed; `ORACLE_OK`, `ORACLE_REUSE_OK`, existing chat reused |
 | Same-window tab selector isolation | Passed; primary `README.md`, secondary `CONTRIBUTING.md` |

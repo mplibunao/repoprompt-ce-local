@@ -7,7 +7,7 @@ This file was the working handoff between the session that merged build 47's pul
 
 ## What merged
 
-MP approved #147, #149, and #152 for build 47 and kept #148, #151, and #153 out. An approved-only candidate, `release/v1.4.0-b47-rc6` (`main` plus merges of the three approved heads), passed `pr-ready` (its first run failed only the #74 timing flake) and a debug-app run, with the Oracle and Context Builder rows run on an earlier candidate whose stack source files were byte-identical. On GitHub:
+MP approved #147, #149, and #152 for build 47 and kept #148, #151, and #153 out. An approved-only candidate (`main` plus merges of the three approved heads) passed `pr-ready` (its first run failed only the #74 timing flake) and a debug-app run, with the Oracle and Context Builder rows run on an earlier candidate whose stack source files were byte-identical. On GitHub:
 
 - The stack merge of #147 and #149 produced one merge commit, `1685da11`, whose tree equals #149's head.
 - The three-pull-request stack merge refused atomically, because #152's branch had been cut from an earlier #149 commit. After #147 and #149 merged, GitHub retargeted #152 to `main` and rebased it, keeping the patch and the candidate's tree. It merged as `356dcb89`.

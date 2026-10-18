@@ -10,8 +10,8 @@ Oracle supports the CC Zai Claude Code route in current source. Selecting its Op
 
 - Read-only investigation; this report is the only intended checkout write. No source, credentials, defaults, app lifecycle, or active implementation changes.
 - Distribution checkout: the main checkout, `main`, HEAD `6ac4685a1927b40f620f6a7f9fc0292dfcb2d4c1`. Existing untracked worktrees/investigation reports preserved.
-- Production CE CLI is reachable. Native MCP `bind_context` was unavailable; the personal toolkit's global agent rules authorize the CE CLI as a faithful transport in Codex Desktop.
-- Own unfocused investigation tab: `<redacted>`, window 1, in the owner's existing multi-root workspace, which includes this distribution; all source investigation must scope to this root.
+- Production CE CLI is reachable. Native MCP `bind_context` was unavailable, so the CE CLI served as the transport.
+- Own unfocused investigation tab: `<redacted>`, in the owner's existing multi-root workspace, which includes this distribution; all source investigation must scope to this root.
 - The concurrent implementation is outside this investigation. No DeepPlan. Same-chat next-turn model switching already works and is not a requested fix.
 
 ## Background / Prior Research

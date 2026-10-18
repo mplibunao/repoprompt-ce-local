@@ -15,7 +15,7 @@ Authority: MP authorized finishing the work, deploying to production, and provin
 | Version, build, tag | 1.4.0, build 46, `local/v1.4.0-b46` |
 | Archive tag for the installed build | `local/v1.4.0-b45` → `~/Archives/repoprompt-ce/local/v1.4.0-b45/` (does not exist yet) |
 | Receipt | GitHub Release `local/v1.4.0-b46` on `mplibunao/repoprompt-ce-local`, notes in the same shape as `local/v1.4.0-b45` |
-| Installed now | build 45, commit `40716eb1` (`main`, clean), bundled Codex 0.156.1, PID `23403` |
+| Installed now | build 45, commit `40716eb1` (`main`, clean), bundled Codex 0.156.1 |
 
 ## Prerequisites (measured 2026-10-02 ~01:25Z)
 

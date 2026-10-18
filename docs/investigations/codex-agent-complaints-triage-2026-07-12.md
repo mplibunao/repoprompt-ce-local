@@ -1,6 +1,6 @@
 # Investigation: Ongoing Codex-agent / context_builder complaints — post-fix triage
 
-> Investigation report, observed 2026-07-12 on the `release/mp-patches` debug build. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Investigation report, observed 2026-07-12 on a debug build of the local patch branch. It records what was true then. Where it disagrees with a current document, the current document is right.
 > Current guidance: [docs/testing.md](../testing.md), Debug CLI and live MCP smoke.
 
 Date: 2026-07-12
@@ -16,16 +16,16 @@ The complaints are real and are **four co-occurring RepoPrompt CE defects — no
 - LIVE (this session): two consecutive `file_actions create` calls failed with `MCP error -32000: Connection closed`; reads (`git status`) worked immediately after. Write-path-skewed bridge failure, matches defect class 3 (+ possibly Fault C selection auto-select on create).
 
 ## Known prior defect classes (from earlier investigations in this folder)
-1. **Upstream issue 449 / upstream PR 450** — `textElements` camelCase key suppresses `turn/completed` on codex app-server ⇒ indefinite "Thinking…" hang. Fixed locally (`7e3cafbf` on `release/mp-patches`); upstream status to re-verify.
+1. **Upstream issue 449 / upstream PR 450** — `textElements` camelCase key suppresses `turn/completed` on codex app-server ⇒ indefinite "Thinking…" hang. Fixed locally on the local patch branch; upstream status to re-verify.
 2. **App-server startup stalls** — pre-`1ab555e6` builds: interactive fish login-shell env capture + blocking memoryMode call ⇒ "Codex app-server process is not running" on start/resume. Fixed by upstream `1ab555e6` (in local base).
-3. **`repoprompt-mcp` bridge SIGABRT** (upstream issue 513, superseded by upstream PR 517) — retry-backoff sleep frame dealloc crash ⇒ intermittent "Connection closed". Fixed locally (`2bc5179c`).
+3. **`repoprompt-mcp` bridge SIGABRT** (upstream issue 513, superseded by upstream PR 517) — retry-backoff sleep frame dealloc crash ⇒ intermittent "Connection closed". Fixed locally by a backoff patch.
 4. **Silent child MCP provisioning failure** (upstream issue 514) — Codex children can start without `mcp__RepoPromptCE__*` tools; stop-don't-substitute rule turns this into hard refusals.
 5. **Context Builder faults A/B/C** (07-09 doc; upstream issue 457/upstream PR 472 covers the wedge) — missingFinalContext drop on non-orderly close, leaked discovery children, selection-mirror head-of-line wedge. Upstream PR 472 rebased+pushed; A/B unfiled(?) — re-verify.
 
 ## Open questions this triage must answer
-- Q1: Is the currently running debug app built from `release/mp-patches` (post `2bc5179c`, the 00:04 UTC package), or still the older build? ("relaunch pending" at end of 07-12 doc)
+- Q1: Is the currently running debug app built from the local patch branch (with the backoff patch, the 00:04 UTC package), or still the older build? ("relaunch pending" at end of 07-12 doc)
 - Q2: Do Codex explore/engineer dispatches work right now (start, complete, and receive `mcp__RepoPromptCE__*` tools)?
-- Q3: What are the 5 upstream commits `release/mp-patches` is behind — did upstream PR 450 and/or upstream PR 517 merge (drop-triggers for local cherry-picks)?
+- Q3: What are the 5 upstream commits the local patch branch is behind — did upstream PR 450 and/or upstream PR 517 merge (drop-triggers for local cherry-picks)?
 - Q4: Which complaints post-date the relaunch (if it happened)? Are they residual classes (upstream issue 514, CB Faults A/B) rather than the fixed ones?
 - Q5: Any new crash reports since 07-11 00:52 UTC? Which binary serves THIS session's MCP bridge (release vs debug vs mp-patches)?
 
@@ -34,8 +34,8 @@ The complaints are real and are **four co-occurring RepoPrompt CE defects — no
 ### Phase 1.5 findings (explore probes + orchestrator checks, 2026-07-12)
 
 **Q1 — running build (ANSWERED): the relaunch DID happen at 23:32 UTC on 07-11, but for the 4-commit stack; the 5-commit repackage (00:04 UTC on 07-12) has never been launched.**
-- Only ONE app instance running: debug app PID 12863, started 2026-07-11 23:32:41 UTC by a conductor run job (packaged 23:32:09 UTC from the then-4-commit `release/mp-patches`). No release app process.
-- Running app therefore CONTAINS: upstream PR 450 text_elements fix, 3x upstream PR 472 wedge-fix commits, upstream `1ab555e6` startup fix. MISSING: `2bc5179c` (upstream issue 513 bridge backoff fix — but that only matters for the embedded helper binary).
+- Only ONE app instance running: the debug app, started 2026-07-11 23:32:41 UTC by a conductor run job (packaged 23:32:09 UTC from the then-4-commit local patch branch). No release app process.
+- Running app therefore CONTAINS: upstream PR 450 text_elements fix, 3x upstream PR 472 wedge-fix commits, upstream `1ab555e6` startup fix. MISSING: the backoff patch (upstream issue 513 bridge backoff fix — but that only matters for the embedded helper binary).
 - On-disk DebugApps bundle = the 00:04:24 UTC package (1.0.28/29, post-2bc5179c). Running process predates it (loaded the image staged at 23:32 UTC).
 
 **Q2 — live Codex dispatch (ANSWERED): dispatch + turn completion WORK; provisioning inconsistent; in-child RP tool calls can time out.**
@@ -50,19 +50,19 @@ The complaints are real and are **four co-occurring RepoPrompt CE defects — no
 
 **Q3 — upstream state (ANSWERED, GitHub probe):**
 - Upstream issue 449 open (mp's repro comment posted 07-11); upstream PR 450 open, review required, Copilot clean, NO human review. Upstream PR 472 open, review required. Upstream issues 513 and 514 open, no comments. Upstream PR 517 open — a maintainer: "looks like a great fix" (07-11 23:57 UTC) but unmerged.
-- `release/mp-patches..upstream/main` = 5 commits: upstream PR 497 appcast fail-closed + 4x upstream PR 516 titlebar/menu UI. Neither upstream PR 450 nor upstream PR 517 among them → no drop-triggers; no upstream relief.
+- The 5 `upstream/main` commits the local patch branch lacks: upstream PR 497 appcast fail-closed + 4x upstream PR 516 titlebar/menu UI. Neither upstream PR 450 nor upstream PR 517 among them → no drop-triggers; no upstream relief.
 - Latest release v1.0.28 (07-10); Homebrew cask already 1.0.28,29. Installed /Applications app is 1.0.27-era binary (its crash build UUID matches the 1.0.27 vintage from the earlier report).
 - NEW upstream items to evaluate: **upstream PR 520 "Fix Oracle selection packaging and mutation-ingress stalls"** (prime suspect for residual wedge), upstream issue 515 (CB leaks intermediate selection after failed discovery), upstream PR 455 (unbounded MCP buffering / silent receive drops), upstream issue 390 (MCP freshness/ingress stalls), upstream PR 360 (reduce retained app-server processes).
 
 **Q4/Q5 — crash storm + bridge routing (ANSWERED): all of today's 25 repoprompt-mcp SIGABRTs are the RELEASE binary, spawned per MCP-client config, NOT the running app.**
 - 25 .ips today: 01:23 x3, 07:38–08:55 x22 (UTC); every procPath = /Applications/RepoPrompt CE.app/Contents/MacOS/repoprompt-mcp, signature = MCPService.runTransport() / swift_task_dealloc (defect upstream issue 513/upstream PR 517).
 - Bridge routing: some Claude client configurations resolved `RepoPromptCE` to the stale release helper, which runs the /Applications RELEASE binary, while Codex's configuration resolved to the debug helper.
-- ⇒ Claude Code orchestrator sessions use the unfixed release bridge (crash → "Connection closed" storms); Codex children use the debug helper. The crash storm windows correlate with active orchestrator sessions (07:38–08:55 UTC, and one earlier).
-- 7 live `claude -p` discovery children under PID 12863 (oldest 00:52 UTC, ~9.5h) with 7 matching discovery-D-*.json leases — CB child leak (Fault B / upstream issue 515 territory) live on the current build.
+- ⇒ Claude Code orchestrator sessions use the unfixed release bridge (crash → "Connection closed" storms); Codex children use the debug helper. The crash storm windows correlate with active orchestrator sessions.
+- 7 live `claude -p` discovery children under the debug app (oldest 00:52 UTC, ~9.5h) with 7 matching discovery-D-*.json leases — CB child leak (Fault B / upstream issue 515 territory) live on the current build.
 - 4 codex app-server chains under the debug app; codex-cli 0.144.1.
 
 ## Investigator Findings
-### Method + live upstream issue 514 probe note (2026-07-12, pair investigator on `release/mp-patches` @ `2bc5179c`, read-only)
+### Method + live upstream issue 514 probe note (2026-07-12, pair investigator on the local patch branch with the backoff patch, read-only)
 
 Traced the full source on the running branch; three Codex-backed `agent_explore` probes ran in parallel for recon (gh PR diffs, error-string location, await-definition sites). **All three probes completed inside the 3-min window and all had `mcp__RepoPromptCE__*` tools available** (they successfully ran `file_search`/`gh`). So **defect upstream issue 514 did NOT reproduce this round** — consistent with the earlier "2/3 children provisioned" observation that upstream issue 514 is *intermittent, not deterministic*. Load-bearing probe claims (error-string site, `awaitAppliedIngress` bounded-vs-unbounded, `usedAgentOutputAsPrompt` origin) were independently re-read from source before being used below.
 
@@ -78,9 +78,9 @@ Traced the full source on the running branch; three Codex-backed `agent_explore`
 3. `:173-179` — **`if op != "get"` → `:177 await dependencies.promptVM.workspaceFileContextStore.awaitAppliedIngress(rootScope: lookupRootScope)`**, wrapped in phase `.manageSelectionIngressWait` (`:176`/`:178`). **← the residual wedge. Gated on `op != "get"`, which is exactly the reported "op=get instant / op=add 30s" split.**
 
 **What upstream PR 472's three commits actually bounded (read from `git show`):**
-- `06d7bf72` (*bound selection mirror tail*, `WorkspaceSelectionCoordinator.swift`) — introduced `makeSelectionMirrorTail` with a `timeoutTask` (`Task.sleep(for: mcpSelectionMirrorTimeout)`, **default `.seconds(10)`**, `defaultMCPSelectionMirrorTimeout`) plus a `MCPSelectionMirrorWaitSignal`; callers now `await waitForSelectionMirrorTail(tail)` (fires on completion **or** the 10s timeout) instead of the old unbounded `await task.value`; `supersedeSelectionMirrorTail` cancels predecessor task+timeout on the next enqueue. **⇒ Layer 2 (`mcpSelectionMirrorTail`) is now bounded to ~10s.**
-- `edb20954` (*release auto-selection mirror waiters*, `MCPReadFileAutoSelectionCoordinator.swift`) — `invalidate(context:)` now calls `cancelMirrorWaiters(for:)`; `waitForMirrorTicket` bails when `invalidatedContexts.contains(contextKey)`; `cleanupMirrorLaneIfSettled` now cancels the parked worker task (`mirrorWorkers.removeValue(...)?.task.cancel()`). **⇒ Layer 1 (mirror-ticket waiters) now self-heals / releases on invalidate.**
-- `06248a34` — **test-only** (`MCPCodeStructureWorktreeTests.swift`), no runtime effect.
+- The *bound selection mirror tail* commit (`WorkspaceSelectionCoordinator.swift`) — introduced `makeSelectionMirrorTail` with a `timeoutTask` (`Task.sleep(for: mcpSelectionMirrorTimeout)`, **default `.seconds(10)`**, `defaultMCPSelectionMirrorTimeout`) plus a `MCPSelectionMirrorWaitSignal`; callers now `await waitForSelectionMirrorTail(tail)` (fires on completion **or** the 10s timeout) instead of the old unbounded `await task.value`; `supersedeSelectionMirrorTail` cancels predecessor task+timeout on the next enqueue. **⇒ Layer 2 (`mcpSelectionMirrorTail`) is now bounded to ~10s.**
+- The *release auto-selection mirror waiters* commit (`MCPReadFileAutoSelectionCoordinator.swift`) — `invalidate(context:)` now calls `cancelMirrorWaiters(for:)`; `waitForMirrorTicket` bails when `invalidatedContexts.contains(contextKey)`; `cleanupMirrorLaneIfSettled` now cancels the parked worker task (`mirrorWorkers.removeValue(...)?.task.cancel()`). **⇒ Layer 1 (mirror-ticket waiters) now self-heals / releases on invalidate.**
+- The third commit — **test-only** (`MCPCodeStructureWorktreeTests.swift`), no runtime effect.
 
 **None of the three touched `MCPSelectionToolProvider.swift` or `WorkspaceFileContextStore.swift`.** So the applied-ingress await at `:177` is *unchanged* by upstream PR 472.
 
@@ -127,16 +127,16 @@ Traced the full source on the running branch; three Codex-backed `agent_explore`
 | **Upstream issue 515** CB leaks intermediate selection into Oracle context after **failed** discovery | Issue, open | Names `MCPSelectionToolProvider.swift`; about selection authority after *failed* discovery. | **PARTIALLY related to Q-B family** but a **different CB fault** — the Q-B gate is a *completed*-discovery prompt-emptiness gate, not failed-discovery selection authority. Upstream PR 520 closes it. |
 | **Upstream PR 360** Reduce Agent Mode memory from retained provider processes | PR, open, **425 files** (oversized diff) | Touches `MCPSelectionToolProvider.swift` + `awaitAppliedIngress` *incidentally*; core = 5-min idle shutdown + cancellation-safe provider teardown. Does **not** touch `WorkspaceSelectionCoordinator.swift` or `MCPReadFileAutoSelectionCoordinator.swift`. | **PARTIALLY related to Fault B** (leaked discovery children — idle shutdown + cancellation-safe teardown could reap them), **not** the Q-A ingress wedge or Q-B typed gate. The 425-file scope warrants caution. |
 
-**Is cherry-picking upstream PR 520 onto `release/mp-patches` sound?**
-- **Upstream PR 520 is the correct fix for the Q-A residual wedge** (it bounds mutation-ingress and adds `MCPTimeoutPolicy`). But it **rewrites `WorkspaceSelectionCoordinator.swift` and `WorkspaceFileContextStore.swift` — the same files `release/mp-patches` already heavily rewrote via upstream PR 472 `06d7bf72`** (mirror tail/fence). A clean cherry-pick is **unlikely**; expect conflicts in `WorkspaceSelectionCoordinator.swift` (overlapping mirror-tail/fence regions) and possibly the store's ingress region. The two are *complementary* (upstream PR 472 bounded the mirror tail; upstream PR 520 bounds mutation ingress) so both should be kept — but that requires **manual conflict reconciliation**, not a fast-forward pick.
-- **Recommended lower-risk local patch (surgical alternative):** swap `MCPSelectionToolProvider.swift:177` from the unbounded `awaitAppliedIngress(rootScope:)` to a **bounded** wait. The machinery already exists — `awaitAppliedIngressWithTimeout` (`WorkspaceFileContextStore.swift:8063`) — so add a `rootScope`+`timeout` overload that wraps `awaitAppliedIngress(rootScope:)` in it (timeout < the 30s contract, e.g. 8-12s, ideally via an MCP timeout policy constant). ~1 file + 1 small helper, composes cleanly with upstream PR 472's already-applied mirror-tail timeout, and directly bounds the residual wedge without importing upstream PR 520's 26-file surface. **Prefer this for `release/mp-patches`** unless full upstream parity with upstream PR 520 is the goal; if upstream parity is wanted, take upstream PR 520 wholesale on a fresh branch and reconcile the upstream PR 472 overlap deliberately.
+**Is cherry-picking upstream PR 520 onto the local patch branch sound?**
+- **Upstream PR 520 is the correct fix for the Q-A residual wedge** (it bounds mutation-ingress and adds `MCPTimeoutPolicy`). But it **rewrites `WorkspaceSelectionCoordinator.swift` and `WorkspaceFileContextStore.swift` — the same files the local patch branch already heavily rewrote via upstream PR 472's mirror-tail commit** (mirror tail/fence). A clean cherry-pick is **unlikely**; expect conflicts in `WorkspaceSelectionCoordinator.swift` (overlapping mirror-tail/fence regions) and possibly the store's ingress region. The two are *complementary* (upstream PR 472 bounded the mirror tail; upstream PR 520 bounds mutation ingress) so both should be kept — but that requires **manual conflict reconciliation**, not a fast-forward pick.
+- **Recommended lower-risk local patch (surgical alternative):** swap `MCPSelectionToolProvider.swift:177` from the unbounded `awaitAppliedIngress(rootScope:)` to a **bounded** wait. The machinery already exists — `awaitAppliedIngressWithTimeout` (`WorkspaceFileContextStore.swift:8063`) — so add a `rootScope`+`timeout` overload that wraps `awaitAppliedIngress(rootScope:)` in it (timeout < the 30s contract, e.g. 8-12s, ideally via an MCP timeout policy constant). ~1 file + 1 small helper, composes cleanly with upstream PR 472's already-applied mirror-tail timeout, and directly bounds the residual wedge without importing upstream PR 520's 26-file surface. **Prefer this for the local patch branch** unless full upstream parity with upstream PR 520 is the goal; if upstream parity is wanted, take upstream PR 520 wholesale on a fresh branch and reconcile the upstream PR 472 overlap deliberately.
 - **Separately:** the Q-B typed-response gate is **not** covered by any of these with confidence — upstream PR 520 *may* touch its commit region incidentally but no PR clearly seeds `tab.promptText` from MCP `instructions` for typed runs. If the 2/2 CB failures are to be fixed, that gap likely needs its own change (seed the effective prompt from `instructions` on typed MCP CB runs, or relax the `usedAgentOutputAsPrompt` guard when `instructions` were supplied). Recommend filing/confirming this as a distinct item rather than assuming upstream PR 520 resolves it.
 
 ## Investigation Log
 
 ### Phase 1 — Assessment (orchestrator, this session)
 - Role labels: explore/engineer = Codex CLI GPT-5.6 Sol; pair = Claude Opus; design = Claude Fable 5 — confirms "only codex-backed roles affected" framing.
-- `release/mp-patches` @ `2bc5179c` = upstream/main (`d4b1e05e`) + 5 cherry-picks (upstream PR 450 fix, 3× upstream PR 472, upstream issue 513 backoff fix). Branch is 5 behind upstream/main → Q3.
+- The local patch branch = upstream/main (`d4b1e05e`) + 5 cherry-picks (upstream PR 450 fix, 3× upstream PR 472, upstream issue 513 backoff fix). Branch is 5 behind upstream/main → Q3.
 - History: all five "Codex app-server process is not running" events are 2026-07-11 15:34–15:57Z (in the work workspace), none since → consistent with startup-stall class being build-vintage-bound.
 - LIVE bridge failure evidence: 2× `Connection closed` on `file_actions create` at investigation start; report file had to be created via shell.
 
@@ -152,7 +152,7 @@ A Claude Opus pair session: Q-A residual wedge await-chain, Q-B "typed direct re
 
 ### Follow-up round 2 (2026-07-12 late) — config-audit correction + upstream PR 520-vs-upstream PR 472 verdict
 
-**Correction to defect 1's attribution (MP pointed out that orchestrator sessions start through a launcher with a strict MCP config).** Verified: that launcher's MCP config points at the **debug** helper, so launcher-started orchestrator sessions were NOT using the release bridge. The 25 crashed release bridges were spawned by Claude clients (confirmed from .ips `parentProc`) that did not go through the launcher and whose own configuration still resolved to the RELEASE helper: plain `claude` sessions in one project, and Claude Desktop.
+**Correction to defect 1's attribution (MP pointed out that orchestrator sessions start through a launcher with a strict MCP config).** Verified: that launcher's MCP config points at the **debug** helper, so launcher-started orchestrator sessions were NOT using the release bridge. The 25 crashed release bridges were spawned by Claude clients (confirmed from .ips `parentProc`) that did not go through the launcher and whose own configuration still resolved to the RELEASE helper.
 
 Since NO release app is running, these release helpers dial the release socket (`repoprompt-ce-<n>.sock`) with no app behind it (a known failure mode), retry in `runTransport`'s backoff, and die in the upstream issue 513 teardown crash — a storm of zombie bridges from sessions that never successfully used RP. **The "self-inflicted stale path" fear is confirmed but narrowly scoped**: the maintained configurations all point at the debug helper; the stale ones are a few Claude client entries.
 
@@ -166,17 +166,17 @@ Since NO release app is running, these release helpers dial the release socket (
 **Live bridge note (this session):** the orchestrator's own RepoPromptCE MCP connection died mid-investigation ("not connected", no auto-reconnect) after two earlier `Connection closed` write failures; no matching .ips (mechanism unconfirmed — NOT proven to be the upstream issue 513 signature). Claude Code restart required to restore RP MCP for this session.
 
 ### Amended recommendation 1 (replaces the earlier recommendation 1)
-Remove or repoint the stale Claude client entries that resolve to the RELEASE helper: delete each entry (the strict launcher is the intended path for orchestrator sessions), or point it at the debug helper while the daily driver is the local debug build. This ends the release-bridge crash storm at the source.
+Remove or repoint the stale Claude client entries that resolve to the RELEASE helper: delete each entry, or point it at the debug helper while the local debug build is in use. This ends the release-bridge crash storm at the source.
 
 ## Root Cause
 Four independent, co-occurring defects (all RepoPrompt CE, none in codex-cli), each verified this session:
 
-1. **Bridge routing → unfixed release binary crashes (the "Connection closed" complaints).** Some Claude client configurations resolve `RepoPromptCE` to the release helper, which runs `/Applications/RepoPrompt CE.app/Contents/MacOS/repoprompt-mcp` (1.0.27, no upstream issue 513/upstream PR 517 fix). 25 SIGABRTs today, all this binary, all `MCPService.runTransport()`/`swift_task_dealloc`. The fixed debug helper (post-`2bc5179c` since 00:04 UTC) is what Codex children use.
+1. **Bridge routing → unfixed release binary crashes (the "Connection closed" complaints).** Some Claude client configurations resolve `RepoPromptCE` to the release helper, which runs `/Applications/RepoPrompt CE.app/Contents/MacOS/repoprompt-mcp` (1.0.27, no upstream issue 513/upstream PR 517 fix). 25 SIGABRTs today, all this binary, all `MCPService.runTransport()`/`swift_task_dealloc`. The fixed debug helper (with the backoff patch since 00:04 UTC) is what Codex children use.
 2. **Residual selection-mutation wedge (the "stalling/hanging" complaints).** `MCPSelectionToolProvider.swift:177` awaits the UNBOUNDED `WorkspaceFileContextStore.awaitAppliedIngress(rootScope:)` (:7973 → `join.value()` with no timeout/cancellation race) for every mutating op, gated `op != "get"` — exactly the observed op=get-instant/op=add-30s split. Upstream PR 472 bounded only the mirror chain (both layers). The bounded twin (`awaitAppliedIngressForExplicitRequest`, :8050) exists and is used by read_file's explicit path. Upstream: upstream issue 390 names this class; upstream PR 520 is the fix. Downstream casualties: `file_actions`/`apply_edits` mutations, child-agent `read_file` auto-selection timeouts, permanently "pending" token accounting.
 3. **Context Builder typed-response structural failure + child leaks (the "context builder errors").** MCP `instructions` flow only to the discovery task (`ContextBuilderAgentViewModel.swift:1764`), never to `tab.promptText`; on completion with an empty tab prompt, CB copies agent output in, sets `usedAgentOutputAsPrompt`, and `responseDisposition` refuses (`MCPContextBuilderToolProvider.swift:663-665`) ⇒ deterministic 2/2 failure for typed instructions-only runs. Distinct from Fault A (missingFinalContext) and from the wedge. Discovery children leak via Fault B (supersession skips `provider.dispose()`): 7→10 live children today.
 4. **Upstream issue 514 intermittent child MCP tool provisioning.** 1/3 explore children this session had no `mcp__RepoPromptCE__*` tools; pair's 3 probes all had them. Intermittent routing/bootstrap failure, open upstream, unfixed.
 
-**Build-state addendum:** the 23:32 UTC relaunch loaded the 4-commit `release/mp-patches` package — upstream PRs 450 and 472/`1ab555e6` fixes ARE live in the host app; only the 5-commit repackage (00:04 UTC, adds `2bc5179c`) remains unlaunched, which matters only for the app-embedded helper. No Codex turn hangs or app-server start failures occurred today — those two classes are confirmed fixed by the running build.
+**Build-state addendum:** the 23:32 UTC relaunch loaded the 4-commit local patch branch package — upstream PRs 450 and 472/`1ab555e6` fixes ARE live in the host app; only the 5-commit repackage (00:04 UTC, adds the backoff patch) remains unlaunched, which matters only for the app-embedded helper. No Codex turn hangs or app-server start failures occurred today — those two classes are confirmed fixed by the running build.
 
 ## Eliminated hypotheses
 - **Upstream codex-cli regression** — 0.144.1 latest; all Codex dispatches today started AND completed turns; no `turn/completed` hangs, no "process is not running" since 07-11 (pre-fix build).
@@ -186,11 +186,11 @@ Four independent, co-occurring defects (all RepoPrompt CE, none in codex-cli), e
 - **The crash storm coming from the running app** — all 25 .ips are the /Applications release binary spawned by client configs; no release app process exists.
 
 ## Recommendations
-1. **Repoint Claude Code MCP config at the fixed bridge** (highest leverage, zero build work): point the stale Claude client entries at the debug helper, which contains `2bc5179c`, until an upstream release ships upstream PR 517. This alone should end the "Connection closed" storms for orchestrator sessions.
-2. **Surgical bounded-ingress patch on `release/mp-patches`**: swap `MCPSelectionToolProvider.swift:177` to a bounded wait using the existing `awaitAppliedIngressWithTimeout` machinery (`WorkspaceFileContextStore.swift:8063`) via a small `rootScope`+`timeout` overload (8-12s). Composes with upstream PR 472; avoids importing upstream PR 520's 26-file surface. Adopt upstream PR 520 wholesale (with deliberate upstream PR 472 conflict reconciliation) when it merges upstream — drop the surgical patch then.
-3. **Relaunch the debug app** (user approval required) to load the 00:04 UTC bundle — clears the currently wedged window state and picks up `2bc5179c` in the embedded helper; kill the 10 leaked `claude -p` discovery children at the same time (no reaper exists).
+1. **Repoint Claude Code MCP config at the fixed bridge** (highest leverage, zero build work): point the stale Claude client entries at the debug helper, which contains the backoff patch, until an upstream release ships upstream PR 517. This should end the release-bridge crashes behind the "Connection closed" storms.
+2. **Surgical bounded-ingress patch on the local patch branch**: swap `MCPSelectionToolProvider.swift:177` to a bounded wait using the existing `awaitAppliedIngressWithTimeout` machinery (`WorkspaceFileContextStore.swift:8063`) via a small `rootScope`+`timeout` overload (8-12s). Composes with upstream PR 472; avoids importing upstream PR 520's 26-file surface. Adopt upstream PR 520 wholesale (with deliberate upstream PR 472 conflict reconciliation) when it merges upstream — drop the surgical patch then.
+3. **Relaunch the debug app** (user approval required) to load the 00:04 UTC bundle — clears the currently wedged window state and picks up the backoff patch in the embedded helper; kill the 10 leaked `claude -p` discovery children at the same time (no reaper exists).
 4. **File the CB typed-response gap upstream** (after confirming upstream PR 520 doesn't fix it): typed MCP `context_builder` runs never seed `tab.promptText` from `instructions`, so instructions-only typed runs fail deterministically at `MCPContextBuilderToolProvider.swift:665`. Reference upstream issue 515 as related-but-distinct.
-5. **Nudge upstream review**: upstream PRs 450, 472, and 517 are all CI-green and awaiting human review; upstream issue 449 already has the repro evidence; a maintainer's "looks like a great fix" on upstream PR 517 suggests a merge is close — after it lands, drop `2bc5179c` per the recorded disposition.
+5. **Nudge upstream review**: upstream PRs 450, 472, and 517 are all CI-green and awaiting human review; upstream issue 449 already has the repro evidence; a maintainer's "looks like a great fix" on upstream PR 517 suggests a merge is close — after it lands, drop the backoff patch per the recorded disposition.
 6. **Workaround guidance for orchestrators until fixed**: prefer op=get/read-only RP calls; avoid `manage_selection` mutations, `file_actions`, `apply_edits`, and typed `context_builder` in wedged windows; treat child RP-tool timeouts as the ingress wedge, not agent flakiness.
 
 ## Preventive Measures
@@ -204,7 +204,7 @@ Four independent, co-occurring defects (all RepoPrompt CE, none in codex-cli), e
 
 ## Resolution status (2026-07-12)
 
-All three approved remediation items executed (full gate evidence lives in the personal toolkit's remediation ledger):
+All three approved remediation items executed:
 
 1. The stale client configurations were repointed to the debug helper.
 2. Debug app relaunched onto the 00:04 UTC five-fix bundle; leaked discovery children were already gone.
@@ -216,5 +216,5 @@ All three approved remediation items executed (full gate evidence lives in the p
 
 Post-fix watch items: "Connection closed" bridge drops persist on the patched build without
 SIGABRT reports; one unexplained silent app exit (~12:49–12:54 UTC); `agent_run` respond only
-accepts the `response` key despite advertising `decision` (unfiled). Upstream PR 520 merged upstream —
-`release/mp-patches` rebase is due.
+accepts the `response` key despite advertising `decision` (unfiled). Upstream PR 520 merged upstream, so
+the local patch branch is due for a rebase.

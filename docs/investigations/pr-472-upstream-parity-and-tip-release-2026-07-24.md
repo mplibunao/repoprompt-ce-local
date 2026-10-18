@@ -8,15 +8,15 @@
 2. **Tip Builds** is an official opt-in rolling update channel (upstream PR 442, live since 2026-07-10): every merge to `main` that passes CI is signed, notarized, and published to `repoprompt/repoprompt-ce-tip-updates`; the app's Sparkle updater pulls from that feed when Settings → General → Updates → Update Channel is set to "Tip Builds". Switching to Tip is the natural replacement for the local build — once upstream PR 472 merges.
 
 ## Questions
-1. Is the issue upstream PR 472 addresses (selection mirror wedge recovery, upstream issue 457) already solved in current upstream main? Can MP drop the local build (`release/mp-patches-*`) and run the official version?
+1. Is the issue upstream PR 472 addresses (selection mirror wedge recovery, upstream issue 457) already solved in current upstream main? Can MP drop the local build and run the official version?
 2. What is the "tip release" — how does it work, where is it configured, what code/issues/PRs define it?
 
-## Known context (from the personal toolkit's RepoPrompt CE notes)
-- Local fork checkout; build branch pattern `release/mp-patches-*`.
-- Patch ledger (as of last update):
-  - Upstream PR 568 (worktree-bound Codex app-server startup fix, upstream issue 554) — was OPEN; MP reports it just merged upstream. VERIFY.
-  - Upstream PR 472 (selection mirror wedge recovery, upstream issue 457, local branch `bugfix/selection-mirror-wedge`) — OPEN; the only remaining local patch. mp-patches also carries follow-on commits "bound selection mirror tail" and "release auto-selection mirror waiters".
-- Merged-and-dropped history: upstream PRs 450 and 532 (v1.1.0, 2026-07-21), upstream PR 529 (2026-07-13).
+## Known context
+- Local fork checkout with local build branches.
+- Local patches at the time:
+  - Upstream PR 568 (worktree-bound Codex app-server startup fix, upstream issue 554): MP reported it just merged upstream. To verify.
+  - Upstream PR 472 (selection mirror wedge recovery, upstream issue 457): open, and the only remaining local patch.
+- Already merged upstream and dropped: upstream PRs 450 and 532 (v1.1.0, 2026-07-21), upstream PR 529 (2026-07-13).
 - Upstream is undergoing big changes (e.g., bundling the codex app server); PRs may be superseded/stale.
 
 ## Background / Prior Research
@@ -29,9 +29,9 @@
 - **Upstream PR 568** (worktree-bound Codex app-server startup, upstream issue 554): **MERGED 2026-07-22**, merge commit `6834a541`.
 
 ### B. Local build vs upstream/main (explore agent, git, 2026-07-24)
-- Current build branch: `release/mp-patches-2026-07-20`, head `bbe19ad2` (merge of `bugfix/codex-worktree-app-server-start`). Behind upstream/main by **109 commits**.
+- Current build branch: the 2026-07-20 local build branch, with `bugfix/codex-worktree-app-server-start` merged. Behind upstream/main by **109 commits**.
 - `upstream/main` = `cebd7e64`.
-- **Local-only commits: exactly two** — `23e31e27` "fix: release auto-selection mirror waiters" and `6fa4cde7` "fix: bound selection mirror tail" (the upstream PR 472 content, +513/−94 across coordinator + tests). Everything else in the build branch is reachable from upstream.
+- **Local-only commits: exactly two** — "fix: release auto-selection mirror waiters" and "fix: bound selection mirror tail" (the upstream PR 472 content, +513/−94 across coordinator + tests). Everything else in the build branch is reachable from upstream.
 - Ancestor checks: `bugfix/codex-worktree-app-server-start` **IS** in upstream/main (landed as true merge `6834a541`); `bugfix/selection-mirror-wedge` (head `2ca83e97`) is **NOT**, and no squash-equivalent subject exists.
 - Recent upstream themes (last ~3 weeks): (1) **bundled pinned/signed Codex runtime is now the runtime authority** (`4fd888ed`, `f6ab144a`, `97a2489b`, `89a0e235`, …) — external codex install no longer primary; (2) Codex app-server lifecycle hardening (bounded liveness/control, spawn-failure classification); (3) CodeMap perf/architecture overhaul (Tree-sitter upgrade, Dart removed); (4) **Context Builder & MCP reliability: routing/settlement/cancellation/selection-handoff race fixes, bounded MCP cleanup** — territory adjacent to upstream issue 457, needs code-level check; (5) releases v1.0.29/v1.0.30/v1.1.0 + release tooling hardening.
 
@@ -65,20 +65,20 @@ Upstream `main` (`cebd7e64`) still contains both halves of the upstream issue 45
 
 ## Root Cause / Answers
 
-**Q1 — Can the local build be dropped?** Not without re-accepting upstream issue 457. The delta is now exactly one patch: `release/mp-patches-2026-07-20` carries only `6fa4cde7` + `23e31e27` (the upstream PR 472 fix) beyond upstream; upstream PR 568 merged 2026-07-22 (`6834a541`). The build branch is 109 commits behind upstream/main, so staying on it also means missing the bundled-Codex-runtime work, app-server lifecycle hardening, CodeMap perf overhaul, and MCP-reliability fixes.
+**Q1 — Can the local build be dropped?** Not without re-accepting upstream issue 457. The delta is now exactly one patch: the local build branch carries only the two upstream PR 472 commits beyond upstream; upstream PR 568 merged 2026-07-22 (`6834a541`). The build branch is 109 commits behind upstream/main, so staying on it also means missing the bundled-Codex-runtime work, app-server lifecycle hardening, CodeMap perf overhaul, and MCP-reliability fixes.
 
 **Q2 — Tip release**: see Background section C for the full mechanism (channel enum `UpdateChannel`, UserDefaults key `RepoPromptUpdateChannel`, Settings → General → Updates picker, `.github/workflows/main-tip.yml` publish-on-green-CI, feed `repoprompt-ce-tip-updates/releases/latest/download/appcast.xml`, tags `tip-<sha>`). Actively publishing (latest tip dated 2026-07-24). Note: tip builds are official signed/notarized builds — but they do NOT contain upstream PR 472 either.
 
 ## Recommendations
 1. **Rebase upstream PR 472 onto current upstream/main and push** — it is `CONFLICTING`/`DIRTY` (untouched since 2026-07-11; conflicts most likely from upstream PR 520's `WorkspaceSelectionCoordinator`/`WorkspaceFileContextStore` changes and 109 commits of drift). Getting it merged is the exit ramp from local builds entirely. After rebase, revalidate the five upstream PR 472 contract tests (`testMCPMirrorTimeoutBoundsUncooperativeTailAndRepairsLatestSelection`, `testMCPMirrorTimeoutRepairsCanonicalSelectionAfterCancelledApplyReturns`, `testNewMCPMirrorCancelsSupersededApply`, `testInvalidationCancelsParkedMirrorWaiterAndReclaimsWorker`, `testReplacementContextMirroredDrainCompletesWhileInvalidatedWorkerIsParked`).
-2. **Once upstream PR 472 merges: switch to the official app on the Tip channel** and retire the local build + `release/mp-patches-*` maintenance. Until then, either keep the local build (needs a fresh sync — it's 109 commits behind) or switch early and accept the wedge risk.
-3. Migration mechanics (investigated 2026-07-24, follow-up explores into dotfiles + codebase):
+2. **Once upstream PR 472 merges: switch to the official app on the Tip channel** and retire the local build and its branch maintenance. Until then, either keep the local build (needs a fresh sync — it's 109 commits behind) or switch early and accept the wedge risk.
+3. Migration mechanics (investigated 2026-07-24):
    - Official app **already installed** at `/Applications/RepoPrompt CE.app` by the owner's machine configuration. No change to it was needed. Release MCP launcher already exists: `~/Library/Application Support/RepoPrompt CE/repoprompt_ce_cli` → official app binary.
    - **Shared** between debug/official (file-backed, same App Support root): workspaces, chat/session history, `Settings/globalSettings.json`, window sessions. **Not shared**: `UserDefaults` (bundle IDs differ: `com.pvncher.repoprompt.ce.debug` vs `.ce`) — update channel, onboarding markers, last-used model reset to defaults; and **API keys** (debug ephemeral / separate keychain domain `….debug.keychain` vs `….developer-id.keychain.v2`) — must re-enter.
-   - MCP rewiring: the toolkit's strict MCP config (used by `clm`) points at `repoprompt_ce_cli_debug`; change to `…/repoprompt_ce_cli`. Also the debug entries in `~/.claude.json`. Release PATH CLI: `rpce-cli` (Settings → MCP Server → CLI Tools).
-   - Coexistence: separate sockets (`repoprompt-ce-D-7.sock` vs `repoprompt-ce-7.sock`), but shared workspace files — don't run both apps concurrently.
-   - Watch: if darwin-rebuild's homebrew activation upgrades casks, a rebuild may overwrite a Sparkle-updated tip build with latest stable; Sparkle re-offers the tip update afterward (self-healing).
+   - MCP rewiring: client MCP configurations that point at `repoprompt_ce_cli_debug` change to `…/repoprompt_ce_cli`. Release PATH CLI: `rpce-cli` (Settings → MCP Server → CLI Tools).
+   - Coexistence: separate sockets, but shared workspace files — don't run both apps concurrently.
+   - Watch: if the machine configuration upgrades Homebrew casks, a rebuild may overwrite a Sparkle-updated tip build with latest stable; Sparkle re-offers the tip update afterward (self-healing).
 
 ## Preventive Measures
-- Patch ledger in the personal toolkit's RepoPrompt CE notes updated this session: upstream PR 568 row dropped to merged history (verified via merge commit, not assumption); upstream PR 472 row annotated with the conflict state.
+- The local patch ledger was updated: upstream PR 568 moved to merged history (verified via merge commit, not assumption); upstream PR 472 annotated with the conflict state.
 - The tip channel makes "stay current without rebuilding" viable long-term; the remaining discipline is keeping the ledger at zero open rows.
