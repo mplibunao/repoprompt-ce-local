@@ -16,8 +16,9 @@ permissions:
 
 jobs:
   # Classifies the event's changed paths so the macOS jobs can skip a change that touches
-  # only Markdown. Guardrails and the secret scan run on every change. A comparison the job
-  # can't make, such as a new branch's first push or a force-push whose old head is gone,
+  # only Markdown. A pull request or a release candidate is compared with `main`; a push to
+  # `main` compares only the commits it adds. Guardrails and the secret scan run on every
+  # change. A comparison the job can't make, such as a force-push whose old head is gone,
   # takes the full code path, and a failure here fails the run.
   changes:
     name: Changes
@@ -41,10 +42,15 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
+          CURRENT_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             range="$PR_BASE_SHA...$PR_HEAD_SHA"
+          elif [[ "$CURRENT_REF" == refs/heads/release/* ]]; then
+            # The whole candidate: its tip can add only Markdown on top of commits whose
+            # shards failed, and landing reads the run on the tip.
+            range="origin/main...$CURRENT_SHA"
           elif [[ -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
             range="$PUSH_BEFORE_SHA..$CURRENT_SHA"
           else
