@@ -1,6 +1,7 @@
 import RepoPromptShared
 import XCTest
 
+/// `docs/porting.md` requires upstream ports of the Orchestrate and Optimize prompts to keep the text these tests check.
 final class WorkflowPromptRunRecordTests: XCTestCase {
     private static let renderCases: [(label: String, variant: WorkflowPromptVariant, includeSessionCleanupGuidance: Bool)] = [
         ("mcp, cleanup guidance on", .mcp, true),
@@ -28,6 +29,20 @@ final class WorkflowPromptRunRecordTests: XCTestCase {
                 testCase.includeSessionCleanupGuidance,
                 testCase.label
             )
+        }
+    }
+
+    func testOptimizeWritesScoreboardInLedgers() {
+        for testCase in Self.renderCases {
+            let prompt = RepoPromptWorkflowPrompts.render(
+                id: .optimize,
+                variant: testCase.variant,
+                includeSessionCleanupGuidance: testCase.includeSessionCleanupGuidance
+            )
+
+            XCTAssertTrue(prompt.contains("docs/ledgers/<YYYY-MM-DD>-optimize-<slug>.md"), testCase.label)
+            XCTAssertTrue(prompt.contains("Rejected candidates"), testCase.label)
+            XCTAssertFalse(prompt.contains("prompt-exports/optimize-"), testCase.label)
         }
     }
 }

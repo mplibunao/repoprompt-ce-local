@@ -57,6 +57,14 @@ This workflow is delegation-heavy by design. Implementation, measurement, deep c
 - **One attributed change per loop iteration.** Causality is cheap to preserve and expensive to recover.
 - **The scoreboard is the shared truth.** Every iteration appends; nothing gets overwritten. Sub-agents and the oracle both read from it.
 - **The oracle is the stop signal.** You don't decide when to stop on gut feel — you ask, with the scoreboard in selection, and respect the answer.
+
+### The scoreboard
+
+The scoreboard is the run's record, so whoever optimizes this code next can see what was measured and which paths were dead ends. Below, `<scoreboard path>` stands for its repository-relative path.
+
+- **Where it goes.** `docs/ledgers/<YYYY-MM-DD>-optimize-<slug>.md`, dated the day the run starts. A later run never appends to an earlier run's scoreboard: it starts its own and links the earlier one in its header.
+- **What it holds.** A header with the run's start date, the metric and its unit, the stop criterion, the scope, and the measurement command; a runs table whose first row is the baseline and which gains one row per iteration, kept or reverted; and a **Rejected candidates** section listing each candidate that was tried and reverted, or set aside without being tried, with the reason.
+- **Write it for a later reader.** Rows use repository-relative paths and leave out session, window, or run IDs, which mean nothing outside this run.
 \(workspaceVerificationBlock(variant: variant, heading: "## Phase 0", beforeAction: "optimization work", nextStep: "Phase 1"))
 ## Phase 1: Surface Mapping & Bottleneck Scouting (delegate to explore agents)
 
@@ -157,13 +165,13 @@ Now that the surface is mapped and bottleneck candidates are in hand, route the 
 - **Instrumentation strategy** — where the metric will be measured, what build gate to use, which secondary test/support file holds the collection logic. Where the instrumentation lives is informed by the bottleneck candidates from Phase 1 — measure where the cost actually is.
 - **Baseline procedure** — how many samples, how to discard outliers, what variance band to expect.
 - **First-pass optimization candidates** — 2–3 concrete optimizations ranked by expected delta vs. risk, **grounded in the bottleneck candidates from Phase 1** (each of those is now a candidate to address; \(builderName) translates them into actionable changes with risk assessment).
-- **Scoreboard scaffold** — the markdown shape for `prompt-exports/optimize-<slug>-runs.md`.
+- **Scoreboard scaffold** — the markdown shape for the scoreboard described under "The scoreboard" above.
 
 \(example(variant,
 	mcp: """
 ```json
 {"tool":"context_builder","args":{
-	"instructions":"<task>Design the setup for an iterative optimization loop targeting <metric> on <scope>.\\n\\nReturn an actionable plan with:\\n1. Instrumentation strategy: which file to add/extend (must be a test/support file, not production code), the debug-build gate to use (e.g. #if DEBUG / cfg(debug_assertions) / NODE_ENV / etc. — pick what matches this repo's convention), and the smallest hook the production code needs to expose.\\n2. Baseline procedure: how many samples, how to discard outliers, expected variance band, and the exact command to run (per AGENTS.md).\\n3. First-pass optimization candidates: 2–3 concrete optimizations ranked by (expected delta / risk). For each: the change, why it should help the metric, and what could regress.\\n4. Scoreboard scaffold: the initial contents for prompt-exports/optimize-<slug>-runs.md.</task>\\n\\n<context>\\nUser request: <raw request>\\nMetric + units: <name + units>\\nStop criterion: <threshold or 'oracle-satisfied'>\\nScope: <files/modules in play>\\nMeasurement command (from Conventions explore): <exact command>\\nTarget & call graph (from Target explore): <implementation file:line + 3–5 callers with context>\\nBottleneck candidates (from Bottleneck explore — the heart of Phase 1): <ranked list with file:line and one-sentence rationale per candidate>\\nPrior perf work (from Prior perf work explore): <existing benchmarks, profiler traces, perf TODOs and what they say>\\nProject conventions doc: AGENTS.md (already summarized by explore — the agent doesn't need to re-read it)\\n\\nWhen ranking first-pass optimization candidates, treat the Bottleneck candidates list as the seed. Each item there is a hypothesis about where time is going; the plan should propose how to address each, with risk and verification.\\n</context>",
+	"instructions":"<task>Design the setup for an iterative optimization loop targeting <metric> on <scope>.\\n\\nReturn an actionable plan with:\\n1. Instrumentation strategy: which file to add/extend (must be a test/support file, not production code), the debug-build gate to use (e.g. #if DEBUG / cfg(debug_assertions) / NODE_ENV / etc. — pick what matches this repo's convention), and the smallest hook the production code needs to expose.\\n2. Baseline procedure: how many samples, how to discard outliers, expected variance band, and the exact command to run (per AGENTS.md).\\n3. First-pass optimization candidates: 2–3 concrete optimizations ranked by (expected delta / risk). For each: the change, why it should help the metric, and what could regress.\\n4. Scoreboard scaffold: the initial contents for <scoreboard path>: a header with the run's start date, the metric and its unit, the stop criterion, the scope, and the measurement command; a runs table whose first row is the baseline; and an empty Rejected candidates section.</task>\\n\\n<context>\\nUser request: <raw request>\\nMetric + units: <name + units>\\nStop criterion: <threshold or 'oracle-satisfied'>\\nScope: <files/modules in play>\\nMeasurement command (from Conventions explore): <exact command>\\nTarget & call graph (from Target explore): <implementation file:line + 3–5 callers with context>\\nBottleneck candidates (from Bottleneck explore — the heart of Phase 1): <ranked list with file:line and one-sentence rationale per candidate>\\nPrior perf work (from Prior perf work explore): <existing benchmarks, profiler traces, perf TODOs and what they say>\\nProject conventions doc: AGENTS.md (already summarized by explore — the agent doesn't need to re-read it)\\n\\nWhen ranking first-pass optimization candidates, treat the Bottleneck candidates list as the seed. Each item there is a hypothesis about where time is going; the plan should propose how to address each, with risk and verification.\\n</context>",
 	"response_type":"plan",
 	"export_response":true
 }}
@@ -177,7 +185,7 @@ Return an actionable plan with:
 1. Instrumentation strategy: which file to add/extend (must be a test/support file, not production code), the debug-build gate matching this repo, and the smallest hook the production code needs to expose.
 2. Baseline procedure: sample count, outlier rules, expected variance, exact command (per AGENTS.md).
 3. First-pass optimization candidates: 2–3 concrete optimizations ranked by (expected delta / risk).
-4. Scoreboard scaffold: initial contents for prompt-exports/optimize-<slug>-runs.md.</task>
+4. Scoreboard scaffold: initial contents for <scoreboard path>: a header with the run start date, metric and unit, stop criterion, scope, and measurement command; a runs table whose first row is the baseline; and an empty Rejected candidates section.</task>
 
 <context>
 User request: <raw request>
@@ -211,13 +219,13 @@ You don't run measurements. Dispatch a single `pair` agent to execute the setup 
 	"op":"start",
 	"model_id":"pair",
 	"session_name":"Optimize setup: instrumentation + baseline",
-	"message":"Read the setup plan at <plan path> with read_file first. Execute the setup phase only — do not pursue any optimization yet:\\n\\n1. Land the instrumentation per the plan: keep it in a secondary test/support file, gate it behind the repo's debug build flag, and expose only the minimum hook in production code.\\n2. Verify a release build with instrumentation stripped still compiles cleanly.\\n3. Capture the baseline: run the measurement command 3–5 times. Discard obvious outliers. Record the median and p95 (or whichever is appropriate for this metric). Note the variance band — if optimizations smaller than that band would be invisible, say so explicitly.\\n4. Create prompt-exports/optimize-<slug>-runs.md from the scoreboard scaffold in the plan, fill in the baseline row with median, p95, environment notes, and current commit.\\n5. Report back: instrumentation files touched, the exact command used, baseline numbers, variance, and any concerns about measurement reliability.\\n\\nDo not attempt any optimization yet — that's the next iteration. Skip oracle review; the orchestrator handles that."
+	"message":"Read the setup plan at <plan path> with read_file first. Execute the setup phase only — do not pursue any optimization yet:\\n\\n1. Land the instrumentation per the plan: keep it in a secondary test/support file, gate it behind the repo's debug build flag, and expose only the minimum hook in production code.\\n2. Verify a release build with instrumentation stripped still compiles cleanly.\\n3. Capture the baseline: run the measurement command 3–5 times. Discard obvious outliers. Record the median and p95 (or whichever is appropriate for this metric). Note the variance band — if optimizations smaller than that band would be invisible, say so explicitly.\\n4. Create <scoreboard path> from the scoreboard scaffold in the plan, fill in the baseline row with median, p95, environment notes, and current commit.\\n5. Report back: instrumentation files touched, the exact command used, baseline numbers, variance, and any concerns about measurement reliability.\\n\\nDo not attempt any optimization yet — that's the next iteration. Skip oracle review; the orchestrator handles that."
 }}
 ```
 """,
 	cli: """
 ```bash
-rpce-cli -w <window_id> -e 'agent_run op=start model_id=pair session_name="Optimize setup" message="Read the setup plan at <plan path> with read_file first. Execute the setup phase only: land instrumentation in a test/support file gated behind the debug build flag; verify release builds strip it; capture 3–5 baseline samples per AGENTS.md; create prompt-exports/optimize-<slug>-runs.md and fill the baseline row (median, p95, variance, env, commit). Report files touched, command used, baseline numbers, variance, and any reliability concerns. Do not optimize anything yet."'
+rpce-cli -w <window_id> -e 'agent_run op=start model_id=pair session_name="Optimize setup" message="Read the setup plan at <plan path> with read_file first. Execute the setup phase only: land instrumentation in a test/support file gated behind the debug build flag; verify release builds strip it; capture 3–5 baseline samples per AGENTS.md; create <scoreboard path> and fill the baseline row (median, p95, variance, env, commit). Report files touched, command used, baseline numbers, variance, and any reliability concerns. Do not optimize anything yet."'
 ```
 """))
 
@@ -245,11 +253,11 @@ The Phase 2 plan listed first-pass candidates. For iteration 1, pick the top-ran
 ```json
 {"tool":"manage_selection","args":{
 	"op":"set",
-	"paths":["<target source files>","<benchmark or test>","prompt-exports/optimize-<slug>-runs.md","<setup plan path>"],
+	"paths":["<target source files>","<benchmark or test>","<scoreboard path>","<setup plan path>"],
 	"mode":"full"
 }}
 {"tool":"context_builder","args":{
-	"instructions":"<task>Propose the single next optimization to pursue for <metric>. One change, not a list. Include: the specific change, why you expect it to move the metric, any risks to behavior or correctness, how to verify it didn't regress other tests.</task>\\n\\n<context>Current baseline and prior runs are in prompt-exports/optimize-<slug>-runs.md. The setup plan at <setup plan path> already listed first-pass candidates — prefer one of those if it still looks promising and hasn't been tried. Target: <threshold or directional goal>. Scope: <modules>.</context>",
+	"instructions":"<task>Propose the single next optimization to pursue for <metric>. One change, not a list. Include: the specific change, why you expect it to move the metric, any risks to behavior or correctness, how to verify it didn't regress other tests.</task>\\n\\n<context>Current baseline and prior runs are in <scoreboard path>. The setup plan at <setup plan path> already listed first-pass candidates — prefer one of those if it still looks promising and hasn't been tried. Target: <threshold or directional goal>. Scope: <modules>.</context>",
 	"response_type":"plan",
 	"export_response":true
 }}
@@ -257,10 +265,10 @@ The Phase 2 plan listed first-pass candidates. For iteration 1, pick the top-ran
 """,
 	cli: """
 ```bash
-rpce-cli -w <window_id> -e 'select set <target source files> <benchmark or test> prompt-exports/optimize-<slug>-runs.md <setup plan path>'
+rpce-cli -w <window_id> -e 'select set <target source files> <benchmark or test> <scoreboard path> <setup plan path>'
 rpce-cli -w <window_id> -e 'builder "<task>Propose the single next optimization to pursue for <metric>. One change, not a list. Include the change, why it moves the metric, risks, and how to verify no regressions.</task>
 
-<context>Baseline and prior runs in prompt-exports/optimize-<slug>-runs.md. Setup plan with first-pass candidates at <setup plan path>. Target: <threshold>. Scope: <modules>.</context>" --response-type plan --export'
+<context>Baseline and prior runs in <scoreboard path>. Setup plan with first-pass candidates at <setup plan path>. Target: <threshold>. Scope: <modules>.</context>" --response-type plan --export'
 ```
 """))
 
@@ -277,13 +285,13 @@ Dispatch **one `pair` agent** for the selected change. The brief covers landing 
 	"op":"start",
 	"model_id":"pair",
 	"session_name":"Optimize <N>: <change summary>",
-	"message":"Read the plan at <plan path> with read_file first. Run one full optimize-and-harden loop:\\n\\n1. Implement the change in <files>.\\n2. Run the project's standard test command (see AGENTS.md) for the touched modules — fix anything that breaks.\\n3. Re-run the same measurement command used for the baseline (in prompt-exports/optimize-<slug>-runs.md). Take the same number of samples as the baseline so deltas are comparable. Append a new row — don't overwrite.\\n4. If the change regressed the metric or broke correctness, either revert it or iterate once to fix, then report back.\\n5. Summarize: what you changed, what the metric moved to, tests touched, concerns worth flagging.\\n\\nStay inside <scope>. Don't pursue tangential optimizations — one attributed change per loop. Skip oracle review; the orchestrator handles that."
+	"message":"Read the plan at <plan path> with read_file first. Run one full optimize-and-harden loop:\\n\\n1. Implement the change in <files>.\\n2. Run the project's standard test command (see AGENTS.md) for the touched modules — fix anything that breaks.\\n3. Re-run the same measurement command used for the baseline (in <scoreboard path>). Take the same number of samples as the baseline so deltas are comparable. Append a new row — don't overwrite.\\n4. If the change regressed the metric or broke correctness, either revert it or iterate once to fix, then report back.\\n5. Summarize: what you changed, what the metric moved to, tests touched, concerns worth flagging.\\n\\nStay inside <scope>. Don't pursue tangential optimizations — one attributed change per loop. Skip oracle review; the orchestrator handles that."
 }}
 ```
 """,
 	cli: """
 ```bash
-rpce-cli -w <window_id> -e 'agent_run op=start model_id=pair session_name="Optimize <N>: <change summary>" message="Read the plan at <plan path> with read_file first. Implement the change in <files>; run the project test command per AGENTS.md and fix breaks; re-run the baseline measurement command with matching sample count and append a new row to prompt-exports/optimize-<slug>-runs.md; if regressed, revert or iterate once to fix; then report changes, new metric value, updated tests, and concerns. Stay inside <scope>. Skip oracle review."'
+rpce-cli -w <window_id> -e 'agent_run op=start model_id=pair session_name="Optimize <N>: <change summary>" message="Read the plan at <plan path> with read_file first. Implement the change in <files>; run the project test command per AGENTS.md and fix breaks; re-run the baseline measurement command with matching sample count and append a new row to <scoreboard path>; if regressed, revert or iterate once to fix; then report changes, new metric value, updated tests, and concerns. Stay inside <scope>. Skip oracle review."'
 ```
 """))
 
@@ -298,7 +306,7 @@ Verify the agent's output against the plan's done-when criteria — for optimize
 - **Tests actually ran?** "Ran the tests" in a summary isn't the same as tests passing. If you're suspicious, ask the agent for the exact command and exit code, or dispatch a narrow explore to re-run them.
 - **Behavior spot-check, when needed.** If the change touches a correctness-sensitive surface, dispatch a narrow explore agent to read the diffed files and report whether semantics shifted (early returns, cache invalidation, ordering). Don't pull the diff into your own context unless the explore flags something concrete.
 
-If the change regressed the metric or broke correctness that the sub-agent didn't catch, **steer** the same agent to fix it before opening a new loop. Rolling back counts as progress — record the attempt in the scoreboard so the next plan knows that path was tried.
+If the change regressed the metric or broke correctness that the sub-agent didn't catch, **steer** the same agent to fix it before opening a new loop. Rolling back counts as progress — record the attempt under the scoreboard's Rejected candidates, with the reason, so the next plan knows that path was tried.
 
 ### 4d. Ask the oracle for the next plan (and the stop decision)
 
@@ -309,7 +317,7 @@ After a successful iteration, refresh the selection and ask the oracle both ques
 ```json
 {"tool":"manage_selection","args":{
 	"op":"set",
-	"paths":["<files changed this iteration>","<benchmark or test>","prompt-exports/optimize-<slug>-runs.md"],
+	"paths":["<files changed this iteration>","<benchmark or test>","<scoreboard path>"],
 	"mode":"full"
 }}
 {"tool":"\(chatToolName)","args":{
@@ -320,7 +328,7 @@ After a successful iteration, refresh the selection and ask the oracle both ques
 """,
 	cli: """
 ```bash
-rpce-cli -w <window_id> -e 'select set <files changed this iteration> <benchmark or test> prompt-exports/optimize-<slug>-runs.md'
+rpce-cli -w <window_id> -e 'select set <files changed this iteration> <benchmark or test> <scoreboard path>'
 rpce-cli -w <window_id> -e 'chat "Plan: We just landed <change summary>. Metric moved from <baseline> to <new>. Scoreboard is in the selection. Given the stop criterion (<criterion>), should we run another iteration? If yes, what is the single best next optimization. If no, explain why we have hit diminishing returns or the target." --mode plan'
 ```
 """))
@@ -364,7 +372,8 @@ Specifically for optimize:
 - **Starting metric → final metric**, with iteration count. A one-line summary: "`PathMatcher.match` p95: 124ms → 38ms over 4 iterations (-69%)."
 - **Which changes landed**, in order, with their individual deltas.
 - **Which changes were tried and reverted**, with the reason — useful so the next person doesn't repeat dead ends.
-- **State of the instrumentation.** If the debug-only metrics are worth keeping, say so; otherwise suggest removal. The scoreboard file under `prompt-exports/` can stay as historical record or be deleted — default to keeping it and let the user decide.
+- **State of the instrumentation.** If the debug-only metrics are worth keeping, say so; otherwise suggest removal.
+- **The scoreboard.** First add each candidate the run set aside untried to the scoreboard's Rejected candidates, with the reason, then give the scoreboard's path.
 - **Known follow-ups.** Anything the oracle flagged but wasn't pursued this session.
 
 ---
