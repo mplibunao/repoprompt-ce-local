@@ -35,6 +35,9 @@ Raw request: $ARGUMENTS
 		let cleanupQuickReferenceRow = includeSessionCleanupGuidance
 			? "| Dismiss a completed session | `agent_manage op=cleanup_sessions session_ids=[\"...\"]` |\n"
 			: ""
+		let planRetentionNote = includeSessionCleanupGuidance
+			? "Export cleanup never covers the run's plan, even when the plan is an export under `prompt-exports/`.\n\n"
+			: ""
 
 		return """
 You are an orchestrator: **plan**, **decompose**, **delegate**. Implementation and deep context-gathering happen in sub-agents. Keep your own context lean for coordination.
@@ -111,7 +114,7 @@ For user-provided plan files, you already have a path — just reference it in d
 
 The tool returns `oracle_export_path` and `oracle_export_instruction`. Include `oracle_export_path` inside the `message` you send on your next `agent_run` `start` call. The `oracle_export_instruction` field is a ready-made sentence ("Read the Oracle export at `<path>` with `read_file` …") you can emit verbatim at the head of that `message`. The child agent opens the file with `read_file`. Do **not** ask child agents to continue your Oracle chat — they are in different tabs.
 
-**The export is a shared document.** Sub-agents treat it as **read-only** context. As the orchestrator, you own this file — use it as a living checklist by updating it (via `apply_edits`) to mark items complete, note deferred work, or track progress across phases.
+**The plan stays as approved.** Sub-agents read it as context, and you don't edit it either. Record what happens during the run in the run ledger, so the plan keeps saying what was approved and the ledger says what was done.
 
 \(example(variant,
 	mcp: """
@@ -149,6 +152,50 @@ rpce-cli -w <window_id> -e 'agent_run op=start model_id=pair session_name="Orche
 
 ---
 
+## The run ledger
+
+Each run writes one ledger: a short Markdown file that records what the run did, for whoever later needs to know what happened and why. A single-item run still writes one.
+
+**Where it goes.** Write it to `docs/ledgers/<YYYY-MM-DD>-<topic>.md`, dated the day the run starts, or to the repository's own ledger location and naming when its AGENTS.md, or a document it links, gives one. When the run serves an issue or ticket, put its reference after the date, as in `<YYYY-MM-DD>-issue-<number>-<topic>.md`. A run that spans repositories keeps one ledger, in the repository that owns the request. Write it in the checkout where the run's work happens: the run's worktree, if it has one.
+
+**What it holds.** Start from this template:
+
+```markdown
+# Run ledger: <topic>
+
+Request: <the issue, ticket, or other request the run serves, or "none"> · Plan: `<plan file name>`
+
+<One or two sentences on what the run set out to do.>
+
+| Item | Outcome | Agent session | Commits |
+|------|---------|---------------|---------|
+| 1. <goal> | pending | | |
+| 2. <goal> | pending | | |
+
+## 1. <goal>
+
+- Decision: <what was decided, and why>. Source: <"approved plan", "user", a review finding, or "orchestrator judgment">.
+- Evidence: <a check and its result, or a link to a pull request comment, CI run, or file in the repository>.
+- Deferred: <what remains>.
+
+## Parked decisions
+
+- <Question> Options: <a> or <b>. Recommendation: <a>. Blocks: item <n>. Answer: <added when the user answers>.
+```
+
+An outcome is `pending`, `done`, `partial`, `dropped`, or `parked`, and by the end of the run no row is `pending`. List commits by subject line, because rebasing the branch changes their hashes. For a commit in another repository, name that repository and its branch first, and add its pull request once one exists. Leave out any line or section with nothing to record.
+
+**How to write it.**
+- You are the ledger's only writer.
+- Keep each item's log to a few lines, and leave out narration, transcripts, and tool output.
+- Write for a later reader who has only the repository: use repository-relative paths, leave out session, window, or run IDs, link any investigation report or optimization scoreboard the item wrote, and state each decision rather than pointing at the plan or `prompt-exports/`, which may be gone by then.
+- Make reversible choices yourself, and record in the item's log the ones a reviewer would want to know, with the reason. Two things wait for the user: an action that a rule, a skill, or their request reserves for their approval, and a choice that can't be undone. When one comes up while the user is away, add it under **Parked decisions** with the question, the options, your recommendation, and what it blocks, then continue with work that doesn't depend on it.
+- The ledger never gates a step: a missing or late entry doesn't hold up dispatch, review, or a commit.
+
+**ADRs.** When the repository keeps architecture decision records (its AGENTS.md, or a document it links, says where they live), write each ADR draft the plan contains into that folder during the run. Use the repository's rule for which of the run's own decisions are ADR candidates. If it gives none, a decision is a candidate only when it is hard to reverse, would surprise someone without the background, and involved a real trade-off; every other decision stays in the ledger. The ledger links to the ADR instead of repeating its reasoning.
+
+---
+
 ## Phase 2: Decompose into Work Items
 
 Take the plan (from \(builderName) or a user-provided plan file) and break it into **up to 5 discrete work items**.
@@ -161,15 +208,15 @@ Take the plan (from \(builderName) or a user-provided plan file) and break it in
 
 ### Default: fresh agent per item
 
-For multi-item work, dispatch a **fresh agent per item**. The plan file provides continuity — each agent reads it first, sees what's already done, and reasons with a clean context budget.
+For multi-item work, dispatch a **fresh agent per item**. The plan and the run ledger provide continuity: each agent reads the plan for its item and the ledger for what earlier items did, and reasons with a clean context budget.
 
 The pattern is a **verify-then-dispatch-fresh loop**:
 
 1. **Dispatch** the first work item with a self-contained brief + plan reference.
 2. **Wait** for the agent to finish.
 3. **Verify** against the plan — did it meet the "done when" criteria from Phase 2? A quick scan of the agent's output and, if needed, a lightweight `file_search` or `read_file` on key deliverables catches drift before it compounds.
-4. **Update the plan file** to record progress so the next agent sees current state.
-5. **Dispatch the next item fresh**, referencing the updated plan.
+4. **Record the item in the run ledger.**
+5. **Dispatch the next item fresh**, referencing the plan and the ledger.
 
 Do **not** fire-and-forget the full list. Catching drift early — before the next agent builds on a flawed foundation — is your value as the orchestrator.
 
@@ -178,23 +225,30 @@ Do **not** fire-and-forget the full list. Catching drift early — before the ne
 \(example(variant,
 	mcp: """
 ```json
+// 0. Before the first dispatch, create the run ledger with one row per item
+{"tool":"file_actions","args":{
+	"action":"create",
+	"path":"<absolute ledger path>",
+	"content":"<the ledger template, filled in>"
+}}
+
 // 1. Dispatch item 1 as a fresh agent
 {"tool":"agent_run","args":{
 	"op":"start",
 	"model_id":"pair",
 	"session_name":"Orchestrate 1/N: <item 1 goal>",
-	"message":"Read the plan at <plan path> with read_file first. Your job is item 1: <brief>. Later items are handled separately."
+	"message":"Read the plan at <plan path> with read_file first. Your job is item 1: <brief>. Later items are handled separately. Report your decisions and verification results to me. I keep the run ledger."
 }}
 
 // 2. Agent completes — verify against the plan.
 //    Optionally spot-check a key file:
 {"tool":"read_file","args":{"path":"<key file from item 1>"}}
 
-// 3. Update the plan file to record progress:
+// 3. Record the item in the run ledger:
 {"tool":"apply_edits","args":{
-	"path":"<plan path>",
-	"search":"- [ ] Item 1:",
-	"replace":"- [x] Item 1:"
+	"path":"<ledger path>",
+	"search":"| 1. <item 1 goal> | pending | | |",
+	"replace":"| 1. <item 1 goal> | done | pair · Orchestrate 1/N: <item 1 goal> | `<commit subject>` |"
 }}
 
 // 4. Dispatch item 2 as a new fresh agent:
@@ -202,23 +256,26 @@ Do **not** fire-and-forget the full list. Catching drift early — before the ne
 	"op":"start",
 	"model_id":"pair",
 	"session_name":"Orchestrate 2/N: <item 2 goal>",
-	"message":"Read the plan at <plan path> with read_file first. Item 1 is complete. Your job is item 2: <brief>."
+	"message":"Read the plan at <plan path> and the run ledger at <ledger path> with read_file first. Item 1 is complete. Your job is item 2: <brief>. Report your decisions and verification results to me. I keep the run ledger."
 }}
 ```
 """,
 	cli: """
 ```bash
+# 0. Before the first dispatch, create the run ledger with one row per item
+rpce-cli -w <window_id> -e 'call file_actions {"action":"create","path":"<absolute ledger path>","content":"<the ledger template, filled in>"}'
+
 # 1. Dispatch item 1 as a fresh agent
-rpce-cli -w <window_id> -e 'agent_run op=start model_id=pair session_name="Orchestrate 1/N: <goal>" message="Read the plan at <plan path> with read_file first. Your job is item 1: <brief>."'
+rpce-cli -w <window_id> -e 'agent_run op=start model_id=pair session_name="Orchestrate 1/N: <goal>" message="Read the plan at <plan path> with read_file first. Your job is item 1: <brief>. Report your decisions and verification results to me. I keep the run ledger."'
 
 # 2. Verify output, spot-check key files
 rpce-cli -w <window_id> -e 'read "<key file from item 1>"'
 
-# 3. Update plan file to record progress
-rpce-cli -w <window_id> -e 'call apply_edits {"path":"<plan path>","search":"- [ ] Item 1:","replace":"- [x] Item 1:"}'
+# 3. Record the item in the run ledger
+rpce-cli -w <window_id> -e 'call apply_edits {"path":"<ledger path>","search":"| 1. <goal> | pending | | |","replace":"| 1. <goal> | done | pair · Orchestrate 1/N: <goal> | <commit subject> |"}'
 
 # 4. Dispatch item 2 as a new fresh agent
-rpce-cli -w <window_id> -e 'agent_run op=start model_id=pair session_name="Orchestrate 2/N: <goal>" message="Read the plan at <plan path> with read_file first. Item 1 is complete. Your job is item 2: <brief>."'
+rpce-cli -w <window_id> -e 'agent_run op=start model_id=pair session_name="Orchestrate 2/N: <goal>" message="Read the plan at <plan path> and the run ledger at <ledger path> with read_file first. Item 1 is complete. Your job is item 2: <brief>. Report your decisions and verification results to me. I keep the run ledger."'
 ```
 """))
 
@@ -273,13 +330,18 @@ When questions arise during coordination, reason through them yourself. If you'r
 \(sharedParallelDispatchBlock(variant: variant, defaultRole: "pair"))
 
 \(sharedSessionCleanupSection(variant: variant, heading: "### Housekeeping", includeSessionCleanupGuidance: includeSessionCleanupGuidance, includeStrayPlanExportCleanup: true))
----
+\(planRetentionNote)---
 
 ## Phase 4: Monitor and Verify
 
-\(sharedMonitorAndVerifyBlock(variant: variant))
+\(sharedMonitorAndVerifyBlock(variant: variant, recordStep: "Record the item's outcome, or the gaps you found, in the run ledger."))
 
 \(sharedFinalRollupBlock(variant: variant, taskNoun: "item"))
+
+The final rollup also gives:
+- The run ledger's path.
+- ADR candidates, when the repository keeps ADRs: decisions made during the run that meet the ADR rule given under **ADRs**. Write the ones the user approves into the repository's ADR folder.
+- One line about the plan. For an untracked plan: "I'll delete `<plan path>` when you tell me the work is done." For a plan git tracks: "`<plan path>` is tracked, so it stays and follows the repository's own plan lifecycle."
 
 ### Quick reference: orchestrator operations
 
@@ -292,7 +354,23 @@ When questions arise during coordination, reason through them yourself. If you'r
 | Poll without blocking | `agent_run op=poll session_id="..."` |
 | Poll multiple agents | `agent_run op=poll session_ids=["...", "..."]` |
 \(cleanupQuickReferenceRow)| Read plan/context | `read_file`, `get_file_tree`, `file_search` |
+| Create or update the run ledger | `file_actions` (`action:"create"`), then `apply_edits` |
 | Reason with oracle | `\(isAgent ? "ask_oracle" : "oracle_send")` — requires file selection from \(builderName) |
+
+---
+
+## Phase 5: Close Out
+
+The plan the run worked from, whether a `docs/plans/` file or a `prompt-exports/` export, stays until the user says the work is done. Finishing the items, passing CI, or a merge doesn't count, because review and feedback usually follow.
+
+Bring up deleting it at two moments only:
+1. In the final rollup, with the one line about the plan.
+2. When the user approves the finished work, for example "looks good" or "merge it", ask once: "Is the work done, so I can delete `<plan path>`?" Approving the plan, or a single item, doesn't count.
+
+When the user says the work is done:
+1. Check that git doesn't track the plan: in your shell, `git ls-files -- <plan path>` prints nothing. If git tracks it, leave it in place and stop here, because that repository keeps its plans under its own lifecycle.
+2. Check that each decision in the plan is in the run ledger or an ADR, and that each deferral is in the run ledger. Tell the user what is missing, and record it before you delete anything.
+3. Delete the plan by its absolute path with `file_actions`, which moves it to the Trash.
 
 ---
 
