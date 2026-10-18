@@ -132,31 +132,39 @@ final class ReviewPromptUpgradeTests: XCTestCase {
     """
 
     func testUneditedPreviousReviewDefaultUpgradesAndEditedCopyIsKept() throws {
-        let freshInstall = try loadReviewPrompt(seedingContent: nil).loaded
-        XCTAssertNotEqual(freshInstall.content, Self.previousShippedReviewDefault)
+        let freshInstall = try loadReviewPrompt(seeding: [])
+        XCTAssertNotEqual(freshInstall.loaded.content, Self.previousShippedReviewDefault)
 
-        let upgraded = try loadReviewPrompt(seedingContent: Self.previousShippedReviewDefault)
-        XCTAssertEqual(upgraded.loaded.content, freshInstall.content)
+        /// A store saved by any earlier launch holds every built-in, so seeding all of them leaves
+        /// the [Review] decision as the only reason the load can save.
+        func storeWithReview(content: String) -> [StoredPromptRecord] {
+            freshInstall.storedPrompts.map { prompt in
+                guard prompt.id == Self.reviewPromptID else { return prompt }
+                return StoredPromptRecord(id: prompt.id, title: "[Review]", content: content)
+            }
+        }
+
+        let upgraded = try loadReviewPrompt(seeding: storeWithReview(content: Self.previousShippedReviewDefault))
+        XCTAssertEqual(upgraded.loaded.content, freshInstall.loaded.content)
         XCTAssertFalse(upgraded.loaded.isUserEdited)
         XCTAssertEqual(upgraded.persisted, upgraded.loaded)
         XCTAssertFalse(upgraded.persisted.isUserEdited)
 
         let editedContent = Self.previousShippedReviewDefault + "\nAlso check logging."
-        let edited = try loadReviewPrompt(seedingContent: editedContent)
+        let edited = try loadReviewPrompt(seeding: storeWithReview(content: editedContent))
         XCTAssertEqual(edited.loaded.content, editedContent)
         XCTAssertTrue(edited.loaded.isUserEdited)
         XCTAssertEqual(edited.persisted.content, editedContent)
     }
 
     private func loadReviewPrompt(
-        seedingContent: String?
-    ) throws -> (loaded: StoredPromptRecord, persisted: StoredPromptRecord) {
+        seeding seededPrompts: [StoredPromptRecord]
+    ) throws -> (loaded: StoredPromptRecord, persisted: StoredPromptRecord, storedPrompts: [StoredPromptRecord]) {
         let directory = try makeTestDirectory()
         let storage = PromptStorage(fileURL: directory.appendingPathComponent("SavedPrompts.json"))
-        if let seedingContent {
-            let seeded = StoredPromptRecord(id: Self.reviewPromptID, title: "[Review]", content: seedingContent)
+        if !seededPrompts.isEmpty {
             _ = try storage.mutatePrompts { prompts in
-                prompts = [seeded]
+                prompts = seededPrompts
                 return ((), true)
             }.get()
         }
@@ -178,7 +186,7 @@ final class ReviewPromptUpgradeTests: XCTestCase {
         let loaded = try XCTUnwrap(prompts.storedPrompts.first { $0.id == Self.reviewPromptID })
         // Storage reads and writes share one serial queue, so this read waits for the load's background save.
         let persisted = try XCTUnwrap(storage.loadPrompts().get().first { $0.id == Self.reviewPromptID })
-        return (loaded, persisted)
+        return (loaded, persisted, prompts.storedPrompts)
     }
 }
 
