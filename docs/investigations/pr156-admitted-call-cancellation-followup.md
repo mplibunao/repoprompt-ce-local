@@ -36,6 +36,6 @@ This file was the working log of the session that finished #156, promoted build 
 
 ## Build 49, second attempt: accepted
 
-- Before the quit, the session waited for an independent `rpce-cli` caller's Context Builder review in a third production window to finish, because Agent Mode inventories do not show Context Builder runs. A fresh rollback archive was taken after that window appeared.
+- Before the quit, the session waited for another caller's Context Builder run to finish, because Agent Mode inventories do not show Context Builder runs. A fresh rollback archive was taken afterwards.
 - Build 49 was installed from `c58c212c`. The Codex and Claude Code client arms passed, and the inactive-tab selection kept its single path through peer publications, later reads, the saved document, and a quit and relaunch. Tab IDs, their order, active contexts, and Agent Mode settings matched the baseline.
 - Tag `local/v1.4.0-b49` and its receipt-only release were published on 2026-10-09.

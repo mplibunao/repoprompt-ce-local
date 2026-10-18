@@ -28,7 +28,7 @@ RepoPrompt CE is the failing layer for the observed hang. Basic Codex CLI and di
 - `Sources/RepoPrompt/Features/AgentMode/Runtime/Codex/CodexAgentModeCoordinator.swift:5878` sets visible Codex Agent Mode status to `Thinking...` on `.turnStarted`.
 - `Sources/RepoPrompt/Features/AgentMode/Runtime/Codex/CodexAgentModeCoordinator.swift:5896` finalizes only after a correlated `.turnCompleted`. If the controller drops or never emits completion, Agent Mode remains active.
 - `Sources/RepoPrompt/Infrastructure/AI/Providers/Codex/CodexCLIProvider.swift:70` uses the native Codex app-server path for visible chat, so the same controller/event issue can affect both visible chat and Agent Mode.
-- `agent_manage` showed the visible `Scout CE first-install milestone` session still running with only the user prompt in its transcript, confirming RepoPrompt didn't record assistant output or terminal completion for that run.
+- `agent_manage` showed the visible Codex session still running with only the user prompt in its transcript, confirming RepoPrompt didn't record assistant output or terminal completion for that run.
 - A targeted `agent_run` explore launch couldn't start because RepoPrompt rejected the run with a workspace-routing error before provider startup. That's separate from the Codex hang and should be handled as routing/tooling hardening.
 
 ## Investigation Log

@@ -45,7 +45,6 @@ Context Builder on Sol Low, `versionCode` 202_609, and saved selections not rewr
 
 Other observations, not counted as findings:
 
-- The plan's progress note still says `wi-5` is in progress, although `616d67fe` is committed.
 - Recommendation copy uses different examples for the same thing. `contextBuilderRationale` says
   "such as GPT-6 Sol Low", while `bestContextBuilder` says "such as GPT-6.1 Sol Low"
   (`RecommendationTypes.swift`). This is a wording-only adaptation, which the brief expects.

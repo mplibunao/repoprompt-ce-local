@@ -23,7 +23,7 @@ Reusing a healthy root app-server is protocol-compatible but does not fit RepoPr
 ## Background / Prior Research
 
 - `docs/investigations/codex-appserver-and-issue-triage-2026-07-12.md` established that Codex app-server clients/controllers are per session or tab, that idle servers are intentionally retired, and that older builds could collapse startup detail into the same generic “process is not running” message. The current report treats the worktree-only isolation as a distinct regression until the startup path and current build history prove otherwise.
-- The target repositories keep mise tool-version configuration at the root, so each fresh worktree also contains it, which may affect cwd-sensitive executable or environment resolution.
+- The target repositories keep tool-version configuration at the root, so each fresh worktree also contains it, which may affect cwd-sensitive executable or environment resolution.
 
 ### Codex protocol and mise behavior
 

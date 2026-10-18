@@ -28,11 +28,11 @@ The fresh read-only triage used the existing physical window and contexts. It di
 
 - The only RepoPrompt process was debug app `<debug app A>`, launched at 2026-09-04 01:31:59 UTC. Bundle provenance reported the local stability branch and `dirty: false`; no production process was present.
 - The first non-resetting snapshot showed balanced counters. `get_file_tree` had three starts and three handler completions, while `read_file` had two starts and two handler completions. Neither tool had a deadline expiration, grace expiration, detachment, or residual settlement entry. `get_code_structure` had no residual detachment. An explicitly routed roots canary completed in 20 to 40 milliseconds.
-- The incident-correlation session for upstream issue 918 (heartbeat-only) called `read_file` at 01:40:52 with the absolute path `<checkout>/docs/investigations/context-builder-selection-construction-watchdog-2026-09-01.md`. The response arrived 35.259 seconds later with `tool_execution_timeout` and explicit detached-for-eventual-cleanup semantics.
-- Session `Upstream heartbeat coverage audit` called `read_file` at 01:42:40 with projected root-qualified path `repoprompt-ce/Sources/RepoPrompt/Features/Diagnostics/MCP/MCPToolExecutionDiagnostics.swift`. The response arrived 35.086 seconds later with the same timeout and detachment result. This is a projected workspace path, distinct from the explicit `root-alias//relative-path` token form.
+- One Agent session called `read_file` at 01:40:52 with the absolute path `<checkout>/docs/investigations/context-builder-selection-construction-watchdog-2026-09-01.md`. The response arrived 35.259 seconds later with `tool_execution_timeout` and explicit detached-for-eventual-cleanup semantics.
+- A second Agent session called `read_file` at 01:42:40 with projected root-qualified path `repoprompt-ce/Sources/RepoPrompt/Features/Diagnostics/MCP/MCPToolExecutionDiagnostics.swift`. The response arrived 35.086 seconds later with the same timeout and detachment result. This is a projected workspace path, distinct from the explicit `root-alias//relative-path` token form.
 - After those calls, `read_file` reported 12 starts, ten handler completions, two deadline expiration events, two cleanup-grace expiration events, two detachments, and zero detached settlements. `get_file_tree` remained balanced at ten starts and ten handler completions with no deadline, grace, or detachment event.
 - A bounded roots canary then returned in 30 milliseconds with `tool_execution_structure_settlement_busy`, reporting the limit of one released cancellation-ignoring structure provider. The exact saved session records tie the two timeout outputs to their qualified input paths, so the new pair no longer has the historical incident's first-provider attribution gap.
-- A mandatory upstream issue 881 Context Builder was already active when the first Agent timed out. A separate stability-integration Context Builder began after the terminal fence already existed. Neither builder's owner interrupted or repurposed it for this triage. Their owning lanes retain the campaign's 20-minute continuous no-progress policy.
+- One Context Builder run was already active when the first Agent timed out, and another began after the terminal fence already existed. Neither was interrupted or repurposed for this triage.
 
 This sequence proves process-local recurrence from a clean baseline on that build; it doesn't prove persistence across reboot. Both failing forms are explicitly within upstream issue 887: an absolute existing-file path and a root-qualified existing-file path in a multi-root workspace.
 
@@ -45,10 +45,10 @@ Let `C` be the packaged stability commit used for the replay. Before any lifecyc
 1. Refresh upstream and PR metadata, then pin the exact upstream and final upstream PR 889 commit IDs used for the run. If either moved, update the recorded prerequisite instead of relying on these captured values.
 2. `git merge-base --is-ancestor <current-upstream> C` and `git merge-base --is-ancestor 4ff8036d0fdb4d675da0caa5a28eabfcd7d14fc2 C` must both succeed.
 3. The packaged bundle's provenance file must name `C` exactly and report `dirty: false`.
-4. The quiescent phase must have no unrelated Context Builder or Agent scope in flight. Its owning lane must resolve any builder with no new output or state change for 20 continuous minutes before replay; elapsed runtime alone isn't a stop condition.
+4. The quiescent phase must have no unrelated Context Builder or Agent scope in flight.
 5. A non-resetting concurrency snapshot must show zero residual detached providers, and an explicitly routed roots canary must complete without a settlement-busy response.
 
-The current package fails checks 2 and 3. The missing integrated, provenance-verified runtime is the only stability-runtime prerequisite for the decisive replay. Active campaign work is a scheduling condition for the quiescent phase, not permission to weaken the integration gate.
+The current package fails checks 2 and 3. The missing integrated, provenance-verified runtime is the only stability-runtime prerequisite for the decisive replay. Other active work is a scheduling condition for the quiescent phase, not permission to weaken the integration gate.
 
 ## Pre-reboot upstream assessment
 
@@ -60,11 +60,11 @@ Upstream PR 936 can prevent a routed tool from combining an inactive workspace i
 
 Bundle provenance recorded the same clean stability commit. The replay used fresh `rpce-cli-debug` invocations with explicit window and context routing against a temporary window and context `<context A>`.
 
-- At 2026-09-03 11:56:20 UTC, the stability acceptance task issued `get_code_structure`, `read_file`, and `get_file_tree` concurrently in the temporary window. Code structure completed in 25.408 seconds and the read completed in 21.253 seconds. The tree request targeting `Sources/RepoPrompt/Infrastructure/MCP` reached the 30-second execution deadline, did not settle during the five-second cancellation grace, and returned `tool_execution_timeout` at 11:56:55.
+- At 2026-09-03 11:56:20 UTC, an acceptance session issued `get_code_structure`, `read_file`, and `get_file_tree` concurrently in the temporary window. Code structure completed in 25.408 seconds and the read completed in 21.253 seconds. The tree request targeting `Sources/RepoPrompt/Infrastructure/MCP` reached the 30-second execution deadline, did not settle during the five-second cancellation grace, and returned `tool_execution_timeout` at 11:56:55.
 - At 11:57:14, 18.8 seconds after the detached timeout completed, another tree request returned `tool_execution_structure_settlement_busy` with bounded-recovery guidance. This is the expected upstream PR 822 fence during its 30-second recovery horizon.
 - At 11:57:45, 50.3 seconds after the first detach, a fresh tree request was admitted. Admission proves the first provider stopped fencing on schedule. The fresh request independently reached the same 30-second deadline and five-second grace and returned `tool_execution_timeout` at 11:58:20.
 - No post-refresh response reported `released_provider_limit_reached`. The replay therefore did not exhaust the one-released-provider allowance and did not enter upstream PR 822's terminal safety state.
-- The two timed-out providers are attributable to the stability acceptance caller in the temporary window. Context `<context A>` projected reads into the upstream PR 472 worktree, but upstream PR 472 did not initiate these invocations.
+- The two timed-out providers are attributable to that acceptance session in the temporary window. Context `<context A>` projected reads into the upstream PR 472 worktree, but upstream PR 472 did not initiate these invocations.
 - The timeout responses omitted invocation ID, connection ID, and last handler phase. Current code reports separate `get_file_tree` phases for request resolution, ingress wait, and tree construction, so this evidence cannot distinguish a worktree-ingress wait from tree construction.
 - MP retired the temporary physical window after this sequence. That retirement canceled the later tiny Context Builder availability canary and superseded its result; it did not cause the earlier tree timeouts and is not standalone provider evidence.
 
@@ -74,24 +74,24 @@ The later incident occurred in the still-running packaged debug process `<debug 
 
 ### Entry into the terminal fence
 
-- The stability Context Builder started at 2026-09-03 19:22:46 UTC in tab `<tab A>`. Its outer CLI process is `<stability client>`.
-- An upstream issue 830 Agent session, Codex conversation `<redacted>`, started at 19:23:14 in the session-bound upstream issue 830 worktree. Its initial disambiguated reads completed normally.
-- At 19:24:02 the upstream issue 830 Agent called `read_file` for the absolute path `<checkout>/docs/investigations/root-agent-replacement-handoff-2026-09-02/proposed-revised-goal.md`. At 19:24:37 it returned after 35.1736 seconds with `tool_execution_timeout` and `settlement: detached` semantics.
-- At 19:24:46 the same Agent's next absolute `read_file`, targeting the hot campaign ledger, returned `tool_execution_structure_settlement_busy` in 204 milliseconds with the released-provider-limit message. Further upstream issue 830 reads and a tree request were rejected synchronously.
-- This sequence proves that a released provider predated the upstream issue 830 goal read. The upstream issue 830 goal read was admitted only after the earlier blocker had reached the registry's 30-second recovery horizon; it then became the second blocking lease.
-- Working backward from the upstream issue 830 goal-read admission, the earlier call had to cross its 30-second execution deadline, five-second cancellation grace, and 30-second registry recovery horizon after the stability Context Builder began. The stability builder is the only correlated surviving operation whose start time fits that window. This is strong attribution evidence, not proof of the exact nested invocation or file path.
-- The root Doc Garden Context Builder started later, at 19:32:41 in tab `<redacted>`, with CLI process `<Doc Garden client>`. It cannot have caused entry into the terminal state.
-- Independent roots canaries then observed the same window-3 response across upstream issue 916 beginning at 19:39, upstream issues 830 and 882, and root through 22:53. At 22:53 root explicitly bound existing upstream issue 830 context `<redacted>`; the binding succeeded and its immediate roots request returned the same terminal fence. This separates routing success from provider settlement failure.
+- Context Builder A started at 2026-09-03 19:22:46 UTC in tab `<tab A>`. Its outer CLI process is `<client A>`.
+- An Agent session, Codex conversation `<redacted>`, started at 19:23:14 in its session-bound worktree. Its initial disambiguated reads completed normally.
+- At 19:24:02 that Agent called `read_file` for the absolute path `<checkout>/docs/investigations/root-agent-replacement-handoff-2026-09-02/proposed-revised-goal.md`. At 19:24:37 it returned after 35.1736 seconds with `tool_execution_timeout` and `settlement: detached` semantics.
+- At 19:24:46 the same Agent's next absolute `read_file` returned `tool_execution_structure_settlement_busy` in 204 milliseconds with the released-provider-limit message. Its further reads and a tree request were rejected synchronously.
+- This sequence proves that a released provider predated the Agent's goal read. That goal read was admitted only after the earlier blocker had reached the registry's 30-second recovery horizon; it then became the second blocking lease.
+- Working backward from the goal read's admission, the earlier call had to cross its 30-second execution deadline, five-second cancellation grace, and 30-second registry recovery horizon after Context Builder A began. Context Builder A is the only correlated surviving operation whose start time fits that window. This is strong attribution evidence, not proof of the exact nested invocation or file path.
+- Context Builder B started later, at 19:32:41 in tab `<redacted>`, with CLI process `<client B>`. It cannot have caused entry into the terminal state.
+- Independent roots canaries from several sessions then observed the same response in the affected window from 19:39 through 22:53. At 22:53 one session explicitly bound an existing context `<redacted>`; the binding succeeded and its immediate roots request returned the same terminal fence. This separates routing success from provider settlement failure.
 
 ### Live pre-lifecycle snapshot
 
-A source-verified read-only DEBUG diagnostics call at the same process, without resetting counters, reported these active window-3 scopes:
+A source-verified read-only DEBUG diagnostics call at the same process, without resetting counters, reported these active scopes in the affected window:
 
-- stability Context Builder: connection `<connection A>`, sequence 868;
-- root Doc Garden Context Builder: connection `<connection B>`, sequence 903;
+- Context Builder A: connection `<connection A>`, sequence 868;
+- Context Builder B: connection `<connection B>`, sequence 903;
 - a separate Agent run: connection `<connection C>`, sequence 1449.
 
-Both Context Builder connections were `ready`, in flight, and still owned one outer `context_builder` scope. Process start order and the monotonic scope sequence map sequence 868 to `<stability client>` and sequence 903 to `<Doc Garden client>`; `lsof` independently maps the two client sockets to app file descriptors 45 and 54.
+Both Context Builder connections were `ready`, in flight, and still owned one outer `context_builder` scope. Process start order and the monotonic scope sequence map sequence 868 to `<client A>` and sequence 903 to `<client B>`; `lsof` independently maps the two client sockets to the app's file descriptors.
 
 The non-resetting concurrency snapshot localizes the remaining settlement entries:
 
@@ -101,7 +101,7 @@ The non-resetting concurrency snapshot localizes the remaining settlement entrie
 | `get_file_tree` | 2 | 2 | 2 | 2 | 0 |
 | `get_code_structure` | 0 | 0 | 0 | 0 | 0 |
 
-`read_file` also recorded one force-disconnect request. The exact difference between detachments and detached settlements is two, matching the registry state required by the terminal response. The earlier window-2 tree providers have both settled and do not own the current fence.
+`read_file` also recorded one force-disconnect request. The exact difference between detachments and detached settlements is two, matching the registry state required by the terminal response. The earlier temporary window's tree providers have both settled and do not own the current fence.
 
 The public error metadata contains an origin tool, invocation, connection, age, and handler phase, but ordinary CLI and Agent result projection retained only the human-readable error text. The hidden diagnostics surface exposes active outer scopes and aggregate execution counters, not each retained settlement lease. This leaves the first released nested read without exact attribution before a lifecycle boundary.
 
@@ -109,14 +109,14 @@ The duration inventory's separate 10-second readiness ceiling is not evidence of
 
 ### Final pre-relaunch snapshot
 
-MP authorized recursive retirement of the two Context Builder clients without stopping the app. The stability client exited first; the root Doc Garden client then exited with code 130 after an interrupt. Neither process retained an OS descendant. The app's terminal-event store independently recorded both connections as peer-initiated EOFs:
+MP authorized recursive retirement of the two Context Builder clients without stopping the app. Client A exited first; client B then exited with code 130 after an interrupt. Neither process retained an OS descendant. The app's terminal-event store independently recorded both connections as peer-initiated EOFs:
 
-- at 2026-09-03 23:07:11 UTC, connection `<connection A>`, peer `<stability client>`;
-- at 23:10:49 UTC, connection `<connection B>`, peer `<Doc Garden client>`.
+- at 2026-09-03 23:07:11 UTC, connection `<connection A>`, peer `<client A>`;
+- at 23:10:49 UTC, connection `<connection B>`, peer `<client B>`.
 
-An immediate upstream issue 830 roots canary after both client exits still returned `tool_execution_structure_settlement_busy`. At 23:14:49 UTC, a final non-resetting diagnostics snapshot showed neither Context Builder connection or scope, while `read_file` remained at 11 detachments and nine detached settlements. The two residual providers survived both outer clients and remain inside `<debug app B>`; client EOF did not settle or remove their registry leases.
+An immediate roots canary after both client exits still returned `tool_execution_structure_settlement_busy`. At 23:14:49 UTC, a final non-resetting diagnostics snapshot showed neither Context Builder connection or scope, while `read_file` remained at 11 detachments and nine detached settlements. The two residual providers survived both outer clients and remain inside `<debug app B>`; client EOF did not settle or remove their registry leases.
 
-The same snapshot contained one active outer `agent_run` scope on connection `<connection C>`, sequence 1466. That scope belongs to unrelated upstream issue 881 merge-coverage work and is not settlement evidence. The visible app must remain undisturbed until those Agent sessions finish and the root campaign establishes the authorized relaunch boundary.
+The same snapshot contained one active outer `agent_run` scope on connection `<connection C>`, sequence 1466. That scope belongs to unrelated work and is not settlement evidence. The visible app must remain undisturbed until those Agent sessions finish and a relaunch is authorized.
 
 ## Deduplication and residual boundary
 
@@ -124,7 +124,7 @@ The same snapshot contained one active outer `agent_run` scope on connection `<c
 - Upstream PR 644 owns the earlier change that moved `read_file` and `get_file_tree` onto detach-and-settle instead of disconnecting the bridge.
 - Closed upstream issue 390 and merged upstream PR 520 own session-bound worktree ingress stalls and basic-tool waits. The missing internal phase leaves this as the nearest root-cause family, not a confirmed regression.
 - Open upstream issue 172 owns the broader MCP throughput roadmap, including small-read admission, freshness, worktree binding, and file-provider projection. The two tree timeouts are compatible with that active track.
-- Upstream issue 887 and upstream PR 889 own qualified `read_file` probing of unrelated roots. The upstream issue 830 goal read is an absolute existing-file request in the same multi-root workspace and matches that issue's trigger shape. The running package does not contain upstream PR 889's final exact-identity and freshness-isolation commits, so this incident cannot validate or invalidate the final repair.
+- Upstream issue 887 and upstream PR 889 own qualified `read_file` probing of unrelated roots. The Agent's goal read is an absolute existing-file request in the same multi-root workspace and matches that issue's trigger shape. The running package does not contain upstream PR 889's final exact-identity and freshness-isolation commits, so this incident cannot validate or invalidate the final repair.
 - Upstream issue 918 owns a nested `manage_selection.selection_construction` stall after Context Builder discovery. The canceled tiny Context Builder attempt did not reach an attributable phase and adds no evidence to that issue.
 - Upstream PR 936 owns routing authority, not provider execution. The successful sibling operations and explicit worktree projection make stale routing an unsupported explanation for these timeouts.
 

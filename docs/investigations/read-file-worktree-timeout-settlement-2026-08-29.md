@@ -34,8 +34,7 @@ window fence match the current settlement-registry design and tests.
 - Target size: 12,631 bytes.
 - Existing worktree: `bugfix/882-same-workspace-admission` at `f5787166`, registered with
   RepoPrompt.
-- The worktree contained four modified paths and one untracked path. This investigation
-  did not alter them.
+- This investigation left the worktree's contents unchanged.
 
 ## Failure chronology
 
@@ -122,8 +121,8 @@ The settled-during-grace result establishes that the worktree route is not invar
 cancellation-ignoring and that a timeout does not necessarily poison the window. It does
 not identify the stage that consumed the execution budget.
 
-The direct CE CLI transport control was not run. Packaged CLI option `-t` addressed the
-active upstream issue 900 worktree instead of the requested clean tab during the mandatory Git-routing
+The direct CE CLI transport control was not run. Packaged CLI option `-t` addressed a
+different worktree instead of the requested clean tab during the mandatory Git-routing
 preflight, so a CLI `read_file` would have tested the wrong context. This is known
 upstream issue 900 selector-routing behavior and is not a separate candidate in this investigation.
 

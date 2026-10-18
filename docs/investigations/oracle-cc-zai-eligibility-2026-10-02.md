@@ -33,7 +33,7 @@ The task provides prior source confirmation of OpenCode and direct API Oracle su
 - Installed production bundle metadata: `com.pvncher.repoprompt.ce`, version `1.4.0`, build `46`; CLI version `1.4.0`. Info.plist supplies no commit provenance, so this report distinguishes checkout source from installed observations.
 - `app_settings op=options key=models.planning_model agent=claudeCodeGLM limit=200`: 95 static Claude Code candidates, no compatible-backend entries. This surface labels itself non-exhaustive and uses `AIModel.allModels()`, so absence there does not establish backend ineligibility. It is not the configured UI picker catalog.
 - Own-context `app_settings op=get group=context_builder`: `codexExec` / `gpt-6.1-sol-medium`. This metadata is scoped to the newly created investigation context and does not establish which model ran the user's previous builder. The user's CC Zai observation is preserved as task input.
-- The initial window-1 handoff ended with a pre-launch approval rejection and immediate slot release. Following explicit approval and parent authorization to use normal admission, one builder question ran successfully and released the slot at 13:41:43 UTC. No concurrent run was cancelled or displaced.
+- The initial handoff ended with a pre-launch approval rejection and immediate slot release. Following explicit approval and parent authorization to use normal admission, one builder question ran successfully and released the slot at 13:41:43 UTC. No concurrent run was cancelled or displaced.
 
 ## Investigator Findings
 
