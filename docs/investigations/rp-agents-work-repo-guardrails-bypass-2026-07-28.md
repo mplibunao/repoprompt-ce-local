@@ -30,7 +30,7 @@ RepoPrompt CE's bundled-Codex change (upstream PR 612, 2026-07-23) moved the Cod
 - Bundled runtime: `Contents/Resources/BundledRuntimes/Codex/<arch>/` with `bin/codex`, `bin/codex-code-mode-host`, `codex-resources/zsh`, `codex-path/rg`, `codex-package.json` (layoutVersion 1, entrypoint bin/codex, pathDir codex-path).
 - **Bundled codex version: `codex-cli 0.145.0` — IDENTICAL to system codex (0.145.0).**
 - Implication: version drift is ruled out. Regression vector must be launch-time differences: environment (PATH shims), config discovery (CODEX_HOME / repo-root trust), cwd, or sandbox/exec policy flags passed by RP to the bundled app-server.
-- `~/.codex/rules/default.rules` contains only `decision="allow"` prefix rules (approval learning cache) — no deny/guardrail rules live at user level. `~/.codex/config.toml` marks the work repository trusted.
+- `~/.codex/config.toml` marks the work repository trusted.
 
 ### Explore agent: git archaeology (2026-07-28)
 - Vendoring introduced `4fd888ed` (2026-07-22, "Bundle pinned Codex runtime artifact"), merged `d9af842f` 2026-07-23 via upstream PR 605. Bundled runtime staged into `RepoPrompt.app/Contents/Resources/BundledRuntimes/Codex/<target>/` (`Scripts/package_app.sh:306-312`).
@@ -155,7 +155,6 @@ Confirmed by minimal reproduction: adding the work repository's `[hooks.state]` 
 Proposed fix (DECIDED 2026-07-28: MP rejected warn-only/visibility-only preflight as a non-fix; the proposal is the approval flow or nothing):
 - **Hook approval flow in Agent Mode**: after thread start, call `hooks/list`; on hooks with `trustStatus` `untrusted`/`modified`, offer an approval interaction (repo, hook command, hash); on approval CE writes the `[hooks.state]` entry into its private home using codex-reported `key`/`currentHash`, then restarts/refreshes the session so hooks are active. Implementable without codex-side changes. Requires adding `hooks/list` to the declared contract fixture.
 - Auto-seeding from `~/.codex` only as an opt-in, repo-scoped bridge — not wholesale config copying.
-- Implementation plan: see rp-deep-plan output (in progress 2026-07-28) before filing the upstream ticket.
 
 **Scope caveat — user-level (global) hooks**: `HookSource` includes `user`, i.e. hooks declared in the CODEX_HOME's own config.toml. Under CE's private home, the user's `~/.codex/config.toml` is never read, so user-global hooks are not "untrusted" — they are **invisible**; `hooks/list` cannot warn about them. That gap is part of the broader "isolated home severs user codex config" story and belongs in the upstream issue narrative (fixable only by import/migration UX, not by detection).
 

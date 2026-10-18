@@ -36,7 +36,7 @@ The complaints are real and are **four co-occurring RepoPrompt CE defects — no
 **Q1 — running build (ANSWERED): the relaunch DID happen at 23:32 UTC on 07-11, but for the 4-commit stack; the 5-commit repackage (00:04 UTC on 07-12) has never been launched.**
 - Only ONE app instance running: the debug app, started 2026-07-11 23:32:41 UTC by a conductor run job (packaged 23:32:09 UTC from the then-4-commit local patch branch). No release app process.
 - Running app therefore CONTAINS: upstream PR 450 text_elements fix, 3x upstream PR 472 wedge-fix commits, upstream `1ab555e6` startup fix. MISSING: the backoff patch (upstream issue 513 bridge backoff fix — but that only matters for the embedded helper binary).
-- On-disk DebugApps bundle = the 00:04:24 UTC package (1.0.28/29, post-2bc5179c). Running process predates it (loaded the image staged at 23:32 UTC).
+- On-disk DebugApps bundle = the 00:04:24 UTC package (1.0.28/29, with the backoff patch). Running process predates it (loaded the image staged at 23:32 UTC).
 
 **Q2 — live Codex dispatch (ANSWERED): dispatch + turn completion WORK; provisioning inconsistent; in-child RP tool calls can time out.**
 - Smoke probe: completed, listed 9 mcp__RepoPromptCE__* tools, BUT its read_file call timed out → shell fallback. Ended CODEX_PROVISIONING_SMOKE_OK.
@@ -89,7 +89,7 @@ Traced the full source on the running branch; three Codex-backed `agent_explore`
 - **Contrast — the bounded twin exists and is used elsewhere:** `awaitAppliedIngressForExplicitRequest(..., timeout:)` (`:8050`) → `awaitAppliedIngressWithTimeout` (`:8063`) races the operation against `Task.sleep(for: timeout)` inside a `withThrowingTaskGroup { defer { group.cancelAll() } }`. `read_file` uses this bounded variant (`WorkspaceReadableFileService.swift:41`). **`manage_selection` mutation calls the *unbounded* sibling.** This is the whole defect in one line.
 
 **What parks / what unparks:**
-- **Parks:** the `ScopedIngressBarrierJoin` never resolves because the root's watcher-watermark / service-publication-sequence never reaches the captured `target` (`launchScopedIngressBarrier` never drives convergence) — i.e. the root's freshness/reconciliation pipeline is stalled. This is exactly the class described by **upstream issue 390** ("warm single-file mutations trigger full-root reconciliation; freshness/ingress can stall basic MCP tools 8-12s"). The 30s MCP execution contract then ends the *tool call* ("settled as cancellation during cancellation grace"), but the underlying `join` is not resumed — the *same* "cancellation settles, resource never released" shape H4 found in the mirror tail, moved one layer over.
+- **Parks:** the `ScopedIngressBarrierJoin` never resolves because the root's watcher-watermark / service-publication-sequence never reaches the captured `target` (`launchScopedIngressBarrier` never drives convergence) — i.e. the root's freshness/reconciliation pipeline is stalled. This is exactly the class described by **upstream issue 390** ("warm single-file mutations trigger full-root reconciliation; freshness/ingress can stall basic MCP tools 8-12s"). The 30s MCP execution contract then ends the *tool call* ("settled as cancellation during cancellation grace"), but the underlying `join` is not resumed — the *same* "cancellation settles, resource never released" shape found in the mirror tail, moved one layer over.
 - **Unparks:** either the barrier genuinely converges (watermarks advance), or a real timeout/cancellation race is added around `join.value()` (currently absent).
 
 **Corroborating (non-blocking) symptom — the stuck token accounting:** `MCPServerViewModel+TokenStats.swift:266` returns `source: "bound_tab_cached_state"` with `refreshPending: true` (`:267`) and non-empty `incompleteComponents`; rendered as "incomplete from bound_tab_cached_state; refresh pending" (`ToolOutputFormatter.swift:2957`). This path **does not await** the refresh — `enqueueVirtualTokenRefresh` is fire-and-forget. So the perpetually-incomplete accounting is a *read-out of the same stalled root pipeline*, not a second wedge. It confirms the root's ingress/convergence is stuck (which is precisely what `:177` blocks on).
@@ -137,7 +137,7 @@ Traced the full source on the running branch; three Codex-backed `agent_explore`
 ### Phase 1 — Assessment (orchestrator, this session)
 - Role labels: explore/engineer = Codex CLI GPT-5.6 Sol; pair = Claude Opus; design = Claude Fable 5 — confirms "only codex-backed roles affected" framing.
 - The local patch branch = upstream/main (`d4b1e05e`) + 5 cherry-picks (upstream PR 450 fix, 3× upstream PR 472, upstream issue 513 backoff fix). Branch is 5 behind upstream/main → Q3.
-- History: all five "Codex app-server process is not running" events are 2026-07-11 15:34–15:57Z (in the work workspace), none since → consistent with startup-stall class being build-vintage-bound.
+- History: all five "Codex app-server process is not running" events predate the fixed debug build, none since → consistent with startup-stall class being build-vintage-bound.
 - LIVE bridge failure evidence: 2× `Connection closed` on `file_actions create` at investigation start; report file had to be created via shell.
 
 ### Phase 2 — context_builder live test (orchestrator, 2026-07-12)

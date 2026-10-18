@@ -121,7 +121,7 @@ Repo: `repoprompt/repoprompt-ce` (GitHub Discussions disabled; issues/PRs are th
 The commit exists in the local object database and on remote refs, but it is not an ancestor of this checkout:
 
 - `git log --all --oneline --grep='906' --grep='global instructions' --grep='AGENTS' -i` includes `13e9be2d fix(codex): project global instructions into managed state (#906)`.
-- `git merge-base --is-ancestor 13e9be2d HEAD` exits `1`. `HEAD` is a local commit (`fix: isolate display-alias reads from peer roots`, 2026-08-29). The local branch is one commit ahead of and 46 commits behind `origin/bugfix/887-qualified-read-peer-stall`.
+- `git merge-base --is-ancestor 13e9be2d HEAD` exits `1`. `HEAD` is a local commit from 2026-08-29. The local branch is one commit ahead of and 46 commits behind `origin/bugfix/887-qualified-read-peer-stall`.
 - `git branch -r --contains 13e9be2d` includes `origin/bugfix/887-qualified-read-peer-stall`, `origin/bugfix/881-large-export-watchdog`, `origin/bugfix/882-same-workspace-admission`, `upstream/main` (and `upstream/HEAD -> upstream/main`), plus multiple upstream feature/worktree refs. Thus the named remote tracking branch contains the fix even though the checked-out local HEAD does not.
 - `git cat-file -e HEAD:Sources/RepoPrompt/Infrastructure/AI/Providers/Codex/Shared/CodexGlobalInstructionsProjection.swift` fails because that path does not exist on HEAD. A HEAD-only Sources search for `AGENTS.override.md`, `AGENTS.md`, `instructions projection`, and `managed instructions` finds only unrelated project-instruction prompt text, not a projection implementation.
 

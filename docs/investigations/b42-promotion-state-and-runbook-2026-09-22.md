@@ -43,7 +43,7 @@ Two release jobs ran in a detached worktree at `0c6bb1d3`:
   `codesign --remove-signature` on a temp copy of the x86_64 Codex binary returned
   `internal error in Code Signing subsystem` while normalizing it for verification. A
   transient macOS code-signing fault, not a source defect.
-- The retry (`b42-final-artifact`) completed in 20m14s with
+- The retry completed in 20m14s with
   signature, architecture, and Codex bundle verification passing.
 
 That completed artifact is **universal (`x86_64 arm64`) and explicitly ad-hoc signed**: the
@@ -102,15 +102,9 @@ worktree churn, which repeatedly changes root epochs and cancels graph-index wor
 `git diff e24df046 0c6bb1d3 -- '*WorkspaceCodemapBinding*'` is empty, so **build 42 does not
 change this code and will not fix these crashes.**
 
-### 3. Stale disk (recommendation only)
-
-`/Applications/.RepoPrompt CE.app.pre-r13-backup`, Sep 6, `root:wheel`, build 36, **998 MB**.
-Not produced by any current job and not referenced by the rollback unit. Removal needs `sudo`
-and MP's approval of the exact path.
-
 ## Incident: unattended install cancelled
 
-A conductor job (`b42-warm-install`, run by the main checkout's
+A conductor job (run by the main checkout's
 daemon) started `Scripts/install_local_production.sh` at 07:00:18 UTC while MP was away. It was
 cancelled at 3m02s during `[42/49] RepoPromptApp`, before any packaging or replacement step.
 
