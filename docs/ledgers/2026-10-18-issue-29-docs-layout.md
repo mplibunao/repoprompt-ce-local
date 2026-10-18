@@ -29,5 +29,4 @@ Commit run ledgers, sanitized investigation reports, and ADRs, keep plans local,
 
 ## Parked decisions
 
-- Should the toolkit's global unattended-run sentence drop "(orchestrated runs do)"? The clause is false until version 64 is released and toolkit pull request 80 merges, and it stays false for other orchestrators. Options: approve the replacement the toolkit skills audit proposed, or keep the approved text. Recommendation: approve the replacement. Blocks: the wording of toolkit pull request 79.
 - In which order do the toolkit pull requests merge? Options: 79 together with or after 80, or 79 first, as planned. Recommendation: together with or after 80, so the toolkit docs never point at a ledger template the skill doesn't have yet. Blocks: merging toolkit pull request 79.
