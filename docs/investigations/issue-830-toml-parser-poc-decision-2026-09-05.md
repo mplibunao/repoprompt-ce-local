@@ -398,9 +398,9 @@ above.
   probes never implement a full-document traversal and their resource, ordering, and diagnostic
   behavior remains unmeasured.
 
-# 5. Plan correction applied
+# 5. Corrected acceptance requirements
 
-The local issue 830 bridge plan now states that acceptance is strict
+After these results, the issue 830 bridge requirements state that acceptance is strict
 whole-document parity with bundled Codex 0.149.0 with 0.152.0 as the regression oracle, that parse
 success means parse plus complete recursive materialization, that the formatting-preserving mutator
 is a layout mechanism rather than the validity authority, and that the dependency decision is NO-GO
