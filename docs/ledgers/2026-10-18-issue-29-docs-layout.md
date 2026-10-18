@@ -8,7 +8,7 @@ Commit run ledgers, sanitized investigation reports, and ADRs, keep plans local,
 |------|---------|---------------|---------|
 | 1. Records and rails | done | engineer · Orchestrate 1/5: Records and rails | `docs: commit run ledgers, investigation reports, and ADRs`; `docs: apply review fixes to the run records and check 8`; `fix: catch home paths after escaped newlines, not inside escaped paths` |
 | 2. Investigations sweep | pending | | |
-| 3. Built-in Orchestrate ledger and Optimize scoreboard | pending | | |
+| 3. Built-in Orchestrate ledger and Optimize scoreboard | done | engineer · Orchestrate 3/5: Built-in Orchestrate ledger and Optimize scoreboard | `feat(workflows): record Orchestrate runs in a run ledger`; `feat(workflows): write the Optimize scoreboard to docs/ledgers`; `test(workflows): apply review fixes to the run-record test and porting notes` |
 | 4. Toolkit loop ledger and docs | pending | | |
 | 5. Citation check and ledger close-out | pending | | |
 
@@ -26,8 +26,22 @@ Commit run ledgers, sanitized investigation reports, and ADRs, keep plans local,
 - Evidence: each changed document matches its approved text byte for byte, apart from the wrapping, the two review fixes above, and the ADR's two filled dates.
 - Evidence: `pr-ready` passed on the first commit. An independent review found no blockers, a separate cleanup pass found nothing to change, and the `context_builder` review found the gitleaks false positive above.
 
+## 3. Built-in Orchestrate ledger and Optimize scoreboard
+
+- Decision: `docs/porting.md` cites the ADR as `docs/adr/2026-10-18-committed-run-records.md`, filling the date placeholder in the approved text. Source: approved plan.
+- Decision: the run-record test also asserts that the old "in the export file" monitor sentence is absent, so a port that drops the `recordStep:` argument fails it. Source: review finding.
+- Decision: two `docs/porting.md` sentences now match the installer code: a full install also rewrites when a skill file is missing, and the workspace-switch and app-launch refreshes skip the counter and update only existing copies. Source: review finding.
+- Decision: four review findings are left as they are. The Prior perf work scout doesn't search `docs/ledgers/`, and Optimize has no fallback location; the user decided both. The single-item ledger sentence is explicit, and the `/// Version 64:` comment is accurate. Source: orchestrator judgment.
+- Evidence: the four workflow sources match their approved text byte for byte. Rendering every other workflow, variant, and setting on `main` and on this branch differs only in the skills version line.
+- Evidence: each run-record test fails in all six variant and setting cases when its change is undone.
+- Evidence: in the debug app, an Orchestrate run in a scratch repository wrote its ledger where that repository's AGENTS.md said, with both rows `done`. The plan survived the run, "Looks good." got one question about deleting it, and "Yes, the work is done." deleted it after the decision check. A tracked plan was kept, and without AGENTS.md the ledger went to `docs/ledgers/`. An Optimize run in the same scratch repository wrote `docs/ledgers/2026-10-18-optimize-count-primes.md` there from setup on, with the baseline, one iteration, and Rejected candidates.
+- Evidence: the agents in those runs drifted from the template: decisions in run-level sections, a session column that didn't match the session name, no scope line in the scoreboard, home paths in the scoreboard's notes, and the setup agent writing Rejected candidates.
+- Evidence: `pr-ready` passed with 1,767 root tests. An independent review found no blockers, and a separate cleanup pass found nothing to change.
+- Deferred: every `context_builder` call from an Agent Mode session in the debug app returned "Tool execution was cancelled". Nothing in this change causes it, and it needs its own investigation.
+
 ## Parked decisions
 
 - Should pull request #203 land only in the same release candidate as the investigations sweep? Landing it first lets the unsanitized local reports in the main checkout pass check 8, and most of them gitleaks, until the sweep lands and the originals are removed. Options: the same candidate as the sweep; a candidate with the prompt changes first, as planned, accepting that window; or moving `docs/investigations/` from check 8's record folders in this pull request to the sweep's pull request, so this one is safe to land alone. Recommendation: the same candidate as the sweep, or the move if the prompt changes have to land first. Blocks: landing item 1.
 - Should the toolkit's global unattended-run sentence drop "(orchestrated runs do)"? The clause is false until version 64 is released and toolkit pull request 80 merges, and it stays false for other orchestrators. Options: approve the replacement the toolkit skills audit proposed, or keep the approved text. Recommendation: approve the replacement. Blocks: the wording of toolkit pull request 79.
 - In which order do the toolkit pull requests merge? Options: 79 together with or after 80, or 79 first, as planned. Recommendation: together with or after 80, so the toolkit docs never point at a ledger template the skill doesn't have yet. Blocks: merging toolkit pull request 79.
+- Should the Optimize setup and loop briefs carry the scoreboard's writing rule? The sub-agents that write the scoreboard's rows never see "repository-relative paths, no session, window, or run IDs", and the debug-app run's scoreboard got home paths. Options: add "Use repository-relative paths and no session, window, or run IDs in the scoreboard." to the setup brief's step 4 and "Use repository-relative paths and no session, window, or run IDs in it." to the loop brief's step 3, with apostrophe-free equivalents in the CLI briefs; or leave the briefs as approved. Recommendation: add them; approved before pull request #204 lands, they ship under skills version 64. Blocks: nothing, since this repository's gitleaks rule already rejects home paths in `docs/ledgers/`.

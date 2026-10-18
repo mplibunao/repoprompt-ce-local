@@ -24,6 +24,7 @@ final class WorkflowPromptRunRecordTests: XCTestCase {
             XCTAssertTrue(prompt.contains("Is the work done, so I can delete"), testCase.label)
             XCTAssertFalse(prompt.contains("living checklist"), testCase.label)
             XCTAssertFalse(prompt.contains("- [x] Item 1:"), testCase.label)
+            XCTAssertFalse(prompt.contains("in the export file"), testCase.label)
             XCTAssertEqual(
                 prompt.contains("Export cleanup never covers the run's plan"),
                 testCase.includeSessionCleanupGuidance,
