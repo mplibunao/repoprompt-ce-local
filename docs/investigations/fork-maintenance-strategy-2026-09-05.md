@@ -43,22 +43,25 @@ Deliverables: executive recommendation; strategy comparison table; branch/releas
 
 Sources: the personal toolkit's RepoPrompt CE notes (371 lines, full read), their two checksummed archives (skimmed — same section skeleton, superseded chronology only), and `docs/investigations/{mp-patches-vs-latest-release-2026-07-15, upstream-sync-mp-patches-2026-07-20, pr-472-upstream-parity-and-tip-release-2026-07-24, tip-updates-not-appearing-2026-07-25, structure-settlement-velocity-bottleneck-2026-09-03, read-file-worktree-timeout-settlement-2026-08-29}.md`.
 
-#### 1. Patch inventory (from the personal toolkit's local patch ledger)
+#### 1. Patch inventory
 
-| Patch / defect | Local branch | Upstream PR | Status | Subsystem |
-| --- | --- | --- | --- | --- |
-| Selection-mirror wedge recovery (upstream issue 457) | `bugfix/pr472-selection-mirror-recovery` | **Upstream PR 472** | OPEN upstream since 2026-07-11; local successor `5dce1ef7` gated but unpushed | Workspace/MCP selection (`WorkspaceSelectionCoordinator`, `MCPReadFileAutoSelectionCoordinator`) |
-| Qualified multi-root `read_file` stall (upstream issue 887) | `bugfix/889-display-alias-followup-redo` | **Upstream PR 889** | OPEN upstream; corrected head `10217034` delivered; blocked on CI infra + maintainer | File ops / FS watcher / `WorkspaceFileContextStore` |
-| Large prompt/workspace export watchdog (upstream issue 881) | `bugfix/881-large-export-watchdog` | **Upstream PR 898** | OPEN upstream; head `e058ee28`, all checks green | MCP server/transport (`InteractiveMCPClientSession`, `UnixSocketMCPTransport`) |
-| Concurrent same-workspace Agent admission (upstream issue 882) | `bugfix/882-same-workspace-admission` | **Upstream PR 897** | OPEN upstream, `CHANGES_REQUESTED`; +2478/-80 remediation uncommitted | Agent Mode admission + domain persistence/recovery journal |
-| Context Builder Claude-provider app-termination teardown (upstream issue 954) | `bugfix/context-builder-graceful-shutdown` | **Upstream PR 955** | OPEN upstream, 9 checks green, **packaged acceptance FAILED** | Agent Mode providers + process lifecycle (`WindowStateManager`, `AppDelegate` SIGTERM route) |
-| Context Builder selection-construction watchdog (upstream issue 918) | `bugfix/918-context-builder-selection-watchdog` | **Upstream PR 957** | OPEN upstream, ready for review, 9 checks green | Context Builder / MCP selection |
-| Cancellable physical reads (upstream issue 949) | `bugfix/949-cancellable-physical-reads` | none yet | Fork-local; green VERIFY, REVIEW/REFACTOR blocked by runtime | File ops / caching / shared read limiter |
-| MCP phase-attribution diagnostics | `feature/local-rp-diagnostics` (`51ef0fa4`) | **none — fork-only, never to be PR'd** | Fork-delivered to `origin` | Diagnostics / MCP instrumentation |
+The local stability builds carried fixes for these upstream defects. The status column is each upstream pull request's public state on 2026-09-05.
+
+| Defect | Upstream PR | Upstream status | Subsystem |
+| --- | --- | --- | --- |
+| Selection-mirror wedge recovery (upstream issue 457) | **Upstream PR 472** | Open since 2026-07-11 | Workspace/MCP selection (`WorkspaceSelectionCoordinator`, `MCPReadFileAutoSelectionCoordinator`) |
+| Qualified multi-root `read_file` stall (upstream issue 887) | **Upstream PR 889** | Open; waiting on CI and maintainer review | File ops / FS watcher / `WorkspaceFileContextStore` |
+| Large prompt/workspace export watchdog (upstream issue 881) | **Upstream PR 898** | Open; all checks green | MCP server/transport (`InteractiveMCPClientSession`, `UnixSocketMCPTransport`) |
+| Concurrent same-workspace Agent admission (upstream issue 882) | **Upstream PR 897** | Open; changes requested | Agent Mode admission + domain persistence/recovery journal |
+| Context Builder Claude-provider app-termination teardown (upstream issue 954) | **Upstream PR 955** | Open; checks green | Agent Mode providers + process lifecycle (`WindowStateManager`, `AppDelegate` SIGTERM route) |
+| Context Builder selection-construction watchdog (upstream issue 918) | **Upstream PR 957** | Open; ready for review, checks green | Context Builder / MCP selection |
+| Cancellable physical reads (upstream issue 949) | none yet | No pull request | File ops / caching / shared read limiter |
+
+The builds also carried a local MCP diagnostics patch that isn't meant for upstream.
 
 - Merged upstream and dropped: upstream issue 900→upstream PR 904 (2026-08-29 squash `834b43e0`), upstream issue 554→upstream PR 568 fix (2026-07-22 merge `6834a541`), upstream PR 450 Codex text payload key + upstream PR 532 fail-closed child MCP provisioning (v1.1.0, 2026-07-21), upstream PR 529 (2026-07-13). Upstream issue 916 closed `NOT_PLANNED`; upstream issue 921 handed to a maintainer; upstream issue 830 retired after upstream PR 956 shipped a workaround.
 - OBSERVED historical churn: of the original five `release/mp-patches` commits, upstream absorbed two (MP's own upstream PR 450; upstream PR 517 solved the retry-backoff crash *differently*) and reworked one test-only patch — leaving only the two upstream PR 472 selection commits as genuine local value (`upstream-sync-mp-patches-2026-07-20.md:4,89`).
-- INFERRED: eight of eight ever-open rows touch either MCP tool execution, Context Builder, or process/provider lifecycle. No patch is cosmetic; all are liveness/cancellation defects in workflows MP depends on.
+- INFERRED: every patch in the inventory touches MCP tool execution, Context Builder, or process/provider lifecycle. No patch is cosmetic; all are liveness/cancellation defects in workflows MP depends on.
 
 #### 2. Sync / stability-stack rebuilds
 
@@ -450,7 +453,7 @@ $CLI -w "$W1" -c agent_manage -j '{"op":"list_sessions"}'                    # P
 
 ### 6. Fork-only versus upstream-bound
 
-- **OBSERVED/INFERRED — inherently fork-only:** MCP phase-attribution diagnostics are explicitly local and instrument MP's investigation workflow (the diagnostics row under "Patch inventory" above). Personal defaults/preferences should also remain tiny leaf patches: they express MP's product choice and create upstream review noise without fixing a shared contract.
+- **OBSERVED/INFERRED — inherently fork-only:** MCP phase-attribution diagnostics are explicitly local and instrument MP's investigation workflow (see "Patch inventory" above). Personal defaults/preferences should also remain tiny leaf patches: they express MP's product choice and create upstream review noise without fixing a shared contract.
 - **OBSERVED/INFERRED — upstream-bound:** selection-mirror recovery, qualified multi-root reads, export watchdog, same-workspace Agent admission, app-quit provider teardown, Context Builder selection watchdog, and cancellable physical reads all repair shared MCP/provider/worktree behavior (the patch table under "Patch inventory" above). The admission patch changes shared persistence/recovery, making permanent divergence especially costly.
 - **INFERRED — submission shape:** keep diagnostics/preferences separate; upstream behavioral fixes as the smallest source delta plus the focused regression contract. Large open PRs correlate with review stall (+3,827 to +11,162 lines versus +221 to +1,511 for merged examples; "MP's upstream PRs" above). Split test/diagnostic scaffolding when the behavior remains independently reviewable, but never split protocol and its compatibility test into different releases.
 

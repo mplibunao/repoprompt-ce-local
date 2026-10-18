@@ -56,8 +56,8 @@ The complaints are real and are **four co-occurring RepoPrompt CE defects — no
 
 **Q4/Q5 — crash storm + bridge routing (ANSWERED): all of today's 25 repoprompt-mcp SIGABRTs are the RELEASE binary, spawned per MCP-client config, NOT the running app.**
 - 25 .ips today: 01:23 x3, 07:38–08:55 x22 (UTC); every procPath = /Applications/RepoPrompt CE.app/Contents/MacOS/repoprompt-mcp, signature = MCPService.runTransport() / swift_task_dealloc (defect upstream issue 513/upstream PR 517).
-- Bridge routing: two project entries in `~/.claude.json` (the personal toolkit repository and a temporary directory) point RepoPromptCE at `~/RepoPrompt/repoprompt_ce_cli` and App Support `repoprompt_ce_cli` — BOTH symlink to the /Applications RELEASE binary. ~/.codex/config.toml points at `repoprompt_ce_cli_debug` → DebugApps bundle helper.
-- ⇒ Claude Code orchestrator sessions use the unfixed release bridge (crash → "Connection closed" storms); Codex children use the debug helper. The crash storm windows correlate with active orchestrator sessions (keep-codex-fast work 07:38–08:55 UTC, a work-repository session earlier).
+- Bridge routing: some Claude client configurations resolved `RepoPromptCE` to the stale release helper, which runs the /Applications RELEASE binary, while Codex's configuration resolved to the debug helper.
+- ⇒ Claude Code orchestrator sessions use the unfixed release bridge (crash → "Connection closed" storms); Codex children use the debug helper. The crash storm windows correlate with active orchestrator sessions (07:38–08:55 UTC, and one earlier).
 - 7 live `claude -p` discovery children under PID 12863 (oldest 00:52 UTC, ~9.5h) with 7 matching discovery-D-*.json leases — CB child leak (Fault B / upstream issue 515 territory) live on the current build.
 - 4 codex app-server chains under the debug app; codex-cli 0.144.1.
 
@@ -152,20 +152,9 @@ A Claude Opus pair session: Q-A residual wedge await-chain, Q-B "typed direct re
 
 ### Follow-up round 2 (2026-07-12 late) — config-audit correction + upstream PR 520-vs-upstream PR 472 verdict
 
-**Correction to defect 1's attribution (MP pointed out that clm uses a strict MCP config, not ~/.claude.json).** Verified in the personal toolkit repository: the `clm` launcher runs `claude --mcp-config ... --strict-mcp-config`, and its maintained MCP config points at the **debug** helper (`.../RepoPrompt CE/repoprompt_ce_cli_debug`) — correct. So clm-launched orchestrator sessions were NOT using the release bridge. The 25 crashed release bridges were spawned by `claude` parents (confirmed from .ips `parentProc`) that did NOT go through clm:
-- plain `claude` sessions in the toolkit repository load the **project-scoped** `~/.claude.json` entry → `~/RepoPrompt/repoprompt_ce_cli` → RELEASE binary;
-- **Claude Desktop**: `claude_desktop_config.json` has `RepoPromptCE → App Support repoprompt_ce_cli` → RELEASE binary (its temp-dir cwd matches the second `~/.claude.json` entry).
+**Correction to defect 1's attribution (MP pointed out that orchestrator sessions start through a launcher with a strict MCP config).** Verified: that launcher's MCP config points at the **debug** helper, so launcher-started orchestrator sessions were NOT using the release bridge. The 25 crashed release bridges were spawned by Claude clients (confirmed from .ips `parentProc`) that did not go through the launcher and whose own configuration still resolved to the RELEASE helper: plain `claude` sessions in one project, and Claude Desktop.
 
-Since NO release app is running, these release helpers dial the release socket (`repoprompt-ce-<n>.sock`) with no app behind it (the failure mode the toolkit's MCP config notes describe), retry in `runTransport`'s backoff, and die in the upstream issue 513 teardown crash — a storm of zombie bridges from sessions that never successfully used RP. **The "self-inflicted stale path" fear is confirmed but narrowly scoped**: the maintained surfaces (the toolkit's MCP configs, both .codex config.toml files) all point at the debug helper; the stale surfaces are `~/.claude.json` project entries (toolkit + temp-dir) and `claude_desktop_config.json`.
-
-Config audit table (command → resolves to):
-| Config | RepoPromptCE command | Resolves to | Verdict |
-|---|---|---|---|
-| Toolkit MCP config (clm strict) | `…/RepoPrompt CE/repoprompt_ce_cli_debug` | DEBUG (patched) | ✅ correct |
-| `~/.codex/config.toml` + the personal toolkit's Codex config | `~/RepoPrompt/repoprompt_ce_cli_debug` | DEBUG (patched) | ✅ correct |
-| `~/.claude.json` project entry for the toolkit | `~/RepoPrompt/repoprompt_ce_cli` | RELEASE 1.0.27 | ❌ stale — crash source |
-| `~/.claude.json` project `/private/var/…/T` | `…/RepoPrompt CE/repoprompt_ce_cli` | RELEASE 1.0.27 | ❌ stale — crash source |
-| `claude_desktop_config.json` `RepoPromptCE` | `…/RepoPrompt CE/repoprompt_ce_cli` | RELEASE 1.0.27 | ❌ stale — crash source |
+Since NO release app is running, these release helpers dial the release socket (`repoprompt-ce-<n>.sock`) with no app behind it (a known failure mode), retry in `runTransport`'s backoff, and die in the upstream issue 513 teardown crash — a storm of zombie bridges from sessions that never successfully used RP. **The "self-inflicted stale path" fear is confirmed but narrowly scoped**: the maintained configurations all point at the debug helper; the stale ones are a few Claude client entries.
 
 **Upstream PR 520 vs upstream PR 472 (user question: can upstream PR 472 be dropped when upstream PR 520 lands?) — NO; they are COMPLEMENTARY.** Evidence from `gh pr diff`:
 - Upstream PR 520 (by a maintainer, open) contains **zero** occurrences of the mirror-tail symbols upstream PR 472 bounded (`mcpSelectionMirrorTail`/`makeSelectionMirrorTail`/`waitForSelectionMirrorTail`/`supersedeSelectionMirrorTail`/`cancelMirrorWaiters`/`waitForMirrorTicket`) and does not touch `MCPReadFileAutoSelectionCoordinator.swift` at all; its 43 relevant hits are all `awaitAppliedIngress*`/`IngressBarrier`/`MCPTimeoutPolicy`.
@@ -176,13 +165,13 @@ Config audit table (command → resolves to):
 
 **Live bridge note (this session):** the orchestrator's own RepoPromptCE MCP connection died mid-investigation ("not connected", no auto-reconnect) after two earlier `Connection closed` write failures; no matching .ips (mechanism unconfirmed — NOT proven to be the upstream issue 513 signature). Claude Code restart required to restore RP MCP for this session.
 
-### Amended recommendation 1 (replaces "repoint ~/.claude.json")
-Remove or repoint the three stale RELEASE-helper configs: the two `~/.claude.json` project-scoped `RepoPromptCE` entries (toolkit + temp dir) and the `claude_desktop_config.json` `RepoPromptCE` entry. Options per surface: delete the entry (clm/strict is the intended path for toolkit sessions) or point it at `repoprompt_ce_cli_debug` while the daily driver is the local debug build (per the toolkit's MCP config switching guidance). This ends the release-bridge crash storm at the source.
+### Amended recommendation 1 (replaces the earlier recommendation 1)
+Remove or repoint the stale Claude client entries that resolve to the RELEASE helper: delete each entry (the strict launcher is the intended path for orchestrator sessions), or point it at the debug helper while the daily driver is the local debug build. This ends the release-bridge crash storm at the source.
 
 ## Root Cause
 Four independent, co-occurring defects (all RepoPrompt CE, none in codex-cli), each verified this session:
 
-1. **Bridge routing → unfixed release binary crashes (the "Connection closed" complaints).** `~/.claude.json` RepoPromptCE entries → `~/RepoPrompt/repoprompt_ce_cli` and App Support `repoprompt_ce_cli` → BOTH symlink to `/Applications/RepoPrompt CE.app/Contents/MacOS/repoprompt-mcp` (1.0.27, UUID 911106f5, no upstream issue 513/upstream PR 517 fix). 25 SIGABRTs today, all this binary, all `MCPService.runTransport()`/`swift_task_dealloc`. The fixed helper exists (`repoprompt_ce_cli_debug` → DebugApps bundle, post-`2bc5179c` since 00:04 UTC) and is what Codex children use via `~/.codex/config.toml`.
+1. **Bridge routing → unfixed release binary crashes (the "Connection closed" complaints).** Some Claude client configurations resolve `RepoPromptCE` to the release helper, which runs `/Applications/RepoPrompt CE.app/Contents/MacOS/repoprompt-mcp` (1.0.27, no upstream issue 513/upstream PR 517 fix). 25 SIGABRTs today, all this binary, all `MCPService.runTransport()`/`swift_task_dealloc`. The fixed debug helper (post-`2bc5179c` since 00:04 UTC) is what Codex children use.
 2. **Residual selection-mutation wedge (the "stalling/hanging" complaints).** `MCPSelectionToolProvider.swift:177` awaits the UNBOUNDED `WorkspaceFileContextStore.awaitAppliedIngress(rootScope:)` (:7973 → `join.value()` with no timeout/cancellation race) for every mutating op, gated `op != "get"` — exactly the observed op=get-instant/op=add-30s split. Upstream PR 472 bounded only the mirror chain (both layers). The bounded twin (`awaitAppliedIngressForExplicitRequest`, :8050) exists and is used by read_file's explicit path. Upstream: upstream issue 390 names this class; upstream PR 520 is the fix. Downstream casualties: `file_actions`/`apply_edits` mutations, child-agent `read_file` auto-selection timeouts, permanently "pending" token accounting.
 3. **Context Builder typed-response structural failure + child leaks (the "context builder errors").** MCP `instructions` flow only to the discovery task (`ContextBuilderAgentViewModel.swift:1764`), never to `tab.promptText`; on completion with an empty tab prompt, CB copies agent output in, sets `usedAgentOutputAsPrompt`, and `responseDisposition` refuses (`MCPContextBuilderToolProvider.swift:663-665`) ⇒ deterministic 2/2 failure for typed instructions-only runs. Distinct from Fault A (missingFinalContext) and from the wedge. Discovery children leak via Fault B (supersession skips `provider.dispose()`): 7→10 live children today.
 4. **Upstream issue 514 intermittent child MCP tool provisioning.** 1/3 explore children this session had no `mcp__RepoPromptCE__*` tools; pair's 3 probes all had them. Intermittent routing/bootstrap failure, open upstream, unfixed.
@@ -197,7 +186,7 @@ Four independent, co-occurring defects (all RepoPrompt CE, none in codex-cli), e
 - **The crash storm coming from the running app** — all 25 .ips are the /Applications release binary spawned by client configs; no release app process exists.
 
 ## Recommendations
-1. **Repoint Claude Code MCP config at the fixed bridge** (highest leverage, zero build work): change `~/.claude.json` RepoPromptCE `command` entries from `.../repoprompt_ce_cli` to `~/RepoPrompt/repoprompt_ce_cli_debug` (→ DebugApps bundle helper, contains `2bc5179c`) until an upstream release ships upstream PR 517. This alone should end the "Connection closed" storms for orchestrator sessions.
+1. **Repoint Claude Code MCP config at the fixed bridge** (highest leverage, zero build work): point the stale Claude client entries at the debug helper, which contains `2bc5179c`, until an upstream release ships upstream PR 517. This alone should end the "Connection closed" storms for orchestrator sessions.
 2. **Surgical bounded-ingress patch on `release/mp-patches`**: swap `MCPSelectionToolProvider.swift:177` to a bounded wait using the existing `awaitAppliedIngressWithTimeout` machinery (`WorkspaceFileContextStore.swift:8063`) via a small `rootScope`+`timeout` overload (8-12s). Composes with upstream PR 472; avoids importing upstream PR 520's 26-file surface. Adopt upstream PR 520 wholesale (with deliberate upstream PR 472 conflict reconciliation) when it merges upstream — drop the surgical patch then.
 3. **Relaunch the debug app** (user approval required) to load the 00:04 UTC bundle — clears the currently wedged window state and picks up `2bc5179c` in the embedded helper; kill the 10 leaked `claude -p` discovery children at the same time (no reaper exists).
 4. **File the CB typed-response gap upstream** (after confirming upstream PR 520 doesn't fix it): typed MCP `context_builder` runs never seed `tab.promptText` from `instructions`, so instructions-only typed runs fail deterministically at `MCPContextBuilderToolProvider.swift:665`. Reference upstream issue 515 as related-but-distinct.
@@ -217,7 +206,7 @@ Four independent, co-occurring defects (all RepoPrompt CE, none in codex-cli), e
 
 All three approved remediation items executed (full gate evidence lives in the personal toolkit's remediation ledger):
 
-1. Stale configs repointed to `repoprompt_ce_cli_debug` (3 entries; backups `.bak-<timestamp>`).
+1. The stale client configurations were repointed to the debug helper.
 2. Debug app relaunched onto the 00:04 UTC five-fix bundle; leaked discovery children were already gone.
 3. CB typed-response gate filed upstream as upstream issue 526
    after adversarial review corrected the mechanism attribution: for MCP runs the

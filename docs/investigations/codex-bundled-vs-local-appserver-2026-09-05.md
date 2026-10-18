@@ -18,8 +18,8 @@ Questions:
 4. Is a bundled/local toggle a good idea? What are the alternatives (e.g. `CODEX_HOME` passthrough, letting the bundled server read the real `~/.codex`, auto-updating the bundled binary, pinned-protocol + local-binary)?
 5. Is MP's argument (below) solid, and where are its gaps?
 
-## MP's position (verbatim, for reference)
-> I would argue if it's even worth supporting both local and bundled codex app-server. IMO the main advantage of bundling app server with RP was to make reproduction easier for the maintainers and to eliminate a whole class of "What codex version are you on" conversations. Though I think nobody anticipated the different things that would break (big ones being `~/.codex/AGENTS.md` and skills not being picked up by codex rp agents). If we support a mix, doesn't that defeat the purpose of bundling and just increase the surface area to support and maintain? There are still features unsupported in the current architecture like global hooks and MCPs for codex rp agents. I'm working on bringing back MCP but if we add a local app-server option I'll probably drop that and just use local. Open to either approach; concern is long-term maintainability and feature parity across both paths.
+## MP's position (paraphrased)
+MP questioned whether RepoPrompt should support both a local and a bundled Codex app server. Bundling's main benefit was easier reproduction for maintainers and an end to questions about which Codex version a user runs, but it broke things nobody expected, chiefly `~/.codex/AGENTS.md` and skills for Codex agents in RepoPrompt. Supporting both runtimes would undo that benefit and enlarge what has to be maintained, while global hooks and MCP servers were still unsupported. MP was working on restoring MCP servers but would probably drop that and use a local app server if that option were added. Either approach was acceptable; the concern was long-term maintainability and feature parity across both paths.
 
 ## Symptoms
 - After bundling, Codex RP agents stopped picking up `~/.codex/AGENTS.md`, `~/.codex/skills`, hooks, MCP servers.

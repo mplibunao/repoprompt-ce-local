@@ -6,7 +6,7 @@
 RepoPrompt CE's bundled-Codex change (upstream PR 612, 2026-07-23) moved the Codex runtime to an app-private `CODEX_HOME`. Codex 0.145.0 only runs repo-level PreToolUse hooks when the effective CODEX_HOME carries per-hook `[hooks.state]` `trusted_hash` approval entries, and silently fails OPEN without them. MP's approvals live in `~/.codex/config.toml` and were never migrated, so a private work repository's terraform guardrails are silently disabled in every RP Agent Mode session. Confirmed via six-probe differential bisection with minimal repro of both failure and fix.
 
 ## Symptoms
-- The work repository has a guardrails setup (a guardrails directory, `.codex` hooks at the repository root, and `mise.toml`) that blocks destructive commands such as `terraform destroy` and `terraform apply`.
+- The work repository blocks destructive terraform commands through a repository-level Codex PreToolUse hook.
 - Previously, RepoPrompt CE Agent Mode (Codex-backed) sessions in the work repository had these guardrails active.
 - Agents now report the guardrails are NOT functioning in RepoPrompt-created agent sessions.
 - Timing coincides with RepoPrompt CE (and the Tip builds channel) bundling/vendoring the Codex app server into the app bundle instead of using the system-installed codex-cli.
@@ -15,11 +15,11 @@ RepoPrompt CE's bundled-Codex change (upstream PR 612, 2026-07-23) moved the Cod
 - MP runs the official RepoPrompt CE app on the Tip update channel (no local builds since 2026-07-24).
 - Local checkout `main` fast-forwarded to `upstream/main` @ `30549a11` on 2026-07-28 (this investigation).
 - Upstream recently landed vendored Codex: `Vendor/Codex/manifest.json`, `Scripts/codex_runtime_artifact.py`, `Scripts/codex_vendor_guardrails.sh`, `AppBundle/CodexV8JIT.entitlements` ("Fix bundled Codex JIT entitlements (upstream PR 647)").
-- The work repository is the known environment-sensitive repository (`mise.toml` and `.codex` hooks at its root).
+- The work repository is the known environment-sensitive repository, with repository-level Codex hooks at its root.
 
 ## Hypotheses
 1. The bundled Codex app server binary/runtime differs in version or behavior from the system codex-cli, and no longer loads repo-level `.codex` hooks / guardrail config (dropped feature, changed discovery, or changed defaults).
-2. The bundled runtime launches with a different environment (PATH, cwd, config home) so mise shims / wrapper scripts that intercepted `terraform` are no longer on PATH inside agent shells.
+2. The bundled runtime launches with a different environment (PATH, cwd, config home) so PATH shims or wrapper scripts that intercepted `terraform` are no longer on PATH inside agent shells.
 3. RP's app-server launch code changed which config directories are passed/honored (e.g., CODEX_HOME or project config discovery) when switching to the bundled runtime.
 
 ## Background / Prior Research
@@ -29,7 +29,7 @@ RepoPrompt CE's bundled-Codex change (upstream PR 612, 2026-07-23) moved the Cod
 - Installed app: `/Applications/RepoPrompt CE.app`, version 1.1.0, build 31.12.0 (Tip channel).
 - Bundled runtime: `Contents/Resources/BundledRuntimes/Codex/<arch>/` with `bin/codex`, `bin/codex-code-mode-host`, `codex-resources/zsh`, `codex-path/rg`, `codex-package.json` (layoutVersion 1, entrypoint bin/codex, pathDir codex-path).
 - **Bundled codex version: `codex-cli 0.145.0` — IDENTICAL to system codex (`~/.npm-global/bin/codex`, 0.145.0).**
-- Implication: version drift is ruled out. Regression vector must be launch-time differences: environment (PATH/mise shims), config discovery (CODEX_HOME / repo-root trust), cwd, or sandbox/exec policy flags passed by RP to the bundled app-server.
+- Implication: version drift is ruled out. Regression vector must be launch-time differences: environment (PATH shims), config discovery (CODEX_HOME / repo-root trust), cwd, or sandbox/exec policy flags passed by RP to the bundled app-server.
 - `~/.codex/rules/default.rules` contains only `decision="allow"` prefix rules (approval learning cache) — no deny/guardrail rules live at user level. `~/.codex/config.toml` marks the work repository `trust_level = "trusted"`; approval_policy on-request, sandbox_mode workspace-write globally.
 
 ### Explore agent: git archaeology (2026-07-28)
@@ -45,21 +45,14 @@ RepoPrompt CE's bundled-Codex change (upstream PR 612, 2026-07-23) moved the Cod
 - Timing fits regression: MP moved to Tip channel 2026-07-24, immediately after bundling became authoritative upstream.
 
 ### Explore agent: work-repository guardrails mechanism (2026-07-28)
-The work repository enforces its guardrails through this chain:
-1. A repository-level Codex project hook in `.codex/config.toml`: `[[hooks.PreToolUse]]` with `matcher = "^Bash$"` and a 30-second deadline, running a guardrails script in the repository.
-2. The script resets `PATH` to system directories and runs a shared guardrails script.
-3. That script invokes a home-scoped gate under `$XDG_STATE_HOME` (default `~/.local/state`) and fails closed (exit 2) if the gate is missing or tampered with.
-4. The gate verifies a manifest and checksums, then runs an attested policy binary that checks the command.
-5. The policy allowlists read-only terraform subcommands (`fmt`, `validate`, `init`, `plan`, `show`, `providers`, `version`, `output`, `graph`, `state list`/`show`) and denies everything else, so `terraform apply` and `terraform destroy` are blocked. Shell wrapper forms (`bash -c`, `sh`, `zsh`, `eval`) are also denied.
+The work repository blocks destructive terraform commands through a repository-level Codex PreToolUse hook. A nonzero hook exit denies the command.
 
-Dependencies and failure boundaries:
-- **The Codex runtime must discover and honor the repository-level `.codex/config.toml` PreToolUse hooks** for the session's project root; a nonzero hook exit means deny. No minimum Codex version is pinned, and the repository relies on an empirical denied-command probe as its gate.
-- **Multi-root caveat**: hooks bind only when the work repository is the first workspace root or the bound worktree. Secondary-root sessions bypass hooks by design.
-- The home-scoped gate is installed out of band and depends on `$HOME`/`$XDG_STATE_HOME`.
-- mise is not the blocker (no terraform shims); a Claude-only deny list is defense in depth; the repository has no execpolicy or sandbox rules.
-- The Codex hooks and the home-scoped trust anchor predate the regression, and the terraform allowlist did not change: apply and destroy stayed denied throughout.
+What the RepoPrompt finding depends on:
+- **The Codex runtime must discover and honor the repository-level PreToolUse hooks** for the session's project root.
+- **Multi-root caveat**: the hooks bind only when the work repository is the first workspace root or the bound worktree; sessions where it is a secondary root don't run them.
+- The hooks and their policy predate the regression and didn't change during it.
 
-Safe unhooked-vs-hooked probe: `bash -c true`-style wrapper commands are DENIED when hooks are active but harmless when unhooked, which makes them a zero-risk canary.
+Safe probe: a harmless command that the guardrails deny when the hook runs, and that does nothing when it doesn't, makes a zero-risk canary.
 
 ## Investigator Findings
 
@@ -67,7 +60,7 @@ Pair phase intentionally skipped: Phase 1.5 research plus live differential prob
 
 ### Live differential probes (orchestrator, 2026-07-28)
 
-All probes ask the agent to run `bash -c true` — a harmless command that the work repository's guardrails DENY when hooks are active ("shell wrapper commands are not allowed").
+All probes ask the agent to run the canary: a harmless command that the work repository's guardrails DENY when the hook runs.
 
 | # | Surface | CODEX_HOME | Result |
 |---|---------|------------|--------|
@@ -81,16 +74,14 @@ All probes ask the agent to run `bash -c true` — a harmless command that the w
 Probe 1 also captured the RP session child environment:
 - `CODEX_HOME=~/Library/Application Support/RepoPrompt CE/Codex/Release/home`
 - `CODEX_SQLITE_HOME=.../Codex/Release/sqlite`, `CODEX_SANDBOX=seatbelt`, `CODEX_CI=1`
-- `HOME=~` intact; `XDG_STATE_HOME=~/.local/state` intact; home-scoped gate installed under `~/.local/state`.
+- `HOME=~` intact, along with the rest of the environment the guardrails need.
 
 ### The gating mechanism: codex `[hooks.state]` approval hashes
 
-Codex 0.145.0 runs repo-level `.codex/config.toml` hooks only when the effective CODEX_HOME's `config.toml` records a per-hook approval hash. The user's `~/.codex/config.toml` holds two such entries, one per PreToolUse hook:
+Codex 0.145.0 runs repo-level `.codex/config.toml` hooks only when the effective CODEX_HOME's `config.toml` records a per-hook approval hash. The user's `~/.codex/config.toml` holds one such entry per repository PreToolUse hook:
 
 ```toml
-[hooks.state."<absolute path to the work repository>/.codex/config.toml:pre_tool_use:0:0"]
-trusted_hash = "sha256:<hash>"
-[hooks.state."<absolute path to the work repository>/.codex/config.toml:pre_tool_use:1:0"]
+[hooks.state."<absolute path to the work repository>/.codex/config.toml:pre_tool_use:<n>:0"]
 trusted_hash = "sha256:<hash>"
 ```
 
@@ -113,7 +104,7 @@ RP's private home config (`.../Codex/Release/home/config.toml`) contains project
 **Conclusion:** Needs archaeology on when bundling landed and how binary resolution changed.
 
 ### Phase 1.5 - External fact gathering (2 explore agents + local checks)
-**Findings:** See Background section. Bundled == system codex 0.145.0 (version drift eliminated); bundling authoritative since upstream PR 612 (2026-07-23); guardrails = repo-level Codex PreToolUse hooks chain.
+**Findings:** See Background section. Bundled == system codex 0.145.0 (version drift eliminated); bundling authoritative since upstream PR 612 (2026-07-23); guardrails = a repository-level Codex PreToolUse hook.
 
 ### Phase 2 - Context builder
 **Findings:** CE-side proof that `f6ab144a` introduced both runtime authority AND CODEX_HOME isolation in one change; CE migrates no user config; app-server protocol carries no trust/hook params. Ranked isolated-CODEX_HOME-hides-trust as top hypothesis (partially right — the hidden state turned out to be hooks.state approvals, not project trust).
@@ -127,13 +118,13 @@ RP's private home config (`.../Codex/Release/home/config.toml`) contains project
 
 RepoPrompt CE's bundled-Codex transition (upstream PR 612, `f6ab144a`, 2026-07-23) redirected the Codex runtime's `CODEX_HOME` from `~/.codex` to an app-private directory (`~/Library/Application Support/RepoPrompt CE/Codex/<Build>/home`). Codex 0.145.0 gates repo-level `.codex/config.toml` PreToolUse hooks on per-hook `[hooks.state]` `trusted_hash` approval entries stored in the effective CODEX_HOME's config.toml, and **silently skips (fails open) any hook without a matching approval**. MP's hook approvals live in `~/.codex/config.toml`; CE neither migrates them into the private home nor surfaces any approval flow. Every RP Agent Mode session since the Tip-channel switch (2026-07-24) therefore runs work-repository commands with guardrail hooks silently disabled.
 
-Confirmed by minimal reproduction: adding the two `[hooks.state]` entries to an otherwise equivalent CODEX_HOME flips the probe from fail-open to BLOCKED (probes 4 vs 5); worktree checkouts inherit main-repo approval (probe 6).
+Confirmed by minimal reproduction: adding the work repository's `[hooks.state]` entries to an otherwise equivalent CODEX_HOME flips the probe from fail-open to BLOCKED (probes 4 vs 5); worktree checkouts inherit main-repo approval (probe 6).
 
 ## Eliminated hypotheses
 - **Codex version drift**: bundled and system are both 0.145.0; terminal probe with default home blocks correctly (probe 2).
 - **Project trust missing in private home**: private config trusts the work repository; trust-only scratch home still fails open (probe 4).
-- **Missing HOME/XDG or uninstalled gate**: probe 1 env shows intact HOME/XDG; the home-scoped gate is installed. Gate absence would fail closed (exit 2), not open.
-- **mise/PATH interception loss**: hooks reset PATH themselves; mise is not part of the enforcement chain.
+- **A broken guardrail install**: probe 1's environment was intact, and the same guardrails blocked the canary wherever the hook was approved (probes 2, 5, and 6).
+- **PATH interception loss**: the guardrails run from the hook, not from PATH shims.
 - **Daemon mode / upstream issue 554 recurrence**: CE spawns plain `app-server` per session; upstream issue 554 failed closed (start failure), not open.
 - **`REPOPROMPT_CODEX_EXECUTABLE` as a fix**: external overrides receive the same isolated state paths (`CodexRuntimeAuthority.swift`).
 - **code_mode suppressing hooks**: superseded — probe 5 blocks with no code_mode change; the gating variable is hooks.state alone.
@@ -143,15 +134,15 @@ Confirmed by minimal reproduction: adding the two `[hooks.state]` entries to an 
 ### 1. Immediate mitigation (user-side, no code) — needs MP go because it touches the live app home
 1. Quiesce RP Agent Mode (no running Codex sessions; ideally quit RepoPrompt CE).
 2. Back up `~/Library/Application Support/RepoPrompt CE/Codex/Release/home/config.toml`.
-3. **Upsert (never blind-append)** ALL `[hooks.state]` tables for the work repository from `~/.codex/config.toml` (both pre_tool_use entries — the Bash hook AND the write hook) into the private config. Validate no duplicate table headers.
+3. **Upsert (never blind-append)** ALL `[hooks.state]` tables for the work repository from `~/.codex/config.toml` into the private config. Validate no duplicate table headers.
 4. Relaunch RepoPrompt CE, start a fresh correctly-rooted session (work repository as first root or primary bound worktree).
-5. Verify: RP agent probe `bash -c true` must be BLOCKED ("shell wrapper commands are not allowed"). Optionally verify the write hook with a prohibited-path write attempt.
+5. Verify: the canary must be BLOCKED in an RP agent session.
 - Debug home (`.../Codex/Debug/home`) needs the same treatment if local builds resume.
 - `REPOPROMPT_CODEX_EXECUTABLE` is NOT a fix (same isolated home). Do not copy SQLite state or the whole user config.
 
 ### 2. Keep it from silently regressing
 - Small sync script in the personal toolkit that upserts hook-approval entries for an explicit repo allowlist from `~/.codex/config.toml` into the RP private home(s), fail-closed on missing/malformed source entries. Re-run + re-probe after: hook definition changes (hash drift!), codex upgrades, RP updates, repo relocation/reclone, Debug/Release switch.
-- Reaffirm the work repository's "the probe is the gate" doctrine for RP-dispatched Codex work — the denied-command canary is the only end-to-end attestation; approval entries alone don't prove the chain.
+- Re-run the canary in an RP session after each of those changes: approval entries alone don't prove the hook runs.
 
 ### 3. Upstream (repoprompt/repoprompt-ce)
 **FILED 2026-07-28: upstream issue 665** (bug, area:agent-mode, provider:codex); a local implementation plan was written, ticket-first — awaiting maintainer signal. Original framing: CODEX_HOME isolation silently drops user hook approvals → security-critical PreToolUse hooks fail OPEN in Agent Mode with no warning.

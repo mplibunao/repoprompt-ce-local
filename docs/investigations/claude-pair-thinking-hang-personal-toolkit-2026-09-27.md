@@ -3,7 +3,7 @@
 > Investigation report, observed 2026-09-27 on local build 45. It records what was true then. Where it disagrees with a current document, the current document is right.
 
 ## Summary
-The Claude provider setting "RepoPrompt Only (Strict MCP)" was turned off in production CE on 2026-09-25 08:19 UTC. Since then, CE has launched Claude Code without `--strict-mcp-config`, so Claude loads the user's own MCP servers for the session cwd. For `personal-toolkit` sessions (cwd: the toolkit repository), that includes a long-standing local-scope entry for the Classic RepoPrompt proxy. The Classic app isn't running, so the proxy never answers, and Claude Code never finishes startup or begins the turn. CE shows "Thinking…" with no timeout for the whole wait. The configuration exposed the hang; the silent, unbounded "Thinking…" is a CE startup-supervision defect. Neither b45 nor the Claude Code version is involved.
+The Claude provider setting "RepoPrompt Only (Strict MCP)" was turned off in production CE on 2026-09-25 08:19 UTC. Since then, CE has launched Claude Code without `--strict-mcp-config`, so Claude loads the user's own MCP servers for the session cwd. For `personal-toolkit` sessions (cwd: the toolkit repository), those include a long-standing entry for the RepoPrompt Classic proxy. The Classic app isn't running, so the proxy never answers, and Claude Code never finishes startup or begins the turn. CE shows "Thinking…" with no timeout for the whole wait. The configuration exposed the hang; the silent, unbounded "Thinking…" is a CE startup-supervision defect. Neither b45 nor the Claude Code version is involved.
 
 ## Symptoms
 - A Claude Code `pair` session (Opus Latest 1M, High) in the RepoPrompt CE workspace `personal-toolkit` shows "Thinking…" for 30+ minutes on the prompt `hi`. Some sessions eventually respond.
@@ -14,25 +14,16 @@ The Claude provider setting "RepoPrompt Only (Strict MCP)" was turned off in pro
 
 ### Reproduction (2026-09-27 00:33 UTC)
 - An MCP `agent_run start model_id=pair message="hi"` bound to window 3 (`personal-toolkit`) produced a session that stayed at `Running · Thinking…`.
-- Child process: `~/.local/bin/claude -p --verbose --output-format stream-json --input-format stream-json --permission-prompt-tool stdio --allow-dangerously-skip-permissions --mcp-config <launch config> --disallowedTools …`, with the toolkit repository as cwd. No `--strict-mcp-config`.
-- The children it spawned: `docker run … terraform-mcp-server`, `docker run … slack-mcp-server` (user scope), **`~/RepoPrompt/repoprompt_cli` (Classic)**, and `~/RepoPrompt/repoprompt_ce_cli --backend app` (from the RepoPrompt launch config). Every Claude child was at 0% CPU.
+- Child process: `claude -p --verbose --output-format stream-json --input-format stream-json --permission-prompt-tool stdio --allow-dangerously-skip-permissions --mcp-config <launch config> --disallowedTools …`, with the toolkit repository as cwd. No `--strict-mcp-config`.
+- The children it spawned: the user's other MCP servers, **the RepoPrompt Classic proxy**, and `repoprompt_ce_cli --backend app` (from the RepoPrompt launch config). Every Claude child was at 0% CPU.
 - No transcript for the new session was written while it was stuck.
 
-### MCP servers by Claude Code config scope (`~/.claude.json`)
-| Scope | Servers |
-|---|---|
-| user | `terraform` (docker), `slack` (docker) |
-| project: the toolkit repository | **`RepoPrompt` → `~/RepoPrompt/repoprompt_cli` (Classic)**, `RepoPromptCE` → `repoprompt_ce_cli` |
-| project: this repository | none |
-| project: another personal project | none |
-| project: the dotfiles | `RepoPrompt` (Classic) |
-
-- The toolkit repository has no `.mcp.json`. Both entries are local-scope entries in `~/.claude.json`.
-- `~/RepoPrompt/repoprompt_cli` → `/Applications/Repo Prompt.app/Contents/MacOS/repoprompt-mcp` (Classic 2.1.33, binary dated 2026-06-20). The Classic app isn't running.
+### The inherited MCP servers
+Without `--strict-mcp-config`, Claude Code also loads the MCP servers in the user's own Claude configuration for the session cwd. For the toolkit repository, those include an entry for the RepoPrompt Classic proxy. The Classic app isn't running.
 
 ### Classic proxy never answers when the Classic app is down
-- A direct MCP `initialize` probe of `repoprompt_cli` got no response in 25 s. It logs `Bootstrap connection lost (connectionFailed(... connectFailed(errno: 2))). Retrying in 0.5s` forever (attempt 45 at 25 s) and never exits.
-- Claude Desktop's `~/Library/Logs/Claude/mcp-server-RepoPrompt.log` shows the same retry loop on every day since at least 2026-09-15. Classic prefs were last written 2026-09-08. Classic has been down the whole period, including Sep 24.
+- A direct MCP `initialize` probe of the Classic proxy got no response in 25 s. It logs `Bootstrap connection lost (connectionFailed(... connectFailed(errno: 2))). Retrying in 0.5s` forever (attempt 45 at 25 s) and never exits.
+- Claude Desktop's log for its own Classic entry shows the same retry loop every day since at least 2026-09-15, so Classic has been down the whole period, including Sep 24.
 
 ### Controlled Claude Code tests (outside RepoPrompt, empty scratch cwd, `--strict-mcp-config`)
 | Claude Code | MCP config | Mode | Result |
@@ -64,7 +55,7 @@ The toolkit's notes on RepoPrompt Classic coexistence call for one RepoPrompt ed
 Source refs are at HEAD `40716eb1`. `git diff --stat local/v1.4.0-b45 -- Sources/RepoPrompt/Features/AgentMode Sources/RepoPrompt/Infrastructure/AI/Providers` is empty, so the lines below are also the b45 production lines. Times are UTC.
 
 ### Bottom line
-The trigger is the **"RepoPrompt Only (Strict MCP)" Claude setting being turned off in production RepoPrompt CE on 2026-09-25 08:19:23 UTC**. The Classic `RepoPrompt` entry in the toolkit repository's local scope has been in `~/.claude.json` since at least 2026-05-08. While strict mode was on, CE launched Claude with `--strict-mcp-config`, Claude ignored that entry, and the Classic proxy never started. With strict mode off, Claude loads every server in `~/.claude.json` for the cwd, and the dead Classic proxy blocks startup. The same hang happened during a 2-minute strict-off window on Sep 24; details under item 2.
+The trigger is the **"RepoPrompt Only (Strict MCP)" Claude setting being turned off in production RepoPrompt CE on 2026-09-25 08:19:23 UTC**. The Classic entry in the user's Claude configuration for the toolkit repository dates from at least 2026-05-08. While strict mode was on, CE launched Claude with `--strict-mcp-config`, Claude ignored that entry, and the Classic proxy never started. With strict mode off, Claude loads every server in the user's Claude configuration for the cwd, and the dead Classic proxy blocks startup. The same hang happened during a 2-minute strict-off window on Sep 24; details under item 2.
 
 ### 1. Which persisted setting turns strict mode off — **Confirmed** (setting and storage); current value **inferred**, direct read blocked
 **Decision path (verified):**
@@ -89,17 +80,17 @@ The trigger is the **"RepoPrompt Only (Strict MCP)" Claude setting being turned 
 | `…local-self-signed…` | `rp.agent.permissions.subagent.v1` | 2026-09-08 04:37:17 | 2026-09-23 11:44:59 |
 
 **Current values: inferred, not read directly.** Reading the JSON payload needs `security find-generic-password -w`. That command is not in the item's access list, so it would show MP a Keychain access prompt, and I did not run it. The inference rests on runtime evidence:
-- `claude.mcpStrictModeEnabled == false`: every CE Agent Mode session since Sep 25 08:22 loads user-scope `slack` and `terraform` (item 2). Bash is enabled in those sessions, so they are not on the Safe Managed path, and on the non–Safe Managed path strict mode can only come from this value. This investigator session, started from production CE today, runs as `claude -p … --allow-dangerously-skip-permissions --mcp-config <launch config> --disallowedTools Write,Edit,Glob,Grep,Task,Monitor,SlashCommand,NotebookEdit,TodoWrite` (from `ps`): no `--strict-mcp-config`, and Bash is not disallowed.
+- `claude.mcpStrictModeEnabled == false`: every CE Agent Mode session since Sep 25 08:22 loads the user's other MCP servers (item 2). Bash is enabled in those sessions, so they are not on the Safe Managed path, and on the non–Safe Managed path strict mode can only come from this value. This investigator session, started from production CE today, runs as `claude -p … --allow-dangerously-skip-permissions --mcp-config <launch config> --disallowedTools Write,Edit,Glob,Grep,Task,Monitor,SlashCommand,NotebookEdit,TodoWrite` (from `ps`): no `--strict-mcp-config`, and Bash is not disallowed.
 - Sub-agent policy is `inheritProviderSettings` or `custom`, not `safeManaged`: the MCP-started reproduction session launched without `--strict-mcp-config`, and `.mcpSafeDefaults` would have forced it on.
 - The production `app_settings` MCP surface doesn't expose either value. `agent_mode` lists only 4 unrelated keys.
 
 ### 2. When strict mode became effectively off — **Confirmed**
 Method: sweep all 335 transcripts with a top-level `"entrypoint":"sdk-cli"`, keeping only CE Agent Mode sessions, meaning the `prompt_snapshot.systemPrompt` contains "RepoPrompt's MCP tools". Loaded MCP servers come from the structured `mcp_instructions_delta.addedNames` and the `prompt_snapshot.tools[].name` prefixes, not from prose. The output was a temporary table, not retained.
 - **Latest session that loaded only `RepoPromptCE` at start:** a session in another personal project, 2026-09-25 07:30:35.
-- **Earliest session in the persistent strict-off period:** a `repoprompt-ce` session, 2026-09-25 08:22:57. It loaded `RepoPromptCE, slack, terraform` with Bash enabled and `bypassPermissions`. That is **3.5 min after the Claude-permissions Keychain write at 08:19:23**.
-- Every CE Agent Mode session from then through Sep 27 00:18 loads `slack` and `terraform`, in `repoprompt-ce`, another personal project, and the CE worktrees `bugfix-111` and `bugfix-73`; that is about 40 sessions. Those folders have no Classic entry, so they start in 0.0–0.5 s. Every toolkit-repository session in the period (seven, from Sep 26 07:47) records no tool snapshot, which is the hung-startup signature.
-- **Earlier short strict-off window, same hang:** two sessions that started CE-only on Sep 23 received mid-session deltas: one added `terraform` at 2026-09-24 07:50:42 and the other at 07:51:02. The second then removed `terraform` at 07:52:27, which fits a controller relaunch after the strict setting flipped (`ClaudeAgentModeCoordinator.swift:373–390`). A toolkit-repository session started at 07:51:32 inside that window. Its first user turn was recorded at 07:52:10 together with `[Request interrupted by user]`, and it has no tool snapshot. That is the "38 s outlier" in the timing table: a hang that was interrupted, then strict mode went back on, and three later Sep 24 toolkit-repository sessions, from 08:01, started CE-only in under 10 ms.
-- **The Classic entry is not new:** the toolkit repository's `mcpServers` in every `~/.claude.json` copy contain `RepoPrompt → ~/RepoPrompt/repoprompt_cli`. That includes `.claude.json.bak` (mtime 2026-05-08), `.claude.json.backup` (2026-07-12), `.claude.json.bak-<timestamp>`, the five `~/.claude/backups/.claude.json.backup.*` from 2026-09-27, and the live file. **This eliminates the open hypothesis** in "Open: why Sep 24 toolkit-repository sessions didn't hang": the entry was not added between Sep 24 and Sep 26.
+- **Earliest session in the persistent strict-off period:** a `repoprompt-ce` session, 2026-09-25 08:22:57. It loaded `RepoPromptCE` and the user's other MCP servers, with Bash enabled and `bypassPermissions`. That is **3.5 min after the Claude-permissions Keychain write at 08:19:23**.
+- Every CE Agent Mode session from then through Sep 27 00:18 loads the user's other MCP servers, in this repository, another personal project, and two CE worktrees; that is about 40 sessions. Those folders have no Classic entry, so they start in 0.0–0.5 s. Every toolkit-repository session in the period (seven, from Sep 26 07:47) records no tool snapshot, which is the hung-startup signature.
+- **Earlier short strict-off window, same hang:** two sessions that started CE-only on Sep 23 received mid-session deltas: one gained a user MCP server at 2026-09-24 07:50:42 and the other at 07:51:02. The second then dropped it at 07:52:27, which fits a controller relaunch after the strict setting flipped (`ClaudeAgentModeCoordinator.swift:373–390`). A toolkit-repository session started at 07:51:32 inside that window. Its first user turn was recorded at 07:52:10 together with `[Request interrupted by user]`, and it has no tool snapshot. That is the "38 s outlier" in the timing table: a hang that was interrupted, then strict mode went back on, and three later Sep 24 toolkit-repository sessions, from 08:01, started CE-only in under 10 ms.
+- **The Classic entry is not new:** every backup of the user's Claude configuration back to 2026-05-08 contains it, and so does the live file. **This eliminates the open hypothesis** in "Open: why Sep 24 toolkit-repository sessions didn't hang": the entry was not added between Sep 24 and Sep 26.
 
 Caveat: Keychain `mdat` keeps only the last write. The Sep 25 08:19:23 write is pinned to the strict-off flip by timing, not by reading the diff; permission mode or Bash could have changed in the same write.
 
@@ -123,10 +114,10 @@ Caveat: Keychain `mdat` keeps only the last write. The Sep 25 08:19:23 write is 
 | View fallback label | `AgentModeView.swift:3322` `Text(runInteractionSnapshot.runningStatusText ?? "Thinking…")` | This label shows for the whole hang. |
 
 ### Why Sep 24 toolkit-repository sessions started instantly and Sep 26+ sessions hung
-Strict mode was **on** for the Sep 24 toolkit-repository sessions that started instantly. They loaded only `RepoPromptCE`, and `--strict-mcp-config` made Claude skip the local Classic entry. The one Sep 24 session that started during the brief 07:50–07:52 strict-off window hung and was interrupted. On Sep 25 08:19 the setting was turned off and stayed off. The first toolkit-repository session afterwards, Sep 26 07:47, and every later one loaded the Classic proxy and blocked before `system/init`. Other workspaces also lost strict mode then, but they have no Classic entry, so they only gained `slack` and `terraform` and still started instantly.
+Strict mode was **on** for the Sep 24 toolkit-repository sessions that started instantly. They loaded only `RepoPromptCE`, and `--strict-mcp-config` made Claude skip the Classic entry. The one Sep 24 session that started during the brief 07:50–07:52 strict-off window hung and was interrupted. On Sep 25 08:19 the setting was turned off and stayed off. The first toolkit-repository session afterwards, Sep 26 07:47, and every later one loaded the Classic proxy and blocked before `system/init`. Other workspaces also lost strict mode then, but they have no Classic entry, so they only gained the user's other servers and still started instantly.
 
 ### Candidate fix locations (listed only; no changes made)
-- Setting: turn "RepoPrompt Only (Strict MCP)" back on (`AgentProviderPermissionControlsComponents.swift:393`). Separately, remove the stale Classic `RepoPrompt` local-scope entries for the toolkit repository and the dotfiles in `~/.claude.json`.
+- Setting: turn "RepoPrompt Only (Strict MCP)" back on (`AgentProviderPermissionControlsComponents.swift:393`). Separately, remove the stale Classic entries from the user's Claude configuration.
 - A bounded `initialize`: `ClaudeNativeProcessSessionController.swift:648` passes no timeout to `sendControlRequest` (`:780–803`), and `sdkConnectTimeoutSeconds` (`ClaudeCodeAgentConfig.swift:20`) is never read. A timeout there would turn the silent hang into a visible startup failure. Note that Claude itself blocks before `system/init`, so any timeout has to cover the whole pre-init phase.
 - Status honesty: `ClaudeIntegratedAgentModeRunner.swift:94–95` and `AgentModeView.swift:3322` report "Thinking…" before the provider is up.
 
@@ -138,8 +129,8 @@ Strict mode was **on** for the Sep 24 toolkit-repository sessions that started i
 **Conclusion:** Confirmed.
 
 ### Phase 1 — Classic entry added recently
-**Hypothesis:** the Classic `RepoPrompt` local-scope entry for the toolkit repository was added between Sep 24 and Sep 26, which would explain why Sep 24 sessions started instantly.
-**Findings:** the entry is present in every `~/.claude.json` copy back to 2026-05-08. Fish history and transcripts show no `claude mcp add RepoPrompt` in the window.
+**Hypothesis:** the Classic entry for the toolkit repository was added between Sep 24 and Sep 26, which would explain why Sep 24 sessions started instantly.
+**Findings:** the entry is present in every backup of the user's Claude configuration back to 2026-05-08, and shell history and transcripts show nothing adding it in the window.
 **Conclusion:** Eliminated. Sep 24 sessions started instantly because strict mode was on (Investigator Findings, item 2).
 
 ### Phase 1 — b45 promotion or Claude Code 2.1.283 as trigger
@@ -160,24 +151,24 @@ Strict mode was **on** for the Sep 24 toolkit-repository sessions that started i
 ## Root Cause
 Two layers.
 
-**Trigger (configuration, works as designed).** "RepoPrompt Only (Strict MCP)" is off (Keychain item `rp.agent.permissions.claude.v1` last written 2026-09-25 08:19:23 UTC; the flip is tied to that write by transcript timing, not by reading the value). With strict off, `ClaudeNativeProcessSessionController.swift:1999–2003` omits `--strict-mcp-config`, so Claude also loads user-scope and project/local-scope servers for the cwd. The documented off-state text reads: "Other MCP servers from your Claude config will also be loaded" (`AgentProviderPermissionControlsComponents.swift:393–406`). MCP-started sessions follow the same setting unless the sub-agent policy is Safe Managed (`AgentModeProviderBindingService.swift:71–90`, `ClaudeControllerLaunchPolicy.swift:16–33`). For `personal-toolkit`, the cwd is the workspace's first repo path, the toolkit repository (`AgentModeViewModel.swift:2213–2218`). Its local scope loads Classic `repoprompt_cli`, which retries its socket connect forever while the Classic app is down. Claude Code never completes startup.
+**Trigger (configuration, works as designed).** "RepoPrompt Only (Strict MCP)" is off (Keychain item `rp.agent.permissions.claude.v1` last written 2026-09-25 08:19:23 UTC; the flip is tied to that write by transcript timing, not by reading the value). With strict off, `ClaudeNativeProcessSessionController.swift:1999–2003` omits `--strict-mcp-config`, so Claude also loads user-scope and project/local-scope servers for the cwd. The documented off-state text reads: "Other MCP servers from your Claude config will also be loaded" (`AgentProviderPermissionControlsComponents.swift:393–406`). MCP-started sessions follow the same setting unless the sub-agent policy is Safe Managed (`AgentModeProviderBindingService.swift:71–90`, `ClaudeControllerLaunchPolicy.swift:16–33`). For `personal-toolkit`, the cwd is the workspace's first repo path, the toolkit repository (`AgentModeViewModel.swift:2213–2218`). Its configuration loads the Classic proxy, which retries its socket connect forever while the Classic app is down. Claude Code never completes startup.
 
 **Defect (CE).** CE marks the run `.running` / "Thinking…" before the provider has initialized (`ClaudeIntegratedAgentModeRunner.swift:94–95`, before provider init at `:128–129`; label fallback `AgentModeView.swift:3322`). Nothing supervises the cold-start window. Startup control requests carry no timeout (`:648`, `:780–803`), `sdkConnectTimeoutSeconds` (`ClaudeCodeAgentConfig.swift:20`) is never read, and the only readiness gate (`MCPBootstrapLease.releaseWhenRouted`) runs after send and covers only CE's own server. A live Claude process that never emits `system/init` therefore shows "Thinking…" indefinitely, with no user-facing failure or diagnosis.
 
 ## Recommendations
 1. **Immediate unblock (MP's choice of one or both):**
-   - Turn "RepoPrompt Only (Strict MCP)" back on (Settings → Agent providers → Claude, `AgentProviderPermissionControlsComponents.swift:393`), unless the Sep 25 change was made deliberately to give agents Slack/Terraform.
-   - Remove the stale Classic `RepoPrompt` local-scope entries for the toolkit repository and the dotfiles from `~/.claude.json`. The toolkit policy already calls for one RepoPrompt edition per process. This keeps strict-off workable.
+   - Turn "RepoPrompt Only (Strict MCP)" back on (Settings → Agent providers → Claude, `AgentProviderPermissionControlsComponents.swift:393`), unless the Sep 25 change was made deliberately to give agents the user's other MCP servers.
+   - Remove the stale Classic entries from the user's Claude configuration. The toolkit policy already calls for one RepoPrompt edition per process. This keeps strict-off workable.
 2. **CE defect: supervise Claude cold start.** For a newly spawned (cold or `--resume`) process, arm a startup watchdog from spawn through the first stream `system/init`. Per the Phase 4 probe, it must cover the post-user-message window, not only `initialize` (`ClaudeNativeProcessSessionController.swift:643–671`, `:780–803`). Scope it to the transport generation so it can't kill a replacement process. Leave warm sessions unaffected. Route timeout through the existing attempt/terminal-commit path, and don't auto-replay the user message. Use a soft "taking longer than expected" warning plus a generous or configurable hard limit, since Docker-backed servers can be slow but healthy. Either wire `sdkConnectTimeoutSeconds` into this or remove it.
 3. **CE defect: honest startup status.** Replace the initial "Thinking…" (`ClaudeIntegratedAgentModeRunner.swift:94`) with a startup status such as "Starting Claude Code…". Transition on an explicit stream-`system/init`-observed milestone, not on any `.runtimeInit` (session-ID and SDK-init events also emit it). On timeout, say which MCP servers were configured but never reported, where known.
 
 ## Resolution (2026-09-27)
 - Strict MCP stays off deliberately, so agents keep the user's other MCP servers.
-- `claude mcp remove RepoPrompt -s local` removed the Classic entries for seven project directories: the toolkit repository, the dotfiles, `~/.claude`, `~/.codex`, and three work repositories. A before/after diff of every `mcpServers` map in `~/.claude.json` shows exactly those 7 removals and no other change. One Classic entry remains, for a personal directory that no longer exists, so no session can start there.
-- Verified in production CE: a `pair` session with prompt `hi` in `personal-toolkit` started its turn 0.5 s after dequeue (previously 200–962 s) and replied 4.1 s later. It loaded `RepoPromptCE`, `slack`, and `terraform`.
-- Codex's Classic `RepoPrompt` entry is `enabled = false` in both `~/.codex/config.toml` and the toolkit snapshot. Claude Desktop's `claude_desktop_config.json` still lists Classic `RepoPrompt`, and its server log shows the connect-retry loop daily. Desktop's behavior is outside this investigation.
+- The stale Classic entries were removed from the user's Claude configuration. A before-and-after comparison showed those removals and no other change.
+- Verified in production CE: a `pair` session with prompt `hi` in `personal-toolkit` started its turn 0.5 s after dequeue (previously 200–962 s) and replied 4.1 s later. It loaded `RepoPromptCE` and the user's other MCP servers.
+- Codex's Classic entry was already disabled. Claude Desktop still lists Classic, and its log shows the connect-retry loop daily; Desktop's behavior is outside this investigation.
 - The CE startup-supervision and status defects (Recommendations 2–3) are tracked in distribution issue #124, deferred.
 
 ## Preventive Measures
-- Keep one RepoPrompt edition per Claude process. Stale Classic entries in `~/.claude.json` local scopes become latent hangs whenever strict mode is off.
+- Keep one RepoPrompt edition per Claude process. Stale Classic entries in the user's Claude configuration become latent hangs whenever strict mode is off.
 - Treat "strict MCP off" as a mode that inherits the user's whole MCP fleet. A dead server anywhere in that fleet should surface as a visible startup failure, not a silent spinner.

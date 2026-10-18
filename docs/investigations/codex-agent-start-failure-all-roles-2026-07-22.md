@@ -42,7 +42,7 @@ All probes used a harness that keeps stdin open (see pitfall below) and the same
 - The app's discovery/warmup app-server (PID 66607, spawned 04:31:38 UTC) is healthy and long-lived; its argv shows RP resolves node to the absolute mise path and codex to the npm shim.
 - codex 0.145.0 added an app-server daemon subcommand and `~/.codex/app-server-daemon/` (lock files created 03:43:41 UTC, 0 bytes); no daemon process observed; not implicated by probes.
 - In the work window, `worktree_create` without explicit `worktree_repo_root` defaulted to another work repository and was rejected: "worktree binding currently supports the primary workspace root only... provider runtime cwd resolves from primary root `~/<work project>/<work repo>`" — i.e. "first loaded Git repo" and "primary root" disagree in the work multi-root workspace.
-- `<work repo>` root contains `mise.toml`, `.tool-versions`, `mise.lock`, and `.codex/config.toml` with PreToolUse hooks; repoprompt-ce contains none of these. The two repos also differ in size and worktree container path (`~/<work project>/.repoprompt-worktrees/` vs `<worktree>/`).
+- The `<work repo>` root carries its own tool-version files and a Codex project config with PreToolUse hooks; repoprompt-ce has neither. The two repos also differ in size and worktree container path (`~/<work project>/.repoprompt-worktrees/` vs `<worktree>/`).
 - Unified log has no RepoPrompt entries for the failure window (debug build prints to stdout, app launched via Finder).
 
 ### Session-store failure timeline (on-disk `AgentSessions/*.json` containing the error text, times UTC)

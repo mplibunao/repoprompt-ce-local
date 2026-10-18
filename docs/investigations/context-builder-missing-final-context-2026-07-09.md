@@ -10,7 +10,7 @@ mapping and the finalized context (`MCPConnectionManager.swift:5959-5966`). Two 
 faults share the same "drop, don't reconcile" root: discovery child processes leak when a
 run record is superseded before teardown (5 zombies observed live), and the window-scoped
 selection-mirror task chain has no timeout/cancellation, wedging all `manage_selection`
-mutations in the affected window (reproduced live in window 4). The user's patched branch
+mutations in the affected window (reproduced live). The user's patched branch
 is exonerated — the failing app is the *release* 1.0.27 build. Of the referenced issues,
 none is this bug: upstream issue 170 is the nearest sibling (same pipeline), upstream issue 169 is an adjacent
 multi-window bug but not on this path, upstream issue 312 is a different failure mode, and upstream issue 27 is the
@@ -18,7 +18,7 @@ enhancement that addresses the separate progress-visibility gap (whose purpose-b
 already exists as dead code).
 
 ## Symptoms
-Observed in a prior session (2026-07-09, window 1 / the work workspace, RepoPrompt CE debug build from branch `bugfix/codex-app-server-text-elements`):
+Observed in a prior session (2026-07-09, in a work-repository window, RepoPrompt CE debug build from branch `bugfix/codex-app-server-text-elements`):
 
 - Every `context_builder` call (plan mode, `export_response: true`) failed with:
   `failed: Context Builder final context is missing for run <RUN_ID> (connection none).`
@@ -32,8 +32,7 @@ Observed in a prior session (2026-07-09, window 1 / the work workspace, RepoProm
 - No oracle export file ever landed on disk.
 - Scope was isolated to `context_builder`: in the same window/period, `bind_context`,
   `agent_run` (5 explore agents), `rpce-cli -e 'windows'`, `--tools-schema` all worked.
-- 3 windows were open at the time (the work workspace, personal-toolkit, and a worktree workspace);
-  multi-window state suspected as contributing factor.
+- 3 windows were open at the time; multi-window state suspected as contributing factor.
 - Separate UX gap reported by user: since the IDE view was removed in CE, Context
   Builder progress is invisible and Context Builder runs don't appear in the Agent view.
 
@@ -139,22 +138,20 @@ findings instead.
 ## Live reproduction evidence (2026-07-09 ~15:10–15:35 UTC, gathered by orchestrator)
 
 Environment discovered during this session — **two CE app instances running simultaneously**:
-- `/Applications/RepoPrompt CE.app` — **release 1.0.27 (build 28)**, PID 11796, started
-  Jul 9 09:50 UTC, owns socket `/tmp/repoprompt-ce-mcp-501/repoprompt-ce-7.sock`. This hosts
-  the user's working windows (the work workspace=1, personal-toolkit=2, a worktree workspace=3, the owner's multi-root workspace=4) and
+- The installed release app, `/Applications/RepoPrompt CE.app` — **release 1.0.27 (build 28)**, started
+  Jul 9 09:50 UTC. It owned the user's working windows, including the affected ones, and
   served both the failing session and this one.
-- `~/Library/Application Support/RepoPrompt CE/DebugApps/RepoPrompt.app` — **debug 1.0.24
-  (build 25)**, PID 2774, started Jul 8 15:00 UTC, separate socket
-  (`repoprompt-ce-D-7.sock`). Not involved in the failures.
+- A debug build in `DebugApps` — **debug 1.0.24 (build 25)**, started Jul 8 15:00 UTC, on its own
+  socket. Not involved in the failures.
 - ⇒ The local patched branch (`bf9a0b82`, Codex provider only) is **exonerated twice
   over**: the failing app is the release 1.0.27 build, and the patch touches only the
   Codex app-server payload key.
 
 **Five orphaned Context Builder discovery agents** (headless `claude -p … --mcp-config
 …/MCP/LaunchConfigs/discovery-R-<UUID>.json`, each with a `repoprompt_ce_cli` child
-connecting back to the release app socket), all spawned by PID 11796, all sleeping, 0% CPU:
-- PID 344 — spawned Jul 9 10:58 UTC (alive 4.5h; plausibly the user's failed session)
-- PIDs 8576, 9740, 10538, 11183 — spawned Jul 9 13:54:32–13:55:30 UTC, **four launches ~20s
+connecting back to the release app), all spawned by the release app, all sleeping, 0% CPU:
+- one spawned Jul 9 10:58 UTC (alive 4.5h; plausibly the user's failed session)
+- four spawned Jul 9 13:54:32–13:55:30 UTC, **four launches ~20s
   apart within one minute** — pattern consistent with a discovery-launch retry loop where
   the app fails to associate the child's inbound connection with the run and retries.
 - 10 `discovery-R-*.json` configs on disk total; 5 children exited, 5 leaked.
@@ -162,16 +159,16 @@ connecting back to the release app socket), all spawned by PID 11796, all sleepi
   version 1.0.27 — matches the app; version-mismatch hypothesis eliminated.
 
 **Selection-mutation wedge, window-scoped** (all measured while both apps idle):
-- Window 4 (the owner's multi-root workspace): `manage_selection op=get` returns in **0.09s** ("fresh");
+- The affected window: `manage_selection op=get` returns in **0.09s** ("fresh");
   `op=add` **hangs until the 30s execution contract** then settles as cancellation —
   reproduced 3× on both MCP and CLI transports (`tool_execution_timeout … settled as
   cancellation during cancellation grace`). Transport stays alive (upstream PR 171's
   cancellation-safety working at the transport layer; the underlying blockage persists).
-- Window 2: identical `op=add` completes in **0.11s** ⇒ wedge is window/tab-scoped.
+- Another window: identical `op=add` completes in **0.11s** ⇒ wedge is window/tab-scoped.
 - "Token accounting: stale from active_tab_published; refresh pending" appears in the
   *healthy* window too ⇒ that note is not diagnostic of the wedge.
-- Thread sample of PID 11796 during a blocked mutation: release binary is stripped;
-  only dispatch runtime frames visible (sample at scratchpad `rp-sample.txt`); parked
+- Thread sample of the release app during a blocked mutation: release binary is stripped;
+  only dispatch runtime frames visible (sample not retained); parked
   Swift-concurrency continuations not observable — consistent with an awaited
   continuation rather than a busy/blocked thread.
 - Unified log (`log show`, 6 min): zero Context-Builder-related lines from either app.
@@ -333,7 +330,7 @@ identical, faults.
   but the wedged tail `Task` is never cancelled, so it remains head-of-line for the **next** caller.
   "Cancellation now settles, underlying resource never released" is literally this design: the tail
   task has no cancellation path and no timeout. Window-scoping (`mcpSelectionMirrorTail` is one
-  instance per window) matches the report's window-4-wedged / window-2-fine observation.
+  instance per window) matches the report's observation that one window wedged while another stayed fine.
 - `read_file` "sometimes hangs" *(probe C, plausible)*: interactive/CLI `read_file` auto-selection
   drains `.mirroredSelectionAndMetrics` synchronously and its mirror worker feeds the same
   `mcpSelectionMirrorTail` chain, so it wedges only when it triggers a new auto-selection on the
@@ -466,8 +463,8 @@ One shared root, three faults (full mechanism in `## Investigator Findings`):
    add the fork as a remote, and PR from there. The local Codex fix `bf9a0b82` is also
    still unfixed upstream and can be PR'd.
 5. **Immediate remediation** (operator): quit/restart the installed release CE app
-   (PID 11796) to clear the window-4 wedge and reap nothing — the 5 zombie `claude -p`
-   discovery children (PIDs 344, 8576, 9740, 10538, 11183) must be killed manually since
+   to clear the affected window's wedge and reap nothing — the 5 zombie `claude -p`
+   discovery children must be killed manually since
    no reaper exists. Decide whether both app instances (release 1.0.27 in /Applications +
    debug 1.0.24 in DebugApps) should really run concurrently.
 
