@@ -91,6 +91,99 @@ final class PromptMigrationRemovalTests: XCTestCase {
     }
 }
 
+@MainActor
+final class ReviewPromptUpgradeTests: XCTestCase {
+    private static let reviewPromptID = UUID(uuidString: "D7F1B2E4-3C5A-6B8D-CF8E-1F5D0E2A4C6B")!
+
+    /// The [Review] default that shipped before the current one. It is copied here instead of read from
+    /// `previousReviewPromptV2`, so an accidental edit to that snapshot fails this test.
+    private static let previousShippedReviewDefault = """
+    You are reviewing code changes with git diffs included in the prompt. The git diff shows what changed; the file contents show full context. Use both.
+
+    **Review Criteria:**
+
+    1. **Correctness & Safety**:
+    \t- Do the changes achieve their intended purpose without regressions?
+    \t- Are edge cases and error paths handled?
+    \t- Any security vulnerabilities, race conditions, or resource leaks?
+    \t- Any breaking changes to APIs or contracts?
+
+    2. **Design & Complexity**:
+    \t- Do changes increase coupling or reduce separation of concerns?
+    \t- Is new complexity justified, or can the same result be achieved more simply?
+    \t- Are there DRY violations — duplicated logic that should be extracted?
+    \t- Do abstractions sit at the right level (not too early, not too late)?
+
+    3. **Intentionality**:
+    \t- Does every change have a clear purpose? Flag accidental modifications or dead code.
+    \t- Are the changes minimal and focused, or is scope creeping in?
+
+    **Severity Levels — be disciplined about classification:**
+    - **P0 (Must fix)**: Bugs, data loss, security holes, crashes — things that break correctness.
+    - **P1 (Should fix)**: Design issues that will compound — poor separation of concerns, growing complexity, DRY violations, missing error handling for reachable paths.
+    - **P2 (Consider)**: Style, naming, minor refactoring opportunities, test coverage gaps.
+
+    Most findings should be P1 or P2. Reserve P0 for genuinely broken behavior.
+
+    **Output Format:**
+    1. One-paragraph summary of what the changes accomplish.
+    2. Findings grouped by severity (P0 → P1 → P2), each with: file reference, what's wrong, and a concrete suggestion. Omit empty severity groups.
+    3. If no issues found at a severity level, skip it — don't pad the review.
+    """
+
+    func testUneditedPreviousReviewDefaultUpgradesAndEditedCopyIsKept() throws {
+        let freshInstall = try loadReviewPrompt(seedingContent: nil).loaded
+        XCTAssertNotEqual(freshInstall.content, Self.previousShippedReviewDefault)
+
+        let upgraded = try loadReviewPrompt(seedingContent: Self.previousShippedReviewDefault)
+        XCTAssertEqual(upgraded.loaded.content, freshInstall.content)
+        XCTAssertFalse(upgraded.loaded.isUserEdited)
+        XCTAssertEqual(upgraded.persisted, upgraded.loaded)
+        XCTAssertFalse(upgraded.persisted.isUserEdited)
+
+        let editedContent = Self.previousShippedReviewDefault + "\nAlso check logging."
+        let edited = try loadReviewPrompt(seedingContent: editedContent)
+        XCTAssertEqual(edited.loaded.content, editedContent)
+        XCTAssertTrue(edited.loaded.isUserEdited)
+        XCTAssertEqual(edited.persisted.content, editedContent)
+    }
+
+    private func loadReviewPrompt(
+        seedingContent: String?
+    ) throws -> (loaded: PromptViewModel.StoredPrompt, persisted: PromptViewModel.StoredPrompt) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReviewPromptUpgradeTests-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let storage = PromptStorage(fileURL: directory.appendingPathComponent("SavedPrompts.json"))
+        if let seedingContent {
+            let seeded = StoredPromptRecord(id: Self.reviewPromptID, title: "[Review]", content: seedingContent)
+            _ = try storage.mutatePrompts { prompts in
+                prompts = [seeded]
+                return ((), true)
+            }.get()
+        }
+
+        let keyManager = KeyManager(secureService: SecureKeysService(secureStorage: TestSecureStorageBackend()))
+        let apiSettings = APISettingsViewModel(
+            aiQueriesService: AIQueriesService(keyManager: keyManager),
+            keyManager: keyManager,
+            loadStoredDataOnInit: false
+        )
+        addTeardownBlock { @MainActor in apiSettings.prepareForWindowClose() }
+        let prompts = PromptViewModel(
+            fileManager: WorkspaceFilesViewModel(),
+            apiSettingsViewModel: apiSettings,
+            windowID: -1931,
+            settingsManager: WindowSettingsManager(windowID: -1931),
+            storedPromptPersistence: StoredPromptPersistenceService(storage: storage)
+        )
+        let loaded = try XCTUnwrap(prompts.storedPrompts.first { $0.id == Self.reviewPromptID })
+        // Storage reads and writes share one serial queue, so this read waits for the load's background save.
+        let persisted = try XCTUnwrap(storage.loadPrompts().get().first { $0.id == Self.reviewPromptID })
+        return (loaded, persisted)
+    }
+}
+
 private extension String? {
     func unwrapForTest(file: StaticString = #filePath, line: UInt = #line) throws -> String {
         try XCTUnwrap(self, file: file, line: line)
