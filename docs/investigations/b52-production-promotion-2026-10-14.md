@@ -39,7 +39,7 @@ Main passed guardrails, but push preflight rejected its existing local files out
 
 Re-enabled RepoPromptCE in the paused session’s connector menu, then restarted Claude Desktop to replace its disconnected MCP process. Developer settings showed RepoPromptCE Running with `~/RepoPrompt/repoprompt_ce_cli`.
 
-Sent exactly `continue` to the paused Claude Desktop session. The message appeared, and the session changed to Running. PR177’s monitoring automation remains paused.
+Sent exactly `continue` to the paused Claude Desktop session. The message appeared, and the session changed to Running.
 
 ## Unresolved work
 

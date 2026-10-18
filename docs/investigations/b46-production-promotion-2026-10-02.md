@@ -63,7 +63,7 @@ PR #136 CI run `36949724061`, attempt 2: all eight checks passed after one retry
 
 ## Release closure
 
-The approved idle-window lifecycle check completed on 2026-10-02. Production quit was verified at 03:10:06 UTC: every previously recorded app, bundled Codex, code-mode host and MCP PID had exited. The same installed build relaunched, and a fresh Codex client made a RepoPrompt MCP call and returned `POST_RELAUNCH_OK`. Production is running as PID `67505`; no active acceptance sessions remain.
+The approved idle-window lifecycle check completed on 2026-10-02. Production quit was verified at 03:10:06 UTC: every previously recorded app, bundled Codex, code-mode host and MCP PID had exited. The same installed build relaunched, and a fresh Codex client made a RepoPrompt MCP call and returned `POST_RELAUNCH_OK`. Production is running; no active acceptance sessions remain.
 
 Annotated tag `local/v1.4.0-b46` targets installed commit `fe504414b2c80d8c145067a12f4d834acd8a9982` and was pushed to the distribution. [The GitHub Release receipt](https://github.com/mplibunao/repoprompt-ce-local/releases/tag/local/v1.4.0-b46) was published at 03:14:24 UTC, with no app assets uploaded. Push preflight passed in the existing clean release-validation worktree; the main checkout's unrelated local investigation files were preserved.
 

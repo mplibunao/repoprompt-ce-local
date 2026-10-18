@@ -29,10 +29,10 @@ Authority: MP authorized finishing the work, deploying to production, and provin
 
 `local_release_archive.sh` refuses to run while any process holds RepoPrompt state. Its guard (`python3 Scripts/debug_app_process.py guard release-state --production-executable "/Applications/RepoPrompt CE.app/Contents/MacOS/RepoPrompt" --app-name RepoPrompt --display-name "RepoPrompt CE" --support-dir "$HOME/Library/Application Support/RepoPrompt CE"`, exit 3 = blocked) listed 47 processes at 01:25Z:
 
-- the production app (`23403`) and the debug app (`74674`);
-- 33 `repoprompt-mcp` connectors spawned by Claude Code sessions, which includes the supervising sessions;
-- 3 connectors spawned by Codex clients: the ChatGPT app's Codex and a `~/.codex` app-server daemon (0.160.0);
-- 9 connectors spawned by `cursor-agent` processes more than a day old.
+- the production app and the debug app;
+- `repoprompt-mcp` connectors spawned by Claude Code sessions, which includes the supervising sessions;
+- connectors spawned by Codex clients: the ChatGPT app's Codex and a `~/.codex` app-server daemon;
+- connectors spawned by long-running `cursor-agent` processes.
 
 Clients launch the connector through `~/RepoPrompt/repoprompt_ce_cli` → `/Applications/RepoPrompt CE.app/Contents/MacOS/repoprompt-mcp` (also reached through `/usr/local/bin/rpce-cli`). During the b45 promotion an external Codex client kept respawning its connector, and moving that link aside for the archive, then restoring it, cleared it.
 
