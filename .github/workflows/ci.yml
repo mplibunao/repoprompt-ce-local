@@ -66,7 +66,8 @@ jobs:
           echo "Comparison: ${range:-none}; markdown_only=$markdown_only"
           echo "markdown_only=$markdown_only" >> "$GITHUB_OUTPUT"
 
-  # On a Markdown-only change this job runs only checkout and guardrails. Guardrails need
+  # On a Markdown-only change this job runs only guardrails and the conductor tests, which
+  # check wording in README.md and docs/architecture/developer-daemon.md. Guardrails need
   # macOS (`xcrun swiftc`), so the job stays there.
   style:
     name: Style
@@ -91,7 +92,6 @@ jobs:
         run: make lint
 
       - name: Run conductor tests
-        if: needs.changes.outputs.markdown_only != 'true'
         run: make conductor-selftest
 
       - name: Set up Node for pinned Codex CLI
