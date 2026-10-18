@@ -166,7 +166,6 @@ Two layers.
 - Strict MCP stays off deliberately, so agents keep the user's other MCP servers.
 - The stale Classic entries were removed from the user's Claude configuration. A before-and-after comparison showed those removals and no other change.
 - Verified in production CE: a `pair` session with prompt `hi` in the personal toolkit's workspace started its turn 0.5 s after dequeue (previously 200–962 s) and replied 4.1 s later. It loaded `RepoPromptCE` and the user's other MCP servers.
-
 - The CE startup-supervision and status defects (Recommendations 2–3) are tracked in distribution issue #124, deferred.
 
 ## Preventive Measures
