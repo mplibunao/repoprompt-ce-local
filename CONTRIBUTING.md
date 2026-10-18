@@ -197,15 +197,15 @@ durable documents; adding a document to that list is how a working document is
 promoted.
 
 **Run ledgers.** Run ledgers are committed in `docs/ledgers/`, as part of the
-run's pull request. The built-in Orchestrate workflow and the toolkit's
-`rp-orchestrate-loop` skill write them and define the template. A ledger is
-named `<YYYY-MM-DD>-issue-<number>-<topic>.md` for the date the run started,
-without `issue-<number>-` when the run has no issue. Deferrals are recorded as
-GitHub issues. The built-in Optimize workflow writes its scoreboard here too, as
-`<YYYY-MM-DD>-optimize-<slug>.md`; the scoreboard is that run's record, so an
-Optimize run writes no separate ledger. The orchestrator deletes the run's plan
-only when the user says the work is done, after checking that the plan's
-decisions are in the ledger or an ADR.
+run's pull request. The built-in Orchestrate workflow and the
+`rp-orchestrate-loop` skill from a separate toolkit repository write them and
+define the template. A ledger is named `<YYYY-MM-DD>-issue-<number>-<topic>.md`
+for the date the run started, without `issue-<number>-` when the run has no
+issue. Deferrals are recorded as GitHub issues. The built-in Optimize workflow
+writes its scoreboard here too, as `<YYYY-MM-DD>-optimize-<slug>.md`; the
+scoreboard is that run's record, so an Optimize run writes no separate ledger.
+The orchestrator deletes the run's plan only when the user says the work is
+done, after checking that the plan's decisions are in the ledger or an ADR.
 
 **ADRs.** A decision gets an ADR when it is hard to reverse, would surprise
 someone without the background, and involved a real trade-off. Other decisions

@@ -816,7 +816,7 @@ while IFS= read -r path; do
     done
   fi
   existing_tracked_docs+=("$path")
-done < <(git ls-files docs)
+done < <(git -c core.quotePath=false ls-files docs)
 unexpected_tracked_docs="$(comm -23 \
   <(printf '%s\n' "${existing_tracked_docs[@]}" | sort) \
   <(printf '%s\n' "${allowed_tracked_docs[@]}" | sort))"
