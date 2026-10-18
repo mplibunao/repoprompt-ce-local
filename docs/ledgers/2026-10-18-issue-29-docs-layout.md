@@ -7,7 +7,7 @@ Commit run ledgers, sanitized investigation reports, and ADRs, keep plans local,
 | Item | Outcome | Agent session | Commits |
 |------|---------|---------------|---------|
 | 1. Records and rails | done | engineer · Orchestrate 1/5: Records and rails | `docs: commit run ledgers, investigation reports, and ADRs`; `docs: apply review fixes to the run records and check 8`; `fix: catch home paths after escaped newlines, not inside escaped paths` |
-| 2. Investigations sweep | pending | | |
+| 2. Investigations sweep | done | engineer · Orchestrate 2/5: Investigations sweep | `docs(investigations): commit the first five sanitized reports`; `docs(investigations): commit eleven sanitized reports with current guidance`; `docs(investigations): commit 22 more sanitized reports`; `docs(investigations): commit the last 22 sanitized reports`; `docs(investigations): commit the issue 830 TOML parser decision report`; in `mplibunao/repoprompt-ce` on `feature/830-design-archive`: `docs: archive issue 830 TOML parser proof of concept` |
 | 3. Built-in Orchestrate ledger and Optimize scoreboard | pending | | |
 | 4. Toolkit loop ledger and docs | pending | | |
 | 5. Citation check and ledger close-out | pending | | |
@@ -25,6 +25,20 @@ Commit run ledgers, sanitized investigation reports, and ADRs, keep plans local,
 - Evidence: `make guardrails` passes with the ADRs and this ledger tracked, and a force-added `docs/plans/tmp.md`, `docs/ledgers/tmp.json`, and `docs/ledgersx/tmp.md` each fail check 8.
 - Evidence: each changed document matches its approved text byte for byte, apart from the wrapping, the two review fixes above, and the ADR's two filled dates.
 - Evidence: `pr-ready` passed on the first commit. An independent review found no blockers, a separate cleanup pass found nothing to change, and the `context_builder` review found the gitleaks false positive above.
+
+## 2. Investigations sweep
+
+- Decision: the sweep covers the 62 Markdown files in `docs/investigations/` on 2026-10-18, two of them already tracked, plus the issue 830 proof of concept's decision report, committed as `issue-830-toml-parser-poc-decision-2026-09-05.md`. Source: approved plan.
+- Decision: where the redaction rules leave room, the sweep leans to less disclosure. Third-party names and handles became roles, work-repository and workspace names became descriptions, times are in UTC with no time zone, private toolkit paths and quotes are paraphrased, and filed drafts, superseded drafts, and working logs became short summaries. Source: orchestrator judgment.
+- Decision: `rp-agents-work-repo-guardrails-bypass-2026-07-28.md` was renamed because its original name held a work project's name. Source: approved plan.
+- Decision: the decision report is dated 2026-09-05 from the session logs that wrote its final wording, because its text gives no date. Source: orchestrator judgment.
+- Decision: the test-coverage audit ledger is upstream's own file, committed in `30d8ae319` and deleted in upstream PR 908. It stays in the sweep, and its opening says where it came from. Source: review finding.
+- Decision: no refactor pass, because this item changes only report text; the per-batch reviews and the independent reviewers cover it. Source: orchestrator judgment.
+- Evidence: the originals are archived locally outside the repository, and the archive's 62 entries match the inventory's checksums.
+- Evidence: gitleaks with the `agent-doc-home-path` rule reports nothing on the five commits or on `docs/investigations/`, and planted paths in a control file are all caught.
+- Evidence: a `context_builder` review of each batch, then three independent reviewers who compared every report with its original, found no private values left and no lost conclusions. They raised 36 findings; 34 were applied, and two were declined: a notice date taken from the file name, which the plan allows, and package owners' handles in dependency URLs.
+- Evidence: the proof of concept is archived on the fork's `feature/830-design-archive` branch at `ForkArtifacts/issue-830/docs/investigations/issue-830-toml11-parser-poc/`, without its build folder, and gitleaks finds nothing in it.
+- Deferred: once this lands, the untracked originals in the main checkout are removed after a checksum check against the archive, so `main` can bring in the tracked versions.
 
 ## Parked decisions
 
