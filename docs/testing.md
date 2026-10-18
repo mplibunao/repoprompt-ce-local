@@ -53,6 +53,8 @@ make dev-provider-test
 
 A focused green run is evidence for the named contract, not a substitute for full-suite or CI coverage when the changed boundary is broad. The hosted root-test workflow discovers one current root XCTest population through `swift test list`, counts methods per suite, assigns every discovered suite to one of four shards by deterministic, method-count-weighted longest-processing-time-first (LPT) scheduling, and executes each suite in its own XCTest process. Root CI has no contract/integration tier split or contributor-maintained registry. Provider-package tests run inside the Style job.
 
+Hosted CI first lists the run's changed paths. When every path ends in lowercase `.md`, the run checks only guardrails and secrets: the Style job runs only `make guardrails`, and the run skips the four root shards and the Sentry-enabled build. When CI can't list the paths, as on a new branch's first push, it runs everything.
+
 The Sentry-enabled build runs only on pushes to `main` and `release/**`. Its `SentryTelemetryPrivacyTests` filter matches no suite in this distribution, so the step passes without running a test and a green run isn't privacy-test coverage.
 
 ## Codemap-sensitive changes
