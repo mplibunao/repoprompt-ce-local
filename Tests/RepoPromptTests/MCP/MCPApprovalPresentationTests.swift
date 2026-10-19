@@ -83,6 +83,30 @@ import XCTest
             }
         }
 
+        /// A delayed presentation cannot bring back a cleared notice generation, and a clear for an
+        /// older generation leaves a newer notice in place. The notice lives on the window's
+        /// `MCPServerViewModel`, which this suite's fixture builds.
+        func testCodeStructureSettlementNoticeTombstoneRejectsDelayedPresentationAndOldClear() async throws {
+            try await withPresentationFixture { fixture in
+                let server = fixture.server
+
+                server.clearCodeStructureSettlementLimitNotice(generation: 41)
+                server.presentCodeStructureSettlementLimitNotice(generation: 41)
+                XCTAssertNil(server.codeStructureSettlementLimitNotice)
+
+                server.presentCodeStructureSettlementLimitNotice(generation: 42)
+                XCTAssertEqual(server.codeStructureSettlementLimitNotice?.generation, 42)
+                server.clearCodeStructureSettlementLimitNotice(generation: 41)
+                XCTAssertEqual(server.codeStructureSettlementLimitNotice?.generation, 42)
+
+                server.clearCodeStructureSettlementLimitNotice(generation: 42)
+                XCTAssertNil(server.codeStructureSettlementLimitNotice)
+
+                server.presentCodeStructureSettlementLimitNotice(generation: 41)
+                XCTAssertNil(server.codeStructureSettlementLimitNotice)
+            }
+        }
+
         // MARK: - Fixture
 
         private struct Fixture {

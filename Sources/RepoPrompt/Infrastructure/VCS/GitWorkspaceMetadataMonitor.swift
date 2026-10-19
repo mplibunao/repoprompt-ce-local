@@ -225,7 +225,9 @@ actor GitWorkspaceMetadataMonitor {
     /// Serializes an authority install linearization point with synchronous
     /// event acceptance. If an event was accepted during collection, the body
     /// never runs; an event accepted afterward observes the installed value as
-    /// a prior generation and makes its lease immediately non-current.
+    /// a prior generation and makes its lease immediately non-current. The callback
+    /// runs under the monitor lock and may synchronously acquire the authority mirror, but may not
+    /// synchronously invalidate/query the Store cache or run an admitted Git subprocess.
     nonisolated func withCurrentAcceptedWatermark<T>(
         for repositoryKey: GitWorkspaceAuthorityRepositoryKey,
         expected: UInt64,
@@ -240,7 +242,9 @@ actor GitWorkspaceMetadataMonitor {
 
     /// Validates a complete multi-root watermark cut while holding the monitor
     /// lock exactly once. Duplicate repository keys must already have been
-    /// coalesced to one exact expected value by the caller.
+    /// coalesced to one exact expected value by the caller. The callback runs under
+    /// the monitor lock and may synchronously acquire the authority mirror, but may not synchronously
+    /// invalidate/query the Store cache or run an admitted Git subprocess.
     nonisolated func withCurrentAcceptedWatermarks<T>(
         _ expected: [GitWorkspaceAuthorityRepositoryKey: UInt64],
         _ body: () -> T
@@ -589,13 +593,14 @@ actor GitWorkspaceMetadataMonitor {
 }
 
 private final class GitMetadataAcceptedWatermarks: @unchecked Sendable {
-    private let lock = NSLock()
+    // While held, no synchronous Store cache invalidation/queryability or admitted Git subprocess may run.
+    private let lock = SameThreadReentryCheckedLock()
     private var values: [GitWorkspaceAuthorityRepositoryKey: UInt64] = [:]
 
     func accept(_ key: GitWorkspaceAuthorityRepositoryKey) {
         lock.lock()
+        defer { lock.unlock() }
         values[key, default: 0] &+= 1
-        lock.unlock()
     }
 
     func value(for key: GitWorkspaceAuthorityRepositoryKey) -> UInt64 {
@@ -618,6 +623,8 @@ private final class GitMetadataAcceptedWatermarks: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard values[key, default: 0] == expected else { return nil }
+        // `body` may acquire the authority mirror but cannot re-enter this lock or invalidate/query the Store cache.
+        // REENTRANCY-REVIEWED: no admitted Git subprocess may run while it is held.
         return body()
     }
 
@@ -628,6 +635,8 @@ private final class GitMetadataAcceptedWatermarks: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard expected.allSatisfy({ values[$0.key, default: 0] == $0.value }) else { return nil }
+        // `body` may acquire the authority mirror but cannot re-enter this lock or invalidate/query the Store cache.
+        // REENTRANCY-REVIEWED: no admitted Git subprocess may run while it is held.
         return body()
     }
 }
