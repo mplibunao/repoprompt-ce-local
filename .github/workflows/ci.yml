@@ -193,16 +193,51 @@ jobs:
 
       # Every run restores; only a refresh saves (below). A cache saved on any other branch
       # is visible only to runs on that branch and pull requests targeting it. A refresh
-      # whose exact key already exists has nothing to build or save.
+      # whose exact key already exists has nothing to build or save. The `v2` namespace holds
+      # caches built after the mtime step below; an older cache would recompile everything.
       - name: Restore SwiftPM build cache
         id: root-cache
         uses: actions/cache/restore@v6
         with:
           path: .build
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-root-
+
+      # llbuild and the Swift driver treat a source file as unchanged only when its mtime
+      # (and size, for llbuild) equals what they recorded; SwiftPM runs llbuild in its
+      # device-agnostic mode, so inode numbers don't count. A fresh checkout stamps every
+      # file with the checkout time, so a restored cache recompiled every first-party module.
+      # Deriving each tracked file's mtime from its content gives the refresh that builds a
+      # cache and the run that restores it the same mtime for the same bytes, so an unchanged
+      # module builds nothing, and a changed file gets another mtime and is compiled with its
+      # dependents.
+      - name: Set tracked-file mtimes from their content
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import stat
+          import subprocess
+
+          count = 0
+          for raw in subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True).stdout.split(b"\0"):
+              if not raw:
+                  continue
+              path = raw.decode()
+              info = os.lstat(path)
+              if not stat.S_ISREG(info.st_mode):
+                  continue
+              with open(path, "rb") as f:
+                  digest = int(hashlib.sha1(f.read()).hexdigest()[:15], 16)
+              seconds = 1_000_000_000 + digest % 500_000_000
+              nanoseconds = (digest >> 29) % 1_000_000_000
+              os.utime(path, ns=(info.st_atime_ns, seconds * 1_000_000_000 + nanoseconds))
+              count += 1
+          print(f"set the mtime of {count} tracked files")
+          PY
 
       - name: Build app product
         if: needs.changes.outputs.mode != 'cache-refresh' || steps.root-cache.outputs.cache-hit != 'true'
@@ -259,10 +294,37 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: .build
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-sentry-
+
+      # The same step as in Build and Test, which explains it.
+      - name: Set tracked-file mtimes from their content
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import stat
+          import subprocess
+
+          count = 0
+          for raw in subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True).stdout.split(b"\0"):
+              if not raw:
+                  continue
+              path = raw.decode()
+              info = os.lstat(path)
+              if not stat.S_ISREG(info.st_mode):
+                  continue
+              with open(path, "rb") as f:
+                  digest = int(hashlib.sha1(f.read()).hexdigest()[:15], 16)
+              seconds = 1_000_000_000 + digest % 500_000_000
+              nanoseconds = (digest >> 29) % 1_000_000_000
+              os.utime(path, ns=(info.st_atime_ns, seconds * 1_000_000_000 + nanoseconds))
+              count += 1
+          print(f"set the mtime of {count} tracked files")
+          PY
 
       - name: Build app product with Sentry SDK linked
         if: needs.changes.outputs.mode != 'cache-refresh' || steps.sentry-cache.outputs.cache-hit != 'true'
