@@ -5510,8 +5510,11 @@ actor WorkspaceFileContextStore {
         }
         let publicationFences = pendingRoots.compactMap(\.authorityFence)
 
-        // No await, callback, task creation, or throwing operation is allowed
-        // from the authority permit through the complete visible-state assignment.
+        // The permit closure is synchronous: nothing suspends between taking the
+        // authority permit and finishing the visible-state assignment. Resuming
+        // ingress may schedule a drain task, whose store work waits until this
+        // actor suspends. Path-cache invalidation and seeded queryability checks
+        // must stay outside the permit, because both reach its non-recursive locks.
         var installedRoots = currentRecord.roots
         var newlyPublishedRootIDs = Set<UUID>()
         var newlyPublishedPaths: [String] = []
@@ -5616,11 +5619,6 @@ actor WorkspaceFileContextStore {
                 preparation.token,
                 forKey: preparation.token.ownerID
             )
-            invalidatePathMatchSnapshot(
-                affectedRootKinds: [.sessionWorktree],
-                reason: .rootLoad,
-                affectedRootIDs: newlyPublishedRootIDs
-            )
             return true
         } ?? false
 
@@ -5634,6 +5632,15 @@ actor WorkspaceFileContextStore {
                 reason: .authorityUnstable
             )
         }
+
+        // The visibility assignment above is linearized by the authority permit.
+        // Invalidate the derived path cache synchronously afterward, before any
+        // actor suspension can expose subsequent work.
+        invalidatePathMatchSnapshot(
+            affectedRootKinds: [.sessionWorktree],
+            reason: .rootLoad,
+            affectedRootIDs: newlyPublishedRootIDs
+        )
 
         var previousResources = SessionWorktreeOwnershipRemoval()
         if let previousToken, previousToken != preparation.token {
