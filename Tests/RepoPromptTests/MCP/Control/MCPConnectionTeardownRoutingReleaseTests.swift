@@ -44,7 +44,12 @@ import XCTest
                         ]),
                         ("binds a tab", [
                             ("bind_context", ["op": "bind", "context_id": context.tabID.uuidString]),
-                            (MCPWindowToolName.readFile, ["path": context.fileURL.path, "limit": 5])
+                            (MCPWindowToolName.readFile, [
+                                "path": context.fileURL.path,
+                                "limit": 5,
+                                "_windowID": windowID,
+                                "context_id": context.tabID.uuidString
+                            ])
                         ])
                     ]
                     for kind in kinds {
@@ -59,9 +64,11 @@ import XCTest
                         let registeredWhileOpen = await Self.isRegistered(endpoint.connectionID, in: coordinator)
                         XCTAssertTrue(registeredWhileOpen, "\(kind.label): connection was never registered")
 
+                        // Remove the connection before closing the client. The client's EOF starts the same
+                        // teardown, and while that runs, removal returns at once, before any release is queued.
+                        await fixture.networkManager.debugRemoveConnection(endpoint.connectionID)
                         endpoint.client.close()
                         await endpoint.connectionManager.stop()
-                        await fixture.networkManager.debugRemoveConnection(endpoint.connectionID)
                         for window in [fixture.contextA.window, fixture.contextB.window] {
                             await window.mcpServer.domainRoutingPublishTask?.value
                         }
