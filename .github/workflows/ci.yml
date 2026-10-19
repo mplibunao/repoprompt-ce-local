@@ -131,7 +131,7 @@ jobs:
   style:
     name: Style
     needs: changes
-    if: false  # [experiment, do not merge] skipped to save macOS minutes
+    if: false  # [round trip, do not merge] skipped to save macOS minutes
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -182,7 +182,7 @@ jobs:
   build-and-test:
     name: Build and Test
     needs: changes
-    if: false  # [experiment, do not merge] skipped to save macOS minutes
+    if: needs.changes.outputs.mode != 'landed' && needs.changes.outputs.markdown_only != 'true'
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -193,16 +193,51 @@ jobs:
 
       # Every run restores; only a refresh saves (below). A cache saved on any other branch
       # is visible only to runs on that branch and pull requests targeting it. A refresh
-      # whose exact key already exists has nothing to build or save.
+      # whose exact key already exists has nothing to build or save. The `v2` namespace holds
+      # caches built after the mtime step below; an older cache would recompile everything.
       - name: Restore SwiftPM build cache
         id: root-cache
         uses: actions/cache/restore@v6
         with:
           path: .build
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-root-
+
+      # llbuild and the Swift driver treat a source file as unchanged only when its mtime
+      # (and size, for llbuild) equals what they recorded; SwiftPM runs llbuild in its
+      # device-agnostic mode, so inode numbers don't count. A fresh checkout stamps every
+      # file with the checkout time, so a restored cache recompiled every first-party module.
+      # Deriving each tracked file's mtime from its content gives the refresh that builds a
+      # cache and the run that restores it the same mtime for the same bytes, so an unchanged
+      # module builds nothing, and a changed file gets another mtime and is compiled with its
+      # dependents.
+      - name: Set tracked-file mtimes from their content
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import stat
+          import subprocess
+
+          count = 0
+          for raw in subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True).stdout.split(b"\0"):
+              if not raw:
+                  continue
+              path = raw.decode()
+              info = os.lstat(path)
+              if not stat.S_ISREG(info.st_mode):
+                  continue
+              with open(path, "rb") as f:
+                  digest = int(hashlib.sha1(f.read()).hexdigest()[:15], 16)
+              seconds = 1_000_000_000 + digest % 500_000_000
+              nanoseconds = (digest >> 29) % 1_000_000_000
+              os.utime(path, ns=(info.st_atime_ns, seconds * 1_000_000_000 + nanoseconds))
+              count += 1
+          print(f"set the mtime of {count} tracked files")
+          PY
 
       - name: Build app product
         if: needs.changes.outputs.mode != 'cache-refresh' || steps.root-cache.outputs.cache-hit != 'true'
@@ -232,7 +267,7 @@ jobs:
       # The path must match the restore step's: the cache version hashes the path list, so
       # with a different path no restore could find what this step saves.
       - name: Save SwiftPM build cache (refresh only)
-        if: needs.changes.outputs.mode == 'cache-refresh' && steps.root-cache.outputs.cache-hit != 'true'
+        if: steps.root-cache.outputs.cache-hit != 'true'  # [round trip, do not merge] saves from this pull request too
         uses: actions/cache/save@v6
         with:
           path: .build
@@ -244,7 +279,7 @@ jobs:
   sentry-enabled-build:
     name: Sentry-enabled Build
     needs: changes
-    if: false  # [experiment, do not merge] skipped to save macOS minutes
+    if: needs.changes.outputs.mode != 'landed' && needs.changes.outputs.markdown_only != 'true'  # [round trip, do not merge] runs on this pull request too
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -259,10 +294,37 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: .build
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-sentry-
+
+      # The same step as in Build and Test, which explains it.
+      - name: Set tracked-file mtimes from their content
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import stat
+          import subprocess
+
+          count = 0
+          for raw in subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True).stdout.split(b"\0"):
+              if not raw:
+                  continue
+              path = raw.decode()
+              info = os.lstat(path)
+              if not stat.S_ISREG(info.st_mode):
+                  continue
+              with open(path, "rb") as f:
+                  digest = int(hashlib.sha1(f.read()).hexdigest()[:15], 16)
+              seconds = 1_000_000_000 + digest % 500_000_000
+              nanoseconds = (digest >> 29) % 1_000_000_000
+              os.utime(path, ns=(info.st_atime_ns, seconds * 1_000_000_000 + nanoseconds))
+              count += 1
+          print(f"set the mtime of {count} tracked files")
+          PY
 
       - name: Build app product with Sentry SDK linked
         if: needs.changes.outputs.mode != 'cache-refresh' || steps.sentry-cache.outputs.cache-hit != 'true'
@@ -285,7 +347,7 @@ jobs:
         run: swift test --filter SentryTelemetryPrivacyTests
 
       - name: Save SwiftPM build cache (refresh only)
-        if: needs.changes.outputs.mode == 'cache-refresh' && steps.sentry-cache.outputs.cache-hit != 'true'
+        if: steps.sentry-cache.outputs.cache-hit != 'true'  # [round trip, do not merge] saves from this pull request too
         uses: actions/cache/save@v6
         with:
           path: .build
@@ -296,7 +358,7 @@ jobs:
   secret-scan:
     name: Secret Scan
     needs: changes
-    if: false  # [experiment, do not merge] skipped; the branch adds only workflow steps
+    if: false  # [round trip, do not merge] the branch changes only the workflow
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -352,330 +414,3 @@ jobs:
             gitleaks_command+=(--config .gitleaks.toml)
           fi
           "${gitleaks_command[@]}" --redact .
-
-  # [experiment, do not merge] Iteration 4 of the macOS-minute optimization. A restored SwiftPM
-  # `.build` recompiles every first-party module because a fresh checkout gives every source a
-  # new inode and mtime. llbuild re-runs each command regardless (its FileInfo compares inode),
-  # which hands the decision to the Swift driver, which skips a source only when its mtime
-  # equals the build record's (or, with -enable-incremental-file-hashing, when its content
-  # hash does). One job seeds `.build`, recreates every tracked file in place, and measures
-  # the `] Compiling` lines per module for each arm, resetting `.build` from an APFS clone of
-  # the seed between arms:
-  #   A  no normalization (control; measured in run 39225985371 and not repeated)
-  #   B  mtimes restored from a record taken before the seed, only for unchanged blobs
-  #   B' mtimes recomputed from each file's blob ID, no record (the permanent candidate)
-  #   D  B' plus a one-file change to a widely used RepoPromptApp type
-  #   C  -enable-incremental-file-hashing on its own seed, no normalization
-  cache-reuse-experiment:
-    name: Cache reuse experiment
-    runs-on: macos-26
-    timeout-minutes: 120
-    env:
-      CHANGED_FILE: Sources/RepoPrompt/Infrastructure/WorkspaceContext/Slices/LineRange.swift
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - name: Toolchain and workspace facts
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "EXP=$RUNNER_TEMP/exp" >> "$GITHUB_ENV"
-          sw_vers
-          xcodebuild -version
-          swift --version
-          python3 --version
-          echo "workspace: $PWD"
-          echo "tracked paths: $(git ls-files | wc -l | tr -d ' ')"
-          if swiftc -help-hidden 2>/dev/null | grep -q -- '-enable-incremental-file-hashing'; then
-            echo "driver offers -enable-incremental-file-hashing"
-            echo "HASHING_FLAG=yes" >> "$GITHUB_ENV"
-          else
-            echo "driver lacks -enable-incremental-file-hashing"
-            echo "HASHING_FLAG=no" >> "$GITHUB_ENV"
-          fi
-
-      - name: Write experiment helpers
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$EXP"
-          cat > "$EXP/mtimes.py" <<'PY'
-          """Tracked-file mtime helpers: record <json> | restore <json> | normalize | show <path>...
-
-          A file's identity is the SHA-1 of its working-tree content, not its index blob: the index
-          doesn't see an unstaged edit, and a tracked file can be edited after checkout.
-          """
-          import hashlib
-          import json
-          import os
-          import stat
-          import subprocess
-          import sys
-
-
-          def tracked():
-              """Yield (path, content SHA-1) for every tracked regular file; skips symlinks and gitlinks."""
-              out = subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True).stdout
-              for raw in out.split(b"\0"):
-                  if not raw:
-                      continue
-                  path = raw.decode()
-                  try:
-                      st = os.lstat(path)
-                  except FileNotFoundError:
-                      continue
-                  if not stat.S_ISREG(st.st_mode):
-                      continue
-                  digest = hashlib.sha1()
-                  with open(path, "rb") as f:
-                      for chunk in iter(lambda: f.read(1 << 20), b""):
-                          digest.update(chunk)
-                  yield path, digest.hexdigest()
-
-
-          def deterministic_mtime_ns(content_id):
-              h = int(content_id[:15], 16)
-              seconds = 1_000_000_000 + h % 500_000_000  # 2001-09-09 .. 2017-07-14
-              nanoseconds = (h >> 29) % 1_000_000_000
-              return seconds * 1_000_000_000 + nanoseconds
-
-
-          def set_mtime(path, mtime_ns):
-              os.utime(path, ns=(os.lstat(path).st_atime_ns, mtime_ns))
-
-
-          command = sys.argv[1]
-          if command == "record":
-              record = {}
-              for path, content_id in tracked():
-                  st = os.lstat(path)
-                  record[path] = {"content_id": content_id, "mtime_ns": st.st_mtime_ns, "inode": st.st_ino}
-              with open(sys.argv[2], "w") as f:
-                  json.dump(record, f)
-              print(f"recorded {len(record)} tracked regular files")
-          elif command == "restore":
-              with open(sys.argv[2]) as f:
-                  record = json.load(f)
-              restored = changed = added = 0
-              seen = set()
-              for path, content_id in tracked():
-                  seen.add(path)
-                  previous = record.get(path)
-                  if previous is None:
-                      added += 1
-                  elif previous["content_id"] != content_id:
-                      changed += 1
-                  else:
-                      set_mtime(path, previous["mtime_ns"])
-                      restored += 1
-              print(f"restored {restored}, changed {changed}, added {added}, removed {len(set(record) - seen)}")
-          elif command == "normalize":
-              count = 0
-              for path, content_id in tracked():
-                  set_mtime(path, deterministic_mtime_ns(content_id))
-                  count += 1
-              print(f"normalized {count} tracked regular files")
-          elif command == "show":
-              for path in sys.argv[2:]:
-                  st = os.lstat(path)
-                  print(f"{path}: inode={st.st_ino} mtime_ns={st.st_mtime_ns}")
-          else:
-              sys.exit(f"unknown command {command}")
-          PY
-
-          cat > "$EXP/count.sh" <<'SH'
-          #!/bin/bash
-          # Usage: count.sh <log>: `] Compiling` lines per module, plus other build activity.
-          set -euo pipefail
-          log="$1"
-          echo "Compiling lines: $(grep -c '\] Compiling ' "$log" || true)"
-          echo "By module:"
-          grep '\] Compiling ' "$log" | sed -E 's/.*\] Compiling //' \
-            | awk '{ print (NF >= 2) ? $1 : "(C/C++ file without a module name)" }' | sort | uniq -c | sort -rn || true
-          echo "Emitting module: $(grep -c '\] Emitting module' "$log" || true); Linking: $(grep -c '\] Linking' "$log" || true); Write sources: $(grep -c '\] Write sources' "$log" || true)"
-          SH
-
-          cat > "$EXP/build.sh" <<'SH'
-          #!/bin/bash
-          # Usage: build.sh <label> <swift build args...>. Logs to $EXP/<label>.log with elapsed
-          # seconds per line, appends a section to the step summary, and exports
-          # <label>_SWIFT_COMPILES (Swift source compiles) to later steps.
-          set -euo pipefail
-          label="$1"; shift
-          log="$EXP/$label.log"
-          start=$(date +%s)
-          set +e
-          swift build "$@" 2>&1 \
-            | perl -MTime::HiRes=time -ne 'BEGIN { $| = 1; $t0 = time() } printf("%7.1f %s", time() - $t0, $_)' \
-            | tee "$log"
-          status=${PIPESTATUS[0]}
-          set -e
-          elapsed=$(( $(date +%s) - start ))
-          at() { grep -m1 "$1" "$log" | awk '{ print $1 }' || true; }
-          {
-            echo "## $label: swift build $* — ${elapsed}s, exit $status"
-            echo '```'
-            "$EXP/count.sh" "$log"
-            echo "seconds to: planning $(at 'Planning build'); first compile $(at '\] Compiling '); first link $(at '\] Linking'); complete $(at 'Build .*complete')"
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          # `grep` exits 1 on zero matches, which is the result this experiment hopes for.
-          swift_compiles=$( (grep '\] Compiling ' "$log" || true) | sed -E 's/.*\] Compiling //' | awk 'NF >= 2 && $2 ~ /\.swift$/ { n++ } END { print n + 0 }')
-          echo "${label}_SWIFT_COMPILES=$swift_compiles" >> "$GITHUB_ENV"
-          exit "$status"
-          SH
-
-          cat > "$EXP/recheckout.sh" <<'SH'
-          #!/bin/bash
-          # Recreate every tracked file in place (new inode, new mtime), keeping .git, .build and the
-          # seed clones, like a fresh actions/checkout at the same path.
-          set -euo pipefail
-          echo "before: $(python3 "$EXP/mtimes.py" show "$CHANGED_FILE")"
-          find . -mindepth 1 -maxdepth 1 ! -name .git ! -name .build ! -name '.build-seed*' -exec rm -rf {} +
-          git checkout -- .
-          echo "after:  $(python3 "$EXP/mtimes.py" show "$CHANGED_FILE")"
-          dirty=$(git status --porcelain --untracked-files=no)
-          if [[ -n "$dirty" ]]; then
-            echo "::error::worktree dirty after re-checkout"; echo "$dirty"; exit 1
-          fi
-          echo "re-checkout complete: $(git ls-files | wc -l | tr -d ' ') tracked paths"
-          SH
-
-          cat > "$EXP/reset.sh" <<'SH'
-          #!/bin/bash
-          # Usage: reset.sh <seed-dir>: replace .build with an APFS clone of the seed (new inodes,
-          # same mtimes, like a cache restore).
-          set -euo pipefail
-          seed="$1"
-          start=$(date +%s)
-          rm -rf .build
-          cp -cRp "$seed" .build
-          echo "reset .build from $seed in $(( $(date +%s) - start ))s; entries $(find .build | wc -l | tr -d ' ') vs seed $(find "$seed" | wc -l | tr -d ' ')"
-          sample=$(find .build -name '*.swiftmodule' -type f | head -1)
-          echo "sample: $(python3 "$EXP/mtimes.py" show "$sample")"
-          echo "seed:   $(python3 "$EXP/mtimes.py" show "$seed/${sample#.build/}")"
-          SH
-          chmod +x "$EXP"/*.sh
-          ls -la "$EXP"
-
-      - name: Normalize tracked-file mtimes by blob ID, then record them
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 "$EXP/mtimes.py" show Package.swift "$CHANGED_FILE"
-          time python3 "$EXP/mtimes.py" normalize
-          python3 "$EXP/mtimes.py" record "$EXP/seed1.json"
-          python3 "$EXP/mtimes.py" show Package.swift "$CHANGED_FILE"
-          git status --porcelain --untracked-files=no | head -5
-
-      - name: Seed 1 — app product
-        shell: bash
-        run: |
-          "$EXP/build.sh" seed1_app --product RepoPrompt
-
-      - name: Seed 1 — test bundles
-        shell: bash
-        run: |
-          "$EXP/build.sh" seed1_tests --build-tests
-
-      - name: Clone .build as seed 1
-        shell: bash
-        run: |
-          set -euo pipefail
-          time cp -cRp .build .build-seed1
-          du -sh .build .build-seed1
-
-      - name: Re-checkout (fresh inodes and mtimes)
-        shell: bash
-        run: |
-          "$EXP/recheckout.sh"
-
-      - name: Arm B — reset .build, restore recorded mtimes for unchanged blobs
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$EXP/reset.sh" .build-seed1
-          time python3 "$EXP/mtimes.py" restore "$EXP/seed1.json"
-          python3 "$EXP/mtimes.py" show Package.swift "$CHANGED_FILE"
-
-      - name: Arm B — app product
-        shell: bash
-        run: |
-          "$EXP/build.sh" armB_app --product RepoPrompt
-
-      - name: Arm B — test bundles
-        shell: bash
-        run: |
-          "$EXP/build.sh" armB_tests --build-tests
-
-      - name: Arm B' — reset .build, re-checkout, recompute mtimes from blob IDs
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$EXP/reset.sh" .build-seed1
-          "$EXP/recheckout.sh"
-          time python3 "$EXP/mtimes.py" normalize
-          python3 "$EXP/mtimes.py" show Package.swift "$CHANGED_FILE"
-
-      - name: Arm B' — app product
-        shell: bash
-        run: |
-          "$EXP/build.sh" armBprime_app --product RepoPrompt
-
-      - name: Arm D — reset .build, re-checkout, change one file, recompute mtimes
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$EXP/reset.sh" .build-seed1
-          "$EXP/recheckout.sh"
-          cat >> "$CHANGED_FILE" <<'SWIFT'
-
-          // [experiment] A new member on a widely used type, so its dependents recompile too.
-          extension LineRange {
-              var experimentLineCount: Int { end - start + 1 }
-          }
-          SWIFT
-          git status --porcelain --untracked-files=no
-          python3 "$EXP/mtimes.py" normalize
-          python3 "$EXP/mtimes.py" show Package.swift "$CHANGED_FILE"
-
-      - name: Arm D — app product
-        shell: bash
-        run: |
-          "$EXP/build.sh" armD_app --product RepoPrompt
-
-      - name: Arm D — test bundles
-        shell: bash
-        run: |
-          "$EXP/build.sh" armD_tests --build-tests
-
-      - name: Seed 2 — reset .build, re-checkout, app product with -enable-incremental-file-hashing
-        if: env.HASHING_FLAG == 'yes'
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$EXP/reset.sh" .build-seed1
-          "$EXP/recheckout.sh"
-          "$EXP/build.sh" seed2_app --product RepoPrompt -Xswiftc -enable-incremental-file-hashing
-
-      - name: Arm C — re-checkout, hashing flag, no normalization
-        if: env.HASHING_FLAG == 'yes'
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$EXP/recheckout.sh"
-          "$EXP/build.sh" armC_app --product RepoPrompt -Xswiftc -enable-incremental-file-hashing
-
-      - name: Arm summary
-        if: always()
-        shell: bash
-        run: |
-          {
-            echo "## Swift source compiles per arm"
-            echo '```'
-            env | grep '_SWIFT_COMPILES=' | sort || true
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
