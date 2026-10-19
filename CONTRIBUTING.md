@@ -217,9 +217,12 @@ orchestrator lists ADR candidates in its final report and writes the ones the
 user approves, in the same pull request. To replace a decision, write a new ADR
 and change the old one's status line to `Status: superseded by <link>, <date>`.
 
-**Investigations.** Investigation reports are committed in
-`docs/investigations/`. Each report opens with the date of what it observed. It
-records what was true then. Where it disagrees with a current document, the
+**Investigations.** An investigation report is committed in
+`docs/investigations/` when it states a finding: a root cause, a decision, a
+ruled-out option, or a measured baseline. Promotion logs, handoffs, approval
+drafts, and issue drafts aren't committed. What they hold goes in the issue or
+pull request they serve. Each report opens with the date of what it observed.
+It records what was true then. Where it disagrees with a current document, the
 current document is right.
 
 **Redaction.** Ledgers and investigation reports are public once pushed. Before
