@@ -193,7 +193,10 @@ edited in place. GitHub issues and pull requests track open work.
   `docs/designs/`, `docs/analysis/`, and `docs/references/`;
 - local configuration;
 - daemon logs, raw provider traces and events, transcripts, and generated
-  diagnostic artifacts.
+  diagnostic artifacts;
+- promotion logs, session handoffs, approval drafts, and issue drafts, in
+  `docs/plans/`. Their content goes in the release receipt, issue, pull
+  request, or plan they serve.
 
 To keep something a working file found, write it into a committed record or a
 durable document. Under `docs/`, check 8 of
@@ -223,8 +226,12 @@ orchestrator lists ADR candidates in its final report and writes the ones the
 user approves, in the same pull request. To replace a decision, write a new ADR
 and change the old one's status line to `Status: superseded by <link>, <date>`.
 
-**Investigations.** Investigation reports are committed in
-`docs/investigations/`. Each report opens with the date of what it observed. It
+**Investigations.** An investigation report states one of four kinds of
+finding: a root cause, a ruled-out option, a measurement, or the evidence
+behind a decision. A file that states none of them isn't an investigation
+report. Reports are committed in `docs/investigations/`. A runbook goes in the
+document that describes its procedure, such as `docs/releasing.md` or
+`docs/testing.md`. Each report opens with the date of what it observed. It
 records what was true then. Where it disagrees with a current document, the
 current document is right.
 
