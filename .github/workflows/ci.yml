@@ -267,7 +267,7 @@ jobs:
       # The path must match the restore step's: the cache version hashes the path list, so
       # with a different path no restore could find what this step saves.
       - name: Save SwiftPM build cache (refresh only)
-        if: steps.root-cache.outputs.cache-hit != 'true'  # [round trip, do not merge] saves from this pull request too
+        if: needs.changes.outputs.mode == 'cache-refresh' && steps.root-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: .build
@@ -347,7 +347,7 @@ jobs:
         run: swift test --filter SentryTelemetryPrivacyTests
 
       - name: Save SwiftPM build cache (refresh only)
-        if: steps.sentry-cache.outputs.cache-hit != 'true'  # [round trip, do not merge] saves from this pull request too
+        if: needs.changes.outputs.mode == 'cache-refresh' && steps.sentry-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: .build
