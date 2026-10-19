@@ -373,16 +373,20 @@ struct WorkspacePathSearchOverlayHistory<Payload>: @unchecked Sendable {
 
     private let recentPayloadsNewestFirst: [Payload]
     private let compactedPageHead: Page?
+    /// Every payload in the history, recent and compacted.
+    let totalPayloadCount: Int
 
     init() {
         recentPayloadsNewestFirst = []
         compactedPageHead = nil
+        totalPayloadCount = 0
     }
 
-    private init(recentPayloadsNewestFirst: [Payload], compactedPageHead: Page?) {
+    private init(recentPayloadsNewestFirst: [Payload], compactedPageHead: Page?, totalPayloadCount: Int) {
         precondition(recentPayloadsNewestFirst.count <= Self.maximumRecentPayloadCount)
         self.recentPayloadsNewestFirst = recentPayloadsNewestFirst
         self.compactedPageHead = compactedPageHead
+        self.totalPayloadCount = totalPayloadCount
     }
 
     func appending(_ payload: Payload) -> Self {
@@ -390,7 +394,11 @@ struct WorkspacePathSearchOverlayHistory<Payload>: @unchecked Sendable {
             var recent = [payload]
             recent.reserveCapacity(recentPayloadsNewestFirst.count + 1)
             recent.append(contentsOf: recentPayloadsNewestFirst)
-            return Self(recentPayloadsNewestFirst: recent, compactedPageHead: compactedPageHead)
+            return Self(
+                recentPayloadsNewestFirst: recent,
+                compactedPageHead: compactedPageHead,
+                totalPayloadCount: totalPayloadCount + 1
+            )
         }
 
         var pagePayloads = [payload]
@@ -398,8 +406,22 @@ struct WorkspacePathSearchOverlayHistory<Payload>: @unchecked Sendable {
         pagePayloads.append(contentsOf: recentPayloadsNewestFirst)
         return Self(
             recentPayloadsNewestFirst: [],
-            compactedPageHead: Page(payloadsNewestFirst: pagePayloads, previous: compactedPageHead)
+            compactedPageHead: Page(payloadsNewestFirst: pagePayloads, previous: compactedPageHead),
+            totalPayloadCount: totalPayloadCount + 1
         )
+    }
+
+    /// The newest `count` payloads, newest first. Visits only those payloads.
+    func newestPayloads(_ count: Int) -> [Payload] {
+        precondition(count >= 0 && count <= totalPayloadCount)
+        var payloads = Array(recentPayloadsNewestFirst.prefix(count))
+        payloads.reserveCapacity(count)
+        var page = compactedPageHead
+        while payloads.count < count, let current = page {
+            payloads.append(contentsOf: current.payloadsNewestFirst.prefix(count - payloads.count))
+            page = current.previous
+        }
+        return payloads
     }
 
     func visitNewestFirst(_ body: (Payload) -> Void) {
@@ -458,6 +480,8 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         case overlay
         case reused
         case projectedReuse
+        /// A materialized base rebuilt off the store actor under the overlays newer than its capture.
+        case rebase
     }
 
     struct Candidate {
@@ -466,7 +490,7 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         let tieBreakKey: String
     }
 
-    private final class MaterializedBase: @unchecked Sendable {
+    fileprivate final class MaterializedBase: @unchecked Sendable {
         let entries: [WorkspaceSearchCatalogEntry]
         let index: PathSearchIndex
 
@@ -507,9 +531,7 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
     let rootPath: String
     let entries: [WorkspaceSearchCatalogEntry]
     let buildKind: BuildKind
-    /// Overlay payloads appended to the materialized base since it was built.
-    let overlayPayloadCount: Int
-    /// Affected entry IDs summed over those payloads, counting an entry again for each payload.
+    /// Affected entry IDs summed over the overlay payloads, counting an entry again for each payload.
     let overlayMentionCount: Int
 
     private let base: MaterializedBase?
@@ -527,7 +549,6 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         self.rootPath = rootPath
         self.entries = entries
         buildKind = .full
-        overlayPayloadCount = 0
         overlayMentionCount = 0
         base = MaterializedBase(entries: entries)
         projectedIndex = nil
@@ -542,7 +563,6 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         buildKind: BuildKind,
         base: MaterializedBase,
         overlayHistory: WorkspacePathSearchOverlayHistory<OverlaySegment>,
-        overlayPayloadCount: Int,
         overlayMentionCount: Int,
         shadowControl: WorkspaceProjectedPathSearchShadowControl?
     ) {
@@ -550,7 +570,6 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         self.rootPath = rootPath
         self.entries = entries
         self.buildKind = buildKind
-        self.overlayPayloadCount = overlayPayloadCount
         self.overlayMentionCount = overlayMentionCount
         self.base = base
         projectedIndex = nil
@@ -569,7 +588,6 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         self.rootPath = rootPath
         self.entries = entries
         buildKind = .projectedReuse
-        overlayPayloadCount = 0
         overlayMentionCount = 0
         base = nil
         self.projectedIndex = projectedIndex
@@ -629,6 +647,11 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         entries.count
     }
 
+    /// Overlay payloads layered on the materialized base.
+    var overlayPayloadCount: Int {
+        overlayHistory.totalPayloadCount
+    }
+
     func applyingPatch(
         identity: WorkspaceSearchRootPathIndexIdentity,
         entries: [WorkspaceSearchCatalogEntry],
@@ -659,7 +682,6 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
                 buildKind: .reused,
                 base: base,
                 overlayHistory: overlayHistory,
-                overlayPayloadCount: overlayPayloadCount,
                 overlayMentionCount: overlayMentionCount,
                 shadowControl: shadowControl
             )
@@ -698,8 +720,62 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
             buildKind: .overlay,
             base: base,
             overlayHistory: nextOverlayHistory,
-            overlayPayloadCount: overlayPayloadCount + 1,
             overlayMentionCount: overlayMentionCount + patch.affectedFileIDs.count,
+            shadowControl: nil
+        )
+    }
+
+    /// What a rebase flight takes from a materialized index on the store actor, in O(1): the base it
+    /// replaces, the entries the new base is built from, and how many overlay payloads those entries
+    /// already include.
+    struct RebaseCapture: @unchecked Sendable {
+        fileprivate let base: MaterializedBase
+        let entries: [WorkspaceSearchCatalogEntry]
+        let overlayPayloadCount: Int
+    }
+
+    /// A materialized base built from a capture's entries.
+    struct RebasedBase: @unchecked Sendable {
+        let capture: RebaseCapture
+        fileprivate let base: MaterializedBase
+    }
+
+    /// Nil for a projected index and for one without overlays to fold into a new base.
+    func rebaseCapture() -> RebaseCapture? {
+        guard projectedIndex == nil, let base, overlayPayloadCount > 0 else { return nil }
+        return RebaseCapture(base: base, entries: entries, overlayPayloadCount: overlayPayloadCount)
+    }
+
+    /// Builds a materialized base from the captured entries. It reads only the capture, so it runs off
+    /// the store actor.
+    nonisolated static func buildRebasedBase(_ capture: RebaseCapture) -> RebasedBase {
+        RebasedBase(capture: capture, base: MaterializedBase(entries: capture.entries))
+    }
+
+    /// This index on `rebased`'s base, keeping only the overlay payloads appended since the capture.
+    /// Nil when this index no longer descends from the captured one, because a rebuild or another
+    /// rebase replaced its base: installing then would roll back newer entries.
+    func rebased(onto rebased: RebasedBase) -> WorkspaceSearchRootPathIndex? {
+        guard projectedIndex == nil,
+              let base,
+              base === rebased.capture.base,
+              overlayPayloadCount >= rebased.capture.overlayPayloadCount
+        else { return nil }
+        let newerSegments = overlayHistory.newestPayloads(overlayPayloadCount - rebased.capture.overlayPayloadCount)
+        var history = WorkspacePathSearchOverlayHistory<OverlaySegment>()
+        var mentionCount = 0
+        for segment in newerSegments.reversed() {
+            history = history.appending(segment)
+            mentionCount += segment.affectedEntryIDs.count
+        }
+        return WorkspaceSearchRootPathIndex(
+            identity: identity,
+            rootPath: rootPath,
+            entries: entries,
+            buildKind: .rebase,
+            base: rebased.base,
+            overlayHistory: history,
+            overlayMentionCount: mentionCount,
             shadowControl: nil
         )
     }

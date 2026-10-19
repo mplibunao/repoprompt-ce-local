@@ -741,6 +741,9 @@ import RepoPromptShared
                             "live_topology_generations": root.liveTopologyGenerations,
                             "retained_topology_generations": root.retainedTopologyGenerations,
                             "build_count": root.buildCount,
+                            // Full path-index builds on the actor; a rebased base counts under `path_index_rebase`.
+                            "path_index_build_count": root.pathIndexBuildCount,
+                            "overlay_path_index_build_count": root.overlayPathIndexBuildCount,
                             "patch_count": root.patchCount,
                             "authoritative_rebuild_count": root.authoritativeRebuildCount,
                             "fallback_count": root.fallbackCount,
@@ -751,7 +754,16 @@ import RepoPromptShared
                             "delta_state_dirty": root.deltaStateDirty,
                             "backstop_count": root.backstopCount,
                             "max_live_generation_count": root.maxLiveGenerationCount,
-                            "batches": catalogBatchHistoryPayload(root.batches, sampleLimit: batchSampleLimit)
+                            "batches": catalogBatchHistoryPayload(root.batches, sampleLimit: batchSampleLimit),
+                            "path_index_rebase": pathIndexRebasePayload(root.pathIndexRebase),
+                            "folder_subtree_traversals": [
+                                "folder_removal_count": root.folderSubtreeTraversals.folderRemovalCount,
+                                "folder_removal_visited_record_count":
+                                    root.folderSubtreeTraversals.folderRemovalVisitedRecordCount,
+                                "codemap_invalidation_count": root.folderSubtreeTraversals.codemapInvalidationCount,
+                                "codemap_invalidation_visited_record_count":
+                                    root.folderSubtreeTraversals.codemapInvalidationVisitedRecordCount
+                            ]
                         ]
                     }
                 ]
@@ -777,6 +789,26 @@ import RepoPromptShared
                         "estimated_bytes": root.estimatedByteCount
                     ]
                 }
+            ]
+        }
+
+        private func pathIndexRebasePayload(
+            _ snapshot: WorkspaceFileContextStore.RootCatalogShardPathIndexRebaseDebugSnapshot
+        ) -> [String: Any] {
+            [
+                "start_count": snapshot.startCount,
+                "install_count": snapshot.installCount,
+                "discard_counts": Dictionary(uniqueKeysWithValues: snapshot.discardCounts.map {
+                    ($0.key.rawValue, $0.value)
+                }),
+                "in_flight": snapshot.isInFlight,
+                "completed_build_count": snapshot.completedBuildCount,
+                "total_build_us": snapshot.totalBuildNanoseconds / 1000,
+                "max_build_us": snapshot.maxBuildNanoseconds / 1000,
+                "overlay_payload_count": snapshot.overlayPayloadCount,
+                "overlay_mention_count": snapshot.overlayMentionCount,
+                "max_overlay_payload_count": snapshot.maxOverlayPayloadCount,
+                "max_overlay_mention_count": snapshot.maxOverlayMentionCount
             ]
         }
 

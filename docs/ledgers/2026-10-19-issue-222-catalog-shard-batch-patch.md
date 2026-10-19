@@ -8,7 +8,7 @@ Patch a root's catalog shard for a whole published batch of file changes in one 
 |------|---------|---------------|---------|
 | 0. Prepare | done | orchestrator | |
 | 1. One-pass batch patch | pending | pair · Orchestrate 1/4: one-pass batch patch | `fix(workspace): patch catalog shards for a whole batch in one pass` |
-| 2. Off-actor rebase and ingress scans | pending | | |
+| 2. Off-actor rebase and ingress scans | pending | pair · Orchestrate 2/4: off-actor rebase and ingress scans | `fix(workspace): rebase the path index off the store actor and walk folder subtrees` |
 | 3. Measure, set the cap, prove the reproduction | pending | | |
 | 4. Twin-path fix (branch `bugfix/222-standardized-path-twins`, its own pull request) | pending | engineer · Orchestrate 4/4: twin-path fix | `fix(workspace): store each record's standardized paths once` |
 
@@ -49,6 +49,22 @@ Patch a root's catalog shard for a whole published batch of file changes in one 
 - Decision: the cleanup pass removed the builder's same-ID replacement path. The store writes every record with a fresh UUID and modifications write no record, so a shard record and the store's record with the same ID are always equal. A modification now requires exactly one old record at its path equal to the store's record, or the batch rebuilds. Source: cleanup finding, checked against the store's write paths.
 - Evidence: a second review round found no blockers or should-fix items; a second cleanup round removed three leftovers of the replacement path. After both, the affected suites (33 tests), `make dev-format`, `make dev-lint`, and `make dev-swift-build PRODUCT=RepoPrompt` were clean. With the projected branch made to drop removal and displaced paths, and with materialized overlays made to suppress nothing, the differential test failed on parity and on contents.
 - Deferred: no local lane builds the release configuration. A scan of every name declared in an added `#if DEBUG` region found no use outside one, in both review rounds.
+
+## 2. Off-actor rebase and ingress scans
+
+- Decision: a rebase starts after a patch publishes when the root's path index holds 32 or more overlay payloads or the overlays mention at least max(2,048, n/16) entries, with no flight running for the root and live generations below the cap. The thresholds are `static let` constants that tests read, and item 3 tunes them. Source: approved plan.
+- Decision: the trigger counts live shards directly instead of calling `canPublishAnotherRootCatalogShard`, which also increments a DEBUG backstop counter; the install still calls it. Source: implementer judgment.
+- Decision: the capture holds the base object, the entries array, the overlay payload count, and the root's lifetime. The shard key, applied generation, and index identity aren't captured, because no install check reads them and the swap copies them from the current shard. Source: implementer judgment, narrowing the plan's capture list.
+- Decision: the install requires the same flight, root, lifetime, and base object, and at least the captured payload count, keeps only the newer payloads, and publishes through a same-key initializer. A rebuild doesn't cancel a flight; its fresh base makes the install discard the result as stale. Source: approved plan.
+- Decision: the overlay history owns the total payload count and gives the newest k payloads; item 1's copy of the count on the index is gone. An install counts under its own rebase counter, not as a full or overlay path-index build, and the detached build runs at utility priority. Source: approved plan for the counter; implementer judgment for the single owner and the priority.
+- Decision: the subtree walk also serves the trash path, which the plan allowed when free, and keeps two results of the old prefix scan: a file stored at the folder's own path, and nothing for the root path. One `ancestorFolderKeys` helper replaces a duplicated parent walk. Source: approved plan; implementer judgment for the kept results and the helper.
+- Decision: the traversal counters are cumulative per root rather than per batch sample, because the CodeMap invalidation walk runs before the apply pass that owns the sample. The payload also exposes the existing full and overlay path-index build counts, which gate 2 reads. Source: implementer judgment.
+- Evidence: a rebase doesn't change catalog generations, so cached search snapshots keep the pre-rebase index, with its old base, until the next catalog change, normally the next patch. Results are the same; the memory shows in gates 6 and 8. Seeded worktree roots never rebase, because their projected index keeps its own overlay history.
+- Decision: a rebase install evicts the store's cached search snapshots whose scope includes the root, through the same helper the cache-capacity eviction uses, without bumping catalog generations, which would invalidate CodeMap graph-index tokens and path-match snapshots. Source: review finding.
+- Deferred: each window's search service keeps its own reference to a root's path index and refreshes it only on a catalog change. On a large root, where the base build outlasts the service's 50 ms debounce, the window holds the pre-rebase index until the next change, so an idle root can keep two bases. Results are unaffected. Freeing it needs a change event that lets windows swap one root's index; gate 6 measures whether that is worth a follow-up. Source: review finding, accepted as a known gap.
+- Decision: the rebase test is named `testPathIndexRebaseKeepsNewerOverlaysAndDiscardsStaleResult`, because it checks both that an install keeps the newer overlays and that a stale result is discarded. Source: cleanup finding.
+- Evidence: two review rounds found no blockers or should-fix items; the cleanup pass made two edits. After them the eight affected suites (45 tests), `make dev-format`, `make dev-lint`, and `make dev-swift-build PRODUCT=RepoPrompt` were clean.
+- Evidence: the three item 2 tests pass, and each failed with its defect put in by hand (no base-object check at install, newest-payload slicing that skips pages, a walk that doesn't descend). Eight affected suites (45 tests) and the full `make dev-test` (1,853 tests) passed; `make dev-format`, `make dev-lint`, and `make dev-swift-build PRODUCT=RepoPrompt` were clean.
 
 ## 4. Twin-path fix
 

@@ -246,6 +246,44 @@ actor WorkspaceFileContextStore {
             let backstopCount: Int
             let maxLiveGenerationCount: Int
             let batches: RootCatalogShardBatchDebugHistory
+            let pathIndexRebase: RootCatalogShardPathIndexRebaseDebugSnapshot
+            let folderSubtreeTraversals: RootFolderSubtreeTraversalDebugSnapshot
+        }
+
+        enum RootCatalogShardPathIndexRebaseDiscardReason: String, CaseIterable, Hashable {
+            /// The root, its lifetime, or the path index's base changed after the capture.
+            case stale
+            /// Retention refused another shard generation at install.
+            case retention
+            /// Root unload or a lifetime change cancelled the flight.
+            case cancelled
+        }
+
+        /// One root's path-index rebase flights and overlay counts. Build durations cover every base
+        /// build that finished, whether it installed or not.
+        struct RootCatalogShardPathIndexRebaseDebugSnapshot: Equatable {
+            let startCount: Int
+            let installCount: Int
+            let discardCounts: [RootCatalogShardPathIndexRebaseDiscardReason: Int]
+            let isInFlight: Bool
+            let completedBuildCount: Int
+            let totalBuildNanoseconds: UInt64
+            let maxBuildNanoseconds: UInt64
+            /// The published path index's overlay counts now.
+            let overlayPayloadCount: Int
+            let overlayMentionCount: Int
+            /// The largest overlay counts a published path index of the root has carried.
+            let maxOverlayPayloadCount: Int
+            let maxOverlayMentionCount: Int
+        }
+
+        /// Records visited by folder-subtree walks: the walk that removes a folder, and the walk that
+        /// lists a removed folder's files for CodeMap invalidation.
+        struct RootFolderSubtreeTraversalDebugSnapshot: Equatable {
+            var folderRemovalCount = 0
+            var folderRemovalVisitedRecordCount = 0
+            var codemapInvalidationCount = 0
+            var codemapInvalidationVisitedRecordCount = 0
         }
 
         enum RootCatalogShardPatchComparisonMode: String, Equatable {
@@ -456,6 +494,17 @@ actor WorkspaceFileContextStore {
             var totalObservedSampleCount = 0
             var outcomeCounts: [RootCatalogShardBatchOutcome: Int] = [:]
             var samples: [RootCatalogShardBatchDebugSample] = []
+        }
+
+        private struct RootCatalogShardPathIndexRebaseDebugState {
+            var startCount = 0
+            var installCount = 0
+            var discardCounts: [RootCatalogShardPathIndexRebaseDiscardReason: Int] = [:]
+            var completedBuildCount = 0
+            var totalBuildNanoseconds: UInt64 = 0
+            var maxBuildNanoseconds: UInt64 = 0
+            var maxOverlayPayloadCount = 0
+            var maxOverlayMentionCount = 0
         }
 
         /// The synchronous mutation pass of one canonical apply, which publishes at most one batch.
@@ -1087,6 +1136,7 @@ actor WorkspaceFileContextStore {
         case managedFilePromotion = "managed_file_promotion"
         case catalogMutation = "catalog_mutation"
         case cacheCapacity = "cache_capacity"
+        case pathIndexRebase = "path_index_rebase"
     }
 
     private final class PublicationInvalidationBatch {
@@ -1497,6 +1547,9 @@ actor WorkspaceFileContextStore {
         private var rootCatalogShardBatchHistoriesByRootID: [UUID: RootCatalogShardBatchHistoryState] = [:]
         private var heldRootCatalogShardBatchesByRootIDForTesting: [UUID: [WorkspaceAppliedIndexBatchEvent]] = [:]
         private var uncachedAuthoritativeSnapshotBuildState = UncachedAuthoritativeSnapshotBuildState()
+        private var rootCatalogShardPathIndexRebaseDebugStatesByRootID: [UUID: RootCatalogShardPathIndexRebaseDebugState] = [:]
+        private var rootFolderSubtreeTraversalsByRootID: [UUID: RootFolderSubtreeTraversalDebugSnapshot] = [:]
+        private var pathIndexRebaseBuildHandler: (@Sendable (UUID) async -> Void)?
 
         func setCodemapGraphIndexBuildStartHandlerForTesting(
             _ handler: (@Sendable (WorkspaceCodemapRootEpoch) async -> Void)?
@@ -1508,6 +1561,16 @@ actor WorkspaceFileContextStore {
             _ handler: (@Sendable (WorkspaceCodemapRootEpoch) async -> Void)?
         ) {
             codemapGraphIndexCatalogBuildHandler = handler
+        }
+
+        /// Runs at the start of each detached path-index rebase build, with the flight's root ID.
+        func setPathIndexRebaseBuildHandlerForTesting(_ handler: (@Sendable (UUID) async -> Void)?) {
+            pathIndexRebaseBuildHandler = handler
+        }
+
+        /// The root's in-flight rebase task. It finishes after the flight installs or discards its result.
+        func pathIndexRebaseFlightTaskForTesting(rootID: UUID) -> Task<Void, Never>? {
+            pathIndexRebaseFlightsByRootID[rootID]?.task
         }
 
         func codemapGraphIndexBuildStoreEventsForTesting(
@@ -2614,6 +2677,12 @@ actor WorkspaceFileContextStore {
             for rootID in Set(rootCatalogShardBatchHistoriesByRootID.keys).subtracting(trackedRootIDs) {
                 rootCatalogShardBatchHistoriesByRootID.removeValue(forKey: rootID)
             }
+            for rootID in Set(rootCatalogShardPathIndexRebaseDebugStatesByRootID.keys).subtracting(trackedRootIDs) {
+                rootCatalogShardPathIndexRebaseDebugStatesByRootID.removeValue(forKey: rootID)
+            }
+            for rootID in Set(rootFolderSubtreeTraversalsByRootID.keys).subtracting(trackedRootIDs) {
+                rootFolderSubtreeTraversalsByRootID.removeValue(forKey: rootID)
+            }
 
             let roots = trackedRootIDs.sorted { $0.uuidString < $1.uuidString }.map { rootID in
                 let liveShards = liveRootCatalogShards(rootID: rootID)
@@ -2656,7 +2725,12 @@ actor WorkspaceFileContextStore {
                     deltaStateDirty: rootCatalogShardDeltaStatesByRootID[rootID]?.isDirty ?? false,
                     backstopCount: rootCatalogShardBackstopCountsByRootID[rootID] ?? 0,
                     maxLiveGenerationCount: maxLiveCount,
-                    batches: rootCatalogShardBatchDebugHistory(rootID: rootID)
+                    batches: rootCatalogShardBatchDebugHistory(rootID: rootID),
+                    pathIndexRebase: rootCatalogShardPathIndexRebaseDebugSnapshot(
+                        rootID: rootID,
+                        publishedPathSearchIndex: publishedShard?.pathSearchIndex
+                    ),
+                    folderSubtreeTraversals: rootFolderSubtreeTraversalsByRootID[rootID] ?? .init()
                 )
             }
             return RootCatalogShardDebugSnapshot(
@@ -2674,6 +2748,66 @@ actor WorkspaceFileContextStore {
                 lastShadowByteCount: rootCatalogShardLastShadowByteCount,
                 roots: roots
             )
+        }
+
+        private func rootCatalogShardPathIndexRebaseDebugSnapshot(
+            rootID: UUID,
+            publishedPathSearchIndex: WorkspaceSearchRootPathIndex?
+        ) -> RootCatalogShardPathIndexRebaseDebugSnapshot {
+            let state = rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID]
+                ?? RootCatalogShardPathIndexRebaseDebugState()
+            return RootCatalogShardPathIndexRebaseDebugSnapshot(
+                startCount: state.startCount,
+                installCount: state.installCount,
+                discardCounts: state.discardCounts,
+                isInFlight: pathIndexRebaseFlightsByRootID[rootID] != nil,
+                completedBuildCount: state.completedBuildCount,
+                totalBuildNanoseconds: state.totalBuildNanoseconds,
+                maxBuildNanoseconds: state.maxBuildNanoseconds,
+                overlayPayloadCount: publishedPathSearchIndex?.overlayPayloadCount ?? 0,
+                overlayMentionCount: publishedPathSearchIndex?.overlayMentionCount ?? 0,
+                maxOverlayPayloadCount: state.maxOverlayPayloadCount,
+                maxOverlayMentionCount: state.maxOverlayMentionCount
+            )
+        }
+
+        private func recordPathIndexRebaseBuild(rootID: UUID, nanoseconds: UInt64) {
+            var state = rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID]
+                ?? RootCatalogShardPathIndexRebaseDebugState()
+            state.completedBuildCount += 1
+            state.totalBuildNanoseconds &+= nanoseconds
+            state.maxBuildNanoseconds = max(state.maxBuildNanoseconds, nanoseconds)
+            rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID] = state
+        }
+
+        private func recordPathIndexRebaseDiscard(_ reason: RootCatalogShardPathIndexRebaseDiscardReason, rootID: UUID) {
+            rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID, default: .init()]
+                .discardCounts[reason, default: 0] += 1
+        }
+
+        private func recordPathIndexOverlayCounts(_ pathSearchIndex: WorkspaceSearchRootPathIndex, rootID: UUID) {
+            var state = rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID]
+                ?? RootCatalogShardPathIndexRebaseDebugState()
+            state.maxOverlayPayloadCount = max(state.maxOverlayPayloadCount, pathSearchIndex.overlayPayloadCount)
+            state.maxOverlayMentionCount = max(state.maxOverlayMentionCount, pathSearchIndex.overlayMentionCount)
+            rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID] = state
+        }
+
+        private func recordFolderSubtreeTraversal(
+            _ purpose: FolderSubtreeTraversalPurpose,
+            rootID: UUID,
+            visitedRecordCount: Int
+        ) {
+            var traversals = rootFolderSubtreeTraversalsByRootID[rootID] ?? RootFolderSubtreeTraversalDebugSnapshot()
+            switch purpose {
+            case .removal:
+                traversals.folderRemovalCount += 1
+                traversals.folderRemovalVisitedRecordCount += visitedRecordCount
+            case .codemapInvalidation:
+                traversals.codemapInvalidationCount += 1
+                traversals.codemapInvalidationVisitedRecordCount += visitedRecordCount
+            }
+            rootFolderSubtreeTraversalsByRootID[rootID] = traversals
         }
 
         private func rootCatalogShardBatchDebugHistory(rootID: UUID) -> RootCatalogShardBatchDebugHistory {
@@ -3010,6 +3144,22 @@ actor WorkspaceFileContextStore {
             appliedIndexGeneration = source.appliedIndexGeneration
         }
 
+        /// `source` with another path index over the same entries: the same key, records, and applied
+        /// generation. A path-index rebase installs through this.
+        init(swappingPathSearchIndexOf source: RootCatalogShard, pathSearchIndex: WorkspaceSearchRootPathIndex) {
+            precondition(pathSearchIndex.identity.rootID == source.key.rootID)
+            precondition(pathSearchIndex.identity.lifetimeID == source.key.lifetimeID)
+            precondition(pathSearchIndex.count == source.entries.count)
+            key = source.key
+            root = source.root
+            files = source.files
+            projectionFiles = source.projectionFiles
+            folders = source.folders
+            entries = source.entries
+            self.pathSearchIndex = pathSearchIndex
+            appliedIndexGeneration = source.appliedIndexGeneration
+        }
+
         /// The index of `fileID` in `projectionFiles`, found by binary search in file catalog order.
         func projectionIndex(fileID: UUID, standardizedRelativePath: String) -> Int? {
             let index = WorkspaceFileContextStore.catalogPartitionIndex(in: projectionFiles) { projectionFile in
@@ -3076,6 +3226,16 @@ actor WorkspaceFileContextStore {
         case patch
         case authoritative
         case promotion
+        /// The same shard with a path index rebased off the actor.
+        case rebase
+    }
+
+    /// A path-index base build running off the actor for one root. Its task builds the base from the
+    /// capture it holds, then installs or discards the result itself.
+    private struct PathIndexRebaseFlight {
+        let id: UUID
+        let lifetimeID: UUID
+        let task: Task<Void, Never>
     }
 
     /// The arrays and path-index changes of a patched shard. Kinds without edits share the previous arrays.
@@ -3184,6 +3344,8 @@ actor WorkspaceFileContextStore {
     private var rootSeedSearchShadowsByRootID: [UUID: RootSeedSearchShadow] = [:]
     private var rootCatalogShardWeakReferencesByRootID: [UUID: [WeakRootCatalogShardReference]] = [:]
     private var rootCatalogShardDeltaStatesByRootID: [UUID: RootCatalogShardDeltaState] = [:]
+    /// At most one path-index rebase per root.
+    private var pathIndexRebaseFlightsByRootID: [UUID: PathIndexRebaseFlight] = [:]
     private var pathMatchSnapshotIdentitiesByScope: [WorkspaceLookupRootScope: PathMatchCacheIdentity] = [:]
     private var staticPathMatchSnapshotsByScope: [WorkspaceLookupRootScope: StaticPathMatchSnapshotCacheEntry] = [:]
     private var nextStaticPathMatchSnapshotAccessSequence: UInt64 = 0
@@ -3215,6 +3377,12 @@ actor WorkspaceFileContextStore {
     // every broader batch until measured evidence supports increasing this deliberately conservative cap.
     private static let maxRootCatalogShardPatchLogicalMutationCount = 1
     private static let defaultMaxPendingDeltasPerRoot = 10000
+    // A patched root's path index rebases its materialized base off the actor once it carries this many
+    // overlay payloads, or this many affected-entry mentions summed over them. The mention threshold
+    // scales with the root's file count, so each rebase costs about the same per mention it removes.
+    static let pathIndexRebaseOverlayPayloadThreshold = 32
+    private static let pathIndexRebaseMinimumMentionThreshold = 2048
+    private static let pathIndexRebaseMentionThresholdFileCountDivisor = 16
     private let pathMatchWorker = PathMatchWorker()
     private let deferredReplayBuffer = DeferredReplayBufferActor(
         maxPendingDeltasPerRoot: WorkspaceFileContextStore.defaultMaxPendingDeltasPerRoot
@@ -7960,7 +8128,7 @@ actor WorkspaceFileContextStore {
                     isDirty: false,
                     capability: built.shard.pathSearchIndex == nil ? .recordsOnly : .recordsAndPathIndexes
                 )
-            case .patch:
+            case .patch, .rebase:
                 break
             }
             registerPublishedRootCatalogShard(built.shard, kind: built.kind)
@@ -8137,7 +8305,11 @@ actor WorkspaceFileContextStore {
                 rootCatalogShardAuthoritativeRebuildCountsByRootID[shard.key.rootID, default: 0] += 1
             case .promotion:
                 break
+            case .rebase:
+                rootCatalogShardPathIndexRebaseDebugStatesByRootID[shard.key.rootID, default: .init()].installCount += 1
             }
+            // A rebased base was built off the actor, so it isn't a full path-index build; its install
+            // count above is its counter.
             switch shard.pathSearchIndex?.buildKind {
             case .full:
                 rootCatalogShardFullPathIndexBuildCountsByRootID[shard.key.rootID, default: 0] += 1
@@ -8145,8 +8317,11 @@ actor WorkspaceFileContextStore {
                 rootCatalogShardOverlayPathIndexBuildCountsByRootID[shard.key.rootID, default: 0] += 1
             case .projectedReuse:
                 rootCatalogShardOverlayPathIndexBuildCountsByRootID[shard.key.rootID, default: 0] += 1
-            case .reused, nil:
+            case .reused, .rebase, nil:
                 break
+            }
+            if let pathSearchIndex = shard.pathSearchIndex {
+                recordPathIndexOverlayCounts(pathSearchIndex, rootID: shard.key.rootID)
             }
         #endif
     }
@@ -8230,6 +8405,7 @@ actor WorkspaceFileContextStore {
             defer { finishRootCatalogShardBatchSample() }
         #endif
         if event.isRootUnload {
+            cancelPathIndexRebaseFlight(rootID: event.rootID)
             publishedRootCatalogShardsByRootID.removeValue(forKey: event.rootID)
             rootCatalogShardDeltaStatesByRootID.removeValue(forKey: event.rootID)
             return
@@ -8239,9 +8415,13 @@ actor WorkspaceFileContextStore {
               state.root.standardizedFullPath == StandardizedPath.absolute(event.rootPath),
               let currentKey = rootCatalogShardKey(for: state.root)
         else {
+            cancelPathIndexRebaseFlight(rootID: event.rootID)
             publishedRootCatalogShardsByRootID.removeValue(forKey: event.rootID)
             rootCatalogShardDeltaStatesByRootID.removeValue(forKey: event.rootID)
             return
+        }
+        if let flight = pathIndexRebaseFlightsByRootID[event.rootID], flight.lifetimeID != state.lifetimeID {
+            cancelPathIndexRebaseFlight(rootID: event.rootID)
         }
 
         guard let previousShard = publishedRootCatalogShardsByRootID[event.rootID] else {
@@ -8510,6 +8690,116 @@ actor WorkspaceFileContextStore {
                 publishNanoseconds: WorkspaceFileSearchDebugTiming.elapsed(since: publishStart, through: publishEnd)
             )
             compareRootCatalogShardPatchIfArmed(patchedShard, requirement: fallbackRequirement)
+        #endif
+        startPathIndexRebaseIfDue(rootID: event.rootID, lifetimeID: state.lifetimeID)
+    }
+
+    /// Starts rebuilding the published path index's materialized base off the actor once its overlays
+    /// pass either threshold. Starts nothing while a flight runs for the root, or at the retention cap,
+    /// where the install would be refused.
+    private func startPathIndexRebaseIfDue(rootID: UUID, lifetimeID: UUID) {
+        guard pathIndexRebaseFlightsByRootID[rootID] == nil,
+              let shard = publishedRootCatalogShardsByRootID[rootID],
+              let pathSearchIndex = shard.pathSearchIndex,
+              pathSearchIndex.overlayPayloadCount >= Self.pathIndexRebaseOverlayPayloadThreshold
+              || pathSearchIndex.overlayMentionCount >= max(
+                  Self.pathIndexRebaseMinimumMentionThreshold,
+                  shard.files.count / Self.pathIndexRebaseMentionThresholdFileCountDivisor
+              ),
+              liveRootCatalogShards(rootID: rootID).count < Self.maxLiveRootCatalogShardGenerationsPerRoot,
+              let capture = pathSearchIndex.rebaseCapture()
+        else { return }
+
+        let flightID = UUID()
+        #if DEBUG
+            let buildHandler = pathIndexRebaseBuildHandler
+        #endif
+        // A detached task inherits no task-local values, so the base build reports nothing to the
+        // actor's catalog build observer; the flight times itself instead.
+        let task = Task.detached(priority: .utility) { [weak self, capture] in
+            #if DEBUG
+                if let buildHandler {
+                    await buildHandler(rootID)
+                }
+            #endif
+            guard !Task.isCancelled else { return }
+            #if DEBUG
+                let buildStart = WorkspaceFileSearchDebugTiming.now()
+            #endif
+            let rebased = WorkspaceSearchRootPathIndex.buildRebasedBase(capture)
+            #if DEBUG
+                let buildNanoseconds = WorkspaceFileSearchDebugTiming.elapsed(
+                    since: buildStart,
+                    through: WorkspaceFileSearchDebugTiming.now()
+                )
+                // Recorded even when the flight was cancelled mid-build, since the build ran.
+                await self?.recordPathIndexRebaseBuild(rootID: rootID, nanoseconds: buildNanoseconds)
+            #endif
+            await self?.installPathIndexRebase(rebased, rootID: rootID, flightID: flightID)
+        }
+        pathIndexRebaseFlightsByRootID[rootID] = PathIndexRebaseFlight(
+            id: flightID,
+            lifetimeID: lifetimeID,
+            task: task
+        )
+        #if DEBUG
+            rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID, default: .init()].startCount += 1
+        #endif
+    }
+
+    /// Publishes the root's shard again with its path index on the rebased base, keeping the overlays
+    /// appended since the capture. Discards the result when the root, its lifetime, or the index's base
+    /// changed since the capture, or when retention refuses another shard generation.
+    private func installPathIndexRebase(
+        _ rebased: WorkspaceSearchRootPathIndex.RebasedBase,
+        rootID: UUID,
+        flightID: UUID
+    ) {
+        guard pathIndexRebaseFlightsByRootID[rootID]?.id == flightID,
+              let flight = pathIndexRebaseFlightsByRootID.removeValue(forKey: rootID)
+        else { return }
+        guard let state = rootStatesByID[rootID],
+              state.lifetimeID == flight.lifetimeID,
+              let current = publishedRootCatalogShardsByRootID[rootID],
+              current.key.rootID == rootID,
+              current.key.lifetimeID == flight.lifetimeID,
+              let rebasedIndex = current.pathSearchIndex?.rebased(onto: rebased)
+        else {
+            #if DEBUG
+                recordPathIndexRebaseDiscard(.stale, rootID: rootID)
+            #endif
+            return
+        }
+        // Overlays keep growing until a later patch starts another flight.
+        guard canPublishAnotherRootCatalogShard(rootID: rootID) else {
+            #if DEBUG
+                recordPathIndexRebaseDiscard(.retention, rootID: rootID)
+            #endif
+            return
+        }
+        let rebasedShard = RootCatalogShard(swappingPathSearchIndexOf: current, pathSearchIndex: rebasedIndex)
+        publishedRootCatalogShardsByRootID[rootID] = rebasedShard
+        registerPublishedRootCatalogShard(rebasedShard, kind: .rebase)
+        // The install keeps every catalog generation, so cached snapshots that include the root would
+        // keep serving the old index and holding its base. Drop them; the next request composes from
+        // the rebased shard. Readers that already hold a snapshot keep the old base until they let go.
+        let scopesHoldingOldIndex = Set(searchCatalogSnapshotsByScope.compactMap { scope, entry in
+            entry.snapshot.roots.contains { $0.id == rootID } ? scope : nil
+        })
+        guard !scopesHoldingOldIndex.isEmpty else { return }
+        evictSearchCatalogSnapshots(
+            scopes: scopesHoldingOldIndex,
+            reasons: [.pathIndexRebase],
+            affectedRootIDs: [rootID],
+            affectedRootKinds: [current.root.kind]
+        )
+    }
+
+    private func cancelPathIndexRebaseFlight(rootID: UUID) {
+        guard let flight = pathIndexRebaseFlightsByRootID.removeValue(forKey: rootID) else { return }
+        flight.task.cancel()
+        #if DEBUG
+            recordPathIndexRebaseDiscard(.cancelled, rootID: rootID)
         #endif
     }
 
@@ -18144,9 +18434,11 @@ actor WorkspaceFileContextStore {
         let oldFolder = folder(rootID: rootID, relativePath: standardizedRelativePath)
         let oldFolderWasDiscoverable = oldFolder.map { isDiscoverableFolderID($0.id) } ?? false
         let affectedPaths: Set<String> = if oldFolder != nil {
-            Set(state.fileIDsByRelativePath.keys.filter {
-                $0 == standardizedRelativePath || $0.hasPrefix(standardizedRelativePath + "/")
-            })
+            Set(folderSubtree(
+                atRelativePath: standardizedRelativePath,
+                state: state,
+                purpose: .codemapInvalidation
+            ).filePaths)
         } else {
             [standardizedRelativePath]
         }
@@ -20493,11 +20785,9 @@ actor WorkspaceFileContextStore {
                 commands.append(.deleted([prepared.relativePath]))
             case .folderRemoved:
                 let folderPath = StandardizedPath.relative(prepared.relativePath)
-                let descendantPaths = Set(
-                    rootStatesByID[rootID]?.fileIDsByRelativePath.keys.filter {
-                        $0 == folderPath || $0.hasPrefix(folderPath + "/")
-                    } ?? []
-                )
+                let descendantPaths = rootStatesByID[rootID].map { state in
+                    Set(folderSubtree(atRelativePath: folderPath, state: state, purpose: .codemapInvalidation).filePaths)
+                } ?? []
                 if !descendantPaths.isEmpty {
                     commands.append(.deleted(descendantPaths))
                 }
@@ -20710,7 +21000,9 @@ actor WorkspaceFileContextStore {
                 if let existingFile {
                     invalidateSearchContent(existingFile)
                 }
-                let existingFolderPaths = Set(rootStatesByID[rootID].map { Array($0.folderIDsByRelativePath.keys) } ?? [])
+                let existingFolderPaths = rootStatesByID[rootID].map {
+                    indexedAncestorFolderPaths(of: relativePath, state: $0)
+                } ?? []
                 indexFile(relativePath: relativePath, root: root)
                 if let file = file(rootID: rootID, relativePath: relativePath) {
                     // Publish existing records too: file-system deltas may have already
@@ -22462,7 +22754,7 @@ actor WorkspaceFileContextStore {
 
     private func indexFile(relativePath: String, root: WorkspaceRootRecord, managedOnly: Bool = false) {
         guard var state = rootStatesByID[root.id] else { return }
-        let existingFolderPaths = Set(state.folderIDsByRelativePath.keys)
+        let existingFolderPaths = managedOnly ? indexedAncestorFolderPaths(of: relativePath, state: state) : []
         var stagedIndexes = RootIndexBuffers()
         indexFiles([FSItemDTO(relativePath: relativePath, isDirectory: false, hierarchy: relativePath.split(separator: "/").count)], root: root, state: &state, indexes: &stagedIndexes)
         commit(stagedIndexes)
@@ -22482,48 +22774,52 @@ actor WorkspaceFileContextStore {
 
     private func discoverableParentFolders(for fileRelativePath: String, rootID: UUID) -> [WorkspaceFolderRecord] {
         guard let state = rootStatesByID[rootID] else { return [] }
-        let standardizedPath = StandardizedPath.relative(fileRelativePath)
-        var current = (standardizedPath as NSString).deletingLastPathComponent
-        var folders: [WorkspaceFolderRecord] = []
-        while !current.isEmpty, current != "." {
-            let key = StandardizedPath.relative(current)
-            if let folderID = state.folderIDsByRelativePath[key],
-               isDiscoverableFolderID(folderID),
-               let folder = foldersByID[folderID]
-            {
-                folders.append(folder)
+        return Self.ancestorFolderKeys(ofFile: fileRelativePath)
+            .compactMap { key -> WorkspaceFolderRecord? in
+                guard let folderID = state.folderIDsByRelativePath[key], isDiscoverableFolderID(folderID) else {
+                    return nil
+                }
+                return foldersByID[folderID]
             }
-            let next = (key as NSString).deletingLastPathComponent
-            guard next != key else { break }
-            current = next
-        }
-        return folders.sorted { $0.standardizedRelativePath < $1.standardizedRelativePath }
+            .sorted { $0.standardizedRelativePath < $1.standardizedRelativePath }
     }
 
+    /// `existingFolderPaths` needs only the file's ancestors that were indexed before the file, as
+    /// `indexedAncestorFolderPaths` returns them.
     private func newlyIndexedParentFolders(
         for fileRelativePath: String,
         rootID: UUID,
         existingFolderPaths: Set<String>
     ) -> [WorkspaceFolderRecord] {
         guard let state = rootStatesByID[rootID] else { return [] }
-        let standardizedPath = StandardizedPath.relative(fileRelativePath)
-        let parentPath = (standardizedPath as NSString).deletingLastPathComponent
-        guard !parentPath.isEmpty, parentPath != "." else { return [] }
-        var folders: [WorkspaceFolderRecord] = []
-        var current = parentPath
+        return Self.ancestorFolderKeys(ofFile: fileRelativePath)
+            .compactMap { key -> WorkspaceFolderRecord? in
+                guard !existingFolderPaths.contains(key), let folderID = state.folderIDsByRelativePath[key] else {
+                    return nil
+                }
+                return foldersByID[folderID]
+            }
+            .sorted { $0.standardizedRelativePath < $1.standardizedRelativePath }
+    }
+
+    /// The ancestor folder paths of a file that the root already indexes, found in O(depth) by walking
+    /// up the file's path rather than copying every folder path of the root.
+    private func indexedAncestorFolderPaths(of fileRelativePath: String, state: RootState) -> Set<String> {
+        Set(Self.ancestorFolderKeys(ofFile: fileRelativePath).filter { state.folderIDsByRelativePath[$0] != nil })
+    }
+
+    /// The standardized relative paths of a file's ancestor folders, nearest first, without the root.
+    private static func ancestorFolderKeys(ofFile fileRelativePath: String) -> [String] {
+        var keys: [String] = []
+        var current = (StandardizedPath.relative(fileRelativePath) as NSString).deletingLastPathComponent
         while !current.isEmpty, current != "." {
             let key = StandardizedPath.relative(current)
-            if !existingFolderPaths.contains(key),
-               let folderID = state.folderIDsByRelativePath[key],
-               let folder = foldersByID[folderID]
-            {
-                folders.append(folder)
-            }
+            keys.append(key)
             let next = (key as NSString).deletingLastPathComponent
             guard next != key else { break }
             current = next
         }
-        return folders.sorted { $0.standardizedRelativePath < $1.standardizedRelativePath }
+        return keys
     }
 
     private func publishAppliedIndexEvent(
@@ -22609,6 +22905,53 @@ actor WorkspaceFileContextStore {
         return fileID
     }
 
+    private enum FolderSubtreeTraversalPurpose {
+        case removal
+        case codemapInvalidation
+    }
+
+    /// The files and folders under the folder at `relativePath`, the folder included, found by walking
+    /// the root's child indexes, so the cost follows the subtree rather than the root. Folder IDs come
+    /// parents first. File paths also include a file stored at the folder's own path, so a removal
+    /// reported as a folder clears a file record left there. Walk again after an `await` rather than
+    /// reuse the result.
+    private func folderSubtree(
+        atRelativePath relativePath: String,
+        state: RootState,
+        purpose: FolderSubtreeTraversalPurpose
+    ) -> (filePaths: [String], folderIDs: [UUID]) {
+        guard !relativePath.isEmpty else { return ([], []) }
+        var filePaths: [String] = state.fileIDsByRelativePath[relativePath] == nil ? [] : [relativePath]
+        var folderIDs: [UUID] = []
+        if let folderID = state.folderIDsByRelativePath[relativePath] {
+            folderIDs.append(folderID)
+            var visitedFolderIDs: Set<UUID> = [folderID]
+            var nextFolderIndex = 0
+            while nextFolderIndex < folderIDs.count {
+                let currentFolderID = folderIDs[nextFolderIndex]
+                nextFolderIndex += 1
+                for fileID in state.childFileIDsByFolderID[currentFolderID] ?? [] {
+                    if let file = filesByID[fileID] {
+                        filePaths.append(file.standardizedRelativePath)
+                    }
+                }
+                for childFolderID in state.childFolderIDsByFolderID[currentFolderID] ?? []
+                    where visitedFolderIDs.insert(childFolderID).inserted
+                {
+                    folderIDs.append(childFolderID)
+                }
+            }
+        }
+        #if DEBUG
+            recordFolderSubtreeTraversal(
+                purpose,
+                rootID: state.root.id,
+                visitedRecordCount: filePaths.count + folderIDs.count
+            )
+        #endif
+        return (filePaths, folderIDs)
+    }
+
     private func removeFolderTree(relativePath: String, rootID: UUID) -> (fileIDs: [UUID], folderIDs: [UUID], filePaths: [String], folderPaths: [String]) {
         guard var state = rootStatesByID[rootID] else { return ([], [], [], []) }
         let key = StandardizedPath.relative(relativePath)
@@ -22617,11 +22960,10 @@ actor WorkspaceFileContextStore {
               let folder = foldersByID[folderID]
         else { return ([], [], [], []) }
 
-        let filePaths = state.fileIDsByRelativePath.keys
-            .filter { $0 == key || $0.hasPrefix(key + "/") }
+        let subtree = folderSubtree(atRelativePath: key, state: state, purpose: .removal)
         var removedFileIDs: [UUID] = []
         var removedFilePaths: [String] = []
-        for path in filePaths {
+        for path in subtree.filePaths {
             let wasDiscoverable = state.fileIDsByRelativePath[path].map(isDiscoverableFileID) ?? false
             if let removedFileID = removeFile(relativePath: path, state: &state), wasDiscoverable {
                 removedFileIDs.append(removedFileID)
@@ -22629,19 +22971,16 @@ actor WorkspaceFileContextStore {
             }
         }
 
-        let folderPaths = state.folderIDsByRelativePath.keys
-            .filter { $0 == key || $0.hasPrefix(key + "/") }
-            .sorted { $0.count > $1.count }
         var removedFolderIDs: [UUID] = []
         var removedFolderPaths: [String] = []
-        for path in folderPaths {
-            guard let id = state.folderIDsByRelativePath.removeValue(forKey: path),
-                  let removed = foldersByID.removeValue(forKey: id)
-            else { continue }
+        // Children before parents.
+        for id in subtree.folderIDs.reversed() {
+            guard let removed = foldersByID.removeValue(forKey: id) else { continue }
+            state.folderIDsByRelativePath.removeValue(forKey: removed.standardizedRelativePath)
             let wasDiscoverable = isDiscoverableFolderID(id)
             if wasDiscoverable {
                 removedFolderIDs.append(id)
-                removedFolderPaths.append(path)
+                removedFolderPaths.append(removed.standardizedRelativePath)
             }
             managedOnlyFolderIDs.remove(id)
             folderIDsByStandardizedFullPath.removeValue(forKey: removed.standardizedFullPath)

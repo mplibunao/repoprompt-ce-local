@@ -876,6 +876,120 @@ final class WorkspaceSearchServiceTests: XCTestCase {
         }
     }
 
+    func testPathIndexRebaseKeepsNewerOverlaysAndDiscardsStaleResult() async throws {
+        let rootURL = try makeTemporaryRoot(name: "PathIndexRebaseStale")
+        // Files are added to an existing folder, so each add is a single-edit patch and one overlay payload.
+        try write("seed", to: rootURL.appendingPathComponent("Added/Seed.swift"))
+        let store = WorkspaceFileContextStore()
+        let root = try await store.loadRoot(path: rootURL.path)
+        _ = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
+        await store.setRootCatalogShardPatchCapOverride(1)
+        var addedFileCount = 0
+        func addFiles(_ count: Int) async throws {
+            for _ in 0 ..< count {
+                addedFileCount += 1
+                let path = "Added/File\(addedFileCount).swift"
+                try write("added", to: rootURL.appendingPathComponent(path))
+                await store.replayObservedFileSystemDeltas(rootID: root.id, deltas: [.fileAdded(path)])
+            }
+        }
+        let queries = ["File", "Seed", "*.swift"]
+        func assertPublishedMatchesAuthoritative(_ label: String) async {
+            let published = await store.rootCatalogShardContentsForTesting(rootID: root.id, pathQueries: queries)
+            let authoritative = await store.authoritativeRootCatalogShardContentsForTesting(
+                rootID: root.id,
+                pathQueries: queries
+            )
+            XCTAssertNotNil(published?.pathMatches, label)
+            XCTAssertEqual(published, authoritative, label)
+        }
+        let threshold = WorkspaceFileContextStore.pathIndexRebaseOverlayPayloadThreshold
+
+        // (a) Two patches land while the base builds. The install keeps them as its only overlays.
+        let firstBuild = TestAsyncGate()
+        addTeardownBlock { await firstBuild.open() }
+        await store.setPathIndexRebaseBuildHandlerForTesting { _ in await firstBuild.wait() }
+        let fullIndexBuildCount = try await catalogShardDebugRoot(store, rootID: root.id).pathIndexBuildCount
+        try await addFiles(threshold)
+        let firstFlightTask = await store.pathIndexRebaseFlightTaskForTesting(rootID: root.id)
+        let firstFlight = try XCTUnwrap(firstFlightTask)
+        await firstBuild.waitUntilEntered()
+        try await addFiles(2)
+        // A snapshot cached while the base builds holds the pre-rebase index.
+        let cachedDuringBuild = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
+        XCTAssertEqual(cachedDuringBuild.rootPathIndexes.map(\.overlayPayloadCount), [threshold + 2])
+        await firstBuild.open()
+        await firstFlight.value
+        // The install drops that snapshot without a catalog change, so the next one has the rebased index.
+        let afterInstall = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
+        XCTAssertEqual(afterInstall.rootPathIndexes.map(\.overlayPayloadCount), [2])
+
+        var debugRoot = try await catalogShardDebugRoot(store, rootID: root.id)
+        XCTAssertEqual(debugRoot.pathIndexRebase.startCount, 1)
+        XCTAssertEqual(debugRoot.pathIndexRebase.installCount, 1)
+        XCTAssertEqual(debugRoot.pathIndexRebase.discardCounts, [:])
+        XCTAssertEqual(debugRoot.pathIndexRebase.overlayPayloadCount, 2)
+        XCTAssertEqual(debugRoot.pathIndexRebase.maxOverlayPayloadCount, threshold + 2)
+        // The rebased base was built off the actor, so it isn't counted as a full path-index build.
+        XCTAssertEqual(debugRoot.pathIndexBuildCount, fullIndexBuildCount)
+        await assertPublishedMatchesAuthoritative("installed rebase")
+
+        // (b) A rebuild while the base builds replaces the captured base, so the result is discarded.
+        let secondBuild = TestAsyncGate()
+        addTeardownBlock { await secondBuild.open() }
+        await store.setPathIndexRebaseBuildHandlerForTesting { _ in await secondBuild.wait() }
+        try await addFiles(threshold - 2)
+        let secondFlightTask = await store.pathIndexRebaseFlightTaskForTesting(rootID: root.id)
+        let secondFlight = try XCTUnwrap(secondFlightTask)
+        await secondBuild.waitUntilEntered()
+        // A cap of zero admits no edits, so the next add rebuilds the shard from the store's records.
+        await store.setRootCatalogShardPatchCapOverride(0)
+        try await addFiles(1)
+        let rebuildCount = try await catalogShardDebugRoot(store, rootID: root.id).authoritativeRebuildCount
+        XCTAssertEqual(rebuildCount, debugRoot.authoritativeRebuildCount + 1)
+        // The rebuilt index gathers as many overlays as the capture had, so only its base tells them apart.
+        await store.setRootCatalogShardPatchCapOverride(1)
+        try await addFiles(threshold)
+        await secondBuild.open()
+        await secondFlight.value
+
+        debugRoot = try await catalogShardDebugRoot(store, rootID: root.id)
+        XCTAssertEqual(debugRoot.pathIndexRebase.startCount, 2)
+        XCTAssertEqual(debugRoot.pathIndexRebase.installCount, 1)
+        XCTAssertEqual(debugRoot.pathIndexRebase.discardCounts, [.stale: 1])
+        XCTAssertEqual(debugRoot.pathIndexRebase.overlayPayloadCount, threshold)
+        await assertPublishedMatchesAuthoritative("discarded rebase")
+    }
+
+    func testFolderRemovalVisitsOnlyItsSubtree() async throws {
+        let rootURL = try makeTemporaryRoot(name: "FolderRemovalSubtree")
+        let removedFiles = ["Removed/Top.swift", "Removed/Nested/Inner.swift", "Removed/Nested/Notes.md"]
+        // A sibling whose name extends the removed folder's, and an unrelated subtree many times larger.
+        let unrelatedFolders = (0 ..< 8).map { "Unrelated/Group\($0)" }
+        let keptFiles = ["Kept.swift", "RemovedSibling/Keep.swift"]
+            + unrelatedFolders.flatMap { folder in (0 ..< 25).map { "\(folder)/File\($0).swift" } }
+        for path in removedFiles + keptFiles {
+            try write(path, to: rootURL.appendingPathComponent(path))
+        }
+        let store = WorkspaceFileContextStore()
+        let root = try await store.loadRoot(path: rootURL.path)
+        let before = try await catalogShardDebugRoot(store, rootID: root.id).folderSubtreeTraversals
+
+        try FileManager.default.removeItem(at: rootURL.appendingPathComponent("Removed"))
+        await store.replayObservedFileSystemDeltas(rootID: root.id, deltas: [.folderRemoved("Removed")])
+
+        let files = await store.files(inRoot: root.id).map(\.standardizedRelativePath)
+        XCTAssertEqual(files, keptFiles.sorted())
+        let folders = await store.folders(inRoot: root.id).map(\.standardizedRelativePath)
+        XCTAssertEqual(folders, (["", "RemovedSibling", "Unrelated"] + unrelatedFolders).sorted())
+        // The removal and its CodeMap invalidation each visit the three files and two folders removed.
+        let after = try await catalogShardDebugRoot(store, rootID: root.id).folderSubtreeTraversals
+        XCTAssertEqual(after.folderRemovalCount - before.folderRemovalCount, 1)
+        XCTAssertEqual(after.folderRemovalVisitedRecordCount - before.folderRemovalVisitedRecordCount, 5)
+        XCTAssertEqual(after.codemapInvalidationCount - before.codemapInvalidationCount, 1)
+        XCTAssertEqual(after.codemapInvalidationVisitedRecordCount - before.codemapInvalidationVisitedRecordCount, 5)
+    }
+
     private func catalogShardDebugRoot(
         _ store: WorkspaceFileContextStore,
         rootID: UUID
