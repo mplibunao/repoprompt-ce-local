@@ -20,7 +20,7 @@ import XCTest
                     XCTAssertNotNil(server.domainRoutingCoordinator)
                     XCTAssertNotNil(server.domainWorkspaceAuthorityClient)
                     try await fixture.registerDomainWorkspace(context)
-                    try await Self.activateWorkspace(context)
+                    try await MCPWindowTestSupport.activateWorkspace(context, reason: "WindowRoutedFileToolIntegrationTests")
                     let toolsEnabled = await server.setWindowToolsEnabled(true)
                     XCTAssertTrue(toolsEnabled)
                     let endpoint = try fixture.endpointA()
@@ -36,7 +36,7 @@ import XCTest
                         var arguments = call.arguments
                         arguments["_windowID"] = context.window.windowID
                         let response = try await endpoint.callTool(name: call.name, arguments: arguments)
-                        let text = try Self.toolResultText(response)
+                        let text = try MCPWindowTestSupport.toolResultText(response)
                         XCTAssertFalse(response.rawJSON.contains("\"isError\":true"), "\(call.name): \(response.rawJSON)")
                         XCTAssertFalse(text.contains("workspace_authority"), "\(call.name): \(text)")
                         XCTAssertFalse(text.contains("Workspace authority unavailable"), "\(call.name): \(text)")
@@ -53,7 +53,7 @@ import XCTest
                             "_rawJSON": true
                         ]
                     )
-                    let structureData = try XCTUnwrap(Self.toolResultText(structure).data(using: .utf8))
+                    let structureData = try XCTUnwrap(MCPWindowTestSupport.toolResultText(structure).data(using: .utf8))
                     let structureReply = try JSONDecoder().decode(
                         ToolResultDTOs.CodeStructureReplyDTO.self,
                         from: structureData
@@ -73,25 +73,6 @@ import XCTest
                     throw error
                 }
             }
-        }
-
-        private static func activateWorkspace(_ context: PersistentMCPTestContext) async throws {
-            let workspace = try XCTUnwrap(
-                context.window.workspaceManager.workspaces.first { $0.id == context.workspaceID }
-            )
-            await context.window.workspaceManager.switchWorkspace(
-                to: workspace,
-                saveState: false,
-                reason: "WindowRoutedFileToolIntegrationTests"
-            )
-            context.window.promptManager.loadComposeTabsFromWorkspace(workspace, syncPromptText: true)
-        }
-
-        private static func toolResultText(_ response: PersistentMCPTestRPCResponse) throws -> String {
-            let object = try MCPExportWatchdogIntegrationTests.responseObject(from: response)
-            let result = try XCTUnwrap(object["result"] as? [String: Any], response.rawJSON)
-            let content = try XCTUnwrap(result["content"] as? [[String: Any]], response.rawJSON)
-            return content.compactMap { $0["text"] as? String }.joined(separator: "\n")
         }
     }
 #endif

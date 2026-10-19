@@ -24,6 +24,13 @@ import XCTest
             )
         }
 
+        func testBoundedToolFreshnessWaitSettlesBeforeTheWatchdog() {
+            XCTAssertLessThanOrEqual(
+                MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout + .seconds(10),
+                MCPTimeoutPolicy.boundedToolExecutionDeadline
+            )
+        }
+
         func testToolCallDeadlineEnvelopeJSONCodablePreservesWireSchema() throws {
             let envelope = MCPToolCallDeadlineEnvelope(
                 kind: .ordinaryPromptExportV1,

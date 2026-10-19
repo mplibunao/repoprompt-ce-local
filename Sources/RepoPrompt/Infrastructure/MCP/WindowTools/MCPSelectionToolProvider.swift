@@ -2,6 +2,7 @@ import Foundation
 import JSONSchema
 import MCP
 import Ontology
+import RepoPromptShared
 
 @MainActor
 final class MCPSelectionToolProvider: MCPAppToolProviding {
@@ -195,7 +196,10 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         let lookupRootScope = lookupContext.rootScope
         if op != "get" {
             await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionIngressWait)
-            _ = await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(rootScope: lookupRootScope)
+            _ = try await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(
+                rootScope: lookupRootScope,
+                timeout: MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
+            )
             await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionIngressWait, transition: .completed)
         }
         try Task.checkCancellation()

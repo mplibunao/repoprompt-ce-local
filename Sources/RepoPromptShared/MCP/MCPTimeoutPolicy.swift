@@ -82,6 +82,17 @@ public enum MCPTimeoutPolicy {
         mutationPreflightFreshnessWaitTimeoutSeconds
     )
 
+    /// An ingress freshness wait inside a 30-second bounded tool call must settle before the
+    /// ordinary bounded tool watchdog, so a backed-up ingress queue returns a retryable freshness
+    /// reply instead of a watchdog timeout that detaches the provider. The 20-second bound reserves
+    /// ten seconds of the deadline for the work the watchdog has already counted when the wait
+    /// starts (domain admission, request resolution, and the Git-artifact preflight), but does not
+    /// bound that work.
+    public static let boundedToolFreshnessWaitTimeoutSeconds = 20
+    public static let boundedToolFreshnessWaitTimeout: Duration = .seconds(
+        boundedToolFreshnessWaitTimeoutSeconds
+    )
+
     public static let workspaceReadinessWaitTimeoutSeconds = 30
     public static let workspaceReadinessWaitTimeout: Duration = .seconds(workspaceReadinessWaitTimeoutSeconds)
 

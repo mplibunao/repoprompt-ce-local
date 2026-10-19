@@ -114,5 +114,35 @@ import XCTest
             await deadline.value
             return snapshots
         }
+
+        /// Makes `context`'s fixture workspace current in its window and loads its compose tabs.
+        static func activateWorkspace(_ context: PersistentMCPTestContext, reason: String) async throws {
+            let workspace = try XCTUnwrap(
+                context.window.workspaceManager.workspaces.first { $0.id == context.workspaceID }
+            )
+            await context.window.workspaceManager.switchWorkspace(
+                to: workspace,
+                saveState: false,
+                reason: reason
+            )
+            context.window.promptManager.loadComposeTabsFromWorkspace(workspace, syncPromptText: true)
+        }
+
+        /// The tool result's text blocks, joined by newlines.
+        nonisolated static func toolResultText(_ response: PersistentMCPTestRPCResponse) throws -> String {
+            let object = try responseObject(from: response)
+            let result = try XCTUnwrap(object["result"] as? [String: Any], response.rawJSON)
+            let content = try XCTUnwrap(result["content"] as? [[String: Any]], response.rawJSON)
+            return content.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        }
+
+        /// Decodes a JSON-RPC response and asserts that it answers its own request without a JSON-RPC error.
+        nonisolated static func responseObject(from response: PersistentMCPTestRPCResponse) throws -> [String: Any] {
+            let data = try XCTUnwrap(response.rawJSON.data(using: .utf8))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertEqual((object["id"] as? NSNumber)?.intValue, response.id)
+            XCTAssertNil(object["error"])
+            return object
+        }
     }
 #endif
