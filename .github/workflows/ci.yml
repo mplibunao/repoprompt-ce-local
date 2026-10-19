@@ -120,23 +120,19 @@ jobs:
         run: swift test
 
   build-and-test:
-    name: Build and Test (root shard ${{ matrix.shard }})
+    name: Build and Test
     needs: changes
     if: needs.changes.outputs.markdown_only != 'true'
     runs-on: macos-26
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      # Every run restores; only main pushes save (shard 1, below). A cache saved on any
-      # other branch is visible only to runs on that branch and pull requests targeting it.
+      # Every run restores; only main pushes save (below). A cache saved on any other
+      # branch is visible only to runs on that branch and pull requests targeting it.
       - name: Restore SwiftPM build cache
         id: root-cache
         uses: actions/cache/restore@v6
@@ -153,21 +149,20 @@ jobs:
       - name: Build MCP product
         run: swift build --product repoprompt-mcp
 
-      - name: Run root test shard
+      - name: Run root tests
         shell: bash
         run: |
           set -euo pipefail
           # `swift test list` discovers every root XCTest suite.
           # Each suite gets a fresh HOME/TMP/XDG sandbox and one XCTest process.
-          # There are no retries or suite-specific clocks: a failure is a failure.
-          python3 Scripts/ci_app_test_runner.py \
-            --shard-count 4 \
-            --shard-index "${{ matrix.shard }}"
+          # There are no retries or suite-specific clocks: a failure is a failure,
+          # and the runner stops at the first failing suite.
+          python3 Scripts/ci_app_test_runner.py
 
       # The path must match the restore step's: the cache version hashes the path list, so
       # with a different path no restore could find what this step saves.
-      - name: Save SwiftPM build cache (main, shard 1)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.root-cache.outputs.cache-hit != 'true'
+      - name: Save SwiftPM build cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.root-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: .build
