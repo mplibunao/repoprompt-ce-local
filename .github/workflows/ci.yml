@@ -131,8 +131,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # Every run restores; only main pushes save (below). A cache saved on any
-      # other branch is visible only to runs on that branch and pull requests targeting it.
+      # Every run restores; only main pushes save (below). A cache saved on any other
+      # branch is visible only to runs on that branch and pull requests targeting it.
       - name: Restore SwiftPM build cache
         id: root-cache
         uses: actions/cache/restore@v6
