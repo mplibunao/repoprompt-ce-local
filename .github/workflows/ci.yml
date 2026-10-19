@@ -128,7 +128,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1]
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -161,7 +161,7 @@ jobs:
           # Each suite gets a fresh HOME/TMP/XDG sandbox and one XCTest process.
           # There are no retries or suite-specific clocks: a failure is a failure.
           python3 Scripts/ci_app_test_runner.py \
-            --shard-count 4 \
+            --shard-count 1 \
             --shard-index "${{ matrix.shard }}"
 
       # The path must match the restore step's: the cache version hashes the path list, so
