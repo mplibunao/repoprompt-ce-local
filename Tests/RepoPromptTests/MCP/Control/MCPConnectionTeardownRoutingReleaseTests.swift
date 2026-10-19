@@ -31,19 +31,21 @@ import XCTest
                     let windowID = context.window.windowID
 
                     // The calls rpce-cli makes for `-e 'windows'` without `-w`, `-w 1 -e 'windows'`,
-                    // `-w 1 -c get_file_tree`, and `--context-id … -c read_file`.
-                    let kinds: [(label: String, calls: [(name: String, arguments: [String: Any])])] = [
+                    // `-w 1 -c get_file_tree`, and `--context-id … -c read_file`. A closing window leaves
+                    // `allWindows` before its teardown, so the last kind ends with no window to target; it
+                    // stays last because the fixture's windows aren't registered again.
+                    let kinds: [(label: String, calls: [(name: String, arguments: [String: Any])], closesWindows: Bool)] = [
                         ("never binds", [
                             ("bind_context", ["op": "list"])
-                        ]),
+                        ], false),
                         ("lists windows", [
                             ("bind_context", ["op": "bind", "window_id": windowID]),
                             ("bind_context", ["op": "list"])
-                        ]),
+                        ], false),
                         ("targets a window", [
                             ("bind_context", ["op": "bind", "window_id": windowID]),
                             (MCPWindowToolName.getFileTree, ["type": "roots", "_windowID": windowID])
-                        ]),
+                        ], false),
                         ("binds a tab", [
                             ("bind_context", ["op": "bind", "context_id": context.tabID.uuidString]),
                             (MCPWindowToolName.readFile, [
@@ -52,7 +54,10 @@ import XCTest
                                 "_windowID": windowID,
                                 "context_id": context.tabID.uuidString
                             ])
-                        ])
+                        ], false),
+                        ("never binds, every window closed first", [
+                            ("bind_context", ["op": "list"])
+                        ], true)
                     ]
                     for kind in kinds {
                         let endpoint = try await PersistentMCPTestEndpoint.make(
@@ -65,6 +70,12 @@ import XCTest
                         }
                         let registeredWhileOpen = await Self.isRegistered(endpoint.connectionID, in: coordinator)
                         XCTAssertTrue(registeredWhileOpen, "\(kind.label): connection was never registered")
+                        if kind.closesWindows {
+                            for window in [context.window, fixture.contextB.window] {
+                                WindowStatesManager.shared.unregisterWindowState(window)
+                            }
+                            XCTAssertTrue(WindowStatesManager.shared.allWindows.isEmpty, "\(kind.label): a window is still registered")
+                        }
 
                         // Remove the connection before closing the client. The client's EOF starts the same
                         // teardown, and while that runs, removal returns at once, before any release is queued.
