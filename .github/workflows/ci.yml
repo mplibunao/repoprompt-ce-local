@@ -1,30 +1,45 @@
 name: CI
 
+# A validation run, on a pull request or a push to `release/**`, tests the change. A refresh
+# run, on the daily schedule or a `workflow_dispatch` from `main`, builds without testing so
+# the SwiftPM caches that every other run restores stay fresh. A push to `main` starts no run:
+# `main` only fast-forwards to a candidate tip whose run already passed. The `changes` job
+# owns the mode; `run-name` and `concurrency` can't read its outputs, so they test the event
+# themselves. An empty `run-name` leaves a validation run GitHub's default title.
+run-name: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'Cache refresh' || '' }}
+
 on:
   pull_request:
   push:
     branches:
-      - main
       - 'release/**'
+  schedule:
+    - cron: '17 19 * * *'  # 03:17 Manila
+  workflow_dispatch:
 
+# Refresh runs queue behind one another and never cancel a running one. A pull request's new
+# run cancels its previous one, and every other run has a group of its own.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'ci-cache-refresh' || format('ci-{0}', github.event.pull_request.number || github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  # Classifies the event's changed paths so the macOS jobs can skip a change that touches
-  # only Markdown. A pull request is compared with its base branch, a release candidate with
-  # `main`, and a push to `main` only with what it adds. Guardrails and the secret scan run
-  # on every change. A comparison the job can't make, such as a force-push whose old head is
-  # gone, takes the full code path, and a failure here fails the run.
+  # Picks the run's mode, then classifies a validation run's changed paths so the macOS jobs
+  # can skip a change that touches only Markdown. A pull request is compared with its base
+  # branch and a release candidate with `main`. Guardrails and the secret scan run on every
+  # validation run. A comparison the job can't make, such as a force-push whose old head is
+  # gone, takes the full code path. A refresh run never counts as Markdown-only, and a
+  # `workflow_dispatch` from any ref but `main` fails here: only a cache saved on the default
+  # branch is visible to every pull request. A failure here fails the run.
   changes:
     name: Changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
+      mode: ${{ steps.classify.outputs.mode }}
       markdown_only: ${{ steps.classify.outputs.markdown_only }}
     steps:
       - name: Check out repository
@@ -33,25 +48,32 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Classify changed paths
+      - name: Pick the mode and classify changed paths
         id: classify
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          mode=validation
+          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "::error::A cache refresh runs only from main, not from $GITHUB_REF. Dispatch the CI workflow from the main branch."
+              exit 1
+            fi
+            mode=cache-refresh
+          fi
+          if [[ "$mode" == "cache-refresh" ]]; then
+            range=""
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
             range="$PR_BASE_SHA...$PR_HEAD_SHA"
           elif [[ "$GITHUB_REF" == refs/heads/release/* ]]; then
             # The whole candidate: landing reads the run on its tip, so a Markdown commit
             # pushed on top of failing code must not skip the tests.
             range="origin/main...$CURRENT_SHA"
-          elif [[ -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
-            range="$PUSH_BEFORE_SHA..$CURRENT_SHA"
           else
             range=""
           fi
@@ -63,15 +85,18 @@ jobs:
               markdown_only=true
             fi
           fi
-          echo "Comparison: ${range:-none}; markdown_only=$markdown_only"
+          echo "Mode: $mode; comparison: ${range:-none}; markdown_only=$markdown_only"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "markdown_only=$markdown_only" >> "$GITHUB_OUTPUT"
 
-  # On a Markdown-only change this job runs only guardrails and the conductor tests, which
-  # check wording in README.md and docs/architecture/developer-daemon.md. Guardrails need
-  # macOS (`xcrun swiftc`), so the job stays there.
+  # Validation runs only. On a Markdown-only change this job runs only guardrails and the
+  # conductor tests, which check wording in README.md and
+  # docs/architecture/developer-daemon.md. Guardrails need macOS (`xcrun swiftc`), so the job
+  # stays there.
   style:
     name: Style
     needs: changes
+    if: needs.changes.outputs.mode == 'validation'
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -131,8 +156,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Every run restores; only main pushes save (below). A cache saved on any other
-      # branch is visible only to runs on that branch and pull requests targeting it.
+      # Every run restores; only a refresh saves (below). A cache saved on any other branch
+      # is visible only to runs on that branch and pull requests targeting it. A refresh
+      # whose exact key already exists has nothing to build or save.
       - name: Restore SwiftPM build cache
         id: root-cache
         uses: actions/cache/restore@v6
@@ -144,12 +170,21 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-
 
       - name: Build app product
+        if: needs.changes.outputs.mode != 'cache-refresh' || steps.root-cache.outputs.cache-hit != 'true'
         run: swift build --product RepoPrompt
 
       - name: Build MCP product
+        if: needs.changes.outputs.mode != 'cache-refresh' || steps.root-cache.outputs.cache-hit != 'true'
         run: swift build --product repoprompt-mcp
 
+      # A validation run builds the test bundles through `swift test list` below. They belong
+      # in the cache, so a refresh builds them here.
+      - name: Build root test bundles (refresh only)
+        if: needs.changes.outputs.mode == 'cache-refresh' && steps.root-cache.outputs.cache-hit != 'true'
+        run: swift build --build-tests
+
       - name: Run root tests
+        if: needs.changes.outputs.mode != 'cache-refresh'
         shell: bash
         run: |
           set -euo pipefail
@@ -161,20 +196,20 @@ jobs:
 
       # The path must match the restore step's: the cache version hashes the path list, so
       # with a different path no restore could find what this step saves.
-      - name: Save SwiftPM build cache (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.root-cache.outputs.cache-hit != 'true'
+      - name: Save SwiftPM build cache (refresh only)
+        if: needs.changes.outputs.mode == 'cache-refresh' && steps.root-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: .build
           key: ${{ steps.root-cache.outputs.cache-primary-key }}
 
-  # Pushes only (main and release/**); pull requests and Markdown-only pushes show it as
+  # Pushes to release/** and refresh runs; pull requests and Markdown-only pushes show it as
   # skipped. It stays in this workflow because a release candidate lands only when the CI
   # run on its tip is green.
   sentry-enabled-build:
     name: Sentry-enabled Build
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.markdown_only != 'true'
+    if: needs.changes.outputs.mode == 'cache-refresh' || (github.event_name == 'push' && needs.changes.outputs.markdown_only != 'true')
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -195,24 +230,37 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-
 
       - name: Build app product with Sentry SDK linked
+        if: needs.changes.outputs.mode != 'cache-refresh' || steps.sentry-cache.outputs.cache-hit != 'true'
         env:
           REPOPROMPT_ENABLE_SENTRY: "1"
         run: swift build --product RepoPrompt
 
+      # The test step below builds the test bundles with Sentry linked. A refresh skips that
+      # step, so it builds them here for the cache.
+      - name: Build test bundles with Sentry SDK linked (refresh only)
+        if: needs.changes.outputs.mode == 'cache-refresh' && steps.sentry-cache.outputs.cache-hit != 'true'
+        env:
+          REPOPROMPT_ENABLE_SENTRY: "1"
+        run: swift build --build-tests
+
       - name: Test serialized Sentry privacy boundary
+        if: needs.changes.outputs.mode != 'cache-refresh'
         env:
           REPOPROMPT_ENABLE_SENTRY: "1"
         run: swift test --filter SentryTelemetryPrivacyTests
 
-      - name: Save SwiftPM build cache (main only)
-        if: github.ref == 'refs/heads/main' && steps.sentry-cache.outputs.cache-hit != 'true'
+      - name: Save SwiftPM build cache (refresh only)
+        if: needs.changes.outputs.mode == 'cache-refresh' && steps.sentry-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: .build
           key: ${{ steps.sentry-cache.outputs.cache-primary-key }}
 
+  # Validation runs only: a refresh introduces no commits.
   secret-scan:
     name: Secret Scan
+    needs: changes
+    if: needs.changes.outputs.mode == 'validation'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
