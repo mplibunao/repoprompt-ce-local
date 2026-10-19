@@ -17,6 +17,8 @@ import XCTest
                 )
                 let context = fixture.contextA
                 let server = context.window.mcpServer
+                let otherServer = fixture.contextB.window.mcpServer
+                let manager = fixture.networkManager
                 do {
                     let coordinator = try XCTUnwrap(server.domainRoutingCoordinator)
                     try await fixture.registerDomainWorkspace(context)
@@ -24,7 +26,7 @@ import XCTest
                     let toolsEnabled = await server.setWindowToolsEnabled(true)
                     XCTAssertTrue(toolsEnabled)
                     // A single MCP-enabled window makes an unbound connection eligible for automatic binding.
-                    let otherToolsEnabled = await fixture.contextB.window.mcpServer.setWindowToolsEnabled(true)
+                    let otherToolsEnabled = await otherServer.setWindowToolsEnabled(true)
                     XCTAssertTrue(otherToolsEnabled)
                     let windowID = context.window.windowID
 
@@ -55,7 +57,7 @@ import XCTest
                     for kind in kinds {
                         let endpoint = try await PersistentMCPTestEndpoint.make(
                             label: "teardown-release",
-                            networkManager: fixture.networkManager
+                            networkManager: manager
                         )
                         for call in kind.calls {
                             let response = try await endpoint.callTool(name: call.name, arguments: call.arguments)
@@ -66,24 +68,24 @@ import XCTest
 
                         // Remove the connection before closing the client. The client's EOF starts the same
                         // teardown, and while that runs, removal returns at once, before any release is queued.
-                        await fixture.networkManager.debugRemoveConnection(endpoint.connectionID)
+                        await manager.debugRemoveConnection(endpoint.connectionID)
                         endpoint.client.close()
                         await endpoint.connectionManager.stop()
-                        for window in [fixture.contextA.window, fixture.contextB.window] {
-                            await window.mcpServer.domainRoutingPublishTask?.value
+                        for mcpServer in [server, otherServer] {
+                            await mcpServer.domainRoutingPublishTask?.value
                         }
-                        await fixture.networkManager.clearClientConnectionPolicy(for: endpoint.clientName)
-                        await fixture.networkManager.debugClearPersistedRoutingState(for: endpoint.clientName)
+                        await manager.clearClientConnectionPolicy(for: endpoint.clientName)
+                        await manager.debugClearPersistedRoutingState(for: endpoint.clientName)
 
                         let registeredAfterTeardown = await Self.isRegistered(endpoint.connectionID, in: coordinator)
                         XCTAssertFalse(registeredAfterTeardown, "\(kind.label): ended connection is still registered")
                     }
                     _ = await server.setWindowToolsEnabled(false)
-                    _ = await fixture.contextB.window.mcpServer.setWindowToolsEnabled(false)
+                    _ = await otherServer.setWindowToolsEnabled(false)
                     await fixture.cleanup()
                 } catch {
                     _ = await server.setWindowToolsEnabled(false)
-                    _ = await fixture.contextB.window.mcpServer.setWindowToolsEnabled(false)
+                    _ = await otherServer.setWindowToolsEnabled(false)
                     await fixture.cleanup()
                     throw error
                 }
