@@ -11,7 +11,7 @@ Re-implement upstream commit c9778b03 on `port/1003-seeded-publication-watchdog-
 | 2. Descriptor reuse | done | engineer · Orchestrate 2/4: Descriptor reuse | `refactor(git): build worktree descriptors from the resolved alias records` |
 | 3. Window-local released-provider warning | done | engineer · Orchestrate 3/4: Released-provider warning | `feat(mcp): warn in the window when stuck structure work exhausts recovery` |
 | 4. Watchdog terminal response ownership | done | engineer · Orchestrate 4/4: Watchdog terminal errors | `fix(mcp): answer outstanding requests before a watchdog disconnect` |
-| 5. Pull request | pending | | |
+| 5. Pull request | partial | orchestrator | `docs: record the port 1003 live checks in the run ledger`; `docs: close the port 1003 run ledger for review` |
 
 ## 0. Prepare the branch
 
@@ -97,3 +97,5 @@ Re-implement upstream commit c9778b03 on `port/1003-seeded-publication-watchdog-
 
 - Decision: the banner screenshots stay with the reviewer instead of in the pull request, because the GitHub CLI can't attach images. The pull request describes what they show. Source: orchestrator judgment.
 - Evidence (debug app, 2026-10-19 15:04–15:05 UTC, clean build of `029d501f7`): `make dev-smoke-launch` passed. Its windows-readiness and workspace-switch stages retried while the relaunched app restored window 1, then passed.
+- Evidence: `pr-ready` passed on `origin/main..HEAD` before the first push: Swift lint, the full root test run (1,859 tests in five bundles, every new test among them, 0 failures), and the `RepoPrompt` product build.
+- Deferred: approval of this pull request and its landing through a release candidate.
