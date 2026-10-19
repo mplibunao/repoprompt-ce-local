@@ -191,18 +191,35 @@ jobs:
         with:
           persist-credentials: false
 
-      # Every run restores; only a refresh saves (below). A cache saved on any other branch
-      # is visible only to runs on that branch and pull requests targeting it. A refresh
-      # whose exact key already exists has nothing to build or save.
+      # Every run but a refresh restores; only a refresh saves (below). A cache saved on any
+      # other branch is visible only to runs on that branch and pull requests targeting it. A
+      # refresh whose exact key already exists has nothing to build or save, and otherwise
+      # builds from an empty `.build`, so each saved cache is a clean build and no stale
+      # object carries over from one refresh to the next. The `v2` namespace holds caches
+      # built after the mtime step below; an older cache would recompile everything. The key
+      # hashes the C headers, module maps, and Sparkle with the manifests: the Swift driver
+      # treats those as changed only when they are newer than its last build, which the
+      # mtime step never makes them, so a change to one must miss the cache.
       - name: Restore SwiftPM build cache
         id: root-cache
         uses: actions/cache/restore@v6
         with:
           path: .build
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
+          lookup-only: ${{ needs.changes.outputs.mode == 'cache-refresh' }}
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved', 'Sources/**/*.h', 'Sources/**/*.modulemap', 'Vendor/**/*.h', 'Vendor/**/*.modulemap', 'Vendor/Sparkle/**') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-root-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-root-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved', 'Sources/**/*.h', 'Sources/**/*.modulemap', 'Vendor/**/*.h', 'Vendor/**/*.modulemap', 'Vendor/Sparkle/**') }}-
+
+      # llbuild and the Swift driver treat a source file as unchanged only when its mtime
+      # (and size, for llbuild) equals what they recorded; SwiftPM runs llbuild in its
+      # device-agnostic mode, so inode numbers don't count. A fresh checkout stamps every
+      # file with the checkout time, so a restored cache recompiled every first-party module.
+      # Deriving each tracked file's mtime from its content gives the refresh that builds a
+      # cache and the run that restores it the same mtime for the same bytes, so an unchanged
+      # module builds nothing, and a changed file gets another mtime and is compiled with its
+      # dependents.
+      - name: Set tracked-file mtimes from their content
+        run: python3 Scripts/set_tracked_file_mtimes.py
 
       - name: Build app product
         if: needs.changes.outputs.mode != 'cache-refresh' || steps.root-cache.outputs.cache-hit != 'true'
@@ -254,15 +271,20 @@ jobs:
           persist-credentials: false
 
       # Linking Sentry changes the build graph, so this cache is separate from the root one.
+      # Its key and refresh rules follow the root cache's, which Build and Test explains.
       - name: Restore SwiftPM build cache
         id: sentry-cache
         uses: actions/cache/restore@v6
         with:
           path: .build
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-${{ github.sha }}
+          lookup-only: ${{ needs.changes.outputs.mode == 'cache-refresh' }}
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved', 'Sources/**/*.h', 'Sources/**/*.modulemap', 'Vendor/**/*.h', 'Vendor/**/*.modulemap', 'Vendor/Sparkle/**') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved') }}-
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-sentry-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-v2-sentry-${{ hashFiles('Package.swift', 'Package.resolved', 'Packages/RepoPromptAgentProviders/Package.swift', 'Packages/RepoPromptAgentProviders/Package.resolved', 'Sources/**/*.h', 'Sources/**/*.modulemap', 'Vendor/**/*.h', 'Vendor/**/*.modulemap', 'Vendor/Sparkle/**') }}-
+
+      # The same step as in Build and Test, which explains it.
+      - name: Set tracked-file mtimes from their content
+        run: python3 Scripts/set_tracked_file_mtimes.py
 
       - name: Build app product with Sentry SDK linked
         if: needs.changes.outputs.mode != 'cache-refresh' || steps.sentry-cache.outputs.cache-hit != 'true'
