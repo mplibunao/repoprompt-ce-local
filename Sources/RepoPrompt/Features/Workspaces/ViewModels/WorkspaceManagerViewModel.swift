@@ -1422,6 +1422,21 @@ class WorkspaceManagerViewModel: ObservableObject {
     let workspaceSearchService: WorkspaceSearchService
     /// Non-nil only in production composition; nil is the isolated legacy test owner.
     private let domainWorkspaceAuthorityClient: DomainWorkspaceAuthorityClient?
+    /// This window's exact-identity reader and writer of workspace content.
+    private(set) lazy var contentGateway: WorkspaceContentGateway = {
+        let backend: any WorkspaceContentBackend = if let domainWorkspaceAuthorityClient {
+            DomainWorkspaceContentBackend(client: domainWorkspaceAuthorityClient)
+        } else {
+            LegacyWorkspaceContentBackend(manager: self)
+        }
+        return WorkspaceContentGateway(manager: self, backend: backend)
+    }()
+
+    /// The store's workspace summaries, kept beside `workspaces`. They come only from the domain
+    /// store, never from a decoded model, so a manager without an authority client has none.
+    private(set) var workspaceSummaries: [DomainWorkspaceSummary] = []
+    private var workspaceSummaryIndexByID: [UUID: Int] = [:]
+    private var lastDomainSummarySequence: UInt64 = 0
     let workspaceActivityCoordinator: WorkspaceActivityCoordinator
     private let workspaceAgentAdmissionCoordinator: WorkspaceAgentAdmissionCoordinator
     private var agentSessionProjectionReconciler: ((
@@ -1466,7 +1481,17 @@ class WorkspaceManagerViewModel: ObservableObject {
     @Published private(set) var pendingSwitchConfirmation: WorkspaceSwitchConfirmation?
     @Published private(set) var workspaceSwitchOverlayState: WorkspaceSwitchOverlayState?
     @Published private(set) var isWorkspaceSwitchOverlayVisible: Bool = false
-    @Published private(set) var activeWorkspaceSwitch: WorkspaceSwitchActivity?
+    @Published private(set) var activeWorkspaceSwitch: WorkspaceSwitchActivity? {
+        didSet {
+            let callbacks = switchProgressCallbacks
+            switchProgressCallbacks.removeAll()
+            callbacks.forEach { $0() }
+        }
+    }
+
+    /// One-shot callbacks for the next change to `activeWorkspaceSwitch`: a phase change, a
+    /// retarget, or the switch ending.
+    private var switchProgressCallbacks: [() -> Void] = []
     @Published private(set) var lastWorkspaceSwitchBlockageReport: WorkspaceSwitchBlockageReport?
     @Published private(set) var pendingWorkspaceSwitchBlockedNotice: WorkspaceSwitchBlockedNotice?
     private let instanceID = UUID()
@@ -2662,6 +2687,7 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     func prepareForWindowClose() {
+        contentGateway.invalidate()
         workspaceActivityCoordinator.unregister(ownerID: instanceID)
         stopPollTimer()
         reloadWorkspacesTask?.cancel()
@@ -5173,6 +5199,17 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
     }
 
+    /// Reports a refusal the app made before any command reached the authority.
+    func reportDomainAuthorityIssue(workspaceID: UUID, operation: String, diagnostic: String) {
+        publishDomainAuthorityIssueIfChanged(DomainWorkspaceAuthorityIssue(
+            workspaceID: workspaceID,
+            operation: operation,
+            kind: .commandFailure,
+            diagnostic: diagnostic
+        ))
+        Self.logger.error("Domain workspace \(operation, privacy: .public) refused workspace \(workspaceID.uuidString, privacy: .public): \(diagnostic, privacy: .public)")
+    }
+
     func reportDomainProjectionFailure(_ error: Error) {
         publishDomainAuthorityIssueIfChanged(DomainWorkspaceAuthorityIssue(
             workspaceID: nil,
@@ -5691,6 +5728,203 @@ class WorkspaceManagerViewModel: ObservableObject {
         synchronizeDomainAuthorityIssueForActiveWorkspace(operation: "authority_health_projection")
     }
 
+    func applyDomainWorkspaceSummaryProjection(_ snapshot: DomainWorkspaceSummaryCatalogSnapshot) {
+        guard snapshot.isBootstrapped,
+              snapshot.publicationSequence >= lastDomainSummarySequence
+        else { return }
+        lastDomainSummarySequence = snapshot.publicationSequence
+        workspaceSummaries = snapshot.workspaces
+        workspaceSummaryIndexByID = Dictionary(
+            snapshot.workspaces.enumerated().map { ($1.workspaceID, $0) },
+            uniquingKeysWith: { _, last in last }
+        )
+    }
+
+    func workspaceSummary(withID id: UUID) -> DomainWorkspaceSummary? {
+        workspaceSummaryIndexByID[id].map { workspaceSummaries[$0] }
+    }
+
+    #if DEBUG
+        var domainSummaryProjectionSequenceForTesting: UInt64 {
+            lastDomainSummarySequence
+        }
+    #endif
+
+    // MARK: - Workspace content gateway support
+
+    /// Whether the workspace is a durable catalog member: in the store's summaries, or for the
+    /// isolated legacy owner, among its own durable workspaces.
+    func contentGatewayCatalogContains(_ workspaceID: UUID) -> Bool {
+        if domainWorkspaceAuthorityClient != nil {
+            return workspaceSummaryIndexByID[workspaceID] != nil
+        }
+        return workspace(withID: workspaceID).map { !$0.isEphemeral } ?? false
+    }
+
+    /// The tab with the window's live UI state applied when it is the shown workspace's active tab.
+    func contentGatewayLiveSnapshot(of tab: ComposeTabState, inWorkspace workspaceID: UUID) -> ComposeTabState {
+        guard activeWorkspaceID == workspaceID, tab.id == promptViewModel.activeComposeTabID else { return tab }
+        return collectComposeTabSnapshot(name: tab.name, base: tab)
+    }
+
+    /// The shown workspace as its next save capture stores it. Nil when that capture stores no tab:
+    /// the workspace isn't shown, has no active tab, or its active tab is being applied to the UI.
+    func contentGatewayShownSaveCapture(_ workspaceID: UUID) -> WorkspaceModel? {
+        guard activeWorkspaceID == workspaceID,
+              let workspace = workspace(withID: workspaceID),
+              let activeTab = saveCaptureActiveTab(in: workspace),
+              !activeTab.isSuspended
+        else { return nil }
+        let (name, _) = activeComposeTabContext()
+        return activeTabSaveCapture(of: workspace, tabIndex: activeTab.index, tabName: name).workspace
+    }
+
+    /// Applies a stored edit of the shown workspace to the prompt UI, as an MCP tab-context commit
+    /// does. A save capture copies the active tab from the UI, so a tab the UI didn't take would
+    /// lose the edit at the next capture. `base` is the save capture the edit started from.
+    func contentGatewayMirrorShownEdit(from base: WorkspaceModel, to edited: WorkspaceModel) async {
+        guard activeWorkspaceID == edited.id else { return }
+        if base.composeTabs != edited.composeTabs
+            || base.stashedTabs != edited.stashedTabs
+            || base.activeComposeTabID != edited.activeComposeTabID
+        {
+            promptViewModel.loadComposeTabsFromWorkspace(edited)
+        }
+        func activeTab(of workspace: WorkspaceModel) -> ComposeTabState? {
+            let activeTabID = workspace.activeComposeTabID ?? workspace.composeTabs.first?.id
+            return workspace.composeTabs.first { $0.id == activeTabID }
+        }
+        guard let tab = activeTab(of: edited), activeTab(of: base) != tab else { return }
+        let identity = WorkspaceSelectionIdentity(workspaceID: edited.id, tabID: tab.id)
+        selectionCoordinator?.protectCanonicalMCPSelectionFromDeferredUISnapshots(tab.selection, for: identity)
+        beginApplyingTabContext(forTabID: tab.id)
+        defer { endApplyingTabContext(forTabID: tab.id) }
+        // After duplicate consolidation another workspace can list the same tab ID, so the apply
+        // looks the tab up in this workspace only.
+        await applyComposeTabStateInternal(
+            tabID: tab.id,
+            workspaceID: edited.id,
+            markWorkspaceDirtyAfterApply: false
+        )
+        // The apply's final recount can queue another UI snapshot that predates the edit.
+        selectionCoordinator?.protectCanonicalMCPSelectionFromDeferredUISnapshots(tab.selection, for: identity)
+    }
+
+    /// Whether a switch from or to the workspace is in flight, in any phase. The workspace
+    /// `activeWorkspaceID` names counts too: a recovery retarget can drop the original target from
+    /// the switch's activity while it is still the active workspace.
+    func contentGatewaySwitchInvolves(_ workspaceID: UUID) -> Bool {
+        guard isSwitchingWorkspace, let activity = activeWorkspaceSwitch else { return false }
+        return activity.previousWorkspaceID == workspaceID
+            || activity.targetWorkspaceID == workspaceID
+            || activeWorkspaceID == workspaceID
+    }
+
+    /// Whether a switch from or to the workspace can change what the window shows: from the outgoing
+    /// save until the switch ends, and through any recovery. In that span `activeWorkspaceID`
+    /// doesn't say whether the window keeps showing the workspace, and a capture would read UI state
+    /// the switch is replacing. The phases before it, the confirmation dialog and session
+    /// cancellation among them, leave the shown workspace and its UI as they are.
+    func contentGatewayShownStateIsChanging(_ workspaceID: UUID) -> Bool {
+        guard contentGatewaySwitchInvolves(workspaceID), let activity = activeWorkspaceSwitch else {
+            return false
+        }
+        // Recovery sets the phase back to `.preparing` after the roots were unloaded or the target
+        // installed, so the switch's own markers decide before the phase does.
+        if rootsUnloadedWorkspaceSwitchOperationID == activity.operationID
+            || recoveringWorkspaceSwitchOperationID == activity.operationID
+            || activeWorkspaceID != activity.previousWorkspaceID
+        {
+            return true
+        }
+        switch activity.phase {
+        case .savingCurrentWorkspace, .unloadingRoots, .loadingTargetWorkspace, .restoringState, .hydratingRoots:
+            return true
+        case .preparing, .awaitingConfirmation, .cancellingSessions, .waitingForChatIdle, .notifyingListeners, .finalizing:
+            return false
+        }
+    }
+
+    /// Calls `callback` once, at the switch's next phase change, retarget, or end.
+    func contentGatewayOnNextSwitchProgress(_ callback: @escaping () -> Void) {
+        switchProgressCallbacks.append(callback)
+    }
+
+    /// Saves the window's stored copy of the workspace without capturing the prompt UI into it.
+    func contentGatewaySaveStoredCopy(
+        _ workspaceID: UUID,
+        source: WorkspaceSaveSource
+    ) async -> WorkspacePersistenceOutcome {
+        guard let workspace = workspace(withID: workspaceID) else {
+            return .rejected(reason: "workspace_unavailable")
+        }
+        switch await saveWorkspaceAsync(
+            workspaceID: workspaceID,
+            fileURL: workspaceFileURL(for: workspace),
+            source: source
+        ) {
+        case let .success(stateVersion):
+            return .persisted(workspaceID: workspaceID, stateVersion: stateVersion)
+        case let .failure(failure):
+            return .rejected(reason: failure.publicReason, category: failure.category)
+        }
+    }
+
+    /// Stores an edit to content this window holds, without touching the UI, and marks it unsaved
+    /// so the shown workspace's publish carries it.
+    func contentGatewayInstallLocalEdit(_ workspace: WorkspaceModel) {
+        guard let index = workspaceIndex(for: workspace.id) else { return }
+        let previous = workspaces[index]
+        workspaces[index] = workspace
+        recordSelectionRevisions(in: workspace.id, replacing: previous, reason: "contentGatewayLocalEdit")
+        bumpStateVersion(for: workspace.id)
+    }
+
+    /// Replaces this window's copy with a document the authority accepted from it. The copy isn't
+    /// marked unsaved, because the authority already has it.
+    func contentGatewayInstallAcceptedCopy(_ workspace: WorkspaceModel) {
+        guard let index = workspaceIndex(for: workspace.id) else { return }
+        let previous = workspaces[index]
+        workspaces[index] = workspace
+        recordSelectionRevisions(in: workspace.id, replacing: previous, reason: "contentGatewayAcceptedCopy")
+    }
+
+    func contentGatewayApplyAcceptedOutcome(_ outcome: DomainCommandOutcome, workspaceID: UUID) {
+        applyDomainAuthorityOutcome(outcome, workspaceID: workspaceID)
+    }
+
+    func contentGatewayStateVersion(for workspaceID: UUID) -> Int {
+        stateVersionByWorkspaceID[workspaceID, default: 0]
+    }
+
+    /// The authority revision and digest this window last accepted for the workspace.
+    func contentGatewayCommittedState(for workspaceID: UUID) -> (revisions: DomainRevisionState, digest: String)? {
+        guard domainWorkspaceAuthorityClient != nil,
+              let revisions = domainWorkspaceRevisionsByID[workspaceID],
+              let digest = domainWorkspaceDigestsByID[workspaceID]
+        else { return nil }
+        return (revisions, digest)
+    }
+
+    private func recordSelectionRevisions(in workspaceID: UUID, replacing previous: WorkspaceModel, reason: String) {
+        guard let index = workspaceIndex(for: workspaceID) else { return }
+        let previousSelections = Dictionary(
+            previous.composeTabs.map { ($0.id, $0.selection) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        for tabIndex in workspaces[index].composeTabs.indices {
+            let tab = workspaces[index].composeTabs[tabIndex]
+            guard let oldSelection = previousSelections[tab.id] else { continue }
+            recordSelectionRevisionIfChanged(
+                workspaceIndex: index,
+                tabIndex: tabIndex,
+                oldSelection: oldSelection,
+                newSelection: tab.selection,
+                reason: reason
+            )
+        }
+    }
+
     func collectComposeTabSnapshot(name: String, base: ComposeTabState? = nil) -> ComposeTabState {
         let resolvedName = name.isEmpty ? (base?.name ?? "Tab") : name
         var snapshot = base ?? ComposeTabState(name: resolvedName)
@@ -5947,13 +6181,20 @@ class WorkspaceManagerViewModel: ObservableObject {
         await task?.value
     }
 
+    /// `workspaceID` looks the tab up in that workspace only. Without it the lookup takes the first
+    /// workspace that lists the tab ID.
     @MainActor
     private func applyComposeTabStateInternal(
         tabID: UUID,
+        workspaceID: UUID? = nil,
         markWorkspaceDirtyAfterApply: Bool,
         performFinalRecount: Bool = true
     ) async {
-        guard let initialTab = composeTab(with: tabID) else { return }
+        func storedTab() -> ComposeTabState? {
+            guard let workspaceID else { return composeTab(with: tabID) }
+            return composeTab(for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID))
+        }
+        guard let initialTab = storedTab() else { return }
         beginApplyingTabContext(forTabID: tabID)
         promptViewModel.tokenCountingViewModel.suspendAutomaticRecounts()
         defer {
@@ -5967,7 +6208,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         #endif
         await Task.yield()
         guard !Task.isCancelled else { return }
-        guard let refreshedTab = composeTab(with: tabID) else { return }
+        guard let refreshedTab = storedTab() else { return }
         await applyComposeTabHeavyFileState(refreshedTab)
         guard !Task.isCancelled else { return }
         if performFinalRecount {
@@ -6871,35 +7112,73 @@ class WorkspaceManagerViewModel: ObservableObject {
         workspace.dateModified = Date()
     }
 
+    private struct ActiveTabSaveCapture {
+        let workspace: WorkspaceModel
+        let snapshot: ComposeTabState
+        let liveUISelection: StoredSelection
+        let storedSelection: StoredSelection
+        let canonicalSelection: StoredSelection?
+        let saveSelection: WorkspaceSelectionForSaveDecision
+    }
+
+    /// The active compose tab a save capture copies the live UI state into. Nil when the workspace
+    /// has no active compose tab. While the tab is being applied to the UI, `isSuspended` is set and
+    /// the capture stores nothing.
+    private func saveCaptureActiveTab(in workspace: WorkspaceModel) -> (index: Int, isSuspended: Bool)? {
+        guard let activeTabID = workspace.activeComposeTabID,
+              let tabIndex = workspace.composeTabs.firstIndex(where: { $0.id == activeTabID })
+        else { return nil }
+        return (tabIndex, isSnapshotCommitSuspended(forTabID: activeTabID))
+    }
+
+    /// The workspace as a save capture stores it: the active tab with the live UI state and the
+    /// workspace fields that the prompt UI owns. Nothing is stored or published.
+    private func activeTabSaveCapture(
+        of workspace: WorkspaceModel,
+        tabIndex: Int,
+        tabName: String
+    ) -> ActiveTabSaveCapture {
+        var workspace = workspace
+        let activeTabID = workspace.composeTabs[tabIndex].id
+        let storedSelection = workspace.composeTabs[tabIndex].selection
+        var snapshot = collectComposeTabSnapshot(name: tabName, base: workspace.composeTabs[tabIndex])
+        let liveUISelection = snapshot.selection
+        let canonical = selectionCoordinator?.activeSelectionSnapshot(flushPendingUI: false)
+        let saveSelection = Self.selectionForSaveSnapshot(
+            liveUISelection: liveUISelection,
+            storedSelection: storedSelection,
+            canonicalSelection: canonical?.selection,
+            canonicalTabID: canonical?.tabID,
+            activeTabID: activeTabID
+        )
+        snapshot.selection = saveSelection.selection
+        workspace.composeTabs[tabIndex] = snapshot
+        updateWorkspaceState(
+            &workspace,
+            with: (snapshot.expandedFolders, snapshot.selection, snapshot.promptText, snapshot.selectedMetaPromptIDs)
+        )
+        return ActiveTabSaveCapture(
+            workspace: workspace,
+            snapshot: snapshot,
+            liveUISelection: liveUISelection,
+            storedSelection: storedSelection,
+            canonicalSelection: canonical?.selection,
+            saveSelection: saveSelection
+        )
+    }
+
     @discardableResult
     private func captureActiveTabSnapshotForWorkspaceIndex(_ index: Int, source: WorkspaceSaveSource = .pollAndSaveState) -> ComposeTabState? {
         guard workspaces.indices.contains(index) else { return nil }
         var workspace = workspaces[index]
         let (name, _) = activeComposeTabContext()
-        if let activeTabID = workspace.activeComposeTabID,
-           let tabIndex = workspace.composeTabs.firstIndex(where: { $0.id == activeTabID })
-        {
-            guard !isSnapshotCommitSuspended(forTabID: activeTabID) else { return nil }
+        if let activeTab = saveCaptureActiveTab(in: workspace) {
+            guard !activeTab.isSuspended else { return nil }
             #if DEBUG
                 debugSelectionOwnerTraceEvent("save.capture.before", workspace: workspace)
             #endif
-            let storedSelection = workspace.composeTabs[tabIndex].selection
-            var snapshot = collectComposeTabSnapshot(name: name, base: workspace.composeTabs[tabIndex])
-            let liveUISelection = snapshot.selection
-            let canonical = selectionCoordinator?.activeSelectionSnapshot(flushPendingUI: false)
-            let saveSelection = Self.selectionForSaveSnapshot(
-                liveUISelection: liveUISelection,
-                storedSelection: storedSelection,
-                canonicalSelection: canonical?.selection,
-                canonicalTabID: canonical?.tabID,
-                activeTabID: activeTabID
-            )
-            snapshot.selection = saveSelection.selection
-            workspace.composeTabs[tabIndex] = snapshot
-            updateWorkspaceState(
-                &workspace,
-                with: (snapshot.expandedFolders, snapshot.selection, snapshot.promptText, snapshot.selectedMetaPromptIDs)
-            )
+            let capture = activeTabSaveCapture(of: workspace, tabIndex: activeTab.index, tabName: name)
+            workspace = capture.workspace
             workspaces[index] = workspace
             publishWorkingDocumentToDomainAuthority(workspace)
             #if DEBUG
@@ -6909,15 +7188,15 @@ class WorkspaceManagerViewModel: ObservableObject {
             WorkspaceSaveTracer.capture(
                 metadata: metadata,
                 url: workspaceFileURL(for: workspace),
-                liveUI: liveUISelection,
-                stored: storedSelection,
-                canonical: canonical?.selection,
-                chosenOwner: saveSelection.owner
+                liveUI: capture.liveUISelection,
+                stored: capture.storedSelection,
+                canonical: capture.canonicalSelection,
+                chosenOwner: capture.saveSelection.owner
             )
             #if DEBUG
                 debugSelectionOwnerTraceEvent("save.capture.after", workspace: workspace)
             #endif
-            return snapshot
+            return capture.snapshot
         } else {
             let legacy = collectWorkspaceState()
             updateWorkspaceState(&workspace, with: legacy)

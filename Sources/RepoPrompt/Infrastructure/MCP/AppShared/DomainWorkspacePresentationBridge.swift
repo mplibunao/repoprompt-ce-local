@@ -34,8 +34,18 @@ struct DomainWorkspaceAuthorityClient {
         await store.snapshot()
     }
 
+    func summarySnapshot() async -> DomainWorkspaceSummaryCatalogSnapshot {
+        await store.summarySnapshot()
+    }
+
     func canonicalWorkspaceSnapshot(_ workspaceID: UUID) async -> DomainWorkspaceSnapshot? {
         await store.canonicalWorkspaceSnapshot(workspaceID)
+    }
+
+    /// A registered read overlay when one exists, otherwise the canonical record. Never a baseline
+    /// for a mutation.
+    func workspaceSnapshot(_ workspaceID: UUID) async -> DomainWorkspaceSnapshot? {
+        await store.workspaceSnapshot(workspaceID)
     }
 
     /// Awaited read-registration seam for current app state. Unlike create/replace/save, this is
@@ -76,12 +86,14 @@ struct DomainWorkspaceAuthorityClient {
         _ workspace: WorkspaceModel,
         fileURL: URL,
         expectedWorkspaceRevision: UInt64?,
+        conflictRecoveryPolicy: DomainWorkspaceConflictRecoveryPolicy? = nil,
         operationID: UUID = UUID()
     ) async throws -> DomainCommandOutcome {
         let document = try document(for: workspace, fileURL: fileURL)
         return await executeStable(.init(
             operationID: operationID,
             expectedWorkspaceRevision: expectedWorkspaceRevision,
+            conflictRecoveryPolicy: conflictRecoveryPolicy,
             origin: .appPresentation(windowID: windowID),
             command: .replaceWorkingDocument(document)
         ))
@@ -199,7 +211,7 @@ struct DomainWorkspaceAuthorityClient {
     }
 }
 
-private extension DomainCommandOutcome {
+extension DomainCommandOutcome {
     var isSuccessfulDomainMutation: Bool {
         disposition == .applied || disposition == .unchanged || disposition == .deduplicated
     }
@@ -253,14 +265,21 @@ final class DomainWorkspacePresentationBridge {
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: timeout)
             repeat {
-                if lastPublicationSequence >= publicationSequence { return true }
+                if hasProjected(through: publicationSequence) { return true }
                 do {
                     try await Task.sleep(nanoseconds: 10_000_000)
                 } catch {
                     return false
                 }
             } while clock.now < deadline
-            return lastPublicationSequence >= publicationSequence
+            return hasProjected(through: publicationSequence)
+        }
+
+        /// True once both the models and the summaries reach the sequence. Each event projects its
+        /// summaries after its models.
+        private func hasProjected(through publicationSequence: UInt64) -> Bool {
+            lastPublicationSequence >= publicationSequence
+                && workspaceManager.map { $0.domainSummaryProjectionSequenceForTesting >= publicationSequence } ?? true
         }
 
         func suppressSelfEchoForTesting(_ event: DomainWorkspaceEvent) async -> Bool {
@@ -334,17 +353,30 @@ final class DomainWorkspacePresentationBridge {
             }
         }
         project(initial, force: true)
+        await projectSummaries()
     }
 
     private func consume(_ event: DomainWorkspaceEvent) async {
         guard event.sequence > lastPublicationSequence else { return }
         let gap = lastPublicationSequence != 0 && event.sequence != lastPublicationSequence &+ 1
-        if !gap, await suppressSelfEcho(for: event) { return }
+        if !gap, await suppressSelfEcho(for: event) {
+            await projectSummaries()
+            return
+        }
         let snapshot = await client.snapshot()
         project(
             snapshot,
             force: gap || event.kind == .externalReloaded
         )
+        await projectSummaries()
+    }
+
+    /// Every consumed event refreshes the summaries, the self-echo of this window's own commit
+    /// included, because that commit can rename or restash a tab. The manager drops older sequences.
+    private func projectSummaries() async {
+        let summaries = await client.summarySnapshot()
+        guard !Task.isCancelled else { return }
+        workspaceManager?.applyDomainWorkspaceSummaryProjection(summaries)
     }
 
     /// The originating window already applied its command outcome (revisions + digest) via

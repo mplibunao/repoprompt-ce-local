@@ -606,6 +606,113 @@ final class DomainWorkspaceStorageBoundaryTests: XCTestCase {
         XCTAssertEqual(unflagged.catalogRevision, enforced.catalogRevision)
     }
 
+    func testSummarySubscriptionAndSingleWorkspaceReadBootstrapWithoutWrites() async throws {
+        let fixture = try BoundaryFixture.make()
+        defer { fixture.remove() }
+        let workspaceID = UUID()
+        let composeID = UUID()
+        let agentSessionID = UUID()
+        let chatSessionID = UUID()
+        let stashID = UUID()
+        let stashedID = UUID()
+        let stashedChatSessionID = UUID()
+        let unwrappedStashedID = UUID()
+        let document: [String: Any] = [
+            "id": workspaceID.uuidString,
+            "schemaVersion": 1,
+            "name": "Parked",
+            "repoPaths": [fixture.root.path],
+            "dateModified": 700_000_000.5,
+            "activeComposeTabID": composeID.uuidString,
+            "composeTabs": [[
+                "id": composeID.uuidString,
+                "name": "Plan",
+                "isPinned": true,
+                "activeAgentSessionID": agentSessionID.uuidString,
+                "activeChatSessionID": chatSessionID.uuidString,
+                "selection": ["selectedPaths": ["/tmp/plan.swift"]],
+                "promptText": "draft"
+            ]],
+            "stashedTabs": [
+                [
+                    "id": stashID.uuidString,
+                    "stashedAt": 700_000_100.0,
+                    "tab": [
+                        "id": stashedID.uuidString,
+                        "name": "Fork",
+                        "activeChatSessionID": stashedChatSessionID.uuidString
+                    ]
+                ],
+                // A wrapper with no ID or date, which the app decode rejects. Its pinned tab still
+                // has to be listed so its protection holds.
+                ["tab": ["id": unwrappedStashedID.uuidString, "isPinned": true]]
+            ]
+        ]
+        let bytes = try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
+        let documentURL = fixture.defaultDocumentURL(workspaceID: workspaceID, name: "Parked")
+        try FileManager.default.createDirectory(
+            at: documentURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try bytes.write(to: documentURL)
+        try fixture.writeLegacyIndex([(workspaceID, "Parked", nil)])
+        let workspaceFilesBefore = try contents(of: fixture.workspaceDirectory)
+
+        // Each single-workspace read is the first call on a runtime that was never started, so it
+        // has to wait for bootstrap itself.
+        let singleReads: [(label: String, read: (DomainWorkspaceStore) async -> DomainWorkspaceSnapshot?)] = [
+            ("canonicalWorkspaceSnapshot", { await $0.canonicalWorkspaceSnapshot(workspaceID) }),
+            ("workspaceSnapshot", { await $0.workspaceSnapshot(workspaceID) })
+        ]
+        for (label, read) in singleReads {
+            let runtime = MCPDomainRuntime(configuration: fixture.configuration(enforcing: true))
+            let snapshot = await read(runtime.workspaceStore)
+            _ = await runtime.shutdown()
+            XCTAssertEqual(snapshot?.document.documentBytes, bytes, label)
+        }
+
+        let runtime = MCPDomainRuntime(configuration: fixture.configuration(enforcing: true))
+        let subscription = await runtime.workspaceStore.subscribeSummaries()
+        let canonical = await runtime.workspaceStore.canonicalWorkspaceSnapshot(workspaceID)
+        _ = await runtime.shutdown()
+
+        XCTAssertTrue(subscription.snapshot.isBootstrapped)
+        XCTAssertEqual(subscription.snapshot.workspaces.map(\.workspaceID), [workspaceID])
+        let summary = try XCTUnwrap(subscription.snapshot.workspaces.first)
+        XCTAssertEqual(summary.name, "Parked")
+        XCTAssertEqual(summary.fileURL, documentURL)
+        XCTAssertEqual(summary.contentDigest, DomainContentDigest.sha256(bytes))
+        XCTAssertEqual(summary.activeContextID, composeID)
+        XCTAssertEqual(summary.dateModified, Date(timeIntervalSinceReferenceDate: 700_000_000.5))
+        XCTAssertEqual(summary.lastUsed, .distantPast)
+
+        let compose = try XCTUnwrap(summary.composeTabs.first)
+        XCTAssertEqual(summary.composeTabs.map(\.tabID), [composeID])
+        XCTAssertEqual(compose.location, .composed)
+        XCTAssertEqual(compose.name, "Plan")
+        XCTAssertTrue(compose.isPinned)
+        XCTAssertEqual(compose.activeAgentSessionID, agentSessionID)
+        XCTAssertEqual(compose.activeChatSessionID, chatSessionID)
+        XCTAssertEqual(compose.contentDigest, canonical?.document.metadata.contexts.first?.contentDigest)
+
+        XCTAssertEqual(summary.stashedTabs.map(\.tabID), [stashedID, unwrappedStashedID])
+        XCTAssertEqual(summary.stashedTabs.map(\.location), [.stashed, .stashed])
+        let fork = summary.stashedTabs[0]
+        XCTAssertEqual(fork.name, "Fork")
+        XCTAssertEqual(fork.activeChatSessionID, stashedChatSessionID)
+        XCTAssertEqual(fork.stashID, stashID)
+        XCTAssertEqual(fork.stashedAt, Date(timeIntervalSinceReferenceDate: 700_000_100))
+        let unwrapped = summary.stashedTabs[1]
+        XCTAssertEqual(unwrapped.name, "T1")
+        XCTAssertTrue(unwrapped.isPinned)
+        XCTAssertNil(unwrapped.stashID)
+        XCTAssertNil(unwrapped.stashedAt)
+
+        XCTAssertEqual(try contents(of: fixture.workspaceDirectory), workspaceFilesBefore)
+        XCTAssertNil(fixture.runtimeFile(named: "workspace-catalog.json"))
+        XCTAssertNil(fixture.runtimeFile(named: "\(workspaceID.uuidString).json", in: "working-journals"))
+    }
+
     #if DEBUG
         func testCancellationBeforeWorkingCommitLeavesEveryFileUnchanged() async throws {
             let fixture = try BoundaryFixture.make()

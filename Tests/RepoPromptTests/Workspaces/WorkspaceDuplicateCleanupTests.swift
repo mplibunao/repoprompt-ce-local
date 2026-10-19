@@ -5,44 +5,30 @@ import XCTest
 #if DEBUG
     @MainActor
     final class WorkspaceDuplicateCleanupTests: XCTestCase {
-        private var originalMCPAutoStart = false
-        private var originalStoragePath: String?
-        private var storageRoot: URL!
+        private var fixture: RuntimeBackedWorkspaceFixture!
         private var agentWorkspaceRoot: URL!
         private var chatWorkspaceRoot: URL!
-        private var managers: [WorkspaceManagerViewModel] = []
+
+        private var storageRoot: URL {
+            fixture.storageRoot
+        }
 
         override func setUp() async throws {
             try await super.setUp()
-            originalMCPAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
-            GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-            originalStoragePath = UserDefaults.standard.string(forKey: "GlobalCustomStorageURL")
-            storageRoot = FileManager.default.temporaryDirectory
-                .appendingPathComponent("WorkspaceDuplicateCleanupTests-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+            fixture = try await RuntimeBackedWorkspaceFixture(name: "WorkspaceDuplicateCleanupTests")
             agentWorkspaceRoot = storageRoot.appendingPathComponent("AgentWorkspaces", isDirectory: true)
             chatWorkspaceRoot = storageRoot.appendingPathComponent("ChatWorkspaces", isDirectory: true)
             try FileManager.default.createDirectory(at: agentWorkspaceRoot, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: chatWorkspaceRoot, withIntermediateDirectories: true)
             await AgentSessionDataService.shared.test_setWorkspaceRootOverride(agentWorkspaceRoot)
             await ChatDataService.test_setWorkspaceRootOverride(chatWorkspaceRoot)
-            UserDefaults.standard.set(storageRoot.path, forKey: "GlobalCustomStorageURL")
-            await WorkspaceManagerViewModel.WorkspaceDiskWriter.shared.removeAllForTesting()
         }
 
         override func tearDown() async throws {
-            managers.forEach { $0.prepareForWindowClose() }
-            managers.removeAll()
-            await WorkspaceManagerViewModel.WorkspaceDiskWriter.shared.removeAllForTesting()
+            await fixture.tearDown()
+            fixture = nil
             await AgentSessionDataService.shared.test_setWorkspaceRootOverride(nil)
             await ChatDataService.test_setWorkspaceRootOverride(nil)
-            try? FileManager.default.removeItem(at: storageRoot)
-            if let originalStoragePath {
-                UserDefaults.standard.set(originalStoragePath, forKey: "GlobalCustomStorageURL")
-            } else {
-                UserDefaults.standard.removeObject(forKey: "GlobalCustomStorageURL")
-            }
-            GlobalSettingsStore.shared.setMCPAutoStart(originalMCPAutoStart, commit: false)
             try await super.tearDown()
         }
 
@@ -58,27 +44,11 @@ import XCTest
                 composeTabs: [activeTab, inactiveTab],
                 activeComposeTabID: activeTab.id
             )
-            try writeWorkspace(workspace)
-            try writeLegacyIndex([workspace])
-            let runtime = MCPDomainRuntime(configuration: .init(
-                mode: .app,
-                profileIdentifier: "inactive-selection-\(UUID().uuidString)",
-                storageDirectory: storageRoot.appendingPathComponent("runtime-state", isDirectory: true),
-                workspaceStorageDirectory: storageRoot,
-                eventDirectory: storageRoot.appendingPathComponent("events", isDirectory: true),
-                temporaryDirectory: storageRoot.appendingPathComponent("tmp", isDirectory: true),
-                externalReloadInterval: nil
-            ))
-            try await runtime.start()
-            defer { Task { _ = await runtime.shutdown() } }
-            let client = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -790)
+            try fixture.writeWorkspace(workspace)
+            try fixture.writeLegacyIndex([workspace])
+            let runtime = try await fixture.makeRuntime(profileIdentifier: "inactive-selection")
             let peer = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -791)
-            let manager = makeManager(windowID: -790, domainWorkspaceAuthorityClient: client)
-            await manager.awaitInitialized()
-            let bridge = DomainWorkspacePresentationBridge(workspaceManager: manager, client: client)
-            bridge.start()
-            defer { bridge.stop() }
-            await bridge.awaitInitialProjection()
+            let (manager, bridge) = await fixture.makeProjectedManager(windowID: -790, runtime: runtime)
 
             let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: inactiveTab.id)
             var updatedTab = try XCTUnwrap(manager.composeTab(for: identity))
@@ -87,7 +57,7 @@ import XCTest
             XCTAssertTrue(manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspace.id))
 
             let unrelated = WorkspaceModel(name: "Other", repoPaths: ["/tmp/other"])
-            let outcome = try await peer.create(unrelated, fileURL: workspaceFileURL(for: unrelated))
+            let outcome = try await peer.create(unrelated, fileURL: fixture.workspaceFileURL(for: unrelated))
             XCTAssertEqual(outcome.disposition, .applied)
             let unrelatedSequence = await runtime.workspaceStore.snapshot().publicationSequence
             let unrelatedProjected = await bridge.waitUntilProjected(through: unrelatedSequence)
@@ -147,9 +117,9 @@ import XCTest
                 ],
                 activeComposeTabID: duplicateTabID
             )
-            try writeWorkspace(canonical)
-            try writeWorkspace(duplicate)
-            try writeLegacyIndex([canonical, duplicate])
+            try fixture.writeWorkspace(canonical)
+            try fixture.writeWorkspace(duplicate)
+            try fixture.writeLegacyIndex([canonical, duplicate])
 
             let chatsDirectory = sidecarWorkspaceDirectory(for: duplicate, root: chatWorkspaceRoot)
                 .appendingPathComponent("Chats", isDirectory: true)
@@ -184,17 +154,7 @@ import XCTest
                 itemCount: 7
             )).write(to: agentSidecarURL, options: .atomic)
 
-            let runtime = MCPDomainRuntime(configuration: .init(
-                mode: .app,
-                profileIdentifier: "workspace-duplicate-retirement-\(UUID().uuidString)",
-                storageDirectory: storageRoot.appendingPathComponent("runtime-state", isDirectory: true),
-                workspaceStorageDirectory: storageRoot,
-                eventDirectory: storageRoot.appendingPathComponent("events", isDirectory: true),
-                temporaryDirectory: storageRoot.appendingPathComponent("tmp", isDirectory: true),
-                externalReloadInterval: nil
-            ))
-            try await runtime.start()
-            defer { Task { _ = await runtime.shutdown() } }
+            let runtime = try await fixture.makeRuntime(profileIdentifier: "workspace-duplicate-retirement")
             let bootstrappedSnapshot = await runtime.workspaceStore.snapshot()
             let bootstrappedWorkspaceIDs = Set(bootstrappedSnapshot.workspaces.map(\.document.workspaceID))
             XCTAssertEqual(bootstrappedWorkspaceIDs, Set([canonical.id, duplicate.id]))
@@ -207,7 +167,7 @@ import XCTest
             })
             let materializeOutcome = try await authorityClient.replaceWorking(
                 canonical,
-                fileURL: workspaceFileURL(for: canonical),
+                fileURL: fixture.workspaceFileURL(for: canonical),
                 expectedWorkspaceRevision: canonicalSnapshot.revisions.workingRevision
             )
             XCTAssertTrue(
@@ -216,7 +176,7 @@ import XCTest
                     || materializeOutcome.disposition == .deduplicated
             )
 
-            let manager = makeManager(
+            let manager = fixture.makeManager(
                 windowID: -781,
                 domainWorkspaceAuthorityClient: authorityClient
             )
@@ -311,7 +271,7 @@ import XCTest
 
             // Runtime and the manager bootstrapped both records; now make the retired legacy index
             // stale. Cleanup must re-plan from DomainRuntime rather than making it authoritative.
-            try writeLegacyIndex([canonical])
+            try fixture.writeLegacyIndex([canonical])
 
             XCTAssertEqual(
                 manager.duplicateWorkspaceGroups().count,
@@ -360,7 +320,7 @@ import XCTest
                 manager.workspace(withID: duplicate.id)?.consolidatedIntoWorkspaceID,
                 canonical.id
             )
-            let staleManager = makeManager(windowID: -789)
+            let staleManager = fixture.makeManager(windowID: -789)
             await staleManager.awaitInitialized()
             let staleSwitch = await staleManager.switchWorkspace(
                 to: duplicate,
@@ -449,7 +409,7 @@ import XCTest
             )
             let unrelatedOutcome = try await authorityClient.create(
                 unrelated,
-                fileURL: workspaceFileURL(for: unrelated)
+                fileURL: fixture.workspaceFileURL(for: unrelated)
             )
             XCTAssertEqual(unrelatedOutcome.disposition, .applied)
             let unrelatedProjectionSequence = await (runtime.workspaceStore.snapshot()).publicationSequence
@@ -553,9 +513,9 @@ import XCTest
                 lastUsed: Date(timeIntervalSince1970: 100),
                 selectedMetaPromptIDs: [mergedPromptID]
             )
-            try writeWorkspace(canonical)
-            try writeWorkspace(duplicate)
-            try writeLegacyIndex([canonical, duplicate])
+            try fixture.writeWorkspace(canonical)
+            try fixture.writeWorkspace(duplicate)
+            try fixture.writeLegacyIndex([canonical, duplicate])
 
             let configuration = DomainRuntimeConfiguration(
                 mode: .app,
@@ -579,7 +539,7 @@ import XCTest
 
             let managerClient = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -782)
             let externalClient = DomainWorkspaceAuthorityClient(store: competingRuntime.workspaceStore, windowID: -783)
-            let manager = makeManager(windowID: -782, domainWorkspaceAuthorityClient: managerClient)
+            let manager = fixture.makeManager(windowID: -782, domainWorkspaceAuthorityClient: managerClient)
             manager.setDuplicateCleanupBackupDirectoryForTesting(
                 storageRoot.appendingPathComponent("cleanup-backups", isDirectory: true)
             )
@@ -794,9 +754,9 @@ import XCTest
                 repoPaths: canonical.repoPaths,
                 lastUsed: Date(timeIntervalSince1970: 100)
             )
-            try writeWorkspace(canonical)
-            try writeWorkspace(duplicate)
-            try writeLegacyIndex([canonical, duplicate])
+            try fixture.writeWorkspace(canonical)
+            try fixture.writeWorkspace(duplicate)
+            try fixture.writeLegacyIndex([canonical, duplicate])
 
             let sourceAgentDirectory = sidecarWorkspaceDirectory(for: duplicate, root: agentWorkspaceRoot)
                 .appendingPathComponent("AgentSessions", isDirectory: true)
@@ -817,7 +777,7 @@ import XCTest
                 .appendingPathComponent("ChatSession-\(UUID().uuidString).json")
             try Data("not-json".utf8).write(to: invalidChatURL, options: .atomic)
 
-            let manager = makeManager(windowID: -786)
+            let manager = fixture.makeManager(windowID: -786)
             manager.setDuplicateCleanupBackupDirectoryForTesting(
                 storageRoot.appendingPathComponent("preflight-backups", isDirectory: true)
             )
@@ -894,9 +854,9 @@ import XCTest
                 repoPaths: canonical.repoPaths,
                 lastUsed: Date(timeIntervalSince1970: 100)
             )
-            try writeWorkspace(canonical)
-            try writeWorkspace(duplicate)
-            try writeLegacyIndex([canonical, duplicate])
+            try fixture.writeWorkspace(canonical)
+            try fixture.writeWorkspace(duplicate)
+            try fixture.writeLegacyIndex([canonical, duplicate])
 
             let sourceAgentDirectory = sidecarWorkspaceDirectory(for: duplicate, root: agentWorkspaceRoot)
                 .appendingPathComponent("AgentSessions", isDirectory: true)
@@ -938,7 +898,7 @@ import XCTest
                 options: .atomic
             )
 
-            let manager = makeManager(windowID: -787)
+            let manager = fixture.makeManager(windowID: -787)
             manager.setDuplicateCleanupBackupDirectoryForTesting(
                 storageRoot.appendingPathComponent("rollback-backups", isDirectory: true)
             )
@@ -987,9 +947,9 @@ import XCTest
                 isHiddenInMenus: true,
                 consolidatedIntoWorkspaceID: canonicalID
             )
-            try writeWorkspace(canonical)
-            try writeWorkspace(workspace)
-            try writeLegacyIndex([canonical, workspace])
+            try fixture.writeWorkspace(canonical)
+            try fixture.writeWorkspace(workspace)
+            try fixture.writeLegacyIndex([canonical, workspace])
 
             let configuration = DomainRuntimeConfiguration(
                 mode: .app,
@@ -1069,7 +1029,7 @@ import XCTest
                 store: runtime.workspaceStore,
                 windowID: -787
             )
-            let secondManager = makeManager(
+            let secondManager = fixture.makeManager(
                 windowID: -787,
                 domainWorkspaceAuthorityClient: secondClient
             )
@@ -1117,7 +1077,7 @@ import XCTest
                 store: restartedRuntime.workspaceStore,
                 windowID: -788
             )
-            let restartedManager = makeManager(
+            let restartedManager = fixture.makeManager(
                 windowID: -788,
                 domainWorkspaceAuthorityClient: restartedClient
             )
@@ -1161,7 +1121,7 @@ import XCTest
                 store: restartedRuntime.workspaceStore,
                 windowID: -791
             )
-            let staleActivationManager = makeManager(
+            let staleActivationManager = fixture.makeManager(
                 windowID: -791,
                 domainWorkspaceAuthorityClient: staleActivationClient
             )
@@ -1327,40 +1287,6 @@ import XCTest
             )
         }
 
-        private func writeWorkspace(_ workspace: WorkspaceModel) throws {
-            let fileURL = workspaceFileURL(for: workspace)
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try JSONEncoder().encode(workspace).write(to: fileURL, options: .atomic)
-        }
-
-        private func workspaceFileURL(for workspace: WorkspaceModel) -> URL {
-            storageRoot
-                .appendingPathComponent(
-                    DomainWorkspaceStoragePath.directoryName(name: workspace.name, id: workspace.id),
-                    isDirectory: true
-                )
-                .appendingPathComponent("workspace.json")
-        }
-
-        private func writeLegacyIndex(_ workspaces: [WorkspaceModel]) throws {
-            let entries = workspaces.map {
-                WorkspaceIndexEntry(
-                    id: $0.id,
-                    name: $0.name,
-                    customStoragePath: $0.customStoragePath,
-                    isSystemWorkspace: $0.isSystemWorkspace,
-                    isHiddenInMenus: $0.isHiddenInMenus
-                )
-            }
-            try JSONEncoder().encode(entries).write(
-                to: storageRoot.appendingPathComponent("workspacesIndex.json"),
-                options: .atomic
-            )
-        }
-
         private func legacyIndexEntries() throws -> [WorkspaceIndexEntry] {
             try JSONDecoder().decode(
                 [WorkspaceIndexEntry].self,
@@ -1391,37 +1317,6 @@ import XCTest
                 ],
                 options: [.sortedKeys]
             )
-        }
-
-        private func makeManager(
-            windowID: Int,
-            domainWorkspaceAuthorityClient: DomainWorkspaceAuthorityClient? = nil
-        ) -> WorkspaceManagerViewModel {
-            let keyManager = KeyManager(
-                secureService: SecureKeysService(secureStorage: TestSecureStorageBackend())
-            )
-            let aiQueriesService = AIQueriesService(keyManager: keyManager)
-            let fileManager = WorkspaceFilesViewModel()
-            let apiSettings = APISettingsViewModel(
-                aiQueriesService: aiQueriesService,
-                keyManager: keyManager,
-                loadStoredDataOnInit: false
-            )
-            let prompt = PromptViewModel(
-                fileManager: fileManager,
-                apiSettingsViewModel: apiSettings,
-                windowID: windowID,
-                settingsManager: WindowSettingsManager(windowID: windowID)
-            )
-            let manager = WorkspaceManagerViewModel(
-                fileManager: fileManager,
-                promptViewModel: prompt,
-                domainWorkspaceAuthorityClient: domainWorkspaceAuthorityClient,
-                workspaceActivityCoordinator: WorkspaceActivityCoordinator(),
-                performInitialWorkspaceActivation: false
-            )
-            managers.append(manager)
-            return manager
         }
     }
 

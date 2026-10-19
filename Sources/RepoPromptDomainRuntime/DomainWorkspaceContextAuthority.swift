@@ -21,6 +21,15 @@ package struct DomainWorkspaceStore {
         await authority.readySubscription()
     }
 
+    package func summarySnapshot() async -> DomainWorkspaceSummaryCatalogSnapshot {
+        await authority.readySummarySnapshot()
+    }
+
+    /// The summary catalog and the event stream, taken together so no event falls between them.
+    package func subscribeSummaries() async -> DomainWorkspaceSummarySubscription {
+        await authority.readySummarySubscription()
+    }
+
     package func execute(_ command: DomainWorkspaceCommandEnvelope) async -> DomainCommandOutcome {
         await authority.execute(command)
     }
@@ -60,13 +69,13 @@ package struct DomainWorkspaceStore {
     }
 
     package func workspaceSnapshot(_ workspaceID: UUID) async -> DomainWorkspaceSnapshot? {
-        await authority.workspaceSnapshot(workspaceID)
+        await authority.readyWorkspaceSnapshot(workspaceID)
     }
 
     /// Returns only persisted command-authority state. Read registrations are routing overlays and
     /// must not influence mutation admission, recovery CAS baselines, or authority health.
     package func canonicalWorkspaceSnapshot(_ workspaceID: UUID) async -> DomainWorkspaceSnapshot? {
-        await authority.canonicalWorkspaceSnapshot(workspaceID)
+        await authority.readyCanonicalWorkspaceSnapshot(workspaceID)
     }
 }
 
@@ -78,11 +87,11 @@ package struct DomainContextStore {
     }
 
     package func snapshot(_ identity: DomainContextIdentity) async -> DomainContextSnapshot? {
-        await authority.contextSnapshot(identity)
+        await authority.readyContextSnapshot(identity)
     }
 
     package func workspaceSnapshot(_ workspaceID: UUID) async -> DomainWorkspaceSnapshot? {
-        await authority.workspaceSnapshot(workspaceID)
+        await authority.readyWorkspaceSnapshot(workspaceID)
     }
 }
 
@@ -257,6 +266,21 @@ actor DomainWorkspaceContextAuthority {
         )
     }
 
+    func summarySnapshot() -> DomainWorkspaceSummaryCatalogSnapshot {
+        DomainWorkspaceSummaryCatalogSnapshot(
+            runtimeIdentity: identity,
+            isBootstrapped: didBootstrap,
+            publicationSequence: publicationSequence,
+            catalogRevision: catalogRevision,
+            health: health,
+            workspaces: records.values.map(makeSummary).sorted {
+                let lhs = $0.name.localizedCaseInsensitiveCompare($1.name)
+                if lhs != .orderedSame { return lhs == .orderedAscending }
+                return $0.workspaceID.uuidString < $1.workspaceID.uuidString
+            }
+        )
+    }
+
     func workspaceSnapshot(_ workspaceID: UUID) -> DomainWorkspaceSnapshot? {
         readRegistrations[workspaceID] ?? records[workspaceID].map(makeSnapshot)
     }
@@ -325,18 +349,44 @@ actor DomainWorkspaceContextAuthority {
 
     func readySubscription() async -> DomainWorkspaceSnapshotSubscription {
         await bootstrap()
-        return subscribe()
+        return DomainWorkspaceSnapshotSubscription(snapshot: snapshot(), events: makeEventStream())
     }
 
-    private func subscribe() -> DomainWorkspaceSnapshotSubscription {
+    func readySummarySnapshot() async -> DomainWorkspaceSummaryCatalogSnapshot {
+        await bootstrap()
+        return summarySnapshot()
+    }
+
+    func readySummarySubscription() async -> DomainWorkspaceSummarySubscription {
+        await bootstrap()
+        return DomainWorkspaceSummarySubscription(snapshot: summarySnapshot(), events: makeEventStream())
+    }
+
+    func readyWorkspaceSnapshot(_ workspaceID: UUID) async -> DomainWorkspaceSnapshot? {
+        await bootstrap()
+        return workspaceSnapshot(workspaceID)
+    }
+
+    func readyCanonicalWorkspaceSnapshot(_ workspaceID: UUID) async -> DomainWorkspaceSnapshot? {
+        await bootstrap()
+        return canonicalWorkspaceSnapshot(workspaceID)
+    }
+
+    func readyContextSnapshot(_ identity: DomainContextIdentity) async -> DomainContextSnapshot? {
+        await bootstrap()
+        return contextSnapshot(identity)
+    }
+
+    /// Registers a subscriber in the same actor turn as the caller's snapshot, so the stream starts
+    /// with the first event after that snapshot.
+    private func makeEventStream() -> AsyncStream<DomainWorkspaceEvent> {
         let token = UUID()
-        let stream = AsyncStream<DomainWorkspaceEvent>(bufferingPolicy: .bufferingNewest(256)) { continuation in
+        return AsyncStream<DomainWorkspaceEvent>(bufferingPolicy: .bufferingNewest(256)) { continuation in
             subscribers[token] = continuation
             continuation.onTermination = { [weak self] _ in
                 Task { await self?.removeSubscriber(token) }
             }
         }
-        return DomainWorkspaceSnapshotSubscription(snapshot: snapshot(), events: stream)
     }
 
     func execute(_ envelope: DomainWorkspaceCommandEnvelope) async -> DomainCommandOutcome {
@@ -2034,6 +2084,10 @@ actor DomainWorkspaceContextAuthority {
             diagnostic: acceptExternal ? "external_conflict_accepted" : "local_conflict_rebased"
         )
         return outcome
+    }
+
+    private func makeSummary(_ record: WorkspaceRecord) -> DomainWorkspaceSummary {
+        DomainWorkspaceSummary(document: record.document, revisions: record.revisions, health: record.health)
     }
 
     private func makeSnapshot(_ record: WorkspaceRecord) -> DomainWorkspaceSnapshot {
