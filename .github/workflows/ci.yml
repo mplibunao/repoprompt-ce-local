@@ -15,8 +15,63 @@ permissions:
   contents: read
 
 jobs:
+  # Classifies the event's changed paths so the macOS jobs can skip a change that touches
+  # only Markdown. A pull request is compared with its base branch, a release candidate with
+  # `main`, and a push to `main` only with what it adds. Guardrails and the secret scan run
+  # on every change. A comparison the job can't make, such as a force-push whose old head is
+  # gone, takes the full code path, and a failure here fails the run.
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      markdown_only: ${{ steps.classify.outputs.markdown_only }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            range="$PR_BASE_SHA...$PR_HEAD_SHA"
+          elif [[ "$GITHUB_REF" == refs/heads/release/* ]]; then
+            # The whole candidate: landing reads the run on its tip, so a Markdown commit
+            # pushed on top of failing code must not skip the tests.
+            range="origin/main...$CURRENT_SHA"
+          elif [[ -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            range="$PUSH_BEFORE_SHA..$CURRENT_SHA"
+          else
+            range=""
+          fi
+          markdown_only=false
+          # Deleted paths and both sides of a rename count. Anything but a nonempty list of
+          # paths ending in lowercase `.md` keeps the full code path, including a git error.
+          if [[ -n "$range" ]] && paths="$(git diff --name-only --no-renames "$range")"; then
+            if [[ -n "$paths" ]] && ! grep -qv '\.md$' <<<"$paths"; then
+              markdown_only=true
+            fi
+          fi
+          echo "Comparison: ${range:-none}; markdown_only=$markdown_only"
+          echo "markdown_only=$markdown_only" >> "$GITHUB_OUTPUT"
+
+  # On a Markdown-only change this job runs only guardrails and the conductor tests, which
+  # check wording in README.md and docs/architecture/developer-daemon.md. Guardrails need
+  # macOS (`xcrun swiftc`), so the job stays there.
   style:
     name: Style
+    needs: changes
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -29,36 +84,45 @@ jobs:
         run: make guardrails
 
       - name: Install Swift style tools
+        if: needs.changes.outputs.markdown_only != 'true'
         run: ./Scripts/install_format_tools.sh install
 
       - name: Run Swift style lint
+        if: needs.changes.outputs.markdown_only != 'true'
         run: make lint
 
       - name: Run conductor tests
         run: make conductor-selftest
 
       - name: Set up Node for pinned Codex CLI
+        if: needs.changes.outputs.markdown_only != 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 24
 
       - name: Install pinned Codex CLI
+        if: needs.changes.outputs.markdown_only != 'true'
         run: npm install --global @openai/codex@0.159.0
 
       - name: Validate Codex app-server schema contract
+        if: needs.changes.outputs.markdown_only != 'true'
         run: make dev-codex-schema-check
 
       - name: Run release workflow tests
+        if: needs.changes.outputs.markdown_only != 'true'
         run: make release-selftest
 
       # Part of Style so each run starts one fewer macOS job. The package has no remote
       # dependencies, so it needs no cache.
       - name: Run provider package tests
+        if: needs.changes.outputs.markdown_only != 'true'
         working-directory: Packages/RepoPromptAgentProviders
         run: swift test
 
   build-and-test:
     name: Build and Test (root shard ${{ matrix.shard }})
+    needs: changes
+    if: needs.changes.outputs.markdown_only != 'true'
     runs-on: macos-26
     timeout-minutes: 45
     strategy:
@@ -109,11 +173,13 @@ jobs:
           path: .build
           key: ${{ steps.root-cache.outputs.cache-primary-key }}
 
-  # Pushes only (main and release/**); pull requests show it as skipped. It stays in this
-  # workflow because a release candidate lands only when the CI run on its tip is green.
+  # Pushes only (main and release/**); pull requests and Markdown-only pushes show it as
+  # skipped. It stays in this workflow because a release candidate lands only when the CI
+  # run on its tip is green.
   sentry-enabled-build:
     name: Sentry-enabled Build
-    if: github.event_name == 'push'
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.markdown_only != 'true'
     runs-on: macos-26
     timeout-minutes: 45
     steps:
