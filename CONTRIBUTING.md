@@ -147,10 +147,12 @@ and checks. These are its steps.
    candidate onto `main`; run the push preflight; require each pull request's
    head to equal the head that was merged; push the tip to `main`. A rejected
    push means `main` moved: the candidate is void, and each retargeted upper
-   layer goes back to its lower branch. After the push, GitHub marks each pull
-   request merged. Comment on each with the candidate name, its tip, and the
-   hosted run, then delete the head branches. The candidate branch stays until
-   the version is promoted.
+   layer goes back to its lower branch. The push starts a `CI` run that
+   confirms the commit already passed on the candidate and stops; the run on
+   the candidate's tip is the landing evidence. After the push, GitHub marks
+   each pull request merged. Comment on each with the candidate name, its tip,
+   and the hosted run, then delete the head branches. The candidate branch
+   stays until the version is promoted.
 5. **Fail.** Fix on the pull request's branch or drop the pull request and
    anything stacked on it, then cut
    rc<N+1> from `origin/main` with the current heads. Step 6 of
@@ -158,7 +160,11 @@ and checks. These are its steps.
 
 New approvals enter the next candidate; MP may abandon an open candidate so the
 next one is cut now. Every `main` tip is a landed candidate, and promotion
-follows [`docs/releasing.md`](docs/releasing.md).
+follows [`docs/releasing.md`](docs/releasing.md). A commit pushed to `main`
+that never passed as a candidate gets the `CI` run a candidate gets. The daily
+cache refresh on `main` builds without running tests and validates nothing.
+[`docs/testing.md`](docs/testing.md) describes the `CI` run on `main` and the
+refresh.
 
 Ports from upstream follow [`docs/porting.md`](docs/porting.md).
 
