@@ -153,16 +153,7 @@ extension MCPServerViewModel {
                 self?.domainRoutingConnectionIDs.remove(connectionID)
                 return
             }
-            let released = await coordinator.unregisterConnection(
-                registration,
-                operationID: UUID()
-            )
-            if released.disposition == .applied || released.disposition == .unchanged {
-                await AppDomainRuntimeComposition.shared.runtime.domainHost.releaseConnection(
-                    connectionID: registration.connectionID,
-                    connectionGeneration: registration.generation
-                )
-            }
+            let released = await Self.releaseDomainRoutingRegistration(registration, coordinator: coordinator)
             if released.disposition != .applied, released.disposition != .unchanged {
                 self?.logger.warning(
                     "Domain routing release rejected: \(released.diagnostic ?? String(describing: released.disposition))"
@@ -170,6 +161,22 @@ extension MCPServerViewModel {
             }
             self?.domainRoutingConnectionIDs.remove(connectionID)
         }
+    }
+
+    /// Unregisters a connection incarnation and, unless the coordinator rejected that, releases
+    /// the connection's domain-host state.
+    nonisolated static func releaseDomainRoutingRegistration(
+        _ registration: DomainConnectionRegistration,
+        coordinator: DomainRoutingCoordinator
+    ) async -> DomainRoutingOutcome {
+        let released = await coordinator.unregisterConnection(registration, operationID: UUID())
+        if released.disposition == .applied || released.disposition == .unchanged {
+            await AppDomainRuntimeComposition.shared.runtime.domainHost.releaseConnection(
+                connectionID: registration.connectionID,
+                connectionGeneration: registration.generation
+            )
+        }
+        return released
     }
 
     /// Decides whether a scoped read may (re)issue `coordinator.bind` for its connection.
@@ -610,16 +617,7 @@ extension MCPServerViewModel {
         let ownedConnectionIDs = domainRoutingConnectionIDs
         domainRoutingConnectionIDs.removeAll()
         for connection in routing.connections where ownedConnectionIDs.contains(connection.registration.connectionID) {
-            let released = await coordinator.unregisterConnection(
-                connection.registration,
-                operationID: UUID()
-            )
-            if released.disposition == .applied || released.disposition == .unchanged {
-                await AppDomainRuntimeComposition.shared.runtime.domainHost.releaseConnection(
-                    connectionID: connection.registration.connectionID,
-                    connectionGeneration: connection.registration.generation
-                )
-            }
+            _ = await Self.releaseDomainRoutingRegistration(connection.registration, coordinator: coordinator)
         }
         _ = await coordinator.unregisterWindow(
             windowID: descriptor.windowID,

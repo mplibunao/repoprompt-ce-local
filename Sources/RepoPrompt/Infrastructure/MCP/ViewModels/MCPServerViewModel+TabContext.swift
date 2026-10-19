@@ -4837,6 +4837,7 @@ extension MCPServerViewModel {
                 fileToolLookupContextCacheByConnectionID.removeValue(forKey: connectionID)
                 pendingFileToolLookupContextResolutionByConnectionID.removeValue(forKey: connectionID)?.task.cancel()
                 tabContextByConnectionID.removeValue(forKey: connectionID)
+                publishDomainRoutingRelease(connectionID: connectionID)
                 presentationWindowByConnection.removeValue(forKey: connectionID)
 
                 if let boundRunID = context.runID,
@@ -4868,6 +4869,10 @@ extension MCPServerViewModel {
                     presentationWindowByConnection.removeValue(forKey: connectionID)
                     tabContextLog("removeTabContext removed deferred mapping connectionID=\(connectionID) runID=\(runID.uuidString)")
                 }
+            } else {
+                // Only connection teardown arrives here without a run. Any tool call registers its
+                // connection with the routing coordinator, bound to a tab in this window or not.
+                publishDomainRoutingRelease(connectionID: connectionID)
             }
         }
 

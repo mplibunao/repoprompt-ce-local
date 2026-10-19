@@ -6452,6 +6452,14 @@ actor ServerNetworkManager {
                 runID: nil
             )
         }
+        if targets.isEmpty {
+            // A closing window leaves `allWindows` before its teardown, so a connection can end with
+            // no window left to release it. Its tool calls registered it with the shared coordinator.
+            let coordinator = AppDomainRuntimeComposition.shared.runtime.routingCoordinator
+            if let registration = try? await coordinator.currentRegistration(connectionID: connectionID) {
+                _ = await MCPServerViewModel.releaseDomainRoutingRegistration(registration, coordinator: coordinator)
+            }
+        }
         if let contextBuilderRunID {
             let isOrderlyPeerEOF = closeContext.reason == MCPTransportTerminalCause.peerEOF.rawValue
                 && closeContext.initiator == .peer
