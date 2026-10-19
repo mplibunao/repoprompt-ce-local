@@ -19,23 +19,46 @@ Work is tracked as issues and pull requests there.
    .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
    ```
 
-4. Commit, then run the `pr-ready` lane while the branch still has no
-   configured upstream, so it validates the whole branch against `main` (the
-   comparison-base procedure in
-   `.agents/skills/rpce-contribution-check/SKILL.md` explains why the order
-   matters):
+4. Commit. A change under `Sources/` or `Packages/` then needs a debug-app
+   run: build and launch the debug app from the branch, exercise the changed
+   behavior through `rpce-cli-debug` or the app itself, and note the commands,
+   what you observed, and the result for the pull request description. Unit
+   tests and `pr-ready` don't replace that run. Validate from a current
+   build. [Debug profile isolation](docs/testing.md#debug-profile-isolation)
+   says why. [`AGENTS.md`](AGENTS.md#commit-preflight) says which app actions
+   need approval.
 
    ```bash
-   git commit
+   make dev-smoke-launch          # builds, launches the debug app, runs the smoke flow
+   rpce-cli-debug -w 1 -e '<the check for this change>'
+   ```
+
+   Next, draft the pull request description. Then run an independent review
+   and a separate refactor pass on the branch, such as an orchestrated
+   workflow's review and refactor gates or sessions started from the prompts in
+   [`review-prompts.md`](.agents/skills/rpce-merge-pr-batch/references/review-prompts.md),
+   which quote the draft. Commit the fixes for what they find through the
+   commit preflight, and repeat the debug-app run when a fix changes the
+   behavior it covered. All this happens before the pull request opens. CI
+   runs on every push to an open pull request, and a push during a run cancels
+   that run and wastes the minutes it already used.
+
+   Then run the `pr-ready` lane while the branch still has no configured
+   upstream, so it validates the whole branch against `main`, fixes included
+   (the comparison-base procedure in
+   `.agents/skills/rpce-contribution-check/SKILL.md` explains why `pr-ready`
+   runs before the first push):
+
+   ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready
    ```
 
 5. Run the push preflight, push the branch, and open a pull request against
-   `main` on `mplibunao/repoprompt-ce-local`, with the `pr-ready` result from
-   step 4 recorded in the description, one type label (`bug`, `port`,
-   `tooling`, `agent-env`, `documentation`, or `cleanup`), and the `area:`
-   labels for the code it touches. Open it ready for review, not as a draft,
-   so the Codex review bot reviews it from the start.
+   `main` on `mplibunao/repoprompt-ce-local`, with the `pr-ready` result and
+   any debug-app run from step 4 recorded in the description, one type label
+   (`bug`, `port`, `tooling`, `agent-env`, `documentation`, or `cleanup`), and
+   the `area:` labels for the code it touches. Open it ready for review, not
+   as a draft, so the Codex review bot reviews it from the start.
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh push
@@ -56,32 +79,12 @@ Work is tracked as issues and pull requests there.
    gh stack link <lower-pr-number> <this-pr-number>
    ```
 
-   A change under `Sources/` or `Packages/` needs a debug-app run before MP
-   reviews it, and its description says that validation is pending until you
-   record the run. Build and launch the debug app from the branch, exercise
-   the changed behavior through `rpce-cli-debug` or the app itself, and record
-   the commands, what you observed, and the result in the description. Unit
-   tests and `pr-ready` do not replace that run. Validate from a current
-   build. [Debug profile isolation](docs/testing.md#debug-profile-isolation)
-   says why. [`AGENTS.md`](AGENTS.md#commit-preflight) says which app actions
-   need approval.
-
-   ```bash
-   make dev-smoke-launch          # builds, launches the debug app, runs the smoke flow
-   rpce-cli-debug -w 1 -e '<the check for this change>'
-   ```
-
-6. Before asking for MP's review, run an independent review and a separate
-   refactor pass on the change, such as an orchestrated workflow's review and
-   refactor gates or sessions started from the prompts in
-   [`review-prompts.md`](.agents/skills/rpce-merge-pr-batch/references/review-prompts.md),
-   and fix what they find. The Codex review bot may also review the pull
-   request. Its review is optional input, never a merge gate:
-   when it does not review, nothing waits for it or asks it to review again.
-   When it posts findings, assess each one: fix the findings that are real
-   defects, reply with the reason for any you decline, resolve each thread,
-   commit the fix through the commit preflight, and push it through the push
-   preflight.
+6. The Codex review bot may review the pull request. Its review is optional
+   input, never a merge gate: when it doesn't review, nothing waits for it or
+   asks it to review again. When it posts findings, assess each one: fix the
+   findings that are real defects, reply with the reason for any you decline,
+   resolve each thread, commit the fixes through the commit preflight, and push
+   them together through the push preflight.
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
