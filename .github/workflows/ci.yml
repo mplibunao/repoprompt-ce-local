@@ -82,12 +82,16 @@ jobs:
           elif [[ "$EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
             # Testing is the safe direction: a failed request, or an answer without such a
             # run, leaves the commit in validation mode. Only stdout decides; a warning gh
-            # writes to stderr must not read as a run.
+            # writes to stderr must not read as a run. The filter checks every field itself
+            # rather than trusting the query to have filtered them.
             query="head_sha=$CURRENT_SHA&status=success&event=push&per_page=100"
+            filter='.workflow_runs[]
+              | select(.head_sha == env.CURRENT_SHA and .event == "push" and .conclusion == "success"
+                and (.head_branch | startswith("release/")))
+              | "\(.head_branch) \(.html_url)"'
             gh_stderr="$RUNNER_TEMP/gh-api-stderr.txt"
             if landed="$(gh api "repos/$REPOSITORY/actions/workflows/ci.yml/runs?$query" \
-                --jq '.workflow_runs[] | select(.head_branch | startswith("release/")) | "\(.head_branch) \(.html_url)"' 2>"$gh_stderr")" \
-                && [[ -n "$landed" ]]; then
+                --jq "$filter" 2>"$gh_stderr")" && [[ -n "$landed" ]]; then
               echo "::notice::Already tested as a release candidate; skipping. Passed on $(head -1 <<<"$landed")"
               mode=landed
             else

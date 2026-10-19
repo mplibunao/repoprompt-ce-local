@@ -160,11 +160,11 @@ and checks. These are its steps.
 
 New approvals enter the next candidate; MP may abandon an open candidate so the
 next one is cut now. Every `main` tip is a landed candidate, and promotion
-follows [`docs/releasing.md`](docs/releasing.md). A push to `main` starts a
-`CI` run that confirms the commit already passed as a release candidate and
-stops; a commit that didn't pass gets a full run. The daily cache refresh on
-`main` builds without running tests and validates nothing.
-[`docs/testing.md`](docs/testing.md) describes both.
+follows [`docs/releasing.md`](docs/releasing.md). A commit pushed to `main`
+that never passed as a candidate gets the `CI` run a candidate gets. The daily
+cache refresh on `main` builds without running tests and validates nothing.
+[`docs/testing.md`](docs/testing.md) describes the `CI` run on `main` and the
+refresh.
 
 Ports from upstream follow [`docs/porting.md`](docs/porting.md).
 
