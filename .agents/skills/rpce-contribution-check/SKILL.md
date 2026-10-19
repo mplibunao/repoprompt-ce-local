@@ -31,7 +31,7 @@ Run the repository-local safety preflight before every commit and push. Read `AG
 
 3. Review the computed current-branch range printed by the script.
 4. Read [references/validation-matrix.md](references/validation-matrix.md) and ensure any required focused, release, smoke, or PR-ready evidence is recorded before pushing.
-5. Push only the intended current branch, and check the GitHub Actions run when the push starts one; a push to `main` starts no `CI` run (`CONTRIBUTING.md`, "Landing").
+5. Push only the intended current branch and check the GitHub Actions run after pushing. On `main`, the run confirms the commit already passed as a release candidate and stops; a commit that didn't pass gets a full run (`CONTRIBUTING.md`, "Landing").
 
 Default push mode validates whitespace, staged-index secrets, guardrails, the remote allowlist, clean worktree state, the current-branch outgoing range, and outgoing-range secrets. It does not run heavyweight lint/test/build/provider lanes.
 

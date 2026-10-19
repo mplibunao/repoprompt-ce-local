@@ -1,17 +1,21 @@
 name: CI
 
-# A validation run, on a pull request or a push to `release/**`, tests the change. A refresh
-# run, on the daily schedule or a `workflow_dispatch` from `main`, builds without testing so
-# the SwiftPM caches that every other run restores stay fresh. A push to `main` starts no run:
-# `main` only fast-forwards to a candidate tip whose run already passed. The `changes` job
-# owns the mode; `run-name` and `concurrency` can't read its outputs, so they test the event
-# themselves. An empty `run-name` leaves a validation run GitHub's default title.
+# A validation run, on a pull request or a push to `release/**`, tests the change. A push to
+# `main` first asks GitHub whether the commit already passed as a release candidate: `main`
+# moves by fast-forwarding to a candidate tip, so that run confirms the earlier result and
+# stops, and a commit that didn't pass, or that the check can't confirm, gets a validation
+# run. A refresh run, on the daily schedule or a `workflow_dispatch` from `main`, builds
+# without testing so the SwiftPM caches that every other run restores stay fresh. The
+# `changes` job owns the mode; `run-name` and `concurrency` can't read its outputs, so they
+# test the event themselves. An empty `run-name` leaves every other run GitHub's default
+# title.
 run-name: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'Cache refresh' || '' }}
 
 on:
   pull_request:
   push:
     branches:
+      - main
       - 'release/**'
   schedule:
     - cron: '17 19 * * *'  # 03:17 Manila
@@ -28,17 +32,23 @@ permissions:
   contents: read
 
 jobs:
-  # Picks the run's mode, then classifies a validation run's changed paths so the macOS jobs
-  # can skip a change that touches only Markdown. A pull request is compared with its base
-  # branch and a release candidate with `main`. Guardrails and the secret scan run on every
-  # validation run. A comparison the job can't make, such as a force-push whose old head is
-  # gone, takes the full code path. A refresh run never counts as Markdown-only, and a
-  # `workflow_dispatch` from any ref but `main` fails here: only a cache saved on the default
-  # branch is visible to every pull request. A failure here fails the run.
+  # Picks the run's mode: `landed` for a push to `main` whose commit already has a successful
+  # run from a push to `release/**`, `cache-refresh` for the schedule and a dispatch, and
+  # `validation` otherwise. A validation run then classifies its changed paths so the macOS
+  # jobs can skip a change that touches only Markdown. A pull request is compared with its
+  # base branch, a release candidate with `main`, and a push to `main` with the commits it
+  # adds. Guardrails and the secret scan run on every validation run. A comparison the job
+  # can't make, such as a force-push whose old head is gone, takes the full code path. A
+  # refresh run never counts as Markdown-only, and a `workflow_dispatch` from any ref but
+  # `main` fails here: only a cache saved on the default branch is visible to every pull
+  # request. A failure here fails the run.
   changes:
     name: Changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     outputs:
       mode: ${{ steps.classify.outputs.mode }}
       markdown_only: ${{ steps.classify.outputs.markdown_only }}
@@ -56,7 +66,10 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mode=validation
@@ -66,8 +79,23 @@ jobs:
               exit 1
             fi
             mode=cache-refresh
+          elif [[ "$EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
+            # Testing is the safe direction: a failed request, or an answer without such a
+            # run, leaves the commit in validation mode. Only stdout decides; a warning gh
+            # writes to stderr must not read as a run.
+            query="head_sha=$CURRENT_SHA&status=success&event=push&per_page=100"
+            gh_stderr="$RUNNER_TEMP/gh-api-stderr.txt"
+            if landed="$(gh api "repos/$REPOSITORY/actions/workflows/ci.yml/runs?$query" \
+                --jq '.workflow_runs[] | select(.head_branch | startswith("release/")) | "\(.head_branch) \(.html_url)"' 2>"$gh_stderr")" \
+                && [[ -n "$landed" ]]; then
+              echo "::notice::Already tested as a release candidate; skipping. Passed on $(head -1 <<<"$landed")"
+              mode=landed
+            else
+              echo "No successful run from a release/** push found for $CURRENT_SHA; testing it. gh api stderr:"
+              cat "$gh_stderr"
+            fi
           fi
-          if [[ "$mode" == "cache-refresh" ]]; then
+          if [[ "$mode" != "validation" ]]; then
             range=""
           elif [[ "$EVENT_NAME" == "pull_request" ]]; then
             range="$PR_BASE_SHA...$PR_HEAD_SHA"
@@ -75,6 +103,8 @@ jobs:
             # The whole candidate: landing reads the run on its tip, so a Markdown commit
             # pushed on top of failing code must not skip the tests.
             range="origin/main...$CURRENT_SHA"
+          elif [[ -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            range="$PUSH_BEFORE_SHA..$CURRENT_SHA"
           else
             range=""
           fi
@@ -148,7 +178,7 @@ jobs:
   build-and-test:
     name: Build and Test
     needs: changes
-    if: needs.changes.outputs.markdown_only != 'true'
+    if: needs.changes.outputs.mode != 'landed' && needs.changes.outputs.markdown_only != 'true'
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -204,13 +234,13 @@ jobs:
           path: .build
           key: ${{ steps.root-cache.outputs.cache-primary-key }}
 
-  # Pushes to release/** and refresh runs; pull requests and Markdown-only pushes show it as
-  # skipped. It stays in this workflow because a release candidate lands only when the CI
-  # run on its tip is green.
+  # Validation pushes and refresh runs; pull requests, Markdown-only pushes, and landed
+  # commits show it as skipped. It stays in this workflow because a release candidate lands
+  # only when the CI run on its tip is green.
   sentry-enabled-build:
     name: Sentry-enabled Build
     needs: changes
-    if: needs.changes.outputs.mode == 'cache-refresh' || (github.event_name == 'push' && needs.changes.outputs.markdown_only != 'true')
+    if: needs.changes.outputs.mode == 'cache-refresh' || (needs.changes.outputs.mode == 'validation' && github.event_name == 'push' && needs.changes.outputs.markdown_only != 'true')
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -257,7 +287,8 @@ jobs:
           path: .build
           key: ${{ steps.sentry-cache.outputs.cache-primary-key }}
 
-  # Validation runs only: a refresh introduces no commits.
+  # Validation runs only: a refresh introduces no commits, and a landed commit was scanned on
+  # its candidate.
   secret-scan:
     name: Secret Scan
     needs: changes
@@ -287,6 +318,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -294,6 +326,8 @@ jobs:
             range="$PR_BASE_SHA..$PR_HEAD_SHA"
           elif [[ "$GITHUB_REF" == refs/heads/release/* ]]; then
             range="origin/main..$CURRENT_SHA"
+          elif [[ -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            range="$PUSH_BEFORE_SHA..$CURRENT_SHA"
           else
             range="$CURRENT_SHA"
           fi
