@@ -45,6 +45,7 @@ Re-implement upstream commit c9778b03 on `port/1003-seeded-publication-watchdog-
 - Evidence: the refactor analysis read the patch from its message and proposed no change. Folding the regression test's separate failure branches would hide their diagnostics, and sharing the guard tests' source loading would diverge from upstream for a small cleanup.
 - Evidence: `make dev-format` left every file as it was, and `make dev-lint` and `make guardrails` passed.
 
+- Evidence (debug app, 2026-10-19 15:06 UTC, clean build of `029d501f7`): in one debug window on a scratch Git repository, two Agent Mode sessions each started with a new app-created worktree, the second after the first one's search. Each session's `read_file` reported "session-bound worktree" scope with the repository root remapped to its own worktree, its `file_search` found the fixture file, and its shell ran in its worktree on its own branch. The second session finished in about 20 s, and the window's settlement snapshot read `0/0/0` afterwards. The worktree startup route is exposed only through the armed worktree-startup benchmark, so whether these publications took the seeded route wasn't observed. Neither session reproduces the deadlock's timing or explains other production stalls.
 ## 2. Descriptor reuse
 
 - Decision: `GitService.makeWorktreeDescriptors` builds each descriptor from its alias-resolution record's normalized record, standardized path URL, and layout, and the function now matches upstream's c9778b03 version byte for byte. The `commonGitDir` fallback takes the first record's layout where it used to take whichever layout a dictionary returned first. Every layout in one repository's worktree list has the same common directory, so the output is the same. Source: approved plan.
@@ -91,3 +92,8 @@ Re-implement upstream commit c9778b03 on `port/1003-seeded-publication-watchdog-
 - Evidence: after the peer-closure fix, all six item 4 tests passed again, and `make dev-format` and `make dev-lint` passed. No run here forces the peer-closure race, so the new catch clause hasn't run.
 - Evidence: the review read the production patch and both test files' changes. Its follow-up, given the catch fix and the test-support helpers' diff, found no defect. Two longer follow-up attempts were cut off by RepoPrompt's inactivity watchdog before any reply, so the follow-up that answered was the short one.
 - Evidence: the refactor analysis, given the production patch, proposed no change. It considered sharing the transport's repeated response-ID filtering and the write bookkeeping that the ordinary and terminal writers both do, and kept upstream's form for both.
+
+## 5. Pull request
+
+- Decision: the banner screenshots stay with the reviewer instead of in the pull request, because the GitHub CLI can't attach images. The pull request describes what they show. Source: orchestrator judgment.
+- Evidence (debug app, 2026-10-19 15:04–15:05 UTC, clean build of `029d501f7`): `make dev-smoke-launch` passed. Its windows-readiness and workspace-switch stages retried while the relaunched app restored window 1, then passed.
