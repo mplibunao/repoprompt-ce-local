@@ -431,6 +431,22 @@ struct WorkspacePathSearchOverlayHistory<Payload>: @unchecked Sendable {
     }
 }
 
+/// The path-index changes of one catalog shard patch, as the shard's patch builder resolved them.
+struct WorkspaceSearchRootPathIndexPatch {
+    /// Removed, inserted, and displaced file IDs.
+    let affectedFileIDs: Set<UUID>
+    /// The inserted entries, in catalog order.
+    let changedEntries: [WorkspaceSearchCatalogEntry]
+    /// The previous and current standardized relative paths of the affected files.
+    let changedRelativePaths: Set<String>
+
+    static let empty = WorkspaceSearchRootPathIndexPatch(
+        affectedFileIDs: [],
+        changedEntries: [],
+        changedRelativePaths: []
+    )
+}
+
 /// Immutable root-local search projection retained by catalog snapshots and active readers.
 ///
 /// Shard patches share one materialized base index and append immutable overlay payloads.
@@ -491,6 +507,10 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
     let rootPath: String
     let entries: [WorkspaceSearchCatalogEntry]
     let buildKind: BuildKind
+    /// Overlay payloads appended to the materialized base since it was built.
+    let overlayPayloadCount: Int
+    /// Affected entry IDs summed over those payloads, counting an entry again for each payload.
+    let overlayMentionCount: Int
 
     private let base: MaterializedBase?
     private let projectedIndex: WorkspaceProjectedPathSearchIndex?
@@ -507,6 +527,8 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         self.rootPath = rootPath
         self.entries = entries
         buildKind = .full
+        overlayPayloadCount = 0
+        overlayMentionCount = 0
         base = MaterializedBase(entries: entries)
         projectedIndex = nil
         overlayHistory = WorkspacePathSearchOverlayHistory()
@@ -520,12 +542,16 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         buildKind: BuildKind,
         base: MaterializedBase,
         overlayHistory: WorkspacePathSearchOverlayHistory<OverlaySegment>,
+        overlayPayloadCount: Int,
+        overlayMentionCount: Int,
         shadowControl: WorkspaceProjectedPathSearchShadowControl?
     ) {
         self.identity = identity
         self.rootPath = rootPath
         self.entries = entries
         self.buildKind = buildKind
+        self.overlayPayloadCount = overlayPayloadCount
+        self.overlayMentionCount = overlayMentionCount
         self.base = base
         projectedIndex = nil
         self.overlayHistory = overlayHistory
@@ -543,6 +569,8 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         self.rootPath = rootPath
         self.entries = entries
         buildKind = .projectedReuse
+        overlayPayloadCount = 0
+        overlayMentionCount = 0
         base = nil
         self.projectedIndex = projectedIndex
         overlayHistory = WorkspacePathSearchOverlayHistory()
@@ -604,7 +632,7 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
     func applyingPatch(
         identity: WorkspaceSearchRootPathIndexIdentity,
         entries: [WorkspaceSearchCatalogEntry],
-        changedFileIDs: Set<UUID>
+        patch: WorkspaceSearchRootPathIndexPatch
     ) -> WorkspaceSearchRootPathIndex {
         guard identity.rootID == self.identity.rootID,
               identity.lifetimeID == self.identity.lifetimeID
@@ -612,7 +640,7 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
             return WorkspaceSearchRootPathIndex(identity: identity, rootPath: rootPath, entries: entries)
         }
 
-        guard !changedFileIDs.isEmpty else {
+        guard !patch.affectedFileIDs.isEmpty else {
             if let projectedIndex {
                 return WorkspaceSearchRootPathIndex(
                     identity: identity,
@@ -631,28 +659,18 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
                 buildKind: .reused,
                 base: base,
                 overlayHistory: overlayHistory,
+                overlayPayloadCount: overlayPayloadCount,
+                overlayMentionCount: overlayMentionCount,
                 shadowControl: shadowControl
             )
         }
 
         if let projectedIndex {
-            var changedRelativePaths = Set<String>()
-            changedRelativePaths.reserveCapacity(changedFileIDs.count * 2)
-            var resolvedFileIDs = Set<UUID>()
-            for previous in self.entries where changedFileIDs.contains(previous.id) {
-                changedRelativePaths.insert(previous.standardizedRelativePath)
-                resolvedFileIDs.insert(previous.id)
-            }
-            for current in entries where changedFileIDs.contains(current.id) {
-                changedRelativePaths.insert(current.standardizedRelativePath)
-                resolvedFileIDs.insert(current.id)
-            }
-            guard resolvedFileIDs == changedFileIDs else {
-                return WorkspaceSearchRootPathIndex(identity: identity, rootPath: rootPath, entries: entries)
-            }
+            // The shard's patch builder resolved every affected ID to an old or new record, so its
+            // paths replace a scan of both entry arrays.
             guard let nextProjectedIndex = projectedIndex.applyingPatch(
                 entries: entries,
-                changedRelativePaths: changedRelativePaths
+                changedRelativePaths: patch.changedRelativePaths
             ) else {
                 return WorkspaceSearchRootPathIndex(identity: identity, rootPath: rootPath, entries: entries)
             }
@@ -668,10 +686,10 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         guard let base else {
             return WorkspaceSearchRootPathIndex(identity: identity, rootPath: rootPath, entries: entries)
         }
-        let segmentEntries = entries.filter { changedFileIDs.contains($0.id) }
+        // Removed and displaced IDs only suppress older results; the segment indexes the changed entries.
         let nextOverlayHistory = overlayHistory.appending(OverlaySegment(
-            entries: segmentEntries,
-            affectedEntryIDs: changedFileIDs
+            entries: patch.changedEntries,
+            affectedEntryIDs: patch.affectedFileIDs
         ))
         return WorkspaceSearchRootPathIndex(
             identity: identity,
@@ -680,9 +698,34 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
             buildKind: .overlay,
             base: base,
             overlayHistory: nextOverlayHistory,
+            overlayPayloadCount: overlayPayloadCount + 1,
+            overlayMentionCount: overlayMentionCount + patch.affectedFileIDs.count,
             shadowControl: nil
         )
     }
+
+    #if DEBUG
+        /// The entries a search can return: each overlay segment, newest first, shadows the entries older
+        /// segments and the base hold for its affected IDs. Visits every entry; for parity checks only.
+        func searchableEntriesForVerification() -> [WorkspaceSearchCatalogEntry] {
+            if let projectedIndex {
+                return projectedIndex.searchableEntriesForVerification()
+            }
+            guard let base else { return [] }
+            var suppressedEntryIDs = Set<UUID>()
+            var searchable: [WorkspaceSearchCatalogEntry] = []
+            overlayHistory.visitNewestFirst { segment in
+                for entry in segment.entries where !suppressedEntryIDs.contains(entry.id) {
+                    searchable.append(entry)
+                }
+                suppressedEntryIDs.formUnion(segment.affectedEntryIDs)
+            }
+            for entry in base.entries where !suppressedEntryIDs.contains(entry.id) {
+                searchable.append(entry)
+            }
+            return searchable
+        }
+    #endif
 
     func search(_ query: String, limit: Int) -> [Candidate] {
         guard limit > 0 else { return [] }
@@ -1310,6 +1353,29 @@ final class WorkspaceProjectedPathSearchIndex: @unchecked Sendable {
         }
         return result
     }
+
+    #if DEBUG
+        /// The entries a search can return: each overlay segment, newest first, shadows the entries older
+        /// segments and the base hold at its affected paths. Visits every entry; for parity checks only.
+        func searchableEntriesForVerification() -> [WorkspaceSearchCatalogEntry] {
+            var suppressedRelativePaths: [AffectedRelativePaths] = []
+            var searchable: [WorkspaceSearchCatalogEntry] = []
+            overlayHistory.visitNewestFirst { segment in
+                for entry in segment.entries
+                    where !Self.contains(entry.standardizedRelativePath, in: suppressedRelativePaths)
+                {
+                    searchable.append(entry)
+                }
+                suppressedRelativePaths.append(segment.affectedRelativePaths)
+            }
+            for case let entry? in targetEntriesByBaseIndex
+                where !Self.contains(entry.standardizedRelativePath, in: suppressedRelativePaths)
+            {
+                searchable.append(entry)
+            }
+            return searchable
+        }
+    #endif
 
     func applyingPatch(
         entries: [WorkspaceSearchCatalogEntry],

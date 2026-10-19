@@ -495,6 +495,60 @@ import RepoPromptShared
                 )
             }
 
+            let catalogBatchSampleLimit: Int
+            // Zero by default, so callers that don't ask for samples get the payload they always had.
+            switch debugBoundedInt(arguments, "catalog_batch_sample_limit", defaultValue: 0, range: 0 ... 128) {
+            case let .value(parsed), let .defaulted(parsed):
+                catalogBatchSampleLimit = parsed
+            case .invalid:
+                return debugDiagnosticsError(
+                    op: op,
+                    code: "invalid_params",
+                    message: "`catalog_batch_sample_limit` must be an integer between 0 and 128."
+                )
+            }
+
+            // Both catalog patch arguments change one window's store before the snapshot.
+            let patchCapOverride: Int??
+            if arguments["catalog_patch_cap_override"] == nil {
+                patchCapOverride = nil
+            } else if case let .value(parsed) = debugBoundedInt(
+                arguments,
+                "catalog_patch_cap_override",
+                defaultValue: 0,
+                range: 0 ... 1_000_000
+            ) {
+                patchCapOverride = .some(parsed == 0 ? nil : parsed)
+            } else {
+                return debugDiagnosticsError(
+                    op: op,
+                    code: "invalid_params",
+                    message: "`catalog_patch_cap_override` must be an integer between 0 and 1000000; 0 restores the release cap."
+                )
+            }
+
+            let patchComparisonMode: WorkspaceFileContextStore.RootCatalogShardPatchComparisonMode?
+            if arguments["catalog_patch_comparison"] == nil {
+                patchComparisonMode = nil
+            } else if let rawMode = debugString(arguments, "catalog_patch_comparison"),
+                      let mode = WorkspaceFileContextStore.RootCatalogShardPatchComparisonMode(rawValue: rawMode)
+            {
+                patchComparisonMode = mode
+            } else {
+                return debugDiagnosticsError(
+                    op: op,
+                    code: "invalid_params",
+                    message: "`catalog_patch_comparison` must be \"on\", \"next\", or \"off\"."
+                )
+            }
+            if patchCapOverride != nil || patchComparisonMode != nil, requestedWindowID == nil {
+                return debugDiagnosticsError(
+                    op: op,
+                    code: "invalid_params",
+                    message: "`catalog_patch_cap_override` and `catalog_patch_comparison` require `window_id`."
+                )
+            }
+
             let targets = await debugReadSearchRuntimeTargets(windowID: requestedWindowID)
             if let requestedWindowID, targets.isEmpty {
                 return debugDiagnosticsError(
@@ -508,6 +562,12 @@ import RepoPromptShared
             var duplicationByPhysicalRoot: [String: DebugPhysicalRootDuplicationAccumulator] = [:]
             windows.reserveCapacity(targets.count)
             for target in targets {
+                if let patchCapOverride {
+                    await target.store.setRootCatalogShardPatchCapOverride(patchCapOverride)
+                }
+                if let patchComparisonMode {
+                    await target.store.setRootCatalogShardPatchComparisonMode(patchComparisonMode)
+                }
                 let snapshots = await target.store.readSearchRootDiagnosticsSnapshot(
                     recentPublicationLimit: recentPublicationLimit
                 )
@@ -537,7 +597,7 @@ import RepoPromptShared
                     "projection_direct_id_lookup_miss_count": target.projection.directIDLookupMissCount,
                     "projection_canonical_resync_count": target.projection.canonicalResyncCount,
                     "ui_index_rebuild": uiIndexRebuildPayload(target.projection),
-                    "store_work": storeWorkPayload(storeWork),
+                    "store_work": storeWorkPayload(storeWork, batchSampleLimit: catalogBatchSampleLimit),
                     "search_rebuild": searchRebuildPayload(searchWork),
                     "read_file_auto_selection": readFileAutoSelectionPayload(target.readFileAutoSelection),
                     "roots": included.map { root in
@@ -635,8 +695,10 @@ import RepoPromptShared
             }
         }
 
+        /// `batchSampleLimit` bounds each root's catalog batch samples, newest last.
         private func storeWorkPayload(
-            _ snapshot: WorkspaceFileContextStore.StoreWorkDiagnosticsSnapshot
+            _ snapshot: WorkspaceFileContextStore.StoreWorkDiagnosticsSnapshot,
+            batchSampleLimit: Int
         ) -> [String: Any] {
             [
                 "invalidations": snapshot.invalidations.map { event in
@@ -657,9 +719,14 @@ import RepoPromptShared
                     "last_file_count": snapshot.catalogRebuild.lastFileCount,
                     "last_root_count": snapshot.catalogRebuild.lastRootCount
                 ],
+                "uncached_authoritative_snapshot_builds": uncachedSnapshotBuildPayload(
+                    snapshot.uncachedAuthoritativeSnapshotBuilds
+                ),
                 "root_catalog_shards": [
                     "live_generation_cap_per_root": snapshot.rootCatalogShards.liveGenerationCapPerRoot,
                     "max_patch_logical_mutation_count": snapshot.rootCatalogShards.maxPatchLogicalMutationCount,
+                    "patch_cap_override": Self.debugOptionalValue(snapshot.rootCatalogShards.patchCapOverride),
+                    "patch_comparison_mode": snapshot.rootCatalogShards.patchComparisonMode.rawValue,
                     "published_shard_count": snapshot.rootCatalogShards.publishedShardCount,
                     "total_build_count": snapshot.rootCatalogShards.totalBuildCount,
                     "total_backstop_count": snapshot.rootCatalogShards.totalBackstopCount,
@@ -683,11 +750,102 @@ import RepoPromptShared
                             "last_applied_index_generation": root.lastAppliedIndexGeneration.map { $0 as Any } ?? NSNull(),
                             "delta_state_dirty": root.deltaStateDirty,
                             "backstop_count": root.backstopCount,
-                            "max_live_generation_count": root.maxLiveGenerationCount
+                            "max_live_generation_count": root.maxLiveGenerationCount,
+                            "batches": catalogBatchHistoryPayload(root.batches, sampleLimit: batchSampleLimit)
                         ]
                     }
                 ]
             ]
+        }
+
+        private func uncachedSnapshotBuildPayload(
+            _ snapshot: WorkspaceFileContextStore.UncachedAuthoritativeSnapshotBuildDebugSnapshot
+        ) -> [String: Any] {
+            [
+                "count": snapshot.buildCount,
+                "file_count": snapshot.fileCount,
+                "total_us": snapshot.totalNanoseconds / 1000,
+                "estimated_bytes": snapshot.estimatedByteCount,
+                "last_file_count": snapshot.lastFileCount,
+                "last_us": snapshot.lastNanoseconds / 1000,
+                "last_estimated_bytes": snapshot.lastEstimatedByteCount,
+                "roots": snapshot.roots.map { root in
+                    [
+                        "root_id": root.rootID.uuidString,
+                        "count": root.buildCount,
+                        "file_count": root.fileCount,
+                        "estimated_bytes": root.estimatedByteCount
+                    ]
+                }
+            ]
+        }
+
+        private func catalogBatchHistoryPayload(
+            _ history: WorkspaceFileContextStore.RootCatalogShardBatchDebugHistory,
+            sampleLimit: Int
+        ) -> [String: Any] {
+            [
+                "retained_sample_limit": history.retainedSampleLimit,
+                "total_observed_count": history.totalObservedSampleCount,
+                "dropped_count": history.droppedSampleCount,
+                "outcome_counts": Dictionary(uniqueKeysWithValues: history.outcomeCounts.map {
+                    ($0.key.rawValue, $0.value)
+                }),
+                "samples": history.samples.suffix(sampleLimit).map(catalogBatchSamplePayload)
+            ]
+        }
+
+        private func catalogBatchSamplePayload(
+            _ sample: WorkspaceFileContextStore.RootCatalogShardBatchDebugSample
+        ) -> [String: Any] {
+            var payload: [String: Any] = [
+                "root_lifetime_id": Self.debugOptionalValue(sample.rootLifetimeID?.uuidString),
+                "applied_index_generation": sample.appliedIndexGeneration,
+                "topology_generation": Self.debugOptionalValue(sample.topologyGeneration),
+                "service_publication_sequence": Self.debugOptionalValue(sample.servicePublicationSequence),
+                "root_file_count": sample.rootFileCount,
+                "root_folder_count": sample.rootFolderCount,
+                "input_size": sample.inputSize,
+                "no_op_count": sample.noOpCount,
+                "effective_edit_count": Self.debugOptionalValue(sample.effectiveEditCount),
+                "outcome": Self.debugOptionalValue(sample.outcome?.rawValue),
+                "fallback_reason": Self.debugOptionalValue(sample.fallbackReason?.rawValue),
+                "normalize_us": sample.normalizeNanoseconds / 1000,
+                "locate_us": sample.locateNanoseconds / 1000,
+                "derive_us": sample.deriveNanoseconds / 1000,
+                "merge_copy_us": sample.mergeCopyNanoseconds / 1000,
+                "path_index_segment_us": sample.pathIndexSegmentNanoseconds / 1000,
+                "publish_us": sample.publishNanoseconds / 1000,
+                "rebuild_us": sample.rebuildNanoseconds / 1000,
+                "canonical_apply_us": Self.debugOptionalValue(sample.canonicalApplyNanoseconds.map { $0 / 1000 }),
+                "mutation_pass_us": Self.debugOptionalValue(sample.mutationPassNanoseconds.map { $0 / 1000 }),
+                "merge_copied_element_count": sample.mergeCopiedElementCount,
+                "derived_entry_count": sample.derivedEntryCount,
+                "projection_classification_count": sample.projectionClassificationCount,
+                "overlay_payload_count": sample.overlayPayloadCount,
+                "overlay_mention_count": sample.overlayMentionCount
+            ]
+            if let ingress = sample.ingress {
+                payload["ingress"] = [
+                    "added_file_count": ingress.addedFileCount,
+                    "added_file_us": ingress.addedFileNanoseconds / 1000,
+                    "max_added_file_us": ingress.maxAddedFileNanoseconds / 1000,
+                    "removed_file_count": ingress.removedFileCount,
+                    "removed_file_us": ingress.removedFileNanoseconds / 1000,
+                    "max_removed_file_us": ingress.maxRemovedFileNanoseconds / 1000,
+                    "removed_folder_count": ingress.removedFolderCount,
+                    "removed_folder_record_count": ingress.removedFolderRecordCount,
+                    "removed_folder_us": ingress.removedFolderNanoseconds / 1000
+                ]
+            }
+            if let comparison = sample.comparison {
+                payload["comparison"] = [
+                    "rebuild_us": comparison.rebuildNanoseconds / 1000,
+                    "parity_us": comparison.parityNanoseconds / 1000,
+                    "parity_matched": comparison.parityMatched
+                ]
+            }
+            return payload
         }
 
         private func searchRebuildPayload(

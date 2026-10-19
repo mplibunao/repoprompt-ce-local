@@ -110,6 +110,86 @@ final class PathSearchIndexRecoveryTests: XCTestCase {
         assertMappings(retainedHits, in: index, paths: paths, expectedFilenames: expectedFilenames)
     }
 
+    func testProjectedPatchWithExplicitPathsMatchesFreshIndex() async throws {
+        struct Match: Equatable {
+            let entry: WorkspaceSearchCatalogEntry
+            let score: Int32
+            let tieBreakKey: String
+        }
+        let root = WorkspaceRootRecord(name: "ProjectedRoot", fullPath: "/Volumes/ProjectedRoot")
+        func entry(_ relativePath: String) -> WorkspaceSearchCatalogEntry {
+            WorkspaceSearchCatalogEntry(
+                file: WorkspaceFileRecord(
+                    rootID: root.id,
+                    name: (relativePath as NSString).lastPathComponent,
+                    relativePath: relativePath,
+                    fullPath: root.standardizedFullPath + "/" + relativePath,
+                    parentFolderID: nil
+                ),
+                root: root
+            )
+        }
+        func catalogOrdered(_ entries: [WorkspaceSearchCatalogEntry]) -> [WorkspaceSearchCatalogEntry] {
+            entries.sorted(by: WorkspaceFileContextStore.searchCatalogEntryPrecedes)
+        }
+
+        let basePaths = [
+            "Docs/Guide.md",
+            "Docs/Notes.md",
+            "Sources/Alpha.swift",
+            "Sources/Beta.swift",
+            "Sources/Gamma.swift"
+        ]
+        let snapshot = try await WorkspaceRootSeedTestSupport.snapshot(paths: basePaths.map { ($0, "100644") })
+        let baseEntries = catalogOrdered(basePaths.map(entry))
+        let identity = WorkspaceSearchRootPathIndexIdentity(rootID: root.id, lifetimeID: UUID(), topologyGeneration: 1)
+        let projected = try XCTUnwrap(WorkspaceSearchRootPathIndex(
+            identity: identity,
+            root: root,
+            projectedSnapshot: snapshot,
+            changedRelativeFilePaths: [],
+            tombstonedBaseRelativeFilePaths: [],
+            entries: baseEntries
+        ))
+
+        // One batch removes a base file, adds a file, and gives a base path a new ID, which displaces
+        // the base entry at that path.
+        let removed = try XCTUnwrap(baseEntries.first { $0.standardizedRelativePath == "Docs/Notes.md" })
+        let displaced = try XCTUnwrap(baseEntries.first { $0.standardizedRelativePath == "Sources/Beta.swift" })
+        let replacement = entry("Sources/Beta.swift")
+        let added = entry("Sources/Delta.swift")
+        let patchedEntries = catalogOrdered(
+            baseEntries.filter { $0.id != removed.id && $0.id != displaced.id } + [replacement, added]
+        )
+        let patched = projected.applyingPatch(
+            identity: WorkspaceSearchRootPathIndexIdentity(
+                rootID: identity.rootID,
+                lifetimeID: identity.lifetimeID,
+                topologyGeneration: identity.topologyGeneration + 1
+            ),
+            entries: patchedEntries,
+            patch: WorkspaceSearchRootPathIndexPatch(
+                affectedFileIDs: [removed.id, displaced.id, replacement.id, added.id],
+                changedEntries: catalogOrdered([replacement, added]),
+                changedRelativePaths: ["Docs/Notes.md", "Sources/Beta.swift", "Sources/Delta.swift"]
+            )
+        )
+        XCTAssertEqual(patched.buildKind, .projectedReuse)
+
+        let fresh = WorkspaceSearchRootPathIndex(
+            identity: identity,
+            rootPath: root.standardizedFullPath,
+            entries: patchedEntries
+        )
+        for query in ["Beta", "Notes", "Delta", "Guide", "*.swift", "Sources"] {
+            XCTAssertEqual(
+                patched.search(query, limit: 20).map { Match(entry: $0.entry, score: $0.score, tieBreakKey: $0.tieBreakKey) },
+                fresh.search(query, limit: 20).map { Match(entry: $0.entry, score: $0.score, tieBreakKey: $0.tieBreakKey) },
+                query
+            )
+        }
+    }
+
     private func assertMappings(
         _ candidates: [PathSearchIndex.Candidate],
         in index: PathSearchIndex,

@@ -628,6 +628,268 @@ final class WorkspaceSearchServiceTests: XCTestCase {
         XCTAssertEqual(rootQualifiedResult.results.map(\.standardizedRelativePath), ["Sources/BetaTarget.swift"])
     }
 
+    func testCatalogBatchPatchMatchesAuthoritativeCatalog() async throws {
+        // Seeded session-worktree roots publish a projected path index, so every shape runs on both kinds.
+        for usesProjectedPathIndex in [false, true] {
+            try await assertCatalogBatchShapesMatchAuthoritative(usesProjectedPathIndex: usesProjectedPathIndex)
+        }
+    }
+
+    private func assertCatalogBatchShapesMatchAuthoritative(usesProjectedPathIndex: Bool) async throws {
+        let variant = usesProjectedPathIndex ? "projected path index" : "materialized path index"
+        let rootURL = try makeTemporaryRoot(name: "CatalogBatchPatchParity")
+        for path in [
+            "Sources/Feature/Deep/Existing.swift",
+            "Sources/Feature/Deep/Sibling.md",
+            "Sources/Replace.swift",
+            "Sources/Modified.swift",
+            "Docs/Old/Notes.md",
+            "Docs/Old/Nested/Deeper.swift",
+            "Docs/Gone/Gone.swift",
+            "Docs/Keep.md"
+        ] {
+            try write(path, to: rootURL.appendingPathComponent(path))
+        }
+        let store = WorkspaceFileContextStore()
+        let root = try await store.loadRoot(path: rootURL.path)
+        _ = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
+        if usesProjectedPathIndex {
+            let paths = await store.files(inRoot: root.id).map(\.standardizedRelativePath)
+            let snapshot = try await WorkspaceRootSeedTestSupport.snapshot(paths: paths.map { ($0, "100644") })
+            let installed = await store.installProjectedPathIndexForTesting(rootID: root.id, snapshot: snapshot)
+            XCTAssertTrue(installed, variant)
+        }
+        await store.setRootCatalogShardPatchCapOverride(64)
+        await store.setRootCatalogShardPatchComparisonMode(.on)
+        let queries = ["Added", "Inner", "Deeper", "Notes", "Replace", "Mixed", "Keep", "Gone", "*.swift"]
+
+        struct BatchShape {
+            let label: String
+            let effectiveEditCount: Int
+            let noOpCount: Int
+            let sharesRecordArrays: Bool
+            let apply: () async throws -> Void
+        }
+        let shapes = [
+            // Each added file republishes its three ancestor folders, so nine folder upserts collapse to no-ops.
+            BatchShape(
+                label: "multi-file add in one nested folder",
+                effectiveEditCount: 3,
+                noOpCount: 9,
+                sharesRecordArrays: false
+            ) {
+                let paths = [
+                    "Sources/Feature/Deep/AddedA.swift",
+                    "Sources/Feature/Deep/AddedB.swift",
+                    "Sources/Feature/Deep/AddedC.md"
+                ]
+                for path in paths {
+                    try self.write(path, to: rootURL.appendingPathComponent(path))
+                }
+                await store.replayObservedFileSystemDeltas(rootID: root.id, deltas: paths.map { .fileAdded($0) })
+            },
+            BatchShape(label: "files in new nested folders", effectiveEditCount: 4, noOpCount: 6, sharesRecordArrays: false) {
+                let paths = ["Sources/NewArea/Inner/One.swift", "Sources/NewArea/Inner/Two.swift"]
+                for path in paths {
+                    try self.write(path, to: rootURL.appendingPathComponent(path))
+                }
+                await store.replayObservedFileSystemDeltas(rootID: root.id, deltas: paths.map { .fileAdded($0) })
+            },
+            BatchShape(label: "folder removal with descendants", effectiveEditCount: 4, noOpCount: 0, sharesRecordArrays: false) {
+                try FileManager.default.removeItem(at: rootURL.appendingPathComponent("Docs/Old"))
+                await store.replayObservedFileSystemDeltas(rootID: root.id, deltas: [.folderRemoved("Docs/Old")])
+            },
+            // The store never rewrites a record under its ID, so modifications match the shard's records.
+            BatchShape(label: "modifications", effectiveEditCount: 0, noOpCount: 3, sharesRecordArrays: true) {
+                await store.replayObservedFileSystemDeltas(rootID: root.id, deltas: [
+                    .fileModified("Sources/Modified.swift", nil),
+                    .fileModified("Sources/Feature/Deep/Existing.swift", nil),
+                    .folderModified("Sources/Feature/Deep", nil)
+                ])
+            },
+            BatchShape(label: "republished add", effectiveEditCount: 0, noOpCount: 2, sharesRecordArrays: true) {
+                await store.replayObservedFileSystemDeltas(rootID: root.id, deltas: [.fileAdded("Sources/Modified.swift")])
+            },
+            // The store never reuses a path's ID after a removal, so the shard is held through the
+            // removal and the re-add, and then receives the re-add alone.
+            BatchShape(label: "same-path replacement", effectiveEditCount: 2, noOpCount: 1, sharesRecordArrays: false) {
+                let url = rootURL.appendingPathComponent("Sources/Replace.swift")
+                await store.holdRootCatalogShardBatchesForTesting(rootID: root.id)
+                try FileManager.default.removeItem(at: url)
+                await store.replayObservedFileSystemDeltas(rootID: root.id, deltas: [.fileRemoved("Sources/Replace.swift")])
+                try self.write("replaced", to: url)
+                await store.replayObservedFileSystemDeltas(rootID: root.id, deltas: [.fileAdded("Sources/Replace.swift")])
+                let held = await store.takeHeldRootCatalogShardBatchesForTesting(rootID: root.id)
+                XCTAssertEqual(held.count, 2)
+                let readd = try XCTUnwrap(held.last)
+                let staged = await store.applyAppliedIndexEventToStagedRootCatalogShardForTesting(readd)
+                XCTAssertTrue(staged)
+            },
+            BatchShape(label: "mixed", effectiveEditCount: 4, noOpCount: 4, sharesRecordArrays: false) {
+                try self.write("mixed", to: rootURL.appendingPathComponent("Sources/Feature/Deep/Mixed.swift"))
+                try FileManager.default.removeItem(at: rootURL.appendingPathComponent("Docs/Keep.md"))
+                try FileManager.default.removeItem(at: rootURL.appendingPathComponent("Docs/Gone"))
+                await store.replayObservedFileSystemDeltas(rootID: root.id, deltas: [
+                    .fileAdded("Sources/Feature/Deep/Mixed.swift"),
+                    .fileRemoved("Docs/Keep.md"),
+                    .folderRemoved("Docs/Gone"),
+                    .fileModified("Sources/Modified.swift", nil)
+                ])
+            }
+        ]
+
+        for shape in shapes {
+            let label = "\(variant): \(shape.label)"
+            let before = try await catalogShardDebugRoot(store, rootID: root.id)
+            let previousContents = await store.rootCatalogShardContentsForTesting(rootID: root.id)
+            try await shape.apply()
+
+            let after = try await catalogShardDebugRoot(store, rootID: root.id)
+            XCTAssertEqual(after.batches.totalObservedSampleCount, before.batches.totalObservedSampleCount + 1, label)
+            let sample = try XCTUnwrap(after.batches.samples.last, label)
+            XCTAssertEqual(sample.outcome, .patched, label)
+            XCTAssertNil(sample.fallbackReason, label)
+            XCTAssertEqual(sample.effectiveEditCount, shape.effectiveEditCount, label)
+            XCTAssertEqual(sample.noOpCount, shape.noOpCount, label)
+            XCTAssertEqual(sample.comparison?.parityMatched, true, label)
+            XCTAssertEqual(after.patchCount, before.patchCount + 1, label)
+            XCTAssertEqual(after.authoritativeRebuildCount, before.authoritativeRebuildCount, label)
+            XCTAssertEqual(after.fallbackCount, before.fallbackCount, label)
+            // A full path-index build would mean the patch fell back to rebuilding the index.
+            XCTAssertEqual(after.pathIndexBuildCount, before.pathIndexBuildCount, label)
+            XCTAssertEqual(after.lastAppliedIndexGeneration, sample.appliedIndexGeneration, label)
+
+            let published = await store.rootCatalogShardContentsForTesting(rootID: root.id, pathQueries: queries)
+            let authoritative = await store.authoritativeRootCatalogShardContentsForTesting(
+                rootID: root.id,
+                pathQueries: queries
+            )
+            XCTAssertNotNil(published?.pathMatches, label)
+            XCTAssertEqual(published?.projectionIndexResolvesEveryFile, true, label)
+            XCTAssertEqual(published, authoritative, label)
+            if shape.sharesRecordArrays {
+                let previous = try XCTUnwrap(previousContents, label)
+                let current = try XCTUnwrap(published, label)
+                XCTAssertEqual(sample.mergeCopiedElementCount, 0, label)
+                XCTAssertTrue(Self.sharesStorage(previous.files, current.files), label)
+                XCTAssertTrue(Self.sharesStorage(previous.entries, current.entries), label)
+                XCTAssertTrue(Self.sharesStorage(previous.folders, current.folders), label)
+            }
+        }
+    }
+
+    func testInvalidCatalogBatchFallsBackWithoutPartialPublication() async throws {
+        let rootURL = try makeTemporaryRoot(name: "CatalogBatchPatchFallback")
+        for path in ["Sources/Alpha.swift", "Sources/Beta.swift", "Docs/Guide.md"] {
+            try write(path, to: rootURL.appendingPathComponent(path))
+        }
+        let store = WorkspaceFileContextStore()
+        let root = try await store.loadRoot(path: rootURL.path)
+        _ = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
+        await store.setRootCatalogShardPatchCapOverride(64)
+        let files = await store.files(inRoot: root.id)
+        let alpha = try XCTUnwrap(files.first { $0.standardizedRelativePath == "Sources/Alpha.swift" })
+        let beta = try XCTUnwrap(files.first { $0.standardizedRelativePath == "Sources/Beta.swift" })
+        // The store holds one record per ID and never moves an ID to another path, so this record,
+        // alpha's ID at another path, isn't the store's.
+        let alphaElsewhere = WorkspaceFileRecord(
+            id: alpha.id,
+            rootID: root.id,
+            name: alpha.name,
+            relativePath: "Sources/Moved/Alpha.swift",
+            fullPath: rootURL.appendingPathComponent("Sources/Moved/Alpha.swift").path,
+            parentFolderID: alpha.parentFolderID
+        )
+
+        struct InvalidBatch {
+            let label: String
+            let reason: WorkspaceFileContextStore.RootCatalogShardFallbackReason
+            let stagedRoot: WorkspaceRootRecord?
+            let event: (UInt64) -> WorkspaceAppliedIndexBatchEvent
+        }
+        let batches = [
+            // Conflicting records under one ID, and an ID the shard holds at another path, both stop at
+            // the guard that every upsert is the store's current record.
+            InvalidBatch(
+                label: "same-ID upserts, one of them at another path",
+                reason: .patchApplicationBackstop,
+                stagedRoot: nil
+            ) {
+                WorkspaceAppliedIndexBatchEvent(
+                    rootID: root.id,
+                    rootPath: root.standardizedFullPath,
+                    generation: $0,
+                    upsertedFiles: [alpha, alphaElsewhere]
+                )
+            },
+            InvalidBatch(label: "a removed ID without its path", reason: .patchApplicationBackstop, stagedRoot: nil) {
+                WorkspaceAppliedIndexBatchEvent(
+                    rootID: root.id,
+                    rootPath: root.standardizedFullPath,
+                    generation: $0,
+                    removedFileIDs: [beta.id]
+                )
+            },
+            InvalidBatch(
+                label: "a changed root record",
+                reason: .unsafeOrAmbiguousBatch,
+                stagedRoot: WorkspaceRootRecord(id: root.id, name: "RenamedRoot", fullPath: root.fullPath, kind: root.kind)
+            ) {
+                WorkspaceAppliedIndexBatchEvent(
+                    rootID: root.id,
+                    rootPath: root.standardizedFullPath,
+                    generation: $0,
+                    upsertedFiles: [alpha]
+                )
+            }
+        ]
+
+        for batch in batches {
+            let before = try await catalogShardDebugRoot(store, rootID: root.id)
+            let generation = try XCTUnwrap(before.lastAppliedIndexGeneration, batch.label) + 1
+            let staged = await store.applyAppliedIndexEventToStagedRootCatalogShardForTesting(
+                batch.event(generation),
+                stagedRoot: batch.stagedRoot
+            )
+            XCTAssertTrue(staged, batch.label)
+
+            let after = try await catalogShardDebugRoot(store, rootID: root.id)
+            XCTAssertEqual(
+                after.fallbackReasonCounts[batch.reason, default: 0],
+                before.fallbackReasonCounts[batch.reason, default: 0] + 1,
+                batch.label
+            )
+            XCTAssertEqual(after.patchCount, before.patchCount, batch.label)
+            XCTAssertEqual(after.authoritativeRebuildCount, before.authoritativeRebuildCount + 1, batch.label)
+            XCTAssertEqual(after.lastAppliedIndexGeneration, generation, batch.label)
+            let sample = try XCTUnwrap(after.batches.samples.last, batch.label)
+            XCTAssertEqual(sample.outcome, .rebuilt, batch.label)
+            XCTAssertEqual(sample.fallbackReason, batch.reason, batch.label)
+
+            let published = await store.rootCatalogShardContentsForTesting(rootID: root.id, pathQueries: ["Alpha", "Beta"])
+            let authoritative = await store.authoritativeRootCatalogShardContentsForTesting(
+                rootID: root.id,
+                pathQueries: ["Alpha", "Beta"]
+            )
+            XCTAssertNotNil(published, batch.label)
+            XCTAssertEqual(published, authoritative, batch.label)
+        }
+    }
+
+    private func catalogShardDebugRoot(
+        _ store: WorkspaceFileContextStore,
+        rootID: UUID
+    ) async throws -> WorkspaceFileContextStore.RootCatalogShardGenerationDebugSnapshot {
+        let work = await store.storeWorkDiagnosticsSnapshot()
+        return try XCTUnwrap(work.rootCatalogShards.roots.first { $0.rootID == rootID })
+    }
+
+    private static func sharesStorage<Element>(_ lhs: [Element], _ rhs: [Element]) -> Bool {
+        lhs.withUnsafeBufferPointer { lhsBuffer in
+            rhs.withUnsafeBufferPointer { rhsBuffer in lhsBuffer.baseAddress == rhsBuffer.baseAddress }
+        }
+    }
+
     private func makeTemporaryRoot(name: String) throws -> URL {
         try makeTestDirectory(name: name)
     }
