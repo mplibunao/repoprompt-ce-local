@@ -19,9 +19,18 @@ Work is tracked as issues and pull requests there.
    .agents/skills/rpce-contribution-check/scripts/preflight.sh commit
    ```
 
-4. Commit, then run the `pr-ready` lane while the branch still has no
-   configured upstream, so it validates the whole branch against `main` (the
-   comparison-base procedure in
+4. Commit, then run an independent review and a separate refactor pass on the
+   branch, such as an orchestrated workflow's review and refactor gates or
+   sessions started from the prompts in
+   [`review-prompts.md`](.agents/skills/rpce-merge-pr-batch/references/review-prompts.md),
+   and commit the fixes for what they find through the commit preflight. Both
+   finish before the pull request opens. CI runs on every push to an open pull
+   request, and a push during a run cancels that run after it has used its
+   runner minutes.
+
+   Then run the `pr-ready` lane while the branch still has no configured
+   upstream, so it validates the whole branch against `main`, fixes included
+   (the comparison-base procedure in
    `.agents/skills/rpce-contribution-check/SKILL.md` explains why the order
    matters):
 
@@ -71,17 +80,12 @@ Work is tracked as issues and pull requests there.
    rpce-cli-debug -w 1 -e '<the check for this change>'
    ```
 
-6. Before asking for MP's review, run an independent review and a separate
-   refactor pass on the change, such as an orchestrated workflow's review and
-   refactor gates or sessions started from the prompts in
-   [`review-prompts.md`](.agents/skills/rpce-merge-pr-batch/references/review-prompts.md),
-   and fix what they find. The Codex review bot may also review the pull
-   request. Its review is optional input, never a merge gate:
-   when it does not review, nothing waits for it or asks it to review again.
-   When it posts findings, assess each one: fix the findings that are real
-   defects, reply with the reason for any you decline, resolve each thread,
-   commit the fix through the commit preflight, and push it through the push
-   preflight.
+6. The Codex review bot may also review the pull request. Its review is
+   optional input, never a merge gate: when it doesn't review, nothing waits
+   for it or asks it to review again. When it posts findings, assess each one:
+   fix the findings that are real defects, reply with the reason for any you
+   decline, resolve each thread, commit the fixes through the commit
+   preflight, and push them together through the push preflight.
 
    ```bash
    .agents/skills/rpce-contribution-check/scripts/preflight.sh commit

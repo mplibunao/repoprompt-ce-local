@@ -9,8 +9,8 @@ Approved pull requests reach `main` only through a release candidate (`CONTRIBUT
 "Landing"). This skill runs that procedure. It lands approved heads as they are: it does not
 review, edit, squash, or rebase them, except that a head which no longer merges cleanly with
 `main` is rebased onto `origin/main` on its own branch per `CONTRIBUTING.md` step 7. Review
-and cleanup passes happen before MP's approval (`CONTRIBUTING.md` step 6, with the prompts in
-[references/review-prompts.md](references/review-prompts.md)).
+and cleanup passes happen before the pull request opens (`CONTRIBUTING.md` step 4, with the
+prompts in [references/review-prompts.md](references/review-prompts.md)).
 
 ## Establish constraints
 
