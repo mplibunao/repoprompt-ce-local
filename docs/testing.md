@@ -51,7 +51,7 @@ make dev-test
 make dev-provider-test
 ```
 
-A focused green run is evidence for the named contract, not a substitute for full-suite or CI coverage when the changed boundary is broad. The hosted root-test workflow discovers one current root XCTest population through `swift test list` and runs every discovered suite in one Build and Test job, each suite in its own XCTest process. Root CI has no contract/integration tier split or contributor-maintained registry. Provider-package tests run inside the Style job.
+A focused green run is evidence for the named contract, not a substitute for full-suite or CI coverage when the changed boundary is broad. The hosted root-test workflow discovers one current root XCTest population through `swift test list` and runs the discovered suites in one Build and Test job, each suite in its own XCTest process. The runner stops at the first failing suite, so a red run doesn't report the suites after it. Root CI has no contract/integration tier split or contributor-maintained registry. Provider-package tests run inside the Style job.
 
 Hosted CI first lists the run's changed paths: a pull request is compared with its base branch, a release candidate with `main`, and a push to `main` only with the commits it adds. When every path ends in lowercase `.md`, the Style job runs only `make guardrails` and `make conductor-selftest`, whose tests check wording in `README.md` and `docs/architecture/developer-daemon.md`. The run skips the Build and Test job and the Sentry-enabled build, and the secret scan runs as usual. When CI can't list the paths, it runs everything.
 
