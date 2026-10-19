@@ -5,6 +5,7 @@ import Foundation
 import RepoPromptCodeMapCore
 #if DEBUG
     import CryptoKit
+    import os
 #endif
 
 enum WorkspaceFileTreePresentationMode: String {
@@ -1255,6 +1256,10 @@ actor WorkspaceFileContextStore {
         private var rootUnloadTerminationDidCompleteHandler: (@Sendable (WorkspaceRootUnloadTerminationDiagnostics) async -> Void)?
         private var appliedIngressDidCaptureWatermarksHandler: (@Sendable ([UUID: UInt64]) async -> Void)?
         private var scopedIngressBarrierWillFlushHandler: (@Sendable (UUID) async -> Void)?
+        /// Lock-protected so the nonisolated timed freshness race can read it without the store actor.
+        private nonisolated let appliedIngressWaitTimeoutOverrideForTesting = OSAllocatedUnfairLock<Duration?>(
+            initialState: nil
+        )
         private enum ExactFileGateTargetForTesting {
             case candidateProbe(
                 purpose: ExactFileCandidatePurpose,
@@ -2046,6 +2051,11 @@ actor WorkspaceFileContextStore {
 
         func setScopedIngressBarrierWillFlushHandler(_ handler: (@Sendable (UUID) async -> Void)?) {
             scopedIngressBarrierWillFlushHandler = handler
+        }
+
+        /// Replaces the bound of every timed freshness wait on this store while set.
+        func setAppliedIngressWaitTimeoutOverrideForTesting(_ timeout: Duration?) {
+            appliedIngressWaitTimeoutOverrideForTesting.withLock { $0 = timeout }
         }
 
         func setExactFileCandidateProbeGateForTesting(
@@ -8949,6 +8959,17 @@ actor WorkspaceFileContextStore {
         await awaitAppliedIngress(rootIDs: rootsForPathLookup(scope: rootScope).map(\.id))
     }
 
+    /// `awaitAppliedIngress(rootScope:)` bounded by `timeout`; throws
+    /// `WorkspaceAppliedIngressWaitError.timedOut` on expiry and `CancellationError` when cancelled.
+    nonisolated func awaitAppliedIngress(
+        rootScope: WorkspaceLookupRootScope,
+        timeout: Duration
+    ) async throws -> [WorkspaceIngressBarrierSample] {
+        try await awaitAppliedIngressWithTimeout(timeout) { [self] in
+            await awaitAppliedIngress(rootScope: rootScope)
+        }
+    }
+
     func awaitAppliedIngress(rootRefs: [WorkspaceRootRef]) async -> [WorkspaceIngressBarrierSample] {
         await awaitAppliedIngress(rootIDs: rootRefs.map(\.id))
     }
@@ -9022,19 +9043,20 @@ actor WorkspaceFileContextStore {
         return await awaitAppliedIngress(rootIDs: [containingRootID])
     }
 
-    func awaitAppliedIngressForExplicitRequest(
+    nonisolated func awaitAppliedIngressForExplicitRequest(
         userPath: String,
         fallbackScope: WorkspaceLookupRootScope,
         timeout: Duration
     ) async throws -> [WorkspaceIngressBarrierSample] {
-        try await awaitAppliedIngressForExplicitRequest(
-            userPath: userPath,
-            fallbackRootRefs: rootRefs(scope: fallbackScope),
-            timeout: timeout
-        )
+        try await awaitAppliedIngressWithTimeout(timeout) { [self] in
+            await awaitAppliedIngressForExplicitRequest(
+                userPath: userPath,
+                fallbackScope: fallbackScope
+            )
+        }
     }
 
-    func awaitAppliedIngressForExplicitRequest(
+    nonisolated func awaitAppliedIngressForExplicitRequest(
         userPath: String,
         fallbackRootRefs: [WorkspaceRootRef],
         timeout: Duration
@@ -9047,11 +9069,20 @@ actor WorkspaceFileContextStore {
         }
     }
 
-    func awaitAppliedIngressForExplicitRequest(
+    nonisolated func awaitAppliedIngressForExplicitRequest(
         _ input: WorkspaceExactFileInput,
         namespace: WorkspaceExactFileNamespace,
         timeout: Duration
     ) async throws -> [WorkspaceIngressBarrierSample] {
+        try await awaitAppliedIngressWithTimeout(timeout) { [self] in
+            await awaitAppliedIngressForExplicitRequest(input, namespace: namespace)
+        }
+    }
+
+    private func awaitAppliedIngressForExplicitRequest(
+        _ input: WorkspaceExactFileInput,
+        namespace: WorkspaceExactFileNamespace
+    ) async -> [WorkspaceIngressBarrierSample] {
         let rootIDs: [UUID] = switch input {
         case let .absolute(path):
             exactAbsoluteTarget(path, namespace: namespace).map { [$0.binding.lookupRoot.id] } ?? []
@@ -9063,19 +9094,29 @@ actor WorkspaceFileContextStore {
         case .relative:
             namespace.lookupRoots.map(\.id)
         }
-        return try await awaitAppliedIngressWithTimeout(timeout) { [self] in
-            await awaitAppliedIngress(rootIDs: rootIDs)
-        }
+        return await awaitAppliedIngress(rootIDs: rootIDs)
     }
 
     /// Awaits one shared freshness barrier for every path participating in a single mutation.
     /// Root IDs are deduplicated before waiting, so a move never spends the preflight timeout
     /// once for its source and again for its destination.
-    func awaitAppliedIngressForExplicitRequests(
+    nonisolated func awaitAppliedIngressForExplicitRequests(
         userPaths: [String],
         fallbackScope: WorkspaceLookupRootScope,
         timeout: Duration
     ) async throws -> [WorkspaceIngressBarrierSample] {
+        try await awaitAppliedIngressWithTimeout(timeout) { [self] in
+            await awaitAppliedIngressForExplicitRequests(
+                userPaths: userPaths,
+                fallbackScope: fallbackScope
+            )
+        }
+    }
+
+    private func awaitAppliedIngressForExplicitRequests(
+        userPaths: [String],
+        fallbackScope: WorkspaceLookupRootScope
+    ) async -> [WorkspaceIngressBarrierSample] {
         let fallbackRootRefs = rootRefs(scope: fallbackScope)
         let rootIDs = userPaths.flatMap { userPath in
             explicitRequestIngressRootIDs(
@@ -9083,9 +9124,7 @@ actor WorkspaceFileContextStore {
                 fallbackRootRefs: fallbackRootRefs
             )
         }
-        return try await awaitAppliedIngressWithTimeout(timeout) { [self] in
-            await awaitAppliedIngress(rootIDs: rootIDs)
-        }
+        return await awaitAppliedIngress(rootIDs: rootIDs)
     }
 
     private func explicitRequestIngressRootIDs(
@@ -9106,10 +9145,18 @@ actor WorkspaceFileContextStore {
         return containingRootID.map { [$0] } ?? []
     }
 
-    private func awaitAppliedIngressWithTimeout(
+    /// Nonisolated, and so are its timed callers: a long ingress apply job can hold the store
+    /// actor past the bound, and neither the timeout nor the caller's cancellation may wait for it.
+    /// Only `operation`, which resolves roots and joins the barrier, runs on the actor.
+    private nonisolated func awaitAppliedIngressWithTimeout(
         _ timeout: Duration,
         operation: @escaping @Sendable () async -> [WorkspaceIngressBarrierSample]
     ) async throws -> [WorkspaceIngressBarrierSample] {
+        #if DEBUG
+            let effectiveTimeout = appliedIngressWaitTimeoutOverrideForTesting.withLock { $0 } ?? timeout
+        #else
+            let effectiveTimeout = timeout
+        #endif
         let race = AppliedIngressTimeoutRace()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -9120,7 +9167,7 @@ actor WorkspaceFileContextStore {
                 }
                 let timeoutTask = Task {
                     do {
-                        try await Task.sleep(for: timeout)
+                        try await Task.sleep(for: effectiveTimeout)
                     } catch {
                         return
                     }
@@ -21714,7 +21761,7 @@ extension WorkspaceAppliedIngressWaitError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .timedOut:
-            "Workspace freshness timed out before pending file-system ingress was applied."
+            "workspace_freshness_timeout: Workspace freshness timed out before pending file-system ingress was applied. Retry after pending file-system ingress settles."
         }
     }
 }

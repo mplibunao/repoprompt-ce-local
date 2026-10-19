@@ -171,6 +171,8 @@ import MCP
                 #else
                     return debugDiagnosticsError(op: op, code: "unavailable", message: "`mcp_read_search_runtime_snapshot` is only available in DEBUG builds.")
                 #endif
+            case "mcp_structure_settlement_snapshot":
+                return await debugMCPStructureSettlementSnapshotPayload(op: op, arguments: arguments)
             case "mcp_read_file_auto_selection_probe_begin":
                 #if DEBUG
                     return await debugMCPReadFileAutoSelectionProbeBeginPayload(op: op, arguments: arguments)

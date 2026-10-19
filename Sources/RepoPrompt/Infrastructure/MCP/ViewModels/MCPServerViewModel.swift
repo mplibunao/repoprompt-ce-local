@@ -6823,7 +6823,7 @@ final class MCPServerViewModel: ObservableObject {
         rootScope: WorkspaceLookupRootScope,
         rootRefs: [WorkspaceRootRef],
         namespace: WorkspaceExactFileNamespace,
-        timeout: Duration = MCPTimeoutPolicy.workspaceFreshnessWaitTimeout
+        timeout: Duration = MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
     ) async throws -> WorkspaceReadableFileResolution {
         try await readableService.awaitFreshnessForExplicitRequest(
             input,

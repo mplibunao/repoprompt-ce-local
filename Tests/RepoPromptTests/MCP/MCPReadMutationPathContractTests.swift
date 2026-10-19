@@ -753,6 +753,171 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             XCTAssertEqual(match.file.id, fixture.match.file.id)
         }
 
+        func testTimedFreshnessWaitsSettleWhileTheStoreActorIsHeld() async throws {
+            let rootURL = try makeTemporaryDirectory(name: "TimedFreshnessHeldStoreActor")
+            let targetURL = rootURL.appendingPathComponent("Target.swift")
+            try write("target token\n", to: targetURL)
+            let store = WorkspaceFileContextStore()
+            let root = try await store.loadRoot(path: rootURL.path)
+            let roots = await store.rootRefs(scope: .visibleWorkspace)
+            let rootRef = try XCTUnwrap(roots.first { $0.id == root.id })
+            let namespace = WorkspaceExactFileNamespace.identity(roots: roots)
+            let targetInput = try WorkspaceExactFileInput.parse(targetURL.path)
+
+            let hold = MCPPathContractStoreActorHold()
+            let tasks = MCPPathContractTaskOwner()
+            let heldIngress = try await MCPPathContractHeldPeerIngress.start(store: store, peerRoot: rootRef)
+            addTeardownBlock {
+                hold.release()
+                await heldIngress.settle(store: store)
+                await tasks.settle()
+                await store.setExactFileDiskPathProbeHandlerForTesting(nil)
+            }
+
+            // Registered behind the held barrier before the actor is held, so cancelling it below
+            // exercises cancellation of a wait in progress.
+            let cancelledWait = tasks.start {
+                try await store.awaitAppliedIngressForExplicitRequest(targetInput, namespace: namespace, timeout: .seconds(60))
+            }
+            try await MCPPathContractAsyncWait.waitUntil("read_file wait registration behind the held barrier", timeout: 10) {
+                let stats = await store.scopedIngressBarrierStatsForTesting(rootID: root.id)
+                return stats.joinCount + stats.successorCount > 0
+            }
+
+            // A long ingress apply job runs synchronously on the store actor; the disk-path probe
+            // hook blocks the same way while a catalog materialization holds the actor.
+            await store.setExactFileDiskPathProbeHandlerForTesting { hold.enterAndBlockUntilReleased() }
+            try write("held token\n", to: rootURL.appendingPathComponent("Held.swift"))
+            tasks.start {
+                try await store.materializeCatalogFileAfterDiskWrite(rootID: root.id, relativePath: "Held.swift")
+            }
+            try await MCPPathContractAsyncWait.waitUntil("store actor hold entry", timeout: 10) { hold.hasEntered }
+            let actorProbe = tasks.start { await store.rootRefs(scope: .visibleWorkspace) }
+
+            let timeout = Duration.milliseconds(50)
+            let rows: [(label: String, wait: @Sendable () async throws -> Void)] = [
+                ("root scope", {
+                    _ = try await store.awaitAppliedIngress(rootScope: .visibleWorkspace, timeout: timeout)
+                }),
+                ("read_file exact input", {
+                    _ = try await store.awaitAppliedIngressForExplicitRequest(targetInput, namespace: namespace, timeout: timeout)
+                }),
+                ("explicit path with fallback scope", {
+                    _ = try await store.awaitAppliedIngressForExplicitRequest(
+                        userPath: targetURL.path,
+                        fallbackScope: .visibleWorkspace,
+                        timeout: timeout
+                    )
+                }),
+                ("explicit path with fallback roots", {
+                    _ = try await store.awaitAppliedIngressForExplicitRequest(
+                        userPath: targetURL.path,
+                        fallbackRootRefs: roots,
+                        timeout: timeout
+                    )
+                }),
+                ("mutation paths", {
+                    _ = try await store.awaitAppliedIngressForExplicitRequests(
+                        userPaths: [targetURL.path],
+                        fallbackScope: .visibleWorkspace,
+                        timeout: timeout
+                    )
+                })
+            ]
+            for row in rows {
+                let wait = tasks.start(row.wait)
+                guard let result = await MCPPathContractAsyncWait.result(of: wait.outcome, within: 5, row.label) else {
+                    XCTFail("\(row.label): no timeout while the store actor was held")
+                    continue
+                }
+                guard case let .failure(error) = result else {
+                    XCTFail("\(row.label): the wait completed while the store actor was held")
+                    continue
+                }
+                XCTAssertEqual(error as? WorkspaceAppliedIngressWaitError, .timedOut, row.label)
+            }
+
+            XCTAssertNil(cancelledWait.outcome.result, "The registered read_file wait settled before it was cancelled")
+            cancelledWait.task.cancel()
+            if let result = await MCPPathContractAsyncWait.result(of: cancelledWait.outcome, within: 5, "cancelled read_file wait") {
+                guard case let .failure(error) = result else {
+                    return XCTFail("The cancelled read_file wait completed while the store actor was held")
+                }
+                XCTAssertTrue(error is CancellationError, "\(error)")
+            } else {
+                XCTFail("The cancelled read_file wait did not settle while the store actor was held")
+            }
+            XCTAssertNil(actorProbe.outcome.result, "The store actor ran other work before the hold was released")
+        }
+
+        @MainActor
+        func testHeldIngressYieldsTypedFreshnessTimeoutBeforeTheWatchdog() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let store = context.window.workspaceFileContextStore
+                do {
+                    try await fixture.registerDomainWorkspace(context)
+                    try await MCPWindowTestSupport.activateWorkspace(context, reason: "MCPReadMutationPathContractTests")
+                    let toolsEnabled = await server.setWindowToolsEnabled(true)
+                    XCTAssertTrue(toolsEnabled)
+                    let endpoint = try fixture.endpointA()
+                    let calls = MCPPathContractTaskOwner()
+                    let roots = await store.rootRefs(scope: .visibleWorkspace)
+                    let root = try XCTUnwrap(roots.first { $0.id == context.rootID })
+                    await store.setAppliedIngressWaitTimeoutOverrideForTesting(.milliseconds(50))
+
+                    let freshnessTimeoutText = "Error: workspace_freshness_timeout: Workspace freshness timed out before pending file-system ingress was applied. Retry after pending file-system ingress settles."
+                    let rows: [(label: String, tool: String, arguments: [String: Any])] = [
+                        ("read_file", MCPWindowToolName.readFile, ["path": context.fileURL.path, "_rawJSON": true]),
+                        ("get_file_tree roots", MCPWindowToolName.getFileTree, ["type": "roots"]),
+                        ("get_file_tree files", MCPWindowToolName.getFileTree, ["type": "files"]),
+                        ("get_code_structure", MCPWindowToolName.getCodeStructure, ["paths": [context.fileURL.path]]),
+                        ("manage_selection add", MCPWindowToolName.manageSelection, ["op": "add", "paths": [context.fileURL.path]]),
+                        ("workspace_context files", MCPWindowToolName.workspaceContext, ["include": ["files"]])
+                    ]
+                    for row in rows {
+                        let arguments = row.arguments.merging(["_windowID": context.window.windowID]) { _, windowID in windowID }
+                        let heldIngress = try await MCPPathContractHeldPeerIngress.start(store: store, peerRoot: root)
+                        let call = calls.start {
+                            try await endpoint.callTool(name: row.tool, arguments: arguments, timeoutSeconds: 60)
+                        }
+                        let reply = await MCPPathContractAsyncWait.result(of: call.outcome, within: 2, row.label)
+                        // A call still waiting on the held barrier finishes once it is released, so the
+                        // next row starts with free admission lanes.
+                        await heldIngress.settle(store: store)
+                        await call.task.value
+                        guard let reply else {
+                            XCTFail("\(row.label): no reply within 2 s while ingress was held")
+                            continue
+                        }
+                        let text = try MCPWindowTestSupport.toolResultText(reply.get())
+                        if row.tool == MCPWindowToolName.readFile {
+                            let data = try XCTUnwrap(text.data(using: .utf8))
+                            let readReply = try JSONDecoder().decode(ToolResultDTOs.ReadFileReply.self, from: data)
+                            XCTAssertEqual(readReply.errorCode, "workspace_freshness_timeout", row.label)
+                            XCTAssertEqual(readReply.retryable, true, row.label)
+                        } else {
+                            XCTAssertEqual(text, freshnessTimeoutText, row.label)
+                        }
+                    }
+
+                    await store.setAppliedIngressWaitTimeoutOverrideForTesting(nil)
+                    _ = await server.setWindowToolsEnabled(false)
+                    await fixture.cleanup()
+                } catch {
+                    await store.setAppliedIngressWaitTimeoutOverrideForTesting(nil)
+                    _ = await server.setWindowToolsEnabled(false)
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
         func testReadProviderUnresolvedQualifiedInputFailsClosedWithoutWaitingForPeer() async throws {
             let fixture = try await makeQualifiedReplayFixture(name: "UnresolvedQualifiedHeldPeer")
             let heldPeer = try await MCPPathContractHeldPeerIngress.start(
@@ -2839,6 +3004,77 @@ final class MCPReadMutationPathContractTests: XCTestCase {
         }
     }
 
+    /// Blocks the first thread that enters until `release()`; later callers return at once.
+    /// Installed as a synchronous store hook, it holds the store actor.
+    private final class MCPPathContractStoreActorHold: @unchecked Sendable {
+        private let condition = NSCondition()
+        private var entered = false
+        private var released = false
+
+        var hasEntered: Bool {
+            condition.withLock { entered }
+        }
+
+        func enterAndBlockUntilReleased() {
+            condition.lock()
+            defer { condition.unlock() }
+            guard !entered else { return }
+            entered = true
+            while !released {
+                condition.wait()
+            }
+        }
+
+        func release() {
+            condition.withLock {
+                released = true
+                condition.broadcast()
+            }
+        }
+    }
+
+    /// Starts tasks that record their own results and keeps every one until `settle()`, so a test
+    /// can observe a result within a deadline and still settle each task it started.
+    private final class MCPPathContractTaskOwner: @unchecked Sendable {
+        private let lock = NSLock()
+        private var tasks: [Task<Void, Never>] = []
+
+        @discardableResult
+        func start<Value>(
+            _ operation: @escaping @Sendable () async throws -> Value
+        ) -> (outcome: MCPPathContractOutcome<Value>, task: Task<Void, Never>) {
+            let outcome = MCPPathContractOutcome<Value>()
+            let task = Task {
+                do {
+                    try await outcome.record(.success(operation()))
+                } catch {
+                    outcome.record(.failure(error))
+                }
+            }
+            lock.withLock { tasks.append(task) }
+            return (outcome, task)
+        }
+
+        func settle() async {
+            for task in lock.withLock({ tasks }) {
+                await task.value
+            }
+        }
+    }
+
+    private final class MCPPathContractOutcome<Value>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var recorded: Result<Value, Error>?
+
+        var result: Result<Value, Error>? {
+            lock.withLock { recorded }
+        }
+
+        func record(_ result: Result<Value, Error>) {
+            lock.withLock { recorded = result }
+        }
+    }
+
     private actor ExactResolutionPeerProbe {
         private(set) var count = 0
 
@@ -2872,6 +3108,17 @@ final class MCPReadMutationPathContractTests: XCTestCase {
                 }
                 await Task.yield()
             }
+        }
+
+        /// Returns `outcome`'s result if it is recorded within `seconds`, or nil while its task is
+        /// still running, so a call that hangs fails its row instead of stalling the suite.
+        static func result<Value>(
+            of outcome: MCPPathContractOutcome<Value>,
+            within seconds: TimeInterval,
+            _ description: String
+        ) async -> Result<Value, Error>? {
+            try? await waitUntil(description, timeout: seconds) { outcome.result != nil }
+            return outcome.result
         }
     }
 

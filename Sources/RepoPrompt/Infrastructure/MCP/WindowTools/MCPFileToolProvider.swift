@@ -351,9 +351,12 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 try Task.checkCancellation()
                 let lookupContext = authority.lookupContext
                 try Task.checkCancellation()
-                _ = await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(
-                    rootScope: lookupContext.rootScope
+                await MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureIngressWait)
+                _ = try await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(
+                    rootScope: lookupContext.rootScope,
+                    timeout: MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
                 )
+                await MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureIngressWait, transition: .completed)
                 try Task.checkCancellation()
 
                 let files: [WorkspaceFileRecord]
@@ -427,7 +430,10 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 let lookupContext = authority.lookupContext
                 await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeRequestResolution, transition: .completed)
                 await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait)
-                _ = await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(rootScope: lookupContext.rootScope)
+                _ = try await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(
+                    rootScope: lookupContext.rootScope,
+                    timeout: MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
+                )
                 try Task.checkCancellation()
                 await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait, transition: .completed)
                 await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction)
@@ -471,7 +477,10 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 let lookupContext = authority.lookupContext
                 await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeRequestResolution, transition: .completed)
                 await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait)
-                _ = await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(rootScope: lookupContext.rootScope)
+                _ = try await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(
+                    rootScope: lookupContext.rootScope,
+                    timeout: MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
+                )
                 try Task.checkCancellation()
                 await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait, transition: .completed)
                 await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction)

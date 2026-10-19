@@ -2826,14 +2826,6 @@ import XCTest
                 XCTFail("Expected socket closure for \(request), got \(error)")
             }
         }
-
-        nonisolated static func responseObject(from response: PersistentMCPTestRPCResponse) throws -> [String: Any] {
-            let data = try XCTUnwrap(response.rawJSON.data(using: .utf8))
-            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-            XCTAssertEqual((object["id"] as? NSNumber)?.intValue, response.id)
-            XCTAssertNil(object["error"])
-            return object
-        }
     }
 
     private final class MCPResponseDeliveryManualClock: @unchecked Sendable {
@@ -3535,7 +3527,7 @@ import XCTest
                         ]
                     ]
                 )
-                _ = try MCPExportWatchdogIntegrationTests.responseObject(from: initialize)
+                _ = try MCPWindowTestSupport.responseObject(from: initialize)
                 try await startTask.value
                 try client.sendNotification(method: "notifications/initialized", params: [:])
                 let tools = try await client.request(method: "tools/list", params: [:])
@@ -3572,7 +3564,7 @@ import XCTest
         }
 
         private static func toolNames(from response: PersistentMCPTestRPCResponse) throws -> [String] {
-            let object = try MCPExportWatchdogIntegrationTests.responseObject(from: response)
+            let object = try MCPWindowTestSupport.responseObject(from: response)
             let result = try XCTUnwrap(object["result"] as? [String: Any])
             let tools = try XCTUnwrap(result["tools"] as? [[String: Any]])
             return tools.compactMap { $0["name"] as? String }

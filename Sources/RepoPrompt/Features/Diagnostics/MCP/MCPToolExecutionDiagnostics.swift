@@ -44,6 +44,7 @@ enum MCPToolExecutionHandlerPhase: String, Equatable {
     case promptExportPublication = "prompt_export.publication"
     // Graph-first get_code_structure execution stages.
     case getCodeStructureSeedResolution = "get_code_structure.seed_resolution"
+    case getCodeStructureIngressWait = "get_code_structure.ingress_wait"
     case getCodeStructureGraphSnapshot = "get_code_structure.graph_snapshot"
     case getCodeStructureGraphTraversal = "get_code_structure.graph_traversal"
     case getCodeStructureGraphRevalidation = "get_code_structure.graph_revalidation"

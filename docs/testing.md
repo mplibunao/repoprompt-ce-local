@@ -172,6 +172,12 @@ rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.perf_diagn
 
 If a key is unavailable, confirm that `rpce-cli-debug --version` resolves to the current CE debug build before falling back to lower-level defaults.
 
+The `mcp_structure_settlement_snapshot` op reports one window's settlement registry counts of active, detached, and released entries:
+
+```bash
+rpce-cli-debug -w 1 -c __repoprompt_debug_diagnostics -j '{"op":"mcp_structure_settlement_snapshot","window_id":1}'
+```
+
 ## Debug profile isolation
 
 The debug app, the debug CLI, and debug headless sessions keep runtime state in `~/Library/Application Support/RepoPrompt CE Debug` and `$TMPDIR/RepoPrompt CE Debug`. Workspaces, chat and agent history, settings, presets, window sessions, saved prompts, and the managed Codex home live there, and production's `~/Library/Application Support/RepoPrompt CE` is neither read nor written. Developer infrastructure stays in the production profile's directory: the debug bundle under `DebugApps`, conductor state under `Conductor`, and the CLI links in [Debug CLI and live MCP smoke](#debug-cli-and-live-mcp-smoke). Archive and restore keep excluding those entries and never touch the debug profile. A debug build packaged before the split still reads and writes production's profile.

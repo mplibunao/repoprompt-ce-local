@@ -168,7 +168,7 @@ import XCTest
         }
 
         private static func toolResultText(_ response: PersistentMCPTestRPCResponse) throws -> String {
-            let object = try MCPExportWatchdogIntegrationTests.responseObject(from: response)
+            let object = try MCPWindowTestSupport.responseObject(from: response)
             let result = try XCTUnwrap(object["result"] as? [String: Any])
             let content = try XCTUnwrap(result["content"] as? [[String: Any]])
             return try XCTUnwrap(content.first?["text"] as? String)

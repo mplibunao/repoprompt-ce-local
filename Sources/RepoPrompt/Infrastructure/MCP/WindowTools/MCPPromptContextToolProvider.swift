@@ -1,6 +1,7 @@
 import Foundation
 import MCP
 import RepoPromptDomainRuntime
+import RepoPromptShared
 
 @MainActor
 final class MCPPromptContextToolProvider {
@@ -72,7 +73,10 @@ final class MCPPromptContextToolProvider {
             throw CancellationError()
         }
         if includeArr.contains("files") {
-            _ = await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(rootScope: lookupContext.rootScope)
+            _ = try await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(
+                rootScope: lookupContext.rootScope,
+                timeout: MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
+            )
         }
         let resolvedTabContext: MCPServerViewModel.ResolvedTabContextSnapshot = if let appContext {
             selectionRefreshedContext(appContext.resolvedTabContext)
