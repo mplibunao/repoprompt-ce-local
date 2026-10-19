@@ -361,7 +361,7 @@ jobs:
   # hash does). One job seeds `.build`, recreates every tracked file in place, and measures
   # the `] Compiling` lines per module for each arm, resetting `.build` from an APFS clone of
   # the seed between arms:
-  #   A  no normalization (control)
+  #   A  no normalization (control; measured in run 39225985371 and not repeated)
   #   B  mtimes restored from a record taken before the seed, only for unchanged blobs
   #   B' mtimes recomputed from each file's blob ID, no record (the permanent candidate)
   #   D  B' plus a one-file change to a widely used RepoPromptApp type
@@ -522,7 +522,8 @@ jobs:
             echo "seconds to: planning $(at 'Planning build'); first compile $(at '\] Compiling '); first link $(at '\] Linking'); complete $(at 'Build .*complete')"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          swift_compiles=$(grep '\] Compiling ' "$log" | sed -E 's/.*\] Compiling //' | awk 'NF >= 2 && $2 ~ /\.swift$/ { n++ } END { print n + 0 }')
+          # `grep` exits 1 on zero matches, which is the result this experiment hopes for.
+          swift_compiles=$( (grep '\] Compiling ' "$log" || true) | sed -E 's/.*\] Compiling //' | awk 'NF >= 2 && $2 ~ /\.swift$/ { n++ } END { print n + 0 }')
           echo "${label}_SWIFT_COMPILES=$swift_compiles" >> "$GITHUB_ENV"
           exit "$status"
           SH
@@ -591,11 +592,6 @@ jobs:
         shell: bash
         run: |
           "$EXP/recheckout.sh"
-
-      - name: Arm A — no normalization, app product
-        shell: bash
-        run: |
-          "$EXP/build.sh" armA_app --product RepoPrompt
 
       - name: Arm B — reset .build, restore recorded mtimes for unchanged blobs
         shell: bash
