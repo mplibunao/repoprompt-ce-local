@@ -1443,6 +1443,91 @@ actor ServerNetworkManager {
 
     private nonisolated let codeStructureSettlementRegistry = MCPCodeStructureSettlementRegistry()
     private nonisolated let toolCardOwnershipLedger = MCPToolCardOwnershipLedger()
+
+    /// The registry remains the lease owner. This actor keeps only the identity
+    /// of a warning projected into each window, so healthy calls do not hop to
+    /// the main actor just to inspect or redraw an absent notice.
+    private struct CodeStructureSettlementLimitNoticeProjection {
+        let generation: UInt64
+    }
+
+    private var nextCodeStructureSettlementLimitNoticeGeneration: UInt64 = 0
+    private var codeStructureSettlementLimitNoticeByWindowID: [Int: CodeStructureSettlementLimitNoticeProjection] = [:]
+
+    private func recordCodeStructureSettlementLimitNotice(
+        windowID: Int
+    ) -> CodeStructureSettlementLimitNoticeProjection {
+        nextCodeStructureSettlementLimitNoticeGeneration &+= 1
+        let projection = CodeStructureSettlementLimitNoticeProjection(
+            generation: nextCodeStructureSettlementLimitNoticeGeneration
+        )
+        codeStructureSettlementLimitNoticeByWindowID[windowID] = projection
+        return projection
+    }
+
+    /// Rechecks the registry immediately before UI publication. A stale busy
+    /// result never leaves a warning behind after the cap has recovered.
+    private func presentCodeStructureSettlementLimitNotice(
+        windowID: Int,
+        projection: CodeStructureSettlementLimitNoticeProjection
+    ) async {
+        let registry = codeStructureSettlementRegistry
+        let didPresent = await MainActor.run {
+            guard registry.hasReleasedProviderLimitBlockage(windowID: windowID) else {
+                // A newer projection may have replaced an already-visible warning
+                // before this main-actor hop. Tombstone-clearing this generation
+                // also dismisses that older visible projection without allowing
+                // either delayed presentation to reappear.
+                WindowStatesManager.shared.window(withID: windowID)?
+                    .mcpServer.clearCodeStructureSettlementLimitNotice(generation: projection.generation)
+                return false
+            }
+            WindowStatesManager.shared.window(withID: windowID)?
+                .mcpServer.presentCodeStructureSettlementLimitNotice(generation: projection.generation)
+            return true
+        }
+        guard !didPresent,
+              codeStructureSettlementLimitNoticeByWindowID[windowID]?.generation == projection.generation
+        else { return }
+        codeStructureSettlementLimitNoticeByWindowID.removeValue(forKey: windowID)
+    }
+
+    private func clearCodeStructureSettlementLimitNotice(
+        windowID: Int,
+        projection: CodeStructureSettlementLimitNoticeProjection
+    ) async {
+        await MainActor.run {
+            WindowStatesManager.shared.window(withID: windowID)?
+                .mcpServer.clearCodeStructureSettlementLimitNotice(generation: projection.generation)
+        }
+    }
+
+    /// An admission proves the registry allowed a new provider at that instant.
+    /// Recheck when this actor resumes so a newer blocker cannot lose its warning.
+    /// The ordinary no-warning path returns without a UI actor hop.
+    private func takeCodeStructureSettlementLimitNoticeAfterSuccessfulAdmission(
+        windowID: Int
+    ) -> CodeStructureSettlementLimitNoticeProjection? {
+        guard let projection = codeStructureSettlementLimitNoticeByWindowID[windowID],
+              !codeStructureSettlementRegistry.hasReleasedProviderLimitBlockage(windowID: windowID)
+        else { return nil }
+        codeStructureSettlementLimitNoticeByWindowID.removeValue(forKey: windowID)
+        return projection
+    }
+
+    /// A settlement clears its projection only when the registry's read-only
+    /// state says the released-provider cap no longer blocks the window. The
+    /// projection token fences delayed UI work; it is not an authority signal.
+    private func takeCodeStructureSettlementLimitNoticeAfterSettlement(
+        slot: MCPCodeStructureSettlementRegistry.Slot
+    ) -> CodeStructureSettlementLimitNoticeProjection? {
+        guard let projection = codeStructureSettlementLimitNoticeByWindowID[slot.windowID],
+              !codeStructureSettlementRegistry.hasReleasedProviderLimitBlockage(windowID: slot.windowID)
+        else { return nil }
+        codeStructureSettlementLimitNoticeByWindowID.removeValue(forKey: slot.windowID)
+        return projection
+    }
+
     #if DEBUG
         private var debugAfterDirectAdmissionPendingPublishedForTesting: (@Sendable (UUID) async -> Void)?
         private var debugAfterBootstrapPolicyReadinessForTesting: (@Sendable (String) async -> Void)?
@@ -2490,6 +2575,7 @@ actor ServerNetworkManager {
 
         // Window close authoritatively removes this bucket; deferred exact-ID completions are no-ops.
         removeActiveToolScopesForWindow(windowID)
+        codeStructureSettlementLimitNoticeByWindowID.removeValue(forKey: windowID)
 
         // Remove stale run→window cache entries for the closed window.
         let staleRunIDs = presentationWindowByRun.compactMap { runID, mappedWindowID in
@@ -12675,6 +12761,14 @@ actor ServerNetworkManager {
                                             }
                                         ) {
                                         case let .admitted(slot):
+                                            if let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSuccessfulAdmission(
+                                                windowID: windowID
+                                            ) {
+                                                await self.clearCodeStructureSettlementLimitNotice(
+                                                    windowID: windowID,
+                                                    projection: noticeProjection
+                                                )
+                                            }
                                             settlementAdmission = (.detachAndSettle, slot)
                                         case let .busy(context):
                                             throw MCPToolExecutionDispatchError.structureSettlementBusy(
@@ -12796,6 +12890,16 @@ actor ServerNetworkManager {
                                     @Sendable func recordSynchronousSettlement(
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
+                                        if let slot = settlementAdmission.slot,
+                                           let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSettlement(
+                                               slot: slot
+                                           )
+                                        {
+                                            await self.clearCodeStructureSettlementLimitNotice(
+                                                windowID: slot.windowID,
+                                                projection: noticeProjection
+                                            )
+                                        }
                                         let outcome = providerSettlement.rawValue
                                         await emitExecutionTrace(.handlerCompleted, cancellationOutcome: outcome)
                                         EditFlowPerf.lifecycleEvent(
@@ -12823,6 +12927,16 @@ actor ServerNetworkManager {
                                     @Sendable func recordDetachedSettlement(
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
+                                        if let slot = settlementAdmission.slot,
+                                           let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSettlement(
+                                               slot: slot
+                                           )
+                                        {
+                                            await self.clearCodeStructureSettlementLimitNotice(
+                                                windowID: slot.windowID,
+                                                projection: noticeProjection
+                                            )
+                                        }
                                         await emitExecutionTrace(
                                             .detachedSettled,
                                             cancellationRequested: true,
@@ -12859,6 +12973,16 @@ actor ServerNetworkManager {
                                     @Sendable func recordAbandonedSettlement(
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
+                                        if let slot = settlementAdmission.slot,
+                                           let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSettlement(
+                                               slot: slot
+                                           )
+                                        {
+                                            await self.clearCodeStructureSettlementLimitNotice(
+                                                windowID: slot.windowID,
+                                                projection: noticeProjection
+                                            )
+                                        }
                                         await emitExecutionTrace(
                                             .handlerCompleted,
                                             cancellationRequested: true,
@@ -12878,6 +13002,16 @@ actor ServerNetworkManager {
                                     @Sendable func recordForceDisconnectedSettlement(
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
+                                        if let slot = settlementAdmission.slot,
+                                           let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSettlement(
+                                               slot: slot
+                                           )
+                                        {
+                                            await self.clearCodeStructureSettlementLimitNotice(
+                                                windowID: slot.windowID,
+                                                projection: noticeProjection
+                                            )
+                                        }
                                         EditFlowPerf.lifecycleEvent(
                                             EditFlowPerf.Lifecycle.MCPToolCall.resolvedProviderEnded,
                                             correlation: lifecycleCorrelation,
@@ -13187,6 +13321,13 @@ actor ServerNetworkManager {
                                         let limitReached = busyContext.reason == .releasedProviderLimitReached
                                         let abandoned = busyContext.reason == .abandoned
                                         if limitReached {
+                                            let noticeProjection = await self.recordCodeStructureSettlementLimitNotice(
+                                                windowID: windowID
+                                            )
+                                            await self.presentCodeStructureSettlementLimitNotice(
+                                                windowID: windowID,
+                                                projection: noticeProjection
+                                            )
                                             message = "Window \(windowID) reached its limit of one released cancellation-ignoring structure provider. Wait for it to settle or restart RepoPrompt CE."
                                         } else if abandoned {
                                             message = "A prior canceled MCP operation for window \(windowID) is still settling. Retry after the bounded recovery wait."
