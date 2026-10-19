@@ -8,7 +8,7 @@ Re-implement upstream commit c9778b03 on `port/1003-seeded-publication-watchdog-
 |------|---------|---------------|---------|
 | 0. Prepare the branch | done | orchestrator | none |
 | 1. Seeded publication locking and regression | done | engineer · Orchestrate 1/4: Seeded publication locking | `fix(worktrees): keep seeded publication out of its own authority locks` |
-| 2. Descriptor reuse | pending | | |
+| 2. Descriptor reuse | done | engineer · Orchestrate 2/4: Descriptor reuse | `refactor(git): build worktree descriptors from the resolved alias records` |
 | 3. Window-local released-provider warning | pending | | |
 | 4. Watchdog terminal response ownership | pending | | |
 | 5. Pull request | pending | | |
@@ -44,3 +44,11 @@ Re-implement upstream commit c9778b03 on `port/1003-seeded-publication-watchdog-
 - Evidence: the follow-up review read the item's patch through RepoPrompt's git diff artifacts. It confirmed that only the invalidation call moved out of the permit, with the same arguments and before any suspension, that the permit's conditions are unchanged, and that publication and installation both take the monitor lock before the mirror lock. It raised one suggestion, the third declined finding above.
 - Evidence: the refactor analysis read the patch from its message and proposed no change. Folding the regression test's separate failure branches would hide their diagnostics, and sharing the guard tests' source loading would diverge from upstream for a small cleanup.
 - Evidence: `make dev-format` left every file as it was, and `make dev-lint` and `make guardrails` passed.
+
+## 2. Descriptor reuse
+
+- Decision: `GitService.makeWorktreeDescriptors` builds each descriptor from its alias-resolution record's normalized record, standardized path URL, and layout, and the function now matches upstream's c9778b03 version byte for byte. The `commonGitDir` fallback takes the first record's layout where it used to take whichever layout a dictionary returned first. Every layout in one repository's worktree list has the same common directory, so the output is the same. Source: approved plan.
+- Evidence: `git grep -n listWorktrees Tests/` finds only a stub closure in `WorktreeMergeReviewStateTests`, which never runs `GitService.listWorktrees`. `GitWorktreePorcelainParserTests` covers alias collapse through the static `collapseEquivalentWorktreeAliases` with injected layouts, and item 1's `WorkspaceSeededPublicationAuthorityRegressionTests` runs the real `listWorktrees` without an alias. No existing test covers collapse into descriptors. Those three suites passed before and after the edit.
+- Evidence: a throwaway test dumped `listWorktrees` output and the layout cache from six entry points of a scratch repository: the main checkout, a subfolder of it with no layout, a branch worktree, a `..` path alias of that worktree, a detached worktree, and a locked worktree, plus a prunable record. The dumps before and after the edit were byte-identical (780 lines each). Every entry point returned five descriptors from six records, so the alias collapsed, and each layout cache held one entry, none for the subfolder. The test and fixture were deleted afterwards. A symlinked path doesn't produce an alias here, because collapse compares standardized paths, which don't resolve symlinks.
+- Evidence: `make dev-format` left every file as it was, and `make dev-lint` passed.
+- Evidence: with the patch in its instructions, the review found no issue in descriptor construction or the layout cache, and the refactor analysis proposed no change.
