@@ -10,6 +10,62 @@ final class WorkspacePathPolicyTests: XCTestCase {
         XCTAssertEqual(StandardizedPath.diagnosticEscaped("bad\0path\n"), "bad\\0path\\n")
     }
 
+    /// Bytes are compared because `String` equality treats precomposed and decomposed text as equal.
+    func testRelativePathReturnsInputBytesOnlyWhenAlreadyStandard() {
+        let cases: [(label: String, input: String, expected: String)] = [
+            ("clean", "Sources/Models/App.swift", "Sources/Models/App.swift"),
+            ("leading slash", "/Sources/App.swift", "Sources/App.swift"),
+            ("trailing slash", "Sources/App.swift/", "Sources/App.swift"),
+            ("doubled slash", "Sources//App.swift", "Sources/App.swift"),
+            ("leading dot", "./Sources/App.swift", "Sources/App.swift"),
+            ("dot component", "Sources/./App.swift", "Sources/App.swift"),
+            ("trailing dot", "Sources/.", "Sources"),
+            ("dot-dot component", "Sources/Models/../App.swift", "Sources/App.swift"),
+            ("trailing dot-dot", "Sources/Models/..", "Sources"),
+            ("dot alone", ".", ""),
+            ("slash alone", "/", ""),
+            ("empty", "", ""),
+            ("names starting with dots", ".github/.../a./App.swift", ".github/.../a./App.swift"),
+            ("non-ASCII", "Sources/日本語/caf\u{E9}.swift", "Sources/日本語/caf\u{E9}.swift"),
+            ("decomposed", "Sources/cafe\u{301}/App.swift", "Sources/cafe\u{301}/App.swift"),
+            ("non-ASCII doubled slash", "Sources//cafe\u{301}/App.swift", "Sources/cafe\u{301}/App.swift"),
+        ]
+        for (label, input, expected) in cases {
+            XCTAssertEqual(Array(StandardizedPath.relative(input).utf8), Array(expected.utf8), label)
+        }
+    }
+
+    /// Foundation's `standardizingPath` is the reference, so rows that depend on the file system
+    /// (`/private/tmp` and `/var/automount/tmp` shorten to `/tmp`) hold on any machine.
+    func testAbsolutePathReturnsFoundationStandardizedBytes() {
+        let inputs: [(label: String, path: String)] = [
+            ("clean", "/Users/test/Project/Sources/App.swift"),
+            ("trailing slash", "/Users/test/Project/"),
+            ("doubled slash", "/Users/test//Project/App.swift"),
+            ("dot component", "/Users/test/./Project"),
+            ("trailing dot", "/Users/test/Project/."),
+            ("dot-dot component", "/Users/test/Project/../Other"),
+            ("tilde", "~"),
+            ("tilde prefix", "~/Project/App.swift"),
+            ("existing /private directory", "/private/tmp"),
+            ("missing /private path", "/private/tmp/rpce-missing-\(UUID().uuidString)"),
+            ("/var/automount", "/var/automount/tmp"),
+            ("non-ASCII", "/Users/test/日本語/caf\u{E9}.swift"),
+            ("decomposed", "/Users/test/cafe\u{301}/App.swift"),
+            ("1,024 bytes", absolutePath(utf8Count: 1024)),
+            ("1,025 bytes, which standardizing truncates", absolutePath(utf8Count: 1025)),
+            ("relative", "Sources/App.swift"),
+            ("root", "/"),
+        ]
+        for (label, path) in inputs {
+            XCTAssertEqual(
+                Array(StandardizedPath.absolute(path).utf8),
+                Array((path as NSString).standardizingPath.utf8),
+                label
+            )
+        }
+    }
+
     func testAliasResolutionUsesDeterministicGeneratedAliasesForDuplicateNames() {
         let first = makeRoot(name: "App", fullPath: "/Users/test/Clients/One/App")
         let second = makeRoot(name: "App", fullPath: "/Users/test/Clients/Two/App")
@@ -165,5 +221,14 @@ final class WorkspacePathPolicyTests: XCTestCase {
 
     private func makeRoot(id: UUID = UUID(), name: String, fullPath: String) -> WorkspaceRootRef {
         WorkspaceRootRef(id: id, name: name, fullPath: fullPath)
+    }
+
+    private func absolutePath(utf8Count: Int) -> String {
+        var path = "/Users/test"
+        while path.utf8.count + 10 <= utf8Count {
+            path += "/abcdefghi"
+        }
+        path += String(repeating: "x", count: utf8Count - path.utf8.count)
+        return path
     }
 }
