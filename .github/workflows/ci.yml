@@ -371,7 +371,6 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 120
     env:
-      EXP: ${{ runner.temp }}/exp
       CHANGED_FILE: Sources/RepoPrompt/Infrastructure/WorkspaceContext/Slices/LineRange.swift
     steps:
       - name: Check out repository
@@ -383,6 +382,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "EXP=$RUNNER_TEMP/exp" >> "$GITHUB_ENV"
           sw_vers
           xcodebuild -version
           swift --version
