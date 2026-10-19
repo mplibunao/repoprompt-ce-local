@@ -17,8 +17,9 @@ on:
     - cron: '17 19 * * *'  # 03:17 Manila
   workflow_dispatch:
 
-# Refresh runs queue behind one another and never cancel a running one. A pull request's new
-# run cancels its previous one, and every other run has a group of its own.
+# Refresh runs share one group and never cancel a running one; GitHub keeps only the newest
+# waiting refresh. A pull request's new run cancels its previous one, and every other run has
+# a group of its own.
 concurrency:
   group: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'ci-cache-refresh' || format('ci-{0}', github.event.pull_request.number || github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -286,7 +287,6 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -294,8 +294,6 @@ jobs:
             range="$PR_BASE_SHA..$PR_HEAD_SHA"
           elif [[ "$GITHUB_REF" == refs/heads/release/* ]]; then
             range="origin/main..$CURRENT_SHA"
-          elif [[ -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
-            range="$PUSH_BEFORE_SHA..$CURRENT_SHA"
           else
             range="$CURRENT_SHA"
           fi
