@@ -1,0 +1,69 @@
+# Run ledger: switch reuses an open window
+
+Request: #232 · Plan: `oracle-plan-2026-10-20-092104-reuse-workspace-wind-588f.md`
+
+Make `manage_workspaces` `switch` with `open_in_new_window: true` reuse a window that already shows the workspace, so agents stop opening duplicate windows, and say so in the tool description. One window per workspace is the long-term goal, and this run changes only the `switch` path.
+
+| Item | Outcome | Agent session | Commits |
+|------|---------|---------------|---------|
+| 1. Reuse a showing window on switch | done | pair · Orchestrate 1/2: reuse a showing window on switch | `fix(mcp): reuse a window that already shows the workspace on switch` |
+| 2. Describe the reuse on every surface | done | engineer · Orchestrate 2/2: describe the reuse on every surface | `fix(mcp): describe the switch window reuse in the tool text and help` |
+
+## Planning
+
+- Decision: the reuse matches a window whose active workspace has the resolved workspace's UUID, and skips windows that are closing, initializing, or mid-switch. Workspaces with the same roots and a different UUID don't count, because `manage_workspaces list` reports showing windows by UUID and root-set matching belongs to `bind_context` `working_dirs`. Source: approved plan.
+- Decision: when several windows show the workspace, the existing `preferredOpenWindowID` ranking picks one: the calling connection's selected window, then the focused window, then the lowest window ID. Source: approved plan.
+- Decision: when every window showing the workspace is closing, initializing, or mid-switch, the call fails with an error instead of opening another window. Source: approved plan.
+- Decision: "binds the caller" keeps the window affinity the new-window path sets today, and an existing compose-tab binding stays as it is. Source: approved plan.
+- Decision: two concurrent switches that both find no showing window can still open two windows, because nothing coordinates them. Source: approved plan (enforcing one window per workspace is out of scope).
+- Decision: the work splits into two items along the plan's implementation steps 2 and 3, so the behavior change and the description surfaces each get their own review, refactor pass, and commit. Source: orchestrator judgment.
+- Phase 1 deviation: the quick scan used shell `git grep` and `git show` on `origin/main` instead of RepoPrompt `get_file_tree` and `file_search`, and took about six calls instead of the skill's two or three. Context Builder then did the deep reading as the skill intends. Source: orchestrator judgment.
+- Phase 1 retries: the Context Builder plan call ran four times. The first never connected (bootstrap handshake timeout while production ran at 100 to 250% CPU). The second and third failed after discovery with "response delivery did not finish", the failure #182 tracks, and were added to #182 as a sighting. The fourth, once production's memory and load were back to normal (same process, no relaunch), returned the plan. Retries waited for the requester's go rather than running on a timer. Source: requester.
+- Evidence: the plan calls were routed by window only, so their discovery may have read another branch's worktree, the one bound to the window's active tab. That branch changes none of the files the plan cites, so the plan's code reading matches `main`.
+
+## 1. Reuse a showing window on switch
+
+- Dispatch: the first start was rejected with "workspace binding was not durably accepted" (the transient failure #181 tracks) and started on one retry. That agent was cancelled before its first edit, because a production relaunch for a deploy was due and would have ended it mid-run. Source: requester (pause for the deploy), orchestrator judgment (cancel rather than run into the relaunch).
+- Dispatch: after the deploy was postponed, two restarts each timed out after 300 s without creating a session, while worktree and tab-routed calls also timed out and window listing answered at once. Production had stalled partway through quitting, and the item resumed after it restarted. Source: requester.
+- Decision: after production restarted, every RepoPrompt call from this run names its own compose tab as well as the window, because a call routed by window only resolves roots through the window's active tab, which another branch's worktree was bound to. The item 1 start also names the repository root its worktree binds. Source: requester (name the tab), orchestrator judgment (name the root).
+- Decision: the reuse checks window eligibility in one main-actor pass right before the affinity call, then checks again after `setActiveWindowForCurrentConnection` returns, and fails the call if the window no longer qualifies. Without the second check, a window that closes in the gap can be left as the connection's window while the call reports success. A close after the second check schedules its cleanup after the write. The implementer first left the second check out; the review asked for it, and the approved plan had it. Source: review finding.
+- Decision: both checks use one readiness test (registered, not closing, initialized, not mid-switch, showing the workspace UUID), so a switch that begins during the affinity call fails the second check too. Source: follow-up review finding.
+- Decision: no undo of the affinity write when the second check fails, and no deterministic test of that race. The plan rules out rollback, and the test would need a production seam to interleave the close. Source: orchestrator judgment, declining parts of a review finding.
+- Decision: the Agent Mode tool-result card needs no change. Its summary reads `switch • window N`, which is true either way, and its expanded text comes from `ToolOutputFormatter` (`ToolResultMarkdownContent.swift`). Source: implementer check, prompted by a finding of the cancelled first agent.
+- Decision: a saved switch result from before this change, which has `window_id` but no `reused_window`, keeps showing the returned window ID under the plain switch heading. Source: review finding.
+- Decision: the reuse test asserts no presentation change through each window's workspace and active tab, without focus flags or prompt and selection snapshots. The test has no `NSWindow`, so a focus flag can't show a focus change. The live debug-app check covers focus. Source: implementer judgment.
+- Decision: the reuse test registers the saved workspace's deletion right after creating it, so the workspace is removed even when later setup fails. Source: follow-up review finding.
+- Decision: the item's review and refactor analysis run Context Builder in this run's own tab, which loads the main checkout, and reach the worktree's diff through the `git` tool with an `@branch:` specifier, with the diff also given inline. `main` had moved to the release candidate that landed meanwhile, but that candidate changed none of the item's files. Source: orchestrator judgment.
+- Evidence: the review loop ran one Context Builder review and two follow-ups in the same chat, and the last found nothing remaining in scope.
+- Refactor loop: no explore agents ran before the refactor analysis. The skill uses them to map areas whose refactor scope isn't clear, and this item's scope is the four changed files, one handler branch, and one formatter case, all in the diff. The refactor analysis, a separate Context Builder chat, found no behavior-preserving refactoring worth doing within the item's constraints, so no refactor plan or refactor agent followed. Source: orchestrator judgment.
+- Evidence (focused validation, 2026-10-20, through the developer daemon): `make dev-format`, `make dev-lint`, and `make dev-swift-build PRODUCT=RepoPrompt` passed; `BindContextRoutingAuthorityTests` ran 9 tests and `BindContextOutputFormattingTests` 6, with no failures.
+- Evidence (old implementation): with both reuse branches disabled, the reuse test failed at the switch call, because the old path tried to open a window (`Failed to open new window: Window opener not available` in the app log), and then had no switch response to decode.
+
+## 2. Describe the reuse on every surface
+
+- Decision: the reuse is stated once, in the advertised `open_in_new_window` property, which the canonical override and the app's raw registration share through one constant, and the flag's bullet leaves the canonical tool description. The Settings description keeps its own bullet, because a person in Settings doesn't see the schema. Source: approved plan, `docs/architecture/mcp-tool-descriptions.md` principle 2.
+- Decision: the property and Settings texts say the behavior applies when the flag is true. Source: review finding.
+- Decision: the property doesn't say the flag is unavailable with `--backend headless`. The headless backend's error states that rule ("window selectors and new-window presentation are unavailable with --backend headless"), the descriptions doc leaves out a rule whose error states it, `window_id` carries no such note, and the previous text had none. Source: implementer judgment, kept by the orchestrator when the review suggested adding the note.
+- Decision: the texts say "this connection's window" rather than "connection window affinity", matching item 1's output, "Connection window set to `<id>`". Source: implementer judgment, descriptions doc principle 3.
+- Decision: the interactive REPL's help line, which the plan didn't list, gets the same switch wording as the other terminal help. Source: implementer finding, approved by the orchestrator under principle 3.
+- Decision: the switch handler's comment and banner say the block reuses or opens a window. Source: review nit.
+- Evidence: the review agreed that stating the reuse in the property, without a top-level description bullet, meets the intent of the issue's criterion that the tool description says the flag reuses a showing window.
+- Evidence: the review loop ran one Context Builder review and one follow-up in the same chat, and the follow-up found nothing remaining.
+- Refactor loop: no explore agents ran before the refactor analysis, for the same reason as item 1: the scope is one override, one constant, and text edits, all in the diff. The refactor analysis, a separate Context Builder chat, found no refactoring worth doing; the three terminal-help surfaces differ in layout, so consolidating their changed lines would add indirection. No refactor plan or refactor agent followed. Source: orchestrator judgment.
+- Evidence (focused validation, 2026-10-20, through the developer daemon): `make dev-format` and `make dev-lint` passed; the review snapshot regenerated with only `manage_workspaces` changed, and the rerun without the marker matched; `MCPDomainStandaloneCompositionTests` failed on the old fingerprint and passed (2 tests) after the update to the measured value; `DirectHeadlessCompositionTests` ran 10 tests with no failures. Both `PRODUCT=RepoPrompt` and `PRODUCT=repoprompt-mcp` built.
+- Evidence (size, compact JSON with sorted keys, the item 1 commit against this item's result, characters and whitespace-separated words, not tokens): advertised entry 7087 to 7037 characters (735 to 729 words), description 4575 to 4416 (588 to 566), input schema 2294 to 2404 (185 to 200), Settings description 4575 to 4712 (588 to 607). The description shrank because the flag's bullet left it; the schema grew because the property now covers reuse, focus, and tab bindings, and the Settings text grew because its reader doesn't see the schema.
+
+## Live check
+
+- Decision: before the debug-app check, the branch was rebased onto the `main` that release candidate 5 and build 56 had moved to, so the check runs the code that would land. The rebase was clean, because the candidate changed none of the branch's files. Source: orchestrator judgment.
+- Evidence (debug app, 2026-10-20 04:40 to 04:50 UTC, built from the rebased branch by `make dev-smoke-launch`): the smoke passed, after retrying its window-readiness stage and its first workspace switch while the launch restore hydrated roots. The debug CLI advertised the new `open_in_new_window` text.
+- Evidence (reuse): with one window showing the `repoprompt-ce` workspace, a switch with `open_in_new_window: true` from a fresh connection returned `reused_window: true` and `window_id: 1`; `bind_context` status in the same connection reported window 1; the window count stayed at 1, and window 1's active tab didn't change.
+- Evidence (no showing window): for a disposable workspace that no window showed, the same call returned `reused_window: false` and `window_id: 2`, opened one window (1 to 2), and routed the connection to it. The new window took focus, as new windows did before this change.
+- Evidence (focus): with window 2 focused, a switch to `repoprompt-ce` reused window 1 (`reused_window: true`, `window_id: 1`) and left focus on window 2 in all 10 AeroSpace samples, taken about every 0.4 s from 1 s before the call to 2 s after it. Window 1 kept its workspace and active tab. A focus change shorter than the sampling interval wouldn't show.
+- Evidence (repeat and CLI): a second switch to the disposable workspace reused window 2 and printed "Workspace Window Reused" with "Connection window set to `2`. Existing tab bindings are unchanged."; `workspace switch repoprompt-ce --new-window` reused window 1, and `--help` shows the new switch line.
+- Evidence: the disposable workspace was deleted with its window, leaving one window. The production app's process didn't change during the run.
+
+## Deferred
+
+- Two concurrent switches that both find no showing window can still open two windows. No issue is filed; it belongs to the one-window-per-workspace goal, and the requester decides whether to track it.
+- No automated test covers the error for a workspace whose showing windows aren't ready, or the check after the affinity write. Both need a window caught mid-transition.
