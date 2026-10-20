@@ -2306,6 +2306,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 providerBindingService.codexCapabilitiesForLaunch(isMCPRelated: isMCPRelated)
             },
             codexHookApprovalSettings: GlobalSettingsStore.shared,
+            idleProviderShutdownMinutes: { GlobalSettingsStore.shared.idleProviderShutdownMinutes() },
             activeToolQuery: { [weak mcpServer] runID in
                 mcpServer?.hasActiveToolExecutions(runID: runID) ?? false
             },
@@ -2517,6 +2518,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 codexCapabilitiesForLaunch: testCodexCapabilitiesForLaunch,
                 authRecovery: testCodexManagedAuthRecovery ?? CodexManagedAuthRecoveryService.shared,
                 codexHookApprovalSettings: testCodexHookApprovalSettingsProvider ?? GlobalSettingsStore.shared,
+                idleProviderShutdownMinutes: { GlobalSettingsStore.defaultIdleProviderShutdownMinutes },
                 activeToolQuery: testCodexActiveToolQuery
                     ?? { [weak testMCPServer] runID in
                         testMCPServer?.hasActiveToolExecutions(runID: runID) ?? false
@@ -2537,7 +2539,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                         )
                     },
                 leaseRoutingTimeoutMs: testCodexLeaseRoutingTimeoutMs ?? 10000,
-                idleShutdownDelayNanos: testCodexIdleShutdownDelayNanos ?? 300_000_000_000,
+                idleShutdownDelayNanosOverride: testCodexIdleShutdownDelayNanos,
                 stallWatchdogPollIntervalNanos: testCodexStallWatchdogPollIntervalNanos ?? 5_000_000_000,
                 stallWatchdogProbeThreshold: testWatchdogProbeThreshold,
                 stallWatchdogRecoveryThreshold: testWatchdogRecoveryThreshold,

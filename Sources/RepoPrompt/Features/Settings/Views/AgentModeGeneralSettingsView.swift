@@ -168,6 +168,8 @@ struct AgentModeGeneralSettingsView: View {
 
             providerCleanupActionCard
 
+            idleProviderShutdownCard
+
             codexHookApprovalStrictModeCard
 
             handoffInstructionsCard
@@ -247,6 +249,61 @@ struct AgentModeGeneralSettingsView: View {
         Binding(
             get: { globalSettings.providerConversationCleanupAction() },
             set: { globalSettings.setProviderConversationCleanupAction($0) }
+        )
+    }
+
+    // MARK: - Idle provider shutdown
+
+    private static let idleProviderShutdownPresetMinutes = [0, 1, 5, 10, 15, 30, 60]
+
+    private var idleProviderShutdownCard: some View {
+        HStack(alignment: .top, spacing: fontPreset.scaledClamped(12, max: 18)) {
+            Image(systemName: "moon.zzz")
+                .font(fontPreset.swiftUIFont(sizeAtNormal: 17))
+                .frame(width: fontPreset.scaledClamped(22, max: 30), alignment: .center)
+                .foregroundColor(.accentColor)
+            VStack(alignment: .leading, spacing: fontPreset.scaledClamped(6, max: 10)) {
+                Picker("Shut down idle agent processes after", selection: idleProviderShutdownMinutesBinding) {
+                    ForEach(idleProviderShutdownMinuteOptions, id: \.self) { minutes in
+                        Text(idleProviderShutdownLabel(minutes: minutes)).tag(minutes)
+                    }
+                }
+                .pickerStyle(.menu)
+                .font(fontPreset.swiftUIFont(sizeAtNormal: 13, weight: .semibold))
+                Text("When an Agent Mode session has been idle this long, RepoPrompt stops its agent process and the MCP servers and commands that process started. The next message resumes the conversation. A Claude agent running a background command keeps its process for up to 2 hours. A change applies to sessions that finish a turn after it.")
+                    .font(fontPreset.swiftUIFont(sizeAtNormal: 12))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: fontPreset.scaledClamped(10, max: 14))
+        }
+        .padding(.vertical, fontPreset.scaledClamped(6, max: 10))
+    }
+
+    /// The presets, plus the stored value when `app_settings` set it to something else.
+    private var idleProviderShutdownMinuteOptions: [Int] {
+        let stored = globalSettings.idleProviderShutdownMinutes()
+        let presets = Self.idleProviderShutdownPresetMinutes
+        return presets.contains(stored) ? presets : (presets + [stored]).sorted()
+    }
+
+    private func idleProviderShutdownLabel(minutes: Int) -> String {
+        switch minutes {
+        case 0:
+            "Never"
+        case GlobalSettingsStore.defaultIdleProviderShutdownMinutes:
+            "\(minutes) minutes (default)"
+        case 1:
+            "1 minute"
+        default:
+            "\(minutes) minutes"
+        }
+    }
+
+    private var idleProviderShutdownMinutesBinding: Binding<Int> {
+        Binding(
+            get: { globalSettings.idleProviderShutdownMinutes() },
+            set: { globalSettings.setIdleProviderShutdownMinutes($0) }
         )
     }
 
