@@ -8,6 +8,7 @@ Make `manage_workspaces` `switch` with `open_in_new_window: true` reuse a window
 |------|---------|---------------|---------|
 | 1. Reuse a showing window on switch | done | pair · Orchestrate 1/2: reuse a showing window on switch | `fix(mcp): reuse a window that already shows the workspace on switch` |
 | 2. Describe the reuse on every surface | done | engineer · Orchestrate 2/2: describe the reuse on every surface | `fix(mcp): describe the switch window reuse in the tool text and help` |
+| 3. Drop the focus clause from the property text | done | engineer · Orchestrate 3/3: drop the focus clause from the property text | `fix(mcp): drop the focus clause from the open_in_new_window description` |
 
 ## Planning
 
@@ -62,6 +63,15 @@ Make `manage_workspaces` `switch` with `open_in_new_window: true` reuse a window
 - Evidence (focus): with window 2 focused, a switch to `repoprompt-ce` reused window 1 (`reused_window: true`, `window_id: 1`) and left focus on window 2 in all 10 AeroSpace samples, taken about every 0.4 s from 1 s before the call to 2 s after it. Window 1 kept its workspace and active tab. A focus change shorter than the sampling interval wouldn't show.
 - Evidence (repeat and CLI): a second switch to the disposable workspace reused window 2 and printed "Workspace Window Reused" with "Connection window set to `2`. Existing tab bindings are unchanged."; `workspace switch repoprompt-ce --new-window` reused window 1, and `--help` shows the new switch line.
 - Evidence: the disposable workspace was deleted with its window, leaving one window. The production app's process didn't change during the run.
+
+## 3. Drop the focus clause from the property text
+
+- Decision: the shared `open_in_new_window` property text no longer says reuse happens "without changing focus", because no agent call depends on focus. The Settings bullet and the three terminal-help texts keep the focus fact for the people who read them, including "Reusing a window does not change focus." Source: user, after the pull request opened.
+- Decision: three other wording fixes a review proposed after the pull request opened were not taken. Source: user.
+- Evidence (focused validation, 2026-10-20, through the developer daemon): `make dev-format` and `make dev-lint` passed; the review snapshot regenerated with only the `open_in_new_window` description changed, and the rerun without the marker matched; `MCPDomainStandaloneCompositionTests` failed on the old fingerprint and passed (2 tests) after the update to the measured value; `DirectHeadlessCompositionTests` ran 10 tests with no failures; both products built.
+- Evidence (size, compact JSON with sorted keys, `main` against the branch after this item, characters and whitespace-separated words, not tokens): advertised entry 7087 to 7013 characters (735 to 726 words), input schema 2294 to 2380 (185 to 197); the description and Settings rows are unchanged from item 2. This item alone removes 24 characters and 3 words from the entry and the schema.
+- Evidence: the review loop ran one Context Builder review with no findings. For the refactor analysis, Context Builder's rewritten prompt dropped the inline diff, so a follow-up in the same chat sent it again; that analysis found nothing worth changing. No explore agents ran, because the item is one string and its generated files.
+- Decision: no repeat of the debug-app check. The item changes only agent-facing text, not behavior the check covered. Source: orchestrator judgment, under the contribution guide's rule to repeat the run when a fix changes the behavior it covered.
 
 ## Deferred
 
