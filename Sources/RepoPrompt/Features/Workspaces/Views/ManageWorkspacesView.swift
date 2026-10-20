@@ -575,7 +575,7 @@ struct ManageWorkspacesView: View {
                             workspace: ws,
                             onSwitch: {
                                 Task {
-                                    let result = await workspaceManager.requestWorkspaceSwitch(to: ws)
+                                    let result = await workspaceManager.requestWorkspaceSwitch(toWorkspaceID: ws.id)
                                     if result.didSwitch {
                                         isPresented = false
                                     }
@@ -653,7 +653,7 @@ struct ManageWorkspacesView: View {
         let activeIDs = activeWorkspaceIDs
         var items = userWorkspaces.map { workspace in
             WorkspaceManagementItem(
-                workspace: workspace,
+                workspace: ListedWorkspace(workspace),
                 isLeakCleanupCandidate: false,
                 evidence: [],
                 deletionBlockReason: deletionBlockReason(for: workspace, activeWorkspaceIDs: activeIDs)
@@ -678,8 +678,7 @@ struct ManageWorkspacesView: View {
     }
 
     private func filterManagementItems(_ items: [WorkspaceManagementItem]) -> [WorkspaceManagementItem] {
-        let matchingIDs = Set(filterWorkspaces(items.map(\.workspace)).map(\.id))
-        return items.filter { matchingIDs.contains($0.id) }
+        items.filter { matchesSearch(name: $0.workspace.name, repoPaths: $0.workspace.repoPaths) }
     }
 
     private var activeWorkspaceIDs: Set<UUID> {
@@ -696,8 +695,8 @@ struct ManageWorkspacesView: View {
         if activeWorkspaceIDs.contains(workspace.id) {
             return "Active in an open window."
         }
-        let protectedTabs = workspace.composeTabs + workspace.stashedTabs.map(\.tab)
-        if protectedTabs.contains(where: { $0.activeAgentSessionID != nil || $0.isPinned }) {
+        let listedTabs = workspaceManager.listedTabs(inWorkspace: workspace.id)
+        if listedTabs.contains(where: { $0.activeAgentSessionID != nil || $0.isPinned }) {
             return "Has a tab with an agent session, or a pinned tab."
         }
         return nil
@@ -1044,7 +1043,7 @@ struct ManageWorkspacesView: View {
 
         if let created = workspaceManager.createWorkspaceFromDraft() {
             Task {
-                let result = await workspaceManager.requestWorkspaceSwitch(to: created)
+                let result = await workspaceManager.requestWorkspaceSwitch(toWorkspaceID: created.id)
                 if result.didSwitch {
                     isPresented = false
                 }
@@ -1082,45 +1081,47 @@ struct ManageWorkspacesView: View {
     // MARK: - Workspace Filtering
 
     private func filterWorkspaces(_ workspaces: [WorkspaceModel]) -> [WorkspaceModel] {
+        workspaces.filter { matchesSearch(name: $0.name, repoPaths: $0.repoPaths) }
+    }
+
+    private func matchesSearch(name: String, repoPaths: [String]) -> Bool {
         guard !searchText.trimmingCharacters(in: .whitespaces).isEmpty else {
-            return workspaces
+            return true
         }
 
         let searchLower = searchText.lowercased()
 
-        return workspaces.filter { workspace in
-            // Check workspace name
-            if workspace.name.lowercased().contains(searchLower) {
+        // Check workspace name
+        if name.lowercased().contains(searchLower) {
+            return true
+        }
+
+        // Check paths in the workspace
+        for path in repoPaths {
+            // Check last component (folder name)
+            let lastComponent = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+            if lastComponent.contains(searchLower) {
                 return true
             }
 
-            // Check paths in the workspace
-            for path in workspace.repoPaths {
-                // Check last component (folder name)
-                let lastComponent = URL(fileURLWithPath: path).lastPathComponent.lowercased()
-                if lastComponent.contains(searchLower) {
-                    return true
-                }
-
-                // Also check if search term appears anywhere in the full path
-                if path.lowercased().contains(searchLower) {
-                    return true
-                }
+            // Also check if search term appears anywhere in the full path
+            if path.lowercased().contains(searchLower) {
+                return true
             }
-
-            return false
         }
+
+        return false
     }
 }
 
 private struct WorkspaceManagementItem: Identifiable {
-    let workspace: WorkspaceModel
+    let workspace: ListedWorkspace
     let isLeakCleanupCandidate: Bool
     let evidence: [String]
     let deletionBlockReason: String?
 
     var id: UUID {
-        workspace.id
+        workspace.workspaceID
     }
 
     var isDeletable: Bool {

@@ -469,7 +469,7 @@ private struct Fixture {
     }
 
     var canonicalSelection: StoredSelection? {
-        window.workspaceManager.composeTab(for: identity)?.selection
+        window.workspaceManager.contentGateway.shownComposeTab(identity)?.selection
     }
 
     var boundContext: MCPServerViewModel.TabContextSnapshot? {
@@ -497,7 +497,7 @@ private struct Fixture {
     }
 
     func makeContext(selection: StoredSelection) throws -> MCPServerViewModel.TabContextSnapshot {
-        let tab = try XCTUnwrap(window.workspaceManager.composeTab(for: identity))
+        let tab = try XCTUnwrap(window.workspaceManager.contentGateway.shownComposeTab(identity))
         return MCPServerViewModel.TabContextSnapshot(
             tabID: tabID,
             windowID: window.windowID,

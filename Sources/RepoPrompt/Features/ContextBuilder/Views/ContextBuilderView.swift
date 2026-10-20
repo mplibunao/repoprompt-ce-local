@@ -31,14 +31,19 @@ struct ContextBuilderView: View {
     private func openGeneratedAnswerChat(route: ContextBuilderGeneratedAnswerRoute) {
         Task { @MainActor in
             let workspaceManager = windowState.workspaceManager
-            guard let workspace = workspaceManager.workspace(withID: route.workspaceID) else { return }
+            guard workspaceManager.contentGateway.listedWorkspace(route.workspaceID) != nil else { return }
 
             if workspaceManager.activeWorkspaceID != route.workspaceID {
-                let result = await workspaceManager.requestWorkspaceSwitch(to: workspace, saveState: true)
+                let result = await workspaceManager.requestWorkspaceSwitch(
+                    toWorkspaceID: route.workspaceID,
+                    saveState: true
+                )
                 guard result.didSwitch else { return }
             }
 
-            guard workspaceManager.activeWorkspace?.composeTabs.contains(where: { $0.id == route.tabID }) == true else {
+            guard workspaceManager.contentGateway.shownComposeTab(
+                WorkspaceSelectionIdentity(workspaceID: route.workspaceID, tabID: route.tabID)
+            ) != nil else {
                 return
             }
             if windowState.promptManager.activeComposeTabID != route.tabID {

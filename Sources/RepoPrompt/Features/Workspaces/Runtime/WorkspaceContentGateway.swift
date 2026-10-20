@@ -24,6 +24,86 @@ enum WorkspaceContentWriteReceipt: Equatable {
 struct WorkspaceComposeTabWrite: Equatable {
     let receipt: WorkspaceContentWriteReceipt
     let tab: ComposeTabState
+    /// For a canonical write, the selection revision the window gave the tab when its projection
+    /// installed the write's accepted revision. A canonical edit that doesn't change the document
+    /// has the one from the install of the revision it read. An edit of the window's copy has none.
+    /// Neither does a canonical write whose install the gateway can't identify. The window may not
+    /// have installed that revision yet, or a later install of the workspace may have replaced it.
+    var projectedSelectionRevision: UInt64?
+}
+
+/// A workspace as this window lists it: from the window's own copy when the window holds the
+/// workspace, and from the store's summary otherwise. It has no tab content.
+struct ListedWorkspace: Equatable {
+    let workspaceID: UUID
+    let name: String
+    let repoPaths: [String]
+    let customStoragePath: URL?
+    let isSystemWorkspace: Bool
+    let isHiddenInMenus: Bool
+    let isEphemeral: Bool
+    let consolidatedIntoWorkspaceID: UUID?
+    let activeTabID: UUID?
+    let lastUsed: Date
+    let dateModified: Date
+
+    init(_ workspace: WorkspaceModel) {
+        workspaceID = workspace.id
+        name = workspace.name
+        repoPaths = workspace.repoPaths
+        customStoragePath = workspace.customStoragePath
+        isSystemWorkspace = workspace.isSystemWorkspace
+        isHiddenInMenus = workspace.isHiddenInMenus
+        isEphemeral = workspace.isEphemeral
+        consolidatedIntoWorkspaceID = workspace.consolidatedIntoWorkspaceID
+        activeTabID = workspace.activeComposeTabID
+        lastUsed = workspace.lastUsed
+        dateModified = workspace.dateModified
+    }
+
+    /// `isHiddenInMenus` replaces the summary's flag for a listing that hides more than the
+    /// document does.
+    init(_ summary: DomainWorkspaceSummary, isHiddenInMenus: Bool? = nil) {
+        workspaceID = summary.workspaceID
+        name = summary.name
+        repoPaths = summary.repoPaths
+        customStoragePath = summary.customStoragePath
+        isSystemWorkspace = summary.isSystemWorkspace
+        self.isHiddenInMenus = isHiddenInMenus ?? summary.isHiddenInMenus
+        isEphemeral = summary.isEphemeral
+        consolidatedIntoWorkspaceID = summary.consolidatedIntoWorkspaceID
+        activeTabID = summary.activeContextID
+        lastUsed = summary.lastUsed
+        dateModified = summary.dateModified
+    }
+}
+
+/// A compose or stashed tab as this window lists it, by the rule `ListedWorkspace` follows.
+struct ListedTab: Equatable {
+    let identity: WorkspaceSelectionIdentity
+    let location: DomainWorkspaceTabLocation
+    let name: String
+    let activeAgentSessionID: UUID?
+    let activeChatSessionID: UUID?
+    let isPinned: Bool
+
+    init(_ tab: ComposeTabState, workspaceID: UUID, location: DomainWorkspaceTabLocation) {
+        identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tab.id)
+        self.location = location
+        name = tab.name
+        activeAgentSessionID = tab.activeAgentSessionID
+        activeChatSessionID = tab.activeChatSessionID
+        isPinned = tab.isPinned
+    }
+
+    init(_ summary: DomainTabSummary, workspaceID: UUID) {
+        identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: summary.tabID)
+        location = summary.location
+        name = summary.name
+        activeAgentSessionID = summary.activeAgentSessionID
+        activeChatSessionID = summary.activeChatSessionID
+        isPinned = summary.isPinned
+    }
 }
 
 /// A tab ID looked up across the summary catalog.
@@ -32,6 +112,14 @@ enum WorkspaceTabIdentityResolution: Equatable {
     /// More than one workspace lists the tab ID, so the caller has to name the workspace.
     case ambiguous([WorkspaceSelectionIdentity])
     case notFound
+}
+
+/// Which document an edit changes.
+enum WorkspaceContentEditTarget: Equatable {
+    /// The window's own copy, for content it holds: its shown workspace or its own ephemeral one.
+    case windowCopy
+    /// The canonical document, decoded for this edit, for a workspace the window doesn't hold.
+    case canonicalDocument
 }
 
 enum WorkspaceContentGatewayError: LocalizedError, Equatable {
@@ -134,6 +222,9 @@ protocol WorkspaceContentBackend: AnyObject {
         expectedDigest: String,
         persistence: WorkspaceContentPersistence
     ) async -> WorkspaceContentCommitResult
+    /// Saves the canonical working document at exactly `expectedRevision` without submitting a
+    /// document, failing closed when another writer advanced it.
+    func saveWorkingDocument(of workspaceID: UUID, expectedRevision: UInt64) async -> WorkspaceContentCommitResult
 }
 
 /// The production backend: the runtime's revisioned workspace authority.
@@ -184,6 +275,12 @@ final class DomainWorkspaceContentBackend: WorkspaceContentBackend {
             return WorkspaceContentCommitResult(accepted: nil, failure: error)
         }
     }
+
+    func saveWorkingDocument(of workspaceID: UUID, expectedRevision: UInt64) async -> WorkspaceContentCommitResult {
+        await WorkspaceContentCommitResult(phases: [
+            client.saveWorkingDocument(workspaceID, expectedWorkspaceRevision: expectedRevision)
+        ])
+    }
 }
 
 /// The isolated legacy owner's configured storage, for a manager built without an authority
@@ -222,6 +319,12 @@ final class LegacyWorkspaceContentBackend: WorkspaceContentBackend {
         nil
     }
 
+    /// Legacy storage is its saved file. Its documents are never ahead of a save, so the gateway
+    /// doesn't call this.
+    func saveWorkingDocument(of workspaceID: UUID, expectedRevision _: UInt64) async -> WorkspaceContentCommitResult {
+        WorkspaceContentCommitResult(accepted: nil, failure: WorkspaceContentGatewayError.workspaceUnavailable(workspaceID))
+    }
+
     func commit(
         _ workspace: WorkspaceModel,
         fileURL: URL,
@@ -252,6 +355,8 @@ final class LegacyWorkspaceContentBackend: WorkspaceContentBackend {
                     failure: WorkspaceContentGatewayError.workspaceUnavailable(workspace.id)
                 )
             }
+            // Without a projection, the backend installs its own commit in the manager's copy.
+            manager.contentGatewayInstallLegacyCommit(workspace)
             return WorkspaceContentCommitResult(accepted: (.initial, digest), failure: nil)
         } catch {
             return WorkspaceContentCommitResult(accepted: nil, failure: error)
@@ -279,6 +384,15 @@ final class WorkspaceContentGateway {
     private var switchWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     #if DEBUG
         private var loadSnapshot = WorkspaceContentLoadSnapshot()
+        /// Runs before a commit submits its document, so a test can change what the window shows
+        /// while the write is in flight.
+        var commitSubmissionWillBeginHandlerForTesting: (@MainActor (_ workspaceID: UUID) async -> Void)?
+        /// Runs after the authority answered a commit and before the gateway reports the answer, so
+        /// a test can deliver a later commit's result first.
+        var commitResultWillReturnHandlerForTesting: (@MainActor (_ workspaceID: UUID) async -> Void)?
+        /// Runs before an operation's canonical read, with the operation's source label, so a test
+        /// can pause one operation's load.
+        var canonicalReadWillBeginHandlerForTesting: (@MainActor (_ workspaceID: UUID, _ source: String) async -> Void)?
     #endif
 
     init(manager: WorkspaceManagerViewModel, backend: any WorkspaceContentBackend) {
@@ -316,11 +430,49 @@ final class WorkspaceContentGateway {
         }
     }
 
-    /// Resolves a bare tab ID across the catalog. A tab ID that more than one workspace lists is
-    /// ambiguous; catalog order never picks a winner.
+    /// The workspace as this window lists it. The window's own copy of a workspace it holds can list
+    /// a tab its summary doesn't yet, because the shown workspace's edits publish on a debounce.
+    func listedWorkspace(_ workspaceID: UUID) -> ListedWorkspace? {
+        if let held = heldWorkspace(workspaceID) {
+            return ListedWorkspace(held)
+        }
+        return workspaceSummary(workspaceID).map { ListedWorkspace($0) }
+    }
+
+    /// The tab as this window lists it, at `location`, or in either location when `location` is nil.
+    func listedTab(
+        _ identity: WorkspaceSelectionIdentity,
+        location: DomainWorkspaceTabLocation? = .composed
+    ) -> ListedTab? {
+        if let held = heldWorkspace(identity.workspaceID) {
+            let composed = held.composeTabs.first { $0.id == identity.tabID }
+                .map { ListedTab($0, workspaceID: held.id, location: .composed) }
+            let stashed = held.stashedTabs.first { $0.tab.id == identity.tabID }
+                .map { ListedTab($0.tab, workspaceID: held.id, location: .stashed) }
+            return switch location {
+            case .composed: composed
+            case .stashed: stashed
+            case nil: composed ?? stashed
+            }
+        }
+        return tabSummary(identity, location: location).map { ListedTab($0, workspaceID: identity.workspaceID) }
+    }
+
+    /// Resolves a bare tab ID across the catalog, reading the window's own copy of each workspace it
+    /// holds. A tab ID that more than one workspace lists is ambiguous, whatever the catalog order.
     func uniqueTabIdentity(tabID: UUID, includeStashed: Bool) -> WorkspaceTabIdentityResolution {
         var matches: [(identity: WorkspaceSelectionIdentity, location: DomainWorkspaceTabLocation)] = []
-        for summary in manager?.workspaceSummaries ?? [] {
+        let held = heldWorkspaces()
+        for workspace in held {
+            let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID)
+            if workspace.composeTabs.contains(where: { $0.id == tabID }) {
+                matches.append((identity, .composed))
+            } else if includeStashed, workspace.stashedTabs.contains(where: { $0.tab.id == tabID }) {
+                matches.append((identity, .stashed))
+            }
+        }
+        let heldIDs = Set(held.map(\.id))
+        for summary in manager?.workspaceSummaries ?? [] where !heldIDs.contains(summary.workspaceID) {
             let identity = WorkspaceSelectionIdentity(workspaceID: summary.workspaceID, tabID: tabID)
             if summary.composeTabs.contains(where: { $0.tabID == tabID }) {
                 matches.append((identity, .composed))
@@ -420,34 +572,93 @@ final class WorkspaceContentGateway {
             selectionTabID: nil,
             source: source,
             persistence: persistence,
+            mirrorsShownEdit: true,
+            presentsCanonicalWrite: true,
             validation: validation,
-            edit: edit
-        )
+            didStore: nil
+        ) { workspace, _ in
+            try edit(&workspace)
+        }.receipt
     }
 
     /// Applies `edit` to one compose tab, through `mutateWorkspace`'s rules. A tab the edit changes
     /// gets a new `lastModified`, and its workspace a new `dateModified`.
+    ///
+    /// `didStore` gets the tab as stored, in the main-actor turn that stores it: right after the
+    /// window's copy takes the edit, or when the authority's answer arrives. That turn is the
+    /// write's place in the window's order. It precedes any UI mirror, save, or projection wait,
+    /// so a caller can report the write before work that can suspend. Its `acceptedRevision` is the
+    /// working revision the authority accepted a canonical write at, and nil for an edit of the
+    /// window's copy. A canonical write returns once the window's projection has installed that
+    /// revision, so the window's copy and its selection revisions include the write. When a
+    /// canonical edit doesn't change the document, the gateway doesn't send a command. Its
+    /// `acceptedRevision` is then the revision the edit read, and it returns without waiting for the
+    /// projection.
+    ///
+    /// Unless `mirrorsShownEdit` is false, the prompt UI and file tree show an edit the shown
+    /// workspace takes. With it false, only the tab presentation follows, and UI snapshots queued
+    /// before the edit can't revert a selection it changed.
+    ///
+    /// The window can start showing the workspace while a canonical write is in flight. The write
+    /// then returns once the window presents it the same way, unless `presentsCanonicalWrite` is
+    /// false. A caller that presents its canonical write by another path passes false.
     func mutateComposeTab(
         _ identity: WorkspaceSelectionIdentity,
         source: String,
         persistence: WorkspaceContentPersistence,
+        mirrorsShownEdit: Bool = true,
+        presentsCanonicalWrite: Bool = true,
         validation: @MainActor () throws -> Void = {},
+        didStore: (@MainActor (ComposeTabState, _ acceptedRevision: UInt64?) -> Void)? = nil,
         edit: (inout ComposeTabState) throws -> Void
     ) async throws -> WorkspaceComposeTabWrite {
+        try await mutateComposeTab(
+            identity,
+            source: source,
+            persistence: persistence,
+            mirrorsShownEdit: mirrorsShownEdit,
+            presentsCanonicalWrite: presentsCanonicalWrite,
+            validation: validation,
+            didStore: didStore
+        ) { tab, _ in
+            try edit(&tab)
+        }
+    }
+
+    /// `mutateComposeTab`, with an edit that learns which document it changes.
+    func mutateComposeTab(
+        _ identity: WorkspaceSelectionIdentity,
+        source: String,
+        persistence: WorkspaceContentPersistence,
+        mirrorsShownEdit: Bool = true,
+        presentsCanonicalWrite: Bool = true,
+        validation: @MainActor () throws -> Void = {},
+        didStore: (@MainActor (ComposeTabState, _ acceptedRevision: UInt64?) -> Void)? = nil,
+        edit: (inout ComposeTabState, WorkspaceContentEditTarget) throws -> Void
+    ) async throws -> WorkspaceComposeTabWrite {
         var editedTab: ComposeTabState?
-        let receipt = try await mutate(
+        let write = try await mutate(
             identity.workspaceID,
             selectionTabID: identity.tabID,
             source: source,
             persistence: persistence,
-            validation: validation
-        ) { workspace in
+            mirrorsShownEdit: mirrorsShownEdit,
+            presentsCanonicalWrite: presentsCanonicalWrite,
+            validation: validation,
+            didStore: didStore.map { report in
+                { workspace, acceptedRevision in
+                    if let tab = workspace.composeTabs.first(where: { $0.id == identity.tabID }) {
+                        report(tab, acceptedRevision)
+                    }
+                }
+            }
+        ) { workspace, target in
             guard let index = workspace.composeTabs.firstIndex(where: { $0.id == identity.tabID }) else {
                 throw WorkspaceContentGatewayError.tabUnavailable(identity)
             }
             var tab = workspace.composeTabs[index]
             let original = tab
-            try edit(&tab)
+            try edit(&tab, target)
             if tab != original {
                 let now = Date()
                 tab.lastModified = now
@@ -457,7 +668,11 @@ final class WorkspaceContentGateway {
             editedTab = tab
         }
         guard let editedTab else { throw WorkspaceContentGatewayError.tabUnavailable(identity) }
-        return WorkspaceComposeTabWrite(receipt: receipt, tab: editedTab)
+        return WorkspaceComposeTabWrite(
+            receipt: write.receipt,
+            tab: editedTab,
+            projectedSelectionRevision: write.projectedInstall?.selectionRevisionByTabID[identity.tabID]
+        )
     }
 
     /// Submits a complete document the caller already holds, for cleanup and recovery that rebuild
@@ -477,6 +692,7 @@ final class WorkspaceContentGateway {
         let fileURL = workspaceSummary(workspace.id)?.fileURL ?? manager.workspaceFileURL(for: workspace)
         let previous = manager.workspace(withID: workspace.id)
         try Task.checkCancellation()
+        // The window's copy takes the document when the bridge projects it, as a remote write's.
         return try await commit(
             workspace,
             changedTabIDs: previous.map { Self.changedTabIDs(from: $0, to: workspace) }
@@ -485,36 +701,46 @@ final class WorkspaceContentGateway {
             expectedRevision: expectedRevision,
             expectedDigest: expectedDigest,
             persistence: persistence,
-            // The whole document replaces the window's copy, local edits included, as a remote
-            // write does. On the shown workspace the next capture puts the live UI back on top.
-            localEditsDuringSubmit: .replace
-        )
+            didStore: nil
+        ).receipt
     }
 
     // MARK: - Internals
+
+    /// A write's receipt. A canonical write also has the window projection's install of the
+    /// workspace at exactly the write's accepted revision, when the gateway can identify it.
+    private struct Write {
+        let receipt: WorkspaceContentWriteReceipt
+        var projectedInstall: ProjectedWorkspaceInstall?
+    }
 
     private func mutate(
         _ workspaceID: UUID,
         selectionTabID: UUID?,
         source: String,
         persistence: WorkspaceContentPersistence,
+        mirrorsShownEdit: Bool,
+        presentsCanonicalWrite: Bool,
         validation: @MainActor () throws -> Void,
-        edit: (inout WorkspaceModel) throws -> Void
-    ) async throws -> WorkspaceContentWriteReceipt {
+        didStore: (@MainActor (WorkspaceModel, _ acceptedRevision: UInt64?) -> Void)?,
+        edit: (inout WorkspaceModel, WorkspaceContentEditTarget) throws -> Void
+    ) async throws -> Write {
         guard manager != nil, !isInvalidated else { throw WorkspaceContentGatewayError.gatewayClosed }
         if let receipt = try await mutateLocalIfHeld(
             workspaceID,
             selectionTabID: selectionTabID,
             source: source,
             persistence: persistence,
+            mirrorsShownEdit: mirrorsShownEdit,
             validation: validation,
+            didStore: didStore,
             edit: edit
         ) {
-            return receipt
+            return Write(receipt: receipt)
         }
 
         // A write's baseline is the canonical document, never a read registration.
-        guard let document = await backend.canonicalDocument(for: workspaceID) else {
+        guard let document = await operationCanonicalDocument(workspaceID, source: source) else {
             throw WorkspaceContentGatewayError.workspaceUnavailable(workspaceID)
         }
         recordLoad(workspaceID, source: source)
@@ -537,35 +763,83 @@ final class WorkspaceContentGateway {
             selectionTabID: selectionTabID,
             source: source,
             persistence: persistence,
+            mirrorsShownEdit: mirrorsShownEdit,
             validation: validation,
+            didStore: didStore,
             edit: edit
         ) {
-            return receipt
+            return Write(receipt: receipt)
         }
 
         try validation()
         var edited = baseline
-        try edit(&edited)
+        try edit(&edited, .canonicalDocument)
         guard edited != baseline else {
-            // A no-op edit sends no command and leaves the parked document's bytes as they are.
-            return .committed(
-                revisions: document.summary.revisions,
-                digest: document.summary.contentDigest,
-                changedTabIDs: []
+            let readRevision = document.summary.revisions.workingRevision
+            // A saved edit still owes the save when the working document already has its change,
+            // as it does on a retry after a save whose working phase landed and saved phase failed.
+            // Only the save command goes, at the revision read. It leaves the working document unchanged.
+            if persistence == .saved, document.summary.revisions.dirtyRevision != nil {
+                try Task.checkCancellation()
+                return try await submit(baseline, changedTabIDs: [], didStore: didStore) {
+                    await backend.saveWorkingDocument(of: workspaceID, expectedRevision: readRevision)
+                }
+            }
+            // Otherwise a no-op edit doesn't send a command and leaves the parked document's bytes
+            // as they are. It reports the revision it read, and the projection's install at exactly
+            // that revision when the window has one.
+            didStore?(baseline, readRevision)
+            return Write(
+                receipt: .committed(
+                    revisions: document.summary.revisions,
+                    digest: document.summary.contentDigest,
+                    changedTabIDs: []
+                ),
+                projectedInstall: manager?.projectedInstall(of: workspaceID, exactly: readRevision)
             )
         }
         try Task.checkCancellation()
-        return try await commit(
+        let write = try await commit(
             edited,
             changedTabIDs: Self.changedTabIDs(from: baseline, to: edited),
             fileURL: document.summary.fileURL,
             expectedRevision: document.summary.revisions.workingRevision,
             expectedDigest: document.summary.contentDigest,
             persistence: persistence,
-            localEditsDuringSubmit: .merge(
-                baseline: baseline,
-                baselineRevision: document.summary.revisions.workingRevision
+            didStore: didStore
+        )
+        if presentsCanonicalWrite {
+            await presentCanonicalWriteIfShown(
+                from: baseline,
+                to: edited,
+                mirrorsShownEdit: mirrorsShownEdit,
+                validation: validation
             )
+        }
+        return write
+    }
+
+    /// A window that started showing the workspace while the write was in flight shows the state its
+    /// switch loaded. The next capture of its UI would store that state over the write. Once any
+    /// switch involving the workspace ends, a window that shows the workspace presents the write, if
+    /// the write's `validation` still passes. A cancelled caller skips the presentation, as it skips
+    /// a local edit's.
+    private func presentCanonicalWriteIfShown(
+        from baseline: WorkspaceModel,
+        to accepted: WorkspaceModel,
+        mirrorsShownEdit: Bool,
+        validation: @MainActor () throws -> Void
+    ) async {
+        do {
+            try await awaitShownStateSettled(accepted.id)
+        } catch {
+            return
+        }
+        guard let manager, manager.activeWorkspaceID == accepted.id, (try? validation()) != nil else { return }
+        await manager.contentGatewayPresentAcceptedEdit(
+            from: baseline,
+            to: accepted,
+            mirrorsShownEdit: mirrorsShownEdit
         )
     }
 
@@ -577,8 +851,10 @@ final class WorkspaceContentGateway {
         selectionTabID: UUID?,
         source: String,
         persistence: WorkspaceContentPersistence,
+        mirrorsShownEdit: Bool,
         validation: @MainActor () throws -> Void,
-        edit: (inout WorkspaceModel) throws -> Void
+        didStore: (@MainActor (WorkspaceModel, _ acceptedRevision: UInt64?) -> Void)?,
+        edit: (inout WorkspaceModel, WorkspaceContentEditTarget) throws -> Void
     ) async throws -> WorkspaceContentWriteReceipt? {
         try await awaitShownStateSettled(workspaceID)
         if holdsLocally(workspaceID) {
@@ -587,7 +863,9 @@ final class WorkspaceContentGateway {
                 selectionTabID: selectionTabID,
                 source: source,
                 persistence: persistence,
+                mirrorsShownEdit: mirrorsShownEdit,
                 validation: validation,
+                didStore: didStore,
                 edit: edit
             )
         }
@@ -597,16 +875,11 @@ final class WorkspaceContentGateway {
         return nil
     }
 
-    /// How `commit` updates a window copy that took local edits during the submit.
-    private enum LocalEditsDuringSubmit {
-        /// The edit's changes from `baseline`, read at `baselineRevision`, are merged into the copy.
-        case merge(baseline: WorkspaceModel, baselineRevision: UInt64)
-        /// The committed document replaces the copy.
-        case replace
-    }
-
-    /// Submits the document and applies whatever the authority accepted, also when the caller's task
-    /// is cancelled during the submit. An accepted write stays accepted.
+    /// Submits the document and reports whatever the authority accepted, even when the caller
+    /// cancels its task during the submit, because cancelling doesn't undo an accepted write.
+    /// `didStore` gets the accepted document and its working revision in the turn the answer
+    /// arrives. The window's copy takes the document only when the bridge projects it, as every
+    /// other window's copy does, and the write returns after that projection.
     private func commit(
         _ workspace: WorkspaceModel,
         changedTabIDs: Set<UUID>,
@@ -614,51 +887,50 @@ final class WorkspaceContentGateway {
         expectedRevision: UInt64,
         expectedDigest: String,
         persistence: WorkspaceContentPersistence,
-        localEditsDuringSubmit: LocalEditsDuringSubmit
-    ) async throws -> WorkspaceContentWriteReceipt {
-        let stateVersionAtDispatch = manager?.contentGatewayStateVersion(for: workspace.id)
-        let recordedRevisionAtDispatch = manager?.contentGatewayCommittedState(for: workspace.id)?
-            .revisions.workingRevision
-        let result = await backend.commit(
-            workspace,
-            fileURL: fileURL,
-            expectedRevision: expectedRevision,
-            expectedDigest: expectedDigest,
-            persistence: persistence
-        )
-        if let manager, let accepted = result.accepted {
-            // A newer revision recorded during the submit means a later write already reached this
-            // window. Applying this older outcome or model would move the window backward.
-            let recordedRevision = manager.contentGatewayCommittedState(for: workspace.id)?.revisions.workingRevision
-            if recordedRevision.map({ $0 <= accepted.revisions.workingRevision }) ?? true {
-                for outcome in result.acceptedOutcomes {
-                    manager.contentGatewayApplyAcceptedOutcome(outcome, workspaceID: workspace.id)
-                }
-                // The window keeps a full model of every workspace. Unless its copy carries the
-                // write, its next whole-model save of this workspace reverts it.
-                if manager.contentGatewayStateVersion(for: workspace.id) == stateVersionAtDispatch {
-                    manager.contentGatewayInstallAcceptedCopy(workspace)
-                } else if let local = manager.workspace(withID: workspace.id) {
-                    // The copy took local edits during the submit, and the self-echo keeps it as it
-                    // is. The edit's changes go into it so it carries both. The merge holds only
-                    // for a copy that started from the edit's baseline: a window that hadn't taken
-                    // an earlier write would read that write's changes as absent and revert them.
-                    if case let .merge(baseline, baselineRevision) = localEditsDuringSubmit,
-                       recordedRevisionAtDispatch == baselineRevision,
-                       let merged = Self.merging(workspace, from: baseline, into: local)
-                    {
-                        manager.contentGatewayInstallLocalEdit(merged)
-                    } else {
-                        manager.contentGatewayInstallAcceptedCopy(workspace)
-                    }
-                }
-            }
+        didStore: (@MainActor (WorkspaceModel, _ acceptedRevision: UInt64?) -> Void)?
+    ) async throws -> Write {
+        try await submit(workspace, changedTabIDs: changedTabIDs, didStore: didStore) {
+            await backend.commit(
+                workspace,
+                fileURL: fileURL,
+                expectedRevision: expectedRevision,
+                expectedDigest: expectedDigest,
+                persistence: persistence
+            )
+        }
+    }
+
+    /// Sends one submission for `workspace` to the authority and returns its write.
+    private func submit(
+        _ workspace: WorkspaceModel,
+        changedTabIDs: Set<UUID>,
+        didStore: (@MainActor (WorkspaceModel, _ acceptedRevision: UInt64?) -> Void)?,
+        _ submission: () async -> WorkspaceContentCommitResult
+    ) async throws -> Write {
+        #if DEBUG
+            if let handler = commitSubmissionWillBeginHandlerForTesting { await handler(workspace.id) }
+        #endif
+        let result = await submission()
+        #if DEBUG
+            if let handler = commitResultWillReturnHandlerForTesting { await handler(workspace.id) }
+        #endif
+        for outcome in result.acceptedOutcomes {
+            manager?.reportDomainAuthorityOutcomeHealth(outcome, workspaceID: workspace.id)
+        }
+        if result.failure == nil, let accepted = result.accepted {
+            didStore?(workspace, accepted.revisions.workingRevision)
         }
         if let failure = result.failure { throw failure }
         guard let accepted = result.accepted else {
             throw WorkspaceContentGatewayError.workspaceUnavailable(workspace.id)
         }
-        return .committed(revisions: accepted.revisions, digest: accepted.digest, changedTabIDs: changedTabIDs)
+        // The write happened, so it returns even when the wait ends without the projection. A later
+        // install describes a later write, so only the install at the accepted revision counts.
+        let install = await manager?.awaitProjectedInstall(of: workspace.id, atLeast: accepted.revisions.workingRevision)
+        return Write(
+            receipt: .committed(revisions: accepted.revisions, digest: accepted.digest, changedTabIDs: changedTabIDs),
+            projectedInstall: install?.workingRevision == accepted.revisions.workingRevision ? install : nil
+        )
     }
 
     private func mutateLocal(
@@ -666,8 +938,10 @@ final class WorkspaceContentGateway {
         selectionTabID: UUID?,
         source: String,
         persistence: WorkspaceContentPersistence,
+        mirrorsShownEdit: Bool,
         validation: @MainActor () throws -> Void,
-        edit: (inout WorkspaceModel) throws -> Void
+        didStore: (@MainActor (WorkspaceModel, _ acceptedRevision: UInt64?) -> Void)?,
+        edit: (inout WorkspaceModel, WorkspaceContentEditTarget) throws -> Void
     ) async throws -> WorkspaceContentWriteReceipt {
         guard let manager, let current = manager.workspace(withID: workspaceID) else {
             throw WorkspaceContentGatewayError.workspaceUnavailable(workspaceID)
@@ -678,12 +952,19 @@ final class WorkspaceContentGateway {
         // live UI state that capture copies in is already part of the edited model.
         let base = manager.contentGatewayShownSaveCapture(workspaceID) ?? current
         var edited = base
-        try edit(&edited)
+        try edit(&edited, .windowCopy)
         try Task.checkCancellation()
         let changedTabIDs = Self.changedTabIDs(from: base, to: edited)
         if edited != base {
             manager.contentGatewayInstallLocalEdit(edited)
-            await manager.contentGatewayMirrorShownEdit(from: base, to: edited)
+            didStore?(edited, nil)
+            if mirrorsShownEdit {
+                await manager.contentGatewayMirrorShownEdit(from: base, to: edited)
+            } else {
+                manager.contentGatewayPresentShownSelections(from: base, to: edited)
+            }
+        } else {
+            didStore?(edited, nil)
         }
 
         guard persistence == .saved, wasShown, !edited.isEphemeral else {
@@ -708,8 +989,8 @@ final class WorkspaceContentGateway {
         if case let .rejected(rejection) = outcome {
             throw WorkspaceContentGatewayError.saveRejected(rejection)
         }
-        if let committed = manager.contentGatewayCommittedState(for: workspaceID) {
-            return .committed(revisions: committed.revisions, digest: committed.digest, changedTabIDs: changedTabIDs)
+        if let saved = manager.contentGatewayRecordedAuthorityState(for: workspaceID) {
+            return .committed(revisions: saved.revisions, digest: saved.digest, changedTabIDs: changedTabIDs)
         }
         guard let document = await backend.canonicalDocument(for: workspaceID) else {
             throw WorkspaceContentGatewayError.workspaceUnavailable(workspaceID)
@@ -735,9 +1016,29 @@ final class WorkspaceContentGateway {
         return workspace
     }
 
+    /// The canonical document an operation loads.
+    private func operationCanonicalDocument(_ workspaceID: UUID, source: String) async -> WorkspaceContentDocument? {
+        #if DEBUG
+            if let handler = canonicalReadWillBeginHandlerForTesting {
+                await handler(workspaceID, source)
+            }
+        #endif
+        return await backend.canonicalDocument(for: workspaceID)
+    }
+
     private func holdsLocally(_ workspaceID: UUID) -> Bool {
-        guard let manager, let workspace = manager.workspace(withID: workspaceID) else { return false }
-        return manager.activeWorkspaceID == workspaceID || workspace.isEphemeral
+        heldWorkspace(workspaceID) != nil
+    }
+
+    /// The window's own copy of a workspace it holds: its shown workspace or its own ephemeral one.
+    private func heldWorkspace(_ workspaceID: UUID) -> WorkspaceModel? {
+        guard let manager, manager.holdsWorkspaceContent(workspaceID) else { return nil }
+        return manager.workspace(withID: workspaceID)
+    }
+
+    private func heldWorkspaces() -> [WorkspaceModel] {
+        guard let manager else { return [] }
+        return manager.workspaces.filter { manager.holdsWorkspaceContent($0.id) }
     }
 
     private func readContentNotHeldLocally(_ workspaceID: UUID, source: String) async throws -> WorkspaceModel {
@@ -758,7 +1059,7 @@ final class WorkspaceContentGateway {
         // A read sees the last published working state. If the document changes during the
         // decode, the read retries once, and a second change returns a state conflict.
         for _ in 0 ..< 2 {
-            guard let document = await backend.canonicalDocument(for: workspaceID) else {
+            guard let document = await operationCanonicalDocument(workspaceID, source: source) else {
                 throw WorkspaceContentGatewayError.workspaceUnavailable(workspaceID)
             }
             recordLoad(workspaceID, source: source)
@@ -843,112 +1144,6 @@ final class WorkspaceContentGateway {
     /// The tabs by ID. For a list that holds one tab ID twice, the first of them.
     private static func tabsByID<Tab>(_ tabs: [Tab], id: (Tab) -> UUID) -> [UUID: Tab] {
         Dictionary(tabs.map { (id($0), $0) }, uniquingKeysWith: { first, _ in first })
-    }
-
-    /// `copy` with the edit's changes from `baseline` to `edited` merged in: each tab the edit
-    /// created, replaced, or removed, with created tabs placed in the edit's order, and each
-    /// workspace field the edit changed. A local change to a tab the edit replaced gives way to the
-    /// edit's version of that tab.
-    ///
-    /// Nil when no merge keeps both sides: a tab list holds one tab ID twice, the copy moved or
-    /// removed a tab the edit changed, the edit reordered tabs it kept, or the result's active tab
-    /// is gone or a tab ID ends up both composed and stashed.
-    static func merging(
-        _ edited: WorkspaceModel,
-        from baseline: WorkspaceModel,
-        into copy: WorkspaceModel
-    ) -> WorkspaceModel? {
-        guard let composeTabs = mergedTabs(
-            baseline: baseline.composeTabs,
-            edited: edited.composeTabs,
-            copy: copy.composeTabs,
-            id: \.id
-        ),
-            let stashedTabs = mergedTabs(
-                baseline: baseline.stashedTabs,
-                edited: edited.stashedTabs,
-                copy: copy.stashedTabs,
-                id: \.tab.id
-            )
-        else { return nil }
-
-        // This starts from the edit's fields and takes the copy's value only for a field the copy
-        // changed and the edit didn't, which equals applying the edit's field changes to the copy.
-        // A field this list misses keeps the committed value instead of reverting it.
-        var merged = edited
-        func keepLocalChange(_ field: WritableKeyPath<WorkspaceModel, some Equatable>) {
-            if copy[keyPath: field] != baseline[keyPath: field],
-               edited[keyPath: field] == baseline[keyPath: field]
-            {
-                merged[keyPath: field] = copy[keyPath: field]
-            }
-        }
-        keepLocalChange(\.schemaVersion)
-        keepLocalChange(\.dateModified)
-        keepLocalChange(\.customStoragePath)
-        keepLocalChange(\.isSystemWorkspace)
-        keepLocalChange(\.isHiddenInMenus)
-        keepLocalChange(\.consolidatedIntoWorkspaceID)
-        keepLocalChange(\.ephemeralFlag)
-        keepLocalChange(\.name)
-        keepLocalChange(\.repoPaths)
-        keepLocalChange(\.presets)
-        keepLocalChange(\.activePresetID)
-        keepLocalChange(\.lastUsed)
-        keepLocalChange(\.customPath)
-        keepLocalChange(\.currentPromptText)
-        keepLocalChange(\.lastSearchQuery)
-        keepLocalChange(\.selectedMetaPromptIDs)
-        keepLocalChange(\.copyPresetId)
-        keepLocalChange(\.copyCustomizations)
-        keepLocalChange(\.chatPresetId)
-        keepLocalChange(\.activeComposeTabID)
-        merged.composeTabs = composeTabs
-        merged.stashedTabs = stashedTabs
-
-        if let activeTabID = merged.activeComposeTabID, !composeTabs.contains(where: { $0.id == activeTabID }) {
-            return nil
-        }
-        guard Set(composeTabs.map(\.id)).isDisjoint(with: stashedTabs.map(\.tab.id)) else { return nil }
-        return merged
-    }
-
-    /// One tab list of `merging(_:from:into:)`. Nil when a list holds one tab ID twice, the copy
-    /// moved or removed a tab the edit changed, already holds a tab the edit created, or the edit
-    /// reordered the tabs it kept.
-    private static func mergedTabs<Tab: Equatable>(
-        baseline: [Tab],
-        edited: [Tab],
-        copy: [Tab],
-        id: (Tab) -> UUID
-    ) -> [Tab]? {
-        // Matching by tab ID can't tell two tabs with one ID apart.
-        for tabs in [baseline, edited, copy] where Set(tabs.map(id)).count != tabs.count {
-            return nil
-        }
-        let baselineByID = tabsByID(baseline, id: id)
-        let editedByID = tabsByID(edited, id: id)
-        let copyIDs = Set(copy.map(id))
-        guard edited.map(id).filter({ baselineByID[$0] != nil }) == baseline.map(id).filter({ editedByID[$0] != nil })
-        else { return nil }
-        let changed = changedIDs(baselineByID, editedByID)
-        guard changed.allSatisfy({ copyIDs.contains($0) == (baselineByID[$0] != nil) }) else { return nil }
-
-        var merged = copy.compactMap { tab -> Tab? in
-            changed.contains(id(tab)) ? editedByID[id(tab)] : tab
-        }
-        for (index, tab) in edited.enumerated() where baselineByID[id(tab)] == nil {
-            // After the nearest tab before it in the edit's order that the merged list holds.
-            var position = 0
-            for previous in edited[..<index].reversed() {
-                if let previousIndex = merged.firstIndex(where: { id($0) == id(previous) }) {
-                    position = previousIndex + 1
-                    break
-                }
-            }
-            merged.insert(tab, at: position)
-        }
-        return merged
     }
 
     private static func tabIDs(of workspace: WorkspaceModel) -> Set<UUID> {

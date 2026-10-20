@@ -144,7 +144,7 @@ extension MCPServerViewModel {
             toolName: "selection",
             startMirroring: false
         )
-        let stabilized = try stabilizedSelectionReadSnapshot(resolved)
+        let stabilized = try await stabilizedSelectionReadSnapshot(resolved)
         return await selectionCollections(
             for: stabilized.snapshot,
             lookupContextOverride: lookupContextOverride
@@ -167,7 +167,7 @@ extension MCPServerViewModel {
                 toolName: "selection",
                 startMirroring: false
             )
-            let stabilized = try stabilizedSelectionReadSnapshot(resolved)
+            let stabilized = try await stabilizedSelectionReadSnapshot(resolved)
             let lookupContext: WorkspaceLookupContext = if let lookupContextOverride {
                 lookupContextOverride
             } else {

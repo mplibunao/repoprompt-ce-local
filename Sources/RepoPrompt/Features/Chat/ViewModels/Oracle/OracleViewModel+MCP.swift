@@ -610,15 +610,11 @@ extension OracleViewModel {
         for session: ChatSession,
         fallbackTabID: UUID?
     ) async -> UUID? {
-        if let tabID = session.composeTabID,
-           workspaceManager.composeTab(with: tabID) != nil
-        {
+        if let tabID = session.composeTabID, composeTabIsListed(tabID) {
             return tabID
         }
 
-        if let fallbackTabID,
-           workspaceManager.composeTab(with: fallbackTabID) != nil
-        {
+        if let fallbackTabID, composeTabIsListed(fallbackTabID) {
             await assignSession(session.id, toTabID: fallbackTabID, setActiveForTab: false)
             return fallbackTabID
         }
@@ -722,6 +718,8 @@ extension OracleViewModel {
         throw ChatToolError.invalidParams("No chats found in the current workspace")
     }
 
+    /// Throws when `startNewChatSession` creates no chat, for example when the tab refuses the link
+    /// to it, rather than returning whichever chat is current.
     @MainActor
     func createSession(
         named name: String?,
@@ -741,8 +739,8 @@ extension OracleViewModel {
             setActiveForTab: setActiveForTab
         )
 
-        guard let id = createdID ?? currentSessionID,
-              let session = sessions.first(where: { $0.id == id })
+        guard let createdID,
+              let session = sessions.first(where: { $0.id == createdID })
         else {
             throw ChatToolError.internalError("Failed to create chat session")
         }
@@ -905,7 +903,11 @@ extension OracleViewModel {
             fallbackTabID: resolvedTabID
         )
         if let targetTabID {
-            workspaceManager.setActiveChatSessionID(session.id, forTabID: targetTabID)
+            await setLinkedTabActiveChatSessionID(
+                session.id,
+                tabID: targetTabID,
+                preferredWorkspaceID: session.workspaceID
+            )
         }
     }
 
@@ -987,7 +989,7 @@ extension OracleViewModel {
             let activeForTab: UUID?
             if let resolvedTabID {
                 scopedSessions = sessions(forTabID: resolvedTabID)
-                activeForTab = workspaceManager.activeChatSessionID(forTabID: resolvedTabID)
+                activeForTab = linkedTabActiveChatSessionID(tabID: resolvedTabID, preferredWorkspaceID: nil)
             } else {
                 scopedSessions = sessions
                 activeForTab = nil
@@ -1132,7 +1134,10 @@ extension OracleViewModel {
         let shouldActivate: Bool
         if let tabContext {
             let isFocusedTab = (promptVM.activeComposeTabID == tabContext.tabID)
-            let activeSessionID = workspaceManager.activeChatSessionID(forTabID: tabContext.tabID)
+            let activeSessionID = linkedTabActiveChatSessionID(
+                tabID: tabContext.tabID,
+                preferredWorkspaceID: tabContext.workspaceID
+            )
                 ?? currentSessionID.flatMap { currentID in
                     sessions.first(where: { $0.id == currentID && $0.composeTabID == tabContext.tabID })?.id
                 }
@@ -1369,7 +1374,7 @@ extension OracleViewModel {
             guard let preferredSession = Self.preferredOracleLogSession(
                 forTabID: tabID,
                 sessions: sessions,
-                activeSessionID: workspaceManager.activeChatSessionID(forTabID: tabID),
+                activeSessionID: linkedTabActiveChatSessionID(tabID: tabID, preferredWorkspaceID: nil),
                 agentModeSessionID: agentModeSessionID,
                 agentModeRunID: agentModeRunID
             ) else {
@@ -1440,7 +1445,9 @@ extension OracleViewModel {
 
         // Convert to Value array - only expose short IDs
         let chatsArray = metadataList.map { meta -> Value in
-            let activeForTab = meta.composeTabID.flatMap { workspaceManager.activeChatSessionID(forTabID: $0) } == meta.id
+            let activeForTab = meta.composeTabID.flatMap {
+                linkedTabActiveChatSessionID(tabID: $0, preferredWorkspaceID: workspace.id)
+            } == meta.id
             var chatDict: [String: Value] = [
                 "id": .string(meta.shortID), // Only expose short ID
                 "name": .string(meta.name),
@@ -1802,12 +1809,12 @@ extension OracleViewModel {
 
         if setActiveForTab {
             if workspaceID != nil {
-                workspaceManager.setActiveChatSessionID(
+                await workspaceManager.setActiveChatSessionID(
                     session.id,
                     for: WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID)
                 )
             } else {
-                workspaceManager.setActiveChatSessionID(session.id, forTabID: tabID)
+                await setLinkedTabActiveChatSessionID(session.id, tabID: tabID, preferredWorkspaceID: workspace.id)
             }
         }
 

@@ -521,8 +521,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         guard !hasPreparedForWindowClose else { return .windowClosing }
         guard closingTabCounts[tabID] == nil,
               let workspaceID,
-              workspaceManager?.composeTab(
-                  for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+              workspaceManager?.contentGateway.listedTab(
+                  WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
               ) != nil
         else { return .tabUnavailable }
         let existing = sessions[tabID]
@@ -613,10 +613,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
     }
 
-    private func workspace(owning tabID: UUID) -> WorkspaceModel? {
-        workspaceManager?.workspaces.first { workspace in
-            workspace.composeTabs.contains { $0.id == tabID }
-        }
+    private func workspace(owning tabID: UUID) -> ListedWorkspace? {
+        workspaceID(containing: tabID).flatMap { workspaceManager?.contentGateway.listedWorkspace($0) }
     }
 
     #if DEBUG
@@ -1153,10 +1151,30 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         workspaceManager?.activeWorkspaceID
     }
 
+    /// The workspace that lists `tabID` as a compose tab: the shown workspace when it does, and
+    /// otherwise the one workspace the catalog lists it in. Nil when no workspace lists it, or when
+    /// several do, because a bare tab ID can't choose between them.
     private func workspaceID(containing tabID: UUID) -> UUID? {
-        workspaceManager?.workspaces.first { workspace in
-            workspace.composeTabs.contains { $0.id == tabID }
-        }?.id
+        if let identity = shownTabIdentity(tabID) { return identity.workspaceID }
+        guard case let .unique(identity, _) = workspaceManager?.contentGateway.uniqueTabIdentity(
+            tabID: tabID,
+            includeStashed: false
+        ) else { return nil }
+        return identity.workspaceID
+    }
+
+    /// The tab's identity in the shown workspace, when the window shows the tab.
+    private func shownTabIdentity(_ tabID: UUID) -> WorkspaceSelectionIdentity? {
+        guard let workspaceID = currentWorkspaceID, shownComposeTab(tabID) != nil else { return nil }
+        return WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+    }
+
+    /// The stored tab, when the shown workspace holds it.
+    private func shownComposeTab(_ tabID: UUID) -> ComposeTabState? {
+        guard let manager = workspaceManager, let workspaceID = manager.activeWorkspaceID else { return nil }
+        return manager.contentGateway.shownComposeTab(
+            WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+        )
     }
 
     private var currentWorkspacePath: String? {
@@ -1224,9 +1242,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             }
         }
 
-        workspaceManager.$workspaces
-            .sink { [weak self] workspaces in
-                self?.cancelMCPRunsWhoseTargetWasRemoved(workspaces)
+        // Membership changes only when a workspace joins or leaves the catalog. A window releasing
+        // an unshown workspace's content isn't a removal.
+        workspaceManager.$workspaceCatalogMembership
+            .sink { [weak self] workspaceIDs in
+                self?.cancelMCPRunsWhoseTargetWasRemoved(workspaceIDs)
             }
             .store(in: &cancellables)
 
@@ -1726,9 +1746,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         !hasPreparedForWindowClose && sessions[session.tabID] === session
     }
 
+    /// Sessions load their settings when their tab becomes the active tab, which is always a tab of
+    /// the shown workspace.
     private func loadConfigForSession(_ session: TabSession) {
         guard let manager = workspaceManager,
-              let tabState = manager.composeTab(with: session.tabID) else { return }
+              let tabState = shownComposeTab(session.tabID) else { return }
 
         isRestoringState = true
 
@@ -1925,8 +1947,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         onTabChanged(promptManager.activeComposeTabID)
     }
 
-    private func cancelMCPRunsWhoseTargetWasRemoved(_ workspaces: [WorkspaceModel]) {
-        let workspaceIDs = Set(workspaces.map(\.id))
+    private func cancelMCPRunsWhoseTargetWasRemoved(_ workspaceIDs: Set<UUID>) {
         for tabID in sessions.keys {
             guard let record = runRegistry.activeRecord(tabID: tabID),
                   let identity = record.mcpConfiguration?.identity
@@ -2152,8 +2173,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
               nestedTabContext.tabID == identity.tabID,
               nestedTabContext.frozenLookupContext != nil,
               let manager = workspaceManager,
-              let workspace = manager.workspaces.first(where: { $0.id == identity.workspaceID }),
-              manager.composeTab(for: identity) != nil
+              let workspace = manager.contentGateway.listedWorkspace(identity.workspaceID),
+              manager.contentGateway.listedTab(identity) != nil
         else {
             throw NSError(
                 domain: "DiscoverAgent",
@@ -2243,23 +2264,60 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     // MARK: - Persistence
 
-    private func persistSessionConfig(_ session: TabSession, markWorkspaceDirty: Bool = true) {
+    /// Stores the session's tab-specific Context Builder settings on its tab. A tab of a workspace
+    /// the window holds takes them in its copy in this turn, so the save capture that follows a
+    /// before-save call stores them, as with any edit of the window's own copy. Any other tab takes
+    /// them through the content gateway, in a write that runs after this returns and reads the
+    /// session's settings when it applies, so of several queued writes the last leaves the newest
+    /// settings. A write that changes the tab marks its workspace unsaved unless `marksUnsaved` is
+    /// false.
+    private func persistSessionConfig(_ session: TabSession, marksUnsaved: Bool = true) {
         guard !isRestoringState,
               let manager = workspaceManager,
-              var tab = manager.composeTab(with: session.tabID) else { return }
-
-        // Persist only tab-specific Context Builder state
-        tab.contextBuilder = ContextBuilderTabConfig(
-            instructions: session.contextBuilderInstructions,
-            followUpTypeRaw: session.selectedFollowUpType.rawValue,
-            selectedContextBuilderPromptIDs: Array(session.selectedContextBuilderPromptIDs)
-        )
-        manager.updateComposeTab(tab, markDirty: markWorkspaceDirty)
+              let workspaceID = workspaceID(containing: session.tabID)
+        else { return }
+        let identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: session.tabID)
+        func store(_ tab: inout ComposeTabState) -> Bool {
+            guard !Self.tabConfig(tab.contextBuilder, holdsSettingsOf: session) else { return false }
+            tab.contextBuilder = ContextBuilderTabConfig(
+                instructions: session.contextBuilderInstructions,
+                followUpTypeRaw: session.selectedFollowUpType.rawValue,
+                selectedContextBuilderPromptIDs: Array(session.selectedContextBuilderPromptIDs)
+            )
+            return true
+        }
+        if manager.holdsWorkspaceContent(workspaceID) {
+            manager.editHeldTab(identity, marksUnsaved: marksUnsaved) { store(&$0) }
+            return
+        }
+        let gateway = manager.contentGateway
+        Task { @MainActor [weak self] in
+            do {
+                _ = try await gateway.mutateComposeTab(
+                    identity,
+                    source: "contextBuilder.persistSessionConfig",
+                    persistence: .working
+                ) { tab in
+                    _ = store(&tab)
+                }
+            } catch {
+                self?.debugLog("persistSessionConfig: tab \(session.tabID) kept its settings: \(error.localizedDescription)")
+            }
+        }
     }
 
+    /// Whether `config` stores the session's settings. Prompt IDs compare as a set, because the
+    /// session keeps them unordered.
+    private static func tabConfig(_ config: ContextBuilderTabConfig, holdsSettingsOf session: TabSession) -> Bool {
+        config.instructions == session.contextBuilderInstructions
+            && config.followUpTypeRaw == session.selectedFollowUpType.rawValue
+            && Set(config.selectedContextBuilderPromptIDs) == session.selectedContextBuilderPromptIDs
+    }
+
+    /// Runs before each save, which is about to store the shown workspace.
     private func persistCurrentSession() {
         guard let session = activeSession else { return }
-        persistSessionConfig(session, markWorkspaceDirty: false)
+        persistSessionConfig(session, marksUnsaved: false)
     }
 
     // MARK: - Run lifecycle
@@ -2306,7 +2364,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
 
         guard !configuration.isSystemWorkspace,
-              workspaceManager?.composeTab(for: identity) != nil
+              workspaceManager?.contentGateway.listedTab(identity) != nil
         else {
             throw NSError(
                 domain: "DiscoverAgent",
@@ -2418,7 +2476,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         ) async throws -> MCPContextBuilderRunCompletion {
             guard let manager = workspaceManager,
                   let workspace = manager.activeWorkspace,
-                  let tab = manager.composeTab(with: tabID)
+                  let tab = shownComposeTab(tabID)
             else { throw ContextBuilderWorkspaceContextError.missingWorkspace }
             let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID)
             var nested = MCPServerViewModel.TabContextSnapshot(
@@ -2615,7 +2673,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         switch outcome {
         case .completed:
             if !record.origin.isMCP {
-                copyAgentOutputToPromptIfEmpty(session: session)
+                copyAgentOutputToPromptIfEmpty(record: record)
             }
             session.appendLogEntry(
                 AgentLogEntry(
@@ -2806,8 +2864,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// If the main prompt area is empty but we have agent output,
     /// copy the agent output to the prompt area so the user can see it.
     /// Sets `session.usedAgentOutputAsPrompt` and returns the extracted agent output.
+    ///
+    /// Only a UI run calls this, and it finishes while its workspace is shown: a workspace switch
+    /// cancels the window's runs before it changes the shown workspace. The decision reads the shown
+    /// tab in this turn, and the content gateway writes the prompt after this returns.
     @discardableResult
-    private func copyAgentOutputToPromptIfEmpty(session: TabSession) -> String? {
+    private func copyAgentOutputToPromptIfEmpty(record: ContextBuilderRunRecord) -> String? {
+        let session = record.session
         // Preserve the exact accumulated output for MCP/result semantics. The bounded preview
         // is only a fallback for legacy providers that emitted no content chunks.
         let exactOutput = session.lastAgentOutput
@@ -2832,7 +2895,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             return agentOutput
         }
 
-        guard var tab = manager.composeTab(with: session.tabID) else {
+        let identity = (session.operationToken?.workspaceID ?? currentWorkspaceID).map {
+            WorkspaceSelectionIdentity(workspaceID: $0, tabID: session.tabID)
+        }
+        guard let identity, let tab = manager.contentGateway.shownComposeTab(identity) else {
             debugLog("copyAgentOutputToPromptIfEmpty: tab not found for \(session.tabID)")
             return agentOutput
         }
@@ -2851,11 +2917,26 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
 
         debugLog("copyAgentOutputToPromptIfEmpty: copying agent output to prompt (\(output.count) chars)")
-        tab.promptText = output
-        // Clear any override since we're putting content directly in the prompt
-        tab.contextOverrides.useOverridePrompt = false
-        tab.contextOverrides.overridePromptText = ""
-        manager.updateComposeTab(tab, markDirty: true)
+        // The run's terminal step checks `usedAgentOutputAsPrompt` right after this call when it
+        // schedules a follow-up, so this call stores the prompt before it returns.
+        let stored = manager.editHeldTab(identity) { tab in
+            guard tab.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+            tab.promptText = output
+            // Clear any override since we're putting content directly in the prompt
+            tab.contextOverrides.useOverridePrompt = false
+            tab.contextOverrides.overridePromptText = ""
+            return true
+        }
+        guard stored else {
+            debugLog("copyAgentOutputToPromptIfEmpty: prompt not stored for \(session.tabID)")
+            return agentOutput
+        }
+        if let shown = manager.activeWorkspace, shown.id == identity.workspaceID {
+            manager.promptViewModel.loadComposeTabsFromWorkspace(
+                shown,
+                syncPromptText: shown.activeComposeTabID == identity.tabID
+            )
+        }
         session.usedAgentOutputAsPrompt = true
 
         return agentOutput
@@ -2867,7 +2948,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         let workspace = workspace(owning: tabID)
 
         // The run ID doubles as the token, so the record's own identity is its release key.
-        switch claimOperationToken(runID, origin: .ui, forTabID: tabID, workspaceID: workspace?.id) {
+        switch claimOperationToken(runID, origin: .ui, forTabID: tabID, workspaceID: workspace?.workspaceID) {
         case .claimed:
             break
         case .tabBusyInAnotherWindow:
@@ -3773,17 +3854,6 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     // MARK: - Tab-scoped MCP integration
 
-    private func snapshotAndWorkspace(for tabID: UUID) -> (ComposeTabState, UUID?)? {
-        guard let manager = workspaceManager else { return nil }
-        let base = manager.composeTab(with: tabID)
-        let name = base?.name ?? "Tab"
-        let snapshot = manager.collectComposeTabSnapshot(name: name, base: base)
-        let workspaceID = manager.workspaces.first(where: { workspace in
-            workspace.composeTabs.contains(where: { $0.id == tabID })
-        })?.id
-        return (snapshot, workspaceID)
-    }
-
     // REMOVED: installTabContextForAgent functions
     // Tab context is now installed automatically by the routing layer via connection policy
 
@@ -3839,12 +3909,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     ) async {
         #if DEBUG
             guard retained else {
-                let recordWorkspaceName = workspaceManager?.workspaces.first(where: {
-                    $0.composeTabs.contains(where: { $0.id == record.tabID })
-                })?.name ?? "unknown"
-                let snapshotWorkspaceName = workspaceManager?.workspaces.first(where: {
-                    $0.composeTabs.contains(where: { $0.id == snapshot.identity.tabID })
-                })?.name ?? "unknown"
+                let gateway = workspaceManager?.contentGateway
+                let recordWorkspaceName = workspaceID(containing: record.tabID)
+                    .flatMap { gateway?.listedWorkspace($0)?.name } ?? "unknown"
+                let snapshotWorkspaceName = gateway?.listedWorkspace(snapshot.identity.workspaceID)?.name ?? "unknown"
                 await ServerNetworkManager.shared.debugRecordRunRoutingEvent(
                     runID: record.runID,
                     event: "context_builder.commit_retain_rejected",
@@ -3889,52 +3957,57 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                             committedTab: nil
                         )
                     }
-                    let matches = manager.workspaces.compactMap { workspace -> WorkspaceSelectionIdentity? in
-                        workspace.composeTabs.contains(where: { $0.id == record.tabID })
-                            ? WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: record.tabID)
-                            : nil
-                    }
-                    guard matches.count == 1,
-                          let identity = matches.first,
-                          var tab = manager.composeTab(for: identity),
-                          activeAgentRuns.contains(runID),
-                          acceptsEvents(from: record),
-                          record.claimFinalContextCommit(),
-                          activeAgentRuns.remove(runID) != nil
+                    guard case let .unique(identity, _) = manager.contentGateway.uniqueTabIdentity(
+                        tabID: record.tabID,
+                        includeStashed: false
+                    ),
+                        activeAgentRuns.contains(runID),
+                        acceptsEvents(from: record),
+                        record.claimFinalContextCommit(),
+                        activeAgentRuns.remove(runID) != nil
                     else {
                         return MCPServerViewModel.ContextBuilderTabContextCommitResult(
                             outcome: .staleOrNoLongerCurrent,
                             committedTab: nil
                         )
                     }
+                    let promptFallback = record.session.lastAgentOutput
                     var usedAgentOutputAsPrompt = false
-                    if tab.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       let promptFallback = record.session.lastAgentOutput,
-                       !promptFallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    {
-                        tab.promptText = promptFallback
-                        tab.contextOverrides.useOverridePrompt = false
-                        tab.contextOverrides.overridePromptText = ""
-                        guard manager.updateComposeTabStoredOnly(
-                            tab,
-                            inWorkspaceID: identity.workspaceID
-                        ) else {
-                            return MCPServerViewModel.ContextBuilderTabContextCommitResult(
-                                outcome: .failed("Context Builder could not store its prompt fallback."),
-                                committedTab: nil
-                            )
+                    let write: WorkspaceComposeTabWrite
+                    do {
+                        write = try await manager.contentGateway.mutateComposeTab(
+                            identity,
+                            source: "contextBuilder.syntheticFinalContext",
+                            persistence: .working,
+                            mirrorsShownEdit: false
+                        ) { tab in
+                            guard tab.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                                  let promptFallback,
+                                  !promptFallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            else { return }
+                            tab.promptText = promptFallback
+                            tab.contextOverrides.useOverridePrompt = false
+                            tab.contextOverrides.overridePromptText = ""
+                            usedAgentOutputAsPrompt = true
                         }
-                        usedAgentOutputAsPrompt = true
+                    } catch {
+                        return MCPServerViewModel.ContextBuilderTabContextCommitResult(
+                            outcome: .failed("Context Builder could not store its prompt fallback."),
+                            committedTab: nil
+                        )
                     }
                     record.session.usedAgentOutputAsPrompt = usedAgentOutputAsPrompt
+                    // A canonical write's revision is the one the window's projection gave the tab.
+                    let selectionRevision: UInt64? = if case .pendingLocal = write.receipt {
+                        manager.selectionRevisionForMCP(workspaceID: identity.workspaceID, tabID: identity.tabID)
+                    } else {
+                        write.projectedSelectionRevision
+                    }
                     let snapshot = MCPServerViewModel.ContextBuilderCommittedTabSnapshot(
                         identity: identity,
                         nestedRunID: runID,
-                        tab: tab,
-                        selectionRevision: manager.selectionRevisionForMCP(
-                            workspaceID: identity.workspaceID,
-                            tabID: identity.tabID
-                        ),
+                        tab: write.tab,
+                        selectionRevision: selectionRevision,
                         usedAgentOutputAsPrompt: usedAgentOutputAsPrompt
                     )
                     let retained = retainCommittedTabSnapshot(snapshot, on: record)
@@ -4373,7 +4446,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         }
 
         // PRIORITY 2: Workspace snapshot (fallback, may be slightly stale)
-        if let snapshot = snapshotForTab(session.tabID) {
+        if let snapshot = await snapshotForTab(session.tabID) {
             let fileTree = await buildFileTree(from: snapshot.selection, lookupContext: lookupContext)
             debugLog("Using workspace snapshot for tab=\(session.tabID)")
             return makeUserMessage(
@@ -4400,7 +4473,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
         debugLog("Using live UI state (tab still active) for tab=\(session.tabID)")
         workspaceManager?.publishActiveComposeTabSnapshot(commitToMemory: true)
-        let liveSelection = snapshotForTab(session.tabID)?.selection ?? StoredSelection()
+        let liveSelection = await snapshotForTab(session.tabID)?.selection ?? StoredSelection()
         let fileTree = await buildFileTree(from: liveSelection, lookupContext: lookupContext)
         return makeUserMessage(
             fileTree: fileTree,
@@ -4514,8 +4587,17 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         return tree
     }
 
-    private func snapshotForTab(_ tabID: UUID) -> ComposeTabState? {
-        workspaceManager?.composeTab(with: tabID)
+    /// The tab as the window's copy or, for a workspace the window doesn't show, its canonical
+    /// document stores it, without live UI state.
+    private func snapshotForTab(_ tabID: UUID) async -> ComposeTabState? {
+        guard let gateway = workspaceManager?.contentGateway,
+              let workspaceID = workspaceID(containing: tabID)
+        else { return nil }
+        return try? await gateway.readComposeTab(
+            WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID),
+            source: "contextBuilder.runMessage",
+            capturingLiveUIState: false
+        )
     }
 
     /// Captures the tab's prompt and selection state at discovery run start.
@@ -4554,11 +4636,12 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         // Ordinary UI runs retain the current view-model prompt selection behavior.
         session.runStartContextBuilderPromptIDs = selectedContextBuilderPromptIDs
 
-        // First try: workspace snapshot (most reliable source)
+        // First try: workspace snapshot (most reliable source). A UI run starts on the active tab,
+        // which the shown workspace holds.
         if session.tabID == currentTabID {
             workspaceManager?.publishActiveComposeTabSnapshot(commitToMemory: true)
         }
-        if let snapshot = workspaceManager?.composeTab(with: session.tabID) {
+        if let snapshot = shownComposeTab(session.tabID) {
             session.runStartPromptText = snapshot.promptText
             session.runStartSelection = snapshot.selection
             debugLog("Captured run-start state from workspace snapshot for tab=\(session.tabID)")
@@ -4854,11 +4937,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     // MARK: - Plan Generation from Discovery
 
-    /// Returns the effective prompt text for a tab (considering overrides).
-    /// Used by the view to send the prompt through normal chat flow.
+    /// Returns the effective prompt text for a tab of the shown workspace (considering overrides),
+    /// and nil for any other tab. Used by the view to send the prompt through normal chat flow.
     @MainActor
     func effectivePrompt(for tabID: UUID) -> String? {
-        guard let tab = workspaceManager?.composeTab(with: tabID) else { return nil }
+        guard let tab = shownComposeTab(tabID) else { return nil }
         let overrides = tab.contextOverrides
         let prompt = overrides.useOverridePrompt
             ? overrides.overridePromptText
@@ -4870,8 +4953,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Centralized logic to compute chat name from a tab's title.
     /// Used by both UI auto-plan and MCP plan/question flows.
     @MainActor
-    func chatNameForTab(_ tabID: UUID) -> String {
-        let tabName = workspaceManager?.composeTab(with: tabID)?.name
+    func chatNameForTab(_ identity: WorkspaceSelectionIdentity) -> String {
+        let tabName = workspaceManager?.contentGateway.listedTab(identity)?.name
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let workspaceName = workspaceManager?.activeWorkspace?.name ?? "Workspace"
         let defaultName = "Plan – \(workspaceName)"
@@ -4899,12 +4982,15 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             debugLog("Automatic analysis: OracleViewModel not set; skipping for tab=\(session.tabID)")
             return
         }
-        guard effectivePrompt(for: session.tabID) != nil else {
+        // The run was a UI run, whose workspace stays shown until it finishes.
+        guard let identity = shownTabIdentity(session.tabID),
+              effectivePrompt(for: session.tabID) != nil
+        else {
             debugLog("Automatic analysis: no effective prompt; skipping for tab=\(session.tabID)")
             return
         }
 
-        let chatName = chatNameForTab(session.tabID)
+        let chatName = chatNameForTab(identity)
         let mode = followUp.headlessMode
 
         debugLog("Automatic analysis: starting background generation for tab=\(session.tabID), mode=\(mode)")
@@ -5380,7 +5466,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         clearPendingBackgroundPlanUIRefresh(for: session.tabID)
         applyPlanPreview(to: session)
         updateRuntimeBindings(from: session)
-        workspaceManager?.setActiveChatSessionID(reply.chatId, forTabID: session.tabID)
+        await workspaceManager?.setActiveChatSessionID(
+            reply.chatId,
+            for: WorkspaceSelectionIdentity(workspaceID: originWorkspaceID, tabID: session.tabID)
+        )
 
         return reply
     }
@@ -5440,7 +5529,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         let promptMode = promptMode(for: mode)
 
         let isFocusedTab = (promptManager.activeComposeTabID == tabID)
-        let activeSessionID = oracleViewModel.workspaceManager.activeChatSessionID(forTabID: tabID) ?? oracleViewModel.currentSessionID
+        let activeSessionID = oracleViewModel.workspaceManager.contentGateway.listedTab(
+            WorkspaceSelectionIdentity(workspaceID: originWorkspaceID, tabID: tabID)
+        )?.activeChatSessionID ?? oracleViewModel.currentSessionID
         let isUserStreaming = oracleViewModel.isSessionStreaming(activeSessionID)
         let shouldActivate = isFocusedTab && !isUserStreaming
 
@@ -5644,9 +5735,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             }
         #endif
 
-        guard let originWorkspaceID = workspaceID(containing: tabID) else {
+        // The follow-up belongs to the run's workspace, whichever other workspaces list the tab ID.
+        guard workspaceManager?.contentGateway.listedTab(identity) != nil else {
             throw ContextBuilderGenerationError.missingWorkspace
         }
+        let originWorkspaceID = identity.workspaceID
 
         // What this follow-up owns is fixed here, before its first suspension: the tab's session,
         // the claim that session holds (none, for a follow-up run outside a claim), and the
@@ -5713,7 +5806,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 let reply = try await oracleViewModel.runHeadless(
                     prompt: prompt,
                     modelParam: nil,
-                    chatName: chatNameForTab(tabID),
+                    chatName: chatNameForTab(identity),
                     tabID: tabID,
                     selection: selection,
                     mode: mode,
@@ -5740,8 +5833,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                     chatID: reply.shortId
                 )
                 session.backgroundPlanResponseText = reply.response
-                workspaceManager?.setActiveChatSessionID(reply.chatId, for: identity)
+                // The bindings update in the turn that checked ownership; the link write can suspend.
                 updateRuntimeBindings(from: session)
+                await workspaceManager?.setActiveChatSessionID(reply.chatId, for: identity)
                 return reply
             } catch {
                 guard ownsSession() else { throw CancellationError() }
@@ -5767,7 +5861,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             finalReviewAuthorization: finalReviewAuthorization,
             agentModeSessionID: agentModeSessionID,
             agentModeRunID: agentModeRunID,
-            chatName: chatNameForTab(tabID),
+            chatName: chatNameForTab(identity),
             model: modelSelection.model,
             chatPresetID: modelSelection.chatPresetID,
             owner: (session, ownsSession),
@@ -5874,8 +5968,23 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         onProgress: ((_ text: String, _ reasoning: String?) -> Void)? = nil
     ) async throws -> ChatSendReply {
         // Get the tab's current state after Context Builder completed
-        guard let tab = workspaceManager?.composeTab(with: tabID) else {
+        guard let gateway = workspaceManager?.contentGateway else {
             throw ContextBuilderGenerationError.missingTab
+        }
+        let tab: ComposeTabState
+        do {
+            tab = try await gateway.readComposeTab(
+                WorkspaceSelectionIdentity(workspaceID: originWorkspaceID, tabID: tabID),
+                source: "contextBuilder.followUp",
+                capturingLiveUIState: false
+            )
+        } catch let error as WorkspaceContentGatewayError {
+            switch error {
+            case .workspaceUnavailable, .tabUnavailable:
+                throw ContextBuilderGenerationError.missingTab
+            default:
+                throw error
+            }
         }
 
         // Effective prompt: override if set, else tab's promptText

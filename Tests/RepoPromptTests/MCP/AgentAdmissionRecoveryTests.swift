@@ -1847,10 +1847,10 @@ import XCTest
             }
             XCTAssertTrue(authorityHookRan)
             XCTAssertNil(boundSession.activeAgentSessionID)
-            XCTAssertNil(beforeHydration.manager.activeAgentSessionID(
-                forTabID: beforeHydration.identity.tabID,
-                inWorkspaceID: beforeHydration.workspaceA.id
-            ))
+            XCTAssertNil(beforeHydration.manager.contentGateway.listedTab(
+                WorkspaceSelectionIdentity(workspaceID: beforeHydration.workspaceA.id, tabID: beforeHydration.identity.tabID),
+                location: nil
+            )?.activeAgentSessionID)
             XCTAssertEqual(
                 boundViewModel.test_ownerValidatedSessionIndex[beforeHydration.identity.sessionID],
                 boundIndexEntry,
@@ -1892,10 +1892,10 @@ import XCTest
             }
             XCTAssertTrue(hydrationHookRan)
             XCTAssertNil(exactSession.activeAgentSessionID)
-            XCTAssertNil(afterHydration.manager.activeAgentSessionID(
-                forTabID: afterHydration.identity.tabID,
-                inWorkspaceID: afterHydration.workspaceA.id
-            ))
+            XCTAssertNil(afterHydration.manager.contentGateway.listedTab(
+                WorkspaceSelectionIdentity(workspaceID: afterHydration.workspaceA.id, tabID: afterHydration.identity.tabID),
+                location: nil
+            )?.activeAgentSessionID)
             XCTAssertEqual(
                 exactViewModel.test_ownerValidatedSessionIndex[afterHydration.identity.sessionID],
                 exactIndexEntry,
@@ -1932,10 +1932,10 @@ import XCTest
             XCTAssertEqual(target.origin, .createdForSessionResume)
             XCTAssertNotNil(target.recoveryClaim)
             XCTAssertNotEqual(target.tabID, indexedTabID)
-            XCTAssertNil(fixture.manager.activeAgentSessionID(
-                forTabID: indexedTabID,
-                inWorkspaceID: fixture.workspaceA.id
-            ))
+            XCTAssertNil(fixture.manager.contentGateway.listedTab(
+                WorkspaceSelectionIdentity(workspaceID: fixture.workspaceA.id, tabID: indexedTabID),
+                location: nil
+            )?.activeAgentSessionID)
             let discard = await viewModel.mcpDiscardSessionTarget(target)
             XCTAssertEqual(discard, .complete)
             XCTAssertEqual(target.recoveryClaim?.state, .complete)
@@ -1957,10 +1957,10 @@ import XCTest
             var installedSessionID: UUID?
             var capturedTarget: AgentModeViewModel.MCPSessionTarget?
             viewModel.test_setAfterProvisionalExistingTabBindingInstalled {
-                installedSessionID = fixture.manager.activeAgentSessionID(
-                    forTabID: targetTabID,
-                    inWorkspaceID: fixture.workspaceA.id
-                )
+                installedSessionID = fixture.manager.contentGateway.listedTab(
+                    WorkspaceSelectionIdentity(workspaceID: fixture.workspaceA.id, tabID: targetTabID),
+                    location: nil
+                )?.activeAgentSessionID
                 if let installedSessionID {
                     capturedTarget = viewModel.test_outstandingProvisionalMCPSessionTarget(
                         sessionID: installedSessionID
@@ -2065,10 +2065,10 @@ import XCTest
             XCTAssertTrue(canonical.composeTabs.contains {
                 $0.id == target.tabID && $0.activeAgentSessionID == nil
             })
-            XCTAssertNil(fixture.manager.activeAgentSessionID(
-                forTabID: target.tabID,
-                inWorkspaceID: fixture.workspaceA.id
-            ))
+            XCTAssertNil(fixture.manager.contentGateway.listedTab(
+                WorkspaceSelectionIdentity(workspaceID: fixture.workspaceA.id, tabID: target.tabID),
+                location: nil
+            )?.activeAgentSessionID)
             XCTAssertEqual(viewModel.test_pendingMCPSessionTargetDiscardCount, 0)
             XCTAssertEqual(viewModel.test_outstandingProvisionalMCPSessionTargetCount, 0)
         }
@@ -2140,10 +2140,10 @@ import XCTest
             XCTAssertEqual(releasedOwnership.installedOwnerCount, 0)
             XCTAssertEqual(releasedOwnership.rootClaimCount, 0)
             XCTAssertEqual(
-                fixture.manager.activeAgentSessionID(
-                    forTabID: fixture.identity.tabID,
-                    inWorkspaceID: fixture.workspaceA.id
-                ),
+                fixture.manager.contentGateway.listedTab(
+                    WorkspaceSelectionIdentity(workspaceID: fixture.workspaceA.id, tabID: fixture.identity.tabID),
+                    location: nil
+                )?.activeAgentSessionID,
                 parentSessionID
             )
             let canonical = try await canonicalModel(fixture)
@@ -2247,10 +2247,10 @@ import XCTest
             agentModeVM.test_setAfterDurableExplicitTabSessionBinding {
                 do {
                     let sessionID = try XCTUnwrap(
-                        fixture.manager.activeAgentSessionID(
-                            forTabID: originalTab.id,
-                            inWorkspaceID: fixture.workspaceA.id
-                        )
+                        fixture.manager.contentGateway.listedTab(
+                            WorkspaceSelectionIdentity(workspaceID: fixture.workspaceA.id, tabID: originalTab.id),
+                            location: nil
+                        )?.activeAgentSessionID
                     )
                     cancelledSessionID = sessionID
                     staleTarget = agentModeVM.test_outstandingProvisionalMCPSessionTarget(

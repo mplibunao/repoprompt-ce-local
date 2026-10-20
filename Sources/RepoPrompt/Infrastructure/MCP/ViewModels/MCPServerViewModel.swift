@@ -824,7 +824,7 @@ final class MCPServerViewModel: ObservableObject {
                 return try OracleViewModel.OracleSendPackagingContext(delegated: context)
             },
             rebindChatSessionIfNeeded: { [self] metadata, chatIDString in
-                try rebindOracleChatSessionIfNeeded(metadata: metadata, chatIDString: chatIDString)
+                try await rebindOracleChatSessionIfNeeded(metadata: metadata, chatIDString: chatIDString)
             },
             resolveTabIDForAgentMode: { [self] args, connectionID in
                 try await resolveTabIDForAgentMode(args: args, connectionID: connectionID)
@@ -973,9 +973,10 @@ final class MCPServerViewModel: ObservableObject {
             ))
         }
 
-        guard let initial = manager.collectMCPTabContextComposeSnapshot(
-            tabID: sourceTabID,
-            workspaceID: snapshot.workspaceID,
+        // The launch source belongs to the target window's shown workspace.
+        let sourceIdentity = WorkspaceSelectionIdentity(workspaceID: snapshot.workspaceID, tabID: sourceTabID)
+        guard let initial = manager.collectShownMCPTabContextComposeSnapshot(
+            sourceIdentity,
             captureActiveUIState: false,
             flushPendingUISelection: false
         ) else {
@@ -1016,7 +1017,7 @@ final class MCPServerViewModel: ObservableObject {
         }
         let bindings = bindingState.bindings ?? []
         let sourceRunID = sourceSession?.runID
-        guard initial.snapshot.activeAgentSessionID == sourceSessionID else {
+        guard initial.activeAgentSessionID == sourceSessionID else {
             return unavailable(
                 "The launching tab changed after its review selection was frozen.",
                 sourceRunID
@@ -1028,7 +1029,7 @@ final class MCPServerViewModel: ObservableObject {
         )
         guard agentRunOracleReviewLaunchSelectionStillMatches(
             snapshot: snapshot,
-            liveSelection: initial.snapshot.selection,
+            liveSelection: initial.selection,
             liveRevision: initialSelectionRevision
         ) else {
             return unavailable(
@@ -1060,9 +1061,8 @@ final class MCPServerViewModel: ObservableObject {
             } else {
                 .notApplicable
             }
-            guard let latest = manager.collectMCPTabContextComposeSnapshot(
-                tabID: sourceTabID,
-                workspaceID: snapshot.workspaceID,
+            guard let latest = manager.collectShownMCPTabContextComposeSnapshot(
+                sourceIdentity,
                 captureActiveUIState: false,
                 flushPendingUISelection: false
             ) else {
@@ -1071,7 +1071,7 @@ final class MCPServerViewModel: ObservableObject {
                     sourceRunID
                 )
             }
-            guard latest.snapshot.activeAgentSessionID == sourceSessionID else {
+            guard latest.activeAgentSessionID == sourceSessionID else {
                 return unavailable(
                     "The launching Agent session changed while its frozen review capability was being created.",
                     sourceRunID
@@ -1095,7 +1095,7 @@ final class MCPServerViewModel: ObservableObject {
             )
             guard agentRunOracleReviewLaunchSelectionStillMatches(
                 snapshot: snapshot,
-                liveSelection: latest.snapshot.selection,
+                liveSelection: latest.selection,
                 liveRevision: latestSelectionRevision
             ) else {
                 return unavailable(
@@ -1472,7 +1472,7 @@ final class MCPServerViewModel: ObservableObject {
         },
         bindTabForConnection: { [weak self] connectionID, clientName, tabID, workspaceID, windowID in
             guard let self else { throw MCPError.internalError("Window deallocated while binding tab context") }
-            try bindTabForConnection(
+            try await bindTabForConnection(
                 connectionID: connectionID,
                 clientName: clientName,
                 tabID: tabID,
@@ -1602,7 +1602,7 @@ final class MCPServerViewModel: ObservableObject {
         },
         updateCurrentTabContext: { [weak self] toolName, mutation in
             guard let self else { throw MCPError.internalError("Window deallocated while updating tab context") }
-            try await updateCurrentTabContext(toolName: toolName, mutation: mutation)
+            return try await updateCurrentTabContext(toolName: toolName, mutation: mutation)
         },
         selectedRecordsForCurrentTabContext: { [weak self] metadata, lookupContextOverride in
             guard let self else { throw MCPError.internalError("Window deallocated while resolving selected files") }
@@ -2204,17 +2204,17 @@ final class MCPServerViewModel: ObservableObject {
             await readFileAutoSelectionMirrorGateForTesting?()
         #endif
         if let workspaceID = key.workspaceID,
-           let sessionID = workspaceManager?.activeAgentSessionID(
-               forTabID: key.tabID,
-               inWorkspaceID: workspaceID
-           ),
+           let sessionID = workspaceManager?.contentGateway.listedTab(
+               WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: key.tabID),
+               location: nil
+           )?.activeAgentSessionID,
            agentWorktreeBindingStateProvider?(sessionID, key.tabID).bindings?.isEmpty == false
         {
             // Worktree-only paths cannot be represented by the logical base file tree. Refresh
             // only the header presentation from canonical storage; do not route through file UI.
-            if let selection = workspaceManager?.composeTab(
+            if let selection = workspaceManager?.shownTabSelection(
                 for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: key.tabID)
-            )?.selection {
+            ) {
                 workspaceManager?.updateComposeTabSelectionPresentation(selection, forTabID: key.tabID)
             }
             return .converged
@@ -2225,7 +2225,39 @@ final class MCPServerViewModel: ObservableObject {
 
     /// Presentation snapshot cache. Domain routing remains the only routing authority.
     @MainActor
-    var tabContextByConnectionID: [UUID: TabContextSnapshot] = [:]
+    var tabContextByConnectionID: [UUID: TabContextSnapshot] = [:] {
+        didSet { countTabBindingLifecycleChanges(from: oldValue) }
+    }
+
+    /// For each connection, how many times any window installed or released a binding of it. The
+    /// count is shared by every window, because a connection's binding in one window replaces its
+    /// binding in another. A release removes the binding but keeps this count, so a bind prepared
+    /// before an install and a release, in this window or another, still sees that both happened.
+    /// It keeps one number for each connection that was ever bound.
+    @MainActor
+    private static var tabBindingLifecycleByConnectionID: [UUID: UInt64] = [:]
+
+    /// The connection's binding lifecycle count across all windows.
+    @MainActor
+    static func tabBindingLifecycle(forConnection connectionID: UUID) -> UInt64 {
+        tabBindingLifecycleByConnectionID[connectionID] ?? 0
+    }
+
+    /// Counts an install or release for each connection whose binding in this window appeared,
+    /// disappeared, or now has another binding generation or tab.
+    @MainActor
+    private func countTabBindingLifecycleChanges(from previous: [UUID: TabContextSnapshot]) {
+        for connectionID in Set(previous.keys).union(tabContextByConnectionID.keys) {
+            let before = previous[connectionID]
+            let after = tabContextByConnectionID[connectionID]
+            guard before?.readFileAutoSelectionGeneration != after?.readFileAutoSelectionGeneration
+                || before?.tabID != after?.tabID
+                || before?.workspaceID != after?.workspaceID
+            else { continue }
+            Self.tabBindingLifecycleByConnectionID[connectionID, default: 0] &+= 1
+        }
+    }
+
     @MainActor
     var detachedContextBuilderTabContextByRunID: [UUID: DetachedContextBuilderTabContext] = [:]
     @MainActor
@@ -4195,7 +4227,7 @@ final class MCPServerViewModel: ObservableObject {
     private func rebindOracleChatSessionIfNeeded(
         metadata: RequestMetadata,
         chatIDString: String
-    ) throws {
+    ) async throws {
         guard let connectionID = metadata.connectionID,
               let windowID = metadata.windowID,
               let session = oracleVM.resolveSession(id: chatIDString),
@@ -4204,7 +4236,7 @@ final class MCPServerViewModel: ObservableObject {
         else {
             return
         }
-        try rebindToTabIfNeeded(
+        try await rebindToTabIfNeeded(
             connectionID: connectionID,
             clientName: metadata.clientName,
             windowID: windowID,
@@ -4239,10 +4271,12 @@ final class MCPServerViewModel: ObservableObject {
             await service.currentRequestConnectionID()
         }
         if let resolvedConnectionID,
-           let boundTab = boundTabID(forConnection: resolvedConnectionID),
-           composeTabExists(boundTab)
+           boundTabID(forConnection: resolvedConnectionID) != nil,
+           let bound = tabContextByConnectionID[resolvedConnectionID],
+           let manager = workspaceManager,
+           Self.listsComposeTab(of: bound, in: manager)
         {
-            return boundTab
+            return bound.tabID
         }
 
         if let activeTab = promptVM.activeComposeTabID,
@@ -4277,7 +4311,13 @@ final class MCPServerViewModel: ObservableObject {
             rawTabID: explicitRaw,
             availableTabIDs: availableTabIDs
         ) {
-            let expectedSessionID = workspaceManager?.composeTab(with: explicitUUID)?.activeAgentSessionID
+            let expectedSessionID = workspaceManager.flatMap { manager in
+                manager.activeWorkspaceID.flatMap { workspaceID in
+                    manager.contentGateway.listedTab(
+                        WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: explicitUUID)
+                    )?.activeAgentSessionID
+                }
+            }
             return try requireTargetWindow().agentModeViewModel
                 .resolveAgentSessionLifecycleMutationTarget(
                     tabID: explicitUUID,
@@ -4395,7 +4435,7 @@ final class MCPServerViewModel: ObservableObject {
             mcpServerViewModelDebugLog("bindCurrentRequestToTabIfPossible preserved agent-run source binding connectionID=\(connectionID) targetTab=\(tabID)")
             return
         }
-        try bindTabForConnection(
+        try await bindTabForConnection(
             connectionID: connectionID,
             clientName: metadata.clientName,
             tabID: tabID,
@@ -4481,12 +4521,22 @@ final class MCPServerViewModel: ObservableObject {
         return TabContextHint(tabID: resolvedTabID, workspaceID: nil, windowID: targetWindow.windowID)
     }
 
-    private func composeTabExists(_ tabID: UUID, in targetWindow: WindowState) -> Bool {
-        targetWindow.workspaceManager.composeTab(with: tabID) != nil
+    /// Whether the window lists the context's exact tab, in a workspace it shows or not.
+    private static func listsComposeTab(of context: TabContextSnapshot, in manager: WorkspaceManagerViewModel) -> Bool {
+        guard let workspaceID = context.workspaceID ?? manager.activeWorkspaceID else { return false }
+        return manager.contentGateway.listedTab(
+            WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: context.tabID),
+            location: .composed
+        ) != nil
     }
 
+    /// Whether the tab is a compose tab of this window's shown workspace, which is where an
+    /// agent-mode tab ID without a workspace ID resolves.
     private func composeTabExists(_ tabID: UUID) -> Bool {
-        workspaceManager?.composeTab(with: tabID) != nil
+        guard let manager = workspaceManager, let workspaceID = manager.activeWorkspaceID else { return false }
+        return manager.contentGateway.shownComposeTab(
+            WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+        ) != nil
     }
 
     private func existingTabContextBindingAcrossWindows(for connectionID: UUID) -> ConnectionBindingSnapshot? {
@@ -4560,14 +4610,14 @@ final class MCPServerViewModel: ObservableObject {
             let context = await targetWindow.mcpServer.stabilizedVirtualContext(
                 for: resolvedContext
             )
-            guard composeTabExists(context.tabID, in: targetWindow) else {
+            guard Self.listsComposeTab(of: context, in: targetWindow.workspaceManager) else {
                 throw MCPError.invalidParams("Tab context '\(context.tabID.uuidString)' is not available in window \(targetWindow.windowID).")
             }
             let shouldBindCaller = source == .explicitHint && purpose != .agentModeRun && connectionID != nil
             let workspaceContext: ContextBuilderWorkspaceContext?
             if purpose == .agentModeRun {
                 guard let workspaceID = context.workspaceID,
-                      let workspace = targetWindow.workspaceManager.workspaces.first(where: { $0.id == workspaceID })
+                      let workspace = targetWindow.workspaceManager.contentGateway.listedWorkspace(workspaceID)
                 else {
                     throw MCPError.invalidParams("context_builder could not resolve the invoking Agent Mode workspace.")
                 }
@@ -4575,7 +4625,11 @@ final class MCPServerViewModel: ObservableObject {
                     workspaceContext = try await ContextBuilderWorkspaceContext.resolve(
                         from: context,
                         workspaceRepoPaths: workspace.repoPaths,
-                        workspaceDirectoryPath: targetWindow.workspaceManager.workspaceDirectory(for: workspace).path,
+                        workspaceDirectoryPath: targetWindow.workspaceManager.workspaceDirectory(
+                            workspaceID: workspace.workspaceID,
+                            name: workspace.name,
+                            customStoragePath: workspace.customStoragePath
+                        ).path,
                         store: targetWindow.promptManager.workspaceFileContextStore
                     )
                 } catch {
@@ -4591,7 +4645,7 @@ final class MCPServerViewModel: ObservableObject {
             } else if let workspaceID = context.workspaceID,
                       workspaceID != targetWindow.workspaceManager.activeWorkspaceID
             {
-                guard let workspace = targetWindow.workspaceManager.workspaces.first(where: { $0.id == workspaceID }) else {
+                guard let workspace = targetWindow.workspaceManager.contentGateway.listedWorkspace(workspaceID) else {
                     throw MCPError.invalidParams("The inactive Context Builder workspace is no longer available.")
                 }
                 let canonicalPaths = Set(workspace.repoPaths.map(StandardizedPath.absolute))
@@ -5444,6 +5498,10 @@ final class MCPServerViewModel: ObservableObject {
         let catalog = await promptVM.workspaceFileContextStore.readFileAutoSelectionCatalogValidationSnapshot(
             rootScope: authoritativeLookupContext.rootScope
         )
+        // Read before the checks below, so they all hold after the read's last suspension.
+        let finalSelection = try? await workspaceManager?.readTabSelection(
+            for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: key.tabID)
+        )
         guard !Task.isCancelled,
               catalog.rootScopeAvailability == .available,
               isReadFileAutoSelectionContextCurrent(key),
@@ -5459,9 +5517,7 @@ final class MCPServerViewModel: ObservableObject {
                   workspaceID: workspaceID,
                   tabID: key.tabID
               ),
-              let finalSelection = workspaceManager?.composeTab(
-                  for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: key.tabID)
-              )?.selection,
+              let finalSelection,
               finalSelectionRevision >= authoritativeResult.selectionRevision,
               MCPReadFileAutoSelectionCoordinator.authoritativeSelection(
                   authoritativeResult.persistedSelection,
@@ -5645,10 +5701,12 @@ final class MCPServerViewModel: ObservableObject {
             guard !Task.isCancelled,
                   isReadFileAutoSelectionContextCurrent(key),
                   let workspaceID = key.workspaceID,
-                  let manager = workspaceManager,
-                  let initialSelection = manager.composeTab(
-                      for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: key.tabID)
-                  )?.selection
+                  let manager = workspaceManager
+            else { break }
+            let identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: key.tabID)
+            guard let initialSelection = try? await manager.readTabSelection(for: identity),
+                  !Task.isCancelled,
+                  isReadFileAutoSelectionContextCurrent(key)
             else { break }
             var selection = await readFileAutoSelectionCandidate(
                 batch: batch,
@@ -5667,13 +5725,9 @@ final class MCPServerViewModel: ObservableObject {
                 else { continue }
                 selection = initialSelection
             }
-            guard !Task.isCancelled,
-                  isReadFileAutoSelectionContextCurrent(key),
-                  manager.composeTab(
-                      for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: key.tabID)
-                  )?.selection == initialSelection
-            else { continue }
-
+            guard !Task.isCancelled else { continue }
+            // The accept rereads the tab and requires `initialSelection` there, so a change during
+            // the candidate computation ends this attempt.
             guard let authoritativeResult = await acceptReadFileAutoSelection(
                 selection: selection,
                 lookupContext: authoritativeLookupContext,
@@ -5698,6 +5752,7 @@ final class MCPServerViewModel: ObservableObject {
                 )
             }
 
+            let finalSelection = try? await manager.readTabSelection(for: identity)
             let finalSelectionRevision = manager.selectionRevisionForMCP(
                 workspaceID: workspaceID,
                 tabID: key.tabID
@@ -5705,9 +5760,7 @@ final class MCPServerViewModel: ObservableObject {
             guard !Task.isCancelled,
                   isReadFileAutoSelectionContextCurrent(key),
                   fileManager.isSliceRebaseFenceCurrent(sliceRebaseFence),
-                  let finalSelection = manager.composeTab(
-                      for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: key.tabID)
-                  )?.selection,
+                  let finalSelection,
                   finalSelectionRevision >= authoritativeResult.selectionRevision,
                   MCPReadFileAutoSelectionCoordinator.authoritativeSelection(
                       authoritativeResult.persistedSelection,
@@ -7241,7 +7294,7 @@ final class MCPServerViewModel: ObservableObject {
     }
 
     static func makeOracleExportDestination(
-        workspace: WorkspaceModel?,
+        workspace: ListedWorkspace?,
         windowID: Int,
         tabID: UUID?,
         lookupContext: WorkspaceLookupContext = .visibleWorkspace
@@ -7261,7 +7314,7 @@ final class MCPServerViewModel: ObservableObject {
         let standardizedRoot = (expandedRoot as NSString).standardizingPath
         try validateOracleExportPrimaryRoot(standardizedRoot)
         return OracleExportDestination(
-            workspaceID: workspace.id,
+            workspaceID: workspace.workspaceID,
             windowID: windowID,
             tabID: tabID,
             primaryRootPath: standardizedRoot,

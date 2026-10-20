@@ -57,7 +57,7 @@ struct WorkspaceEntryRootView: View {
             workspaceManager: workspaceManager,
             onOpenWorkspace: { ws in
                 Task {
-                    _ = await workspaceManager.requestWorkspaceSwitch(to: ws)
+                    _ = await workspaceManager.requestWorkspaceSwitch(toWorkspaceID: ws.id)
                 }
             },
             onManageWorkspaces: {

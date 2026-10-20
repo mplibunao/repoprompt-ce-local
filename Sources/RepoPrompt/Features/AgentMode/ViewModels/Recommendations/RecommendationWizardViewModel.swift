@@ -167,7 +167,7 @@ final class RecommendationWizardViewModel: ObservableObject {
         guard let target else { return nil }
         return RecommendationWizardScopePresentation.agentModelsScopeLabel(
             for: target,
-            workspaceName: workspaceManager?.workspace(withID: target.sourceWorkspaceID)?.name
+            workspaceName: workspaceManager?.contentGateway.listedWorkspace(target.sourceWorkspaceID)?.name
         )
     }
 

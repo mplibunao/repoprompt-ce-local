@@ -1880,19 +1880,20 @@ class OracleViewModel: ObservableObject {
         }
 
         // 2) Remove from in-memory list with animation on the main actor
+        var tabReplacement: (tabID: UUID, sessionID: UUID?)?
         withAnimation {
             guard let idx = sessions.firstIndex(where: { $0.id == session.id }) else { return }
             purgeSessionStorage(session.id)
             sessions.remove(at: idx)
 
             if let tabID = session.composeTabID,
-               workspaceManager.activeChatSessionID(forTabID: tabID) == session.id
+               linkedTabActiveChatSessionID(tabID: tabID, preferredWorkspaceID: session.workspaceID) == session.id
             {
                 let replacement = sessions
                     .filter { $0.composeTabID == tabID }
                     .sorted(by: { $0.savedAt > $1.savedAt })
                     .first
-                workspaceManager.setActiveChatSessionID(replacement?.id, forTabID: tabID)
+                tabReplacement = (tabID, replacement?.id)
             }
 
             // If the deleted session was active, pick a new session or create one
@@ -1901,6 +1902,13 @@ class OracleViewModel: ObservableObject {
                     await self?.ensureActiveSessionForCurrentTab(createIfMissing: true)
                 }
             }
+        }
+        if let tabReplacement {
+            await setLinkedTabActiveChatSessionID(
+                tabReplacement.sessionID,
+                tabID: tabReplacement.tabID,
+                preferredWorkspaceID: session.workspaceID
+            )
         }
     }
 
@@ -1934,7 +1942,10 @@ class OracleViewModel: ObservableObject {
 
         if let workspace = workspaceManager.activeWorkspace {
             for tab in workspace.composeTabs {
-                workspaceManager.setActiveChatSessionID(nil, forTabID: tab.id)
+                await workspaceManager.setActiveChatSessionID(
+                    nil,
+                    for: WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tab.id)
+                )
             }
         }
 
@@ -1954,7 +1965,8 @@ class OracleViewModel: ObservableObject {
     func ensureActiveSessionForCurrentTab(createIfMissing: Bool = true) async -> UUID? {
         guard let tabID = promptViewModel.activeComposeTabID else { return nil }
 
-        if let activeID = workspaceManager.activeChatSessionID(forTabID: tabID),
+        let shownWorkspaceID = workspaceManager.activeWorkspaceID
+        if let activeID = linkedTabActiveChatSessionID(tabID: tabID, preferredWorkspaceID: shownWorkspaceID),
            sessions.contains(where: { $0.id == activeID })
         {
             await switchToSession(activeID, setActiveForTab: false)
@@ -1965,7 +1977,7 @@ class OracleViewModel: ObservableObject {
             .sorted(by: { $0.savedAt > $1.savedAt })
             .first
         {
-            workspaceManager.setActiveChatSessionID(candidate.id, forTabID: tabID)
+            await setLinkedTabActiveChatSessionID(candidate.id, tabID: tabID, preferredWorkspaceID: shownWorkspaceID)
             await switchToSession(candidate.id, setActiveForTab: false)
             return candidate.id
         }
@@ -1998,33 +2010,80 @@ class OracleViewModel: ObservableObject {
         return resolved
     }
 
+    /// Whether some workspace lists `tabID` as a compose tab: the window's own copy of a workspace
+    /// it holds, the store's summary of any other. A tab ID that several workspaces list counts too.
+    @MainActor
+    func composeTabIsListed(_ tabID: UUID) -> Bool {
+        workspaceManager.contentGateway.uniqueTabIdentity(tabID: tabID, includeStashed: false) != .notFound
+    }
+
+    /// The compose tab a chat links to: in `preferredWorkspaceID` when that workspace lists the tab,
+    /// else in the shown workspace, else in the one other workspace that lists it. Nil when no
+    /// workspace lists it, or when only several unshown ones do.
+    @MainActor
+    func linkedComposeTabIdentity(tabID: UUID, preferredWorkspaceID: UUID?) -> WorkspaceSelectionIdentity? {
+        let gateway = workspaceManager.contentGateway
+        for workspaceID in [preferredWorkspaceID, workspaceManager.activeWorkspaceID].compactMap(\.self) {
+            let identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+            if gateway.listedTab(identity, location: .composed) != nil {
+                return identity
+            }
+        }
+        if case let .unique(identity, _) = gateway.uniqueTabIdentity(tabID: tabID, includeStashed: false) {
+            return identity
+        }
+        return nil
+    }
+
+    /// The active chat session of the compose tab a chat links to, which `linkedComposeTabIdentity`
+    /// resolves.
+    @MainActor
+    func linkedTabActiveChatSessionID(tabID: UUID, preferredWorkspaceID: UUID?) -> UUID? {
+        linkedComposeTabIdentity(tabID: tabID, preferredWorkspaceID: preferredWorkspaceID).flatMap {
+            workspaceManager.contentGateway.listedTab($0, location: .composed)?.activeChatSessionID
+        }
+    }
+
+    /// Makes `sessionID` the active chat session of the compose tab a chat links to, which
+    /// `linkedComposeTabIdentity` resolves, and returns whether the tab stored it. When no workspace
+    /// lists the tab, it doesn't write and returns true, because there is no link to keep.
+    @MainActor
+    @discardableResult
+    func setLinkedTabActiveChatSessionID(_ sessionID: UUID?, tabID: UUID, preferredWorkspaceID: UUID?) async -> Bool {
+        guard let identity = linkedComposeTabIdentity(tabID: tabID, preferredWorkspaceID: preferredWorkspaceID) else {
+            return true
+        }
+        return await workspaceManager.setActiveChatSessionID(sessionID, for: identity)
+    }
+
     @MainActor
     func ensureTabForSession(_ session: ChatSession) async -> UUID? {
-        if let tabID = session.composeTabID,
-           workspaceManager.composeTab(with: tabID) != nil
-        {
+        if let tabID = session.composeTabID, composeTabIsListed(tabID) {
             return tabID
         }
 
+        // The new blank tab is in the shown workspace, where the shown-tab selection store reaches it.
         guard let newTab = await promptViewModel.createBackgroundComposeTab(
             strategy: .blank,
             name: session.name
         ) else { return nil }
 
-        var updatedTab = newTab
-        updatedTab.selection = StoredSelection(
-            selectedPaths: session.selectedFilePaths,
-            slices: [:],
-            codemapAutoEnabled: true
-        )
         // Note: Chat session prompt IDs are managed separately from compose tab meta prompts.
         // Don't write session.selectedPromptIDs into tab.selectedMetaPromptIDs as they are
         // different concepts (chat prompts vs copy/clipboard meta prompts).
-        updatedTab.activeSubView = nil
-        workspaceManager.updateComposeTabStoredOnly(updatedTab)
+        if let workspaceID = workspaceManager.activeWorkspaceID {
+            workspaceManager.storeShownTabSelection(
+                StoredSelection(
+                    selectedPaths: session.selectedFilePaths,
+                    slices: [:],
+                    codemapAutoEnabled: true
+                ),
+                for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: newTab.id)
+            )
+        }
 
         if let idx = sessions.firstIndex(where: { $0.id == session.id }) {
-            sessions[idx].composeTabID = updatedTab.id
+            sessions[idx].composeTabID = newTab.id
             refreshSessionLists()
             let sessionToSave = sessions[idx]
             scheduleTrackedAutosave(for: sessionToSave) { [weak self] in
@@ -2033,7 +2092,7 @@ class OracleViewModel: ObservableObject {
             }
         }
 
-        return updatedTab.id
+        return newTab.id
     }
 
     @MainActor
@@ -2042,9 +2101,16 @@ class OracleViewModel: ObservableObject {
         sessions[idx].composeTabID = tabID
         refreshSessionLists()
         if setActiveForTab {
-            workspaceManager.setActiveChatSessionID(sessionID, forTabID: tabID)
+            await setLinkedTabActiveChatSessionID(
+                sessionID,
+                tabID: tabID,
+                preferredWorkspaceID: sessions[idx].workspaceID
+            )
         }
-        let sessionToSave = sessions[idx]
+        // The setter can suspend, and a switch or a deletion can change `sessions` meanwhile.
+        guard let sessionToSave = sessions.first(where: { $0.id == sessionID }),
+              sessionToSave.composeTabID == tabID
+        else { return }
         scheduleTrackedAutosave(for: sessionToSave) { [weak self] in
             guard let self else { return }
             _ = try? await autosaveSession(sessionToSave)
@@ -2279,6 +2345,24 @@ class OracleViewModel: ObservableObject {
         setActiveForTab: Bool = true
     ) async -> UUID? {
         let resolvedTabID = tabID ?? promptViewModel.activeComposeTabID
+        // The chat is saved with its tab's workspace, which need not be the one the window shows.
+        let tabIdentity = resolvedTabID.flatMap { linkedComposeTabIdentity(tabID: $0, preferredWorkspaceID: nil) }
+        // A background chat starts from its tab's stored selection and meta prompts. A tab the window
+        // doesn't show is loaded here, so no await separates the checks below from the session they create.
+        // A failed read returns nil before any session exists.
+        var backgroundTab: ComposeTabState?
+        if !activateInUI, let tabIdentity {
+            do {
+                backgroundTab = try await workspaceManager.contentGateway.readComposeTab(
+                    tabIdentity,
+                    source: "oracle.newChatSession",
+                    capturingLiveUIState: false
+                )
+            } catch {
+                print("Error creating a chat for tab \(tabIdentity.tabID): \(error.localizedDescription)")
+                return nil
+            }
+        }
 
         // If there's already a blank session with that name, just switch to it
         if let existingIndex = sessions.firstIndex(where: {
@@ -2290,7 +2374,21 @@ class OracleViewModel: ObservableObject {
         }) {
             let existingID = sessions[existingIndex].id
             if setActiveForTab, let resolvedTabID {
-                workspaceManager.setActiveChatSessionID(existingID, forTabID: resolvedTabID)
+                let loadGeneration = workspaceChatSessionLoadGeneration
+                guard await setLinkedTabActiveChatSessionID(
+                    existingID,
+                    tabID: resolvedTabID,
+                    preferredWorkspaceID: tabIdentity?.workspaceID
+                ) else {
+                    print("Error switching tab \(resolvedTabID) to chat \(existingID): the tab kept its active chat")
+                    return nil
+                }
+                guard await chatIsStillListedAfterLinking(
+                    existingID,
+                    tabID: resolvedTabID,
+                    preferredWorkspaceID: tabIdentity?.workspaceID,
+                    loadGeneration: loadGeneration
+                ) else { return nil }
             }
             if activateInUI {
                 currentSessionID = existingID
@@ -2318,11 +2416,9 @@ class OracleViewModel: ObservableObject {
         // Capture current selections so the session restores them later
         let currentSelectedPaths: [String]
         let currentSelectedPrompts: [UUID]
-        if !activateInUI, let resolvedTabID,
-           let tab = workspaceManager.composeTab(with: resolvedTabID)
-        {
-            currentSelectedPaths = tab.selection.selectedPaths
-            currentSelectedPrompts = tab.selectedMetaPromptIDs
+        if let backgroundTab {
+            currentSelectedPaths = backgroundTab.selection.selectedPaths
+            currentSelectedPrompts = backgroundTab.selectedMetaPromptIDs
         } else {
             currentSelectedPaths = promptViewModel.fileManager.selectedFiles.map(\.fullPath)
             currentSelectedPrompts = Array(promptViewModel.selectedPromptIDs)
@@ -2331,7 +2427,7 @@ class OracleViewModel: ObservableObject {
         let selectedChatPresetId = promptViewModel.selectedChatPresetID
 
         let newSession = ChatSession(
-            workspaceID: workspaceManager.activeWorkspace?.id,
+            workspaceID: tabIdentity?.workspaceID ?? workspaceManager.activeWorkspace?.id,
             composeTabID: resolvedTabID,
             agentModeSessionID: agentModeSessionID,
             agentModeRunID: agentModeRunID,
@@ -2343,7 +2439,23 @@ class OracleViewModel: ObservableObject {
         )
         sessions.append(newSession)
         if setActiveForTab, let resolvedTabID {
-            workspaceManager.setActiveChatSessionID(newSession.id, forTabID: resolvedTabID)
+            let loadGeneration = workspaceChatSessionLoadGeneration
+            guard await setLinkedTabActiveChatSessionID(
+                newSession.id,
+                tabID: resolvedTabID,
+                preferredWorkspaceID: newSession.workspaceID
+            ) else {
+                // The tab kept its active chat, so the new chat isn't created.
+                sessions.removeAll { $0.id == newSession.id }
+                print("Error creating a chat for tab \(resolvedTabID): the tab kept its active chat")
+                return nil
+            }
+            guard await chatIsStillListedAfterLinking(
+                newSession.id,
+                tabID: resolvedTabID,
+                preferredWorkspaceID: newSession.workspaceID,
+                loadGeneration: loadGeneration
+            ) else { return nil }
         }
         ensureSessionStorage(newSession.id)
         if activateInUI {
@@ -2356,6 +2468,27 @@ class OracleViewModel: ObservableObject {
             unloadNonCurrentSessions()
         }
         return newSession.id
+    }
+
+    /// Whether a chat just linked to its tab is still that tab's chat in `sessions`. Linking can
+    /// suspend, and a workspace switch or a deletion can change `sessions` meanwhile. When the chat
+    /// is gone, the tab's link is cleared while it still names the chat.
+    @MainActor
+    private func chatIsStillListedAfterLinking(
+        _ sessionID: UUID,
+        tabID: UUID,
+        preferredWorkspaceID: UUID?,
+        loadGeneration: UInt64
+    ) async -> Bool {
+        if workspaceChatSessionLoadGeneration == loadGeneration,
+           sessions.contains(where: { $0.id == sessionID && $0.composeTabID == tabID })
+        {
+            return true
+        }
+        if let identity = linkedComposeTabIdentity(tabID: tabID, preferredWorkspaceID: preferredWorkspaceID) {
+            await workspaceManager.clearActiveChatSessionID(sessionID, for: identity)
+        }
+        return false
     }
 
     // MARK: - Clone Sessions for Agent Fork
@@ -2380,7 +2513,10 @@ class OracleViewModel: ObservableObject {
         let sourceSessions = sessions(forTabID: sourceTabID)
         guard !sourceSessions.isEmpty else { return [:] }
 
-        let sourceActiveID = workspaceManager.activeChatSessionID(forTabID: sourceTabID)
+        let sourceActiveID = linkedTabActiveChatSessionID(
+            tabID: sourceTabID,
+            preferredWorkspaceID: sourceSessions.first?.workspaceID
+        )
         var idMapping: [UUID: UUID] = [:]
 
         for sourceSession in sourceSessions {
@@ -2437,7 +2573,7 @@ class OracleViewModel: ObservableObject {
                 // Deterministic fallback: use the clone of the first source session
                 idMapping[sourceSessions.first!.id] ?? idMapping.values.first!
             }
-            workspaceManager.setActiveChatSessionID(clonedActive, forTabID: destTabID)
+            await setLinkedTabActiveChatSessionID(clonedActive, tabID: destTabID, preferredWorkspaceID: nil)
         }
 
         refreshSessionLists()
@@ -2569,7 +2705,11 @@ class OracleViewModel: ObservableObject {
         let targetTabID = await ensureTabForSession(existingSession)
         guard sessionSwitchGeneration == switchGeneration else { return }
         if setActiveForTab, let targetTabID {
-            workspaceManager.setActiveChatSessionID(id, forTabID: targetTabID)
+            await setLinkedTabActiveChatSessionID(
+                id,
+                tabID: targetTabID,
+                preferredWorkspaceID: existingSession.workspaceID
+            )
         }
 
         if let targetTabID,
@@ -3945,14 +4085,36 @@ class OracleViewModel: ObservableObject {
         return message
     }
 
+    /// Gives the chat's linked tab the chat's name while the tab still has a default name. A tab in
+    /// a workspace the window doesn't show is renamed in that workspace's canonical document.
     @MainActor
-    private func renameComposeTabIfDefault(tabID: UUID, sessionName: String) {
+    private func renameComposeTabIfDefault(tabID: UUID, workspaceID: UUID?, sessionName: String) {
         let trimmed = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        guard let tab = workspaceManager.composeTab(with: tabID) else { return }
-        guard isDefaultComposeTabName(tab.name) else { return }
-        if tab.name != trimmed {
+        guard !trimmed.isEmpty,
+              let identity = linkedComposeTabIdentity(tabID: tabID, preferredWorkspaceID: workspaceID),
+              let listed = workspaceManager.contentGateway.listedTab(identity),
+              isDefaultComposeTabName(listed.name),
+              listed.name != trimmed
+        else { return }
+        if identity.workspaceID == workspaceManager.activeWorkspaceID {
             promptViewModel.renameComposeTab(tabID, to: trimmed)
+            return
+        }
+        let gateway = workspaceManager.contentGateway
+        Task { @MainActor [weak self] in
+            do {
+                _ = try await gateway.mutateComposeTab(
+                    identity,
+                    source: "oracle.renameLinkedTab",
+                    persistence: .working
+                ) { tab in
+                    // Another writer may have named the tab since the summary was read.
+                    guard self?.isDefaultComposeTabName(tab.name) == true else { return }
+                    tab.name = trimmed
+                }
+            } catch {
+                print("Warning: Failed to rename linked tab \(tabID) in its workspace: \(error)")
+            }
         }
     }
 
@@ -3986,7 +4148,11 @@ class OracleViewModel: ObservableObject {
                         print("Chat session renamed to: \(extractedName)")
                     }
                     if let tabID = sessions[idx].composeTabID {
-                        renameComposeTabIfDefault(tabID: tabID, sessionName: sessions[idx].name)
+                        renameComposeTabIfDefault(
+                            tabID: tabID,
+                            workspaceID: sessions[idx].workspaceID,
+                            sessionName: sessions[idx].name
+                        )
                     }
                 }
             }
@@ -3994,7 +4160,11 @@ class OracleViewModel: ObservableObject {
             await MainActor.run {
                 guard let idx = sessions.firstIndex(where: { $0.id == sessionID }),
                       let tabID = sessions[idx].composeTabID else { return }
-                renameComposeTabIfDefault(tabID: tabID, sessionName: sessions[idx].name)
+                renameComposeTabIfDefault(
+                    tabID: tabID,
+                    workspaceID: sessions[idx].workspaceID,
+                    sessionName: sessions[idx].name
+                )
             }
         }
 

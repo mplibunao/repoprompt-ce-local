@@ -79,7 +79,7 @@ final class MCPPromptContextToolProvider {
             )
         }
         let resolvedTabContext: MCPServerViewModel.ResolvedTabContextSnapshot = if let appContext {
-            selectionRefreshedContext(appContext.resolvedTabContext)
+            await selectionRefreshedContext(appContext.resolvedTabContext)
         } else {
             try await dependencies.context.resolveTabContextSnapshot(
                 metadata,
@@ -130,7 +130,7 @@ final class MCPPromptContextToolProvider {
                     throw CancellationError()
                 }
                 return if let appContext {
-                    selectionRefreshedContext(appContext.resolvedTabContext)
+                    await selectionRefreshedContext(appContext.resolvedTabContext)
                 } else {
                     try await dependencies.context.resolveTabContextSnapshot(
                         metadata,
@@ -140,7 +140,7 @@ final class MCPPromptContextToolProvider {
             }
         } else {
             if let appContext {
-                selectionRefreshedContext(appContext.resolvedTabContext)
+                await selectionRefreshedContext(appContext.resolvedTabContext)
             } else {
                 try await dependencies.context.resolveTabContextSnapshot(
                     metadata,
@@ -163,19 +163,24 @@ final class MCPPromptContextToolProvider {
         case .set:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for set") }
             try await MCPDomainMutationCommitContext.willCommit()
-            try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText = text }
-            let context = try await dependencies.execution.requireCurrentTabContext(MCPWindowToolName.prompt)
-            return try Value(simplePromptReply(context.promptText, op: operation.rawValue))
+            // The reply describes the tab this call wrote, even if the connection rebinds meanwhile.
+            let storedPrompt = try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) {
+                $0.promptText = text
+            }
+            return try Value(simplePromptReply(storedPrompt, op: operation.rawValue))
         case .append:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for append") }
             try await MCPDomainMutationCommitContext.willCommit()
-            try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText += text }
-            let context = try await dependencies.execution.requireCurrentTabContext(MCPWindowToolName.prompt)
-            return try Value(simplePromptReply(context.promptText, op: operation.rawValue))
+            let storedPrompt = try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) {
+                $0.promptText += text
+            }
+            return try Value(simplePromptReply(storedPrompt, op: operation.rawValue))
         case .clear:
             try await MCPDomainMutationCommitContext.willCommit()
-            try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText = "" }
-            return try Value(simplePromptReply("", op: operation.rawValue))
+            let storedPrompt = try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) {
+                $0.promptText = ""
+            }
+            return try Value(simplePromptReply(storedPrompt, op: operation.rawValue))
         case .export:
             return try await exportPrompt(args: args, resolvedContext: resolvedContext, tabContext: tabContext)
         case .selectPreset:
@@ -196,22 +201,19 @@ final class MCPPromptContextToolProvider {
     /// this avoids a second heavyweight tab-routing resolution on MainActor.
     private func selectionRefreshedContext(
         _ captured: MCPServerViewModel.ResolvedTabContextSnapshot
-    ) -> MCPServerViewModel.ResolvedTabContextSnapshot {
+    ) async -> MCPServerViewModel.ResolvedTabContextSnapshot {
         guard let workspaceID = captured.snapshot.workspaceID,
-              let manager = dependencies.context.workspaceManager,
-              let tab = manager.composeTab(for: WorkspaceSelectionIdentity(
-                  workspaceID: workspaceID,
-                  tabID: captured.snapshot.tabID
-              ))
+              let manager = dependencies.context.workspaceManager
         else { return captured }
+        let identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: captured.snapshot.tabID)
+        guard let selection = try? await manager.readTabSelection(for: identity) else { return captured }
         let revision = manager.selectionRevisionForMCP(
             workspaceID: workspaceID,
-            tabID: tab.id
+            tabID: identity.tabID
         )
         guard revision >= captured.snapshot.selectionRevision else { return captured }
         var refreshed = captured
-        refreshed.snapshot.selection = tab.selection
-        refreshed.snapshot.selectionRevision = revision
+        refreshed.snapshot.synchronizeSelection(selection, revision: revision)
         return refreshed
     }
 

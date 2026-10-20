@@ -199,6 +199,21 @@ final class ContextBuilderGlobalBehaviorSettingsTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedContextBuilderPromptIDs, [secondPromptID])
         XCTAssertEqual(viewModel.selectedFollowUpType, .review)
         XCTAssertTrue(viewModel.followUpAnalysisEnabled)
+
+        // An edited tab setting reaches the stored tab once its write runs, and returns with the tab.
+        viewModel.contextBuilderInstructions = "Edited second instructions"
+        let secondIdentity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: secondTab.id)
+        func storedSecondInstructions() -> String? {
+            composition.workspaceManager.contentGateway.shownComposeTab(secondIdentity)?.contextBuilder.instructions
+        }
+        for _ in 0 ..< 100 where storedSecondInstructions() != "Edited second instructions" {
+            await Task.yield()
+        }
+        XCTAssertEqual(storedSecondInstructions(), "Edited second instructions")
+        await composition.promptManager.switchComposeTab(firstTab.id)
+        XCTAssertEqual(viewModel.contextBuilderInstructions, "First instructions")
+        await composition.promptManager.switchComposeTab(secondTab.id)
+        XCTAssertEqual(viewModel.contextBuilderInstructions, "Edited second instructions")
         XCTAssertEqual(storeEmissions, 0)
     }
 }

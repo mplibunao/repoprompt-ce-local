@@ -393,36 +393,58 @@ final class WindowRoutingService: Service {
         case unhide
     }
 
-    nonisolated static func workspaceInventoryModels(
-        _ workspaces: [WorkspaceModel],
+    /// A workspace as the workspace inventory lists it: its catalog summary, and whether the
+    /// listing shows it as hidden. An incomplete two-phase restore lists as hidden whatever its
+    /// document says.
+    struct WorkspaceInventoryEntry {
+        let summary: DomainWorkspaceSummary
+        let isHidden: Bool
+
+        var id: UUID {
+            summary.workspaceID
+        }
+
+        var name: String {
+            summary.name
+        }
+
+        var isSystemWorkspace: Bool {
+            summary.isSystemWorkspace
+        }
+
+        var listed: ListedWorkspace {
+            ListedWorkspace(summary, isHiddenInMenus: isHidden)
+        }
+    }
+
+    nonisolated static func workspaceInventory(
+        _ summaries: [DomainWorkspaceSummary],
         authorityIncompleteWorkspaceIDs: Set<UUID>,
         includeHidden: Bool
-    ) -> [WorkspaceModel] {
-        workspaces.compactMap { workspace in
-            var presented = workspace
-            if authorityIncompleteWorkspaceIDs.contains(presented.id) {
-                presented.isHiddenInMenus = true
-            }
-            return includeHidden || !presented.isHiddenInMenus ? presented : nil
+    ) -> [WorkspaceInventoryEntry] {
+        summaries.compactMap { summary in
+            let isHidden = summary.isHiddenInMenus
+                || authorityIncompleteWorkspaceIDs.contains(summary.workspaceID)
+            return includeHidden || !isHidden ? WorkspaceInventoryEntry(summary: summary, isHidden: isHidden) : nil
         }
     }
 
     private func loadWorkspaceInventorySnapshot(
         from referenceManager: WorkspaceManagerViewModel,
         includeHidden: Bool
-    ) async -> [WorkspaceModel] {
-        let workspaces = await referenceManager.loadWorkspaceSnapshotFromDisk()
+    ) async -> [WorkspaceInventoryEntry] {
+        let summaries = await referenceManager.loadWorkspaceSummarySnapshot()
         let incompleteIDs = await MainActor.run {
             referenceManager.pendingConsolidatedRestoreIDs
         }
-        return Self.workspaceInventoryModels(
-            workspaces,
+        return Self.workspaceInventory(
+            summaries,
             authorityIncompleteWorkspaceIDs: incompleteIDs,
             includeHidden: includeHidden
         )
     }
 
-    private func loadWorkspaceDiskSnapshot() async throws -> [WorkspaceModel] {
+    private func loadWorkspaceDiskSnapshot() async throws -> [WorkspaceInventoryEntry] {
         guard let referenceManager = await MainActor.run(body: {
             self.windowStates.allWindows.first?.workspaceManager
         }) else {
@@ -434,11 +456,11 @@ final class WindowRoutingService: Service {
         )
     }
 
-    private nonisolated static func availableWorkspaceSuggestion(_ workspaces: [WorkspaceModel], includeHidden: Bool) -> String {
+    private nonisolated static func availableWorkspaceSuggestion(_ workspaces: [WorkspaceInventoryEntry], includeHidden: Bool) -> String {
         let availableNames = workspaces
-            .filter { !$0.isSystemWorkspace && (includeHidden || !$0.isHiddenInMenus) }
+            .filter { !$0.isSystemWorkspace && (includeHidden || !$0.isHidden) }
             .map { workspace in
-                workspace.isHiddenInMenus ? "\(workspace.name) (hidden)" : workspace.name
+                workspace.isHidden ? "\(workspace.name) (hidden)" : workspace.name
             }
             .sorted()
         return availableNames.isEmpty
@@ -446,19 +468,19 @@ final class WindowRoutingService: Service {
             : "Available workspaces: \(availableNames.joined(separator: ", "))"
     }
 
-    private nonisolated static func ambiguousWorkspaceMessage(name: String, matches: [WorkspaceModel]) -> String {
+    private nonisolated static func ambiguousWorkspaceMessage(name: String, matches: [WorkspaceInventoryEntry]) -> String {
         let ids = matches
             .sorted { $0.id.uuidString < $1.id.uuidString }
-            .map { "\($0.name) (\($0.id.uuidString)\($0.isHiddenInMenus ? ", hidden" : ""))" }
+            .map { "\($0.name) (\($0.id.uuidString)\($0.isHidden ? ", hidden" : ""))" }
             .joined(separator: ", ")
         return "Workspace name '\(name)' matches multiple workspaces: \(ids). Use a workspace UUID."
     }
 
     private nonisolated static func resolveWorkspaceReference(
         _ rawWorkspaceParam: String,
-        in diskWorkspaces: [WorkspaceModel],
+        in diskWorkspaces: [WorkspaceInventoryEntry],
         mode: WorkspaceReferenceMode
-    ) throws -> WorkspaceModel {
+    ) throws -> WorkspaceInventoryEntry {
         if let targetID = UUID(uuidString: rawWorkspaceParam) {
             if let found = diskWorkspaces.first(where: { $0.id == targetID }) {
                 return found
@@ -468,8 +490,8 @@ final class WindowRoutingService: Service {
 
         let name = rawWorkspaceParam
         let nameMatches = diskWorkspaces.filter { $0.name == name }
-        let visibleMatches = nameMatches.filter { !$0.isHiddenInMenus }
-        let hiddenMatches = nameMatches.filter(\.isHiddenInMenus)
+        let visibleMatches = nameMatches.filter { !$0.isHidden }
+        let hiddenMatches = nameMatches.filter(\.isHidden)
 
         switch mode {
         case let .visibleNameByDefault(action, includeHidden):
@@ -511,7 +533,7 @@ final class WindowRoutingService: Service {
         }
     }
 
-    private func resolveWorkspaceForSwitch(rawWorkspaceParam: String, includeHidden: Bool) async throws -> WorkspaceModel {
+    private func resolveWorkspaceForSwitch(rawWorkspaceParam: String, includeHidden: Bool) async throws -> WorkspaceInventoryEntry {
         let diskWorkspaces = try await loadWorkspaceDiskSnapshot()
         return try Self.resolveWorkspaceReference(
             rawWorkspaceParam,
@@ -520,7 +542,7 @@ final class WindowRoutingService: Service {
         )
     }
 
-    private func resolveWorkspaceForDelete(rawWorkspaceParam: String, includeHidden: Bool) async throws -> WorkspaceModel {
+    private func resolveWorkspaceForDelete(rawWorkspaceParam: String, includeHidden: Bool) async throws -> WorkspaceInventoryEntry {
         let diskWorkspaces = try await loadWorkspaceDiskSnapshot()
         return try Self.resolveWorkspaceReference(
             rawWorkspaceParam,
@@ -529,7 +551,7 @@ final class WindowRoutingService: Service {
         )
     }
 
-    private func resolveWorkspaceForHiddenMutation(rawWorkspaceParam: String, hidden: Bool) async throws -> WorkspaceModel {
+    private func resolveWorkspaceForHiddenMutation(rawWorkspaceParam: String, hidden: Bool) async throws -> WorkspaceInventoryEntry {
         let diskWorkspaces = try await loadWorkspaceDiskSnapshot()
         return try Self.resolveWorkspaceReference(
             rawWorkspaceParam,
@@ -540,10 +562,10 @@ final class WindowRoutingService: Service {
 
     nonisolated static func test_resolveWorkspaceReference(
         _ rawWorkspaceParam: String,
-        workspaces: [WorkspaceModel],
+        workspaces: [WorkspaceInventoryEntry],
         includeHiddenForName: Bool,
         action: String = "switch"
-    ) throws -> WorkspaceModel {
+    ) throws -> WorkspaceInventoryEntry {
         try resolveWorkspaceReference(
             rawWorkspaceParam,
             in: workspaces,
@@ -553,9 +575,9 @@ final class WindowRoutingService: Service {
 
     nonisolated static func test_resolveWorkspaceHiddenMutationReference(
         _ rawWorkspaceParam: String,
-        workspaces: [WorkspaceModel],
+        workspaces: [WorkspaceInventoryEntry],
         hidden: Bool
-    ) throws -> WorkspaceModel {
+    ) throws -> WorkspaceInventoryEntry {
         try resolveWorkspaceReference(
             rawWorkspaceParam,
             in: workspaces,
@@ -797,30 +819,30 @@ final class WindowRoutingService: Service {
     private struct ActiveWorkspaceWindowSnapshot {
         let windowID: Int
         let isFocused: Bool
-        let workspace: WorkspaceModel
+        let workspace: ListedWorkspace
     }
 
     private struct WorkspaceMatch {
-        let workspace: WorkspaceModel
+        let workspace: ListedWorkspace
         let showingWindowIDs: [Int]
         let kind: WorkingDirsWorkspaceMatchKind
         let normalizedRepoPaths: [String]
         let equivalentWorkspaceIDs: Set<UUID>
-        let activeWorkspaceByWindowID: [Int: WorkspaceModel]
+        let activeWorkspaceByWindowID: [Int: ListedWorkspace]
 
         init(
-            workspace: WorkspaceModel,
+            workspace: ListedWorkspace,
             showingWindowIDs: [Int],
             kind: WorkingDirsWorkspaceMatchKind,
             normalizedRepoPaths: [String]? = nil,
             equivalentWorkspaceIDs: Set<UUID>? = nil,
-            activeWorkspaceByWindowID: [Int: WorkspaceModel] = [:]
+            activeWorkspaceByWindowID: [Int: ListedWorkspace] = [:]
         ) {
             self.workspace = workspace
             self.showingWindowIDs = showingWindowIDs.sorted()
             self.kind = kind
             self.normalizedRepoPaths = normalizedRepoPaths ?? WorkspaceRootSetKey(paths: workspace.repoPaths).normalizedPaths
-            self.equivalentWorkspaceIDs = equivalentWorkspaceIDs ?? [workspace.id]
+            self.equivalentWorkspaceIDs = equivalentWorkspaceIDs ?? [workspace.workspaceID]
             self.activeWorkspaceByWindowID = activeWorkspaceByWindowID
         }
     }
@@ -1031,10 +1053,10 @@ final class WindowRoutingService: Service {
 
     private nonisolated static func workspaceMatches(
         forNormalizedWorkingDirs normalizedWorkingDirs: [String],
-        workspaces: [WorkspaceModel],
+        workspaces: [ListedWorkspace],
         kind: WorkingDirsWorkspaceMatchKind,
         includeHidden: Bool
-    ) -> [WorkspaceModel] {
+    ) -> [ListedWorkspace] {
         switch kind {
         case .exact:
             WorkspaceManagerViewModel.exactWorkspaceMatches(
@@ -1057,12 +1079,12 @@ final class WindowRoutingService: Service {
             return ActiveWorkspaceWindowSnapshot(
                 windowID: window.windowID,
                 isFocused: window.isCurrentlyFocused,
-                workspace: workspace
+                workspace: ListedWorkspace(workspace)
             )
         }
     }
 
-    private nonisolated static func workspaceSort(_ lhs: WorkspaceModel, _ rhs: WorkspaceModel) -> Bool {
+    private nonisolated static func workspaceSort(_ lhs: ListedWorkspace, _ rhs: ListedWorkspace) -> Bool {
         let lhsKey = lhs.name.lowercased()
         let rhsKey = rhs.name.lowercased()
         if lhsKey != rhsKey {
@@ -1071,10 +1093,10 @@ final class WindowRoutingService: Service {
         if lhs.name != rhs.name {
             return lhs.name < rhs.name
         }
-        return lhs.id.uuidString < rhs.id.uuidString
+        return lhs.workspaceID.uuidString < rhs.workspaceID.uuidString
     }
 
-    private nonisolated static func preferredWorkspaceByRecencyAndName(_ lhs: WorkspaceModel, _ rhs: WorkspaceModel) -> Bool {
+    private nonisolated static func preferredWorkspaceByRecencyAndName(_ lhs: ListedWorkspace, _ rhs: ListedWorkspace) -> Bool {
         if lhs.isHiddenInMenus != rhs.isHiddenInMenus {
             return !lhs.isHiddenInMenus
         }
@@ -1089,9 +1111,9 @@ final class WindowRoutingService: Service {
 
     private nonisolated static func canonicalWorkspace(
         for rootSetKey: WorkspaceRootSetKey,
-        candidates: [WorkspaceModel],
+        candidates: [ListedWorkspace],
         activeWindowSnapshots: [ActiveWorkspaceWindowSnapshot]
-    ) -> WorkspaceModel? {
+    ) -> ListedWorkspace? {
         let activeEquivalentSnapshots = activeWindowSnapshots
             .filter {
                 !$0.workspace.isSystemWorkspace
@@ -1117,16 +1139,16 @@ final class WindowRoutingService: Service {
     private nonisolated static func collapsedWorkspaceMatches(
         normalizedWorkingDirs: [String],
         kind: WorkingDirsWorkspaceMatchKind,
-        diskWorkspaces: [WorkspaceModel],
+        diskWorkspaces: [ListedWorkspace],
         activeWindowSnapshots: [ActiveWorkspaceWindowSnapshot],
         includeActiveWindowWorkspaces: Bool,
         includeHidden: Bool
     ) -> [WorkspaceMatch] {
-        var groupedCandidates: [WorkspaceRootSetKey: [UUID: WorkspaceModel]] = [:]
+        var groupedCandidates: [WorkspaceRootSetKey: [UUID: ListedWorkspace]] = [:]
         for workspace in workspaceMatches(forNormalizedWorkingDirs: normalizedWorkingDirs, workspaces: diskWorkspaces, kind: kind, includeHidden: includeHidden) {
             let key = WorkspaceRootSetKey(paths: workspace.repoPaths)
             guard !key.isEmpty else { continue }
-            groupedCandidates[key, default: [:]][workspace.id] = workspace
+            groupedCandidates[key, default: [:]][workspace.workspaceID] = workspace
         }
 
         let reusableActiveSnapshots = activeWindowSnapshots.filter { snapshot in
@@ -1138,12 +1160,12 @@ final class WindowRoutingService: Service {
         if includeActiveWindowWorkspaces {
             for snapshot in reusableActiveSnapshots {
                 let activeWorkspace = snapshot.workspace
-                guard workspaceMatches(forNormalizedWorkingDirs: normalizedWorkingDirs, workspaces: [activeWorkspace], kind: kind, includeHidden: includeHidden).contains(where: { $0.id == activeWorkspace.id }) else {
+                guard workspaceMatches(forNormalizedWorkingDirs: normalizedWorkingDirs, workspaces: [activeWorkspace], kind: kind, includeHidden: includeHidden).contains(where: { $0.workspaceID == activeWorkspace.workspaceID }) else {
                     continue
                 }
                 let key = WorkspaceRootSetKey(paths: activeWorkspace.repoPaths)
                 guard !key.isEmpty else { continue }
-                groupedCandidates[key, default: [:]][activeWorkspace.id] = activeWorkspace
+                groupedCandidates[key, default: [:]][activeWorkspace.workspaceID] = activeWorkspace
             }
         }
 
@@ -1155,11 +1177,11 @@ final class WindowRoutingService: Service {
                       candidates: candidates,
                       activeWindowSnapshots: reusableActiveSnapshots
                   ) else { return nil }
-            let activeWorkspaceByWindowID = Dictionary(uniqueKeysWithValues: reusableActiveSnapshots.compactMap { snapshot -> (Int, WorkspaceModel)? in
+            let activeWorkspaceByWindowID = Dictionary(uniqueKeysWithValues: reusableActiveSnapshots.compactMap { snapshot -> (Int, ListedWorkspace)? in
                 guard WorkspaceRootSetKey(paths: snapshot.workspace.repoPaths) == key else { return nil }
                 return (snapshot.windowID, snapshot.workspace)
             })
-            let equivalentWorkspaceIDs = Set(candidates.map(\.id)).union(activeWorkspaceByWindowID.values.map(\.id))
+            let equivalentWorkspaceIDs = Set(candidates.map(\.workspaceID)).union(activeWorkspaceByWindowID.values.map(\.workspaceID))
             return WorkspaceMatch(
                 workspace: representative,
                 showingWindowIDs: Array(activeWorkspaceByWindowID.keys).sorted(),
@@ -1189,7 +1211,7 @@ final class WindowRoutingService: Service {
         return Self.collapsedWorkspaceMatches(
             normalizedWorkingDirs: normalizedWorkingDirs,
             kind: kind,
-            diskWorkspaces: diskWorkspaces,
+            diskWorkspaces: diskWorkspaces.map(\.listed),
             activeWindowSnapshots: activeWindowSnapshots,
             includeActiveWindowWorkspaces: false,
             includeHidden: false
@@ -1212,7 +1234,7 @@ final class WindowRoutingService: Service {
         return Self.collapsedWorkspaceMatches(
             normalizedWorkingDirs: normalizedWorkingDirs,
             kind: kind,
-            diskWorkspaces: diskWorkspaces,
+            diskWorkspaces: diskWorkspaces.map(\.listed),
             activeWindowSnapshots: activeWindowSnapshots,
             includeActiveWindowWorkspaces: true,
             includeHidden: false
@@ -1262,8 +1284,8 @@ final class WindowRoutingService: Service {
 
     nonisolated static func test_exactWorkspaceMatchForWindowID(
         _ windowID: Int,
-        matches: [(workspace: WorkspaceModel, showingWindowIDs: [Int])]
-    ) -> WorkspaceModel? {
+        matches: [(workspace: ListedWorkspace, showingWindowIDs: [Int])]
+    ) -> ListedWorkspace? {
         workspaceMatch(
             inRequestedWindow: windowID,
             matches: matches.map { match in
@@ -1274,9 +1296,9 @@ final class WindowRoutingService: Service {
 
     nonisolated static func test_selectedWorkingDirsWorkspaceMatch(
         windowID: Int?,
-        exactMatches: [(workspace: WorkspaceModel, showingWindowIDs: [Int])],
-        supersetMatches: [(workspace: WorkspaceModel, showingWindowIDs: [Int])]
-    ) -> (workspace: WorkspaceModel, kind: String, matchedBy: String)? {
+        exactMatches: [(workspace: ListedWorkspace, showingWindowIDs: [Int])],
+        supersetMatches: [(workspace: ListedWorkspace, showingWindowIDs: [Int])]
+    ) -> (workspace: ListedWorkspace, kind: String, matchedBy: String)? {
         let matches = workingDirsMatchCandidates(
             exactMatches: exactMatches.map { match in
                 WorkspaceMatch(workspace: match.workspace, showingWindowIDs: match.showingWindowIDs, kind: .exact)
@@ -1302,12 +1324,12 @@ final class WindowRoutingService: Service {
 
     nonisolated static func test_collapsedWorkingDirsWorkspaceMatches(
         workingDirs: [String],
-        diskWorkspaces: [WorkspaceModel],
-        activeWindows: [(windowID: Int, workspace: WorkspaceModel, isFocused: Bool)],
+        diskWorkspaces: [ListedWorkspace],
+        activeWindows: [(windowID: Int, workspace: ListedWorkspace, isFocused: Bool)],
         kind: String = "exact",
         includeActiveWindowWorkspaces: Bool = true,
         includeHidden: Bool = false
-    ) -> [(workspace: WorkspaceModel, showingWindowIDs: [Int], equivalentWorkspaceIDs: [UUID], activeWorkspaceIDsByWindowID: [Int: UUID], normalizedRepoPaths: [String])] {
+    ) -> [(workspace: ListedWorkspace, showingWindowIDs: [Int], equivalentWorkspaceIDs: [UUID], activeWorkspaceIDsByWindowID: [Int: UUID], normalizedRepoPaths: [String])] {
         let matchKind: WorkingDirsWorkspaceMatchKind = kind == "superset" ? .superset : .exact
         let normalizedWorkingDirs = WorkspaceManagerViewModel.normalizedExactWorkspaceDirectorySet(workingDirs)
         let snapshots = activeWindows.map { activeWindow in
@@ -1329,7 +1351,7 @@ final class WindowRoutingService: Service {
                 workspace: match.workspace,
                 showingWindowIDs: match.showingWindowIDs,
                 equivalentWorkspaceIDs: match.equivalentWorkspaceIDs.sorted { $0.uuidString < $1.uuidString },
-                activeWorkspaceIDsByWindowID: match.activeWorkspaceByWindowID.mapValues(\.id),
+                activeWorkspaceIDsByWindowID: match.activeWorkspaceByWindowID.mapValues(\.workspaceID),
                 normalizedRepoPaths: match.normalizedRepoPaths
             )
         }
@@ -1381,11 +1403,11 @@ final class WindowRoutingService: Service {
         return newWindow
     }
 
-    private func openNewWindowShowingWorkspace(_ workspace: WorkspaceModel) async throws -> WindowState {
+    private func openNewWindowShowingWorkspace(_ workspaceID: UUID) async throws -> WindowState {
         let newWindow = try await openRoutingWindow(deferringInitialAgentSystemWorkspaceRefresh: true)
         defer { newWindow.agentModeViewModel.finishInitialSystemWorkspaceSessionListRefreshDeferral() }
         await newWindow.workspaceManager.awaitInitialized()
-        let switchResult = await newWindow.workspaceManager.requestWorkspaceSwitch(to: workspace, saveState: true)
+        let switchResult = await newWindow.workspaceManager.requestWorkspaceSwitch(toWorkspaceID: workspaceID, saveState: true)
         if !switchResult.didSwitch {
             throw MCPError.invalidRequest(switchResult.message ?? "Workspace switch was cancelled.")
         }
@@ -1431,7 +1453,7 @@ final class WindowRoutingService: Service {
     ) async throws -> WorkspaceModel {
         let newWorkspace = window.workspaceManager.createWorkspace(name: name, repoPaths: repoPaths)
         if switchToCreated {
-            let switchResult = await window.workspaceManager.requestWorkspaceSwitch(to: newWorkspace, saveState: true)
+            let switchResult = await window.workspaceManager.requestWorkspaceSwitch(toWorkspaceID: newWorkspace.id, saveState: true)
             if !switchResult.didSwitch {
                 throw MCPError.invalidRequest(switchResult.message ?? "Workspace switch was cancelled.")
             }
@@ -1442,7 +1464,7 @@ final class WindowRoutingService: Service {
     private func derivedWorkspaceName(
         normalizedWorkingDirs: [String],
         creationNameHint: String?,
-        existingWorkspaces: [WorkspaceModel]
+        existingWorkspaces: [WorkspaceInventoryEntry]
     ) -> String {
         let trimmedHint = creationNameHint?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let derivedBaseName = normalizedWorkingDirs
@@ -1466,7 +1488,7 @@ final class WindowRoutingService: Service {
     private func describeWorkspaceMatches(_ matches: [WorkspaceMatch]) -> String {
         matches.map { match in
             let windows = match.showingWindowIDs.isEmpty ? "none" : match.showingWindowIDs.map(String.init).joined(separator: ", ")
-            return "workspace=\(match.workspace.name) (\(match.workspace.id.uuidString)) • windows=[\(windows)]"
+            return "workspace=\(match.workspace.name) (\(match.workspace.workspaceID.uuidString)) • windows=[\(windows)]"
         }.joined(separator: "\n- ")
     }
 
@@ -1517,14 +1539,14 @@ final class WindowRoutingService: Service {
 
     private func workingDirsResolution(
         windowID: Int,
-        workspace: WorkspaceModel,
+        workspace: ListedWorkspace,
         normalizedWorkingDirs: [String],
         matchedBy: String,
         createdWorkspace: Bool
     ) -> WorkingDirsBindResolution {
         WorkingDirsBindResolution(
             windowID: windowID,
-            workspaceID: workspace.id,
+            workspaceID: workspace.workspaceID,
             workspaceName: workspace.name,
             repoPaths: workspace.repoPaths,
             matchedBy: matchedBy,
@@ -1562,8 +1584,11 @@ final class WindowRoutingService: Service {
             }
 
             if let targetWindow = windowStates.allWindows.first(where: { $0.windowID == preferredWindowID }) {
-                if targetWindow.workspaceManager.activeWorkspace?.id != match.workspace.id {
-                    let switchResult = await targetWindow.workspaceManager.requestWorkspaceSwitch(to: match.workspace, saveState: true)
+                if targetWindow.workspaceManager.activeWorkspace?.id != match.workspace.workspaceID {
+                    let switchResult = await targetWindow.workspaceManager.requestWorkspaceSwitch(
+                        toWorkspaceID: match.workspace.workspaceID,
+                        saveState: true
+                    )
                     if !switchResult.didSwitch {
                         throw MCPError.invalidRequest(switchResult.message ?? "Workspace switch was cancelled.")
                     }
@@ -1578,7 +1603,7 @@ final class WindowRoutingService: Service {
             }
         }
 
-        let newWindow = try await openNewWindowShowingWorkspace(match.workspace)
+        let newWindow = try await openNewWindowShowingWorkspace(match.workspace.workspaceID)
         return workingDirsResolution(
             windowID: newWindow.windowID,
             workspace: match.workspace,
@@ -1611,8 +1636,11 @@ final class WindowRoutingService: Service {
                     createdWorkspace: createdWorkspace
                 )
             }
-            if requestedWindow.workspaceManager.activeWorkspace?.id != match.workspace.id {
-                let switchResult = await requestedWindow.workspaceManager.requestWorkspaceSwitch(to: match.workspace, saveState: true)
+            if requestedWindow.workspaceManager.activeWorkspace?.id != match.workspace.workspaceID {
+                let switchResult = await requestedWindow.workspaceManager.requestWorkspaceSwitch(
+                    toWorkspaceID: match.workspace.workspaceID,
+                    saveState: true
+                )
                 if !switchResult.didSwitch {
                     throw MCPError.invalidRequest(switchResult.message ?? "Workspace switch was cancelled.")
                 }
@@ -1747,7 +1775,10 @@ final class WindowRoutingService: Service {
         let matches = windows.compactMap { window -> ResolvedBindTarget? in
             guard windowID == nil || window.windowID == windowID else { return nil }
             guard let candidate = window.workspaceManager.bindingCandidate(forContextID: contextID) else { return nil }
-            let tabName = window.workspaceManager.composeTabName(with: candidate.tabID) ?? contextID.uuidString
+            let tabName = window.workspaceManager.contentGateway.listedTab(WorkspaceSelectionIdentity(
+                workspaceID: candidate.workspaceID,
+                tabID: candidate.tabID
+            ))?.name ?? contextID.uuidString
             return ResolvedBindTarget(
                 windowID: window.windowID,
                 workspaceID: candidate.workspaceID,
@@ -1908,10 +1939,17 @@ final class WindowRoutingService: Service {
         throw MCPError.invalidParams("Ambiguous window choice for bind_context tab creation. Supply window_id. Available windows: \(available)")
     }
 
+    /// Releases the connection's bindings in every other window after this bind installed one. A
+    /// bind or release of the connection since that install, in any window, is newer than it and
+    /// decides the connection's binding, so the clear doesn't run and the bind reports the change.
     private func clearNonRunScopedBindingsAcrossWindows(
         for connectionID: UUID,
-        excludingWindowID: Int? = nil
-    ) {
+        excludingWindowID: Int,
+        afterInstallAt installedLifecycle: UInt64
+    ) throws {
+        guard MCPServerViewModel.tabBindingLifecycle(forConnection: connectionID) == installedLifecycle else {
+            throw MCPServerViewModel.TabBindError.bindingChanged
+        }
         for window in windowStates.allWindows where window.windowID != excludingWindowID {
             _ = window.mcpServer.clearNonRunScopedBinding(forConnection: connectionID)
         }
@@ -1933,6 +1971,23 @@ final class WindowRoutingService: Service {
             guard bindTargetIsCurrent(target, currentness: currentness) else {
                 throw staleBindTargetError()
             }
+            // The authority check runs its body synchronously, where a load can't happen. The
+            // replacement binding loads first and installs inside the check only if nothing
+            // changed in between.
+            let prepared: MCPServerViewModel.PreparedTabBinding? = if connectionBindingMatchesTarget(
+                targetWindow.mcpServer.connectionBindingSnapshot(forConnection: connectionID),
+                target: target
+            ) {
+                nil
+            } else {
+                try await targetWindow.mcpServer.prepareTabBinding(
+                    connectionID: connectionID,
+                    tabID: target.tabID,
+                    workspaceID: target.workspaceID,
+                    windowID: target.windowID,
+                    frozenFileToolAuthority: expectedFileAuthority
+                )
+            }
             let didBind = try await targetWindow.mcpServer.performIfFileToolAuthorityIsCurrent(
                 expectedFileAuthority,
                 tabID: target.tabID,
@@ -1953,17 +2008,17 @@ final class WindowRoutingService: Service {
                     )
                     return
                 }
-                try targetWindow.mcpServer.bindTabForConnection(
-                    connectionID: connectionID,
-                    clientName: clientName,
-                    tabID: target.tabID,
-                    workspaceID: target.workspaceID,
-                    windowID: target.windowID,
-                    frozenFileToolAuthority: expectedFileAuthority
+                guard let prepared else {
+                    throw staleBindTargetError()
+                }
+                let installedLifecycle = try targetWindow.mcpServer.installPreparedTabBinding(
+                    prepared,
+                    clientName: clientName
                 )
-                clearNonRunScopedBindingsAcrossWindows(
+                try clearNonRunScopedBindingsAcrossWindows(
                     for: connectionID,
-                    excludingWindowID: target.windowID
+                    excludingWindowID: target.windowID,
+                    afterInstallAt: installedLifecycle
                 )
                 bindingChanged = true
             }
@@ -1977,16 +2032,17 @@ final class WindowRoutingService: Service {
             guard !connectionBindingMatchesTarget(existingBinding, target: target) else {
                 return false
             }
-            try targetWindow.mcpServer.bindTabForConnection(
+            let installedLifecycle = try await targetWindow.mcpServer.bindTabForConnection(
                 connectionID: connectionID,
                 clientName: clientName,
                 tabID: target.tabID,
                 workspaceID: target.workspaceID,
                 windowID: target.windowID
             )
-            clearNonRunScopedBindingsAcrossWindows(
+            try clearNonRunScopedBindingsAcrossWindows(
                 for: connectionID,
-                excludingWindowID: target.windowID
+                excludingWindowID: target.windowID,
+                afterInstallAt: installedLifecycle
             )
             bindingChanged = true
         }
@@ -2025,10 +2081,13 @@ final class WindowRoutingService: Service {
         switch currentness {
         case .exactContext:
             guard let window = windowStates.allWindows.first(where: { $0.windowID == target.windowID }),
-                  let candidate = window.workspaceManager.storedBindingCandidate(forContextID: target.tabID),
-                  candidate.workspaceID == target.workspaceID
+                  let workspace = window.workspaceManager.contentGateway.listedWorkspace(target.workspaceID),
+                  window.workspaceManager.contentGateway.listedTab(WorkspaceSelectionIdentity(
+                      workspaceID: target.workspaceID,
+                      tabID: target.tabID
+                  )) != nil
             else { return false }
-            return WorkspaceRootSetKey(paths: candidate.repoPaths) == WorkspaceRootSetKey(paths: target.repoPaths)
+            return WorkspaceRootSetKey(paths: workspace.repoPaths) == WorkspaceRootSetKey(paths: target.repoPaths)
         case .activeTab:
             let currentTarget = try? resolveActiveTabBindTarget(
                 windowID: target.windowID,
@@ -2497,13 +2556,13 @@ final class WindowRoutingService: Service {
 
                     // Build summaries from disk data with window visibility overlay.
                     // Hidden workspaces remain persisted/recoverable, but are excluded unless explicitly requested.
-                    let summaries: [MCPWorkspaceSummary] = diskWorkspaces.map { model in
+                    let summaries: [MCPWorkspaceSummary] = diskWorkspaces.map { entry in
                         MCPWorkspaceSummary(
-                            id: model.id,
-                            name: model.name,
-                            allRepoPaths: model.repoPaths,
-                            showingWindowIDs: Array(windowsByWorkspaceID[model.id] ?? []).sorted(),
-                            isHidden: model.isHiddenInMenus
+                            id: entry.id,
+                            name: entry.name,
+                            allRepoPaths: entry.summary.repoPaths,
+                            showingWindowIDs: Array(windowsByWorkspaceID[entry.id] ?? []).sorted(),
+                            isHidden: entry.isHidden
                         )
                     }.sorted { lhs, rhs in
                         let lhsKey = lhs.name.lowercased()
@@ -2559,7 +2618,10 @@ final class WindowRoutingService: Service {
                         await newWindow.workspaceManager.awaitInitialized()
 
                         // Switch the new window to the target workspace
-                        let switchResult = await newWindow.workspaceManager.requestWorkspaceSwitch(to: targetWorkspace, saveState: true)
+                        let switchResult = await newWindow.workspaceManager.requestWorkspaceSwitch(
+                            toWorkspaceID: targetWorkspace.id,
+                            saveState: true
+                        )
                         if !switchResult.didSwitch {
                             throw MCPError.invalidRequest(switchResult.message ?? "Workspace switch was cancelled.")
                         }
@@ -2607,7 +2669,10 @@ final class WindowRoutingService: Service {
                     let targetModel = try await routingService.resolveWorkspaceForSwitch(rawWorkspaceParam: rawWorkspaceParam, includeHidden: includeHidden)
 
                     // Perform the switch on the target window
-                    let switchResult = await targetWindow.workspaceManager.requestWorkspaceSwitch(to: targetModel, saveState: true)
+                    let switchResult = await targetWindow.workspaceManager.requestWorkspaceSwitch(
+                        toWorkspaceID: targetModel.id,
+                        saveState: true
+                    )
                     if !switchResult.didSwitch {
                         throw MCPError.invalidRequest(switchResult.message ?? "Workspace switch was cancelled.")
                     }
@@ -2716,7 +2781,7 @@ final class WindowRoutingService: Service {
                             newWindow.workspaceManager.createWorkspace(name: workspaceName, repoPaths: initialRepoPaths)
                         }
                         if switchToCreated {
-                            let switchResult = await newWindow.workspaceManager.requestWorkspaceSwitch(to: newWorkspace, saveState: true)
+                            let switchResult = await newWindow.workspaceManager.requestWorkspaceSwitch(toWorkspaceID: newWorkspace.id, saveState: true)
                             if !switchResult.didSwitch {
                                 throw MCPError.invalidRequest(switchResult.message ?? "Workspace switch was cancelled.")
                             }
@@ -2746,7 +2811,7 @@ final class WindowRoutingService: Service {
                     }
 
                     if switchToCreated {
-                        let switchResult = await approvalWindow.workspaceManager.requestWorkspaceSwitch(to: newWorkspace, saveState: true)
+                        let switchResult = await approvalWindow.workspaceManager.requestWorkspaceSwitch(toWorkspaceID: newWorkspace.id, saveState: true)
                         if !switchResult.didSwitch {
                             throw MCPError.invalidRequest(switchResult.message ?? "Workspace switch was cancelled.")
                         }
@@ -2780,7 +2845,11 @@ final class WindowRoutingService: Service {
                         throw MCPError.invalidParams("No windows available to update workspace hidden state. Open at least one window first.")
                     }
 
-                    let updatedWorkspace = try await writerManager.setWorkspaceHiddenFromSnapshot(resolvedWorkspace, hidden: shouldHide)
+                    let updatedWorkspace = try await writerManager.setWorkspaceHidden(
+                        workspaceID: resolvedWorkspace.id,
+                        expectedConsolidatedIntoWorkspaceID: resolvedWorkspace.summary.consolidatedIntoWorkspaceID,
+                        hidden: shouldHide
+                    )
                     await MainActor.run {
                         for manager in mutationManagers {
                             manager.applyWorkspaceHiddenStateInMemory(
@@ -2841,10 +2910,6 @@ final class WindowRoutingService: Service {
 
                     let workspace = try await routingService.resolveWorkspaceForDelete(rawWorkspaceParam: rawWorkspaceParam, includeHidden: includeHidden)
 
-                    await MainActor.run {
-                        targetWindow.workspaceManager.reloadWorkspacesFromDisk()
-                    }
-
                     let showingWindowIDs = await MainActor.run { () -> [Int] in
                         routingService.windowStates.allWindows.compactMap { window in
                             guard window.workspaceManager.activeWorkspace?.id == workspace.id else { return nil }
@@ -2890,13 +2955,13 @@ final class WindowRoutingService: Service {
                         let fallback = await MainActor.run {
                             targetWindow.workspaceManager.getOrCreateSystemWorkspace()
                         }
-                        let switchResult = await targetWindow.workspaceManager.requestWorkspaceSwitch(to: fallback, saveState: false)
+                        let switchResult = await targetWindow.workspaceManager.requestWorkspaceSwitch(toWorkspaceID: fallback.id, saveState: false)
                         if !switchResult.didSwitch {
                             throw MCPError.invalidRequest(switchResult.message ?? "Workspace switch was cancelled.")
                         }
                     }
 
-                    if case let .refused(reason) = await targetWindow.workspaceManager.deleteWorkspaceAsync(workspace) {
+                    if case let .refused(reason) = await targetWindow.workspaceManager.deleteWorkspaceAsync(workspace.summary) {
                         let windowNote = closeWindow
                             ? " Window \(targetWindow.windowID) stays open on the workspace it switched to."
                             : ""
@@ -3198,15 +3263,13 @@ final class WindowRoutingService: Service {
                     }
 
                     try await routingService.networkMgr.setActiveWindowForCurrentConnection(targetWindow.windowID)
-                    try await MainActor.run {
-                        try targetWindow.mcpServer.bindTabForConnection(
-                            connectionID: connectionID,
-                            clientName: clientName,
-                            tabID: tab.id,
-                            workspaceID: workspace.id,
-                            windowID: targetWindow.windowID
-                        )
-                    }
+                    try await targetWindow.mcpServer.bindTabForConnection(
+                        connectionID: connectionID,
+                        clientName: clientName,
+                        tabID: tab.id,
+                        workspaceID: workspace.id,
+                        windowID: targetWindow.windowID
+                    )
 
                     if shouldFocus {
                         await targetWindow.promptManager.switchComposeTab(tab.id)
@@ -3269,15 +3332,13 @@ final class WindowRoutingService: Service {
                     try await routingService.networkMgr.setActiveWindowForCurrentConnection(targetWindow.windowID)
 
                     if shouldBind, let connectionID {
-                        try await MainActor.run {
-                            try targetWindow.mcpServer.bindTabForConnection(
-                                connectionID: connectionID,
-                                clientName: clientName,
-                                tabID: newTab.id,
-                                workspaceID: workspace.id,
-                                windowID: targetWindow.windowID
-                            )
-                        }
+                        try await targetWindow.mcpServer.bindTabForConnection(
+                            connectionID: connectionID,
+                            clientName: clientName,
+                            tabID: newTab.id,
+                            workspaceID: workspace.id,
+                            windowID: targetWindow.windowID
+                        )
                     }
 
                     if shouldFocus {

@@ -23,23 +23,27 @@ extension MCPServerViewModel {
         }
     }
 
+    /// The context tab's stored selection and the selection revision this window records for it,
+    /// read at the tab's exact identity. A workspace the window doesn't show is loaded for this read
+    /// only.
     @MainActor
     private func canonicalSelectionReadSnapshot(
         for context: TabContextSnapshot
-    ) -> CanonicalSelectionReadSnapshot? {
+    ) async -> CanonicalSelectionReadSnapshot? {
         guard let manager = workspaceManager else { return nil }
 
         let identity: WorkspaceSelectionIdentity
         if let workspaceID = context.workspaceID {
             identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: context.tabID)
         } else {
-            guard let workspace = manager.workspaces.first(where: { workspace in
-                workspace.composeTabs.contains(where: { $0.id == context.tabID })
-            }) else { return nil }
-            identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: context.tabID)
+            guard case let .unique(resolved, location: .composed) = manager.contentGateway.uniqueTabIdentity(
+                tabID: context.tabID,
+                includeStashed: false
+            ) else { return nil }
+            identity = resolved
         }
 
-        guard let selection = manager.composeTab(for: identity)?.selection else { return nil }
+        guard let selection = try? await manager.readTabSelection(for: identity) else { return nil }
         return CanonicalSelectionReadSnapshot(
             selection: selection,
             selectionRevision: manager.selectionRevisionForMCP(
@@ -58,18 +62,17 @@ extension MCPServerViewModel {
     func stabilizedVirtualContext(for context: TabContextSnapshot) async -> TabContextSnapshot {
         // For any tab-bound virtual context (including runs), prefer latest stored tab selection.
         // This prevents resurrecting stale slices from the run snapshot after the user clears them.
-        guard let canonical = canonicalSelectionReadSnapshot(for: context) else { return context }
+        guard let canonical = await canonicalSelectionReadSnapshot(for: context) else { return context }
         var stabilized = context
-        stabilized.selection = canonical.selection
-        stabilized.selectionRevision = canonical.selectionRevision
+        stabilized.synchronizeSelection(canonical.selection, revision: canonical.selectionRevision)
         return stabilized
     }
 
     @MainActor
     func stabilizedSelectionReadSnapshot(
         _ resolved: ResolvedTabContextSnapshot
-    ) throws -> ResolvedTabContextSnapshot {
-        guard let canonical = canonicalSelectionReadSnapshot(for: resolved.snapshot) else {
+    ) async throws -> ResolvedTabContextSnapshot {
+        guard let canonical = await canonicalSelectionReadSnapshot(for: resolved.snapshot) else {
             throw StabilizedSelectionReadSnapshotError.canonicalTabUnavailable(
                 workspaceID: resolved.snapshot.workspaceID,
                 tabID: resolved.snapshot.tabID
@@ -77,8 +80,7 @@ extension MCPServerViewModel {
         }
 
         var stabilized = resolved
-        stabilized.snapshot.selection = canonical.selection
-        stabilized.snapshot.selectionRevision = canonical.selectionRevision
+        stabilized.snapshot.synchronizeSelection(canonical.selection, revision: canonical.selectionRevision)
         return stabilized
     }
 

@@ -92,7 +92,7 @@ enum MCPAppPhysicalCapabilityAdapters {
         _ tabID: UUID,
         _ workspaceID: UUID,
         _ windowID: Int
-    ) throws -> Void
+    ) async throws -> Void
     typealias BuildTabSelectionReply = @MainActor @Sendable (
         _ selection: StoredSelection,
         _ includeBlocks: Bool,
@@ -108,7 +108,7 @@ enum MCPAppPhysicalCapabilityAdapters {
         _ message: String
     ) async -> Void
     typealias MakeOracleExportDestination = @MainActor @Sendable (
-        _ workspace: WorkspaceModel?,
+        _ workspace: ListedWorkspace?,
         _ windowID: Int,
         _ tabID: UUID?,
         _ lookupContext: WorkspaceLookupContext
@@ -153,10 +153,11 @@ enum MCPAppPhysicalCapabilityAdapters {
         _ metadata: MCPServerViewModel.RequestMetadata,
         _ toolName: String
     ) throws -> MCPServerViewModel.ResolvedTabContextSnapshot
+    /// Returns the prompt the tab stores after the update.
     typealias UpdateCurrentTabContext = @MainActor @Sendable (
         _ toolName: String,
         _ mutation: (inout MCPServerViewModel.TabContextSnapshot) -> Void
-    ) async throws -> Void
+    ) async throws -> String
     typealias SelectedRecordsForCurrentTabContext = @MainActor @Sendable (
         _ metadata: MCPServerViewModel.RequestMetadata,
         _ lookupContextOverride: WorkspaceLookupContext?

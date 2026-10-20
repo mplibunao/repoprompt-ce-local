@@ -565,7 +565,7 @@ private actor AgentFileTagTestAsyncGate {
 }
 
 @MainActor
-private final class FileTagSelectionHost: WorkspaceSelectionHost {
+private final class FileTagSelectionHost: ShownOnlySelectionHost {
     var activeWorkspace: WorkspaceModel?
     var selectionMirrorContextRevision: UInt64 = 0
 
@@ -581,26 +581,7 @@ private final class FileTagSelectionHost: WorkspaceSelectionHost {
         )
     }
 
-    func composeTab(with id: UUID) -> ComposeTabState? {
-        activeWorkspace?.composeTabs.first { $0.id == id }
-    }
-
-    func composeTab(for identity: WorkspaceSelectionIdentity) -> ComposeTabState? {
-        guard activeWorkspace?.id == identity.workspaceID else { return nil }
-        return activeWorkspace?.composeTabs.first { $0.id == identity.tabID }
-    }
-
     func publishActiveComposeTabSnapshot(commitToMemory _: Bool, touchModified _: Bool) {}
-
-    @discardableResult
-    func updateComposeTabStoredOnly(_ tab: ComposeTabState, inWorkspaceID workspaceID: UUID) -> Bool {
-        guard var workspace = activeWorkspace, workspace.id == workspaceID,
-              let index = workspace.composeTabs.firstIndex(where: { $0.id == tab.id })
-        else { return false }
-        workspace.composeTabs[index] = tab
-        activeWorkspace = workspace
-        return true
-    }
 
     func applySelectionMirrorAttempt(_: StoredSelection, forTabID _: UUID, workspaceID _: UUID) async {}
 }

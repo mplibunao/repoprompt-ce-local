@@ -694,6 +694,22 @@ private func workspaceSavePreparationDecision(
     return .retry(nextRemainingCount: remainingRetryCount - 1)
 }
 
+/// A workspace as a window's projection installed it: the working revision, and each compose tab's
+/// selection revision and selection right after the install.
+struct ProjectedWorkspaceInstall: Equatable {
+    let workingRevision: UInt64
+    let selectionRevisionByTabID: [UUID: UInt64]
+    let selectionByTabID: [UUID: StoredSelection]
+}
+
+/// A working-document command a window submitted with a document its copy produced.
+struct CopySourcedSubmission: Equatable {
+    let workspaceID: UUID
+    let digest: String
+    /// The working revision the authority accepted the command at, once its answer arrives.
+    var acceptedRevision: UInt64?
+}
+
 /// The main WorkspaceManager, refactored to store each WorkspaceModel
 /// in its own folder + workspace.json, and maintain an index file for all known workspaces.
 @MainActor
@@ -714,6 +730,7 @@ class WorkspaceManagerViewModel: ObservableObject {
                 uniquingKeysWith: { _, last in last }
             )
             refreshSelectionMirrorContextRevision()
+            refreshWorkspaceCatalogMembership()
         }
     }
 
@@ -778,6 +795,12 @@ class WorkspaceManagerViewModel: ObservableObject {
     private var domainWorkspaceFileURLsByID: [UUID: URL] = [:]
     private var domainWorkspaceRevisionsByID: [UUID: DomainRevisionState] = [:]
     private var domainWorkspaceDigestsByID: [UUID: String] = [:]
+    /// Working-document commands submitted with a document this window's copy produced, by
+    /// operation ID. The bridge treats only these commands' events as this window's own. A
+    /// registration ends when the bridge consumes its event or when its command doesn't publish an
+    /// event. It also ends when the window's projection covers the command, as `projectionCovers`
+    /// describes, and when projection ends.
+    private var copySourcedSubmissions: [UUID: CopySourcedSubmission] = [:]
     private var domainWorkspaceHealthByID: [UUID: DomainAuthorityHealth] = [:]
     private var workspaceRenameIntentByID: [UUID: UUID] = [:]
     private var workspaceHiddenIntentByID: [UUID: UUID] = [:]
@@ -828,7 +851,31 @@ class WorkspaceManagerViewModel: ObservableObject {
     let mcpSelectionPropagationHostID = UUID()
     private var selectionRevisionByWorkspaceTab: [WorkspaceTabSelectionKey: UInt64] = [:]
     private var revisedSelectionByWorkspaceTab: [WorkspaceTabSelectionKey: StoredSelection] = [:]
-    private var latestMCPSelectionRevisionByWorkspaceTab: [WorkspaceTabSelectionKey: UInt64] = [:]
+    /// The newest propagation revision of an MCP selection stored on a shown workspace that this
+    /// window made or took, per tab.
+    private var latestShownMCPSelectionRevisionByWorkspaceTab: [WorkspaceTabSelectionKey: UInt64] = [:]
+    /// The newest propagation revision of a canonical MCP selection commit that this window made or
+    /// presented, per tab.
+    private var latestCanonicalMCPSelectionRevisionByWorkspaceTab: [WorkspaceTabSelectionKey: UInt64] = [:]
+    /// The tab's selection revision right after this window's last shown-workspace MCP store into
+    /// its copy: its own, or a peer's it stored. While the tab's selection revision still equals
+    /// it, the stored selection is that store's. A canonical commit's store doesn't set it, because
+    /// that store leaves the tab on the projection's selection.
+    private var orderedStoreMCPSelectionRevisionByWorkspaceTab: [WorkspaceTabSelectionKey: UInt64] = [:]
+    /// The latest install of each workspace by this window's projection, from a projected snapshot
+    /// or from the event of a command the window's copy produced.
+    private var projectedInstallByWorkspaceID: [UUID: ProjectedWorkspaceInstall] = [:]
+    /// The workspaces in the latest complete catalog that this window's projection handled, whether
+    /// it installed that catalog or failed to, or nil before the first.
+    private var catalogWorkspaceIDs: Set<UUID>?
+    /// The highest working revision of each workspace that a failed projection couldn't install.
+    private var failedProjectionRevisionByWorkspaceID: [UUID: UInt64] = [:]
+    private var projectedInstallWaiters: [
+        UUID: [(revision: UInt64, continuation: CheckedContinuation<ProjectedWorkspaceInstall?, Never>)]
+    ] = [:]
+    /// True while no bridge projects for this window. `beginProjection()` clears it when a bridge
+    /// starts, and `endProjection()` sets it again.
+    private var projectionEnded = true
 
     private struct SelectionMirrorContext: Equatable {
         let workspaceID: UUID
@@ -1000,20 +1047,30 @@ class WorkspaceManagerViewModel: ObservableObject {
         return revision
     }
 
+    /// A canonical commit also goes to this window, which presents it if it started showing the tab
+    /// during the commit.
     func registerMCPSelectionSourceMutation(
-        for identity: WorkspaceSelectionIdentity
+        for identity: WorkspaceSelectionIdentity,
+        acceptedRevision: UInt64?
     ) -> MCPSelectionPropagationRegistration {
         let revision = Self.nextMCPSelectionPropagationRevision
         Self.nextMCPSelectionPropagationRevision &+= 1
 
         let key = WorkspaceTabSelectionKey(workspaceID: identity.workspaceID, tabID: identity.tabID)
-        latestMCPSelectionRevisionByWorkspaceTab[key] = revision
+        if acceptedRevision == nil {
+            latestShownMCPSelectionRevisionByWorkspaceTab[key] = revision
+        } else {
+            latestCanonicalMCPSelectionRevisionByWorkspaceTab[key] = max(
+                latestCanonicalMCPSelectionRevisionByWorkspaceTab[key, default: 0],
+                revision
+            )
+        }
 
         let peerHostIDs = Set(WindowStatesManager.shared.allWindows.compactMap { window -> UUID? in
             guard !window.isClosing else { return nil }
             let peer = window.workspaceManager
-            guard peer !== self,
-                  peer.composeTab(for: identity) != nil
+            guard peer !== self || acceptedRevision != nil,
+                  peer.contentGateway.listedTab(identity) != nil || peer === self
             else { return nil }
             return peer.mcpSelectionPropagationHostID
         })
@@ -1023,12 +1080,191 @@ class WorkspaceManagerViewModel: ObservableObject {
         )
     }
 
-    func acceptMCPPeerSelectionRevision(_ revision: UInt64, for identity: WorkspaceSelectionIdentity) -> Bool {
-        let key = WorkspaceTabSelectionKey(workspaceID: identity.workspaceID, tabID: identity.tabID)
-        guard revision > latestMCPSelectionRevisionByWorkspaceTab[key, default: 0] else { return false }
-        latestMCPSelectionRevisionByWorkspaceTab[key] = revision
+    /// This window takes a shown-workspace store when its propagation revision is higher than every
+    /// MCP selection revision the window has for the tab.
+    ///
+    /// Once its projection has installed a canonical commit's accepted revision, it takes the commit
+    /// only when each of these holds:
+    /// - No shown-workspace store it made or took for the tab is later in propagation order.
+    /// - The projection's latest install of the workspace has the commit's selection for the tab.
+    ///   A different selection there came from a write the authority accepted later.
+    /// - The tab stores the commit's selection, or the tab's selection is still the one the last
+    ///   shown-workspace MCP store left, which the commit replaces. Any other selection is a local
+    ///   edit, and the window keeps it.
+    func acceptMCPPeerSelection(
+        _ propagation: MCPSelectionPeerPropagation,
+        currentSelection: StoredSelection
+    ) -> Bool {
+        let key = WorkspaceTabSelectionKey(
+            workspaceID: propagation.identity.workspaceID,
+            tabID: propagation.identity.tabID
+        )
+        let latestShown = latestShownMCPSelectionRevisionByWorkspaceTab[key, default: 0]
+        let latestCanonical = latestCanonicalMCPSelectionRevisionByWorkspaceTab[key, default: 0]
+        guard propagation.acceptedRevision != nil else {
+            guard propagation.sourceRevision > max(latestShown, latestCanonical) else { return false }
+            latestShownMCPSelectionRevisionByWorkspaceTab[key] = propagation.sourceRevision
+            return true
+        }
+        let holdsOrderedStore = orderedStoreMCPSelectionRevisionByWorkspaceTab[key].map {
+            $0 == selectionRevisionByWorkspaceTab[key]
+        } ?? false
+        guard latestShown < propagation.sourceRevision,
+              projectedInstallByWorkspaceID[key.workspaceID]?.selectionByTabID[key.tabID] == propagation.selection,
+              currentSelection == propagation.selection || holdsOrderedStore
+        else { return false }
+        latestCanonicalMCPSelectionRevisionByWorkspaceTab[key] = max(latestCanonical, propagation.sourceRevision)
         return true
     }
+
+    /// Notes that the tab's stored selection came from a shown-workspace MCP store, which a canonical
+    /// commit later in propagation order replaces.
+    func recordOrderedMCPSelectionStore(for identity: WorkspaceSelectionIdentity) {
+        let key = WorkspaceTabSelectionKey(workspaceID: identity.workspaceID, tabID: identity.tabID)
+        orderedStoreMCPSelectionRevisionByWorkspaceTab[key] = selectionRevisionByWorkspaceTab[key]
+    }
+
+    /// Waits until this window's projection installs the workspace at `revision` or later, and
+    /// returns that install. It returns nil when the projection can't install it. That happens when
+    /// no bridge projects for the window, when the latest complete catalog lacks the workspace, and
+    /// when a failed projection covered the revision.
+    func awaitProjectedInstall(of workspaceID: UUID, atLeast revision: UInt64) async -> ProjectedWorkspaceInstall? {
+        if let install = projectedInstallByWorkspaceID[workspaceID], install.workingRevision >= revision {
+            return install
+        }
+        guard domainWorkspaceAuthorityClient != nil,
+              !projectionEnded,
+              projectionCanInstall(workspaceID, atLeast: revision)
+        else { return nil }
+        return await withCheckedContinuation { continuation in
+            projectedInstallWaiters[workspaceID, default: []].append((revision, continuation))
+        }
+    }
+
+    /// Whether this window's projection has installed the workspace at `revision` or later.
+    func projectionHasInstalled(_ workspaceID: UUID, atLeast revision: UInt64) -> Bool {
+        (projectedInstallByWorkspaceID[workspaceID]?.workingRevision ?? 0) >= revision
+    }
+
+    /// This window projection's latest install of the workspace, when that install is at exactly
+    /// `revision`.
+    func projectedInstall(of workspaceID: UUID, exactly revision: UInt64) -> ProjectedWorkspaceInstall? {
+        guard let install = projectedInstallByWorkspaceID[workspaceID], install.workingRevision == revision else {
+            return nil
+        }
+        return install
+    }
+
+    /// False when the latest complete catalog lacks the workspace, or a failed projection covered
+    /// `revision`.
+    private func projectionCanInstall(_ workspaceID: UUID, atLeast revision: UInt64) -> Bool {
+        (catalogWorkspaceIDs?.contains(workspaceID) ?? true)
+            && (failedProjectionRevisionByWorkspaceID[workspaceID].map { $0 < revision } ?? true)
+    }
+
+    /// Records the working revisions the projection installed, with each compose tab's selection
+    /// revision right after the install. It records a workspace's first install at any revision,
+    /// including the 0 of a document loaded from disk. Only an install at a higher revision replaces
+    /// that record. For a complete catalog, it also records which workspaces exist. Then it settles
+    /// the waits and the copy-sourced registrations the records cover.
+    private func recordProjectedInstalls(_ revisionsByWorkspaceID: [UUID: UInt64], isCompleteCatalog: Bool) {
+        for (workspaceID, revision) in revisionsByWorkspaceID
+            where projectedInstallByWorkspaceID[workspaceID].map({ revision > $0.workingRevision }) ?? true
+        {
+            let tabs = workspace(withID: workspaceID)?.composeTabs ?? []
+            projectedInstallByWorkspaceID[workspaceID] = ProjectedWorkspaceInstall(
+                workingRevision: revision,
+                selectionRevisionByTabID: Dictionary(uniqueKeysWithValues: tabs.map {
+                    ($0.id, selectionRevision(workspaceID: workspaceID, tabID: $0.id))
+                }),
+                selectionByTabID: Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0.selection) })
+            )
+            if let failed = failedProjectionRevisionByWorkspaceID[workspaceID], failed <= revision {
+                failedProjectionRevisionByWorkspaceID.removeValue(forKey: workspaceID)
+            }
+        }
+        if isCompleteCatalog {
+            let catalog = Set(revisionsByWorkspaceID.keys)
+            catalogWorkspaceIDs = catalog
+            projectedInstallByWorkspaceID = projectedInstallByWorkspaceID.filter { catalog.contains($0.key) }
+            failedProjectionRevisionByWorkspaceID = failedProjectionRevisionByWorkspaceID.filter {
+                catalog.contains($0.key)
+            }
+        }
+        settleProjectionRecords()
+    }
+
+    /// Records the result of a failed projection of a complete catalog. A workspace the catalog
+    /// lacks can't install, and neither can a revision at or below one the projection couldn't
+    /// install. Then it settles the waits and the copy-sourced registrations those records cover.
+    /// The bridge keeps its subscription and projects the next event's snapshot.
+    func recordFailedProjection(revisionsByWorkspaceID: [UUID: UInt64]) {
+        for (workspaceID, revision) in revisionsByWorkspaceID where !projectionHasInstalled(workspaceID, atLeast: revision) {
+            failedProjectionRevisionByWorkspaceID[workspaceID] = max(
+                failedProjectionRevisionByWorkspaceID[workspaceID, default: 0],
+                revision
+            )
+        }
+        catalogWorkspaceIDs = Set(revisionsByWorkspaceID.keys)
+        settleProjectionRecords()
+    }
+
+    /// Resumes each wait the projection records answer, and drops each copy-sourced registration
+    /// they cover.
+    private func settleProjectionRecords() {
+        copySourcedSubmissions = copySourcedSubmissions.filter { !projectionCovers($0.value) }
+        for workspaceID in Array(projectedInstallWaiters.keys) {
+            var waiting: [(revision: UInt64, continuation: CheckedContinuation<ProjectedWorkspaceInstall?, Never>)] = []
+            for waiter in projectedInstallWaiters[workspaceID] ?? [] {
+                if let install = projectedInstallByWorkspaceID[workspaceID], install.workingRevision >= waiter.revision {
+                    waiter.continuation.resume(returning: install)
+                } else if !projectionCanInstall(workspaceID, atLeast: waiter.revision) {
+                    waiter.continuation.resume(returning: nil)
+                } else {
+                    waiting.append(waiter)
+                }
+            }
+            projectedInstallWaiters[workspaceID] = waiting.isEmpty ? nil : waiting
+        }
+    }
+
+    /// Whether the window's projection already covers a copy-sourced command, so the command's
+    /// event can't end its registration. It does when the latest complete catalog lacks the
+    /// command's workspace, and when the projection installed the command's accepted revision. It
+    /// also does when a failed projection covered that revision, because the bridge then projects
+    /// the command's event instead of treating it as this window's own.
+    private func projectionCovers(_ submission: CopySourcedSubmission) -> Bool {
+        if let catalog = catalogWorkspaceIDs, !catalog.contains(submission.workspaceID) { return true }
+        guard let acceptedRevision = submission.acceptedRevision else { return false }
+        return projectionHasInstalled(submission.workspaceID, atLeast: acceptedRevision)
+            || !projectionCanInstall(submission.workspaceID, atLeast: acceptedRevision)
+    }
+
+    /// Starts projection for a bridge that projects for this window. Projection waits can begin,
+    /// and copy-sourced commands register.
+    func beginProjection() {
+        projectionEnded = false
+    }
+
+    /// Ends projection, for a closing window, a stopped bridge, or an ended subscription. It ends
+    /// every projection wait and drops every copy-sourced registration.
+    func endProjection() {
+        projectionEnded = true
+        copySourcedSubmissions.removeAll()
+        let waiters = projectedInstallWaiters.values.flatMap(\.self)
+        projectedInstallWaiters.removeAll()
+        waiters.forEach { $0.continuation.resume(returning: nil) }
+    }
+
+    #if DEBUG
+        var pendingProjectionWaitCountForTesting: Int {
+            projectedInstallWaiters.values.reduce(0) { $0 + $1.count }
+        }
+
+        var copySourcedSubmissionCountForTesting: Int {
+            copySourcedSubmissions.count
+        }
+    #endif
 
     func canCommitMCPSelectionPeerMutation(_ fence: MCPSelectionPeerMutationFence) -> Bool {
         guard fence.hostID == mcpSelectionPropagationHostID else { return false }
@@ -1216,9 +1452,13 @@ class WorkspaceManagerViewModel: ObservableObject {
             workspaceID: UUID?,
             tabID: UUID,
             candidatePaths: [String]
-        ) -> ApplyEditsRebaseProbeSelectionSnapshot? {
+        ) async -> ApplyEditsRebaseProbeSelectionSnapshot? {
             guard let workspaceID,
-                  let tab = composeTab(for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID))
+                  let tab = try? await contentGateway.readComposeTab(
+                      WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID),
+                      source: "debug.applyEditsRebaseProbe",
+                      capturingLiveUIState: false
+                  )
             else { return nil }
             let slices = StoredSelectionPathNormalization.standardizedSlices(tab.selection.slices)
             let candidates = candidatePaths.compactMap(StoredSelectionPathNormalization.standardizedPath)
@@ -1437,11 +1677,15 @@ class WorkspaceManagerViewModel: ObservableObject {
     private(set) var workspaceSummaries: [DomainWorkspaceSummary] = []
     private var workspaceSummaryIndexByID: [UUID: Int] = [:]
     private var lastDomainSummarySequence: UInt64 = 0
+    /// The ID of every workspace this window's catalog lists, as `listedWorkspaceIDs` defines it.
+    /// It publishes only when a workspace joins or leaves the catalog. A content change, a switch,
+    /// or the window releasing an unshown workspace's content doesn't publish it.
+    @Published private(set) var workspaceCatalogMembership: Set<UUID> = []
     let workspaceActivityCoordinator: WorkspaceActivityCoordinator
     private let workspaceAgentAdmissionCoordinator: WorkspaceAgentAdmissionCoordinator
     private var agentSessionProjectionReconciler: ((
-        _ projectedWorkspaces: [WorkspaceModel],
-        _ currentWorkspaces: [WorkspaceModel]
+        _ projectedShownWorkspace: WorkspaceModel?,
+        _ currentShownWorkspace: WorkspaceModel
     ) -> AgentSessionLifecycleAuthority.ProjectionOutcome)?
     private var lastDomainProjectionSequence: UInt64 = 0
     private lazy var checkoutRefreshService = WorkspaceCheckoutRefreshService(
@@ -1465,11 +1709,37 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     func setAgentSessionProjectionReconciler(
         _ reconciler: @escaping (
-            _ projectedWorkspaces: [WorkspaceModel],
-            _ currentWorkspaces: [WorkspaceModel]
+            _ projectedShownWorkspace: WorkspaceModel?,
+            _ currentShownWorkspace: WorkspaceModel
         ) -> AgentSessionLifecycleAuthority.ProjectionOutcome
     ) {
         agentSessionProjectionReconciler = reconciler
+    }
+
+    /// `projection` with the shown workspace's live and pinned Agent tabs kept from the window's
+    /// copy, as the Agent session reconciler decides, and whether it kept any. Only the shown copy
+    /// holds Agent state the window hasn't written canonically yet.
+    private func protectingShownAgentSessions(
+        in projection: [WorkspaceModel]
+    ) -> (workspaces: [WorkspaceModel], isProtected: Bool) {
+        guard let reconciler = agentSessionProjectionReconciler,
+              let shownID = activeWorkspaceID,
+              let current = workspace(withID: shownID)
+        else { return (projection, false) }
+        let projectedIndex = projection.firstIndex { $0.id == shownID }
+        let outcome = reconciler(projectedIndex.map { projection[$0] }, current)
+        var reconciled = projection
+        switch (projectedIndex, outcome.workspace) {
+        case let (index?, workspace?):
+            reconciled[index] = workspace
+        case let (nil, workspace?):
+            reconciled.append(workspace)
+        case let (index?, nil):
+            reconciled.remove(at: index)
+        case (nil, nil):
+            break
+        }
+        return (reconciled, outcome.isProtected)
     }
 
     var liveUISelectionRevision: UInt64 {
@@ -2389,15 +2659,40 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     nonisolated func workspaceDirectory(for workspace: WorkspaceModel, baseRoot: URL) -> URL {
+        workspaceDirectory(
+            workspaceID: workspace.id,
+            name: workspace.name,
+            customStoragePath: workspace.customStoragePath,
+            baseRoot: baseRoot
+        )
+    }
+
+    /// The storage directory of the workspace with this identity, for callers that hold its
+    /// summary rather than its model.
+    func workspaceDirectory(workspaceID: UUID, name: String, customStoragePath: URL?) -> URL {
+        workspaceDirectory(
+            workspaceID: workspaceID,
+            name: name,
+            customStoragePath: customStoragePath,
+            baseRoot: currentBaseRoot
+        )
+    }
+
+    nonisolated func workspaceDirectory(
+        workspaceID: UUID,
+        name: String,
+        customStoragePath: URL?,
+        baseRoot: URL
+    ) -> URL {
         // ➊ Honour per-workspace override first
-        if let customRoot = workspace.customStoragePath,
+        if let customRoot = customStoragePath,
            WorkspaceStoragePaths.admitsCustomStoragePath(customRoot, within: baseRoot)
         {
             return customRoot
         }
 
         // ➋ Fall back to global custom storage set by the user or the default location
-        return baseRoot.appendingPathComponent(directoryName(for: workspace))
+        return baseRoot.appendingPathComponent(DomainWorkspaceStoragePath.directoryName(name: name, id: workspaceID))
     }
 
     func workspaceFileURL(for workspace: WorkspaceModel) -> URL {
@@ -2529,7 +2824,7 @@ class WorkspaceManagerViewModel: ObservableObject {
             .sink { [weak self] observation in
                 guard let self, acceptsDeferredWorkspaceObservation(observation) else { return }
                 bumpStateVersion(for: observation.workspaceID)
-                // Commit to memory so composeTab(with:) reflects the new slice state immediately.
+                // Commit to memory so the shown copy reflects the new slice state immediately.
                 publishActiveComposeTabSnapshot(commitToMemory: true)
             }
             .store(in: &cancellables)
@@ -2688,6 +2983,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     func prepareForWindowClose() {
         contentGateway.invalidate()
+        endProjection()
         workspaceActivityCoordinator.unregister(ownerID: instanceID)
         stopPollTimer()
         reloadWorkspacesTask?.cancel()
@@ -3024,6 +3320,39 @@ class WorkspaceManagerViewModel: ObservableObject {
             }
 
             return loaded
+        }.value
+    }
+
+    /// Lists the catalog as summaries from the owning persistence authority, decoding no
+    /// workspace's tabs. It refreshes the incomplete-restore classification the same way
+    /// `loadWorkspaceSnapshotFromDisk` does. Until that authority is bootstrapped, and for isolated
+    /// legacy managers, it reads the metadata of each document the legacy index names.
+    func loadWorkspaceSummarySnapshot() async -> [DomainWorkspaceSummary] {
+        if let domainWorkspaceAuthorityClient {
+            let snapshot = await domainWorkspaceAuthorityClient.summarySnapshot()
+            if snapshot.isBootstrapped {
+                await refreshAuthorityIncompleteRestoreClassification(
+                    candidates: Self.authorityIncompleteRestoreCandidates(summaries: snapshot.workspaces),
+                    publicationSequence: snapshot.publicationSequence
+                )
+                return snapshot.workspaces
+            }
+        }
+
+        let base = currentBaseRoot
+        let indexURL = workspaceIndexFileURL
+        return await Task.detached(priority: .utility) {
+            Self.loadWorkspaceIndex(from: indexURL).compactMap { entry -> DomainWorkspaceSummary? in
+                guard let fileURL = Self.admittedWorkspaceFileURL(for: entry, base: base) else { return nil }
+                do {
+                    let bytes = try Data(contentsOf: fileURL)
+                    let document = try DomainWorkspaceDocument.decode(documentBytes: bytes, fileURL: fileURL)
+                    return DomainWorkspaceSummary(document: document, revisions: .initial, health: .writable)
+                } catch {
+                    print("[WorkspaceSummarySnapshot] Failed to read \(fileURL.path): \(error)")
+                    return nil
+                }
+            }
         }.value
     }
 
@@ -3580,6 +3909,21 @@ class WorkspaceManagerViewModel: ObservableObject {
         let items = activeSessionSnapshot().items
         guard !items.isEmpty else { return "no reported active sessions" }
         return items.map { $0.formattedCount() }.joined(separator: ", ")
+    }
+
+    /// Switches to the workspace with this ID, as `requestWorkspaceSwitch(to:)` does with this
+    /// window's copy of it. Blocked when the window's catalog doesn't list the workspace.
+    @MainActor
+    func requestWorkspaceSwitch(
+        toWorkspaceID workspaceID: UUID,
+        saveState: Bool = true,
+        reason: String = "userOrInternal"
+    ) async -> WorkspaceSwitchResult {
+        await awaitDefaultWorkspaceReadiness()
+        guard let target = workspace(withID: workspaceID) else {
+            return .blocked("Workspace \(workspaceID.uuidString) isn't in this window's workspace list. Retry after the list refreshes.")
+        }
+        return await requestWorkspaceSwitch(to: target, saveState: saveState, reason: reason)
     }
 
     @MainActor
@@ -4937,7 +5281,7 @@ class WorkspaceManagerViewModel: ObservableObject {
             let workspace = explicitWorkspace ?? activeWorkspace
             let workspaceTabID = workspace?.activeComposeTabID ?? workspace?.composeTabs.first?.id
             let workspaceTab = workspaceTabID.flatMap { id in
-                workspace?.composeTabs.first(where: { $0.id == id }) ?? composeTab(with: id)
+                workspace?.composeTabs.first(where: { $0.id == id })
             }
             let coordinatorSnapshot = selectionCoordinator?.activeSelectionSnapshot(flushPendingUI: false)
             let uiSnapshot = fileManager.snapshotSelection()
@@ -5009,7 +5353,8 @@ class WorkspaceManagerViewModel: ObservableObject {
                     workspace,
                     fileURL: fileURL,
                     expectedWorkspaceRevision: expectedWorkspaceRevision,
-                    operationID: operationID
+                    operationID: operationID,
+                    workingDocumentObserver: copySourcedSubmissionObserver(for: workspaceID)
                 )
                 #if DEBUG
                     let abandonAfterOutcome = cancelWorkingCommitAfterOutcomeWorkspaceIDsForTesting.remove(workspaceID) != nil
@@ -5055,6 +5400,14 @@ class WorkspaceManagerViewModel: ObservableObject {
             health: outcome.workspace?.health,
             catalogRevision: outcome.catalogRevision
         )
+        reportDomainAuthorityOutcomeHealth(outcome, workspaceID: workspaceID)
+    }
+
+    /// Clears a command failure reported for the workspace once one of its commands succeeds, and
+    /// refreshes the active workspace's authority issue. It doesn't record a revision or digest,
+    /// which lets a caller report the outcome of a command whose document didn't come from the
+    /// window's copy.
+    func reportDomainAuthorityOutcomeHealth(_ outcome: DomainCommandOutcome, workspaceID: UUID) {
         if Self.isSuccessfulDomainOutcome(outcome),
            domainWorkspaceAuthorityIssue?.workspaceID == workspaceID,
            domainWorkspaceAuthorityIssue?.kind == .commandFailure
@@ -5062,6 +5415,78 @@ class WorkspaceManagerViewModel: ObservableObject {
             publishDomainAuthorityIssueIfChanged(nil)
         }
         synchronizeDomainAuthorityIssueForActiveWorkspace(operation: "authority_outcome")
+    }
+
+    /// Registers each working-document command submitted for `workspaceID` as copy-sourced while a
+    /// bridge projects for this window, and settles the registration when the command's answer
+    /// arrives.
+    private func copySourcedSubmissionObserver(for workspaceID: UUID) -> DomainWorkingDocumentSubmissionObserver {
+        DomainWorkingDocumentSubmissionObserver(
+            willSubmit: { [weak self] operationID, digest in
+                guard let self, !projectionEnded else { return }
+                copySourcedSubmissions[operationID] = CopySourcedSubmission(workspaceID: workspaceID, digest: digest)
+            },
+            didAnswer: { [weak self] outcome in
+                self?.settleCopySourcedSubmission(outcome)
+            }
+        )
+    }
+
+    /// Drops the registration of a command that doesn't publish an event, because the authority
+    /// rejected it or found it unchanged. An applied or deduplicated command's registration records
+    /// its accepted revision. When the window's projection has already installed that revision,
+    /// this drops the registration instead.
+    private func settleCopySourcedSubmission(_ outcome: DomainCommandOutcome) {
+        guard var submission = copySourcedSubmissions[outcome.operationID] else { return }
+        guard outcome.disposition == .applied || outcome.disposition == .deduplicated else {
+            copySourcedSubmissions.removeValue(forKey: outcome.operationID)
+            return
+        }
+        submission.acceptedRevision = outcome.after?.workingRevision ?? outcome.workspace?.revisions.workingRevision
+        copySourcedSubmissions[outcome.operationID] = projectionCovers(submission) ? nil : submission
+    }
+
+    /// Removes and returns the registration of a copy-sourced command, or nil when the operation
+    /// isn't one.
+    func takeCopySourcedSubmission(_ operationID: UUID) -> CopySourcedSubmission? {
+        copySourcedSubmissions.removeValue(forKey: operationID)
+    }
+
+    #if DEBUG
+        func registerCopySourcedSubmissionForTesting(_ operationID: UUID, workspaceID: UUID, digest: String) {
+            copySourcedSubmissions[operationID] = CopySourcedSubmission(workspaceID: workspaceID, digest: digest)
+        }
+
+        func copySourcedSubmissionObserverForTesting(for workspaceID: UUID) -> DomainWorkingDocumentSubmissionObserver {
+            copySourcedSubmissionObserver(for: workspaceID)
+        }
+    #endif
+
+    /// Records a copy-sourced command's accepted revisions and submitted digest when its event
+    /// arrives. A later command's outcome can arrive before an earlier command's event, so this
+    /// never moves the recorded revisions backward.
+    func applyCopySourcedCommit(
+        workspaceID: UUID,
+        revisions: DomainRevisionState,
+        digest: String,
+        catalogRevision: UInt64
+    ) {
+        defer { recordProjectedInstalls([workspaceID: revisions.workingRevision], isCompleteCatalog: false) }
+        if let recorded = domainWorkspaceRevisionsByID[workspaceID],
+           recorded.workingRevision > revisions.workingRevision
+           || (recorded.workingRevision == revisions.workingRevision && recorded.savedRevision > revisions.savedRevision)
+        {
+            domainWorkspaceCatalogRevision = max(domainWorkspaceCatalogRevision, catalogRevision)
+            return
+        }
+        applyDomainAuthorityBaseline(
+            workspaceID: workspaceID,
+            revisions: revisions,
+            digest: digest,
+            health: nil,
+            catalogRevision: catalogRevision
+        )
+        synchronizeDomainAuthorityIssueForActiveWorkspace(operation: "authority_projection")
     }
 
     func applyDomainAuthorityBaseline(
@@ -5379,9 +5804,26 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
     }
 
+    /// The candidates `authorityIncompleteRestoreCandidates(workspaces:...)` finds, from the
+    /// catalog's summaries: an unmarked working document with a dirty revision.
+    private nonisolated static func authorityIncompleteRestoreCandidates(
+        summaries: [DomainWorkspaceSummary]
+    ) -> [AuthorityIncompleteRestoreCandidate] {
+        summaries.compactMap { summary in
+            guard summary.consolidatedIntoWorkspaceID == nil,
+                  summary.revisions.dirtyRevision != nil
+            else { return nil }
+            return AuthorityIncompleteRestoreCandidate(
+                workspaceID: summary.workspaceID,
+                savedFileURL: summary.fileURL
+            )
+        }
+    }
+
     /// Reads the saved workspace document directly. The decode cache represents presentation
     /// state and may already contain the marker-cleared working document, so it cannot classify
-    /// whether the separate saved phase completed.
+    /// whether the separate saved phase completed. It reads only the workspace ID and the
+    /// consolidation marker, decoding them as `WorkspaceModel` does, and decodes no tab.
     private nonisolated static func savedConsolidationMarkerStatus(
         for candidate: AuthorityIncompleteRestoreCandidate
     ) -> SavedConsolidationMarkerStatus {
@@ -5390,9 +5832,11 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
         do {
             let data = try Data(contentsOf: candidate.savedFileURL)
-            let saved = try JSONDecoder().decode(WorkspaceModel.self, from: data)
-            guard saved.id == candidate.workspaceID else { return .unreadable }
-            return saved.consolidatedIntoWorkspaceID == nil ? .unmarked : .marked
+            guard let saved = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (saved["id"] as? String).flatMap(UUID.init(uuidString:)) == candidate.workspaceID
+            else { return .unreadable }
+            let marker = (saved["consolidatedIntoWorkspaceID"] as? String).flatMap(UUID.init(uuidString:))
+            return marker == nil ? .unmarked : .marked
         } catch {
             return .unreadable
         }
@@ -5458,11 +5902,20 @@ class WorkspaceManagerViewModel: ObservableObject {
         revisionsByWorkspaceID: [UUID: DomainRevisionState],
         publicationSequence: UInt64
     ) async {
-        let candidates = authorityIncompleteRestoreCandidates(
-            workspaces: workspaces,
-            fileURLsByWorkspaceID: fileURLsByWorkspaceID,
-            revisionsByWorkspaceID: revisionsByWorkspaceID
+        await refreshAuthorityIncompleteRestoreClassification(
+            candidates: authorityIncompleteRestoreCandidates(
+                workspaces: workspaces,
+                fileURLsByWorkspaceID: fileURLsByWorkspaceID,
+                revisionsByWorkspaceID: revisionsByWorkspaceID
+            ),
+            publicationSequence: publicationSequence
         )
+    }
+
+    private func refreshAuthorityIncompleteRestoreClassification(
+        candidates: [AuthorityIncompleteRestoreCandidate],
+        publicationSequence: UInt64
+    ) async {
         let incompleteIDs = await Self.authorityIncompleteRestoreIDs(from: candidates)
         guard publicationSequence >= lastDomainProjectionSequence,
               publicationSequence >= lastAuthorityRecoveryClassificationSequence
@@ -5576,6 +6029,9 @@ class WorkspaceManagerViewModel: ObservableObject {
     ) {
         guard publicationSequence >= lastDomainProjectionSequence else { return }
         lastDomainProjectionSequence = publicationSequence
+        defer {
+            recordProjectedInstalls(revisionsByWorkspaceID.mapValues(\.workingRevision), isCompleteCatalog: true)
+        }
         let persistedProjection = projectedWorkspaces.filter { !$0.isEphemeral }
         let persistedWorkspaceIDs = Set(persistedProjection.map(\.id))
         let localProjection = Self.preservingLocalEphemeralWorkspaces(
@@ -5604,12 +6060,20 @@ class WorkspaceManagerViewModel: ObservableObject {
                 invalidateDomainReadRegistration(for: workspaceID)
             }
         }
-        let lifecycleProjection = agentSessionProjectionReconciler?(
-            localProjection,
-            workspaces
+        let lifecycleProjection = protectingShownAgentSessions(in: localProjection)
+        let reconciledWorkspaces = lifecycleProjection.workspaces
+        let protectedShownWorkspaceID = lifecycleProjection.isProtected ? activeWorkspaceID : nil
+        let replacedWorkspaces = Dictionary(
+            workspaces.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
-        let reconciledWorkspaces = lifecycleProjection?.workspaces ?? localProjection
         workspaces = reconciledWorkspaces
+        // The copy's selection revisions advance with each install, so an MCP selection fence on a
+        // tab the projection changed sees the change.
+        for workspace in reconciledWorkspaces {
+            guard let replaced = replacedWorkspaces[workspace.id], replaced != workspace else { continue }
+            recordSelectionRevisions(in: workspace.id, replacing: replaced, reason: "domainProjection")
+        }
         scheduleAuthorityIncompleteRestoreClassification(
             workspaces: reconciledWorkspaces,
             fileURLsByWorkspaceID: domainWorkspaceFileURLsByID,
@@ -5649,10 +6113,8 @@ class WorkspaceManagerViewModel: ObservableObject {
                 adoptProjectedActiveWorkspaceID(fallback?.id)
             }
         }
-        if let protectedWorkspaceIDs = lifecycleProjection?.protectedWorkspaceIDs {
-            for workspaceID in protectedWorkspaceIDs {
-                bumpStateVersion(for: workspaceID)
-            }
+        if let protectedShownWorkspaceID {
+            bumpStateVersion(for: protectedShownWorkspaceID)
         }
         if domainWorkspaceAuthorityIssue?.kind == .projectionFailure {
             publishDomainAuthorityIssueIfChanged(nil)
@@ -5711,6 +6173,9 @@ class WorkspaceManagerViewModel: ObservableObject {
     ) {
         guard publicationSequence >= lastDomainProjectionSequence else { return }
         lastDomainProjectionSequence = publicationSequence
+        defer {
+            recordProjectedInstalls(revisionsByWorkspaceID.mapValues(\.workingRevision), isCompleteCatalog: true)
+        }
         invalidateConfirmedDomainReadRegistrations(
             previousDigestsByWorkspaceID: domainWorkspaceDigestsByID,
             projectedDigestsByWorkspaceID: digestsByWorkspaceID
@@ -5738,6 +6203,14 @@ class WorkspaceManagerViewModel: ObservableObject {
             snapshot.workspaces.enumerated().map { ($1.workspaceID, $0) },
             uniquingKeysWith: { _, last in last }
         )
+        refreshWorkspaceCatalogMembership()
+    }
+
+    private func refreshWorkspaceCatalogMembership() {
+        let membership = listedWorkspaceIDs
+        if membership != workspaceCatalogMembership {
+            workspaceCatalogMembership = membership
+        }
     }
 
     func workspaceSummary(withID id: UUID) -> DomainWorkspaceSummary? {
@@ -5779,6 +6252,24 @@ class WorkspaceManagerViewModel: ObservableObject {
         return activeTabSaveCapture(of: workspace, tabIndex: activeTab.index, tabName: name).workspace
     }
 
+    /// For a stored edit of the shown workspace that stays out of the file tree, as an MCP selection
+    /// with UI mirroring off does: each tab whose selection the edit changed gets that selection in
+    /// its presentation, and a UI snapshot queued before the edit can't store the file tree's
+    /// selection over it. The file tree keeps its selection.
+    func contentGatewayPresentShownSelections(from base: WorkspaceModel, to edited: WorkspaceModel) {
+        guard activeWorkspaceID == edited.id else { return }
+        let baseSelections = Dictionary(
+            base.composeTabs.map { ($0.id, $0.selection) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        for tab in edited.composeTabs where baseSelections[tab.id] != tab.selection {
+            selectionCoordinator?.protectCanonicalMCPSelectionFromDeferredUISnapshots(
+                tab.selection,
+                for: WorkspaceSelectionIdentity(workspaceID: edited.id, tabID: tab.id)
+            )
+        }
+    }
+
     /// Applies a stored edit of the shown workspace to the prompt UI, as an MCP tab-context commit
     /// does. A save capture copies the active tab from the UI, so a tab the UI didn't take would
     /// lose the edit at the next capture. `base` is the save capture the edit started from.
@@ -5795,8 +6286,22 @@ class WorkspaceManagerViewModel: ObservableObject {
             return workspace.composeTabs.first { $0.id == activeTabID }
         }
         guard let tab = activeTab(of: edited), activeTab(of: base) != tab else { return }
+        // A prompt-only edit, such as the MCP prompt tool's, needs only the prompt field. The full
+        // apply below also re-applies the tab's file selection to the file tree.
+        if var promptOnly = activeTab(of: base), promptOnly.id == tab.id {
+            promptOnly.promptText = tab.promptText
+            promptOnly.lastModified = tab.lastModified
+            if promptOnly == tab {
+                promptViewModel.promptText = tab.promptText
+                return
+            }
+        }
         let identity = WorkspaceSelectionIdentity(workspaceID: edited.id, tabID: tab.id)
-        selectionCoordinator?.protectCanonicalMCPSelectionFromDeferredUISnapshots(tab.selection, for: identity)
+        // Only a selection the edit changed is protected. Any other selection came from the UI.
+        let editChangedSelection = activeTab(of: base)?.selection != tab.selection
+        if editChangedSelection {
+            selectionCoordinator?.protectCanonicalMCPSelectionFromDeferredUISnapshots(tab.selection, for: identity)
+        }
         beginApplyingTabContext(forTabID: tab.id)
         defer { endApplyingTabContext(forTabID: tab.id) }
         // After duplicate consolidation another workspace can list the same tab ID, so the apply
@@ -5806,8 +6311,62 @@ class WorkspaceManagerViewModel: ObservableObject {
             workspaceID: edited.id,
             markWorkspaceDirtyAfterApply: false
         )
-        // The apply's final recount can queue another UI snapshot that predates the edit.
-        selectionCoordinator?.protectCanonicalMCPSelectionFromDeferredUISnapshots(tab.selection, for: identity)
+        // The apply's final recount can queue another UI snapshot that predates the edit. The
+        // protection lapses once the copy stores another selection.
+        if editChangedSelection {
+            selectionCoordinator?.protectCanonicalMCPSelectionFromDeferredUISnapshots(tab.selection, for: identity)
+        }
+    }
+
+    /// Presents a canonical write on the shown workspace's active tab, in a window that started
+    /// showing the workspace while the write was in flight. `baseline` is the document the write
+    /// edited, and `accepted` the document it stored. A field the write changed shows the written
+    /// value while the window's copy stores that value. After a store or a switch's reload replaced
+    /// that value, the field stays as the store or reload left it. A field that a capture of the UI
+    /// takes from the UI keeps what the UI shows when the write didn't change it. The copy stores
+    /// the result before the UI applies it, as for a local edit, so a later capture of the UI keeps
+    /// the write.
+    func contentGatewayPresentAcceptedEdit(
+        from baseline: WorkspaceModel,
+        to accepted: WorkspaceModel,
+        mirrorsShownEdit: Bool
+    ) async {
+        guard activeWorkspaceID == accepted.id,
+              let copy = workspace(withID: accepted.id),
+              let activeTabID = copy.activeComposeTabID,
+              !isSnapshotCommitSuspended(forTabID: activeTabID),
+              let index = copy.composeTabs.firstIndex(where: { $0.id == activeTabID }),
+              let before = baseline.composeTabs.first(where: { $0.id == activeTabID }),
+              let written = accepted.composeTabs.first(where: { $0.id == activeTabID })
+        else { return }
+        let stored = copy.composeTabs[index]
+        // The tab as a capture of the UI stores it now.
+        var shown = copy
+        shown.composeTabs[index] = contentGatewayLiveSnapshot(of: stored, inWorkspace: accepted.id)
+        var tab = shown.composeTabs[index]
+        func showWritten(_ field: WritableKeyPath<ComposeTabState, some Equatable>) {
+            guard before[keyPath: field] != written[keyPath: field],
+                  stored[keyPath: field] == written[keyPath: field]
+            else { return }
+            tab[keyPath: field] = written[keyPath: field]
+        }
+        // `collectComposeTabSnapshot` takes these fields from the UI and the others from the copy.
+        showWritten(\.name)
+        showWritten(\.selection)
+        showWritten(\.expandedFolders)
+        showWritten(\.promptText)
+        showWritten(\.selectedMetaPromptIDs)
+        showWritten(\.activeSubView)
+        showWritten(\.contextOverrides)
+        guard tab != shown.composeTabs[index] else { return }
+        var presented = copy
+        presented.composeTabs[index] = tab
+        contentGatewayInstallLocalEdit(presented)
+        if mirrorsShownEdit {
+            await contentGatewayMirrorShownEdit(from: shown, to: presented)
+        } else {
+            contentGatewayPresentShownSelections(from: shown, to: presented)
+        }
     }
 
     /// Whether a switch from or to the workspace is in flight, in any phase. The workspace
@@ -5880,25 +6439,24 @@ class WorkspaceManagerViewModel: ObservableObject {
         bumpStateVersion(for: workspace.id)
     }
 
-    /// Replaces this window's copy with a document the authority accepted from it. The copy isn't
-    /// marked unsaved, because the authority already has it.
-    func contentGatewayInstallAcceptedCopy(_ workspace: WorkspaceModel) {
-        guard let index = workspaceIndex(for: workspace.id) else { return }
+    /// Installs a document the isolated legacy owner's backend committed in the window's copy. That
+    /// owner has no projection, so this stands in for the bridge's install of a committed document.
+    func contentGatewayInstallLegacyCommit(_ workspace: WorkspaceModel) {
+        guard domainWorkspaceAuthorityClient == nil, let index = workspaceIndex(for: workspace.id) else { return }
         let previous = workspaces[index]
+        guard previous != workspace else { return }
         workspaces[index] = workspace
-        recordSelectionRevisions(in: workspace.id, replacing: previous, reason: "contentGatewayAcceptedCopy")
-    }
-
-    func contentGatewayApplyAcceptedOutcome(_ outcome: DomainCommandOutcome, workspaceID: UUID) {
-        applyDomainAuthorityOutcome(outcome, workspaceID: workspaceID)
+        recordSelectionRevisions(in: workspace.id, replacing: previous, reason: "legacyContentCommit")
+        recordRepoPathBaseline(for: workspace)
     }
 
     func contentGatewayStateVersion(for workspaceID: UUID) -> Int {
         stateVersionByWorkspaceID[workspaceID, default: 0]
     }
 
-    /// The authority revision and digest this window last accepted for the workspace.
-    func contentGatewayCommittedState(for workspaceID: UUID) -> (revisions: DomainRevisionState, digest: String)? {
+    /// The revision and digest this window recorded for the workspace. Right after the window saves
+    /// the shown workspace, they describe the saved document.
+    func contentGatewayRecordedAuthorityState(for workspaceID: UUID) -> (revisions: DomainRevisionState, digest: String)? {
         guard domainWorkspaceAuthorityClient != nil,
               let revisions = domainWorkspaceRevisionsByID[workspaceID],
               let digest = domainWorkspaceDigestsByID[workspaceID]
@@ -5958,49 +6516,63 @@ class WorkspaceManagerViewModel: ObservableObject {
         return snapshot
     }
 
-    /// Builds the compose-tab state payload for an MCP tab-context snapshot.
+    /// The compose-tab state of a tab in the shown workspace, for an MCP tab-context snapshot. Nil
+    /// when the window doesn't show the tab.
     ///
-    /// WorkspaceManager remains the source of persisted compose-tab data. When
-    /// `flushPendingUISelection` is requested for the active tab, the selection
-    /// coordinator is the only component asked to flush/return active selection;
-    /// inactive tabs always return their stored `ComposeTabState` unchanged.
+    /// When `flushPendingUISelection` is requested for the active tab, the selection coordinator
+    /// is the only component asked to flush and return the active selection; any other tab returns
+    /// its stored `ComposeTabState` unchanged.
     @MainActor
-    func collectMCPTabContextComposeSnapshot(
-        tabID: UUID,
-        workspaceID requestedWorkspaceID: UUID? = nil,
+    func collectShownMCPTabContextComposeSnapshot(
+        _ identity: WorkspaceSelectionIdentity,
         captureActiveUIState: Bool,
         flushPendingUISelection: Bool
-    ) -> (workspaceID: UUID, snapshot: ComposeTabState)? {
-        let workspaceIndex: Int? = if let requestedWorkspaceID {
-            workspaces.firstIndex(where: { $0.id == requestedWorkspaceID })
-        } else {
-            workspaces.firstIndex { workspace in
-                workspace.composeTabs.contains(where: { $0.id == tabID })
-            }
-        }
-
-        guard let workspaceIndex,
-              workspaces.indices.contains(workspaceIndex),
-              let tabIndex = workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == tabID })
-        else {
-            return nil
-        }
-
-        let workspace = workspaces[workspaceIndex]
-        let base = workspace.composeTabs[tabIndex]
-        let isActiveTab = workspace.id == activeWorkspaceID && tabID == promptViewModel.activeComposeTabID
-        guard isActiveTab, captureActiveUIState else {
-            return (workspace.id, base)
+    ) -> ComposeTabState? {
+        guard let base = contentGateway.shownComposeTab(identity) else { return nil }
+        guard identity.tabID == promptViewModel.activeComposeTabID, captureActiveUIState else {
+            return base
         }
 
         var snapshot = collectComposeTabSnapshot(name: base.name, base: base)
         if flushPendingUISelection,
            let activeSelectionSnapshot = selectionCoordinator?.activeSelectionSnapshot(flushPendingUI: true),
-           activeSelectionSnapshot.tabID == tabID
+           activeSelectionSnapshot.tabID == identity.tabID
         {
             snapshot.selection = activeSelectionSnapshot.selection
         }
-        return (workspace.id, snapshot)
+        return snapshot
+    }
+
+    /// The compose-tab state of any tab, for an MCP tab-context snapshot: a shown tab as
+    /// `collectShownMCPTabContextComposeSnapshot` captures it, and a tab in a workspace the window
+    /// doesn't show as its canonical document holds it, loaded for this read only.
+    @MainActor
+    func readMCPTabContextComposeSnapshot(
+        _ identity: WorkspaceSelectionIdentity,
+        captureActiveUIState: Bool,
+        flushPendingUISelection: Bool,
+        source: String
+    ) async throws -> ComposeTabState {
+        if let shown = collectShownMCPTabContextComposeSnapshot(
+            identity,
+            captureActiveUIState: captureActiveUIState,
+            flushPendingUISelection: flushPendingUISelection
+        ) {
+            return shown
+        }
+        return try await contentGateway.readComposeTab(identity, source: source, capturingLiveUIState: false)
+    }
+
+    /// The tab's stored compose state and the selection revision this window records for it, read
+    /// together after the load, for checks that compare both against a committed snapshot. The tab
+    /// is nil when the read fails.
+    @MainActor
+    func readMCPCanonicalTabState(
+        _ identity: WorkspaceSelectionIdentity,
+        source: String
+    ) async -> (tab: ComposeTabState?, selectionRevision: UInt64) {
+        let tab = try? await contentGateway.readComposeTab(identity, source: source, capturingLiveUIState: false)
+        return (tab, selectionRevisionForMCP(workspaceID: identity.workspaceID, tabID: identity.tabID))
     }
 
     /// Returns the current expanded folder paths for creating a new tab.
@@ -6143,7 +6715,11 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     @MainActor
     func applyComposeTabState(_ tab: ComposeTabState) async {
-        await applyComposeTabStateInternal(tabID: tab.id, markWorkspaceDirtyAfterApply: false)
+        await applyComposeTabStateInternal(
+            tabID: tab.id,
+            workspaceID: activeWorkspaceID,
+            markWorkspaceDirtyAfterApply: false
+        )
     }
 
     @MainActor
@@ -6162,7 +6738,11 @@ class WorkspaceManagerViewModel: ObservableObject {
                     self.composeTabApplyTaskTabID = nil
                 }
             }
-            await applyComposeTabStateInternal(tabID: tabID, markWorkspaceDirtyAfterApply: true)
+            await applyComposeTabStateInternal(
+                tabID: tabID,
+                workspaceID: activeWorkspaceID,
+                markWorkspaceDirtyAfterApply: true
+            )
         }
 
         composeTabApplyTask = applyTask
@@ -6181,18 +6761,18 @@ class WorkspaceManagerViewModel: ObservableObject {
         await task?.value
     }
 
-    /// `workspaceID` looks the tab up in that workspace only. Without it the lookup takes the first
-    /// workspace that lists the tab ID.
+    /// Applies a tab of `workspaceID`, the workspace the window shows or is restoring, to the UI.
+    /// A nil `workspaceID` applies nothing.
     @MainActor
     private func applyComposeTabStateInternal(
         tabID: UUID,
-        workspaceID: UUID? = nil,
+        workspaceID: UUID?,
         markWorkspaceDirtyAfterApply: Bool,
         performFinalRecount: Bool = true
     ) async {
         func storedTab() -> ComposeTabState? {
-            guard let workspaceID else { return composeTab(with: tabID) }
-            return composeTab(for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID))
+            guard let workspaceID else { return nil }
+            return workspace(withID: workspaceID)?.composeTabs.first { $0.id == tabID }
         }
         guard let initialTab = storedTab() else { return }
         beginApplyingTabContext(forTabID: tabID)
@@ -6355,24 +6935,6 @@ class WorkspaceManagerViewModel: ObservableObject {
         let repoPaths: [String]
     }
 
-    func composeTab(with id: UUID) -> ComposeTabState? {
-        for workspace in workspaces {
-            if let tab = workspace.composeTabs.first(where: { $0.id == id }) {
-                return tab
-            }
-        }
-        return nil
-    }
-
-    func composeTab(for identity: WorkspaceSelectionIdentity) -> ComposeTabState? {
-        workspaces.first(where: { $0.id == identity.workspaceID })?
-            .composeTabs.first(where: { $0.id == identity.tabID })
-    }
-
-    func composeTabName(with id: UUID) -> String? {
-        composeTab(with: id)?.name
-    }
-
     func bindingCandidate(forContextID id: UUID) -> ComposeTabBindingCandidate? {
         guard let workspace = activeWorkspace,
               let tab = workspace.composeTabs.first(where: { $0.id == id })
@@ -6438,7 +7000,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         WorkspaceRootSetKey(paths: paths).normalizedPaths
     }
 
-    private nonisolated static func sortedWorkspaceMatches(_ workspaces: [WorkspaceModel]) -> [WorkspaceModel] {
+    private nonisolated static func sortedWorkspaceMatches(_ workspaces: [ListedWorkspace]) -> [ListedWorkspace] {
         workspaces.sorted { lhs, rhs in
             let lhsKey = lhs.name.lowercased()
             let rhsKey = rhs.name.lowercased()
@@ -6448,15 +7010,15 @@ class WorkspaceManagerViewModel: ObservableObject {
             if lhs.name != rhs.name {
                 return lhs.name < rhs.name
             }
-            return lhs.id.uuidString < rhs.id.uuidString
+            return lhs.workspaceID.uuidString < rhs.workspaceID.uuidString
         }
     }
 
     nonisolated static func exactWorkspaceMatches(
         forNormalizedWorkingDirs normalizedWorkingDirs: [String],
-        workspaces: [WorkspaceModel],
+        workspaces: [ListedWorkspace],
         includeHidden: Bool = true
-    ) -> [WorkspaceModel] {
+    ) -> [ListedWorkspace] {
         let requestedRootSetKey = WorkspaceRootSetKey(paths: normalizedWorkingDirs)
         guard !requestedRootSetKey.isEmpty else { return [] }
         return sortedWorkspaceMatches(workspaces.filter { workspace in
@@ -6468,9 +7030,9 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     nonisolated static func supersetWorkspaceMatches(
         forNormalizedWorkingDirs normalizedWorkingDirs: [String],
-        workspaces: [WorkspaceModel],
+        workspaces: [ListedWorkspace],
         includeHidden: Bool = true
-    ) -> [WorkspaceModel] {
+    ) -> [ListedWorkspace] {
         let requestedRootSetKey = WorkspaceRootSetKey(paths: normalizedWorkingDirs)
         guard !requestedRootSetKey.isEmpty else { return [] }
         let requestedDirectories = Set(requestedRootSetKey.normalizedPaths.map { $0.lowercased() })
@@ -6486,9 +7048,9 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     nonisolated static func test_exactWorkspaceMatches(
         forWorkingDirs workingDirs: [String],
-        workspaces: [WorkspaceModel],
+        workspaces: [ListedWorkspace],
         includeHidden: Bool = true
-    ) -> [WorkspaceModel] {
+    ) -> [ListedWorkspace] {
         exactWorkspaceMatches(
             forNormalizedWorkingDirs: workingDirs,
             workspaces: workspaces,
@@ -6498,9 +7060,9 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     nonisolated static func test_supersetWorkspaceMatches(
         forWorkingDirs workingDirs: [String],
-        workspaces: [WorkspaceModel],
+        workspaces: [ListedWorkspace],
         includeHidden: Bool = true
-    ) -> [WorkspaceModel] {
+    ) -> [ListedWorkspace] {
         supersetWorkspaceMatches(
             forNormalizedWorkingDirs: workingDirs,
             workspaces: workspaces,
@@ -6592,160 +7154,129 @@ class WorkspaceManagerViewModel: ObservableObject {
         )
     }
 
-    @MainActor
-    func setActiveChatSessionID(_ sessionID: UUID?, forTabID tabID: UUID) {
-        guard var tab = composeTab(with: tabID) else { return }
-        tab.activeChatSessionID = sessionID
-        updateComposeTabStoredOnly(tab)
-    }
-
-    @MainActor
-    func setActiveChatSessionID(_ sessionID: UUID?, for identity: WorkspaceSelectionIdentity) {
-        guard var tab = composeTab(for: identity) else { return }
-        tab.activeChatSessionID = sessionID
-        _ = updateComposeTabStoredOnly(tab, inWorkspaceID: identity.workspaceID)
-    }
-
-    @MainActor
-    func activeChatSessionID(forTabID tabID: UUID) -> UUID? {
-        composeTab(with: tabID)?.activeChatSessionID
-    }
-
-    struct ActiveAgentSessionReferenceCleanupResult: Equatable {
-        let composeTabIDs: Set<UUID>
-        let stashedTabIDs: Set<UUID>
-
-        var didChange: Bool {
-            !composeTabIDs.isEmpty || !stashedTabIDs.isEmpty
-        }
-    }
-
-    @MainActor
-    func activeAgentSessionID(forTabID tabID: UUID, inWorkspaceID workspaceID: UUID? = nil) -> UUID? {
-        for workspace in workspaces where workspaceID == nil || workspace.id == workspaceID {
-            if let tab = workspace.composeTabs.first(where: { $0.id == tabID }) {
-                return tab.activeAgentSessionID
-            }
-            if let stashed = workspace.stashedTabs.first(where: { $0.tab.id == tabID }) {
-                return stashed.tab.activeAgentSessionID
-            }
-        }
-        return nil
-    }
-
+    /// Makes `sessionID` the compose tab's active chat session. A tab of a workspace the window
+    /// holds takes it in the window's copy before this suspends. Any other tab takes it in one write
+    /// of its workspace's canonical document, and a refused write leaves the tab as it was. A
+    /// stashed tab keeps its reference.
     @MainActor
     @discardableResult
-    func clearActiveAgentSessionIDReferences(
-        matching sessionID: UUID,
-        inWorkspaceID workspaceID: UUID? = nil
-    ) -> ActiveAgentSessionReferenceCleanupResult {
-        var composeTabIDs = Set<UUID>()
-        var stashedTabIDs = Set<UUID>()
-        var changedWorkspaceIDs = Set<UUID>()
-        let now = Date()
-
-        for workspaceIndex in workspaces.indices where workspaceID == nil || workspaces[workspaceIndex].id == workspaceID {
-            var didChangeWorkspace = false
-
-            for tabIndex in workspaces[workspaceIndex].composeTabs.indices
-                where workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID == sessionID
-            {
-                let tabID = workspaces[workspaceIndex].composeTabs[tabIndex].id
-                workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = nil
-                workspaces[workspaceIndex].composeTabs[tabIndex].lastModified = now
-                composeTabIDs.insert(tabID)
-                didChangeWorkspace = true
-            }
-
-            for stashedIndex in workspaces[workspaceIndex].stashedTabs.indices
-                where workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.activeAgentSessionID == sessionID
-            {
-                let tabID = workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.id
-                workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.activeAgentSessionID = nil
-                workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.lastModified = now
-                stashedTabIDs.insert(tabID)
-                didChangeWorkspace = true
-            }
-
-            if didChangeWorkspace {
-                workspaces[workspaceIndex].dateModified = now
-                changedWorkspaceIDs.insert(workspaces[workspaceIndex].id)
-            }
+    func setActiveChatSessionID(_ sessionID: UUID?, for identity: WorkspaceSelectionIdentity) async -> Bool {
+        await editActiveChatSessionID(for: identity, source: "chat.setActiveSession") { activeSessionID in
+            activeSessionID = sessionID
+            return true
         }
-
-        for id in changedWorkspaceIDs {
-            bumpStateVersion(for: id)
-        }
-        if !changedWorkspaceIDs.isEmpty {
-            let workspacesToSave = workspaces.filter { changedWorkspaceIDs.contains($0.id) }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                for workspace in workspacesToSave {
-                    _ = try? await saveWorkspaceToFileAsync(workspace, source: .clearActiveAgentSessionIDReferences)
-                }
-            }
-        }
-
-        return ActiveAgentSessionReferenceCleanupResult(
-            composeTabIDs: composeTabIDs,
-            stashedTabIDs: stashedTabIDs
-        )
     }
 
+    /// Clears the compose tab's active chat session while it is still `sessionID`, where
+    /// `setActiveChatSessionID` would write it.
     @MainActor
     @discardableResult
-    func compareAndSetActiveAgentSessionID(
+    func clearActiveChatSessionID(_ sessionID: UUID, for identity: WorkspaceSelectionIdentity) async -> Bool {
+        await editActiveChatSessionID(for: identity, source: "chat.clearActiveSession") { activeSessionID in
+            guard activeSessionID == sessionID else { return false }
+            activeSessionID = nil
+            return true
+        }
+    }
+
+    /// Applies `edit` to the compose tab's active chat session, which returns whether it changed it.
+    /// Returns what `edit` returned, on either route, or false when the tab is missing or the write
+    /// failed.
+    @MainActor
+    private func editActiveChatSessionID(
+        for identity: WorkspaceSelectionIdentity,
+        source: String,
+        _ edit: (inout UUID?) -> Bool
+    ) async -> Bool {
+        if holdsWorkspaceContent(identity.workspaceID) {
+            guard workspace(withID: identity.workspaceID)?.composeTabs.contains(where: { $0.id == identity.tabID }) == true
+            else { return false }
+            return editHeldTab(identity) { tab in
+                edit(&tab.activeChatSessionID)
+            }
+        }
+        var edited = false
+        do {
+            _ = try await contentGateway.mutateComposeTab(
+                identity,
+                source: source,
+                persistence: .working
+            ) { tab in
+                edited = edit(&tab.activeChatSessionID)
+            }
+            return edited
+        } catch {
+            print("Warning: tab \(identity.tabID) kept its active chat session: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Whether the window holds the workspace's content in its own copy: its shown workspace or one
+    /// of its own ephemeral workspaces.
+    func holdsWorkspaceContent(_ workspaceID: UUID) -> Bool {
+        activeWorkspaceID == workspaceID || workspace(withID: workspaceID)?.isEphemeral == true
+    }
+
+    /// Replaces the tab's agent session reference with `replacement` while it is `expected`, in a
+    /// compose or stashed tab of a workspace the window holds. False when the reference differs, or
+    /// when the window doesn't hold the workspace or the workspace has no such tab.
+    @MainActor
+    @discardableResult
+    func compareAndSetHeldActiveAgentSessionID(
         expected expectedSessionID: UUID?,
         replacement sessionID: UUID?,
-        forTabID tabID: UUID,
-        inWorkspaceID workspaceID: UUID? = nil
+        for identity: WorkspaceSelectionIdentity
     ) -> Bool {
-        for workspaceIndex in workspaces.indices where workspaceID == nil || workspaces[workspaceIndex].id == workspaceID {
-            if let tabIndex = workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == tabID }) {
-                guard workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID == expectedSessionID else { return false }
-                workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = sessionID
-                workspaces[workspaceIndex].composeTabs[tabIndex].lastModified = Date()
-                workspaces[workspaceIndex].dateModified = Date()
-                markWorkspaceDirty(workspaceID: workspaces[workspaceIndex].id)
-                return true
-            }
-
-            if let stashedIndex = workspaces[workspaceIndex].stashedTabs.firstIndex(where: { $0.tab.id == tabID }) {
-                guard workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.activeAgentSessionID == expectedSessionID else { return false }
-                workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.activeAgentSessionID = sessionID
-                workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.lastModified = Date()
-                workspaces[workspaceIndex].dateModified = Date()
-                markWorkspaceDirty(workspaceID: workspaces[workspaceIndex].id)
-                return true
-            }
+        editHeldTab(identity) { tab in
+            guard tab.activeAgentSessionID == expectedSessionID else { return false }
+            tab.activeAgentSessionID = sessionID
+            return true
         }
-        return false
     }
 
-    func updateComposeTab(_ tab: ComposeTabState, markDirty: Bool = true) {
-        for workspaceIndex in workspaces.indices {
-            if let tabIndex = workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == tab.id }) {
-                let oldSelection = workspaces[workspaceIndex].composeTabs[tabIndex].selection
-                workspaces[workspaceIndex].composeTabs[tabIndex] = tab
-                recordSelectionRevisionIfChanged(
-                    workspaceIndex: workspaceIndex,
-                    tabIndex: tabIndex,
-                    oldSelection: oldSelection,
-                    newSelection: tab.selection,
-                    reason: "updateComposeTab"
-                )
-                workspaces[workspaceIndex].dateModified = Date()
-                if workspaces[workspaceIndex].id == activeWorkspaceID {
-                    // Sync promptText to live UI if updating the active tab
-                    let isActiveTab = workspaces[workspaceIndex].activeComposeTabID == tab.id
-                    promptViewModel.loadComposeTabsFromWorkspace(workspaces[workspaceIndex], syncPromptText: isActiveTab)
-                }
-                if markDirty {
-                    markWorkspaceDirty()
-                }
-                return
-            }
+    /// Edits a compose or stashed tab of a workspace the window holds, which is its shown workspace
+    /// or one of its own ephemeral workspaces, in the window's copy and in this main-actor turn. A
+    /// save capture that follows stores the edit, and the prompt UI doesn't reload. `edit` returns
+    /// whether it changed the tab. Returns that, or false when the window doesn't hold the workspace
+    /// or the workspace has no such tab. A change marks the workspace unsaved unless `marksUnsaved`
+    /// is false.
+    @MainActor
+    @discardableResult
+    func editHeldTab(
+        _ identity: WorkspaceSelectionIdentity,
+        marksUnsaved: Bool = true,
+        _ edit: (inout ComposeTabState) -> Bool
+    ) -> Bool {
+        guard holdsWorkspaceContent(identity.workspaceID),
+              let workspaceIndex = workspaceIndex(for: identity.workspaceID)
+        else { return false }
+        let now = Date()
+        if let tabIndex = workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == identity.tabID }) {
+            var tab = workspaces[workspaceIndex].composeTabs[tabIndex]
+            let oldSelection = tab.selection
+            guard edit(&tab) else { return false }
+            tab.lastModified = now
+            workspaces[workspaceIndex].composeTabs[tabIndex] = tab
+            recordSelectionRevisionIfChanged(
+                workspaceIndex: workspaceIndex,
+                tabIndex: tabIndex,
+                oldSelection: oldSelection,
+                newSelection: tab.selection,
+                reason: "editHeldTab"
+            )
+        } else if let stashedIndex = workspaces[workspaceIndex].stashedTabs.firstIndex(where: { $0.tab.id == identity.tabID }) {
+            var tab = workspaces[workspaceIndex].stashedTabs[stashedIndex].tab
+            guard edit(&tab) else { return false }
+            tab.lastModified = now
+            workspaces[workspaceIndex].stashedTabs[stashedIndex].tab = tab
+        } else {
+            return false
         }
+        workspaces[workspaceIndex].dateModified = now
+        if marksUnsaved {
+            bumpStateVersion(for: identity.workspaceID)
+        }
+        return true
     }
 
     /// Performs one selection mirror attempt. The coordinator owns identity fencing and repair.
@@ -6773,7 +7304,7 @@ class WorkspaceManagerViewModel: ObservableObject {
     ) async -> WorkspaceSelectionCoordinator.SelectionMirrorOutcome {
         guard let active = activeWorkspace,
               active.activeComposeTabID == tabID,
-              let tab = composeTab(with: tabID)
+              let tab = active.composeTabs.first(where: { $0.id == tabID })
         else { return .invalidated }
         if let selectionCoordinator {
             return await selectionCoordinator.mirrorSelectionToActiveUI(tab.selection, forTabID: tabID)
@@ -6787,7 +7318,7 @@ class WorkspaceManagerViewModel: ObservableObject {
             guard let current = activeWorkspace,
                   current.id == active.id,
                   current.activeComposeTabID == tabID,
-                  composeTab(with: tabID)?.selection == tab.selection
+                  current.composeTabs.first(where: { $0.id == tabID })?.selection == tab.selection
             else { return .invalidated }
             return .converged
         }
@@ -6805,14 +7336,20 @@ class WorkspaceManagerViewModel: ObservableObject {
         promptViewModel.updateComposeTabSelectionPresentation(selection, forTabID: identity.tabID)
     }
 
-    /// Keeps MCP-owned compose-tab selection canonical across the exact peer hosts that were
-    /// open when the source mutation registered. Host generations prevent delayed work from
-    /// crossing a manager replacement/reopen boundary, and closing windows are rechecked before
-    /// any canonical or UI mutation occurs.
+    /// Presents an MCP selection change, which the source window already committed, in the exact
+    /// peer hosts that were open when the source mutation registered. Only a peer that shows the
+    /// workspace takes it. A shown-workspace store goes into the peer's shown copy without marking
+    /// it unsaved, so no peer writes the selection a second time. A canonical commit gets into the
+    /// peer's copy through the peer's projection, and the peer waits for that projection before it
+    /// compares and presents. The source window takes part when it started showing the tab during
+    /// the commit. Host generations keep delayed work from crossing a manager replacement or
+    /// reopen, and every UI change first checks again whether its window is closing.
     @MainActor
     func propagateMCPSelectionToPeerHosts(_ propagation: MCPSelectionPeerPropagation) async {
         var visitedManagers = Set<ObjectIdentifier>()
-        visitedManagers.insert(ObjectIdentifier(self))
+        if propagation.acceptedRevision == nil {
+            visitedManagers.insert(ObjectIdentifier(self))
+        }
         for window in WindowStatesManager.shared.allWindows {
             guard !window.isClosing else { continue }
             let peer = window.workspaceManager
@@ -6821,9 +7358,14 @@ class WorkspaceManagerViewModel: ObservableObject {
             )
             guard propagation.peerHostIDs.contains(peerMutationFence.hostID),
                   peer.canCommitMCPSelectionPeerMutation(peerMutationFence),
-                  visitedManagers.insert(ObjectIdentifier(peer)).inserted,
-                  let tab = peer.composeTab(for: propagation.identity)
+                  visitedManagers.insert(ObjectIdentifier(peer)).inserted
             else { continue }
+            if let acceptedRevision = propagation.acceptedRevision {
+                guard await peer.awaitProjectedInstall(of: propagation.identity.workspaceID, atLeast: acceptedRevision) != nil,
+                      peer.canCommitMCPSelectionPeerMutation(peerMutationFence)
+                else { continue }
+            }
+            guard let tab = peer.contentGateway.shownComposeTab(propagation.identity) else { continue }
 
             if let peerCoordinator = peer.selectionCoordinator {
                 _ = await peerCoordinator.persistSelection(
@@ -6831,23 +7373,23 @@ class WorkspaceManagerViewModel: ObservableObject {
                     for: propagation.identity,
                     source: .mcpPeerContext,
                     mirrorToUIIfActive: propagation.mirrorToUIIfActive,
-                    peerSourceRevision: propagation.sourceRevision,
+                    peerPropagation: propagation,
                     peerMutationFence: peerMutationFence
                 )
             } else {
                 guard peer.canCommitMCPSelectionPeerMutation(peerMutationFence),
-                      peer.acceptMCPPeerSelectionRevision(
-                          propagation.sourceRevision,
-                          for: propagation.identity
-                      ) else { continue }
+                      peer.acceptMCPPeerSelection(propagation, currentSelection: tab.selection)
+                else { continue }
                 if tab.selection != propagation.selection {
                     guard peer.canCommitMCPSelectionPeerMutation(peerMutationFence) else { continue }
-                    var updatedTab = tab
-                    updatedTab.selection = propagation.selection
-                    _ = peer.updateComposeTabStoredOnly(
-                        updatedTab,
-                        inWorkspaceID: propagation.identity.workspaceID
+                    _ = peer.storeShownTabSelection(
+                        propagation.selection,
+                        for: propagation.identity,
+                        marksUnsaved: false
                     )
+                    if propagation.acceptedRevision == nil {
+                        peer.recordOrderedMCPSelectionStore(for: propagation.identity)
+                    }
                 }
                 guard peer.canCommitMCPSelectionPeerMutation(peerMutationFence) else { continue }
                 peer.updateComposeTabSelectionPresentation(
@@ -6869,43 +7411,94 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
     }
 
-    /// Silent "stored-only" update: updates the compose tab in the backing store
-    /// without reloading PromptViewModel's compose tabs or publishing snapshots.
-    /// Used by MCP virtual context commits to avoid triggering empty live-UI snapshots.
-    @MainActor
-    func updateComposeTabStoredOnly(_ tab: ComposeTabState) {
-        guard let workspaceID = workspaces.first(where: { workspace in
-            workspace.composeTabs.contains(where: { $0.id == tab.id })
-        })?.id else { return }
-        _ = updateComposeTabStoredOnly(tab, inWorkspaceID: workspaceID)
+    // MARK: - Selection host content access
+
+    /// The stored selection of a tab in the shown workspace, or nil for a tab anywhere else.
+    func shownTabSelection(for identity: WorkspaceSelectionIdentity) -> StoredSelection? {
+        contentGateway.shownComposeTab(identity)?.selection
     }
 
-    /// Exact-identity stored update. This avoids duplicate-tab ambiguity and dirties the
-    /// workspace that was actually mutated rather than whichever workspace is active.
-    @MainActor
+    /// Stores `selection` on a tab of the shown workspace without suspending, and without reloading
+    /// the prompt UI or publishing a snapshot. `marksUnsaved` is false for a selection the
+    /// authority already holds, such as a peer window's accepted MCP selection, so this window
+    /// doesn't write it again. False when the window doesn't show the tab.
     @discardableResult
-    func updateComposeTabStoredOnly(_ tab: ComposeTabState, inWorkspaceID workspaceID: UUID) -> Bool {
-        guard let workspaceIndex = workspaces.firstIndex(where: { $0.id == workspaceID }),
-              let tabIndex = workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == tab.id })
+    func storeShownTabSelection(
+        _ selection: StoredSelection,
+        for identity: WorkspaceSelectionIdentity,
+        marksUnsaved: Bool = true
+    ) -> Bool {
+        guard activeWorkspaceID == identity.workspaceID,
+              let workspaceIndex = workspaceIndex(for: identity.workspaceID),
+              let tabIndex = workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == identity.tabID })
         else { return false }
-
         let oldSelection = workspaces[workspaceIndex].composeTabs[tabIndex].selection
-        var updatedTab = tab
-        updatedTab.lastModified = Date()
-        workspaces[workspaceIndex].composeTabs[tabIndex] = updatedTab
+        guard oldSelection != selection else { return true }
+        let now = Date()
+        workspaces[workspaceIndex].composeTabs[tabIndex].selection = selection
+        workspaces[workspaceIndex].composeTabs[tabIndex].lastModified = now
         recordSelectionRevisionIfChanged(
             workspaceIndex: workspaceIndex,
             tabIndex: tabIndex,
             oldSelection: oldSelection,
-            newSelection: updatedTab.selection,
-            reason: "updateComposeTabStoredOnly"
+            newSelection: selection,
+            reason: "storeShownTabSelection"
         )
-        workspaces[workspaceIndex].dateModified = Date()
-
-        // Important: do NOT call promptViewModel.loadComposeTabsFromWorkspace(...)
-        // and do NOT publish snapshots here. We only persist the stored tab data.
-        bumpStateVersion(for: workspaceID)
+        workspaces[workspaceIndex].dateModified = now
+        if marksUnsaved {
+            bumpStateVersion(for: identity.workspaceID)
+        }
         return true
+    }
+
+    /// The stored selection of any tab, read through the content gateway: a workspace the window
+    /// doesn't show is loaded for this read only.
+    func readTabSelection(for identity: WorkspaceSelectionIdentity) async throws -> StoredSelection {
+        try await contentGateway.readComposeTab(
+            identity,
+            source: "selection.read",
+            capturingLiveUIState: false
+        ).selection
+    }
+
+    /// Commits a selection to a tab through the content gateway, which for a workspace the window
+    /// doesn't show makes one fail-closed write at the canonical revision. `transform` runs once,
+    /// right before the edit, on the selection the commit replaces; it returns the selection to
+    /// store and refuses the commit by throwing. Returns the selection before and after. A
+    /// workspace the window starts showing while the commit reads it takes the selection in its own
+    /// copy, and the file tree shows it only when `mirrorToUIIfActive` is true. `didStore` gets the
+    /// stored selection only when the commit changed it. A canonical commit reports the working
+    /// revision the authority accepted it at, once the window's projection has installed that
+    /// revision. A store into the window's copy reports nil, in the turn the copy took it. A window
+    /// that starts showing the workspace during a canonical commit presents the selection unless
+    /// `presentsCanonicalWrite` is false.
+    func commitTabSelection(
+        for identity: WorkspaceSelectionIdentity,
+        mirrorToUIIfActive: Bool,
+        presentsCanonicalWrite: Bool = true,
+        didStore: @escaping @MainActor (StoredSelection, _ acceptedRevision: UInt64?) -> Void = { _, _ in },
+        _ transform: (StoredSelection) throws -> StoredSelection
+    ) async throws -> (before: StoredSelection, after: StoredSelection) {
+        var transition: (before: StoredSelection, after: StoredSelection)?
+        _ = try await contentGateway.mutateComposeTab(
+            identity,
+            source: "selection.commit",
+            persistence: .working,
+            mirrorsShownEdit: mirrorToUIIfActive,
+            presentsCanonicalWrite: presentsCanonicalWrite,
+            // A report takes a peer propagation revision. A commit that left the selection unchanged
+            // doesn't report.
+            didStore: { storedTab, acceptedRevision in
+                guard let transition, transition.after != transition.before else { return }
+                didStore(storedTab.selection, acceptedRevision)
+            }
+        ) { tab in
+            let before = tab.selection
+            tab.selection = try transform(before)
+            transition = (before, tab.selection)
+        }
+        guard let transition else { throw WorkspaceContentGatewayError.tabUnavailable(identity) }
+        return transition
     }
 
     nonisolated static func rebasedStoredSelectionSlices(
@@ -6984,10 +7577,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         guard let workspaceID = activeWorkspaceID,
               let wi = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
 
-        let tabs = workspaces[wi].composeTabs
-        guard !tabs.isEmpty else { return }
-
-        for var tab in tabs {
+        for tab in workspaces[wi].composeTabs {
             #if DEBUG
                 MCPApplyEditsRebaseProbeRecorder.recordTabInspection(fullPath: fullPath)
             #endif
@@ -6995,12 +7585,13 @@ class WorkspaceManagerViewModel: ObservableObject {
                   let nextSelection = Self.rebasedStoredSelectionSlices(tab.selection, for: fullPath, transform: transform)
             else { continue }
 
-            tab.selection = nextSelection
-            tab.lastModified = Date()
             #if DEBUG
                 MCPApplyEditsRebaseProbeRecorder.recordTabWrite(fullPath: fullPath)
             #endif
-            updateComposeTabStoredOnly(tab)
+            editHeldTab(WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tab.id)) { tab in
+                tab.selection = nextSelection
+                return true
+            }
         }
     }
 
@@ -7020,6 +7611,9 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
     }
 
+    /// Refuses a slice rebase's store when the tab's selection changed after the rebase read it.
+    private struct SliceRebaseSelectionChanged: Error {}
+
     @MainActor
     func rebaseSlicesForFilesAcrossTabs(
         targets: [(identity: WorkspaceSelectionIdentity, fullPath: String)],
@@ -7035,18 +7629,20 @@ class WorkspaceManagerViewModel: ObservableObject {
             #if DEBUG
                 MCPApplyEditsRebaseProbeRecorder.recordTabInspection(fullPath: standardizedFullPath)
             #endif
+            // A target can be a tab in a workspace the window doesn't show, so each read goes through
+            // the content gateway.
             for _ in 0 ..< 3 {
-                guard let currentTab = composeTab(for: target.identity),
-                      !currentTab.selection.slices.isEmpty
+                guard let currentSelection = try? await readTabSelection(for: target.identity),
+                      !currentSelection.slices.isEmpty
                 else { break }
-                let currentSlices = StoredSelectionPathNormalization.standardizedSlices(currentTab.selection.slices)
+                let currentSlices = StoredSelectionPathNormalization.standardizedSlices(currentSelection.slices)
                 guard let currentRanges = currentSlices[standardizedFullPath] else { break }
 
                 let nextRanges = await SliceRangeMath.normalize(
                     asyncTransform(target.identity, standardizedFullPath, currentRanges)
                 )
-                guard var latestTab = composeTab(for: target.identity) else { break }
-                let latestSlices = StoredSelectionPathNormalization.standardizedSlices(latestTab.selection.slices)
+                guard let latestSelection = try? await readTabSelection(for: target.identity) else { break }
+                let latestSlices = StoredSelectionPathNormalization.standardizedSlices(latestSelection.slices)
                 guard let latestRanges = latestSlices[standardizedFullPath] else { break }
                 guard latestRanges == currentRanges else { continue }
 
@@ -7056,9 +7652,9 @@ class WorkspaceManagerViewModel: ObservableObject {
                 } else {
                     nextSlices[standardizedFullPath] = nextRanges
                 }
-                guard nextSlices != latestTab.selection.slices else { break }
+                guard nextSlices != latestSelection.slices else { break }
 
-                let expectedSelection = latestTab.selection
+                let expectedSelection = latestSelection
                 let nextSelection = StoredSelection(
                     selectedPaths: expectedSelection.selectedPaths,
                     manualCodemapPaths: expectedSelection.manualCodemapPaths,
@@ -7075,12 +7671,14 @@ class WorkspaceManagerViewModel: ObservableObject {
                         expectedCurrentSelection: expectedSelection
                     )
                 } else {
-                    latestTab.selection = nextSelection
-                    latestTab.lastModified = Date()
-                    persistedSelection = updateComposeTabStoredOnly(
-                        latestTab,
-                        inWorkspaceID: target.identity.workspaceID
-                    ) ? nextSelection : expectedSelection
+                    let transition = try? await commitTabSelection(
+                        for: target.identity,
+                        mirrorToUIIfActive: true
+                    ) { current in
+                        guard current == expectedSelection else { throw SliceRebaseSelectionChanged() }
+                        return nextSelection
+                    }
+                    persistedSelection = transition?.after ?? expectedSelection
                 }
                 guard persistedSelection == nextSelection else { continue }
                 #if DEBUG
@@ -7293,6 +7891,18 @@ class WorkspaceManagerViewModel: ObservableObject {
             outcome: outcome,
             commitEvidence: .saved(revision: nil, digest: document.contentDigest)
         )
+    }
+
+    /// Whether the admitted tab is still bound to its session: in the window's copy while the
+    /// window holds the workspace, and in the canonical document once it doesn't. A failed read
+    /// counts as not bound.
+    func agentAdmissionBindingIsCurrent(_ identity: AgentProvisionalAdmissionIdentity) async -> Bool {
+        let tab = try? await contentGateway.readComposeTab(
+            WorkspaceSelectionIdentity(workspaceID: identity.workspaceID, tabID: identity.tabID),
+            source: "agentAdmission.bindingCheck",
+            capturingLiveUIState: false
+        )
+        return tab?.activeAgentSessionID == identity.sessionID
     }
 
     func recoverProvisionalAgentAdmission(
@@ -8296,12 +8906,10 @@ class WorkspaceManagerViewModel: ObservableObject {
         if refreshedWorkspace != currentWorkspace {
             var projected = workspaces
             projected[currentIndex] = refreshedWorkspace
-            let lifecycleProjection = agentSessionProjectionReconciler?(projected, workspaces)
-            workspaces = lifecycleProjection?.workspaces ?? projected
-            if let protectedWorkspaceIDs = lifecycleProjection?.protectedWorkspaceIDs {
-                for protectedWorkspaceID in protectedWorkspaceIDs {
-                    bumpStateVersion(for: protectedWorkspaceID)
-                }
+            let lifecycleProjection = protectingShownAgentSessions(in: projected)
+            workspaces = lifecycleProjection.workspaces
+            if lifecycleProjection.isProtected, let activeWorkspaceID {
+                bumpStateVersion(for: activeWorkspaceID)
             }
             if activeWorkspaceID == workspaceID,
                let refreshed = workspace(withID: workspaceID)
@@ -8812,6 +9420,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         await fileManager.withDeferredSelectionSliceSnapshotRebuild(reason: "workspaceRestore.applyComposeTab") {
             await applyComposeTabStateInternal(
                 tabID: activeTab.id,
+                workspaceID: wsID,
                 markWorkspaceDirtyAfterApply: false,
                 performFinalRecount: false
             )
@@ -8830,7 +9439,7 @@ class WorkspaceManagerViewModel: ObservableObject {
                 ]
             )
         #endif
-        let latestAppliedTab = composeTab(with: activeID) ?? activeTab
+        let latestAppliedTab = self.workspace(withID: wsID)?.composeTabs.first { $0.id == activeID } ?? activeTab
         #if DEBUG
             debugSelectionOwnerTraceEvent("restore.applyComposeTab.after", workspace: activeWorkspace)
         #endif
@@ -9140,9 +9749,9 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     private struct WorkspaceDuplicateGroupPlan {
         let normalizedRepoPaths: [String]
-        let workspaces: [WorkspaceModel]
-        let canonical: WorkspaceModel
-        let duplicates: [WorkspaceModel]
+        let workspaces: [ListedWorkspace]
+        let canonical: ListedWorkspace
+        let duplicates: [ListedWorkspace]
         let summary: WorkspaceDuplicateGroupSummary
     }
 
@@ -9150,6 +9759,20 @@ class WorkspaceManagerViewModel: ObservableObject {
         let deletableWorkspaceIDs: Set<UUID>
         let skippedWorkspaceIDs: Set<UUID>
     }
+
+    /// A group member's complete document, loaded for one cleanup and released when it ends, with
+    /// the canonical working revision and digest the cleanup read it at.
+    private struct DuplicateCleanupDocument {
+        let workspace: WorkspaceModel
+        let revision: UInt64
+        let digest: String
+    }
+
+    private static let duplicateCleanupDocumentChangedError = NSError(
+        domain: "WorkspaceDuplicateCleanup",
+        code: 14,
+        userInfo: [NSLocalizedDescriptionKey: "Workspace changed while cleanup was reading it."]
+    )
 
     private var duplicateCleanupExcludedWorkspaceIDs: Set<UUID> {
         pendingConsolidatedRestoreIDs
@@ -9160,18 +9783,21 @@ class WorkspaceManagerViewModel: ObservableObject {
         let windowStates = windowStates ?? WindowStatesManager.shared
         let windowSnapshots = Self.duplicateWindowSnapshots(from: windowStates)
         return Self.duplicateWorkspaceGroupPlans(
-            workspaces: workspaces,
+            workspaces: listedWorkspaceCatalog(),
             windowSnapshots: windowSnapshots,
             excludingWorkspaceIDs: duplicateCleanupExcludedWorkspaceIDs
         ).map(\.summary)
     }
 
+    /// Plans duplicate groups from catalog listings and loads complete documents only for the
+    /// workspaces in those groups: once for the backup, and again for each group's merge and
+    /// retirement, which commit those exact documents at the revisions they were read at.
     @MainActor
     func consolidateDuplicateWorkspaces(windowStates: WindowStatesManager? = nil) async -> WorkspaceDuplicateCleanupResult {
         let windowStates = windowStates ?? WindowStatesManager.shared
         let initialWindowSnapshots = Self.duplicateWindowSnapshots(from: windowStates)
         let initialPlans = Self.duplicateWorkspaceGroupPlans(
-            workspaces: workspaces,
+            workspaces: listedWorkspaceCatalog(),
             windowSnapshots: initialWindowSnapshots,
             excludingWorkspaceIDs: duplicateCleanupExcludedWorkspaceIDs
         )
@@ -9194,15 +9820,16 @@ class WorkspaceManagerViewModel: ObservableObject {
             #else
                 let backupDirectoryURL: URL? = nil
             #endif
+            let backupGroups = try await loadDuplicateCleanupBackupGroups(initialPlans)
             backupURL = try Self.writeDuplicateCleanupBackup(
-                for: initialPlans,
+                for: backupGroups,
                 directoryURL: backupDirectoryURL
             )
         } catch {
             let skipped = initialPlans.flatMap { plan in
                 plan.duplicates.map { duplicate in
                     WorkspaceDuplicateCleanupSkippedItem(
-                        workspaceID: duplicate.id,
+                        workspaceID: duplicate.workspaceID,
                         workspaceName: duplicate.name,
                         windowID: nil,
                         reason: "backup_failed: \(error.localizedDescription)"
@@ -9225,8 +9852,8 @@ class WorkspaceManagerViewModel: ObservableObject {
         var protectedWorkspaceIDs: Set<UUID> = []
 
         for plan in initialPlans {
-            let canonical = plan.canonical
-            let duplicateIDs = Set(plan.duplicates.map(\.id))
+            let canonicalID = plan.canonical.workspaceID
+            let duplicateIDs = Set(plan.duplicates.map(\.workspaceID))
             let duplicateWindows = windowStates.allWindows.filter { window in
                 guard let activeID = window.workspaceManager.activeWorkspace?.id else { return false }
                 return duplicateIDs.contains(activeID)
@@ -9250,7 +9877,10 @@ class WorkspaceManagerViewModel: ObservableObject {
                 }
 
                 await window.workspaceManager.pollAndSaveStateAsync(source: .duplicateCleanupPreSwitch)
-                let switchResult = await window.workspaceManager.requestWorkspaceSwitch(to: canonical, saveState: true)
+                let switchResult = await window.workspaceManager.requestWorkspaceSwitch(
+                    toWorkspaceID: canonicalID,
+                    saveState: true
+                )
                 if switchResult.didSwitch {
                     reassignedWindowIDs.insert(window.windowID)
                 } else {
@@ -9267,23 +9897,23 @@ class WorkspaceManagerViewModel: ObservableObject {
             }
         }
 
-        if domainWorkspaceAuthorityClient != nil {
-            do {
-                let projection = try await loadDuplicateCleanupAuthorityProjection()
-                applyDuplicateCleanupAuthorityProjection(projection)
-                await refreshAuthorityIncompleteRestoreClassification(
-                    workspaces: workspaces,
-                    fileURLsByWorkspaceID: domainWorkspaceFileURLsByID,
-                    revisionsByWorkspaceID: domainWorkspaceRevisionsByID,
-                    publicationSequence: projection.snapshot.publicationSequence
+        // Re-plan from the owner that will persist the cleanup's decisions. The legacy index is
+        // intentionally not updated in authority mode and may omit live records.
+        let postSwitchListing: [ListedWorkspace]
+        if let domainWorkspaceAuthorityClient {
+            let snapshot = await domainWorkspaceAuthorityClient.summarySnapshot()
+            guard snapshot.isBootstrapped, !snapshot.workspaces.isEmpty else {
+                let error = NSError(
+                    domain: "WorkspaceDuplicateCleanup",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Runtime workspace catalog is not ready."]
                 )
-            } catch {
                 reportDomainProjectionFailure(error)
                 for plan in initialPlans {
                     for duplicate in plan.duplicates {
                         skipped.append(
                             WorkspaceDuplicateCleanupSkippedItem(
-                                workspaceID: duplicate.id,
+                                workspaceID: duplicate.workspaceID,
                                 workspaceName: duplicate.name,
                                 windowID: nil,
                                 reason: "authority_snapshot_unavailable: \(error.localizedDescription)"
@@ -9300,6 +9930,11 @@ class WorkspaceManagerViewModel: ObservableObject {
                     backupURL: backupURL
                 )
             }
+            await refreshAuthorityIncompleteRestoreClassification(
+                candidates: Self.authorityIncompleteRestoreCandidates(summaries: snapshot.workspaces),
+                publicationSequence: snapshot.publicationSequence
+            )
+            postSwitchListing = snapshot.workspaces.map { ListedWorkspace($0) }
         } else {
             let diskSnapshot = await loadWorkspaceSnapshotFromDisk()
             if !diskSnapshot.isEmpty {
@@ -9307,18 +9942,15 @@ class WorkspaceManagerViewModel: ObservableObject {
                     in: diskSnapshot,
                     currentWorkspaces: workspaces
                 )
-                let lifecycleProjection = agentSessionProjectionReconciler?(
-                    localProjection,
-                    workspaces
-                )
-                workspaces = lifecycleProjection?.workspaces ?? localProjection
+                workspaces = protectingShownAgentSessions(in: localProjection).workspaces
             }
+            postSwitchListing = listedWorkspaceCatalog()
         }
 
         let activeWorkspaceIDs = Set(windowStates.allWindows.compactMap { $0.workspaceManager.activeWorkspace?.id })
         let postSwitchWindowSnapshots = Self.duplicateWindowSnapshots(from: windowStates)
         let postSwitchPlans = Self.duplicateWorkspaceGroupPlans(
-            workspaces: workspaces,
+            workspaces: postSwitchListing,
             windowSnapshots: postSwitchWindowSnapshots,
             excludingWorkspaceIDs: duplicateCleanupExcludedWorkspaceIDs
         )
@@ -9330,12 +9962,12 @@ class WorkspaceManagerViewModel: ObservableObject {
         let stablePostSwitchPlans = initialPlans.compactMap { initialPlan -> WorkspaceDuplicateGroupPlan? in
             let key = WorkspaceRootSetKey(paths: initialPlan.normalizedRepoPaths)
             guard let postSwitchPlan = postSwitchPlansByRoot[key],
-                  Set(postSwitchPlan.workspaces.map(\.id)) == Set(initialPlan.workspaces.map(\.id))
+                  Set(postSwitchPlan.workspaces.map(\.workspaceID)) == Set(initialPlan.workspaces.map(\.workspaceID))
             else {
                 for duplicate in initialPlan.duplicates {
                     skipped.append(
                         WorkspaceDuplicateCleanupSkippedItem(
-                            workspaceID: duplicate.id,
+                            workspaceID: duplicate.workspaceID,
                             workspaceName: duplicate.name,
                             windowID: nil,
                             reason: "group_changed"
@@ -9348,7 +9980,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
 
         let retirementClaim = workspaceActivityCoordinator.claimDeletion(
-            workspaceIDs: Set(stablePostSwitchPlans.flatMap { $0.duplicates.map(\.id) })
+            workspaceIDs: Set(stablePostSwitchPlans.flatMap { $0.duplicates.map(\.workspaceID) })
         )
         protectedWorkspaceIDs.formUnion(retirementClaim.blockedReasonsByWorkspaceID.keys)
         defer { workspaceActivityCoordinator.releaseDeletion(retirementClaim.lease) }
@@ -9358,37 +9990,37 @@ class WorkspaceManagerViewModel: ObservableObject {
             }
         }
 
+        func skip(_ duplicates: [ListedWorkspace], reason: String) {
+            for duplicate in duplicates {
+                skipped.append(
+                    WorkspaceDuplicateCleanupSkippedItem(
+                        workspaceID: duplicate.workspaceID,
+                        workspaceName: duplicate.name,
+                        windowID: nil,
+                        reason: reason
+                    )
+                )
+            }
+        }
+
         var groupsConsolidated = 0
         for plan in stablePostSwitchPlans {
-            guard let canonicalIndex = workspaceIndex(for: plan.canonical.id) else {
-                for duplicate in plan.duplicates {
-                    skipped.append(
-                        WorkspaceDuplicateCleanupSkippedItem(
-                            workspaceID: duplicate.id,
-                            workspaceName: duplicate.name,
-                            windowID: nil,
-                            reason: "canonical_missing"
-                        )
-                    )
-                }
+            guard listedWorkspaceIDs.contains(plan.canonical.workspaceID) else {
+                skip(plan.duplicates, reason: "canonical_missing")
                 continue
             }
 
             let decision = Self.duplicateDeletionDecision(
-                duplicateWorkspaceIDs: Set(plan.duplicates.map(\.id)),
+                duplicateWorkspaceIDs: Set(plan.duplicates.map(\.workspaceID)),
                 protectedWorkspaceIDs: protectedWorkspaceIDs,
                 activeWorkspaceIDs: activeWorkspaceIDs
             )
-            let duplicatesToMerge = plan.duplicates.filter { decision.deletableWorkspaceIDs.contains($0.id) }
+            let duplicatesToMerge = plan.duplicates.filter { decision.deletableWorkspaceIDs.contains($0.workspaceID) }
             guard !duplicatesToMerge.isEmpty else {
-                for duplicate in plan.duplicates where decision.skippedWorkspaceIDs.contains(duplicate.id) {
-                    skipped.append(
-                        WorkspaceDuplicateCleanupSkippedItem(
-                            workspaceID: duplicate.id,
-                            workspaceName: duplicate.name,
-                            windowID: nil,
-                            reason: activeWorkspaceIDs.contains(duplicate.id) ? "still_active" : "protected"
-                        )
+                for duplicate in plan.duplicates where decision.skippedWorkspaceIDs.contains(duplicate.workspaceID) {
+                    skip(
+                        [duplicate],
+                        reason: activeWorkspaceIDs.contains(duplicate.workspaceID) ? "still_active" : "protected"
                     )
                 }
                 continue
@@ -9396,24 +10028,35 @@ class WorkspaceManagerViewModel: ObservableObject {
 
             let activeWorkspaceIDsBeforeCommit = Set(windowStates.allWindows.compactMap { $0.workspaceManager.activeWorkspace?.id })
             let commitDuplicates = duplicatesToMerge.filter { duplicate in
-                let stillActive = activeWorkspaceIDsBeforeCommit.contains(duplicate.id)
+                let stillActive = activeWorkspaceIDsBeforeCommit.contains(duplicate.workspaceID)
                 if stillActive {
-                    skipped.append(
-                        WorkspaceDuplicateCleanupSkippedItem(
-                            workspaceID: duplicate.id,
-                            workspaceName: duplicate.name,
-                            windowID: nil,
-                            reason: "still_active"
-                        )
-                    )
+                    skip([duplicate], reason: "still_active")
                 }
                 return !stillActive
             }
             guard !commitDuplicates.isEmpty else { continue }
 
-            let canonicalBeforeMerge = workspaces[canonicalIndex]
-            var sidecarReadyDuplicates: [WorkspaceModel] = []
+            // Only this group's documents are loaded, for its merge and its retirements.
+            let canonicalDocument: DuplicateCleanupDocument
+            do {
+                canonicalDocument = try await loadDuplicateCleanupDocument(plan.canonical.workspaceID)
+            } catch {
+                skip(commitDuplicates, reason: "canonical_changed")
+                continue
+            }
+            var loadedDuplicates: [(listed: ListedWorkspace, document: DuplicateCleanupDocument)] = []
             for duplicate in commitDuplicates {
+                do {
+                    try await loadedDuplicates.append((duplicate, loadDuplicateCleanupDocument(duplicate.workspaceID)))
+                } catch {
+                    skip([duplicate], reason: "duplicate_changed")
+                }
+            }
+
+            let canonicalBeforeMerge = canonicalDocument.workspace
+            var sidecarReadyDuplicates: [(listed: ListedWorkspace, document: DuplicateCleanupDocument)] = []
+            for loaded in loadedDuplicates {
+                let duplicate = loaded.document.workspace
                 let agentBatch: WorkspaceSessionSidecarPreparedBatch?
                 let chatBatch: WorkspaceSessionSidecarPreparedBatch?
                 do {
@@ -9426,14 +10069,7 @@ class WorkspaceManagerViewModel: ObservableObject {
                         to: canonicalBeforeMerge
                     )
                 } catch {
-                    skipped.append(
-                        WorkspaceDuplicateCleanupSkippedItem(
-                            workspaceID: duplicate.id,
-                            workspaceName: duplicate.name,
-                            windowID: nil,
-                            reason: "sidecar_preflight_failed: \(error.localizedDescription)"
-                        )
-                    )
+                    skip([loaded.listed], reason: "sidecar_preflight_failed: \(error.localizedDescription)")
                     continue
                 }
                 var committedAgentBatch: WorkspaceSessionSidecarPreparedBatch?
@@ -9445,7 +10081,7 @@ class WorkspaceManagerViewModel: ObservableObject {
                     if let chatBatch {
                         try await ChatDataService.commitWorkspaceSessionRehome(chatBatch)
                     }
-                    sidecarReadyDuplicates.append(duplicate)
+                    sidecarReadyDuplicates.append(loaded)
                 } catch {
                     // Both families preflight before either writes, but they still commit serially,
                     // so a Chat rejection arrives once the Agent files are already published.
@@ -9462,145 +10098,65 @@ class WorkspaceManagerViewModel: ObservableObject {
                                 + " (\(unresolved.count) rehomed Agent session file(s) could not be withdrawn)"
                         }
                     }
-                    skipped.append(
-                        WorkspaceDuplicateCleanupSkippedItem(
-                            workspaceID: duplicate.id,
-                            workspaceName: duplicate.name,
-                            windowID: nil,
-                            reason: reason
-                        )
-                    )
+                    skip([loaded.listed], reason: reason)
                 }
             }
             guard !sidecarReadyDuplicates.isEmpty else { continue }
-            let preparedWorkspaceIDs = Set(sidecarReadyDuplicates.map(\.id))
+            let preparedWorkspaceIDs = Set(sidecarReadyDuplicates.map(\.listed.workspaceID))
                 .union([canonicalBeforeMerge.id])
             guard duplicateCleanupExcludedWorkspaceIDs.isDisjoint(with: preparedWorkspaceIDs) else {
-                for duplicate in sidecarReadyDuplicates {
-                    skipped.append(
-                        WorkspaceDuplicateCleanupSkippedItem(
-                            workspaceID: duplicate.id,
-                            workspaceName: duplicate.name,
-                            windowID: nil,
-                            reason: "workspace_dirty_or_restoring"
-                        )
-                    )
-                }
+                skip(sidecarReadyDuplicates.map(\.listed), reason: "workspace_dirty_or_restoring")
                 continue
             }
-            guard let commitCanonicalIndex = workspaceIndex(for: canonicalBeforeMerge.id),
-                  workspaces[commitCanonicalIndex] == canonicalBeforeMerge
-            else {
-                for duplicate in sidecarReadyDuplicates {
-                    skipped.append(
-                        WorkspaceDuplicateCleanupSkippedItem(
-                            workspaceID: duplicate.id,
-                            workspaceName: duplicate.name,
-                            windowID: nil,
-                            reason: "canonical_changed"
-                        )
-                    )
-                }
+            guard await duplicateCleanupDocumentIsCurrent(canonicalDocument) else {
+                skip(sidecarReadyDuplicates.map(\.listed), reason: "canonical_changed")
                 continue
             }
 
-            let merged = Self.mergedCanonicalWorkspace(
-                canonical: canonicalBeforeMerge,
-                duplicates: sidecarReadyDuplicates
-            )
-            // `saveWorkspaceToFileAsync` suppresses the originating window's authority echo using
-            // this manager's current model. Publish the exact outbound value before the await so the
-            // bridge cannot cache the old model under the new authoritative digest.
-            workspaces[commitCanonicalIndex] = merged
-
+            let merged: WorkspaceModel
             do {
-                await WorkspaceDiskWriter.shared.flush(url: workspaceFileURL(for: canonicalBeforeMerge))
-                for duplicate in sidecarReadyDuplicates {
-                    await WorkspaceDiskWriter.shared.flush(url: workspaceFileURL(for: duplicate))
-                }
-                guard workspace(withID: merged.id) == merged else {
-                    throw NSError(
-                        domain: "WorkspaceDuplicateCleanup",
-                        code: 6,
-                        userInfo: [NSLocalizedDescriptionKey: "Canonical workspace changed before merge commit."]
-                    )
-                }
-                let mergedURL = try await saveWorkspaceToFileAsync(merged, preserveDiskRepoPathsIfUnchangedSinceBaseline: false, source: .duplicateCleanupCanonicalMerge)
-                await WorkspaceDiskWriter.shared.flush(url: mergedURL)
+                merged = try await commitDuplicateCleanupMerge(
+                    canonicalDocument,
+                    duplicates: sidecarReadyDuplicates.map(\.document.workspace)
+                )
             } catch {
                 if domainWorkspaceAuthorityClient != nil {
                     _ = await reconcileDuplicateCleanupAuthorityAfterFailedSave()
-                } else if let rollbackIndex = workspaceIndex(for: canonicalBeforeMerge.id),
-                          workspaces[rollbackIndex] == merged
-                {
-                    workspaces[rollbackIndex] = canonicalBeforeMerge
                 }
-                for duplicate in sidecarReadyDuplicates {
-                    skipped.append(
-                        WorkspaceDuplicateCleanupSkippedItem(
-                            workspaceID: duplicate.id,
-                            workspaceName: duplicate.name,
-                            windowID: nil,
-                            reason: Self.duplicateCleanupPersistenceFailureReason(error)
-                        )
-                    )
-                }
+                skip(sidecarReadyDuplicates.map(\.listed), reason: Self.duplicateCleanupPersistenceFailureReason(error))
                 continue
             }
 
-            guard workspaceIndex(for: plan.canonical.id) != nil else {
-                for duplicate in sidecarReadyDuplicates {
-                    skipped.append(
-                        WorkspaceDuplicateCleanupSkippedItem(
-                            workspaceID: duplicate.id,
-                            workspaceName: duplicate.name,
-                            windowID: nil,
-                            reason: "canonical_missing"
-                        )
-                    )
-                }
+            guard listedWorkspaceIDs.contains(plan.canonical.workspaceID) else {
+                skip(sidecarReadyDuplicates.map(\.listed), reason: "canonical_missing")
                 continue
             }
             var retiredInGroup: Set<UUID> = []
             for duplicate in sidecarReadyDuplicates {
                 if domainWorkspaceAuthorityClient != nil {
                     do {
-                        try await persistDuplicateWorkspaceRetirement(
-                            duplicate,
-                            into: merged.id
-                        )
+                        try await persistDuplicateWorkspaceRetirement(duplicate.document, into: merged.id)
                     } catch {
-                        skipped.append(
-                            WorkspaceDuplicateCleanupSkippedItem(
-                                workspaceID: duplicate.id,
-                                workspaceName: duplicate.name,
-                                windowID: nil,
-                                reason: Self.duplicateCleanupPersistenceFailureReason(error)
-                            )
-                        )
+                        skip([duplicate.listed], reason: Self.duplicateCleanupPersistenceFailureReason(error))
                         continue
                     }
                 } else {
-                    await preserveDuplicateWorkspaceStorage(duplicate)
+                    await preserveDuplicateWorkspaceStorage(duplicate.document.workspace)
                 }
-                retiredInGroup.insert(duplicate.id)
+                retiredInGroup.insert(duplicate.listed.workspaceID)
             }
             if domainWorkspaceAuthorityClient == nil {
                 workspaces.removeAll { retiredInGroup.contains($0.id) }
             }
             retiredWorkspaceIDs.formUnion(retiredInGroup)
-            if retiredInGroup == Set(plan.duplicates.map(\.id)) {
+            if retiredInGroup == Set(plan.duplicates.map(\.workspaceID)) {
                 groupsConsolidated += 1
             }
 
-            for duplicate in plan.duplicates where decision.skippedWorkspaceIDs.contains(duplicate.id) {
-                skipped.append(
-                    WorkspaceDuplicateCleanupSkippedItem(
-                        workspaceID: duplicate.id,
-                        workspaceName: duplicate.name,
-                        windowID: nil,
-                        reason: activeWorkspaceIDs.contains(duplicate.id) ? "still_active" : "protected"
-                    )
+            for duplicate in plan.duplicates where decision.skippedWorkspaceIDs.contains(duplicate.workspaceID) {
+                skip(
+                    [duplicate],
+                    reason: activeWorkspaceIDs.contains(duplicate.workspaceID) ? "still_active" : "protected"
                 )
             }
         }
@@ -9628,34 +10184,157 @@ class WorkspaceManagerViewModel: ObservableObject {
         )
     }
 
-    /// Reloads the cleanup planner from the same owner that will persist its decisions.
-    /// The legacy index is intentionally not updated in authority mode and may omit live records.
-    private func loadDuplicateCleanupAuthorityProjection() async throws -> (
-        workspaces: [WorkspaceModel],
-        snapshot: DomainWorkspaceCatalogSnapshot
-    ) {
+    /// Each planned group's documents as this window has them before cleanup changes anything:
+    /// its own copy of a workspace it holds, and the canonical document of any other. Only the
+    /// groups' own documents are read.
+    private func loadDuplicateCleanupBackupGroups(
+        _ plans: [WorkspaceDuplicateGroupPlan]
+    ) async throws -> [WorkspaceDuplicateCleanupBackup.BackupGroup] {
+        var groups: [WorkspaceDuplicateCleanupBackup.BackupGroup] = []
+        for plan in plans {
+            let canonical = try await contentGateway.readWorkspaceContent(
+                plan.canonical.workspaceID,
+                source: "duplicateCleanupBackup",
+                capturingLiveUIState: false
+            )
+            var duplicates: [WorkspaceModel] = []
+            for duplicate in plan.duplicates {
+                try await duplicates.append(contentGateway.readWorkspaceContent(
+                    duplicate.workspaceID,
+                    source: "duplicateCleanupBackup",
+                    capturingLiveUIState: false
+                ))
+            }
+            groups.append(WorkspaceDuplicateCleanupBackup.BackupGroup(
+                canonicalBeforeMerge: canonical,
+                duplicatesBeforeDelete: duplicates
+            ))
+        }
+        return groups
+    }
+
+    /// Loads a group member's complete document for a merge or retirement, with the canonical
+    /// working revision and digest it was read at. A workspace the window doesn't show is read
+    /// through the content gateway between two canonical snapshots at one revision, so the read
+    /// saw that revision. For the shown workspace it decodes the canonical snapshot too, for the
+    /// backup and for an exact commit if the window stops showing it.
+    private func loadDuplicateCleanupDocument(_ workspaceID: UUID) async throws -> DuplicateCleanupDocument {
         guard let domainWorkspaceAuthorityClient else {
-            throw NSError(
-                domain: "WorkspaceDuplicateCleanup",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Runtime workspace authority is unavailable."]
+            return try await loadLegacyDuplicateCleanupDocument(workspaceID)
+        }
+        guard let before = await domainWorkspaceAuthorityClient.canonicalWorkspaceSnapshot(workspaceID) else {
+            throw Self.duplicateCleanupDocumentChangedError
+        }
+        if activeWorkspaceID == workspaceID, workspace(withID: workspaceID) != nil {
+            let documentBytes = before.document.documentBytes
+            let fileURL = before.document.fileURL
+            let canonical = try await Task.detached(priority: .utility) {
+                try Self.decodeDomainWorkspaceProjection(documentBytes: documentBytes, fileURL: fileURL)
+            }.value
+            return DuplicateCleanupDocument(
+                workspace: canonical,
+                revision: before.revisions.workingRevision,
+                digest: before.document.contentDigest
             )
         }
-        let snapshot = await domainWorkspaceAuthorityClient.snapshot()
-        guard snapshot.isBootstrapped, !snapshot.workspaces.isEmpty else {
-            throw NSError(
-                domain: "WorkspaceDuplicateCleanup",
-                code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "Runtime workspace catalog is not ready."]
-            )
+        let workspace = try await contentGateway.readWorkspaceContent(
+            workspaceID,
+            source: "duplicateCleanupMerge",
+            capturingLiveUIState: false
+        )
+        // A window that started showing the workspace during the read returned its own copy.
+        guard activeWorkspaceID != workspaceID,
+              let after = await domainWorkspaceAuthorityClient.canonicalWorkspaceSnapshot(workspaceID),
+              after.revisions.workingRevision == before.revisions.workingRevision,
+              after.document.contentDigest == before.document.contentDigest
+        else { throw Self.duplicateCleanupDocumentChangedError }
+        return DuplicateCleanupDocument(
+            workspace: workspace,
+            revision: before.revisions.workingRevision,
+            digest: before.document.contentDigest
+        )
+    }
+
+    /// The isolated legacy owner holds every workspace it lists, so its copy is the content, at the
+    /// digest of the file the legacy backend checks before a commit.
+    private func loadLegacyDuplicateCleanupDocument(_ workspaceID: UUID) async throws -> DuplicateCleanupDocument {
+        guard let copy = workspace(withID: workspaceID), !copy.isEphemeral else {
+            throw Self.duplicateCleanupDocumentChangedError
         }
-        let workspaces = try snapshot.workspaces.map {
-            try Self.decodeDomainWorkspaceProjection(
-                documentBytes: $0.document.documentBytes,
-                fileURL: $0.document.fileURL
-            )
+        let fileURL = workspaceFileURL(for: copy)
+        await WorkspaceDiskWriter.shared.flush(url: fileURL)
+        let digest = await Task.detached(priority: .utility) {
+            (try? Data(contentsOf: fileURL)).map(DomainContentDigest.sha256)
+        }.value
+        guard let digest else { throw Self.duplicateCleanupDocumentChangedError }
+        return DuplicateCleanupDocument(
+            workspace: copy,
+            revision: DomainRevisionState.initial.workingRevision,
+            digest: digest
+        )
+    }
+
+    /// Whether the document is still canonical at the revision the cleanup read it at. The isolated
+    /// legacy owner's copy is the content, so there the copy must not have changed since the read.
+    private func duplicateCleanupDocumentIsCurrent(_ document: DuplicateCleanupDocument) async -> Bool {
+        let workspaceID = document.workspace.id
+        guard let domainWorkspaceAuthorityClient else {
+            return workspace(withID: workspaceID) == document.workspace
         }
-        return (workspaces, snapshot)
+        guard let snapshot = await domainWorkspaceAuthorityClient.canonicalWorkspaceSnapshot(workspaceID),
+              snapshot.revisions.workingRevision == document.revision,
+              snapshot.document.contentDigest == document.digest
+        else { return false }
+        return true
+    }
+
+    /// Commits a group's merge and returns the merged workspace. When the window holds the
+    /// canonical workspace, the merge is built from the window's copy and installed in that copy in
+    /// one main-actor turn. Edits in the copy that the canonical document lacks join the merge, and
+    /// the copy's save publishes it. Any other canonical workspace gets the merge of what cleanup
+    /// read, committed at exactly the revision it read.
+    private func commitDuplicateCleanupMerge(
+        _ canonicalDocument: DuplicateCleanupDocument,
+        duplicates: [WorkspaceModel]
+    ) async throws -> WorkspaceModel {
+        let workspaceID = canonicalDocument.workspace.id
+        guard holdsWorkspaceContent(workspaceID) else {
+            let merged = Self.mergedCanonicalWorkspace(canonical: canonicalDocument.workspace, duplicates: duplicates)
+            // The window's copy takes the merged document when the bridge projects it.
+            _ = try await contentGateway.commitExactWorkspaceDocument(
+                merged,
+                expectedRevision: canonicalDocument.revision,
+                expectedDigest: canonicalDocument.digest,
+                persistence: .saved
+            )
+            return merged
+        }
+        guard let index = workspaceIndex(for: workspaceID) else {
+            throw WorkspaceContentGatewayError.workspaceUnavailable(workspaceID)
+        }
+        let unmerged = workspaces[index]
+        let merged = Self.mergedCanonicalWorkspace(canonical: unmerged, duplicates: duplicates)
+        // `saveWorkspaceToFileAsync` suppresses the originating window's authority echo using this
+        // manager's current model. Publish the exact outbound value before the await so the bridge
+        // cannot cache the old model under the new authoritative digest.
+        workspaces[index] = merged
+        do {
+            _ = try await saveWorkspaceToFileAsync(
+                merged,
+                preserveDiskRepoPathsIfUnchangedSinceBaseline: false,
+                source: .duplicateCleanupCanonicalMerge
+            )
+        } catch {
+            // With an authority, the caller re-projects the catalog after a failed save.
+            if domainWorkspaceAuthorityClient == nil,
+               let rollbackIndex = workspaceIndex(for: workspaceID),
+               workspaces[rollbackIndex] == merged
+            {
+                workspaces[rollbackIndex] = unmerged
+            }
+            throw error
+        }
+        return merged
     }
 
     private func applyDuplicateCleanupAuthorityProjection(
@@ -9726,7 +10405,7 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     private nonisolated static func duplicateWorkspaceGroupPlans(
-        workspaces: [WorkspaceModel],
+        workspaces: [ListedWorkspace],
         windowSnapshots: [WorkspaceDuplicateWindowSnapshot],
         excludingWorkspaceIDs: Set<UUID> = []
     ) -> [WorkspaceDuplicateGroupPlan] {
@@ -9735,7 +10414,7 @@ class WorkspaceManagerViewModel: ObservableObject {
             return !workspace.isSystemWorkspace
                 && !workspace.isEphemeral
                 && workspace.consolidatedIntoWorkspaceID == nil
-                && !excludingWorkspaceIDs.contains(workspace.id)
+                && !excludingWorkspaceIDs.contains(workspace.workspaceID)
                 && !key.isEmpty
         }
         let grouped = Dictionary(grouping: eligible) { workspace in
@@ -9749,26 +10428,26 @@ class WorkspaceManagerViewModel: ObservableObject {
                       windowSnapshots: windowSnapshots
                   ) else { return nil }
             let sortedWorkspaces = groupWorkspaces.sorted(by: cleanupWorkspaceSort)
-            let duplicates = sortedWorkspaces.filter { $0.id != canonical.id }
+            let duplicates = sortedWorkspaces.filter { $0.workspaceID != canonical.workspaceID }
             // Defensive: workspace IDs inside a duplicate group should be
             // unique, but use a duplicate-tolerant (last-wins) init so the
             // cleanup planner cannot SIGTRAP during recovery.
             let windowIDsByWorkspaceID = Dictionary(
                 sortedWorkspaces.map { workspace -> (UUID, [Int]) in
                     let windowIDs = windowSnapshots
-                        .filter { $0.workspaceID == workspace.id }
+                        .filter { $0.workspaceID == workspace.workspaceID }
                         .map(\.windowID)
                         .sorted()
-                    return (workspace.id, windowIDs)
+                    return (workspace.workspaceID, windowIDs)
                 },
                 uniquingKeysWith: { _, last in last }
             )
             let summary = WorkspaceDuplicateGroupSummary(
                 id: key.normalizedPaths.joined(separator: " | "),
                 normalizedRepoPaths: key.normalizedPaths,
-                canonicalWorkspaceID: canonical.id,
+                canonicalWorkspaceID: canonical.workspaceID,
                 canonicalWorkspaceName: canonical.name,
-                duplicateWorkspaceIDs: duplicates.map(\.id),
+                duplicateWorkspaceIDs: duplicates.map(\.workspaceID),
                 duplicateWorkspaceNames: duplicates.map(\.name),
                 windowIDsByWorkspaceID: windowIDsByWorkspaceID
             )
@@ -9786,22 +10465,22 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     private nonisolated static func cleanupCanonicalWorkspace(
-        in workspaces: [WorkspaceModel],
+        in workspaces: [ListedWorkspace],
         windowSnapshots: [WorkspaceDuplicateWindowSnapshot]
-    ) -> WorkspaceModel? {
+    ) -> ListedWorkspace? {
         guard !workspaces.isEmpty else { return nil }
         let snapshotsByWorkspaceID = Dictionary(grouping: windowSnapshots) { $0.workspaceID }
 
-        func activeWork(_ workspace: WorkspaceModel) -> Bool {
-            snapshotsByWorkspaceID[workspace.id]?.contains { $0.hasActiveWork } == true
+        func activeWork(_ workspace: ListedWorkspace) -> Bool {
+            snapshotsByWorkspaceID[workspace.workspaceID]?.contains { $0.hasActiveWork } == true
         }
 
-        func focused(_ workspace: WorkspaceModel) -> Bool {
-            snapshotsByWorkspaceID[workspace.id]?.contains { $0.isFocused } == true
+        func focused(_ workspace: ListedWorkspace) -> Bool {
+            snapshotsByWorkspaceID[workspace.workspaceID]?.contains { $0.isFocused } == true
         }
 
-        func lowestWindowID(_ workspace: WorkspaceModel) -> Int? {
-            snapshotsByWorkspaceID[workspace.id]?.map(\.windowID).min()
+        func lowestWindowID(_ workspace: ListedWorkspace) -> Int? {
+            snapshotsByWorkspaceID[workspace.workspaceID]?.map(\.windowID).min()
         }
 
         return workspaces.sorted { lhs, rhs in
@@ -9833,12 +10512,12 @@ class WorkspaceManagerViewModel: ObservableObject {
         }.first
     }
 
-    private nonisolated static func cleanupWorkspaceSort(_ lhs: WorkspaceModel, _ rhs: WorkspaceModel) -> Bool {
+    private nonisolated static func cleanupWorkspaceSort(_ lhs: ListedWorkspace, _ rhs: ListedWorkspace) -> Bool {
         let nameComparison = lhs.name.localizedStandardCompare(rhs.name)
         if nameComparison != .orderedSame {
             return nameComparison == .orderedAscending
         }
-        return lhs.id.uuidString < rhs.id.uuidString
+        return lhs.workspaceID.uuidString < rhs.workspaceID.uuidString
     }
 
     private nonisolated static func closeImpactHasActiveWork(_ impact: WindowCloseImpactSnapshot) -> Bool {
@@ -9915,18 +10594,10 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     private nonisolated static func writeDuplicateCleanupBackup(
-        for plans: [WorkspaceDuplicateGroupPlan],
+        for groups: [WorkspaceDuplicateCleanupBackup.BackupGroup],
         directoryURL: URL? = nil
     ) throws -> URL {
-        let backup = WorkspaceDuplicateCleanupBackup(
-            createdAt: Date(),
-            groups: plans.map { plan in
-                WorkspaceDuplicateCleanupBackup.BackupGroup(
-                    canonicalBeforeMerge: plan.canonical,
-                    duplicatesBeforeDelete: plan.duplicates
-                )
-            }
-        )
+        let backup = WorkspaceDuplicateCleanupBackup(createdAt: Date(), groups: groups)
 
         let directory: URL
         if let directoryURL {
@@ -9966,27 +10637,22 @@ class WorkspaceManagerViewModel: ObservableObject {
         await WorkspaceDiskWriter.shared.flush(url: workspaceFileURL(for: workspace))
     }
 
-    /// Retires one duplicate through the authoritative document path without deleting its storage.
-    /// The caller removes the local projection only after this awaited save succeeds.
-    func persistDuplicateWorkspaceRetirement(
-        _ duplicate: WorkspaceModel,
+    /// Retires one duplicate whose content the merged canonical workspace now holds, without
+    /// deleting its storage: an exact commit of the document the cleanup loaded hides it and marks
+    /// it consolidated. A duplicate that changed after that load isn't retired, so nothing it
+    /// gained is left only in a hidden copy. The canonical workspace is looked up in the catalog
+    /// for each retirement, because it can be deleted while an earlier retirement is in flight.
+    /// The window's copy takes the retirement when the bridge projects it.
+    private func persistDuplicateWorkspaceRetirement(
+        _ duplicate: DuplicateCleanupDocument,
         into canonicalWorkspaceID: UUID
     ) async throws {
-        guard let duplicateIndex = workspaceIndex(for: duplicate.id) else {
-            throw NSError(
-                domain: "WorkspaceDuplicateCleanup",
-                code: 4,
-                userInfo: [NSLocalizedDescriptionKey: "Duplicate workspace disappeared before retirement."]
-            )
-        }
-        let duplicateBeforeRetirement = workspaces[duplicateIndex]
-        guard duplicateBeforeRetirement == duplicate,
-              duplicateBeforeRetirement.consolidatedIntoWorkspaceID == nil,
-              !duplicateBeforeRetirement.isSystemWorkspace,
-              !duplicateBeforeRetirement.isEphemeral,
-              let canonical = workspace(withID: canonicalWorkspaceID),
-              WorkspaceRootSetKey(paths: duplicateBeforeRetirement.repoPaths)
-              == WorkspaceRootSetKey(paths: canonical.repoPaths)
+        var retired = duplicate.workspace
+        guard retired.consolidatedIntoWorkspaceID == nil,
+              !retired.isSystemWorkspace,
+              !retired.isEphemeral,
+              let canonical = listedWorkspace(withID: canonicalWorkspaceID),
+              WorkspaceRootSetKey(paths: retired.repoPaths) == WorkspaceRootSetKey(paths: canonical.repoPaths)
         else {
             throw NSError(
                 domain: "WorkspaceDuplicateCleanup",
@@ -9994,28 +10660,18 @@ class WorkspaceManagerViewModel: ObservableObject {
                 userInfo: [NSLocalizedDescriptionKey: "Duplicate workspace changed before retirement."]
             )
         }
-        var retired = duplicateBeforeRetirement
         retired.isHiddenInMenus = true
         retired.consolidatedIntoWorkspaceID = canonicalWorkspaceID
         retired.dateModified = Date()
-        // Keep the local projection identical to the outbound document while the authority call is
-        // awaited; the presentation bridge uses it to suppress the exact self-echo.
-        workspaces[duplicateIndex] = retired
         do {
-            let retiredURL = try await saveWorkspaceToFileAsync(
+            _ = try await contentGateway.commitExactWorkspaceDocument(
                 retired,
-                preserveDiskRepoPathsIfUnchangedSinceBaseline: false,
-                source: .duplicateCleanupRetireDuplicate
+                expectedRevision: duplicate.revision,
+                expectedDigest: duplicate.digest,
+                persistence: .saved
             )
-            await WorkspaceDiskWriter.shared.flush(url: retiredURL)
         } catch {
-            if domainWorkspaceAuthorityClient != nil {
-                _ = await reconcileDuplicateCleanupAuthorityAfterFailedSave()
-            } else if let rollbackIndex = workspaceIndex(for: duplicate.id),
-                      workspaces[rollbackIndex] == retired
-            {
-                workspaces[rollbackIndex] = duplicateBeforeRetirement
-            }
+            _ = await reconcileDuplicateCleanupAuthorityAfterFailedSave()
             throw error
         }
     }
@@ -10032,7 +10688,10 @@ class WorkspaceManagerViewModel: ObservableObject {
                 isFocused: $0.isFocused
             )
         }
-        return duplicateWorkspaceGroupPlans(workspaces: workspaces, windowSnapshots: snapshots).map(\.summary)
+        return duplicateWorkspaceGroupPlans(
+            workspaces: workspaces.map { ListedWorkspace($0) },
+            windowSnapshots: snapshots
+        ).map(\.summary)
     }
 
     nonisolated static func test_duplicateDeletionDecision(
@@ -10073,31 +10732,29 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     // MARK: - CRUD
 
+    /// Lists the catalog's leaked test-fixture workspaces from summaries, decoding none of them.
     func previewLeakedTestWorkspaces(
         protectedWorkspaceIDs: Set<UUID>
     ) async -> WorkspaceLeakCleanupPreview {
         guard let domainWorkspaceAuthorityClient else { return .empty }
-        let snapshot = await domainWorkspaceAuthorityClient.snapshot()
-        let records = snapshot.workspaces.compactMap { authoritative -> WorkspaceLeakCleanupRecord? in
-            let metadata = authoritative.document.metadata
-            guard let fixtureIdentity = Self.leakedTestFixtureIdentity(metadata) else { return nil }
-            guard let workspace = try? Self.decodeDomainWorkspaceProjection(
-                documentBytes: authoritative.document.documentBytes,
-                fileURL: authoritative.document.fileURL
+        let snapshot = await domainWorkspaceAuthorityClient.summarySnapshot()
+        let records = snapshot.workspaces.compactMap { summary -> WorkspaceLeakCleanupRecord? in
+            guard let fixtureIdentity = WorkspaceLeakedTestFixtureIdentity.match(
+                isEphemeral: summary.isEphemeral,
+                name: summary.name,
+                repoPaths: summary.repoPaths
             ) else { return nil }
 
-            let blockReason: String? = if metadata.isSystemWorkspace {
+            let blockReason: String? = if summary.isSystemWorkspace {
                 "System workspaces cannot be deleted."
-            } else if protectedWorkspaceIDs.contains(metadata.workspaceID) {
+            } else if protectedWorkspaceIDs.contains(summary.workspaceID) {
                 "Workspace is active in an open window."
-            } else if metadata.agentIdentityClaims.contains(where: \.requiresProtection) {
-                Self.agentTabDeletionBlockReason
             } else {
-                nil
+                Self.authoritativeDeletionBlockReason(summary)
             }
             return WorkspaceLeakCleanupRecord(
-                workspace: workspace,
-                fileURL: authoritative.document.fileURL,
+                workspace: ListedWorkspace(summary),
+                fileURL: summary.fileURL,
                 evidence: fixtureIdentity.evidence,
                 deletionBlockReason: blockReason
             )
@@ -10152,7 +10809,8 @@ class WorkspaceManagerViewModel: ObservableObject {
                 }
                 let workspaceDirectory = workspaceDirectory(for: localWorkspace)
                 await finalizeWorkspaceDeletion(
-                    localWorkspace,
+                    workspaceID: localWorkspace.id,
+                    customStoragePath: localWorkspace.customStoragePath,
                     workspaceDirectory: workspaceDirectory,
                     saveLegacyIndex: false,
                     cleanupLocalArtifacts: true
@@ -10245,6 +10903,19 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     private static let agentTabDeletionBlockReason = "Workspace has a tab with an agent session, or a pinned tab."
 
+    /// The summary lists every tab the metadata's identity claims cover, and also a stashed entry
+    /// that shares a tab ID with an earlier tab, so this check refuses whatever the metadata
+    /// check refuses.
+    private static func authoritativeDeletionBlockReason(_ summary: DomainWorkspaceSummary) -> String? {
+        if summary.isSystemWorkspace {
+            return "System workspaces cannot be deleted."
+        }
+        if (summary.composeTabs + summary.stashedTabs).contains(where: { $0.activeAgentSessionID != nil || $0.isPinned }) {
+            return agentTabDeletionBlockReason
+        }
+        return nil
+    }
+
     private static func authoritativeDeletionBlockReason(_ metadata: DomainWorkspaceMetadata) -> String? {
         if metadata.isSystemWorkspace {
             return "System workspaces cannot be deleted."
@@ -10274,80 +10945,117 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     @discardableResult
     func deleteWorkspaceAsync(_ workspace: WorkspaceModel) async -> WorkspaceDeleteOutcome {
-        let deletionClaim = workspaceActivityCoordinator.claimDeletion(workspaceIDs: [workspace.id])
-        guard deletionClaim.lease.workspaceIDs.contains(workspace.id) else {
+        await deleteWorkspace(
+            workspaceID: workspace.id,
+            name: workspace.name,
+            customStoragePath: workspace.customStoragePath,
+            localCopy: workspace
+        )
+    }
+
+    /// Deletes the workspace a catalog summary lists, with the checks `deleteWorkspaceAsync(_:)`
+    /// applies to a model. It doesn't decode the workspace's tabs.
+    @discardableResult
+    func deleteWorkspaceAsync(_ summary: DomainWorkspaceSummary) async -> WorkspaceDeleteOutcome {
+        await deleteWorkspace(
+            workspaceID: summary.workspaceID,
+            name: summary.name,
+            customStoragePath: summary.customStoragePath,
+            localCopy: nil
+        )
+    }
+
+    /// `localCopy` is the caller's model of a workspace the catalog doesn't list, which only a
+    /// window's own temporary workspace can be. Without one, the window's copy stands in.
+    private func deleteWorkspace(
+        workspaceID: UUID,
+        name: String,
+        customStoragePath: URL?,
+        localCopy: WorkspaceModel?
+    ) async -> WorkspaceDeleteOutcome {
+        let deletionClaim = workspaceActivityCoordinator.claimDeletion(workspaceIDs: [workspaceID])
+        guard deletionClaim.lease.workspaceIDs.contains(workspaceID) else {
             return .refused(
-                reason: deletionClaim.blockedReasonsByWorkspaceID[workspace.id] ?? "Workspace deletion is blocked."
+                reason: deletionClaim.blockedReasonsByWorkspaceID[workspaceID] ?? "Workspace deletion is blocked."
             )
         }
         defer { workspaceActivityCoordinator.releaseDeletion(deletionClaim.lease) }
 
         if let domainWorkspaceAuthorityClient {
-            let snapshot = await domainWorkspaceAuthorityClient.snapshot()
-            guard let authoritative = snapshot.workspaces.first(where: {
-                $0.document.workspaceID == workspace.id
-            }) else {
-                if let blockReason = Self.localEphemeralDeletionBlockReason(workspace) {
+            let snapshot = await domainWorkspaceAuthorityClient.summarySnapshot()
+            guard let authoritative = snapshot.workspaces.first(where: { $0.workspaceID == workspaceID }) else {
+                guard let local = localCopy ?? workspace(withID: workspaceID) else {
+                    return .refused(reason: "Workspace is not in the workspace list.")
+                }
+                if let blockReason = Self.localEphemeralDeletionBlockReason(local) {
                     return .refused(reason: blockReason)
                 }
                 await finalizeWorkspaceDeletion(
-                    workspace,
-                    workspaceDirectory: workspaceDirectory(for: workspace),
+                    workspaceID: workspaceID,
+                    customStoragePath: local.customStoragePath,
+                    workspaceDirectory: workspaceDirectory(for: local),
                     saveLegacyIndex: false,
                     cleanupLocalArtifacts: true
                 )
                 return .deleted
             }
-            if let blockReason = Self.authoritativeDeletionBlockReason(authoritative.document.metadata) {
+            if let blockReason = Self.authoritativeDeletionBlockReason(authoritative) {
                 return .refused(reason: blockReason)
             }
 
             let outcome = await domainWorkspaceAuthorityClient.delete(
-                workspaceID: workspace.id,
+                workspaceID: workspaceID,
                 expectedCatalogRevision: snapshot.catalogRevision,
                 expectedWorkspaceRevision: authoritative.revisions.workingRevision
             )
-            applyDomainAuthorityOutcome(outcome, workspaceID: workspace.id)
+            applyDomainAuthorityOutcome(outcome, workspaceID: workspaceID)
             guard Self.isSuccessfulDomainOutcome(outcome) else {
                 reportDomainAuthorityIssue(outcome, operation: "delete_workspace")
                 return .refused(reason: Self.deleteFailureReason(from: outcome))
             }
             await finalizeWorkspaceDeletion(
-                workspace,
-                workspaceDirectory: authoritative.document.fileURL.deletingLastPathComponent(),
+                workspaceID: workspaceID,
+                customStoragePath: authoritative.customStoragePath,
+                workspaceDirectory: authoritative.fileURL.deletingLastPathComponent(),
                 saveLegacyIndex: false
             )
             return .deleted
         }
         await finalizeWorkspaceDeletion(
-            workspace,
-            workspaceDirectory: workspaceDirectory(for: workspace),
+            workspaceID: workspaceID,
+            customStoragePath: customStoragePath,
+            workspaceDirectory: workspaceDirectory(
+                workspaceID: workspaceID,
+                name: name,
+                customStoragePath: customStoragePath
+            ),
             saveLegacyIndex: true
         )
         return .deleted
     }
 
     private func finalizeWorkspaceDeletion(
-        _ workspace: WorkspaceModel,
+        workspaceID: UUID,
+        customStoragePath: URL?,
         workspaceDirectory: URL,
         saveLegacyIndex: Bool,
         cleanupLocalArtifacts: Bool = false
     ) async {
-        workspaces.removeAll { $0.id == workspace.id }
-        invalidateDomainReadRegistration(for: workspace.id)
-        domainWorkspaceRevisionsByID.removeValue(forKey: workspace.id)
-        domainWorkspaceDigestsByID.removeValue(forKey: workspace.id)
-        domainWorkspaceFileURLsByID.removeValue(forKey: workspace.id)
-        workspaceRenameIntentByID.removeValue(forKey: workspace.id)
-        workspaceHiddenIntentByID.removeValue(forKey: workspace.id)
-        removeConsolidatedRestoreTracking(workspaceID: workspace.id)
-        if activeWorkspaceID == workspace.id {
+        workspaces.removeAll { $0.id == workspaceID }
+        invalidateDomainReadRegistration(for: workspaceID)
+        domainWorkspaceRevisionsByID.removeValue(forKey: workspaceID)
+        domainWorkspaceDigestsByID.removeValue(forKey: workspaceID)
+        domainWorkspaceFileURLsByID.removeValue(forKey: workspaceID)
+        workspaceRenameIntentByID.removeValue(forKey: workspaceID)
+        workspaceHiddenIntentByID.removeValue(forKey: workspaceID)
+        removeConsolidatedRestoreTracking(workspaceID: workspaceID)
+        if activeWorkspaceID == workspaceID {
             activeWorkspaceID = nil
         }
         if saveLegacyIndex || cleanupLocalArtifacts {
             await Task.detached(priority: .utility) {
                 await GitDiffDataMaintenance.shared.deleteAllGitData(workspaceDirectory: workspaceDirectory)
-                if workspace.customStoragePath == nil,
+                if customStoragePath == nil,
                    FileManager.default.fileExists(atPath: workspaceDirectory.path)
                 {
                     try? FileManager.default.removeItem(at: workspaceDirectory)
@@ -10365,54 +11073,54 @@ class WorkspaceManagerViewModel: ObservableObject {
         )
     }
 
+    /// Renames the workspace in its document through the content gateway, which keeps every tab
+    /// of a workspace the window doesn't show. The window shows the new name once its copy has the
+    /// edit: at once for the shown workspace, and when the bridge projects the commit otherwise. A
+    /// newer rename of the same workspace replaces one that hasn't started.
     func renameWorkspace(_ workspace: WorkspaceModel, newName: String) {
-        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
+        let workspaceID = workspace.id
+        guard listedWorkspaceIDs.contains(workspaceID) else { return }
         let finalName = newName.trimmingCharacters(in: .whitespaces)
         guard !finalName.isEmpty else { return }
 
-        workspaces[index].name = finalName
-        workspaces[index].dateModified = Date()
-
-        // Schedule async save of the specific workspace and index update, with flushes before notify.
-        // The intent token lets an authority projection replace the array element without
-        // losing this request, while a newer rename supersedes the older task.
-        let workspaceID = workspace.id
         let intentID = UUID()
-        let intentDateModified = workspaces[index].dateModified
+        let dateModified = Date()
         workspaceRenameIntentByID[workspaceID] = intentID
         Task { @MainActor [weak self] in
-            guard let self,
-                  workspaceRenameIntentByID[workspaceID] == intentID,
-                  var workspaceToSave = workspaces.first(where: { $0.id == workspaceID })
-            else { return }
+            guard let self, workspaceRenameIntentByID[workspaceID] == intentID else { return }
             defer {
                 if workspaceRenameIntentByID[workspaceID] == intentID {
                     workspaceRenameIntentByID.removeValue(forKey: workspaceID)
                 }
             }
-            workspaceToSave.name = finalName
-            workspaceToSave.dateModified = max(workspaceToSave.dateModified, intentDateModified)
-            if let currentIndex = workspaces.firstIndex(where: { $0.id == workspaceID }) {
-                workspaces[currentIndex].name = workspaceToSave.name
-                workspaces[currentIndex].dateModified = workspaceToSave.dateModified
-            }
             do {
-                let finalURL = try await saveWorkspaceToFileAsync(workspaceToSave, source: .renameWorkspace)
-                await WorkspaceDiskWriter.shared.flush(url: finalURL)
-
+                _ = try await contentGateway.mutateWorkspace(
+                    workspaceID,
+                    source: "renameWorkspace",
+                    persistence: .saved,
+                    validation: { try self.validateNoConsolidatedRestorePending(workspaceID) }
+                ) { workspace in
+                    workspace.name = finalName
+                    workspace.dateModified = max(workspace.dateModified, dateModified)
+                }
                 await rebuildAndSaveIndexAsync()
                 await WorkspaceDiskWriter.shared.flush(url: workspaceIndexFileURL)
-
-                await MainActor.run {
-                    NotificationCenter.default.post(
-                        name: .workspaceListDidChange,
-                        object: nil,
-                        userInfo: ["managerID": instanceID]
-                    )
-                }
+                NotificationCenter.default.post(
+                    name: .workspaceListDidChange,
+                    object: nil,
+                    userInfo: ["managerID": instanceID]
+                )
             } catch {
                 print("Error saving renamed workspace: \(error)")
             }
+        }
+    }
+
+    /// The consolidation check an ordinary whole-model save made before its write, for a gateway
+    /// edit of the workspace's own fields: a restore of a consolidated copy must not interleave.
+    private func validateNoConsolidatedRestorePending(_ workspaceID: UUID) throws {
+        guard !pendingConsolidatedRestoreIDs.contains(workspaceID) else {
+            throw Self.consolidationLifecycleChangedError
         }
     }
 
@@ -10439,84 +11147,84 @@ class WorkspaceManagerViewModel: ObservableObject {
         setOrdinaryWorkspaceHidden(current, hidden: hidden)
     }
 
-    /// Preserves the predecessor optimistic hidden-state flow for ordinary UI mutations.
+    /// An ordinary hide or unhide from the UI, through the same content-gateway edit an MCP caller
+    /// uses. The window shows the new state once its copy has the edit. A newer change of the same
+    /// workspace's hidden state replaces one that hasn't started.
     private func setOrdinaryWorkspaceHidden(_ workspace: WorkspaceModel, hidden: Bool) {
-        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
-        workspaces[index].isHiddenInMenus = hidden
-        workspaces[index].dateModified = Date()
-
         let workspaceID = workspace.id
+        let expectedConsolidatedIntoWorkspaceID = workspace.consolidatedIntoWorkspaceID
         let intentID = UUID()
-        let intentDateModified = workspaces[index].dateModified
         workspaceHiddenIntentByID[workspaceID] = intentID
         Task { @MainActor [weak self] in
-            guard let self,
-                  workspaceHiddenIntentByID[workspaceID] == intentID,
-                  var workspaceToSave = workspaces.first(where: { $0.id == workspaceID })
-            else { return }
+            guard let self, workspaceHiddenIntentByID[workspaceID] == intentID else { return }
             defer {
                 if workspaceHiddenIntentByID[workspaceID] == intentID {
                     workspaceHiddenIntentByID.removeValue(forKey: workspaceID)
                 }
             }
-            workspaceToSave.isHiddenInMenus = hidden
-            workspaceToSave.dateModified = max(workspaceToSave.dateModified, intentDateModified)
-            if let currentIndex = workspaces.firstIndex(where: { $0.id == workspaceID }) {
-                workspaces[currentIndex].isHiddenInMenus = workspaceToSave.isHiddenInMenus
-                workspaces[currentIndex].dateModified = workspaceToSave.dateModified
-            }
             do {
-                let finalURL = try await saveWorkspaceToFileAsync(workspaceToSave, source: .setWorkspaceHidden)
-                await WorkspaceDiskWriter.shared.flush(url: finalURL)
-
-                await rebuildAndSaveIndexAsync()
-                await WorkspaceDiskWriter.shared.flush(url: workspaceIndexFileURL)
-
-                await MainActor.run {
-                    NotificationCenter.default.post(
-                        name: .workspaceListDidChange,
-                        object: nil,
-                        userInfo: ["managerID": instanceID]
-                    )
-                }
+                _ = try await setWorkspaceHidden(
+                    workspaceID: workspaceID,
+                    expectedConsolidatedIntoWorkspaceID: expectedConsolidatedIntoWorkspaceID,
+                    hidden: hidden
+                )
             } catch {
                 print("Error saving hidden state for workspace: \(error)")
             }
         }
     }
 
-    private func validateConsolidationLifecycle(_ workspace: WorkspaceModel) throws {
-        guard !pendingConsolidatedRestoreIDs.contains(workspace.id),
-              let current = self.workspace(withID: workspace.id),
-              current.consolidatedIntoWorkspaceID == workspace.consolidatedIntoWorkspaceID
-        else {
-            throw NSError(
-                domain: "WorkspaceDuplicateCleanup",
-                code: 13,
-                userInfo: [NSLocalizedDescriptionKey: "Workspace restoration state changed before its hidden state could be saved."]
-            )
-        }
+    private func validateConsolidationLifecycle(
+        workspaceID: UUID,
+        expectedConsolidatedIntoWorkspaceID: UUID?
+    ) throws {
+        guard !pendingConsolidatedRestoreIDs.contains(workspaceID),
+              let current = workspace(withID: workspaceID),
+              current.consolidatedIntoWorkspaceID == expectedConsolidatedIntoWorkspaceID
+        else { throw Self.consolidationLifecycleChangedError }
     }
 
+    private static let consolidationLifecycleChangedError = NSError(
+        domain: "WorkspaceDuplicateCleanup",
+        code: 13,
+        userInfo: [NSLocalizedDescriptionKey: "Workspace restoration state changed before its hidden state could be saved."]
+    )
+
     func setWorkspaceHiddenFromSnapshot(_ workspace: WorkspaceModel, hidden: Bool) async throws -> WorkspaceModel {
-        var current = self.workspace(withID: workspace.id)
-        var isAuthorityIncompleteRestore = authorityIncompleteConsolidatedRestoreIDs.contains(workspace.id)
-        let isDirtyAuthorityCandidate = domainWorkspaceRevisionsByID[workspace.id]?.dirtyRevision != nil
+        try await setWorkspaceHidden(
+            workspaceID: workspace.id,
+            expectedConsolidatedIntoWorkspaceID: workspace.consolidatedIntoWorkspaceID,
+            hidden: hidden
+        )
+    }
+
+    /// Sets the hidden state of the workspace with this ID, which a caller found with this
+    /// consolidation marker, and returns the window's copy afterward. An ordinary hide or unhide
+    /// edits that one document through the content gateway and keeps all its tabs. Restoring a
+    /// consolidated duplicate uses its own exact-save path.
+    func setWorkspaceHidden(
+        workspaceID: UUID,
+        expectedConsolidatedIntoWorkspaceID: UUID?,
+        hidden: Bool
+    ) async throws -> WorkspaceModel {
+        var current = workspace(withID: workspaceID)
+        var isAuthorityIncompleteRestore = authorityIncompleteConsolidatedRestoreIDs.contains(workspaceID)
+        let isDirtyAuthorityCandidate = domainWorkspaceRevisionsByID[workspaceID]?.dirtyRevision != nil
         if isAuthorityIncompleteRestore
             || (current?.consolidatedIntoWorkspaceID == nil && isDirtyAuthorityCandidate)
         {
-            switch await refreshAuthorityConsolidatedRestoreClassification(workspaceID: workspace.id) {
+            switch await refreshAuthorityConsolidatedRestoreClassification(workspaceID: workspaceID) {
             case let .incomplete(authoritativeState):
                 isAuthorityIncompleteRestore = true
-                domainWorkspaceFileURLsByID[workspace.id] = authoritativeState.fileURL
+                domainWorkspaceFileURLsByID[workspaceID] = authoritativeState.fileURL
                 applyDomainAuthorityBaseline(
-                    workspaceID: workspace.id,
+                    workspaceID: workspaceID,
                     revisions: authoritativeState.revisions,
                     digest: authoritativeState.contentDigest,
                     health: authoritativeState.health,
                     catalogRevision: authoritativeState.catalogRevision
                 )
-                if let index = workspaces.firstIndex(where: { $0.id == workspace.id }) {
+                if let index = workspaces.firstIndex(where: { $0.id == workspaceID }) {
                     workspaces[index] = authoritativeState.workspace
                 } else {
                     workspaces.append(authoritativeState.workspace)
@@ -10538,12 +11246,12 @@ class WorkspaceManagerViewModel: ObservableObject {
                     userInfo: [NSLocalizedDescriptionKey: "Workspace restoration state could not be verified. Retry after the workspace list refreshes."]
                 )
             }
-            current = self.workspace(withID: workspace.id)
+            current = workspace(withID: workspaceID)
         }
 
         if !hidden {
             guard let current,
-                  current.consolidatedIntoWorkspaceID == workspace.consolidatedIntoWorkspaceID
+                  current.consolidatedIntoWorkspaceID == expectedConsolidatedIntoWorkspaceID
             else {
                 throw NSError(
                     domain: "WorkspaceDuplicateCleanup",
@@ -10559,9 +11267,9 @@ class WorkspaceManagerViewModel: ObservableObject {
                     || isAuthorityIncompleteRestore
             )
         guard isConsolidatedRestore else {
-            // Keep ordinary MCP hide/unhide on its established tolerant snapshot path. Exact
-            // model equality and fail-closed CAS are feature-owned only by consolidation
-            // restoration; only its lifecycle marker is fenced here.
+            // An ordinary hide or unhide changes one field through the content gateway, so it
+            // keeps every other edit to the document. Exact model equality belongs to
+            // consolidation restoration, so this edit checks only the consolidation marker.
             guard let current else {
                 throw NSError(
                     domain: "WorkspaceDuplicateCleanup",
@@ -10572,23 +11280,27 @@ class WorkspaceManagerViewModel: ObservableObject {
             if hidden, current.consolidatedIntoWorkspaceID != nil {
                 return current
             }
-            try validateConsolidationLifecycle(workspace)
-            var updated = current
-            updated.isHiddenInMenus = hidden
-            updated.dateModified = Date()
-
-            if let index = workspaces.firstIndex(where: { $0.id == updated.id }) {
-                workspaces[index].isHiddenInMenus = hidden
-                workspaces[index].dateModified = updated.dateModified
-            } else {
-                workspaces.append(updated)
+            let dateModified = Date()
+            _ = try await contentGateway.mutateWorkspace(
+                workspaceID,
+                source: "workspaceHidden",
+                persistence: .saved,
+                validation: {
+                    guard !self.pendingConsolidatedRestoreIDs.contains(workspaceID) else {
+                        throw Self.consolidationLifecycleChangedError
+                    }
+                }
+            ) { workspace in
+                // Checking the marker on the document this edit changes keeps the check and the
+                // write on one revision, including for a workspace the window doesn't show.
+                guard workspace.consolidatedIntoWorkspaceID == expectedConsolidatedIntoWorkspaceID else {
+                    throw Self.consolidationLifecycleChangedError
+                }
+                workspace.isHiddenInMenus = hidden
+                workspace.dateModified = dateModified
             }
-
-            let finalURL = try await saveWorkspaceToFileAsync(
-                updated,
-                source: .setWorkspaceHiddenFromSnapshot
-            )
-            await WorkspaceDiskWriter.shared.flush(url: finalURL)
+            var updated = workspace(withID: workspaceID) ?? current
+            updated.isHiddenInMenus = hidden
 
             await rebuildAndSaveIndexAsync()
             await WorkspaceDiskWriter.shared.flush(url: workspaceIndexFileURL)
@@ -10601,7 +11313,7 @@ class WorkspaceManagerViewModel: ObservableObject {
             return updated
         }
 
-        guard !activeConsolidatedRestoreIDs.contains(workspace.id) else {
+        guard !activeConsolidatedRestoreIDs.contains(workspaceID) else {
             throw NSError(
                 domain: "WorkspaceDuplicateCleanup",
                 code: 10,
@@ -12346,7 +13058,10 @@ class WorkspaceManagerViewModel: ObservableObject {
         #endif
         try Task.checkCancellation()
         if !requiresExactSnapshotAttempt {
-            try validateConsolidationLifecycle(workspaceToSave)
+            try validateConsolidationLifecycle(
+                workspaceID: workspaceToSave.id,
+                expectedConsolidatedIntoWorkspaceID: workspaceToSave.consolidatedIntoWorkspaceID
+            )
         }
         guard self.workspace(withID: workspace.id)?.isEphemeral != true else {
             throw WorkspaceDirectWriteError.ephemeralWorkspace
@@ -12419,7 +13134,8 @@ class WorkspaceManagerViewModel: ObservableObject {
                 fileURL: targetURL,
                 expectedWorkspaceRevision: exactExpectedWorkspaceRevision,
                 expectedContentDigest: exactExpectedContentDigest,
-                operationIDs: .init()
+                operationIDs: .init(),
+                workingDocumentObserver: copySourcedSubmissionObserver(for: workspaceToSave.id)
             )
             if let working = phasedOutcome.working {
                 applyDomainAuthorityOutcome(working, workspaceID: workspaceToSave.id)
@@ -12439,7 +13155,10 @@ class WorkspaceManagerViewModel: ObservableObject {
                 || (phasedOutcome.working == nil && exactExpectedRevisionState?.dirtyRevision != nil)
         } else {
             let snapshot = await domainWorkspaceAuthorityClient.snapshot()
-            try validateConsolidationLifecycle(workspaceToSave)
+            try validateConsolidationLifecycle(
+                workspaceID: workspaceToSave.id,
+                expectedConsolidatedIntoWorkspaceID: workspaceToSave.consolidatedIntoWorkspaceID
+            )
             let exists = snapshot.workspaces.contains {
                 $0.document.workspaceID == workspaceToSave.id
             }
@@ -12451,7 +13170,8 @@ class WorkspaceManagerViewModel: ObservableObject {
                         workspaceToSave.id
                     ]?.workingRevision,
                     expectedContentDigest: domainWorkspaceDigestsByID[workspaceToSave.id],
-                    operationIDs: .init()
+                    operationIDs: .init(),
+                    workingDocumentObserver: copySourcedSubmissionObserver(for: workspaceToSave.id)
                 )
             } else {
                 try await domainWorkspaceAuthorityClient.create(
@@ -12570,7 +13290,10 @@ class WorkspaceManagerViewModel: ObservableObject {
             || source == .duplicateCleanupRetireDuplicate
             || source == .consolidatedWorkspaceRestore
         if !changesConsolidationLifecycle {
-            try validateConsolidationLifecycle(workspaceToSave)
+            try validateConsolidationLifecycle(
+                workspaceID: workspaceToSave.id,
+                expectedConsolidatedIntoWorkspaceID: workspaceToSave.consolidatedIntoWorkspaceID
+            )
         }
 
         let metadata = workspaceSaveMetadata(for: workspaceToSave, source: source)
@@ -13061,14 +13784,12 @@ class WorkspaceManagerViewModel: ObservableObject {
         // Normalise both sides before comparison so we match identical paths
         // that differ only by redundant "/", "." segments, etc.
         let normalisedTarget = (folderPath as NSString).standardizingPath
-        let oldPaths = workspace.repoPaths
-        let newPaths = oldPaths.filter {
-            let candidate = ($0 as NSString).standardizingPath
-            return candidate != normalisedTarget
+        func keepsRoot(_ path: String) -> Bool {
+            (path as NSString).standardizingPath != normalisedTarget
         }
-
-        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
-        if newPaths.isEmpty {
+        let workspaceID = workspace.id
+        guard listedWorkspaceIDs.contains(workspaceID) else { return }
+        if !workspace.repoPaths.contains(where: keepsRoot) {
             if let fallback = findOrCreateDefaultWorkspace() {
                 await switchWorkspace(to: fallback)
             }
@@ -13076,44 +13797,73 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
 
         pollAndSaveState(source: .rootRemove)
-        workspaces[index].repoPaths = newPaths
 
-        // Save and wait for completion before unloading folder—but persist this workspace, not just the active one
+        // Save and wait for completion before unloading the folder. The edit goes to this
+        // workspace's document, whether or not the window shows it.
         do {
-            let workspaceToSave = workspaces[index]
-            let finalURL = try await saveWorkspaceToFileAsync(workspaceToSave, preserveDiskRepoPathsIfUnchangedSinceBaseline: false, source: .rootRemove)
-            await WorkspaceDiskWriter.shared.flush(url: finalURL)
-            recordRepoPathBaseline(for: workspaceToSave)
-            postWorkspaceRepoPathsDidChange(for: workspaceToSave.id)
+            var edited: WorkspaceModel?
+            _ = try await contentGateway.mutateWorkspace(
+                workspaceID,
+                source: "rootRemove",
+                persistence: .saved,
+                validation: { try self.validateNoConsolidatedRestorePending(workspaceID) }
+            ) { workspace in
+                let remaining = workspace.repoPaths.filter(keepsRoot)
+                // Removing the last root switches to Default instead, as the check above does.
+                guard !remaining.isEmpty else { throw WorkspaceRootEditError.lastRoot }
+                workspace.repoPaths = remaining
+                edited = workspace
+            }
+            if let edited {
+                recordRepoPathBaseline(for: edited)
+            }
+            postWorkspaceRepoPathsDidChange(for: workspaceID)
             await fileManager.unloadRootFolderPath(folderPath)
         } catch {
             print("Error saving workspace after removing folder: \(error)")
         }
     }
 
+    private enum WorkspaceRootEditError: Error {
+        case lastRoot
+    }
+
     @MainActor
     func addFolder(_ folderURL: URL, to workspace: WorkspaceModel) async throws {
-        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
+        let workspaceID = workspace.id
+        guard let listed = listedWorkspace(withID: workspaceID) else { return }
 
         let path = (folderURL.path as NSString).standardizingPath
-        try validateNewRootPath(path, against: workspaces[index].repoPaths)
-        let alreadyHas = workspaces[index].repoPaths.contains {
-            let normalized = ($0 as NSString).standardizingPath
-            return normalized.caseInsensitiveCompare(path) == .orderedSame
+        func listsRoot(_ repoPaths: [String]) -> Bool {
+            repoPaths.contains {
+                let normalized = ($0 as NSString).standardizingPath
+                return normalized.caseInsensitiveCompare(path) == .orderedSame
+            }
         }
-        if !alreadyHas {
-            workspaces[index].repoPaths.append(path)
-            workspaces[index].dateModified = Date()
-
-            // Save asynchronously and flush for cross-window consistency
+        try validateNewRootPath(path, against: listed.repoPaths)
+        if !listsRoot(listed.repoPaths) {
+            // The edit goes to this workspace's document, which it checks again, whether or not
+            // the window shows the workspace.
             do {
-                let workspaceToSave = workspaces[index]
-                let finalURL = try await saveWorkspaceToFileAsync(workspaceToSave, preserveDiskRepoPathsIfUnchangedSinceBaseline: false, source: .rootAdd)
-                await WorkspaceDiskWriter.shared.flush(url: finalURL)
-                recordRepoPathBaseline(for: workspaceToSave)
-                await rebuildAndSaveIndexAsync()
-                await WorkspaceDiskWriter.shared.flush(url: workspaceIndexFileURL)
-                postWorkspaceRepoPathsDidChange(for: workspaceToSave.id)
+                var edited: WorkspaceModel?
+                _ = try await contentGateway.mutateWorkspace(
+                    workspaceID,
+                    source: "rootAdd",
+                    persistence: .saved,
+                    validation: { try self.validateNoConsolidatedRestorePending(workspaceID) }
+                ) { workspace in
+                    try validateNewRootPath(path, against: workspace.repoPaths)
+                    guard !listsRoot(workspace.repoPaths) else { return }
+                    workspace.repoPaths.append(path)
+                    workspace.dateModified = Date()
+                    edited = workspace
+                }
+                if let edited {
+                    recordRepoPathBaseline(for: edited)
+                    await rebuildAndSaveIndexAsync()
+                    await WorkspaceDiskWriter.shared.flush(url: workspaceIndexFileURL)
+                    postWorkspaceRepoPathsDidChange(for: workspaceID)
+                }
             } catch {
                 print("Error saving workspace after adding folder: \(error)")
                 throw error
@@ -13333,46 +14083,16 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     // MARK: - Preset Operations
 
+    /// Creates a preset of the window's current file selection in the workspace.
     func createPreset(for workspace: WorkspaceModel, name: String) async {
-        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
-
-        let selectedPaths = fileManager.selectedFiles.map(\.fullPath)
-        let newPreset = WorkspacePreset(
+        await createPreset(
+            for: workspace,
             name: name,
-            capturesFileSelection: true,
-            capturesFileTreeExpansion: false,
-            capturesSelectedPrompts: false,
-            selectedFilePaths: selectedPaths,
-            expandedFolders: [],
-            selectedPromptIDs: [],
-            lastUpdated: Date()
+            selectedPaths: fileManager.selectedFiles.map(\.fullPath)
         )
-
-        workspaces[index].presets.append(newPreset)
-        workspaces[index].activePresetID = newPreset.id
-        workspaces[index].dateModified = Date()
-
-        // Save asynchronously and notify after disk commit
-        do {
-            let finalURL = try await saveWorkspaceToFileAsync(workspaces[index], source: .createPreset)
-            await WorkspaceDiskWriter.shared.flush(url: finalURL)
-
-            // The selection now matches the preset; not dirty.
-            activePresetIsDirty = false
-
-            NotificationCenter.default.post(
-                name: .workspacePresetsDidChange,
-                object: nil,
-                userInfo: ["managerID": instanceID]
-            )
-        } catch {
-            print("Error saving workspace after creating preset: \(error)")
-        }
     }
 
     func createPreset(for workspace: WorkspaceModel, name: String, selectedPaths: [String]) async {
-        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
-
         let newPreset = WorkspacePreset(
             name: name,
             capturesFileSelection: true,
@@ -13383,27 +14103,50 @@ class WorkspaceManagerViewModel: ObservableObject {
             selectedPromptIDs: [],
             lastUpdated: Date()
         )
+        await createPreset(newPreset, inWorkspaceID: workspace.id)
+    }
 
-        workspaces[index].presets.append(newPreset)
-        workspaces[index].activePresetID = newPreset.id
-        workspaces[index].dateModified = Date()
-
-        // Save this workspace (not only the active one), flush, then notify
-        do {
-            let finalURL = try await saveWorkspaceToFileAsync(workspaces[index], source: .createPresetWithPaths)
-            await WorkspaceDiskWriter.shared.flush(url: finalURL)
-
+    /// Adds `preset` to the workspace's presets and makes it the active preset, in one saved edit.
+    func createPreset(_ preset: WorkspacePreset, inWorkspaceID workspaceID: UUID) async {
+        let saved = await saveWorkspacePresetEdit(workspaceID, source: "createPreset") { workspace in
+            workspace.presets.append(preset)
+            workspace.activePresetID = preset.id
+            workspace.dateModified = Date()
+        }
+        if saved {
             // The selection now matches the preset; not dirty.
             activePresetIsDirty = false
+        }
+    }
 
-            NotificationCenter.default.post(
-                name: .workspacePresetsDidChange,
-                object: nil,
-                userInfo: ["managerID": instanceID]
+    /// Applies a preset edit to the workspace's document through the content gateway, saves it,
+    /// and tells other windows to reload presets. It keeps every tab of a workspace the window
+    /// doesn't show. False when the workspace isn't listed or the edit didn't save.
+    @discardableResult
+    private func saveWorkspacePresetEdit(
+        _ workspaceID: UUID,
+        source: String,
+        edit: (inout WorkspaceModel) throws -> Void
+    ) async -> Bool {
+        guard listedWorkspaceIDs.contains(workspaceID) else { return false }
+        do {
+            _ = try await contentGateway.mutateWorkspace(
+                workspaceID,
+                source: source,
+                persistence: .saved,
+                validation: { try self.validateNoConsolidatedRestorePending(workspaceID) },
+                edit: edit
             )
         } catch {
-            print("Error saving workspace after creating preset: \(error)")
+            print("Error saving workspace presets (\(source)): \(error)")
+            return false
         }
+        NotificationCenter.default.post(
+            name: .workspacePresetsDidChange,
+            object: nil,
+            userInfo: ["managerID": instanceID]
+        )
+        return true
     }
 
     /// Creates a new preset with auto-numbered name (Preset #1, #2, etc.)
@@ -13538,7 +14281,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         beforeSwitch?()
 
         let newWS = createWorkspace(name: name, repoPaths: repoPaths)
-        _ = await requestWorkspaceSwitch(to: newWS, saveState: false)
+        _ = await requestWorkspaceSwitch(toWorkspaceID: newWS.id, saveState: false)
     }
 
     /// Switches to a preset by index (1-based).
@@ -13609,10 +14352,10 @@ class WorkspaceManagerViewModel: ObservableObject {
     func saveAndExitToFallback() async -> WorkspaceSwitchResult {
         let signpost = WorkspaceExitPerf.begin("saveAndExitToFallback")
         defer { WorkspaceExitPerf.end("saveAndExitToFallback", signpost) }
-        guard let fallback = workspaces.first(where: { $0.isSystemWorkspace }) else {
+        guard let fallback = listedWorkspaceCatalog().first(where: \.isSystemWorkspace) else {
             return .blocked("No fallback workspace is available.")
         }
-        return await requestWorkspaceSwitch(to: fallback, reason: "saveAndExitToFallback")
+        return await requestWorkspaceSwitch(toWorkspaceID: fallback.workspaceID, reason: "saveAndExitToFallback")
     }
 
     func checkIfActivePresetIsDirty(with newSelection: [FileViewModel]) {
@@ -13656,79 +14399,34 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     func deletePreset(_ preset: WorkspacePreset, from workspace: WorkspaceModel) {
-        guard let widx = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
-        workspaces[widx].presets.removeAll { $0.id == preset.id }
-
-        // Schedule async save of the mutated workspace and notify after flush
-        Task {
-            do {
-                let finalURL = try await saveWorkspaceToFileAsync(workspaces[widx], source: .deletePreset)
-                await WorkspaceDiskWriter.shared.flush(url: finalURL)
-                await MainActor.run {
-                    NotificationCenter.default.post(
-                        name: .workspacePresetsDidChange,
-                        object: nil,
-                        userInfo: ["managerID": instanceID]
-                    )
-                }
-            } catch {
-                print("Error saving workspace after deleting preset: \(error)")
+        let workspaceID = workspace.id
+        Task { @MainActor [weak self] in
+            await self?.saveWorkspacePresetEdit(workspaceID, source: "deletePreset") { workspace in
+                workspace.presets.removeAll { $0.id == preset.id }
             }
         }
     }
 
     func renamePreset(_ preset: WorkspacePreset, newName: String, in workspace: WorkspaceModel) {
-        guard let widx = workspaces.firstIndex(where: { $0.id == workspace.id }),
-              let pidx = workspaces[widx].presets.firstIndex(where: { $0.id == preset.id })
-        else {
-            return
-        }
-        workspaces[widx].presets[pidx].name = newName
-        workspaces[widx].presets[pidx].lastUpdated = Date()
-
-        // Schedule async save of the mutated workspace and notify after flush
-        Task {
-            do {
-                let finalURL = try await saveWorkspaceToFileAsync(workspaces[widx], source: .renamePreset)
-                await WorkspaceDiskWriter.shared.flush(url: finalURL)
-                await MainActor.run {
-                    NotificationCenter.default.post(
-                        name: .workspacePresetsDidChange,
-                        object: nil,
-                        userInfo: ["managerID": instanceID]
-                    )
-                }
-            } catch {
-                print("Error saving workspace after renaming preset: \(error)")
+        let workspaceID = workspace.id
+        let lastUpdated = Date()
+        Task { @MainActor [weak self] in
+            await self?.saveWorkspacePresetEdit(workspaceID, source: "renamePreset") { workspace in
+                guard let index = workspace.presets.firstIndex(where: { $0.id == preset.id }) else { return }
+                workspace.presets[index].name = newName
+                workspace.presets[index].lastUpdated = lastUpdated
             }
         }
     }
 
     /// Reorders presets in a workspace
     func reorderPresets(for workspace: WorkspaceModel, newPresets: [WorkspacePreset]) {
-        // Find the workspace in our array
-        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else {
-            return
-        }
-
-        // Update presets and modify timestamp in place
-        workspaces[index].presets = newPresets
-        workspaces[index].dateModified = Date()
-
-        // Persist this workspace and notify other windows to reload presets
-        Task {
-            do {
-                let finalURL = try await saveWorkspaceToFileAsync(workspaces[index], source: .reorderPresets)
-                await WorkspaceDiskWriter.shared.flush(url: finalURL)
-                await MainActor.run {
-                    NotificationCenter.default.post(
-                        name: .workspacePresetsDidChange,
-                        object: nil,
-                        userInfo: ["managerID": instanceID]
-                    )
-                }
-            } catch {
-                print("Error saving workspace after preset reorder: \(error)")
+        let workspaceID = workspace.id
+        let dateModified = Date()
+        Task { @MainActor [weak self] in
+            await self?.saveWorkspacePresetEdit(workspaceID, source: "reorderPresets") { workspace in
+                workspace.presets = newPresets
+                workspace.dateModified = dateModified
             }
         }
     }

@@ -34,7 +34,7 @@ struct MCPOracleToolService {
     let requireCurrentTabContext: (String) async throws -> TabContextSnapshot
     let stabilizedVirtualContext: StabilizedVirtualContext
     let resolveDelegatedReviewPackaging: ResolveDelegatedReviewPackaging
-    let rebindChatSessionIfNeeded: (_ metadata: RequestMetadata, _ chatIDString: String) throws -> Void
+    let rebindChatSessionIfNeeded: (_ metadata: RequestMetadata, _ chatIDString: String) async throws -> Void
     let resolveTabIDForAgentMode: (_ args: [String: Value], _ connectionID: UUID?) async throws -> UUID
     let requireTargetWindow: () throws -> WindowState
     let rawExplicitTabID: (_ args: [String: Value]) -> String?
@@ -218,7 +218,7 @@ struct MCPOracleToolService {
 
         let exportDestination: OracleExportDestination? = if exportResponse {
             try MCPServerViewModel.makeOracleExportDestination(
-                workspace: targetWindow.workspaceManager.activeWorkspace,
+                workspace: targetWindow.workspaceManager.activeWorkspace.map(ListedWorkspace.init),
                 windowID: targetWindow.windowID,
                 tabID: tabID,
                 lookupContext: tabContext.packaging.lookupContext ?? .visibleWorkspace
@@ -302,7 +302,7 @@ struct MCPOracleToolService {
            let chatIDString = args["chat_id"]?.stringValue,
            !chatIDString.isEmpty
         {
-            try rebindChatSessionIfNeeded(metadata, chatIDString)
+            try await rebindChatSessionIfNeeded(metadata, chatIDString)
         }
 
         let context = try await requireCurrentTabContext(oracleSendToolName)
@@ -324,7 +324,7 @@ struct MCPOracleToolService {
 
         let exportDestination: OracleExportDestination? = if exportResponse, let targetWindow {
             try MCPServerViewModel.makeOracleExportDestination(
-                workspace: targetWindow.workspaceManager.activeWorkspace,
+                workspace: targetWindow.workspaceManager.activeWorkspace.map(ListedWorkspace.init),
                 windowID: targetWindow.windowID,
                 tabID: tabContext?.tabID,
                 lookupContext: tabContext?.packaging.lookupContext ?? .visibleWorkspace
@@ -531,8 +531,14 @@ struct MCPOracleToolService {
         tabContext: TabContextSnapshot?
     ) async -> AgentOracleOwner {
         let agentModeViewModel = targetWindow.agentModeViewModel
+        let manager = targetWindow.workspaceManager
+        let listedSessionID = (tabContext?.workspaceID ?? manager.activeWorkspaceID).flatMap { workspaceID in
+            manager.contentGateway.listedTab(
+                WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+            )?.activeAgentSessionID
+        }
         let storedSessionID = tabContext?.activeAgentSessionID
-            ?? targetWindow.workspaceManager.composeTab(with: tabID)?.activeAgentSessionID
+            ?? listedSessionID
             ?? agentModeViewModel.session(for: tabID, createIfNeeded: false)?.activeAgentSessionID
         guard let storedSessionID else {
             return AgentOracleOwner(

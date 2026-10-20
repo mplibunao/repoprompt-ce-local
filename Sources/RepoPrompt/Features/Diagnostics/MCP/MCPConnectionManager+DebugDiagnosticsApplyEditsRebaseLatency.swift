@@ -746,13 +746,11 @@ import RepoPromptShared
                 )
             }
             let selectionPathCandidates = [physicalPath, logicalPath, path, storeSnapshot.relativePath].compactMap(\.self)
-            let selectionSnapshot = await MainActor.run {
-                resolved.0.workspaceManager.debugApplyEditsRebaseProbeSelectionSnapshot(
-                    workspaceID: target.workspaceID,
-                    tabID: target.tabID,
-                    candidatePaths: selectionPathCandidates
-                )
-            }
+            let selectionSnapshot = await resolved.0.workspaceManager.debugApplyEditsRebaseProbeSelectionSnapshot(
+                workspaceID: target.workspaceID,
+                tabID: target.tabID,
+                candidatePaths: selectionPathCandidates
+            )
             guard let selectionSnapshot else {
                 return debugDiagnosticsError(op: op, code: "missing_tab", message: "The canonical workspace tab is no longer available.")
             }
@@ -897,13 +895,11 @@ import RepoPromptShared
                         rootID: state.rootID
                     )
                 }
-                let selection = await MainActor.run {
-                    window.workspaceManager.debugApplyEditsRebaseProbeSelectionSnapshot(
-                        workspaceID: state.target.workspaceID,
-                        tabID: state.target.tabID,
-                        candidatePaths: state.selectionPathCandidates
-                    )
-                }
+                let selection = await window.workspaceManager.debugApplyEditsRebaseProbeSelectionSnapshot(
+                    workspaceID: state.target.workspaceID,
+                    tabID: state.target.tabID,
+                    candidatePaths: state.selectionPathCandidates
+                )
                 let content = try? await window.workspaceFileContextStore.readContent(
                     rootID: state.rootID,
                     relativePath: state.relativePath

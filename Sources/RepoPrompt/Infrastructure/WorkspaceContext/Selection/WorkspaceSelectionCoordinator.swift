@@ -12,12 +12,18 @@ struct MCPSelectionPropagationRegistration: Equatable {
     let peerHostIDs: Set<UUID>
 }
 
+/// An MCP selection change for the other windows that show its tab. `sourceRevision` orders it
+/// against every other MCP selection change. A change stored on a window's shown workspace takes it
+/// when stored, and a canonical commit takes it when its answer arrives. `acceptedRevision` is the
+/// working revision the authority accepted a canonical commit at, and nil for a shown-workspace
+/// store. Canonical commits order among themselves by that revision.
 struct MCPSelectionPeerPropagation: Equatable {
     let identity: WorkspaceSelectionIdentity
     let selection: StoredSelection
     let sourceRevision: UInt64
     let peerHostIDs: Set<UUID>
     let mirrorToUIIfActive: Bool
+    var acceptedRevision: UInt64?
 }
 
 /// Identifies the exact peer manager generation allowed to receive one propagation.
@@ -40,22 +46,66 @@ private struct WorkspaceSelectionMirrorTarget: Equatable {
     }
 }
 
+/// The window state a selection coordinator reads and writes. A tab in the shown workspace is read
+/// and stored synchronously; a tab anywhere else is read and committed through async exact-identity
+/// methods that load its workspace for that one operation.
 @MainActor
 protocol WorkspaceSelectionHost: AnyObject {
     var activeWorkspace: WorkspaceModel? { get }
     var selectionMirrorContextRevision: UInt64 { get }
     var liveUISelectionRevision: UInt64 { get }
-    func composeTab(with id: UUID) -> ComposeTabState?
-    func composeTab(for identity: WorkspaceSelectionIdentity) -> ComposeTabState?
-    func publishActiveComposeTabSnapshot(commitToMemory: Bool, touchModified: Bool)
+    /// The stored selection of a tab in the shown workspace, or nil for a tab anywhere else.
+    func shownTabSelection(for identity: WorkspaceSelectionIdentity) -> StoredSelection?
+    /// Stores a selection on a tab of the shown workspace without suspending. `marksUnsaved` is
+    /// false for a selection the authority already holds. False when the window doesn't show the tab.
     @discardableResult
-    func updateComposeTabStoredOnly(_ tab: ComposeTabState, inWorkspaceID workspaceID: UUID) -> Bool
+    func storeShownTabSelection(
+        _ selection: StoredSelection,
+        for identity: WorkspaceSelectionIdentity,
+        marksUnsaved: Bool
+    ) -> Bool
+    /// The stored selection of any tab, loading a workspace the window doesn't show for this read.
+    func readTabSelection(for identity: WorkspaceSelectionIdentity) async throws -> StoredSelection
+    /// Commits a selection to a tab the window doesn't show, in one fail-closed write. `transform`
+    /// runs once, at the commit boundary, on the selection the commit replaces, and refuses the
+    /// commit by throwing. Returns the selection before and after. If the window starts showing
+    /// the tab's workspace while the commit reads it, the window's copy takes the selection, and
+    /// the file tree shows it only when `mirrorToUIIfActive` is true. `didStore` gets the stored
+    /// selection only when the commit changed it. A canonical commit reports the working revision
+    /// the authority accepted it at, once the window's projection has installed that revision. A
+    /// store into the window's copy reports nil, in the turn the copy took it. A window that starts
+    /// showing the workspace during a canonical commit presents the selection unless
+    /// `presentsCanonicalWrite` is false.
+    func commitTabSelection(
+        for identity: WorkspaceSelectionIdentity,
+        mirrorToUIIfActive: Bool,
+        presentsCanonicalWrite: Bool,
+        didStore: @escaping @MainActor (StoredSelection, _ acceptedRevision: UInt64?) -> Void,
+        _ transform: (StoredSelection) throws -> StoredSelection
+    ) async throws -> (before: StoredSelection, after: StoredSelection)
+    func publishActiveComposeTabSnapshot(commitToMemory: Bool, touchModified: Bool)
     func updateComposeTabSelectionPresentation(_ selection: StoredSelection, for identity: WorkspaceSelectionIdentity)
     func committedSelectionRevision(for identity: WorkspaceSelectionIdentity) -> UInt64
+    /// Takes the next MCP selection propagation revision for a change this window made, and names
+    /// the windows to propagate it to. `acceptedRevision` is the working revision of a canonical
+    /// commit, nil for a store on the shown workspace.
     func registerMCPSelectionSourceMutation(
-        for identity: WorkspaceSelectionIdentity
+        for identity: WorkspaceSelectionIdentity,
+        acceptedRevision: UInt64?
     ) -> MCPSelectionPropagationRegistration
-    func acceptMCPPeerSelectionRevision(_ revision: UInt64, for identity: WorkspaceSelectionIdentity) -> Bool
+    /// Whether this window takes a peer's propagated selection for a tab whose stored selection is
+    /// `currentSelection`, and records its propagation revision when it does. Call it for a
+    /// canonical commit only after this window's projection has installed the commit's accepted
+    /// revision. A canonical commit then needs the projection's latest install to have its
+    /// selection for the tab.
+    func acceptMCPPeerSelection(
+        _ propagation: MCPSelectionPeerPropagation,
+        currentSelection: StoredSelection
+    ) -> Bool
+    /// Notes that the tab's stored selection came from a shown-workspace MCP store: this window's own,
+    /// or a peer's that this window stored. A canonical commit later in propagation order replaces
+    /// that selection.
+    func recordOrderedMCPSelectionStore(for identity: WorkspaceSelectionIdentity)
     func canCommitMCPSelectionPeerMutation(_ fence: MCPSelectionPeerMutationFence) -> Bool
     func propagateMCPSelectionToPeerHosts(_ propagation: MCPSelectionPeerPropagation) async
     func applySelectionMirrorAttempt(
@@ -77,14 +127,17 @@ extension WorkspaceSelectionHost {
     }
 
     func registerMCPSelectionSourceMutation(
-        for _: WorkspaceSelectionIdentity
+        for _: WorkspaceSelectionIdentity,
+        acceptedRevision _: UInt64?
     ) -> MCPSelectionPropagationRegistration {
         MCPSelectionPropagationRegistration(sourceRevision: 0, peerHostIDs: [])
     }
 
-    func acceptMCPPeerSelectionRevision(_: UInt64, for _: WorkspaceSelectionIdentity) -> Bool {
+    func acceptMCPPeerSelection(_: MCPSelectionPeerPropagation, currentSelection _: StoredSelection) -> Bool {
         true
     }
+
+    func recordOrderedMCPSelectionStore(for _: WorkspaceSelectionIdentity) {}
 
     func canCommitMCPSelectionPeerMutation(_: MCPSelectionPeerMutationFence) -> Bool {
         false
@@ -121,6 +174,11 @@ final class WorkspaceSelectionCoordinator {
         case committed(StoredSelection)
         case conflict(current: StoredSelection)
         case targetUnavailable
+    }
+
+    /// Thrown from a commit transform to refuse the commit against the selection it would replace.
+    private struct SelectionCommitRefused: Error {
+        let current: StoredSelection
     }
 
     private enum SelectionMutationKind: String {
@@ -297,7 +355,7 @@ final class WorkspaceSelectionCoordinator {
         }
         return Snapshot(
             tabID: identity.tabID,
-            selection: workspaceManager.composeTab(for: identity)?.selection ?? StoredSelection(),
+            selection: workspaceManager.shownTabSelection(for: identity) ?? StoredSelection(),
             isVirtual: false
         )
     }
@@ -316,7 +374,7 @@ final class WorkspaceSelectionCoordinator {
               let fence = deferredUISelectionFenceByIdentity[identity]
         else { return liveUISelection }
 
-        guard workspaceManager.composeTab(for: identity)?.selection == fence.selection else {
+        guard workspaceManager.shownTabSelection(for: identity) == fence.selection else {
             deferredUISelectionFenceByIdentity.removeValue(forKey: identity)
             return liveUISelection
         }
@@ -336,7 +394,7 @@ final class WorkspaceSelectionCoordinator {
               let identity = activeSelectionIdentity(),
               identity.tabID == tabID,
               let fence = deferredUISelectionFenceByIdentity[identity],
-              workspaceManager.composeTab(for: identity)?.selection == fence.selection
+              workspaceManager.shownTabSelection(for: identity) == fence.selection
         else { return }
         deferredUISelectionFenceByIdentity[identity] = DeferredUISelectionFence(
             selection: fence.selection,
@@ -346,13 +404,14 @@ final class WorkspaceSelectionCoordinator {
 
     /// Protects an already-persisted MCP selection from UI snapshots that were queued before
     /// the canonical write. This is the generic presentation fence used when a caller has
-    /// already written canonical tab state outside `persistSelection`.
+    /// already written canonical tab state outside `persistSelection`. Only the shown workspace
+    /// has UI snapshots to fence.
     func protectCanonicalMCPSelectionFromDeferredUISnapshots(
         _ selection: StoredSelection,
         for identity: WorkspaceSelectionIdentity
     ) {
         guard let workspaceManager,
-              workspaceManager.composeTab(for: identity)?.selection == selection
+              workspaceManager.shownTabSelection(for: identity) == selection
         else { return }
         updateSelectionPresentation(
             selection,
@@ -361,6 +420,8 @@ final class WorkspaceSelectionCoordinator {
         )
     }
 
+    /// The selection of a tab in the shown workspace, or nil for a tab anywhere else.
+    /// `readSelectionSnapshot(for:flushPendingUIIfActive:)` reads any tab.
     func selectionSnapshot(
         for identity: WorkspaceSelectionIdentity,
         flushPendingUIIfActive: Bool = true
@@ -368,7 +429,21 @@ final class WorkspaceSelectionCoordinator {
         if identity == activeSelectionIdentity() {
             return activeSelectionSnapshot(flushPendingUI: flushPendingUIIfActive)
         }
-        guard let selection = workspaceManager?.composeTab(for: identity)?.selection else { return nil }
+        guard let selection = workspaceManager?.shownTabSelection(for: identity) else { return nil }
+        return Snapshot(tabID: identity.tabID, selection: selection, isVirtual: true)
+    }
+
+    /// The selection of any tab. A shown tab reads as
+    /// `selectionSnapshot(for:flushPendingUIIfActive:)` reads it, and a tab in a workspace the
+    /// window doesn't show reads from its canonical document. Nil when the tab can't be read.
+    func readSelectionSnapshot(
+        for identity: WorkspaceSelectionIdentity,
+        flushPendingUIIfActive: Bool = true
+    ) async -> Snapshot? {
+        if let shown = selectionSnapshot(for: identity, flushPendingUIIfActive: flushPendingUIIfActive) {
+            return shown
+        }
+        guard let selection = try? await workspaceManager?.readTabSelection(for: identity) else { return nil }
         return Snapshot(tabID: identity.tabID, selection: selection, isVirtual: true)
     }
 
@@ -383,7 +458,7 @@ final class WorkspaceSelectionCoordinator {
     func flushPendingUISelectionToActiveTab() {
         guard !isApplyingSelectionMirror, let workspaceManager else { return }
         let previousIdentity = activeSelectionIdentity()
-        let previousSelection = previousIdentity.flatMap { workspaceManager.composeTab(for: $0)?.selection } ?? StoredSelection()
+        let previousSelection = previousIdentity.flatMap { workspaceManager.shownTabSelection(for: $0) } ?? StoredSelection()
         workspaceManager.publishActiveComposeTabSnapshot(commitToMemory: true, touchModified: false)
         let snapshot = activeSelectionSnapshot(flushPendingUI: false)
         guard snapshot.tabID != previousIdentity?.tabID || snapshot.selection != previousSelection else { return }
@@ -408,6 +483,9 @@ final class WorkspaceSelectionCoordinator {
         )
     }
 
+    /// Stores `selection` on the exact tab. A tab in the shown workspace is stored before any
+    /// suspension, and a tab anywhere else is committed in one fail-closed write. `isStillCurrent` and
+    /// `expectedCurrentSelection` are checked at the store or commit itself, after any load.
     @discardableResult
     func persistSelection(
         _ selection: StoredSelection,
@@ -415,8 +493,9 @@ final class WorkspaceSelectionCoordinator {
         source: Source = .runtimeMutation,
         mirrorToUIIfActive: Bool = true,
         expectedCurrentSelection: StoredSelection? = nil,
-        peerSourceRevision: UInt64? = nil,
-        peerMutationFence: MCPSelectionPeerMutationFence? = nil
+        peerPropagation: MCPSelectionPeerPropagation? = nil,
+        peerMutationFence: MCPSelectionPeerMutationFence? = nil,
+        isStillCurrent: @MainActor () -> Bool = { true }
     ) async -> StoredSelection {
         switch await persistSelectionResult(
             selection,
@@ -424,8 +503,9 @@ final class WorkspaceSelectionCoordinator {
             source: source,
             mirrorToUIIfActive: mirrorToUIIfActive,
             expectedCurrentSelection: expectedCurrentSelection,
-            peerSourceRevision: peerSourceRevision,
-            peerMutationFence: peerMutationFence
+            peerPropagation: peerPropagation,
+            peerMutationFence: peerMutationFence,
+            isStillCurrent: isStillCurrent
         ) {
         case let .committed(committed):
             committed
@@ -442,27 +522,39 @@ final class WorkspaceSelectionCoordinator {
         source: Source = .runtimeMutation,
         mirrorToUIIfActive: Bool = true,
         expectedCurrentSelection: StoredSelection? = nil,
-        peerSourceRevision: UInt64? = nil,
-        peerMutationFence: MCPSelectionPeerMutationFence? = nil
+        peerPropagation: MCPSelectionPeerPropagation? = nil,
+        peerMutationFence: MCPSelectionPeerMutationFence? = nil,
+        isStillCurrent: @MainActor () -> Bool = { true }
     ) async -> SelectionPersistenceResult {
-        guard let workspaceManager,
-              let currentSelection = workspaceManager.composeTab(for: identity)?.selection
-        else { return .targetUnavailable }
+        guard let workspaceManager else { return .targetUnavailable }
+        guard let currentSelection = workspaceManager.shownTabSelection(for: identity) else {
+            // A peer only presents a selection in the workspace its window shows.
+            guard source != .mcpPeerContext else { return .targetUnavailable }
+            return await persistUnshownSelectionResult(
+                selection,
+                for: identity,
+                source: source,
+                mirrorToUIIfActive: mirrorToUIIfActive,
+                expectedCurrentSelection: expectedCurrentSelection,
+                isStillCurrent: isStillCurrent
+            )
+        }
         if let expectedCurrentSelection,
            currentSelection != expectedCurrentSelection
         {
             return .conflict(current: currentSelection)
         }
+        guard isStillCurrent() else { return .conflict(current: currentSelection) }
         if source == .mcpPeerContext {
-            guard let peerSourceRevision,
+            guard let peerPropagation,
                   let peerMutationFence,
                   workspaceManager.canCommitMCPSelectionPeerMutation(peerMutationFence),
-                  workspaceManager.acceptMCPPeerSelectionRevision(peerSourceRevision, for: identity)
+                  workspaceManager.acceptMCPPeerSelection(peerPropagation, currentSelection: currentSelection)
             else { return .conflict(current: currentSelection) }
         }
 
         let propagationRegistration = source == .mcpTabContext
-            ? workspaceManager.registerMCPSelectionSourceMutation(for: identity)
+            ? workspaceManager.registerMCPSelectionSourceMutation(for: identity, acceptedRevision: nil)
             : nil
         let isActive = identity == activeSelectionIdentity()
         let mirrorToUI = isActive && mirrorToUIIfActive
@@ -509,6 +601,11 @@ final class WorkspaceSelectionCoordinator {
             for: identity,
             peerMutationFence: requiredPeerMutationFence
         ) else { return .targetUnavailable }
+        // A canonical commit's store leaves the tab on the projection's selection, so setting the
+        // marker there changes no later commit's outcome.
+        if source.isMCPSelectionSource, peerPropagation?.acceptedRevision == nil {
+            workspaceManager.recordOrderedMCPSelectionStore(for: identity)
+        }
         guard canCommitPeerMutation(
             peerMutationFence,
             source: source,
@@ -551,23 +648,96 @@ final class WorkspaceSelectionCoordinator {
         return .committed(selection)
     }
 
+    /// Commits a selection to a tab in a workspace the window doesn't show, in one fail-closed
+    /// write whose checks run against the canonical selection it replaces. A refused or conflicting
+    /// commit leaves the tab unchanged and reports the canonical selection. A peer window that
+    /// shows the tab only presents the committed selection.
+    private func persistUnshownSelectionResult(
+        _ selection: StoredSelection,
+        for identity: WorkspaceSelectionIdentity,
+        source: Source,
+        mirrorToUIIfActive: Bool,
+        expectedCurrentSelection: StoredSelection?,
+        isStillCurrent: @MainActor () -> Bool
+    ) async -> SelectionPersistenceResult {
+        guard let workspaceManager else { return .targetUnavailable }
+        var propagationRegistration: MCPSelectionPropagationRegistration?
+        var acceptedRevision: UInt64?
+        do {
+            _ = try await workspaceManager.commitTabSelection(
+                for: identity,
+                mirrorToUIIfActive: mirrorToUIIfActive,
+                // `propagateMCPSelectionToPeerHosts` presents a commit that
+                // `recordStoredUnshownChange` registers, in this window as in its peers.
+                presentsCanonicalWrite: source != .mcpTabContext,
+                didStore: { stored, revision in
+                    acceptedRevision = revision
+                    propagationRegistration = self.recordStoredUnshownChange(
+                        stored,
+                        for: identity,
+                        source: source,
+                        acceptedRevision: revision
+                    )
+                }
+            ) { current in
+                guard isStillCurrent(),
+                      expectedCurrentSelection.map({ $0 == current }) ?? true
+                else { throw SelectionCommitRefused(current: current) }
+                return selection
+            }
+        } catch let refused as SelectionCommitRefused {
+            return .conflict(current: refused.current)
+        } catch {
+            // The commit didn't write the tab. One read reports what the canonical tab now holds.
+            guard let current = try? await workspaceManager.readTabSelection(for: identity) else {
+                return .targetUnavailable
+            }
+            return .conflict(current: current)
+        }
+        if let propagationRegistration {
+            await workspaceManager.propagateMCPSelectionToPeerHosts(
+                MCPSelectionPeerPropagation(
+                    identity: identity,
+                    selection: selection,
+                    sourceRevision: propagationRegistration.sourceRevision,
+                    peerHostIDs: propagationRegistration.peerHostIDs,
+                    mirrorToUIIfActive: mirrorToUIIfActive,
+                    acceptedRevision: acceptedRevision
+                )
+            )
+        }
+        return .committed(selection)
+    }
+
     /// Applies a synchronous transform to the latest canonical tab selection and stores the
-    /// result before any actor suspension. Mirroring and peer propagation happen only after
-    /// the canonical commit, so callers never replace a concurrently advanced selection.
+    /// result: before any actor suspension for a tab in the shown workspace, and in one fail-closed
+    /// write at the canonical revision for a tab anywhere else. Mirroring and peer propagation
+    /// happen only after the canonical commit, so callers never replace a concurrently advanced
+    /// selection. `isStillCurrent` is checked at the store or commit itself. Nil when that check
+    /// fails or the commit doesn't land.
     @discardableResult
     func transformSelection(
         for identity: WorkspaceSelectionIdentity,
         source: Source = .runtimeMutation,
         mirrorToUIIfActive: Bool = true,
+        isStillCurrent: @MainActor () -> Bool = { true },
         _ transform: (StoredSelection) -> StoredSelection
     ) async -> TransactionResult? {
-        guard let workspaceManager,
-              let before = workspaceManager.composeTab(for: identity)?.selection
-        else { return nil }
+        guard let workspaceManager else { return nil }
+        guard let before = workspaceManager.shownTabSelection(for: identity) else {
+            return await transformUnshownSelection(
+                for: identity,
+                source: source,
+                mirrorToUIIfActive: mirrorToUIIfActive,
+                isStillCurrent: isStillCurrent,
+                transform
+            )
+        }
+        guard isStillCurrent() else { return nil }
 
         let after = transform(before)
         let propagationRegistration = source == .mcpTabContext
-            ? workspaceManager.registerMCPSelectionSourceMutation(for: identity)
+            ? workspaceManager.registerMCPSelectionSourceMutation(for: identity, acceptedRevision: nil)
             : nil
         let isActive = identity == activeSelectionIdentity()
         let mirrorToUI = isActive && mirrorToUIIfActive
@@ -579,6 +749,9 @@ final class WorkspaceSelectionCoordinator {
             mirrorRevision = selectionRevisionByIdentity[identity] ?? recordSelectionRevision(for: identity)
         } else {
             guard let persistedRevision = persist(after, for: identity) else { return nil }
+            if source.isMCPSelectionSource {
+                workspaceManager.recordOrderedMCPSelectionStore(for: identity)
+            }
             canonicalRevision = workspaceManager.committedSelectionRevision(for: identity)
             mirrorRevision = persistedRevision
         }
@@ -620,6 +793,76 @@ final class WorkspaceSelectionCoordinator {
             before: before,
             after: after,
             revision: canonicalRevision
+        )
+    }
+
+    private func transformUnshownSelection(
+        for identity: WorkspaceSelectionIdentity,
+        source: Source,
+        mirrorToUIIfActive: Bool,
+        isStillCurrent: @MainActor () -> Bool,
+        _ transform: (StoredSelection) -> StoredSelection
+    ) async -> TransactionResult? {
+        guard let workspaceManager else { return nil }
+        var propagationRegistration: MCPSelectionPropagationRegistration?
+        var acceptedRevision: UInt64?
+        guard let transition = try? await workspaceManager.commitTabSelection(
+            for: identity,
+            mirrorToUIIfActive: mirrorToUIIfActive,
+            // `propagateMCPSelectionToPeerHosts` presents a commit that `recordStoredUnshownChange`
+            // registers, in this window as in its peers.
+            presentsCanonicalWrite: source != .mcpTabContext,
+            didStore: { stored, revision in
+                acceptedRevision = revision
+                propagationRegistration = self.recordStoredUnshownChange(
+                    stored,
+                    for: identity,
+                    source: source,
+                    acceptedRevision: revision
+                )
+            },
+            { current in
+                guard isStillCurrent() else { throw SelectionCommitRefused(current: current) }
+                return transform(current)
+            }
+        ) else { return nil }
+        if let propagationRegistration {
+            await workspaceManager.propagateMCPSelectionToPeerHosts(
+                MCPSelectionPeerPropagation(
+                    identity: identity,
+                    selection: transition.after,
+                    sourceRevision: propagationRegistration.sourceRevision,
+                    peerHostIDs: propagationRegistration.peerHostIDs,
+                    mirrorToUIIfActive: mirrorToUIIfActive,
+                    acceptedRevision: acceptedRevision
+                )
+            )
+        }
+        return TransactionResult(
+            identity: identity,
+            before: transition.before,
+            after: transition.after,
+            revision: workspaceManager.committedSelectionRevision(for: identity)
+        )
+    }
+
+    /// Records a selection that a commit to an unshown tab stored. It runs in the turn that took the
+    /// commit's place in this window's order, which is the store into the window's copy or the
+    /// authority's answer. Later stores and mirrors follow it, and an MCP change takes its
+    /// propagation revision here. The propagation also includes `acceptedRevision`, which orders
+    /// canonical commits among themselves.
+    private func recordStoredUnshownChange(
+        _ selection: StoredSelection,
+        for identity: WorkspaceSelectionIdentity,
+        source: Source,
+        acceptedRevision: UInt64?
+    ) -> MCPSelectionPropagationRegistration? {
+        recordSelectionRevision(for: identity)
+        changeSubject.send(Change(tabID: identity.tabID, selection: selection, source: source))
+        guard source == .mcpTabContext else { return nil }
+        return workspaceManager?.registerMCPSelectionSourceMutation(
+            for: identity,
+            acceptedRevision: acceptedRevision
         )
     }
 
@@ -1263,17 +1506,23 @@ final class WorkspaceSelectionCoordinator {
         return nextSelectionRevision
     }
 
+    /// Stores a selection on a tab of the shown workspace. A peer's store doesn't mark the copy
+    /// unsaved, because the source window already committed the selection.
     private func persist(
         _ selection: StoredSelection,
         for identity: WorkspaceSelectionIdentity,
         peerMutationFence: MCPSelectionPeerMutationFence? = nil
     ) -> UInt64? {
-        guard let workspaceManager, var tab = workspaceManager.composeTab(for: identity) else { return nil }
-        guard tab.selection != selection else { return nil }
-        guard canApplyPeerMirror(peerMutationFence, workspaceManager: workspaceManager) else { return nil }
-        tab.selection = selection
-        tab.lastModified = Date()
-        guard workspaceManager.updateComposeTabStoredOnly(tab, inWorkspaceID: identity.workspaceID) else { return nil }
+        guard let workspaceManager,
+              let current = workspaceManager.shownTabSelection(for: identity),
+              current != selection,
+              canApplyPeerMirror(peerMutationFence, workspaceManager: workspaceManager),
+              workspaceManager.storeShownTabSelection(
+                  selection,
+                  for: identity,
+                  marksUnsaved: peerMutationFence == nil
+              )
+        else { return nil }
         return recordSelectionRevision(for: identity)
     }
 }

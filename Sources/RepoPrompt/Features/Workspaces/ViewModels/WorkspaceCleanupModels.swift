@@ -99,13 +99,13 @@ enum WorkspaceLeakedTestFixtureIdentity {
 }
 
 struct WorkspaceLeakCleanupRecord: Identifiable, Equatable {
-    let workspace: WorkspaceModel
+    let workspace: ListedWorkspace
     let fileURL: URL
     let evidence: [String]
     let deletionBlockReason: String?
 
     var id: UUID {
-        workspace.id
+        workspace.workspaceID
     }
 
     var isDeletable: Bool {

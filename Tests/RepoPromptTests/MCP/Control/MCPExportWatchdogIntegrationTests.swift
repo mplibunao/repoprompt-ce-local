@@ -60,7 +60,9 @@ import XCTest
                     await gate.release()
                     await manager.waitForComposeTabStateApplicationForTesting()
 
-                    let storedSelection = try XCTUnwrap(manager.composeTab(with: context.tabID)?.selection)
+                    let storedSelection = try XCTUnwrap(manager.contentGateway.shownComposeTab(
+                        WorkspaceSelectionIdentity(workspaceID: context.workspaceID, tabID: context.tabID)
+                    )?.selection)
                     XCTAssertEqual(Set(storedSelection.selectedPaths), Set([secondURL.path]))
                     let visibleSelection = Set(context.window.workspaceFilesViewModel.selectedFiles.map(\.fullPath))
                     XCTAssertEqual(visibleSelection, Set([secondURL.path]))
@@ -1192,7 +1194,12 @@ import XCTest
                         Set([fixture.contextA.fileURL.path, secondURL.path])
                     )
                     let mirrored = try XCTUnwrap(
-                        fixture.contextA.window.workspaceManager.composeTab(with: fixture.contextA.tabID)?.selection
+                        fixture.contextA.window.workspaceManager.contentGateway.shownComposeTab(
+                            WorkspaceSelectionIdentity(
+                                workspaceID: fixture.contextA.workspaceID,
+                                tabID: fixture.contextA.tabID
+                            )
+                        )?.selection
                     )
                     XCTAssertEqual(Set(mirrored.selectedPaths), Set(canonical.selectedPaths))
 

@@ -533,7 +533,7 @@ private actor SelectionMirrorRecoverySignal {
 }
 
 @MainActor
-private final class SelectionMirrorRecoveryHost: WorkspaceSelectionHost {
+private final class SelectionMirrorRecoveryHost: ShownOnlySelectionHost {
     var activeWorkspace: WorkspaceModel?
     private(set) var selectionMirrorContextRevision: UInt64 = 0
     var gatesByAttempt: [Int: SelectionMirrorRecoveryGate] = [:]
@@ -565,26 +565,7 @@ private final class SelectionMirrorRecoveryHost: WorkspaceSelectionHost {
         )
     }
 
-    func composeTab(with id: UUID) -> ComposeTabState? {
-        activeWorkspace?.composeTabs.first(where: { $0.id == id })
-    }
-
-    func composeTab(for identity: WorkspaceSelectionIdentity) -> ComposeTabState? {
-        guard activeWorkspace?.id == identity.workspaceID else { return nil }
-        return composeTab(with: identity.tabID)
-    }
-
     func publishActiveComposeTabSnapshot(commitToMemory _: Bool, touchModified _: Bool) {}
-
-    func updateComposeTabStoredOnly(_ tab: ComposeTabState, inWorkspaceID workspaceID: UUID) -> Bool {
-        guard var workspace = activeWorkspace,
-              workspace.id == workspaceID,
-              let index = workspace.composeTabs.firstIndex(where: { $0.id == tab.id })
-        else { return false }
-        workspace.composeTabs[index] = tab
-        activeWorkspace = workspace
-        return true
-    }
 
     func applySelectionMirrorAttempt(
         _ selection: StoredSelection,

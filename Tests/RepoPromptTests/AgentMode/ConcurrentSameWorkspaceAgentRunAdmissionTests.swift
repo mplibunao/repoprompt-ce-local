@@ -697,6 +697,62 @@ import XCTest
             XCTAssertEqual(peerProviderCount, 1)
         }
 
+        func testDeletedSessionCleanupClearsReferencesInAWorkspaceTheWindowDoesNotShow() async throws {
+            let fixture = try await DurableAgentAdmissionFixture.make()
+            trackCleanup { await fixture.cleanup() }
+            let manager = fixture.window.workspaceManager
+            let deletedSessionID = UUID()
+            let keptSessionID = UUID()
+            var composed = ComposeTabState(name: "Unshown deleted session")
+            composed.activeAgentSessionID = deletedSessionID
+            var kept = ComposeTabState(name: "Unshown kept session")
+            kept.activeAgentSessionID = keptSessionID
+            var stashed = ComposeTabState(name: "Unshown stashed deleted session")
+            stashed.activeAgentSessionID = deletedSessionID
+            let unshown = WorkspaceModel(
+                name: "Unshown session cleanup \(UUID().uuidString.prefix(8))",
+                repoPaths: [],
+                composeTabs: [composed, kept],
+                activeComposeTabID: composed.id,
+                stashedTabs: [StashedTab(tab: stashed)]
+            )
+            try await createCommittedWorkspace(
+                unshown,
+                authority: DomainWorkspaceAuthorityClient(
+                    store: fixture.runtime.workspaceStore,
+                    windowID: fixture.window.windowID
+                ),
+                fileURL: manager.workspaceFileURL(for: unshown)
+            )
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(5))
+            while manager.workspaceSummary(withID: unshown.id) == nil {
+                guard clock.now < deadline else {
+                    throw AdmissionTestError.timedOut("unshown workspace summary projection")
+                }
+                await Task.yield()
+            }
+
+            let result = await fixture.window.agentModeViewModel.finalizeDeletedAgentSessionReferences(
+                sessionID: deletedSessionID,
+                workspaceID: nil,
+                reason: "unshown_workspace_cleanup"
+            )
+
+            XCTAssertEqual(result.clearedComposeTabIDs, [composed.id])
+            XCTAssertEqual(result.clearedStashedTabIDs, [stashed.id])
+            let canonicalValue = await fixture.runtime.workspaceStore.canonicalWorkspaceSnapshot(unshown.id)
+            let canonical = try JSONDecoder().decode(
+                WorkspaceModel.self,
+                from: XCTUnwrap(canonicalValue).document.documentBytes
+            )
+            XCTAssertEqual(canonical.composeTabs.map(\.id), [composed.id, kept.id])
+            XCTAssertEqual(canonical.composeTabs.map(\.activeAgentSessionID), [nil, keptSessionID])
+            XCTAssertEqual(canonical.stashedTabs.map(\.tab.id), [stashed.id])
+            XCTAssertEqual(canonical.stashedTabs.map(\.tab.activeAgentSessionID), [nil])
+            XCTAssertEqual(manager.activeWorkspaceID, fixture.workspaceID)
+        }
+
         func testAgentRunRefusalUsesReasonSpecificRetryGuidance() async throws {
             let fixture = try await DurableAgentAdmissionFixture.make()
             trackCleanup { await fixture.cleanup() }

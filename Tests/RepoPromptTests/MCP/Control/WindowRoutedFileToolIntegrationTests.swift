@@ -25,7 +25,7 @@ import XCTest
                     XCTAssertTrue(toolsEnabled)
                     let endpoint = try fixture.endpointA()
                     let tabIdentity = WorkspaceSelectionIdentity(workspaceID: context.workspaceID, tabID: context.tabID)
-                    let selectionBefore = context.window.workspaceManager.composeTab(for: tabIdentity)?.selection
+                    let selectionBefore = context.window.workspaceManager.contentGateway.shownComposeTab(tabIdentity)?.selection
 
                     let calls: [(name: String, arguments: [String: Any], expected: String)] = [
                         (MCPWindowToolName.readFile, ["path": context.fileURL.path], context.sentinel),
@@ -64,7 +64,10 @@ import XCTest
                     )
 
                     XCTAssertNil(server.tabContextByConnectionID[endpoint.connectionID])
-                    XCTAssertEqual(context.window.workspaceManager.composeTab(for: tabIdentity)?.selection, selectionBefore)
+                    XCTAssertEqual(
+                        context.window.workspaceManager.contentGateway.shownComposeTab(tabIdentity)?.selection,
+                        selectionBefore
+                    )
                     _ = await server.setWindowToolsEnabled(false)
                     await fixture.cleanup()
                 } catch {

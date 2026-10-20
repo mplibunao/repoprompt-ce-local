@@ -199,8 +199,10 @@ final class AgentSessionLifecycleAuthority {
     }
 
     struct ProjectionOutcome: Equatable {
-        let workspaces: [WorkspaceModel]
-        let protectedWorkspaceIDs: Set<UUID>
+        /// The shown workspace to install, nil only when the projection drops the workspace and no
+        /// claim protects it.
+        let workspace: WorkspaceModel?
+        let isProtected: Bool
         let protectedClaimCount: Int
     }
 
@@ -217,19 +219,20 @@ final class AgentSessionLifecycleAuthority {
         }
     #endif
 
+    /// `current` is the target's identity now, nil when its live session no longer owns a listed tab.
     func validateMutationTarget(
         expected: Identity,
-        current: ProtectionClaim?
+        current: Identity?
     ) -> Result<MutationTarget, RejectionReason> {
         guard let current else { return .failure(.tabMissing) }
-        guard current.identity.tabID == expected.tabID else { return .failure(.tabMissing) }
-        guard current.identity.sessionID == expected.sessionID else {
+        guard current.tabID == expected.tabID else { return .failure(.tabMissing) }
+        guard current.sessionID == expected.sessionID else {
             return .failure(.sessionIdentityChanged)
         }
-        guard current.identity.persistentBindingGeneration == expected.persistentBindingGeneration else {
+        guard current.persistentBindingGeneration == expected.persistentBindingGeneration else {
             return .failure(.bindingGenerationChanged)
         }
-        guard current.identity.bindingTransitionGeneration == expected.bindingTransitionGeneration else {
+        guard current.bindingTransitionGeneration == expected.bindingTransitionGeneration else {
             return .failure(.transitionGenerationChanged)
         }
         return .success(MutationTarget(tabID: expected.tabID, identity: expected))
@@ -308,99 +311,87 @@ final class AgentSessionLifecycleAuthority {
         }
     }
 
+    /// Reconciles the projection of the window's shown workspace with the window's copy of it,
+    /// which `claims` describe. A live or pinned tab keeps the copy's content, and a projection that
+    /// drops the workspace keeps the copy while a claim protects one of its tabs.
     func reconcileProjection(
-        projectedWorkspaces: [WorkspaceModel],
-        currentWorkspaces: [WorkspaceModel],
+        projectedWorkspace: WorkspaceModel?,
+        currentWorkspace: WorkspaceModel,
         claims: [ProtectionClaim]
     ) -> ProjectionOutcome {
-        let protectedClaims = claims.filter(\.isProtected)
+        let protectedClaims = claims.filter { $0.isProtected && $0.identity.workspaceID == currentWorkspace.id }
         guard !protectedClaims.isEmpty else {
-            return ProjectionOutcome(
-                workspaces: projectedWorkspaces,
-                protectedWorkspaceIDs: [],
-                protectedClaimCount: 0
-            )
+            return ProjectionOutcome(workspace: projectedWorkspace, isProtected: false, protectedClaimCount: 0)
         }
-
-        let claimsByWorkspace = Dictionary(grouping: protectedClaims, by: { $0.identity.workspaceID })
-        let currentByID = Dictionary(
-            currentWorkspaces.map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        var reconciled = projectedWorkspaces
-        var protectedWorkspaceIDs = Set<UUID>()
-        var protectedClaimCount = 0
-
-        for (workspaceID, workspaceClaims) in claimsByWorkspace {
-            guard let currentWorkspace = currentByID[workspaceID] else { continue }
-            let projectedIndex: Int
-            if let existingIndex = reconciled.firstIndex(where: { $0.id == workspaceID }) {
-                projectedIndex = existingIndex
-            } else {
-                reconciled.append(currentWorkspace)
-                projectedIndex = reconciled.index(before: reconciled.endIndex)
-                protectedWorkspaceIDs.insert(workspaceID)
-                protectedClaimCount += workspaceClaims.count
-                recordProjectionProtection(
-                    claims: workspaceClaims,
-                    previousTabs: [],
-                    reason: "workspace_missing_from_projection"
-                )
-                continue
-            }
-
-            let previous = reconciled[projectedIndex]
-            var next = previous
-            let protectedTabIDs = Set(workspaceClaims.map(\.identity.tabID))
-            next.stashedTabs.removeAll { protectedTabIDs.contains($0.tab.id) }
-
-            for claim in workspaceClaims {
-                let tabID = claim.identity.tabID
-                if let sessionID = claim.identity.sessionID {
-                    for tabIndex in next.composeTabs.indices
-                        where next.composeTabs[tabIndex].id != tabID
-                        && next.composeTabs[tabIndex].activeAgentSessionID == sessionID
-                    {
-                        next.composeTabs[tabIndex].activeAgentSessionID = nil
-                    }
-                }
-                if let index = next.composeTabs.firstIndex(where: { $0.id == tabID }) {
-                    next.composeTabs[index] = claim.tab
-                } else if let localIndex = currentWorkspace.composeTabs.firstIndex(where: { $0.id == tabID }) {
-                    next.composeTabs.insert(claim.tab, at: min(localIndex, next.composeTabs.count))
-                } else {
-                    next.composeTabs.append(claim.tab)
-                }
-            }
-
-            if let activeTabID = currentWorkspace.activeComposeTabID,
-               protectedTabIDs.contains(activeTabID)
-            {
-                next.activeComposeTabID = activeTabID
-            }
-
-            guard next != previous else { continue }
-            reconciled[projectedIndex] = next
-            protectedWorkspaceIDs.insert(workspaceID)
-            let changedClaims = workspaceClaims.filter { claim in
-                let previousTab = previous.composeTabs.first(where: { $0.id == claim.identity.tabID })
-                return previousTab != claim.tab
-                    || previous.stashedTabs.contains(where: { $0.tab.id == claim.identity.tabID })
-                    || (claim.isActive && previous.activeComposeTabID != claim.identity.tabID)
-            }
-            protectedClaimCount += changedClaims.count
+        guard let previous = projectedWorkspace else {
             recordProjectionProtection(
-                claims: changedClaims,
-                previousTabs: previous.composeTabs,
-                reason: "stale_projection_reconciled"
+                claims: protectedClaims,
+                previousTabs: [],
+                reason: "workspace_missing_from_projection"
+            )
+            return ProjectionOutcome(
+                workspace: currentWorkspace,
+                isProtected: true,
+                protectedClaimCount: protectedClaims.count
             )
         }
 
-        return ProjectionOutcome(
-            workspaces: reconciled,
-            protectedWorkspaceIDs: protectedWorkspaceIDs,
-            protectedClaimCount: protectedClaimCount
+        var next = previous
+        let protectedTabIDs = Set(protectedClaims.map(\.identity.tabID))
+        next.stashedTabs.removeAll { protectedTabIDs.contains($0.tab.id) }
+        var keptTabsByID: [UUID: ComposeTabState] = [:]
+
+        for claim in protectedClaims {
+            let tabID = claim.identity.tabID
+            if let sessionID = claim.identity.sessionID {
+                for tabIndex in next.composeTabs.indices
+                    where next.composeTabs[tabIndex].id != tabID
+                    && next.composeTabs[tabIndex].activeAgentSessionID == sessionID
+                {
+                    next.composeTabs[tabIndex].activeAgentSessionID = nil
+                }
+            }
+            if let index = next.composeTabs.firstIndex(where: { $0.id == tabID }) {
+                // Protection keeps the tab and its session binding. Its selection follows the
+                // canonical document, so it takes the projection's value. When the selection is all
+                // that differs, the tab is the projection's, timestamp included.
+                let projected = next.composeTabs[index]
+                var kept = claim.tab
+                kept.selection = projected.selection
+                kept.lastModified = projected.lastModified
+                if kept != projected {
+                    kept.lastModified = claim.tab.lastModified
+                }
+                next.composeTabs[index] = kept
+                keptTabsByID[tabID] = kept
+            } else if let localIndex = currentWorkspace.composeTabs.firstIndex(where: { $0.id == tabID }) {
+                next.composeTabs.insert(claim.tab, at: min(localIndex, next.composeTabs.count))
+            } else {
+                next.composeTabs.append(claim.tab)
+            }
+        }
+
+        if let activeTabID = currentWorkspace.activeComposeTabID,
+           protectedTabIDs.contains(activeTabID)
+        {
+            next.activeComposeTabID = activeTabID
+        }
+
+        guard next != previous else {
+            return ProjectionOutcome(workspace: previous, isProtected: false, protectedClaimCount: 0)
+        }
+        let changedClaims = protectedClaims.filter { claim in
+            let previousTab = previous.composeTabs.first(where: { $0.id == claim.identity.tabID })
+            return previousTab != (keptTabsByID[claim.identity.tabID] ?? claim.tab)
+                || previous.stashedTabs.contains(where: { $0.tab.id == claim.identity.tabID })
+                || (claim.isActive && previous.activeComposeTabID != claim.identity.tabID)
+        }
+        recordProjectionProtection(
+            claims: changedClaims,
+            previousTabs: previous.composeTabs,
+            reason: "stale_projection_reconciled"
         )
+        return ProjectionOutcome(workspace: next, isProtected: true, protectedClaimCount: changedClaims.count)
     }
 
     func record(_ event: Event) {

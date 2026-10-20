@@ -223,7 +223,10 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
         let discardResult = await viewModel.mcpDiscardSessionTarget(target)
         XCTAssertEqual(discardResult, .complete)
         XCTAssertNotNil(viewModel.session(for: target.tabID, createIfNeeded: false))
-        XCTAssertNotNil(window.workspaceManager.composeTab(with: target.tabID))
+        XCTAssertNotEqual(
+            window.workspaceManager.contentGateway.uniqueTabIdentity(tabID: target.tabID, includeStashed: false),
+            .notFound
+        )
         XCTAssertEqual(providerDispatchCount, 1)
     }
 

@@ -92,10 +92,10 @@ final class GlobalKeyboardShortcutsCoordinator {
 
     private func saveAndExitWorkspace() {
         guard let win = guardedFocusedWindowState() else { return }
-        guard let fallback = win.workspaceManager.workspaces.first(where: { $0.isSystemWorkspace }) else { return }
+        guard let fallback = win.workspaceManager.listedWorkspaceCatalog().first(where: \.isSystemWorkspace) else { return }
         Task {
             win.workspaceManager.pollAndSaveState()
-            _ = await win.workspaceManager.requestWorkspaceSwitch(to: fallback)
+            _ = await win.workspaceManager.requestWorkspaceSwitch(toWorkspaceID: fallback.workspaceID)
         }
     }
 

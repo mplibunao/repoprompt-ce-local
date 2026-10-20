@@ -14,7 +14,7 @@ import XCTest
                 workspaceID: fixture.workspace.id
             )
 
-            try fixture.window.mcpServer.bindTabForConnection(
+            try await fixture.window.mcpServer.bindTabForConnection(
                 connectionID: fixture.connectionID,
                 clientName: "BindContextFileAuthorityTests",
                 tabID: fixture.contextID,
@@ -37,7 +37,7 @@ import XCTest
                 tabID: fixture.contextID,
                 workspaceID: fixture.workspace.id
             )
-            try fixture.window.mcpServer.bindTabForConnection(
+            try await fixture.window.mcpServer.bindTabForConnection(
                 connectionID: fixture.connectionID,
                 clientName: nil,
                 tabID: fixture.contextID,
@@ -72,7 +72,7 @@ import XCTest
                 tabID: fixture.contextID,
                 workspaceID: fixture.workspace.id
             )
-            try fixture.window.mcpServer.bindTabForConnection(
+            try await fixture.window.mcpServer.bindTabForConnection(
                 connectionID: fixture.connectionID,
                 clientName: nil,
                 tabID: fixture.contextID,
@@ -84,14 +84,17 @@ import XCTest
                 forConnection: fixture.connectionID
             )
 
-            XCTAssertThrowsError(try fixture.window.mcpServer.bindTabForConnection(
-                connectionID: fixture.connectionID,
-                clientName: nil,
-                tabID: UUID(),
-                workspaceID: UUID(),
-                windowID: fixture.window.windowID,
-                frozenFileToolAuthority: authority
-            ))
+            do {
+                try await fixture.window.mcpServer.bindTabForConnection(
+                    connectionID: fixture.connectionID,
+                    clientName: nil,
+                    tabID: UUID(),
+                    workspaceID: UUID(),
+                    windowID: fixture.window.windowID,
+                    frozenFileToolAuthority: authority
+                )
+                XCTFail("A bind to an unknown tab should throw.")
+            } catch {}
 
             let retained = fixture.window.mcpServer.connectionBindingSnapshot(
                 forConnection: fixture.connectionID
@@ -168,7 +171,7 @@ import XCTest
                 tabID: prior.contextID,
                 workspaceID: prior.workspace.id
             )
-            try prior.window.mcpServer.bindTabForConnection(
+            try await prior.window.mcpServer.bindTabForConnection(
                 connectionID: prior.connectionID,
                 clientName: nil,
                 tabID: prior.contextID,
@@ -255,21 +258,21 @@ import XCTest
                 additionalTabIDs: [replacementTabID]
             )
             let server = fixture.window.mcpServer
-            try server.bindTabForConnection(
+            try await server.bindTabForConnection(
                 connectionID: fixture.connectionID,
                 clientName: nil,
                 tabID: fixture.contextID,
                 workspaceID: fixture.workspace.id,
                 windowID: fixture.window.windowID
             )
+            let replacement = try await server.prepareTabBinding(
+                connectionID: fixture.connectionID,
+                tabID: replacementTabID,
+                workspaceID: fixture.workspace.id,
+                windowID: fixture.window.windowID
+            )
             installWorktreeBindingHydration(on: server) {
-                try? server.bindTabForConnection(
-                    connectionID: fixture.connectionID,
-                    clientName: nil,
-                    tabID: replacementTabID,
-                    workspaceID: fixture.workspace.id,
-                    windowID: fixture.window.windowID
-                )
+                try? server.installPreparedTabBinding(replacement, clientName: nil)
             }
             let staleCompletionsBefore = server.fileToolLookupContextStaleCompletionCount
 
@@ -285,7 +288,7 @@ import XCTest
         func testBoundRouteWithoutFrozenAuthorityResolvesAuthority() async throws {
             let fixture = try await makeFixture(rootPaths: [makeTemporaryRoot().path])
             let server = fixture.window.mcpServer
-            try server.bindTabForConnection(
+            try await server.bindTabForConnection(
                 connectionID: fixture.connectionID,
                 clientName: nil,
                 tabID: fixture.contextID,
@@ -353,21 +356,21 @@ import XCTest
                 additionalTabIDs: [replacementTabID]
             )
             let server = fixture.window.mcpServer
-            try server.bindTabForConnection(
+            try await server.bindTabForConnection(
                 connectionID: fixture.connectionID,
                 clientName: nil,
                 tabID: fixture.contextID,
                 workspaceID: fixture.workspace.id,
                 windowID: fixture.window.windowID
             )
+            let replacement = try await server.prepareTabBinding(
+                connectionID: fixture.connectionID,
+                tabID: replacementTabID,
+                workspaceID: fixture.workspace.id,
+                windowID: fixture.window.windowID
+            )
             installRootCatalogCaptureHook(on: fixture) {
-                try? server.bindTabForConnection(
-                    connectionID: fixture.connectionID,
-                    clientName: nil,
-                    tabID: replacementTabID,
-                    workspaceID: fixture.workspace.id,
-                    windowID: fixture.window.windowID
-                )
+                try? server.installPreparedTabBinding(replacement, clientName: nil)
             }
 
             await assertSuperseded {

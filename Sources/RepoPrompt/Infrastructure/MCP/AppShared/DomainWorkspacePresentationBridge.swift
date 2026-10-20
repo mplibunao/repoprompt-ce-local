@@ -24,6 +24,15 @@ struct DomainWorkspaceFailClosedSaveOutcome {
     }
 }
 
+/// Follows the working-document command a client method submits.
+struct DomainWorkingDocumentSubmissionObserver {
+    /// Gets the command's operation ID and the digest of its document, just before the client
+    /// submits it.
+    let willSubmit: @MainActor (_ operationID: UUID, _ digest: String) -> Void
+    /// Gets the command's outcome when the authority answers, before the client method returns.
+    let didAnswer: @MainActor (_ outcome: DomainCommandOutcome) -> Void
+}
+
 /// Revisioned app-process client for the runtime-owned workspace/context authority.
 /// It is the only production persistence dependency injected into a workspace manager.
 struct DomainWorkspaceAuthorityClient {
@@ -87,16 +96,20 @@ struct DomainWorkspaceAuthorityClient {
         fileURL: URL,
         expectedWorkspaceRevision: UInt64?,
         conflictRecoveryPolicy: DomainWorkspaceConflictRecoveryPolicy? = nil,
-        operationID: UUID = UUID()
+        operationID: UUID = UUID(),
+        workingDocumentObserver: DomainWorkingDocumentSubmissionObserver? = nil
     ) async throws -> DomainCommandOutcome {
         let document = try document(for: workspace, fileURL: fileURL)
-        return await executeStable(.init(
+        await workingDocumentObserver?.willSubmit(operationID, document.contentDigest)
+        let outcome = await executeStable(.init(
             operationID: operationID,
             expectedWorkspaceRevision: expectedWorkspaceRevision,
             conflictRecoveryPolicy: conflictRecoveryPolicy,
             origin: .appPresentation(windowID: windowID),
             command: .replaceWorkingDocument(document)
         ))
+        await workingDocumentObserver?.didAnswer(outcome)
+        return outcome
     }
 
     func save(
@@ -104,17 +117,20 @@ struct DomainWorkspaceAuthorityClient {
         fileURL: URL,
         expectedWorkspaceRevision: UInt64?,
         expectedContentDigest: String?,
-        operationIDs: DomainWorkspaceSaveOperationIDs = .init()
+        operationIDs: DomainWorkspaceSaveOperationIDs = .init(),
+        workingDocumentObserver: DomainWorkingDocumentSubmissionObserver? = nil
     ) async throws -> DomainCommandOutcome {
         let document = try document(for: workspace, fileURL: fileURL)
         var saveRevision = expectedWorkspaceRevision
         if document.contentDigest != expectedContentDigest {
+            await workingDocumentObserver?.willSubmit(operationIDs.working, document.contentDigest)
             let working = await executeStable(.init(
                 operationID: operationIDs.working,
                 expectedWorkspaceRevision: expectedWorkspaceRevision,
                 origin: .appPresentation(windowID: windowID),
                 command: .replaceWorkingDocument(document)
             ))
+            await workingDocumentObserver?.didAnswer(working)
             guard working.isSuccessfulDomainMutation else { return working }
             saveRevision = working.after?.workingRevision
                 ?? working.workspace?.revisions.workingRevision
@@ -134,12 +150,14 @@ struct DomainWorkspaceAuthorityClient {
         fileURL: URL,
         expectedWorkspaceRevision: UInt64,
         expectedContentDigest: String,
-        operationIDs: DomainWorkspaceSaveOperationIDs = .init()
+        operationIDs: DomainWorkspaceSaveOperationIDs = .init(),
+        workingDocumentObserver: DomainWorkingDocumentSubmissionObserver? = nil
     ) async throws -> DomainWorkspaceFailClosedSaveOutcome {
         let document = try document(for: workspace, fileURL: fileURL)
         var saveRevision = expectedWorkspaceRevision
         var workingOutcome: DomainCommandOutcome?
         if document.contentDigest != expectedContentDigest {
+            await workingDocumentObserver?.willSubmit(operationIDs.working, document.contentDigest)
             let working = await executeStable(.init(
                 operationID: operationIDs.working,
                 expectedWorkspaceRevision: expectedWorkspaceRevision,
@@ -147,6 +165,7 @@ struct DomainWorkspaceAuthorityClient {
                 origin: .appPresentation(windowID: windowID),
                 command: .replaceWorkingDocument(document)
             ))
+            await workingDocumentObserver?.didAnswer(working)
             workingOutcome = working
             guard working.isSuccessfulDomainMutation else {
                 return DomainWorkspaceFailClosedSaveOutcome(
@@ -169,6 +188,21 @@ struct DomainWorkspaceAuthorityClient {
             working: workingOutcome,
             saved: saved
         )
+    }
+
+    /// Saves the working document as it stands at exactly `expectedWorkspaceRevision`. It submits no
+    /// document, so it can't create a newer working revision.
+    func saveWorkingDocument(
+        _ workspaceID: UUID,
+        expectedWorkspaceRevision: UInt64
+    ) async -> DomainCommandOutcome {
+        await executeStable(.init(
+            operationID: UUID(),
+            expectedWorkspaceRevision: expectedWorkspaceRevision,
+            conflictRecoveryPolicy: .failClosed,
+            origin: .appPresentation(windowID: windowID),
+            command: .saveWorkspaceDocument(workspaceID: workspaceID)
+        ))
     }
 
     func delete(
@@ -224,12 +258,16 @@ final class DomainWorkspacePresentationBridge {
     private weak var workspaceManager: WorkspaceManagerViewModel?
     private let client: DomainWorkspaceAuthorityClient
     private var subscriptionTask: Task<Void, Never>?
+    private var subscriptionGeneration: UInt64 = 0
     private var didCompleteInitialProjection = false
     private var initialProjectionWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastPublicationSequence: UInt64 = 0
     #if DEBUG
         private var defaultWorkspaceCreationWillBeginHandlerForTesting:
             (@MainActor (UUID) async -> Void)?
+        /// Runs before the bridge consumes each event, so a test can act while the window hasn't
+        /// projected that event.
+        var eventConsumptionWillBeginHandlerForTesting: (@MainActor (DomainWorkspaceEvent) async -> Void)?
     #endif
     private var projectedDigests: [UUID: String] = [:]
     private var projectedHealth: [UUID: DomainAuthorityHealth] = [:]
@@ -248,6 +286,7 @@ final class DomainWorkspacePresentationBridge {
         subscriptionTask?.cancel()
         subscriptionTask = nil
         completeInitialProjection()
+        workspaceManager?.endProjection()
         projectedDigests.removeAll(keepingCapacity: false)
         projectedHealth.removeAll(keepingCapacity: false)
         projectedModels.removeAll(keepingCapacity: false)
@@ -282,8 +321,8 @@ final class DomainWorkspacePresentationBridge {
                 && workspaceManager.map { $0.domainSummaryProjectionSequenceForTesting >= publicationSequence } ?? true
         }
 
-        func suppressSelfEchoForTesting(_ event: DomainWorkspaceEvent) async -> Bool {
-            await suppressSelfEcho(for: event)
+        func suppressSelfEchoForTesting(_ event: DomainWorkspaceEvent) -> Bool {
+            suppressSelfEcho(for: event)
         }
 
         func setDefaultWorkspaceCreationWillBeginHandlerForTesting(
@@ -308,10 +347,14 @@ final class DomainWorkspacePresentationBridge {
 
     func start() {
         guard subscriptionTask == nil else { return }
+        workspaceManager?.beginProjection()
+        subscriptionGeneration &+= 1
+        let generation = subscriptionGeneration
         subscriptionTask = Task { [weak self, client] in
             let subscription = await client.store.subscribe()
             guard subscription.snapshot.isBootstrapped else {
                 self?.completeInitialProjection()
+                self?.subscriptionDidEnd(generation)
                 return
             }
             if let self {
@@ -322,7 +365,15 @@ final class DomainWorkspacePresentationBridge {
                 guard !Task.isCancelled, let self else { return }
                 await self.consume(event)
             }
+            self?.subscriptionDidEnd(generation)
         }
+    }
+
+    /// Ends projection for a subscription that ended on its own. After `stop`, which already ended
+    /// it, a later generation's subscription owns projection.
+    private func subscriptionDidEnd(_ generation: UInt64) {
+        guard generation == subscriptionGeneration, subscriptionTask != nil else { return }
+        workspaceManager?.endProjection()
     }
 
     private func projectInitial(_ snapshot: DomainWorkspaceCatalogSnapshot) async {
@@ -352,64 +403,71 @@ final class DomainWorkspacePresentationBridge {
                 initial = await client.snapshot()
             }
         }
+        let summaries = await client.summarySnapshot()
         project(initial, force: true)
-        await projectSummaries()
+        applySummaries(summaries)
     }
 
     private func consume(_ event: DomainWorkspaceEvent) async {
         guard event.sequence > lastPublicationSequence else { return }
+        #if DEBUG
+            if let handler = eventConsumptionWillBeginHandlerForTesting {
+                await handler(event)
+            }
+        #endif
         let gap = lastPublicationSequence != 0 && event.sequence != lastPublicationSequence &+ 1
-        if !gap, await suppressSelfEcho(for: event) {
+        // A gap's snapshot, like any projection, drops the copy-sourced registrations it covers.
+        if !gap, suppressSelfEcho(for: event) {
             await projectSummaries()
             return
         }
+        // Both snapshots are read before either is installed, and the models and summaries install
+        // in one main-actor turn. A projection wait that the model install resumes, and any other
+        // main-actor code, then never sees the models ahead of the summaries.
         let snapshot = await client.snapshot()
+        let summaries = await client.summarySnapshot()
         project(
             snapshot,
             force: gap || event.kind == .externalReloaded
         )
-        await projectSummaries()
+        applySummaries(summaries)
     }
 
     /// Every consumed event refreshes the summaries, the self-echo of this window's own commit
     /// included, because that commit can rename or restash a tab. The manager drops older sequences.
     private func projectSummaries() async {
-        let summaries = await client.summarySnapshot()
+        await applySummaries(client.summarySnapshot())
+    }
+
+    private func applySummaries(_ summaries: DomainWorkspaceSummaryCatalogSnapshot) {
         guard !Task.isCancelled else { return }
         workspaceManager?.applyDomainWorkspaceSummaryProjection(summaries)
     }
 
-    /// The originating window already applied its command outcome (revisions + digest) via
-    /// `applyDomainAuthorityOutcome`, so echoing its own commit back through a full catalog
-    /// snapshot plus a MainActor document decode would only amplify every capture by W windows.
-    /// Bookkeeping is refreshed from a single-workspace snapshot instead.
-    private func suppressSelfEcho(for event: DomainWorkspaceEvent) async -> Bool {
+    /// Applies an event as this window's own when its command submitted a document this window's
+    /// copy produced. The copy already contains that document. The bridge records the event's
+    /// revisions and the digest the window submitted instead of decoding the workspace. Every other
+    /// event projects, this window's gateway commits included.
+    private func suppressSelfEcho(for event: DomainWorkspaceEvent) -> Bool {
         let suppressibleKinds: Set<DomainWorkspaceEventKind> = [
             .workingStateCommitted, .savedDocumentCommitted, .operationDeduplicated
         ]
-        guard case let .appPresentation(originWindowID) = event.origin,
-              originWindowID == client.windowID,
-              suppressibleKinds.contains(event.kind),
-              let workspaceID = event.workspaceID,
-              projectedModels[workspaceID] != nil
+        guard let operationID = event.operationID,
+              let workspaceManager,
+              let submission = workspaceManager.takeCopySourcedSubmission(operationID)
         else { return false }
-        guard let workspace = await client.canonicalWorkspaceSnapshot(workspaceID),
-              workspace.health.acceptsMutations,
-              let model = workspaceManager?.workspace(withID: workspaceID)
+        guard suppressibleKinds.contains(event.kind),
+              event.workspaceID == submission.workspaceID,
+              let revisions = event.revisions,
+              projectedModels[submission.workspaceID] != nil,
+              let model = workspaceManager.workspace(withID: submission.workspaceID)
         else { return false }
-        // A same-window commit can be accepted just before a newer local edit is captured. Keep the
-        // local model in both the manager and bridge cache: advancing the baseline below lets the
-        // newer edit commit from the accepted revision, and explicit failed-save reconciliation
-        // remains responsible for authoritative replacement when a two-phase cleanup save does not
-        // complete. The outcome does not depend on re-encoding the model to compare digests.
-        projectedModels[workspaceID] = model
-        projectedDigests[workspaceID] = workspace.document.contentDigest
-        projectedHealth[workspaceID] = workspace.health
-        workspaceManager?.applyDomainAuthorityBaseline(
-            workspaceID: workspaceID,
-            revisions: workspace.revisions,
-            digest: workspace.document.contentDigest,
-            health: workspace.health,
+        projectedModels[submission.workspaceID] = model
+        projectedDigests[submission.workspaceID] = submission.digest
+        workspaceManager.applyCopySourcedCommit(
+            workspaceID: submission.workspaceID,
+            revisions: revisions,
+            digest: submission.digest,
             catalogRevision: event.catalogRevision
         )
         lastPublicationSequence = event.sequence
@@ -473,6 +531,7 @@ final class DomainWorkspacePresentationBridge {
             }
         } catch {
             workspaceManager?.reportDomainProjectionFailure(error)
+            workspaceManager?.recordFailedProjection(revisionsByWorkspaceID: revisions.mapValues(\.workingRevision))
             return
         }
 
@@ -481,6 +540,7 @@ final class DomainWorkspacePresentationBridge {
         }
         guard decoded.count == snapshot.workspaces.count else {
             workspaceManager?.reportDomainProjectionFailure(DomainProjectionError.incompleteSnapshot)
+            workspaceManager?.recordFailedProjection(revisionsByWorkspaceID: revisions.mapValues(\.workingRevision))
             return
         }
         projectedModels = nextModels

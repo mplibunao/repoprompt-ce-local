@@ -270,7 +270,11 @@ class WindowState: ObservableObject {
             return nil
         }
 
-        let rawTitle = promptManager.activeComposeTabID.flatMap { workspaceManager.composeTabName(with: $0) }
+        let rawTitle = promptManager.activeComposeTabID.flatMap { tabID in
+            workspaceManager.contentGateway.listedTab(
+                WorkspaceSelectionIdentity(workspaceID: activeWorkspace.id, tabID: tabID)
+            )?.name
+        }
         return AgentSessionRestoreSupport.normalizedSessionTitle(rawTitle)
     }
 
@@ -845,17 +849,19 @@ class WindowState: ObservableObject {
 
     private func currentAgentTitlebarChatOptionsTarget() -> AgentChatOptionsMenuTarget? {
         guard wantsAgentTitlebarAccessory,
-              let workspace = workspaceManager.activeWorkspace,
+              let workspaceID = workspaceManager.activeWorkspaceID,
               let tabID = promptManager.activeComposeTabID,
               agentModeViewModel.currentTabID == tabID,
-              let tab = workspace.composeTabs.first(where: { $0.id == tabID }),
+              let tab = workspaceManager.contentGateway.shownComposeTab(
+                  WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+              ),
               let agentSessionID = agentModeViewModel.explicitActiveSessionID(for: tabID)
         else {
             return nil
         }
         return AgentChatOptionsMenuTarget(
             windowID: windowID,
-            workspaceID: workspace.id,
+            workspaceID: workspaceID,
             tabID: tabID,
             agentSessionID: agentSessionID,
             tabName: tab.name
@@ -864,13 +870,9 @@ class WindowState: ObservableObject {
 
     func agentChatTitleClusterMenuTargetIsValid(_ target: AgentChatOptionsMenuTarget) -> Bool {
         guard target.windowID == windowID,
-              let workspace = workspaceManager.activeWorkspace,
-              workspace.id == target.workspaceID,
-              workspace.composeTabs.contains(where: { $0.id == target.tabID })
-        else {
-            return false
-        }
-        guard let tab = workspace.composeTabs.first(where: { $0.id == target.tabID }),
+              let tab = workspaceManager.contentGateway.shownComposeTab(
+                  WorkspaceSelectionIdentity(workspaceID: target.workspaceID, tabID: target.tabID)
+              ),
               tab.name == target.tabName
         else {
             return false
@@ -881,7 +883,9 @@ class WindowState: ObservableObject {
     func agentChatTitleClusterMenuSnapshot() -> AgentChatOptionsMenuSnapshot? {
         guard let target = currentAgentTitlebarChatOptionsTarget(),
               agentChatTitleClusterMenuTargetIsValid(target),
-              let tab = workspaceManager.activeWorkspace?.composeTabs.first(where: { $0.id == target.tabID })
+              let tab = workspaceManager.contentGateway.shownComposeTab(
+                  WorkspaceSelectionIdentity(workspaceID: target.workspaceID, tabID: target.tabID)
+              )
         else {
             refreshAgentChatTitleCluster()
             return nil
@@ -1253,7 +1257,7 @@ class WindowState: ObservableObject {
                 // the observer below only fires for non-system workspaces.
                 unresolvedRestoreEntry = nil
             }
-            _ = await workspaceManager.requestWorkspaceSwitch(to: target, saveState: true, reason: "restore")
+            _ = await workspaceManager.requestWorkspaceSwitch(toWorkspaceID: target.id, saveState: true, reason: "restore")
             #if DEBUG
                 if let restoreStartMS {
                     WorkspaceRestorePerfLog.log(
@@ -1322,7 +1326,7 @@ class WindowState: ObservableObject {
     func routeToAgentSession(_ route: AgentSessionDeepLinkRoute) async -> AgentSessionRouteResult {
         await waitForWorkspaceInitializationForRouting()
 
-        guard let targetWorkspace = workspaceManager.workspace(withID: route.workspaceID) else {
+        guard workspaceManager.listedWorkspaceIDs.contains(route.workspaceID) else {
             return .workspaceUnavailable
         }
 
@@ -1334,7 +1338,10 @@ class WindowState: ObservableObject {
         }
 
         if workspaceManager.activeWorkspaceID != route.workspaceID {
-            let switchResult = await workspaceManager.requestWorkspaceSwitch(to: targetWorkspace, saveState: true)
+            let switchResult = await workspaceManager.requestWorkspaceSwitch(
+                toWorkspaceID: route.workspaceID,
+                saveState: true
+            )
             if !switchResult.didSwitch {
                 return .workspaceSwitchBlocked(switchResult.message)
             }
@@ -1346,8 +1353,10 @@ class WindowState: ObservableObject {
             return .workspaceUnavailable
         }
 
-        let tabIsActive = activeWorkspace.composeTabs.contains(where: { $0.id == route.tabID })
-        let tabIsStashed = activeWorkspace.stashedTabs.contains(where: { $0.tab.id == route.tabID })
+        // The workspace is shown now, so the listings come from the window's own copy.
+        let routedTab = WorkspaceSelectionIdentity(workspaceID: route.workspaceID, tabID: route.tabID)
+        let tabIsActive = workspaceManager.contentGateway.listedTab(routedTab, location: .composed) != nil
+        let tabIsStashed = workspaceManager.contentGateway.listedTab(routedTab, location: .stashed) != nil
         guard tabIsActive || tabIsStashed else {
             return .tabUnavailable
         }
@@ -1401,6 +1410,18 @@ class WindowState: ObservableObject {
             _ handler: (@MainActor (UUID) async -> Void)?
         ) {
             domainWorkspacePresentationBridge?.setDefaultWorkspaceCreationWillBeginHandlerForTesting(handler)
+        }
+
+        /// Waits until this window projected the runtime's events through the sequence, summaries
+        /// included. A window without a runtime has nothing to project and returns true.
+        func waitUntilDomainWorkspaceProjectedForTesting(through publicationSequence: UInt64) async -> Bool {
+            await domainWorkspacePresentationBridge?.waitUntilProjected(through: publicationSequence) ?? true
+        }
+
+        func setDomainWorkspaceEventConsumptionWillBeginHandlerForTesting(
+            _ handler: (@MainActor (DomainWorkspaceEvent) async -> Void)?
+        ) {
+            domainWorkspacePresentationBridge?.eventConsumptionWillBeginHandlerForTesting = handler
         }
     #endif
 
@@ -1624,7 +1645,10 @@ class WindowState: ObservableObject {
 
                 // Switch to the existing workspace in this window
                 requestedWorkspaceSwitch = true
-                let result = await workspaceManager.requestWorkspaceSwitch(to: existingWorkspace, saveState: true)
+                let result = await workspaceManager.requestWorkspaceSwitch(
+                    toWorkspaceID: existingWorkspace.id,
+                    saveState: true
+                )
                 didSwitchWorkspace = result.didSwitch
             } else {
                 // Create a brand-new workspace
@@ -1638,7 +1662,7 @@ class WindowState: ObservableObject {
                     ephemeral: shouldBeEphemeral
                 )
                 requestedWorkspaceSwitch = true
-                let result = await workspaceManager.requestWorkspaceSwitch(to: newWS, saveState: true)
+                let result = await workspaceManager.requestWorkspaceSwitch(toWorkspaceID: newWS.id, saveState: true)
                 didSwitchWorkspace = result.didSwitch
             }
         } else if let workspaceName = command.workspaceName, !workspaceName.isEmpty {
@@ -1663,7 +1687,7 @@ class WindowState: ObservableObject {
                 }
 
                 requestedWorkspaceSwitch = true
-                let result = await workspaceManager.requestWorkspaceSwitch(to: existing, saveState: true)
+                let result = await workspaceManager.requestWorkspaceSwitch(toWorkspaceID: existing.id, saveState: true)
                 didSwitchWorkspace = result.didSwitch
             } else {
                 // Create a new workspace by name
@@ -1673,7 +1697,7 @@ class WindowState: ObservableObject {
                     ephemeral: shouldBeEphemeral
                 )
                 requestedWorkspaceSwitch = true
-                let result = await workspaceManager.requestWorkspaceSwitch(to: newWS, saveState: true)
+                let result = await workspaceManager.requestWorkspaceSwitch(toWorkspaceID: newWS.id, saveState: true)
                 didSwitchWorkspace = result.didSwitch
             }
         }

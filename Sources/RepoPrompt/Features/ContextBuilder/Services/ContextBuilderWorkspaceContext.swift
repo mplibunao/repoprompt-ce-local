@@ -186,6 +186,7 @@ struct ContextBuilderWorkspaceContext {
             usedAgentOutputAsPrompt: source.usedAgentOutputAsPrompt,
             selection: source.selection,
             selectionRevision: source.selectionRevision,
+            storedSelectionAtRevision: source.storedSelectionAtRevision,
             selectedMetaPromptIDs: source.selectedMetaPromptIDs,
             selectedContextBuilderPromptIDs: source.selectedContextBuilderPromptIDs,
             tabName: source.tabName,

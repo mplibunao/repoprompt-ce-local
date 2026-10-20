@@ -1,5 +1,6 @@
 import Foundation
 @testable import RepoPromptApp
+import RepoPromptDomainRuntime
 import XCTest
 
 @MainActor
@@ -810,14 +811,96 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         XCTAssertEqual(receivedSelections, [[highPin], [lowPin]])
     }
 
+    /// A tab of a workspace the window doesn't show admits an MCP call, and the call's run starts,
+    /// so a binding that outlives a workspace switch can still run Context Builder on its tab.
+    func testTabOfAWorkspaceTheWindowDoesNotShowAdmitsAnMCPRun() async throws {
+        let root = FileManager.default.temporaryDirectory.path
+        let shownTab = ComposeTabState(name: "Shown")
+        let offscreenTab = ComposeTabState(name: "Offscreen")
+        let shown = WorkspaceModel(
+            name: "Admission shown",
+            repoPaths: [root],
+            composeTabs: [shownTab],
+            activeComposeTabID: shownTab.id
+        )
+        let offscreen = WorkspaceModel(
+            name: "Admission offscreen",
+            repoPaths: [root],
+            composeTabs: [offscreenTab],
+            activeComposeTabID: offscreenTab.id
+        )
+        let (window, _) = try await makeRuntimeBackedGatedWindow(catalog: [shown, offscreen], showing: shown)
+
+        let run = try await startRun(window, tabID: offscreenTab.id, workspaceID: offscreen.id)
+        XCTAssertEqual(window.workspaceManager.activeWorkspaceID, shown.id)
+        await streamGate.open()
+        let completion = try await run.value
+        XCTAssertNotEqual(completion.terminalDisposition, .cancelled)
+    }
+
+    /// An MCP run on a tab of a workspace the window doesn't show ends cancelled once the workspace
+    /// leaves the catalog, as another window's delete makes it do.
+    func testRunEndsCancelledWhenItsWorkspaceLeavesTheCatalog() async throws {
+        let root = FileManager.default.temporaryDirectory.path
+        let shownTab = ComposeTabState(name: "Shown")
+        let offscreenTab = ComposeTabState(name: "Offscreen")
+        let shown = WorkspaceModel(
+            name: "Removal shown",
+            repoPaths: [root],
+            composeTabs: [shownTab],
+            activeComposeTabID: shownTab.id
+        )
+        let offscreen = WorkspaceModel(
+            name: "Removal offscreen",
+            repoPaths: [root],
+            composeTabs: [offscreenTab],
+            activeComposeTabID: offscreenTab.id
+        )
+        let (window, runtime) = try await makeRuntimeBackedGatedWindow(catalog: [shown, offscreen], showing: shown)
+        let viewModel = window.contextBuilderAgentViewModel
+        let run = try await startRun(window, tabID: offscreenTab.id, workspaceID: offscreen.id)
+
+        let otherWindow = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -7401)
+        let deletion = await otherWindow.delete(
+            workspaceID: offscreen.id,
+            expectedCatalogRevision: nil,
+            expectedWorkspaceRevision: nil
+        )
+        XCTAssertTrue(deletion.isSuccessfulDomainMutation, "\(deletion)")
+        let cancelled = await waitUntil {
+            viewModel.activeRunIDForTesting(tabID: offscreenTab.id) == nil
+        }
+        XCTAssertTrue(cancelled, "The run was still active after its workspace left the catalog")
+
+        await streamGate.open()
+        do {
+            _ = try await run.value
+            XCTFail("Expected the run on the removed workspace to end cancelled")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+    }
+
+    /// Runs an MCP call on `tabID` of `workspaceID`, or of the shown workspace when it is nil.
     private func runMCP(
         _ window: WindowState,
         tabID: UUID,
+        workspaceID: UUID? = nil,
         modelParameterSelections: [ACPModelParameterSelection] = []
     ) async throws -> ContextBuilderAgentViewModel.MCPContextBuilderRunCompletion {
         let viewModel = window.contextBuilderAgentViewModel
-        let authority = try makeAuthority(window, tabID: tabID, modelParameterSelections: modelParameterSelections)
-        let token = try viewModel.beginMCPControlledRun(forTabID: tabID, responseType: nil, planModelName: nil)
+        let authority = try makeAuthority(
+            window,
+            tabID: tabID,
+            workspaceID: workspaceID,
+            modelParameterSelections: modelParameterSelections
+        )
+        let token = try viewModel.beginMCPControlledRun(
+            forTabID: tabID,
+            workspaceID: workspaceID,
+            responseType: nil,
+            planModelName: nil
+        )
         return try await AsyncScope.withCleanup({}, cleanup: {
             await viewModel.clearMCPControlledRun(forTabID: tabID, controlToken: token)
         }) {
@@ -828,14 +911,15 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
     private func makeAuthority(
         _ window: WindowState,
         tabID: UUID,
+        workspaceID: UUID? = nil,
         modelParameterSelections: [ACPModelParameterSelection] = []
     ) throws -> ContextBuilderResolvedRunAuthority {
-        let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
-        let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID)
+        let workspaceID = try XCTUnwrap(workspaceID ?? window.workspaceManager.activeWorkspaceID)
+        let identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
         var nested = MCPServerViewModel.TabContextSnapshot(
             tabID: tabID,
             windowID: window.mcpServer.windowID,
-            workspaceID: workspace.id,
+            workspaceID: workspaceID,
             promptText: "",
             selection: StoredSelection(),
             selectedMetaPromptIDs: [],
@@ -891,10 +975,11 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
     /// provider, so `providers` stays in start order. A run that never starts fails the test here.
     private func startRun(
         _ window: WindowState,
-        tabID: UUID
+        tabID: UUID,
+        workspaceID: UUID? = nil
     ) async throws -> Task<ContextBuilderAgentViewModel.MCPContextBuilderRunCompletion, Error> {
         let providerCount = providers.count
-        let run = Task { try await self.runMCP(window, tabID: tabID) }
+        let run = Task { try await self.runMCP(window, tabID: tabID, workspaceID: workspaceID) }
         let started = await waitUntil {
             self.providers.count > providerCount
                 && window.contextBuilderAgentViewModel.activeRunIDForTesting(tabID: tabID) != nil
@@ -905,6 +990,53 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
             started ? run : nil,
             "The run on tab \(tabID) did not start after \(providerCount) earlier run(s) had started"
         )
+    }
+
+    /// A window over a runtime-backed catalog of `catalog` that shows `shown`, with `makeGatedWindow`'s
+    /// providers, and the runtime. It lists every other workspace from the catalog's summaries, as
+    /// the app does.
+    private func makeRuntimeBackedGatedWindow(
+        catalog: [WorkspaceModel],
+        showing shown: WorkspaceModel
+    ) async throws -> (window: WindowState, runtime: MCPDomainRuntime) {
+        let fixture = try await RuntimeBackedWorkspaceFixture(name: "ContextBuilderWindowAdmissionTests")
+        addTeardownBlock { @MainActor in
+            await fixture.tearDown()
+        }
+        for workspace in catalog {
+            try fixture.writeWorkspace(workspace)
+        }
+        try fixture.writeLegacyIndex(catalog)
+        let runtime = try await fixture.makeRuntime(profileIdentifier: "context-builder-admission")
+        let window = WindowState(
+            domainRuntime: runtime,
+            contextBuilderProviderFactory: { [unowned self] _, _, _, _ in
+                let provider = GatedHeadlessAgentProvider(streamGate: streamGate)
+                providers.append(provider)
+                return provider
+            }
+        )
+        addTeardownBlock { @MainActor in
+            await self.streamGate.open()
+            for provider in self.providers {
+                await provider.allowDispose()
+            }
+            _ = await window.mcpServer.setWindowToolsEnabled(false)
+            window.beginClose()
+            await window.tearDown()
+        }
+        await window.workspaceManager.awaitInitialized()
+        _ = await window.workspaceManager.requestWorkspaceSwitch(
+            toWorkspaceID: shown.id,
+            saveState: true,
+            reason: "contextBuilderWindowAdmissionTest"
+        )
+        XCTAssertEqual(window.workspaceManager.activeWorkspaceID, shown.id)
+        let sequence = await runtime.workspaceStore.summarySnapshot().publicationSequence
+        let projected = await window.waitUntilDomainWorkspaceProjectedForTesting(through: sequence)
+        XCTAssertTrue(projected, "The window didn't project the catalog's summaries")
+        _ = await window.mcpServer.setWindowToolsEnabled(true)
+        return (window, runtime)
     }
 
     private func makeWindow(

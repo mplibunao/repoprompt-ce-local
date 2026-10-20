@@ -3364,47 +3364,46 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         workspaceManager?.setAgentSessionProjectionReconciler { [weak self] projected, current in
             guard let self else {
                 return AgentSessionLifecycleAuthority.ProjectionOutcome(
-                    workspaces: projected,
-                    protectedWorkspaceIDs: [],
+                    workspace: projected,
+                    isProtected: false,
                     protectedClaimCount: 0
                 )
             }
             return sessionLifecycleAuthority.reconcileProjection(
-                projectedWorkspaces: projected,
-                currentWorkspaces: current,
+                projectedWorkspace: projected,
+                currentWorkspace: current,
                 claims: agentSessionLifecycleProtectionClaims(in: current)
             )
         }
     }
 
+    /// The live and pinned tabs of the shown workspace, from the window's copy of it.
     private func agentSessionLifecycleProtectionClaims(
-        in workspaces: [WorkspaceModel]
+        in workspace: WorkspaceModel
     ) -> [AgentSessionLifecycleAuthority.ProtectionClaim] {
-        workspaces.flatMap { workspace in
-            workspace.composeTabs.compactMap { tab in
-                let sessionID = tab.activeAgentSessionID
-                let liveSession = sessionID.flatMap { expectedSessionID in
-                    sessions[tab.id]?.activeAgentSessionID == expectedSessionID
-                        ? sessions[tab.id]
-                        : nil
-                }
-                let isLive = liveSession != nil
-                guard isLive || tab.isPinned else { return nil }
-                return AgentSessionLifecycleAuthority.ProtectionClaim(
-                    identity: AgentSessionLifecycleAuthority.Identity(
-                        workspaceID: workspace.id,
-                        tabID: tab.id,
-                        sessionID: sessionID,
-                        persistentBindingGeneration: liveSession?.persistentSessionBindingIdentity?.generation,
-                        bindingTransitionGeneration: liveSession?.bindingTransitionGeneration ?? 0
-                    ),
-                    tab: tab,
-                    isLive: isLive,
-                    isActive: workspace.activeComposeTabID == tab.id,
-                    isPinned: tab.isPinned,
-                    hasActiveRun: liveSession?.runState.isActive == true
-                )
+        workspace.composeTabs.compactMap { tab in
+            let sessionID = tab.activeAgentSessionID
+            let liveSession = sessionID.flatMap { expectedSessionID in
+                sessions[tab.id]?.activeAgentSessionID == expectedSessionID
+                    ? sessions[tab.id]
+                    : nil
             }
+            let isLive = liveSession != nil
+            guard isLive || tab.isPinned else { return nil }
+            return AgentSessionLifecycleAuthority.ProtectionClaim(
+                identity: AgentSessionLifecycleAuthority.Identity(
+                    workspaceID: workspace.id,
+                    tabID: tab.id,
+                    sessionID: sessionID,
+                    persistentBindingGeneration: liveSession?.persistentSessionBindingIdentity?.generation,
+                    bindingTransitionGeneration: liveSession?.bindingTransitionGeneration ?? 0
+                ),
+                tab: tab,
+                isLive: isLive,
+                isActive: workspace.activeComposeTabID == tab.id,
+                isPinned: tab.isPinned,
+                hasActiveRun: liveSession?.runState.isActive == true
+            )
         }
     }
 
@@ -3414,14 +3413,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     ) -> AgentSessionLifecycleAuthority.Identity? {
         guard let session = sessions[tabID],
               session.activeAgentSessionID == expectedSessionID,
-              let workspace = workspaceManager?.workspaces.first(where: { workspace in
-                  workspace.composeTabs.contains(where: {
-                      $0.id == tabID && $0.activeAgentSessionID == expectedSessionID
-                  })
+              let listedTab = firstListedTab(tabID, location: .composed, where: {
+                  $0.activeAgentSessionID == expectedSessionID
               })
         else { return nil }
         return AgentSessionLifecycleAuthority.Identity(
-            workspaceID: workspace.id,
+            workspaceID: listedTab.identity.workspaceID,
             tabID: tabID,
             sessionID: expectedSessionID,
             persistentBindingGeneration: session.persistentSessionBindingIdentity?.generation,
@@ -3429,23 +3426,34 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         )
     }
 
-    private func agentSessionLifecycleClaim(
+    /// What a lifecycle mutation checks and records about a target that a live session owns. A live
+    /// session protects its tab.
+    private struct AgentSessionLifecycleTargetState {
+        let identity: AgentSessionLifecycleAuthority.Identity
+        let isActive: Bool
+        let isPinned: Bool
+        let hasActiveRun: Bool
+        let isLive = true
+        let isProtected = true
+    }
+
+    /// The target's state from the tab as this window lists it, so a target in a workspace the window
+    /// doesn't show needs no decoded tab.
+    private func agentSessionLifecycleTargetState(
         tabID: UUID,
         expectedSessionID: UUID
-    ) -> AgentSessionLifecycleAuthority.ProtectionClaim? {
+    ) -> AgentSessionLifecycleTargetState? {
         guard let identity = agentSessionLifecycleIdentity(
             tabID: tabID,
             expectedSessionID: expectedSessionID
         ),
-            let workspace = workspaceManager?.workspace(withID: identity.workspaceID),
-            let tab = workspace.composeTabs.first(where: { $0.id == tabID }),
+            let workspace = agentListedWorkspace(identity.workspaceID),
+            let tab = workspace.tab(tabID, location: .composed),
             let session = sessions[tabID]
         else { return nil }
-        return AgentSessionLifecycleAuthority.ProtectionClaim(
+        return AgentSessionLifecycleTargetState(
             identity: identity,
-            tab: tab,
-            isLive: true,
-            isActive: workspace.activeComposeTabID == tabID,
+            isActive: workspace.activeTabID == tabID,
             isPinned: tab.isPinned,
             hasActiveRun: session.runState.isActive
         )
@@ -3457,7 +3465,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         intent: AgentSessionLifecycleAuthority.Intent
     ) throws -> AgentSessionLifecycleAuthority.MutationTarget {
         guard let expectedSessionID else {
-            guard workspaceManager?.composeTab(with: tabID) != nil else {
+            guard firstListedTab(tabID, location: .composed) != nil else {
                 throw MCPError.invalidParams("The Agent session target no longer exists; bind the current context again.")
             }
             if let sessionID = sessions[tabID]?.activeAgentSessionID,
@@ -3471,7 +3479,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return .init(tabID: tabID, identity: nil)
         }
 
-        guard let current = agentSessionLifecycleClaim(
+        guard let current = agentSessionLifecycleTargetState(
             tabID: tabID,
             expectedSessionID: expectedSessionID
         ) else {
@@ -3483,7 +3491,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 identity: nil,
                 previousSessionID: expectedSessionID,
                 currentSessionID: sessions[tabID]?.activeAgentSessionID,
-                isPinned: workspaceManager?.composeTab(with: tabID)?.isPinned ?? false,
+                isPinned: firstListedTab(tabID, location: .composed)?.isPinned ?? false,
                 isLive: sessions[tabID] != nil,
                 isActive: workspaceManager?.activeWorkspace?.activeComposeTabID == tabID,
                 isProtected: false,
@@ -3503,7 +3511,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         intent: AgentSessionLifecycleAuthority.Intent
     ) throws -> TabSession? {
         guard let expected = target.identity else {
-            guard workspaceManager?.composeTab(with: target.tabID) != nil else {
+            guard firstListedTab(target.tabID, location: .composed) != nil else {
                 throw MCPError.invalidParams("The Agent session target no longer exists; bind the current context again.")
             }
             return sessions[target.tabID]
@@ -3513,11 +3521,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 "The Agent session target has no session identity; no mutation was applied."
             )
         }
-        let current = agentSessionLifecycleClaim(
+        let current = agentSessionLifecycleTargetState(
             tabID: expected.tabID,
             expectedSessionID: expectedSessionID
         )
-        switch sessionLifecycleAuthority.validateMutationTarget(expected: expected, current: current) {
+        switch sessionLifecycleAuthority.validateMutationTarget(expected: expected, current: current?.identity) {
         case .success:
             return sessions[target.tabID]
         case let .failure(reason):
@@ -3550,7 +3558,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     ) {
         let claim = target.lifecycleIdentity.flatMap { identity in
             identity.sessionID.flatMap { sessionID in
-                agentSessionLifecycleClaim(tabID: identity.tabID, expectedSessionID: sessionID)
+                agentSessionLifecycleTargetState(tabID: identity.tabID, expectedSessionID: sessionID)
             }
         }
         sessionLifecycleAuthority.record(.init(
@@ -3588,7 +3596,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 identity: target.lifecycleIdentity,
                 previousSessionID: target.sessionID,
                 currentSessionID: sessions[target.tabID]?.activeAgentSessionID,
-                isPinned: workspaceManager?.composeTab(with: target.tabID)?.isPinned ?? false,
+                isPinned: firstListedTab(target.tabID, location: .composed)?.isPinned ?? false,
                 isLive: sessions[target.tabID] != nil,
                 isActive: workspaceManager?.activeWorkspace?.activeComposeTabID == target.tabID,
                 isProtected: false,
@@ -4205,7 +4213,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         guard let session = session(for: tabID, createIfNeeded: false) else {
             if workspaceSwitchInFlight,
                !allowDuringWorkspaceSwitch,
-               workspaceManager?.composeTab(with: tabID) == nil
+               firstListedTab(tabID, location: .composed) == nil
             {
                 activeSessionLoadInProgressTabID = tabID
                 publishLoadingTranscriptPresentation(tabID: tabID)
@@ -4254,10 +4262,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if let sessionID = sessions[tabID]?.activeAgentSessionID {
             return sessionID
         }
-        if let tabSessionID = workspaceManager?.composeTab(with: tabID)?.activeAgentSessionID {
+        if let tabSessionID = firstListedTab(tabID, location: .composed)?.activeAgentSessionID {
             return tabSessionID
         }
-        if let tabSessionID = workspaceManager?.activeAgentSessionID(forTabID: tabID) {
+        if let tabSessionID = listedAgentSessionID(forTabID: tabID) {
             return tabSessionID
         }
         let canUseWorkspaceSnapshot = workspaceSwitchInFlight
@@ -4610,9 +4618,32 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             session.lastUserMessageAt = cachedLastUserMessageAt
         }
         if let tabLastModified = promptManager?.currentComposeTabs.first(where: { $0.id == tabID })?.lastModified
-            ?? workspaceManager?.composeTab(with: tabID)?.lastModified
+            ?? shownComposeTab(tabID)?.lastModified
         {
             session.lastActivityAt = tabLastModified
+        } else {
+            seedLastActivityFromUnshownTab(session, tabID: tabID)
+        }
+    }
+
+    /// A tab's summary has no modification date, so a tab in a workspace the window doesn't show is
+    /// read for it. The date applies only while nothing else has set the session's last activity.
+    private func seedLastActivityFromUnshownTab(_ session: TabSession, tabID: UUID) {
+        guard let workspaceManager, let identity = resolvedComposeTabIdentity(tabID) else { return }
+        let seededLastActivityAt = session.lastActivityAt
+        Task { @MainActor [weak self, weak session, weak workspaceManager] in
+            guard let tab = try? await workspaceManager?.contentGateway.readComposeTab(
+                identity,
+                source: "agentMode.sessionSortMetadata",
+                capturingLiveUIState: false
+            ),
+                let self,
+                let session,
+                sessions[tabID] === session,
+                !session.hasLoadedPersistedState,
+                session.lastActivityAt == seededLastActivityAt
+            else { return }
+            session.lastActivityAt = tab.lastModified
         }
     }
 
@@ -4824,7 +4855,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             break
         case let .compareAndSet(workspaceID):
             guard let workspaceManager else { return nil }
-            let currentWorkspaceSessionID = workspaceManager.activeAgentSessionID(
+            let currentWorkspaceSessionID = listedAgentSessionID(
                 forTabID: session.tabID,
                 inWorkspaceID: workspaceID
             )
@@ -4842,13 +4873,28 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 #endif
                 return nil
             }
-            guard workspaceManager.compareAndSetActiveAgentSessionID(
-                expected: previousSessionID,
-                replacement: sessionID,
-                forTabID: session.tabID,
-                inWorkspaceID: workspaceID
-            ) else {
-                return nil
+            if holdsWorkspaceContent(workspaceID) {
+                guard workspaceManager.compareAndSetHeldActiveAgentSessionID(
+                    expected: previousSessionID,
+                    replacement: sessionID,
+                    for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: session.tabID)
+                ) else {
+                    return nil
+                }
+            } else {
+                // The binding takes effect now, as an edit of the window's copy did, and the
+                // reference reaches the workspace's document through one fail-closed write. Binding
+                // inference targets a workspace the window doesn't hold only when it shows none.
+                let tabID = session.tabID
+                Task { @MainActor [weak self] in
+                    _ = await self?.compareAndSetUnheldAgentSessionReferences(
+                        inWorkspaceID: workspaceID,
+                        tabIDs: [tabID],
+                        expected: previousSessionID,
+                        replacement: sessionID,
+                        operation: "compareAndSetActiveAgentSessionID"
+                    )
+                }
             }
         }
 
@@ -4911,10 +4957,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         let workspaceID = workspaceManager.activeWorkspaceID
             ?? sessionIndexOwner?.workspaceID
             ?? lastKnownWorkspaceSnapshot?.id
-            ?? workspaceManager.workspaces.first(where: { workspace in
-                workspace.composeTabs.contains(where: { $0.id == session.tabID })
-                    || workspace.stashedTabs.contains(where: { $0.tab.id == session.tabID })
-            })?.id
+            ?? firstListedTab(session.tabID)?.identity.workspaceID
         guard let workspaceID else { return nil }
         return installPersistentSessionBinding(
             sessionID: sessionID,
@@ -4965,19 +5008,23 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         var workspaceClaimsByTabID: [UUID: Set<UUID>] = [:]
         var composeTabIDs = Set<UUID>()
 
-        let workspaces = workspaceManager?.workspaces ?? lastKnownWorkspaceSnapshot.map { [$0] } ?? []
+        let workspaces: [AgentListedWorkspace] = if workspaceManager != nil {
+            agentListedCatalog()
+        } else {
+            lastKnownWorkspaceSnapshot.map { [.held($0)] } ?? []
+        }
         for workspace in workspaces {
-            for tab in workspace.composeTabs {
+            workspace.forEachTab(at: .composed) { tab in
                 if workspaceManager != nil {
-                    composeTabIDs.insert(tab.id)
+                    composeTabIDs.insert(tab.identity.tabID)
                 }
                 if let claimedSessionID = tab.activeAgentSessionID {
-                    workspaceClaimsByTabID[tab.id, default: []].insert(claimedSessionID)
+                    workspaceClaimsByTabID[tab.identity.tabID, default: []].insert(claimedSessionID)
                 }
             }
-            for stashed in workspace.stashedTabs {
-                if let claimedSessionID = stashed.tab.activeAgentSessionID {
-                    workspaceClaimsByTabID[stashed.tab.id, default: []].insert(claimedSessionID)
+            workspace.forEachTab(at: .stashed) { tab in
+                if let claimedSessionID = tab.activeAgentSessionID {
+                    workspaceClaimsByTabID[tab.identity.tabID, default: []].insert(claimedSessionID)
                 }
             }
         }
@@ -5194,12 +5241,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
         }
 
-        if let workspaceManager {
-            guard workspaceManager.activeAgentSessionID(forTabID: targetSession.tabID) == targetCurrentSessionID else {
+        if workspaceManager != nil {
+            guard listedAgentSessionID(forTabID: targetSession.tabID) == targetCurrentSessionID else {
                 throw PersistentBindingMutationError.staleTransition
             }
             if let sourceSession, sourceSession !== targetSession {
-                guard workspaceManager.activeAgentSessionID(forTabID: sourceSession.tabID) == requestedSessionID else {
+                guard listedAgentSessionID(forTabID: sourceSession.tabID) == requestedSessionID else {
                     throw PersistentBindingMutationError.staleTransition
                 }
             }
@@ -5758,7 +5805,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         }
 
         let currentBinding = sessions[tabID]?.activeAgentSessionID
-            ?? workspaceManager?.activeAgentSessionID(forTabID: tabID, inWorkspaceID: workspace.id)
+            ?? listedAgentSessionID(forTabID: tabID, inWorkspaceID: workspace.id)
         if currentBinding == sessionID {
             let session = await ensureSessionReady(tabID: tabID, reconnectActiveProviders: true)
             return session.activeAgentSessionID == sessionID ? .ready : .sessionNotFound
@@ -6662,7 +6709,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         }()
         let resolvedSessionID = context.sessionID
         let resolvedSessionName: String? = {
-            if let name = workspaceManager?.composeTabName(with: session.tabID) { return name }
+            if let name = resolvedListedComposeTab(session.tabID)?.name { return name }
             if let name = ownerValidatedSessionIndex[resolvedSessionID]?.name { return name }
             return "Agent Session"
         }()
@@ -7398,11 +7445,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         {
             return
         }
-        guard workspaceManager?.workspaces.first(where: {
-            $0.id == expectedWorkspaceID
-        })?.composeTabs.contains(where: {
-            $0.id == target.tabID && $0.activeAgentSessionID == sessionID
-        }) == true else {
+        // The guard above made `expectedWorkspaceID` the shown workspace.
+        guard let tab = shownComposeTab(target.tabID), tab.activeAgentSessionID == sessionID else {
             throw MCPError.invalidParams(
                 "The Agent session target is no longer owned by the expected workspace."
             )
@@ -7448,7 +7492,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         let sourceSession: TabSession? = if let liveSession = sessions[sourceTabID] {
             liveSession
-        } else if workspaceManager?.composeTab(with: sourceTabID) != nil {
+        } else if firstListedTab(sourceTabID, location: .composed) != nil {
             session(for: sourceTabID, createIfNeeded: true)
         } else {
             nil
@@ -8357,10 +8401,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             )
         }
         if let tabID {
+            // The guard above made a given `expectedWorkspaceID` the shown workspace.
             guard let workspaceManager,
                   let workspaceID = expectedWorkspaceID ?? workspaceManager.activeWorkspaceID,
-                  let tab = workspaceManager.workspaces.first(where: { $0.id == workspaceID })?
-                  .composeTabs.first(where: { $0.id == tabID })
+                  let tab = workspaceManager.contentGateway.shownComposeTab(
+                      WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+                  )
             else {
                 throw MCPError.invalidParams("Tab '\(tabID.uuidString)' was not found in the expected workspace.")
             }
@@ -8418,10 +8464,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 requiresHydratedRuntime: false
             )
         case let .tab(tabID, _, true):
+            // The guard above made a given `expectedWorkspaceID` the shown workspace.
             guard let workspaceManager,
                   let workspaceID = expectedWorkspaceID ?? workspaceManager.activeWorkspaceID,
-                  workspaceManager.workspaces.first(where: { $0.id == workspaceID })?
-                  .composeTabs.first(where: { $0.id == tabID })?.activeAgentSessionID == nil,
+                  let tab = workspaceManager.contentGateway.shownComposeTab(
+                      WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+                  ),
+                  tab.activeAgentSessionID == nil,
                   sessions[tabID]?.activeAgentSessionID == nil
             else {
                 throw MCPError.invalidParams(
@@ -8439,13 +8488,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         expectedWorkspaceID: UUID?,
         requiresHydratedRuntime: Bool
     ) throws {
-        guard let workspaceManager,
-              let workspace = workspaceManager.workspaces.first(where: { workspace in
-                  workspace.composeTabs.contains(where: {
-                      $0.id == tabID && $0.activeAgentSessionID == sessionID
-                  })
+        guard workspaceManager != nil,
+              let listedTab = firstListedTab(tabID, location: .composed, where: {
+                  $0.activeAgentSessionID == sessionID
               }),
-              expectedWorkspaceID.map({ $0 == workspace.id }) ?? true
+              expectedWorkspaceID.map({ $0 == listedTab.identity.workspaceID }) ?? true
         else {
             throw MCPError.invalidParams(
                 "The requested tab and Agent session binding changed after its selector was frozen."
@@ -8585,11 +8632,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
 
         case let .tab(tabID, resolvedSessionID, createsBinding):
+            // The guard above made a given `expectedWorkspaceID` the shown workspace.
             guard let workspaceManager,
                   let expectedWorkspaceID = expectedWorkspaceID ?? workspaceManager.activeWorkspaceID,
-                  workspaceManager.workspaces.first(where: {
-                      $0.id == expectedWorkspaceID
-                  })?.composeTabs.contains(where: { $0.id == tabID }) == true
+                  workspaceManager.contentGateway.shownComposeTab(
+                      WorkspaceSelectionIdentity(workspaceID: expectedWorkspaceID, tabID: tabID)
+                  ) != nil
             else {
                 throw MCPError.invalidParams("Tab '\(tabID.uuidString)' was not found in the expected workspace.")
             }
@@ -8608,7 +8656,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 #if DEBUG
                     await test_afterExplicitTabSessionReady?()
                 #endif
-                guard workspaceManager.activeAgentSessionID(
+                guard listedAgentSessionID(
                     forTabID: tabID,
                     inWorkspaceID: expectedWorkspaceID
                 ) == nil,
@@ -8814,7 +8862,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         parentSessionID: UUID?,
         parentWasLocallyRepresentedAtAdmissionStart: Bool
     ) throws {
-        guard workspaceManager?.composeTab(with: childTabID) != nil else {
+        guard firstListedTab(childTabID, location: .composed) != nil else {
             throw MCPError.invalidParams("The new child Agent session was removed before admission completed.")
         }
         if parentWasLocallyRepresentedAtAdmissionStart,
@@ -8948,9 +8996,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return existingSessionID
         }
         guard let workspaceManager,
-              let owningWorkspaceID = workspaceManager.workspaces.first(where: {
-                  $0.composeTabs.contains(where: { $0.id == session.tabID })
-              })?.id,
+              let owningWorkspaceID = firstListedTab(session.tabID, location: .composed)?.identity.workspaceID,
               owningWorkspaceID == expectedWorkspaceID
         else {
             throw MCPError.invalidParams(
@@ -8964,11 +9010,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             refreshCanonicalState: true
         ) {
             guard workspaceManager.activeWorkspaceID == expectedWorkspaceID,
-                  workspaceManager.workspaces.first(where: {
-                      $0.id == expectedWorkspaceID
-                  })?.composeTabs.contains(where: {
-                      $0.id == session.tabID && $0.activeAgentSessionID == nil
-                  }) == true,
+                  let tab = shownComposeTab(session.tabID),
+                  tab.activeAgentSessionID == nil,
                   sessions[session.tabID] === session,
                   session.activeAgentSessionID == nil
             else {
@@ -8988,64 +9031,64 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
 
             let installedTransitionGeneration = session.bindingTransitionGeneration
-            var shouldRollback = true
-            defer {
-                if shouldRollback {
-                    rollbackProvisionalSessionBinding(
-                        installedBinding,
-                        transitionGeneration: installedTransitionGeneration,
-                        session: session,
-                        workspaceID: expectedWorkspaceID,
-                        workspaceManager: workspaceManager
+            do {
+                try Task.checkCancellation()
+                let persistence = await workspaceManager.pollAndSaveStateWithOutcomeAsync(
+                    workspaceID: expectedWorkspaceID,
+                    source: WorkspaceSaveSource("agentSessionLifecycleExistingTabAdmission"),
+                    allowRetainedAgentAdmissionRecoveryRetry: false
+                )
+                #if DEBUG
+                    await test_afterProvisionalExistingTabBindingInstalled?()
+                #endif
+                try Task.checkCancellation()
+                // The window's copy while it still shows the workspace, and the canonical document
+                // once a switch has taken it away.
+                let durableTabSessionID = try? await workspaceManager.contentGateway.readComposeTab(
+                    WorkspaceSelectionIdentity(workspaceID: expectedWorkspaceID, tabID: session.tabID),
+                    source: "agentMode.existingTabAdmission",
+                    capturingLiveUIState: false
+                ).activeAgentSessionID
+                let bindingStillCurrent = session.persistentSessionBindingIdentity == installedBinding
+                    && session.bindingTransitionGeneration == installedTransitionGeneration
+                    && durableTabSessionID == installedBinding.sessionID
+                let admissionDecision = sessionLifecycleAuthority.decideAdmission(
+                    persistence: persistence,
+                    targetWorkspaceID: expectedWorkspaceID,
+                    bindingStillCurrent: bindingStillCurrent
+                )
+                switch admissionDecision {
+                case .commit:
+                    return installedBinding.sessionID
+                case let .rollback(reason):
+                    sessionLifecycleAuthority.record(.init(
+                        caller: .agentRunStart,
+                        intent: .createOrContinue,
+                        phase: .beforeProviderStart,
+                        decision: .rejected,
+                        identity: nil,
+                        previousSessionID: nil,
+                        currentSessionID: installedBinding.sessionID,
+                        isPinned: firstListedTab(session.tabID, location: .composed)?.isPinned ?? false,
+                        isLive: true,
+                        isActive: workspaceManager.activeWorkspace?.activeComposeTabID == session.tabID,
+                        isProtected: false,
+                        workspaceSaveResult: persistence.diagnosticCategory,
+                        reason: reason.rawValue
+                    ))
+                    throw MCPError.internalError(
+                        "The Agent session binding was rejected by workspace persistence. No provider was started."
                     )
                 }
-            }
-
-            try Task.checkCancellation()
-            let persistence = await workspaceManager.pollAndSaveStateWithOutcomeAsync(
-                workspaceID: expectedWorkspaceID,
-                source: WorkspaceSaveSource("agentSessionLifecycleExistingTabAdmission"),
-                allowRetainedAgentAdmissionRecoveryRetry: false
-            )
-            #if DEBUG
-                await test_afterProvisionalExistingTabBindingInstalled?()
-            #endif
-            try Task.checkCancellation()
-            let bindingStillCurrent = session.persistentSessionBindingIdentity == installedBinding
-                && session.bindingTransitionGeneration == installedTransitionGeneration
-                && workspaceManager.workspaces.first(where: {
-                    $0.id == expectedWorkspaceID
-                })?.composeTabs.contains(where: {
-                    $0.id == session.tabID && $0.activeAgentSessionID == installedBinding.sessionID
-                }) == true
-            let admissionDecision = sessionLifecycleAuthority.decideAdmission(
-                persistence: persistence,
-                targetWorkspaceID: expectedWorkspaceID,
-                bindingStillCurrent: bindingStillCurrent
-            )
-            switch admissionDecision {
-            case .commit:
-                shouldRollback = false
-                return installedBinding.sessionID
-            case let .rollback(reason):
-                sessionLifecycleAuthority.record(.init(
-                    caller: .agentRunStart,
-                    intent: .createOrContinue,
-                    phase: .beforeProviderStart,
-                    decision: .rejected,
-                    identity: nil,
-                    previousSessionID: nil,
-                    currentSessionID: installedBinding.sessionID,
-                    isPinned: workspaceManager.composeTab(with: session.tabID)?.isPinned ?? false,
-                    isLive: true,
-                    isActive: workspaceManager.activeWorkspace?.activeComposeTabID == session.tabID,
-                    isProtected: false,
-                    workspaceSaveResult: persistence.diagnosticCategory,
-                    reason: reason.rawValue
-                ))
-                throw MCPError.internalError(
-                    "The Agent session binding was rejected by workspace persistence. No provider was started."
+            } catch {
+                await rollbackProvisionalSessionBinding(
+                    installedBinding,
+                    transitionGeneration: installedTransitionGeneration,
+                    session: session,
+                    workspaceID: expectedWorkspaceID,
+                    workspaceManager: workspaceManager
                 )
+                throw error
             }
         }
     }
@@ -9056,21 +9099,36 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         session: TabSession,
         workspaceID: UUID,
         workspaceManager: WorkspaceManagerViewModel
-    ) {
-        guard sessions[session.tabID] === session,
-              session.persistentSessionBindingIdentity == installedBinding,
-              session.bindingTransitionGeneration == transitionGeneration,
-              workspaceManager.activeAgentSessionID(
-                  forTabID: session.tabID,
-                  inWorkspaceID: workspaceID
-              ) == installedBinding.sessionID,
-              workspaceManager.compareAndSetActiveAgentSessionID(
-                  expected: installedBinding.sessionID,
-                  replacement: nil,
-                  forTabID: session.tabID,
-                  inWorkspaceID: workspaceID
-              )
-        else { return }
+    ) async {
+        func bindingIsCurrent() -> Bool {
+            sessions[session.tabID] === session
+                && session.persistentSessionBindingIdentity == installedBinding
+                && session.bindingTransitionGeneration == transitionGeneration
+        }
+        guard bindingIsCurrent() else { return }
+        if holdsWorkspaceContent(workspaceID) {
+            guard listedAgentSessionID(
+                forTabID: session.tabID,
+                inWorkspaceID: workspaceID
+            ) == installedBinding.sessionID,
+                workspaceManager.compareAndSetHeldActiveAgentSessionID(
+                    expected: installedBinding.sessionID,
+                    replacement: nil,
+                    for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: session.tabID)
+                )
+            else { return }
+        } else {
+            // A switch took the workspace away during admission. The write compares the reference
+            // on the canonical document.
+            let cleared = await compareAndSetUnheldAgentSessionReferences(
+                inWorkspaceID: workspaceID,
+                tabIDs: [session.tabID],
+                expected: installedBinding.sessionID,
+                replacement: nil,
+                operation: "compareAndSetActiveAgentSessionID"
+            )
+            guard cleared.didChange, bindingIsCurrent() else { return }
+        }
 
         _ = installPersistentSessionBinding(
             sessionID: nil,
@@ -10135,7 +10193,17 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         guard claim.state == .workspaceRecovered,
               let sessionID = target.sessionID,
               let workspaceManager,
-              let workspace = workspaceManager.workspace(withID: claim.identity.workspaceID),
+              pendingMCPSessionTargetDiscards[recoveryID] != nil
+        else { return claim.state == .complete ? .complete : .retainedForRetry }
+        // The session store locates a workspace's session files from its model. A workspace the
+        // window doesn't show is read for this cleanup only.
+        let workspace = try? await workspaceManager.contentGateway.readWorkspaceContent(
+            claim.identity.workspaceID,
+            source: "agentMode.provisionalSessionCleanup",
+            capturingLiveUIState: false
+        )
+        guard claim.state == .workspaceRecovered,
+              let workspace,
               let pending = pendingMCPSessionTargetDiscards[recoveryID]
         else { return claim.state == .complete ? .complete : .retainedForRetry }
 
@@ -10220,12 +10288,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if sessions.values.contains(where: { $0.activeAgentSessionID == sessionID }) {
             return true
         }
-        let workspaces = workspaceManager?.workspaces
-            ?? lastKnownWorkspaceSnapshot.map { [$0] }
-            ?? []
+        let workspaces: [AgentListedWorkspace] = if workspaceManager != nil {
+            agentListedCatalog()
+        } else {
+            lastKnownWorkspaceSnapshot.map { [.held($0)] } ?? []
+        }
         if workspaces.contains(where: { workspace in
-            workspace.composeTabs.contains(where: { $0.activeAgentSessionID == sessionID })
-                || workspace.stashedTabs.contains(where: { $0.tab.activeAgentSessionID == sessionID })
+            workspace.containsTab(where: { $0.activeAgentSessionID == sessionID })
         }) {
             return true
         }
@@ -11334,8 +11403,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             else {
                 return false
             }
-            if let workspaceManager,
-               workspaceManager.activeAgentSessionID(forTabID: session.tabID) != binding.sessionID
+            if workspaceManager != nil,
+               listedAgentSessionID(forTabID: session.tabID) != binding.sessionID
             {
                 return false
             }
@@ -13687,11 +13756,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     }
 
     private func resolvedSessionDisplayName(for tabID: UUID) -> String {
-        normalizedSessionTitle(workspaceManager?.composeTabName(with: tabID))
+        normalizedSessionTitle(resolvedListedComposeTab(tabID)?.name)
     }
 
     func codexThreadDisplayName(for tabID: UUID) -> String {
-        let composeName = workspaceManager?.composeTabName(with: tabID)
+        let composeName = resolvedListedComposeTab(tabID)?.name
         if let composeName,
            !composeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
@@ -14484,7 +14553,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             if let liveBinding = sessions[entry.tabID]?.activeAgentSessionID {
                 return liveBinding == entry.id
             }
-            if let workspaceBinding = workspaceManager?.activeAgentSessionID(forTabID: entry.tabID) {
+            if let workspaceBinding = listedAgentSessionID(forTabID: entry.tabID) {
                 return workspaceBinding == entry.id
             }
             return true
@@ -14709,7 +14778,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         reason _: PromptViewModel.ComposeTabRemovalReason,
         workspaceID: UUID
     ) async -> PromptViewModel.ComposeTabRemovalDecision {
-        guard workspaceManager?.workspaces.contains(where: { $0.id == workspaceID }) == true else {
+        guard agentListedWorkspace(workspaceID) != nil else {
             return .abort(.init(
                 stage: .requiredSessionFlush,
                 tabID: nil,
@@ -14744,13 +14813,15 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         reason: PromptViewModel.ComposeTabRemovalReason,
         workspaceID: UUID
     ) async -> [PromptViewModel.ComposeTabPostRemovalIssue] {
-        let removalWorkspace = workspaceManager?.workspaces.first(where: { $0.id == workspaceID })
+        let removalWorkspace = agentListedWorkspace(workspaceID)
+        // The session store locates a workspace's session files from its model, so the cleanup keeps
+        // the window's copy of a workspace it holds.
+        let removalWorkspaceContent = heldWorkspaceContent(workspaceID)
         var issues: [PromptViewModel.ComposeTabPostRemovalIssue] = []
         let orderedTabIDs = tabIDs.sorted(by: { $0.uuidString < $1.uuidString })
 
-        func tabIsRemoved(_ tabID: UUID, from workspace: WorkspaceModel) -> Bool {
-            !workspace.composeTabs.contains(where: { $0.id == tabID })
-                && !workspace.stashedTabs.contains(where: { $0.tab.id == tabID })
+        func tabIsRemoved(_ tabID: UUID, from workspace: AgentListedWorkspace) -> Bool {
+            workspace.tab(tabID) == nil
         }
 
         let runtimeCleanupTabIDs: Set<UUID> = if workspaceManager == nil {
@@ -14759,7 +14830,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             Set(tabIDs.filter { tabID in
                 switch reason {
                 case .stash:
-                    !removalWorkspace.composeTabs.contains(where: { $0.id == tabID })
+                    removalWorkspace.tab(tabID, location: .composed) == nil
                 case .close, .deleteStashed:
                     tabIsRemoved(tabID, from: removalWorkspace)
                 }
@@ -14789,10 +14860,42 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                             message: "The chat was recreated before durable cleanup."
                         )
                     })
-                    let failures = await agentSessionsBatchDeleter(durableTabIDs, removalWorkspace)
-                    issues.append(contentsOf: failures.map { tabID, failure in
-                        .init(tabID: tabID, reason: reason, message: failure.localizedDescription)
-                    })
+                    var cleanupWorkspace = removalWorkspaceContent
+                    if cleanupWorkspace == nil, !durableTabIDs.isEmpty {
+                        // A workspace the window doesn't hold is read for this cleanup only.
+                        cleanupWorkspace = try? await workspaceManager?.contentGateway.readWorkspaceContent(
+                            workspaceID,
+                            source: "agentMode.removedTabSessionCleanup",
+                            capturingLiveUIState: false
+                        )
+                    }
+                    if let cleanupWorkspace {
+                        // The read can suspend, and a tab can come back meanwhile. Only tabs the
+                        // document still lacks lose their session data.
+                        let deletableTabIDs = durableTabIDs.filter { tabID in
+                            !cleanupWorkspace.composeTabs.contains { $0.id == tabID }
+                                && !cleanupWorkspace.stashedTabs.contains { $0.tab.id == tabID }
+                        }
+                        issues.append(contentsOf: durableTabIDs.subtracting(deletableTabIDs).map { tabID in
+                            .init(
+                                tabID: tabID,
+                                reason: reason,
+                                message: "The chat was recreated before durable cleanup."
+                            )
+                        })
+                        let failures = await agentSessionsBatchDeleter(deletableTabIDs, cleanupWorkspace)
+                        issues.append(contentsOf: failures.map { tabID, failure in
+                            .init(tabID: tabID, reason: reason, message: failure.localizedDescription)
+                        })
+                    } else {
+                        issues.append(contentsOf: durableTabIDs.sorted(by: { $0.uuidString < $1.uuidString }).map { tabID in
+                            .init(
+                                tabID: tabID,
+                                reason: reason,
+                                message: "The owning workspace is no longer available for durable cleanup."
+                            )
+                        })
+                    }
                 } else {
                     issues.append(contentsOf: orderedTabIDs.map { tabID in
                         .init(
@@ -14867,11 +14970,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             if sessions[tabID] == nil {
                 await releaseSessionWorktreeOwnership(sessionID: boundID)
             }
-            let currentRemovalWorkspace = workspaceManager?.workspaces.first(where: { $0.id == workspaceID })
+            let currentRemovalWorkspace = agentListedWorkspace(workspaceID)
             let projectionStillRemoved = currentRemovalWorkspace.map { workspace in
                 switch reason {
                 case .stash:
-                    !workspace.composeTabs.contains(where: { $0.id == tabID })
+                    workspace.tab(tabID, location: .composed) == nil
                 case .close, .deleteStashed:
                     tabIsRemoved(tabID, from: workspace)
                 }
@@ -14897,8 +15000,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             #endif
         }
         if reason != .stash {
-            let durableWorkspace = workspaceManager?.workspaces.first(where: { $0.id == workspaceID }) ?? removalWorkspace
-            if let durableWorkspace {
+            let durableWorkspace = agentListedWorkspace(workspaceID) ?? removalWorkspace
+            if let durableWorkspace,
+               let durableWorkspaceContent = heldWorkspaceContent(workspaceID) ?? removalWorkspaceContent
+            {
                 let durableTabIDs = Set(tabIDs.filter { tabID in
                     tabIsRemoved(tabID, from: durableWorkspace) && sessions[tabID] == nil
                 })
@@ -14910,7 +15015,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                         message: "The chat was recreated before durable cleanup."
                     )
                 })
-                let failures = await agentSessionsBatchDeleter(durableTabIDs, durableWorkspace)
+                let failures = await agentSessionsBatchDeleter(durableTabIDs, durableWorkspaceContent)
                 for tabID in failures.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
                     guard let failure = failures[tabID] else { continue }
                     print("[AgentModeVM] Failed to delete removed session data for \(tabID): \(failure)")
@@ -18035,15 +18140,26 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if promptManager.activeComposeTabID == tabID {
             workspaceManager.publishActiveComposeTabSnapshot(commitToMemory: true)
         }
-        guard var tab = workspaceManager.composeTab(with: tabID) else { return }
-        let updatedSelection = Self.selectionByPromotingPathsToFullSelection(
-            tab.selection,
-            paths: resolvedPaths,
-            lookupContext: lookupContext
-        )
-        guard updatedSelection != tab.selection else { return }
-        tab.selection = updatedSelection
-        workspaceManager.updateComposeTabStoredOnly(tab)
+        guard let identity = resolvedComposeTabIdentity(tabID) else { return }
+        func promoted(_ selection: StoredSelection) -> StoredSelection {
+            Self.selectionByPromotingPathsToFullSelection(
+                selection,
+                paths: resolvedPaths,
+                lookupContext: lookupContext
+            )
+        }
+        if let shownSelection = workspaceManager.shownTabSelection(for: identity) {
+            // The shown tab stores the selection without a prompt UI reload, as before.
+            let updatedSelection = promoted(shownSelection)
+            guard updatedSelection != shownSelection else { return }
+            workspaceManager.storeShownTabSelection(updatedSelection, for: identity)
+            return
+        }
+        // A tab in a workspace the window doesn't show takes one fail-closed write of its selection,
+        // promoted from the canonical one. A refused write leaves the selection as it was.
+        _ = try? await workspaceManager.commitTabSelection(for: identity, mirrorToUIIfActive: false) { selection in
+            promoted(selection)
+        }
     }
 
     static func shouldAttemptTaggedFileAutoSelection(
@@ -18198,7 +18314,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return
         }
         let cutoffItemID = session.items.last(where: { $0.kind != .thinking })?.id
-        let sourceTabName = normalizedSessionTitle(workspaceManager?.composeTabName(with: session.tabID))
+        let sourceTabName = normalizedSessionTitle(resolvedListedComposeTab(session.tabID)?.name)
         let escapedSourceTabName = sourceTabName
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "\"", with: "&quot;")
@@ -20359,7 +20475,16 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if isActiveTab {
             workspaceManager?.publishActiveComposeTabSnapshot(commitToMemory: true)
         }
-        let tabState = workspaceManager?.composeTab(with: tabID)
+        // A tab in a workspace the window doesn't show is read from its canonical document.
+        let tabState: ComposeTabState? = if let identity = resolvedComposeTabIdentity(tabID) {
+            try? await workspaceManager?.contentGateway.readComposeTab(
+                identity,
+                source: "agentMode.initialThreadContext",
+                capturingLiveUIState: false
+            )
+        } else {
+            nil
+        }
         let promptText = isActiveTab ? promptManager.promptText : tabState?.promptText
         let selection = tabState?.selection ?? StoredSelection()
         let lookupContext = await agentWorkspaceLookupContext(tabID: tabID, session: session)
@@ -20515,7 +20640,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         let resolvedSessionID = explicitSessionID
             ?? sessions[tabID]?.activeAgentSessionID
-            ?? workspaceManager?.activeAgentSessionID(forTabID: tabID, inWorkspaceID: workspace.id)
+            ?? listedAgentSessionID(forTabID: tabID, inWorkspaceID: workspace.id)
         return AgentSessionDeepLinkRoute(
             windowID: windowID,
             workspaceID: workspace.id,
@@ -20851,25 +20976,34 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         var clearedComposeTabIDs = Set<UUID>()
         var clearedStashedTabIDs = Set<UUID>()
+        // References are found in the listed tabs. The window's own copies are cleared in this turn.
+        // Each other workspace with a reference then gets one write that clears them on its
+        // canonical document.
+        var unheldWorkspaceIDs: [UUID] = []
         if let workspaceManager {
-            for workspace in workspaceManager.workspaces where workspaceID == nil || workspace.id == workspaceID {
-                for tab in workspace.composeTabs where tab.activeAgentSessionID == sessionID {
-                    if workspaceManager.compareAndSetActiveAgentSessionID(
+            for workspace in agentListedCatalog()
+                where (workspaceID == nil || workspace.workspaceID == workspaceID)
+                && workspace.containsTab(where: { $0.activeAgentSessionID == sessionID })
+            {
+                guard case let .held(heldWorkspace) = workspace else {
+                    unheldWorkspaceIDs.append(workspace.workspaceID)
+                    continue
+                }
+                for tab in heldWorkspace.composeTabs where tab.activeAgentSessionID == sessionID {
+                    if workspaceManager.compareAndSetHeldActiveAgentSessionID(
                         expected: sessionID,
                         replacement: nil,
-                        forTabID: tab.id,
-                        inWorkspaceID: workspace.id
+                        for: WorkspaceSelectionIdentity(workspaceID: heldWorkspace.id, tabID: tab.id)
                     ) {
                         clearedComposeTabIDs.insert(tab.id)
                         affectedTabIDs.insert(tab.id)
                     }
                 }
-                for stashed in workspace.stashedTabs where stashed.tab.activeAgentSessionID == sessionID {
-                    if workspaceManager.compareAndSetActiveAgentSessionID(
+                for stashed in heldWorkspace.stashedTabs where stashed.tab.activeAgentSessionID == sessionID {
+                    if workspaceManager.compareAndSetHeldActiveAgentSessionID(
                         expected: sessionID,
                         replacement: nil,
-                        forTabID: stashed.tab.id,
-                        inWorkspaceID: workspace.id
+                        for: WorkspaceSelectionIdentity(workspaceID: heldWorkspace.id, tabID: stashed.tab.id)
                     ) {
                         clearedStashedTabIDs.insert(stashed.tab.id)
                         affectedTabIDs.insert(stashed.tab.id)
@@ -20894,6 +21028,18 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             if didChangeSnapshot {
                 lastKnownWorkspaceSnapshot = snapshot
             }
+        }
+        for unheldWorkspaceID in unheldWorkspaceIDs {
+            let cleared = await compareAndSetUnheldAgentSessionReferences(
+                inWorkspaceID: unheldWorkspaceID,
+                tabIDs: nil,
+                expected: sessionID,
+                replacement: nil,
+                operation: "finalizeDeletedAgentSessionReferences"
+            )
+            clearedComposeTabIDs.formUnion(cleared.composeTabIDs)
+            clearedStashedTabIDs.formUnion(cleared.stashedTabIDs)
+            affectedTabIDs.formUnion(cleared.composeTabIDs.union(cleared.stashedTabIDs))
         }
 
         for tabID in stateCleanupTabIDs {
@@ -21097,9 +21243,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return true
         }
         // Check if tab has a persisted agent session ID via workspaceManager
-        if let tabState = workspaceManager?.composeTab(with: tabID),
-           tabState.activeAgentSessionID != nil
-        {
+        if firstListedTab(tabID, location: .composed)?.activeAgentSessionID != nil {
             return true
         }
         return false
@@ -21204,8 +21348,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if sourceTabID == currentTabID {
             workspaceManager.publishActiveComposeTabSnapshot(commitToMemory: true)
         }
-        let sourceSelection = workspaceManager.composeTab(with: sourceTabID)?.selection ?? StoredSelection()
-        let sourceTabName = workspaceManager.composeTabName(with: sourceTabID) ?? "Session"
+        // The source is the current tab, so it is in the shown workspace.
+        let sourceTab = shownComposeTab(sourceTabID)
+        let sourceSelection = sourceTab?.selection ?? StoredSelection()
+        let sourceTabName = sourceTab?.name ?? "Session"
         let sourceAgentName = sourceSession.selectedAgent.displayName
         let sourceModelName = modelDisplayName(
             rawModel: sourceSession.selectedModelRaw,
@@ -21241,7 +21387,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         guard let workspaceManager,
               let sourceTabID = currentTabID else { return "" }
         workspaceManager.publishActiveComposeTabSnapshot(commitToMemory: true)
-        let sourceSelection = workspaceManager.composeTab(with: sourceTabID)?.selection ?? StoredSelection()
+        let sourceSelection = shownComposeTab(sourceTabID)?.selection ?? StoredSelection()
         let lookupContext = await agentWorkspaceLookupContext(tabID: sourceTabID, session: sessions[sourceTabID])
         return await buildForkFileContentsBlock(
             selection: sourceSelection,
@@ -21329,7 +21475,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         destinationReasoningEffortRaw: String?
     ) async throws -> UUID {
         guard let promptManager,
-              let workspaceManager,
+              workspaceManager != nil,
               let sourceTabID = currentTabID,
               let sourceSession = sessions[sourceTabID]
         else {
@@ -21350,7 +21496,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             sourceTranscript: sourceTranscript,
             upToItemID: upToItemID
         )
-        let sourceTabName = workspaceManager.composeTabName(with: sourceTabID) ?? "Session"
+        let sourceTabName = resolvedListedComposeTab(sourceTabID)?.name ?? "Session"
 
         // 2) Build migrated transcript items (prefix copy up to cutoff, no thinking, no streaming)
         let migratedItems = buildHandoffTranscriptItems(
@@ -21373,7 +21519,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if let oracleViewModel {
             do {
                 _ = try await oracleViewModel.cloneChatSessions(fromTabID: sourceTabID, toTabID: destTabID)
-                clonedActiveChatSessionID = workspaceManager.activeChatSessionID(forTabID: destTabID)
+                clonedActiveChatSessionID = resolvedListedComposeTab(destTabID)?.activeChatSessionID
             } catch {
                 print("[AgentVM] Warning: failed to clone chat sessions for handoff: \(error)")
             }

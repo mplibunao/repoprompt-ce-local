@@ -80,6 +80,40 @@ import XCTest
             XCTAssertEqual(changedTabIDs, [])
         }
 
+        /// A saved edit that doesn't change the document still saves a canonical document whose
+        /// working revision is ahead of its saved one, without changing the working document. A retry
+        /// after a failed saved phase depends on that save.
+        func testNoOpSavedEditSavesADirtyCanonicalDocument() async throws {
+            let tab = ComposeTabState(name: "Plan", promptText: "Parked plan")
+            let parked = parkedWorkspace(composeTabs: [tab], activeTabID: tab.id)
+            let window = try await openWindow(windowID: -7102, parked: parked)
+            let gateway = window.manager.contentGateway
+            let fileURL = fixture.workspaceFileURL(for: parked)
+            _ = try await gateway.mutateWorkspace(
+                parked.id,
+                source: "test.workingRename",
+                persistence: .working
+            ) { $0.name = "Parked Renamed" }
+            let dirtySnapshot = await window.runtime.workspaceStore.canonicalWorkspaceSnapshot(parked.id)
+            let dirty = try XCTUnwrap(dirtySnapshot)
+            XCTAssertNotNil(dirty.revisions.dirtyRevision)
+            XCTAssertEqual(try JSONDecoder().decode(WorkspaceModel.self, from: Data(contentsOf: fileURL)).name, parked.name)
+
+            _ = try await gateway.mutateWorkspace(
+                parked.id,
+                source: "test.savedRename",
+                persistence: .saved
+            ) { $0.name = "Parked Renamed" }
+
+            let savedSnapshot = await window.runtime.workspaceStore.canonicalWorkspaceSnapshot(parked.id)
+            let saved = try XCTUnwrap(savedSnapshot)
+            XCTAssertNil(saved.revisions.dirtyRevision)
+            XCTAssertEqual(saved.revisions.workingRevision, dirty.revisions.workingRevision)
+            XCTAssertEqual(saved.revisions.savedRevision, dirty.revisions.workingRevision)
+            XCTAssertEqual(saved.document.contentDigest, dirty.document.contentDigest)
+            XCTAssertEqual(try JSONDecoder().decode(WorkspaceModel.self, from: Data(contentsOf: fileURL)).name, "Parked Renamed")
+        }
+
         func testConflictingTabEditDoesNotReplaceCanonicalWinner() async throws {
             let parkedTab = ComposeTabState(name: "Parked", promptText: "Base")
             let parked = parkedWorkspace(composeTabs: [parkedTab], activeTabID: parkedTab.id)
@@ -88,9 +122,10 @@ import XCTest
                 workspaceID: window.shown.id,
                 tabID: window.shown.composeTabs[0].id
             )
-            var unsavedShownTab = try XCTUnwrap(window.manager.composeTab(for: shownIdentity))
-            unsavedShownTab.promptText = "Unsaved shown prompt"
-            XCTAssertTrue(window.manager.updateComposeTabStoredOnly(unsavedShownTab, inWorkspaceID: window.shown.id))
+            XCTAssertTrue(window.manager.editHeldTab(shownIdentity) { tab in
+                tab.promptText = "Unsaved shown prompt"
+                return true
+            })
 
             let gate = ArrivalGate()
             let gateway = interceptedGateway(for: window, afterCanonicalRead: { await gate.arriveAndWaitForRelease() })
@@ -129,7 +164,7 @@ import XCTest
             XCTAssertEqual(canonical.document.contentDigest, winningOutcome.resultingDigest)
             XCTAssertEqual(try decodedModel(canonical).composeTabs.first?.promptText, "Winning edit")
             XCTAssertNotEqual(window.manager.workspace(withID: parked.id)?.composeTabs.first?.promptText, "Losing edit")
-            XCTAssertEqual(window.manager.composeTab(for: shownIdentity)?.promptText, "Unsaved shown prompt")
+            XCTAssertEqual(window.manager.contentGateway.shownComposeTab(shownIdentity)?.promptText, "Unsaved shown prompt")
         }
 
         func testEditRefusedWhenDecodeLosesStashedTabs() async throws {
@@ -260,80 +295,353 @@ import XCTest
             XCTAssertEqual(saved.composeTabs.first { $0.id == shownTabID }?.promptText, "Typed live + gateway")
         }
 
-        func testAcceptedWriteKeepsNewerRevisionRecordedDuringSubmit() async throws {
+        func testCanonicalCommitReachesTheOriginatingWindowOnlyByProjection() async throws {
             let parkedTab = ComposeTabState(name: "Parked", promptText: "Before the gateway edit")
             let parked = parkedWorkspace(composeTabs: [parkedTab], activeTabID: parkedTab.id)
             let window = try await openWindow(windowID: -7107, parked: parked)
-            let windowCopy = try XCTUnwrap(window.manager.workspace(withID: parked.id))
-            let newerRevisions = DomainRevisionState(workingRevision: 1000, savedRevision: 1000, dirtyRevision: nil)
-            let gateway = interceptedGateway(for: window, duringSubmit: {
-                // A later write reached the window while the submit was in flight.
-                window.manager.applyDomainAuthorityBaseline(
-                    workspaceID: parked.id,
-                    revisions: newerRevisions,
-                    digest: "newer-baseline",
-                    health: .writable,
-                    catalogRevision: 0
-                )
-            })
-
-            let write = try await gateway.mutateComposeTab(
-                WorkspaceSelectionIdentity(workspaceID: parked.id, tabID: parkedTab.id),
-                source: "test.prompt",
-                persistence: .working
-            ) { $0.promptText = "Gateway edit" }
-            guard case .committed = write.receipt else {
-                return XCTFail("The authority accepted the write; got \(write.receipt)")
+            let copyBefore = try XCTUnwrap(window.manager.workspace(withID: parked.id))
+            let recordedBefore = try XCTUnwrap(window.manager.contentGatewayRecordedAuthorityState(for: parked.id))
+            // The bridge holds the write's event until the test checks the window.
+            let gate = ArrivalGate()
+            window.bridge.eventConsumptionWillBeginHandlerForTesting = { event in
+                guard event.workspaceID == parked.id else { return }
+                await gate.arriveAndWaitForRelease()
             }
 
-            XCTAssertEqual(window.manager.workspace(withID: parked.id), windowCopy)
-            let recorded = window.manager.contentGatewayCommittedState(for: parked.id)
-            XCTAssertEqual(recorded?.revisions, newerRevisions)
-            XCTAssertEqual(recorded?.digest, "newer-baseline")
-        }
-
-        func testLocalEditDuringSubmitAndGatewayEditBothReachLaterSave() async throws {
-            let parkedTab = ComposeTabState(name: "Parked", promptText: "Before the gateway edit")
-            let notesTab = ComposeTabState(name: "Notes")
-            let parked = parkedWorkspace(composeTabs: [parkedTab, notesTab], activeTabID: parkedTab.id)
-            let window = try await openWindow(windowID: -7108, parked: parked)
-            let gateway = interceptedGateway(for: window, duringSubmit: {
-                let notes = WorkspaceSelectionIdentity(workspaceID: parked.id, tabID: notesTab.id)
-                guard var tab = window.manager.composeTab(for: notes) else { return }
-                tab.name = "Renamed during submit"
-                window.manager.updateComposeTabStoredOnly(tab, inWorkspaceID: parked.id)
-            })
-
-            let probe = EditProbe()
-            let receipt = try await gateway.mutateWorkspace(
-                parked.id,
-                source: "test.edit",
-                persistence: .working
-            ) { workspace in
-                probe.runs += 1
-                let created = ComposeTabState(name: "Created by the gateway")
-                probe.createdTabID = probe.createdTabID ?? created.id
-                workspace.composeTabs.append(created)
-                if let index = workspace.composeTabs.firstIndex(where: { $0.id == parkedTab.id }) {
-                    workspace.composeTabs[index].promptText = "Gateway edit"
-                }
+            let write = Task { @MainActor in
+                try await window.manager.contentGateway.mutateComposeTab(
+                    WorkspaceSelectionIdentity(workspaceID: parked.id, tabID: parkedTab.id),
+                    source: "test.prompt",
+                    persistence: .working
+                ) { $0.promptText = "Gateway edit" }
             }
-            guard case .committed = receipt else {
+            await gate.waitForArrival()
+
+            // The authority stores the write, and the window's copy and recorded revision don't have it.
+            let canonicalSnapshot = await window.runtime.workspaceStore.canonicalWorkspaceSnapshot(parked.id)
+            let canonical = try XCTUnwrap(canonicalSnapshot)
+            XCTAssertEqual(try decodedModel(canonical).composeTabs.first?.promptText, "Gateway edit")
+            XCTAssertEqual(window.manager.workspace(withID: parked.id), copyBefore)
+            let recordedWhileHeld = window.manager.contentGatewayRecordedAuthorityState(for: parked.id)
+            XCTAssertEqual(recordedWhileHeld?.revisions, recordedBefore.revisions)
+            XCTAssertEqual(recordedWhileHeld?.digest, recordedBefore.digest)
+
+            await gate.release()
+            let receipt = try await write.value.receipt
+            guard case let .committed(revisions, digest, _) = receipt else {
                 return XCTFail("The authority accepted the write; got \(receipt)")
             }
-            XCTAssertEqual(probe.runs, 1, "The edit runs once")
-            let createdTabID = try XCTUnwrap(probe.createdTabID)
             XCTAssertEqual(
-                window.manager.workspace(withID: parked.id)?.composeTabs.map(\.id),
-                [parkedTab.id, notesTab.id, createdTabID],
-                "The window's copy holds the created tab under its committed ID"
+                window.manager.workspace(withID: parked.id),
+                try WorkspaceManagerViewModel.decodeDomainWorkspaceProjection(
+                    documentBytes: canonical.document.documentBytes,
+                    fileURL: canonical.document.fileURL
+                )
             )
+            let recordedAfter = window.manager.contentGatewayRecordedAuthorityState(for: parked.id)
+            XCTAssertEqual(recordedAfter?.revisions, revisions)
+            XCTAssertEqual(recordedAfter?.digest, digest)
+        }
 
-            let canonical = try await renameAndReadCanonical(window, parked.id, to: "Parked Renamed")
-            XCTAssertEqual(canonical.name, "Parked Renamed")
-            XCTAssertEqual(canonical.composeTabs.map(\.id), [parkedTab.id, notesTab.id, createdTabID])
-            XCTAssertEqual(canonical.composeTabs.first { $0.id == parkedTab.id }?.promptText, "Gateway edit")
-            XCTAssertEqual(canonical.composeTabs.first { $0.id == notesTab.id }?.name, "Renamed during submit")
+        func testSelfEchoAppliesOnlyToCopySourcedCommandsAndRecordsTheSubmittedDigest() async throws {
+            let parkedTab = ComposeTabState(name: "Parked")
+            let parked = parkedWorkspace(composeTabs: [parkedTab], activeTabID: parkedTab.id)
+            let window = try await openWindow(windowID: -7108, parked: parked)
+            let shownID = window.shown.id
+            var copy = try XCTUnwrap(window.manager.workspace(withID: shownID))
+            copy.composeTabs[0].promptText = "Published from the copy"
+            window.manager.contentGatewayInstallLocalEdit(copy)
+            // The bridge holds the window's own commit's event, and then the next one.
+            let ownEvent = ArrivalGate()
+            let nextEvent = ArrivalGate()
+            var heldEvents = 0
+            window.bridge.eventConsumptionWillBeginHandlerForTesting = { event in
+                guard event.workspaceID == shownID else { return }
+                heldEvents += 1
+                await (heldEvents == 1 ? ownEvent : nextEvent).arriveAndWaitForRelease()
+            }
+
+            await window.manager.debugPublishWorkingDocumentToDomainAuthority(copy)
+            await ownEvent.waitForArrival()
+            let submittedSnapshot = await window.runtime.workspaceStore.canonicalWorkspaceSnapshot(shownID)
+            let submitted = try XCTUnwrap(submittedSnapshot)
+            // Another window commits a newer document before this window consumes its own commit's
+            // event.
+            let peer = DomainWorkspaceAuthorityClient(store: window.runtime.workspaceStore, windowID: -7198)
+            var newer = try decodedModel(submitted)
+            newer.composeTabs[0].name = "Renamed elsewhere"
+            let newerOutcome = try await peer.replaceWorking(
+                newer,
+                fileURL: submitted.document.fileURL,
+                expectedWorkspaceRevision: submitted.revisions.workingRevision
+            )
+            XCTAssertEqual(newerOutcome.disposition, .applied)
+
+            await ownEvent.release()
+            await nextEvent.waitForArrival()
+            // The own commit's event recorded the digest the window submitted, not the newer one.
+            XCTAssertEqual(
+                window.manager.contentGatewayRecordedAuthorityState(for: shownID)?.digest,
+                submitted.document.contentDigest
+            )
+            XCTAssertEqual(window.manager.workspace(withID: shownID)?.composeTabs[0].name, copy.composeTabs[0].name)
+
+            await nextEvent.release()
+            let newerRevision = try XCTUnwrap(newerOutcome.after).workingRevision
+            let projected = await window.manager.awaitProjectedInstall(of: shownID, atLeast: newerRevision)
+            XCTAssertNotNil(projected)
+            XCTAssertEqual(window.manager.workspace(withID: shownID)?.composeTabs[0].name, "Renamed elsewhere")
+            XCTAssertEqual(
+                window.manager.contentGatewayRecordedAuthorityState(for: shownID)?.digest,
+                newerOutcome.resultingDigest
+            )
+        }
+
+        func testSelectionRevisionAdvancesOnEveryInstallIntoTheCopy() async throws {
+            let parkedTab = ComposeTabState(name: "Parked", selection: StoredSelection(selectedPaths: ["/tmp/parked/A.swift"]))
+            let parked = parkedWorkspace(composeTabs: [parkedTab], activeTabID: parkedTab.id)
+            let window = try await openWindow(windowID: -7110, parked: parked)
+            let manager = window.manager
+            let shownIdentity = WorkspaceSelectionIdentity(workspaceID: window.shown.id, tabID: window.shown.composeTabs[0].id)
+            let parkedIdentity = WorkspaceSelectionIdentity(workspaceID: parked.id, tabID: parkedTab.id)
+            func revision(_ identity: WorkspaceSelectionIdentity) -> UInt64 {
+                manager.selectionRevisionForMCP(workspaceID: identity.workspaceID, tabID: identity.tabID)
+            }
+
+            // A local store advances the tab's revision, and storing the same selection again doesn't.
+            let beforeLocalStore = revision(shownIdentity)
+            let localSelection = StoredSelection(selectedPaths: ["/tmp/shown/B.swift"])
+            XCTAssertTrue(manager.storeShownTabSelection(localSelection, for: shownIdentity))
+            let afterLocalStore = revision(shownIdentity)
+            XCTAssertNotEqual(afterLocalStore, beforeLocalStore)
+            XCTAssertTrue(manager.storeShownTabSelection(localSelection, for: shownIdentity))
+            XCTAssertEqual(revision(shownIdentity), afterLocalStore)
+
+            // Another window changes the parked tab's selection. While the bridge holds that event, a
+            // summary that shows the change leaves the revision. Projecting the event advances it.
+            let gate = ArrivalGate()
+            window.bridge.eventConsumptionWillBeginHandlerForTesting = { event in
+                guard event.workspaceID == parked.id else { return }
+                await gate.arriveAndWaitForRelease()
+            }
+            let peer = DomainWorkspaceAuthorityClient(store: window.runtime.workspaceStore, windowID: -7197)
+            let baselineSnapshot = await peer.canonicalWorkspaceSnapshot(parked.id)
+            let baseline = try XCTUnwrap(baselineSnapshot)
+            var changed = try decodedModel(baseline)
+            changed.composeTabs[0].selection = StoredSelection(selectedPaths: ["/tmp/parked/C.swift"])
+            let outcome = try await peer.replaceWorking(
+                changed,
+                fileURL: baseline.document.fileURL,
+                expectedWorkspaceRevision: baseline.revisions.workingRevision
+            )
+            XCTAssertEqual(outcome.disposition, .applied)
+            await gate.waitForArrival()
+            let beforeProjection = revision(parkedIdentity)
+            await manager.applyDomainWorkspaceSummaryProjection(peer.summarySnapshot())
+            XCTAssertEqual(manager.workspaceSummary(withID: parked.id)?.contentDigest, outcome.resultingDigest)
+            XCTAssertEqual(revision(parkedIdentity), beforeProjection)
+            await gate.release()
+            let projected = try await manager.awaitProjectedInstall(
+                of: parked.id,
+                atLeast: XCTUnwrap(outcome.after).workingRevision
+            )
+            XCTAssertNotNil(projected)
+            let afterProjection = revision(parkedIdentity)
+            XCTAssertNotEqual(afterProjection, beforeProjection)
+
+            // The window's own canonical commit returns the revision its projection gave the tab, and a
+            // later summary keeps it.
+            let write = try await manager.contentGateway.mutateComposeTab(
+                parkedIdentity,
+                source: "test.selection",
+                persistence: .working
+            ) { $0.selection = StoredSelection(selectedPaths: ["/tmp/parked/D.swift"]) }
+            let projectedRevision = try XCTUnwrap(write.projectedSelectionRevision)
+            XCTAssertNotEqual(projectedRevision, afterProjection)
+            XCTAssertEqual(revision(parkedIdentity), projectedRevision)
+            await manager.applyDomainWorkspaceSummaryProjection(peer.summarySnapshot())
+            XCTAssertEqual(revision(parkedIdentity), projectedRevision)
+        }
+
+        func testProjectionWaitForARemovedWorkspaceEndsAtOnce() async throws {
+            let parkedTab = ComposeTabState(name: "Parked")
+            let parked = parkedWorkspace(composeTabs: [parkedTab], activeTabID: parkedTab.id)
+            let window = try await openWindow(windowID: -7111, parked: parked)
+            let manager = window.manager
+            let peer = DomainWorkspaceAuthorityClient(store: window.runtime.workspaceStore, windowID: -7196)
+            let parkedSnapshot = await peer.canonicalWorkspaceSnapshot(parked.id)
+            let parkedRevision = try XCTUnwrap(parkedSnapshot).revisions.workingRevision
+            let catalog = await window.runtime.workspaceStore.snapshot()
+            let deletion = await peer.delete(
+                workspaceID: parked.id,
+                expectedCatalogRevision: catalog.catalogRevision,
+                expectedWorkspaceRevision: parkedRevision
+            )
+            XCTAssertEqual(deletion.disposition, .applied)
+            let afterDeletion = await window.runtime.workspaceStore.snapshot()
+            let projected = await window.bridge.waitUntilProjected(through: afterDeletion.publicationSequence)
+            XCTAssertTrue(projected)
+
+            // A canonical commit whose answer arrives after the window projected the removal waits
+            // like this.
+            let wait = Task { @MainActor in
+                await manager.awaitProjectedInstall(of: parked.id, atLeast: parkedRevision + 1)
+            }
+            await yieldMainActor()
+            let pendingWaits = manager.pendingProjectionWaitCountForTesting
+            if pendingWaits > 0 { manager.endProjection() }
+            XCTAssertEqual(pendingWaits, 0)
+            let install = await wait.value
+            XCTAssertNil(install)
+        }
+
+        /// Every document the authority holds decodes, so no test can make the bridge's projection
+        /// fail. This test records the failure that the bridge reports when its projection of a
+        /// catalog fails.
+        func testFailedProjectionEndsTheWaitsAndRegistrationsItsCatalogCovers() async throws {
+            let parkedTab = ComposeTabState(name: "Parked")
+            let parked = parkedWorkspace(composeTabs: [parkedTab], activeTabID: parkedTab.id)
+            let window = try await openWindow(windowID: -7113, parked: parked)
+            let manager = window.manager
+            let shownID = window.shown.id
+            let peer = DomainWorkspaceAuthorityClient(store: window.runtime.workspaceStore, windowID: -7194)
+            // The bridge holds the first event. Until it releases that event, the window projects
+            // none of the writes below.
+            let firstEvent = ArrivalGate()
+            var heldEvents = 0
+            window.bridge.eventConsumptionWillBeginHandlerForTesting = { _ in
+                guard heldEvents == 0 else { return }
+                heldEvents += 1
+                await firstEvent.arriveAndWaitForRelease()
+            }
+            let parkedSnapshot = await peer.canonicalWorkspaceSnapshot(parked.id)
+            let parkedRevision = try XCTUnwrap(parkedSnapshot).revisions.workingRevision
+            let catalog = await window.runtime.workspaceStore.snapshot()
+            let deletion = await peer.delete(
+                workspaceID: parked.id,
+                expectedCatalogRevision: catalog.catalogRevision,
+                expectedWorkspaceRevision: parkedRevision
+            )
+            XCTAssertEqual(deletion.disposition, .applied)
+            await firstEvent.waitForArrival()
+
+            // A canonical commit to the removed workspace waits for its install. Each workspace has a
+            // registered command from the window's copy, and the authority accepts the shown
+            // workspace's command.
+            let wait = Task { @MainActor in
+                await manager.awaitProjectedInstall(of: parked.id, atLeast: parkedRevision + 1)
+            }
+            manager.registerCopySourcedSubmissionForTesting(UUID(), workspaceID: parked.id, digest: "submitted")
+            let shownSnapshot = await peer.canonicalWorkspaceSnapshot(shownID)
+            let shownCanonical = try XCTUnwrap(shownSnapshot)
+            var copy = try decodedModel(shownCanonical)
+            copy.composeTabs[0].promptText = "Published from the copy"
+            let client = DomainWorkspaceAuthorityClient(store: window.runtime.workspaceStore, windowID: window.windowID)
+            let published = try await client.replaceWorking(
+                copy,
+                fileURL: shownCanonical.document.fileURL,
+                expectedWorkspaceRevision: shownCanonical.revisions.workingRevision,
+                workingDocumentObserver: manager.copySourcedSubmissionObserverForTesting(for: shownID)
+            )
+            XCTAssertEqual(published.disposition, .applied)
+            await yieldMainActor()
+            XCTAssertEqual(manager.pendingProjectionWaitCountForTesting, 1)
+            XCTAssertEqual(manager.copySourcedSubmissionCountForTesting, 2)
+
+            let failed = await window.runtime.workspaceStore.snapshot()
+            manager.recordFailedProjection(revisionsByWorkspaceID: Dictionary(uniqueKeysWithValues: failed.workspaces.map {
+                ($0.document.workspaceID, $0.revisions.workingRevision)
+            }))
+            let pendingWaits = manager.pendingProjectionWaitCountForTesting
+            let registrations = manager.copySourcedSubmissionCountForTesting
+            if pendingWaits > 0 { manager.endProjection() }
+            XCTAssertEqual(pendingWaits, 0)
+            XCTAssertEqual(registrations, 0)
+            let install = await wait.value
+            XCTAssertNil(install)
+            await firstEvent.release()
+        }
+
+        func testCopySourcedRegistrationEndsWithItsCommand() async throws {
+            for row in CopySourcedRegistrationRow.allCases {
+                try await assertCopySourcedRegistrationEnds(row)
+            }
+        }
+
+        /// How a working-document command the window submitted from its copy ends without the bridge
+        /// consuming its event.
+        private enum CopySourcedRegistrationRow: String, CaseIterable {
+            /// The snapshot the bridge fetches for an earlier event already covers the command.
+            case snapshotCoversTheCommand
+            /// The authority refuses a save's working step, which doesn't publish an event.
+            case refusedWorkingStepOfASave
+            /// The bridge stops before the command's event arrives.
+            case bridgeStops
+        }
+
+        private func assertCopySourcedRegistrationEnds(_ row: CopySourcedRegistrationRow) async throws {
+            let message = row.rawValue
+            try await resetFixture()
+            let parkedTab = ComposeTabState(name: "Parked")
+            let parked = parkedWorkspace(composeTabs: [parkedTab], activeTabID: parkedTab.id)
+            let window = try await openWindow(windowID: -7112, parked: parked)
+            let manager = window.manager
+            let shownID = window.shown.id
+            let peer = DomainWorkspaceAuthorityClient(store: window.runtime.workspaceStore, windowID: -7195)
+
+            switch row {
+            case .snapshotCoversTheCommand:
+                // The bridge holds another window's commit's event while this window publishes its copy.
+                let earlierEvent = ArrivalGate()
+                var heldEvents = 0
+                window.bridge.eventConsumptionWillBeginHandlerForTesting = { event in
+                    guard event.workspaceID == parked.id, heldEvents == 0 else { return }
+                    heldEvents += 1
+                    await earlierEvent.arriveAndWaitForRelease()
+                }
+                let parkedSnapshot = await peer.canonicalWorkspaceSnapshot(parked.id)
+                let parkedCanonical = try XCTUnwrap(parkedSnapshot, message)
+                var renamed = try decodedModel(parkedCanonical)
+                renamed.composeTabs[0].name = "Renamed elsewhere"
+                let peerOutcome = try await peer.replaceWorking(
+                    renamed,
+                    fileURL: parkedCanonical.document.fileURL,
+                    expectedWorkspaceRevision: parkedCanonical.revisions.workingRevision
+                )
+                XCTAssertEqual(peerOutcome.disposition, .applied, message)
+                await earlierEvent.waitForArrival()
+                var copy = try XCTUnwrap(manager.workspace(withID: shownID), message)
+                copy.composeTabs[0].promptText = "Published from the copy"
+                manager.contentGatewayInstallLocalEdit(copy)
+                await manager.debugPublishWorkingDocumentToDomainAuthority(copy)
+                XCTAssertEqual(manager.copySourcedSubmissionCountForTesting, 1, message)
+                await earlierEvent.release()
+                let published = await window.runtime.workspaceStore.snapshot()
+                let projected = await window.bridge.waitUntilProjected(through: published.publicationSequence)
+                XCTAssertTrue(projected, message)
+                XCTAssertEqual(heldEvents, 1, message)
+            case .refusedWorkingStepOfASave:
+                // The save's working step expects a revision the document doesn't have. The
+                // authority refuses it without publishing an event.
+                let parkedSnapshot = await peer.canonicalWorkspaceSnapshot(parked.id)
+                let parkedCanonical = try XCTUnwrap(parkedSnapshot, message)
+                var document = try decodedModel(parkedCanonical)
+                document.composeTabs[0].promptText = "Saved from the copy"
+                let client = DomainWorkspaceAuthorityClient(store: window.runtime.workspaceStore, windowID: window.windowID)
+                let outcome = try await client.save(
+                    document,
+                    fileURL: parkedCanonical.document.fileURL,
+                    expectedWorkspaceRevision: parkedCanonical.revisions.workingRevision &+ 1,
+                    expectedContentDigest: parkedCanonical.document.contentDigest,
+                    workingDocumentObserver: manager.copySourcedSubmissionObserverForTesting(for: parked.id)
+                )
+                XCTAssertEqual(outcome.disposition, .conflict, message)
+            case .bridgeStops:
+                manager.registerCopySourcedSubmissionForTesting(UUID(), workspaceID: shownID, digest: "submitted")
+                XCTAssertEqual(manager.copySourcedSubmissionCountForTesting, 1, message)
+                window.bridge.stop()
+            }
+            XCTAssertEqual(manager.copySourcedSubmissionCountForTesting, 0, message)
         }
 
         func testEditDuringSwitchAwayFromShownWorkspaceCommitsCanonically() async throws {
@@ -486,7 +794,10 @@ import XCTest
             guard case .pendingLocal = write.receipt else {
                 return XCTFail("The edit goes to the shown copy; got \(write.receipt)")
             }
-            XCTAssertEqual(window.manager.composeTab(for: shownIdentity)?.promptText, "Edited during confirmation")
+            XCTAssertEqual(
+                window.manager.contentGateway.shownComposeTab(shownIdentity)?.promptText,
+                "Edited during confirmation"
+            )
         }
 
         func testSwitchWaitEndsOnCancellationAndWhenTheGatewayCloses() async throws {
@@ -691,12 +1002,19 @@ import XCTest
                 afterSubmit?()
                 return result
             }
+
+            func saveWorkingDocument(of workspaceID: UUID, expectedRevision: UInt64) async -> WorkspaceContentCommitResult {
+                let result = await backend.saveWorkingDocument(of: workspaceID, expectedRevision: expectedRevision)
+                afterSubmit?()
+                return result
+            }
         }
 
         private struct OpenWindow {
             let windowID: Int
             let runtime: MCPDomainRuntime
             let manager: WorkspaceManagerViewModel
+            let bridge: DomainWorkspacePresentationBridge
             let shown: WorkspaceModel
         }
 
@@ -748,10 +1066,13 @@ import XCTest
         ) async throws -> OpenWindow {
             let shown = try writeCatalog(parked: parked, parkedDocument: parkedDocument)
             let runtime = try await fixture.makeRuntime(profileIdentifier: "content-gateway")
-            let (manager, _) = await fixture.makeProjectedManager(windowID: windowID, runtime: runtime)
+            let (manager, bridge) = await fixture.makeProjectedManager(windowID: windowID, runtime: runtime)
             XCTAssertEqual(manager.activeWorkspaceID, shown.id, "The window must show the other workspace")
             XCTAssertNotNil(manager.workspaceSummary(withID: parked.id), "The parked workspace must be in the catalog")
-            return OpenWindow(windowID: windowID, runtime: runtime, manager: manager, shown: shown)
+            addTeardownBlock { @MainActor in
+                bridge.eventConsumptionWillBeginHandlerForTesting = nil
+            }
+            return OpenWindow(windowID: windowID, runtime: runtime, manager: manager, bridge: bridge, shown: shown)
         }
 
         /// Replaces the fixture with a fresh one, so a table row gets its own storage root and runtime.
@@ -836,20 +1157,25 @@ import XCTest
         }
     }
 
-    /// Holds the operation that arrives, such as a gateway read or a workspace switch, until the
-    /// test releases it.
-    private actor ArrivalGate {
+    /// Holds the operation that arrives, such as a gateway read, a workspace switch, or a bridge's
+    /// consumption of an event, until the test releases it.
+    actor ArrivalGate {
         private var arrived = false
         private var released = false
         private var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
         private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
 
         func arriveAndWaitForRelease() async {
+            arrive()
+            guard !released else { return }
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+
+        /// Marks the arrival without waiting for a release.
+        func arrive() {
             arrived = true
             arrivalWaiters.forEach { $0.resume() }
             arrivalWaiters.removeAll()
-            guard !released else { return }
-            await withCheckedContinuation { releaseWaiters.append($0) }
         }
 
         func waitForArrival() async {

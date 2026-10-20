@@ -145,7 +145,7 @@ struct WorkspacePickerMenu<Label: View>: View {
                         ) {
                             isPresented = false
                             Task {
-                                _ = await workspaceManager.requestWorkspaceSwitch(to: ws)
+                                _ = await workspaceManager.requestWorkspaceSwitch(toWorkspaceID: ws.id)
                             }
                         }
                     }

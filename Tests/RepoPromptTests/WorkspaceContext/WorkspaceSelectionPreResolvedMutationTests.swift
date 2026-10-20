@@ -287,7 +287,7 @@ private final class PreResolvedCoordinatorHarness {
     }
 
     func selection(for identity: WorkspaceSelectionIdentity) -> StoredSelection? {
-        manager.composeTab(for: identity)?.selection
+        manager.shownTabSelection(for: identity)
     }
 
     func replaceSelection(_ selection: StoredSelection, for identity: WorkspaceSelectionIdentity) {
@@ -300,7 +300,7 @@ private final class PreResolvedCoordinatorHarness {
 }
 
 @MainActor
-private final class PreResolvedSelectionHost: WorkspaceSelectionHost {
+private final class PreResolvedSelectionHost: ShownOnlySelectionHost {
     var activeWorkspace: WorkspaceModel?
     var selectionMirrorContextRevision: UInt64 = 0
     private(set) var selectionStoredByPersistence: StoredSelection?
@@ -309,25 +309,20 @@ private final class PreResolvedSelectionHost: WorkspaceSelectionHost {
         activeWorkspace = workspace
     }
 
-    func composeTab(with id: UUID) -> ComposeTabState? {
-        activeWorkspace?.composeTabs.first { $0.id == id }
-    }
-
-    func composeTab(for identity: WorkspaceSelectionIdentity) -> ComposeTabState? {
-        guard activeWorkspace?.id == identity.workspaceID else { return nil }
-        return composeTab(with: identity.tabID)
-    }
-
     func publishActiveComposeTabSnapshot(commitToMemory: Bool, touchModified: Bool) {}
 
-    func updateComposeTabStoredOnly(_ tab: ComposeTabState, inWorkspaceID workspaceID: UUID) -> Bool {
+    func storeShownTabSelection(
+        _ selection: StoredSelection,
+        for identity: WorkspaceSelectionIdentity,
+        marksUnsaved _: Bool
+    ) -> Bool {
         guard var workspace = activeWorkspace,
-              workspace.id == workspaceID,
-              let index = workspace.composeTabs.firstIndex(where: { $0.id == tab.id })
+              workspace.id == identity.workspaceID,
+              let index = workspace.composeTabs.firstIndex(where: { $0.id == identity.tabID })
         else { return false }
-        workspace.composeTabs[index] = tab
+        workspace.composeTabs[index].selection = selection
         activeWorkspace = workspace
-        selectionStoredByPersistence = tab.selection
+        selectionStoredByPersistence = selection
         return true
     }
 

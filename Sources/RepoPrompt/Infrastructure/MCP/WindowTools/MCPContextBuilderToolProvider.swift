@@ -366,7 +366,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
         )
         let resolvedIdentity = tabResolution.identity
         let finalTabID = resolvedIdentity.tabID
-        guard let workspace = targetWindow.workspaceManager.workspaces.first(where: { $0.id == resolvedIdentity.workspaceID }) else {
+        guard let workspace = targetWindow.workspaceManager.contentGateway.listedWorkspace(resolvedIdentity.workspaceID) else {
             throw MCPError.invalidParams("The resolved Context Builder workspace is no longer available.")
         }
         let workspaceContext = tabResolution.workspaceContext
@@ -385,7 +385,12 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                 )
             }
         }
-        guard let initialResultTab = targetWindow.workspaceManager.composeTab(for: resolvedIdentity) else {
+        guard let initialResultTab = try? await targetWindow.workspaceManager.readMCPTabContextComposeSnapshot(
+            resolvedIdentity,
+            captureActiveUIState: false,
+            flushPendingUISelection: false,
+            source: "mcp.contextBuilder.initialTab"
+        ) else {
             throw MCPError.internalError("Resolved Context Builder tab is unavailable in its workspace")
         }
         try await workspaceContext?.validateReviewTargetAvailability(
@@ -428,13 +433,14 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
             if tabResolution.bindCaller, let connectionID {
                 let clientName = await ServerNetworkManager.shared.clientIdentifier(forConnection: connectionID)
                 try requireControlOwnership()
-                try dependencies.execution.bindTabForConnection(
+                try await dependencies.execution.bindTabForConnection(
                     connectionID,
                     clientName,
                     finalTabID,
                     resolvedIdentity.workspaceID,
                     targetWindow.windowID
                 )
+                try requireControlOwnership()
             }
 
             let targetMetadata = MCPServerViewModel.RequestMetadata(
@@ -601,25 +607,29 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                                 )
                             }
                             if snapshot.terminalDisposition == .completed {
-                                let canonicalState = await MainActor.run { () -> (ComposeTabState?, UInt64) in
-                                    let manager = targetWindow.workspaceManager
-                                    return (
-                                        manager.composeTab(for: committedTab.identity),
-                                        manager.selectionRevisionForMCP(
-                                            workspaceID: committedTab.identity.workspaceID,
-                                            tabID: committedTab.identity.tabID
-                                        )
-                                    )
-                                }
-                                let committedSnapshotIsCurrent: Bool = if responseType == .review {
-                                    canonicalState.1 == committedTab.selectionRevision
-                                        && canonicalState.0?.selection == committedTab.tab.selection
+                                // An exact re-read of the committed tab. A tab it can't read counts as
+                                // changed, never as evidence that the tab vanished.
+                                let canonicalState = await targetWindow.workspaceManager.readMCPCanonicalTabState(
+                                    committedTab.identity,
+                                    source: "mcp.contextBuilder.completion"
+                                )
+                                let committedSnapshotIsCurrent: Bool = if let committedRevision = committedTab.selectionRevision {
+                                    if responseType == .review {
+                                        canonicalState.1 == committedRevision
+                                            && canonicalState.0?.selection == committedTab.tab.selection
+                                    } else {
+                                        canonicalState.1 >= committedRevision
+                                            && (
+                                                canonicalState.1 != committedRevision
+                                                    || canonicalState.0?.selection == committedTab.tab.selection
+                                            )
+                                    }
                                 } else {
-                                    canonicalState.1 >= committedTab.selectionRevision
-                                        && (
-                                            canonicalState.1 != committedTab.selectionRevision
-                                                || canonicalState.0?.selection == committedTab.tab.selection
-                                        )
+                                    // Without the commit's revision, nothing shows that the tab's
+                                    // selection hasn't changed since the commit. A review needs that.
+                                    // The other responses report the committed tab and accept a tab
+                                    // that changed since.
+                                    responseType != .review
                                 }
                                 guard committedSnapshotIsCurrent else {
                                     throw MCPError.internalError(
@@ -736,18 +746,12 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                                 timeline: progressTimeline
                             ) {
                                 await dependencies.execution.beforeContextBuilderFinalReviewAuthorization()
-                                let preAuthorizationCanonical = await MainActor.run {
-                                    () -> (ComposeTabState?, UInt64) in
-                                    let manager = targetWindow.workspaceManager
-                                    return (
-                                        manager.composeTab(for: committedTab.identity),
-                                        manager.selectionRevisionForMCP(
-                                            workspaceID: committedTab.identity.workspaceID,
-                                            tabID: committedTab.identity.tabID
-                                        )
-                                    )
-                                }
-                                guard preAuthorizationCanonical.1 == committedTab.selectionRevision,
+                                let preAuthorizationCanonical = await targetWindow.workspaceManager.readMCPCanonicalTabState(
+                                    committedTab.identity,
+                                    source: "mcp.contextBuilder.reviewAuthorization"
+                                )
+                                guard let committedRevision = committedTab.selectionRevision,
+                                      preAuthorizationCanonical.1 == committedRevision,
                                       preAuthorizationCanonical.0?.selection == sel
                                 else {
                                     throw MCPError.invalidParams(
@@ -759,23 +763,16 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                                     sel,
                                     workspaceID: committedTab.identity.workspaceID,
                                     tabID: committedTab.identity.tabID,
-                                    selectionRevision: committedTab.selectionRevision,
+                                    selectionRevision: committedRevision,
                                     store: dependencies.context.promptVM.workspaceFileContextStore
                                 )
                                 await dependencies.execution.didFinalizeContextBuilderReview(authorization)
 
-                                let finalCanonical = await MainActor.run {
-                                    () -> (ComposeTabState?, UInt64) in
-                                    let manager = targetWindow.workspaceManager
-                                    return (
-                                        manager.composeTab(for: committedTab.identity),
-                                        manager.selectionRevisionForMCP(
-                                            workspaceID: committedTab.identity.workspaceID,
-                                            tabID: committedTab.identity.tabID
-                                        )
-                                    )
-                                }
-                                guard finalCanonical.1 == committedTab.selectionRevision,
+                                let finalCanonical = await targetWindow.workspaceManager.readMCPCanonicalTabState(
+                                    committedTab.identity,
+                                    source: "mcp.contextBuilder.reviewAuthorization"
+                                )
+                                guard finalCanonical.1 == committedRevision,
                                       finalCanonical.0?.selection == sel
                                 else {
                                     throw MCPError.invalidParams(

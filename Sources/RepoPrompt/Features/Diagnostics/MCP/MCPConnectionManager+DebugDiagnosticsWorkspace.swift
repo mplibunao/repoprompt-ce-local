@@ -166,7 +166,7 @@ import MCP
                 do {
                     WorkspaceRestorePerfLog.event(
                         "workspaceSelection.fixtureApply.beforeDiskFlush",
-                        fields: WorkspaceSelectionDebugSignature.unprefixedFields(for: window.workspaceManager.composeTab(with: flushed.tabID ?? UUID())?.selection ?? flushed.selection)
+                        fields: WorkspaceSelectionDebugSignature.unprefixedFields(for: activeWorkspace.composeTabs.first(where: { $0.id == flushed.tabID })?.selection ?? flushed.selection)
                     )
                     let finalURL = try await window.workspaceManager.saveWorkspaceToFileAsync(activeWorkspace, source: .debugWorkspaceSelectionFixtureApply)
                     await WorkspaceManagerViewModel.WorkspaceDiskWriter.shared.flush(url: finalURL)
@@ -240,7 +240,7 @@ import MCP
 
             let workspace = window.workspaceManager.activeWorkspace
             let workspaceTabID = workspace?.activeComposeTabID ?? workspace?.composeTabs.first?.id
-            let workspaceTab = workspaceTabID.flatMap { id in window.workspaceManager.composeTab(with: id) }
+            let workspaceTab = workspaceTabID.flatMap { id in workspace?.composeTabs.first(where: { $0.id == id }) }
             appendOwner(
                 "workspaceManager.activeWorkspace.activeComposeTab",
                 tabID: workspaceTabID,

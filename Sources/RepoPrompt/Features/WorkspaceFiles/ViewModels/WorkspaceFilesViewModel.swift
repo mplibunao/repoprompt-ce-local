@@ -1982,16 +1982,24 @@ class WorkspaceFilesViewModel: ObservableObject {
         await hiddenSessionSliceRangesIfTargetCurrent(target) != nil
     }
 
+    /// The target's current slice ranges, or nil when the target no longer qualifies. The tab is
+    /// read by its exact identity, which loads its workspace when the window no longer shows it,
+    /// so the cheaper checks run first.
     @MainActor
     private func hiddenSessionSliceRangesIfTargetCurrent(
         _ target: HiddenSessionSliceRebaseTarget
     ) async -> [LineRange]? {
         guard let manager = workspaceManager,
-              let tab = manager.composeTab(for: target.identity),
+              case let .hydrated(bindings) = sessionWorktreeBindingState(for: target.agentSessionID),
+              manager.contentGateway.listedTab(target.identity)?.activeAgentSessionID == target.agentSessionID,
+              let tab = try? await manager.contentGateway.readComposeTab(
+                  target.identity,
+                  source: "hiddenSessionSliceRebase",
+                  capturingLiveUIState: false
+              ),
               tab.activeAgentSessionID == target.agentSessionID,
               let ranges = StoredSelectionPathNormalization.standardizedSlices(tab.selection.slices)[target.logicalFullPath],
-              !ranges.isEmpty,
-              case let .hydrated(bindings) = sessionWorktreeBindingState(for: target.agentSessionID)
+              !ranges.isEmpty
         else { return nil }
         guard AgentWorkspaceLookupContextSource.worktreeBindingFingerprint(bindings) == target.bindingFingerprint,
               Set(bindings.map {

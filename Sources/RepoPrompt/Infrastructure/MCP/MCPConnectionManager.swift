@@ -8216,7 +8216,13 @@ actor ServerNetworkManager {
                         }
                         let workspaceInstanceNumber: Any = window.workspaceInstanceNumber ?? NSNull()
                         let activeContextID: Any = activeTabID?.uuidString ?? NSNull()
-                        let activeContextName: Any = activeTabID.flatMap { window.workspaceManager.composeTabName(with: $0) } ?? NSNull()
+                        let activeContextName: Any = activeTabID.flatMap { tabID in
+                            workspace.flatMap { workspace in
+                                window.workspaceManager.contentGateway.listedTab(
+                                    WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID)
+                                )?.name
+                            }
+                        } ?? NSNull()
                         let repoPaths: [String] = workspace.map { WorkspaceManagerViewModel.loadableRepoPaths(for: $0) } ?? []
                         return [
                             "window_id": window.windowID,
@@ -10253,8 +10259,14 @@ actor ServerNetworkManager {
             return nil
         }
         let windowID = cached.windowID
-        let name = await MainActor.run {
-            WindowStatesManager.shared.window(withID: windowID)?.workspaceManager.composeTabName(with: tabID)
+        let cachedWorkspaceID = cached.workspaceID
+        let name = await MainActor.run { () -> String? in
+            guard let manager = WindowStatesManager.shared.window(withID: windowID)?.workspaceManager,
+                  let workspaceID = cachedWorkspaceID ?? manager.activeWorkspaceID
+            else { return nil }
+            return manager.contentGateway.listedTab(
+                WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+            )?.name
         }
         guard let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
             return nil
@@ -11075,35 +11087,14 @@ actor ServerNetworkManager {
         runID: UUID,
         signalRouting: Bool = true
     ) async -> (routed: Bool, replacementToken: MCPServerViewModel.PendingPolicyRunIDMappingToken?) {
-        let resolved = await MainActor.run {
-            () -> (
-                workspaceID: UUID,
-                snapshot: ComposeTabState,
-                routed: Bool,
-                replacementToken: MCPServerViewModel.PendingPolicyRunIDMappingToken?
-            )? in
-            guard let windowState = WindowStatesManager.shared.window(withID: windowID) else {
-                return nil
-            }
-            guard let resolved = windowState.workspaceManager.resolveComposeTabRoutingSnapshot(
-                for: tabID,
-                captureActiveUIState: false
-            ) else {
-                return nil
-            }
-            let replacementToken = windowState.mcpServer.installTabContext(
-                clientID: clientID,
-                clientName: clientName,
-                windowID: windowID,
-                workspaceID: resolved.workspaceID,
-                snapshot: resolved.snapshot,
-                runID: runID,
-                signalRouting: signalRouting,
-                deferRunIDReplacementForPendingPolicy: true
-            )
-            let routed = replacementToken != nil
-            return (resolved.workspaceID, resolved.snapshot, routed, replacementToken)
-        }
+        let resolved = await Self.installPolicyTabContextInWindow(
+            windowID: windowID,
+            clientID: clientID,
+            clientName: clientName,
+            tabID: tabID,
+            runID: runID,
+            signalRouting: signalRouting
+        )
 
         guard let resolved else {
             log.warning("installTabContextFromPolicy: tab \(tabID) could not resolve routing snapshot in window \(windowID)")
@@ -11128,6 +11119,72 @@ actor ServerNetworkManager {
         return (resolved.routed, resolved.replacementToken)
     }
 
+    /// Resolves, loads, and installs a policy's run tab context on the main actor. The load can
+    /// suspend when the window doesn't show the tab's workspace.
+    @MainActor
+    private static func installPolicyTabContextInWindow(
+        windowID: Int,
+        clientID: String,
+        clientName: String,
+        tabID: UUID,
+        runID: UUID,
+        signalRouting: Bool
+    ) async -> (
+        workspaceID: UUID,
+        snapshot: ComposeTabState,
+        routed: Bool,
+        replacementToken: MCPServerViewModel.PendingPolicyRunIDMappingToken?
+    )? {
+        guard let windowState = WindowStatesManager.shared.window(withID: windowID),
+              let installed = await windowState.mcpServer.installPolicyTabContext(
+                  clientID: clientID,
+                  clientName: clientName,
+                  windowID: windowID,
+                  tabID: tabID,
+                  runID: runID,
+                  signalRouting: signalRouting
+              )
+        else { return nil }
+        return (installed.workspaceID, installed.snapshot, installed.replacementToken != nil, installed.replacementToken)
+    }
+
+    /// Binds a connection to its run's cached tab on the main actor, awaiting the bind's load and
+    /// rechecks there. Returns whether it bound and the workspace it bound in.
+    @MainActor
+    private static func bindRunTabInWindow(
+        windowID: Int,
+        connectionID: UUID,
+        clientName: String?,
+        tabID: UUID,
+        runID: UUID,
+        cachedWorkspaceID: UUID?
+    ) async throws -> (didBind: Bool, workspaceID: UUID?) {
+        guard let windowState = WindowStatesManager.shared.window(withID: windowID) else {
+            throw MCPError.invalidParams("Window \(windowID) not found")
+        }
+        // Fast path: already bound to this exact tab+run in this window.
+        let alreadyBoundTab = windowState.mcpServer.boundTabID(forConnection: connectionID) == tabID
+        let alreadyBoundRun = windowState.mcpServer.connectionIDToRunID[connectionID] == runID
+        if alreadyBoundTab, alreadyBoundRun {
+            return (false, cachedWorkspaceID)
+        }
+        let resolvedWorkspaceID = cachedWorkspaceID
+            ?? windowState.mcpServer.resolveBareComposeTabIdentity(tabID)?.workspaceID
+        guard let workspaceID = resolvedWorkspaceID else {
+            throw MCPError.invalidParams("Tab \(tabID) not found in any workspace for window \(windowID)")
+        }
+        try await windowState.mcpServer.bindTabForConnection(
+            connectionID: connectionID,
+            clientName: clientName,
+            tabID: tabID,
+            workspaceID: workspaceID,
+            windowID: windowID,
+            runID: runID,
+            explicitlyBound: false
+        )
+        return (true, workspaceID)
+    }
+
     @discardableResult
     private func ensureTabBoundForRunIfPossible(
         connectionID: UUID,
@@ -11143,31 +11200,14 @@ actor ServerNetworkManager {
         }
         let resolvedClientName = clientName ?? clientIdentifier(forConnection: connectionID)
         do {
-            let bindingResult = try await MainActor.run { () throws -> (didBind: Bool, workspaceID: UUID?) in
-                guard let windowState = WindowStatesManager.shared.window(withID: windowID) else {
-                    throw MCPError.invalidParams("Window \(windowID) not found")
-                }
-                // Fast path: already bound to this exact tab+run in this window.
-                let alreadyBoundTab = windowState.mcpServer.boundTabID(forConnection: connectionID) == tabID
-                let alreadyBoundRun = windowState.mcpServer.connectionIDToRunID[connectionID] == runID
-                if alreadyBoundTab, alreadyBoundRun {
-                    return (false, cached.workspaceID)
-                }
-                let resolvedWorkspaceID = cached.workspaceID ?? windowState.workspaceManager.resolveComposeTabRoutingSnapshot(for: tabID)?.workspaceID
-                guard let workspaceID = resolvedWorkspaceID else {
-                    throw MCPError.invalidParams("Tab \(tabID) not found in any workspace for window \(windowID)")
-                }
-                try windowState.mcpServer.bindTabForConnection(
-                    connectionID: connectionID,
-                    clientName: resolvedClientName,
-                    tabID: tabID,
-                    workspaceID: workspaceID,
-                    windowID: windowID,
-                    runID: runID,
-                    explicitlyBound: false
-                )
-                return (true, workspaceID)
-            }
+            let bindingResult = try await Self.bindRunTabInWindow(
+                windowID: windowID,
+                connectionID: connectionID,
+                clientName: resolvedClientName,
+                tabID: tabID,
+                runID: runID,
+                cachedWorkspaceID: cached.workspaceID
+            )
             if let workspaceID = bindingResult.workspaceID, workspaceID != cached.workspaceID {
                 seedRunPolicyState(
                     runID: runID,

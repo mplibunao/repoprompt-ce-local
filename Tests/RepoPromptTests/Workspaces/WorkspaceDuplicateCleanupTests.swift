@@ -40,7 +40,7 @@ import XCTest
             let activeTab = ComposeTabState(name: "Active")
             let workspace = WorkspaceModel(
                 name: "Selection",
-                repoPaths: ["/tmp"],
+                repoPaths: ["/tmp/pending-inactive-selection-root"],
                 composeTabs: [activeTab, inactiveTab],
                 activeComposeTabID: activeTab.id
             )
@@ -49,12 +49,17 @@ import XCTest
             let runtime = try await fixture.makeRuntime(profileIdentifier: "inactive-selection")
             let peer = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -791)
             let (manager, bridge) = await fixture.makeProjectedManager(windowID: -790, runtime: runtime)
+            if manager.activeWorkspaceID != workspace.id {
+                let switched = await manager.requestWorkspaceSwitch(toWorkspaceID: workspace.id, saveState: false)
+                XCTAssertTrue(switched.didSwitch)
+            }
 
             let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: inactiveTab.id)
-            var updatedTab = try XCTUnwrap(manager.composeTab(for: identity))
             let expectedSelection = StoredSelection(selectedPaths: ["/tmp/new.swift"])
-            updatedTab.selection = expectedSelection
-            XCTAssertTrue(manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspace.id))
+            XCTAssertTrue(manager.editHeldTab(identity) { tab in
+                tab.selection = expectedSelection
+                return true
+            })
 
             let unrelated = WorkspaceModel(name: "Other", repoPaths: ["/tmp/other"])
             let outcome = try await peer.create(unrelated, fileURL: fixture.workspaceFileURL(for: unrelated))
@@ -62,7 +67,7 @@ import XCTest
             let unrelatedSequence = await runtime.workspaceStore.snapshot().publicationSequence
             let unrelatedProjected = await bridge.waitUntilProjected(through: unrelatedSequence)
             XCTAssertTrue(unrelatedProjected)
-            XCTAssertEqual(manager.composeTab(for: identity)?.selection, expectedSelection)
+            XCTAssertEqual(manager.contentGateway.shownComposeTab(identity)?.selection, expectedSelection)
 
             let current = try XCTUnwrap(manager.workspace(withID: workspace.id))
             let savedURL = try await manager.saveWorkspaceToFileAsync(current)
@@ -84,7 +89,7 @@ import XCTest
             let remoteSequence = await runtime.workspaceStore.snapshot().publicationSequence
             let remoteProjected = await bridge.waitUntilProjected(through: remoteSequence)
             XCTAssertTrue(remoteProjected)
-            XCTAssertEqual(manager.composeTab(for: identity)?.selection, remoteSelection)
+            XCTAssertEqual(manager.contentGateway.shownComposeTab(identity)?.selection, remoteSelection)
         }
 
         func testAuthoritativeRetirementSurvivesReloadPreservesSidecarsAndUnhideRestoresDetection() async throws {
@@ -202,16 +207,23 @@ import XCTest
             let canonicalBeforeLocalSave = try XCTUnwrap(authoritySnapshot.workspaces.first {
                 $0.document.workspaceID == canonical.id
             })
-            let suppressedOlderEcho = await presentationBridge.suppressSelfEchoForTesting(DomainWorkspaceEvent(
+            // The echo of a working commit the window submitted from its copy.
+            let echoOperationID = UUID()
+            manager.registerCopySourcedSubmissionForTesting(
+                echoOperationID,
+                workspaceID: canonical.id,
+                digest: canonicalBeforeLocalSave.document.contentDigest
+            )
+            let suppressedOlderEcho = presentationBridge.suppressSelfEchoForTesting(DomainWorkspaceEvent(
                 runtimeID: runtime.identity.runtimeID,
                 sequence: authoritySnapshot.publicationSequence,
                 catalogRevision: authoritySnapshot.catalogRevision,
                 kind: .workingStateCommitted,
                 workspaceID: canonical.id,
                 contextID: nil,
-                operationID: UUID(),
+                operationID: echoOperationID,
                 origin: .appPresentation(windowID: -781),
-                revisions: nil,
+                revisions: canonicalBeforeLocalSave.revisions,
                 timestamp: Date(),
                 diagnostic: nil
             ))
@@ -337,25 +349,25 @@ import XCTest
             let staleIndexEntries = try legacyIndexEntries()
             XCTAssertEqual(staleIndexEntries.map(\.id), [canonical.id])
 
-            let authorityInventory = await manager.loadWorkspaceSnapshotFromDisk()
+            let authorityInventory = await manager.loadWorkspaceSummarySnapshot()
             let authorityUserInventory = authorityInventory.filter { !$0.isSystemWorkspace }
-            XCTAssertEqual(Set(authorityUserInventory.map(\.id)), Set([canonical.id, duplicate.id]))
-            let defaultInventory = WindowRoutingService.workspaceInventoryModels(
+            XCTAssertEqual(Set(authorityUserInventory.map(\.workspaceID)), Set([canonical.id, duplicate.id]))
+            let defaultInventory = WindowRoutingService.workspaceInventory(
                 authorityInventory,
                 authorityIncompleteWorkspaceIDs: manager.pendingConsolidatedRestoreIDs,
                 includeHidden: false
             )
             XCTAssertEqual(defaultInventory.filter { !$0.isSystemWorkspace }.map(\.id), [canonical.id])
-            let recoveryInventory = WindowRoutingService.workspaceInventoryModels(
+            let recoveryInventory = WindowRoutingService.workspaceInventory(
                 authorityInventory,
                 authorityIncompleteWorkspaceIDs: manager.pendingConsolidatedRestoreIDs,
                 includeHidden: true
             )
             let inventoryRetired = try XCTUnwrap(recoveryInventory.first { $0.id == duplicate.id })
-            XCTAssertTrue(inventoryRetired.isHiddenInMenus)
-            XCTAssertEqual(inventoryRetired.consolidatedIntoWorkspaceID, canonical.id)
+            XCTAssertTrue(inventoryRetired.isHidden)
+            XCTAssertEqual(inventoryRetired.summary.consolidatedIntoWorkspaceID, canonical.id)
 
-            let markedSwitch = await manager.requestWorkspaceSwitch(to: inventoryRetired)
+            let markedSwitch = await manager.requestWorkspaceSwitch(toWorkspaceID: inventoryRetired.id)
             XCTAssertFalse(markedSwitch.didSwitch)
 
             let authoritativeCanonical = try await authoritativeWorkspace(
@@ -453,8 +465,9 @@ import XCTest
                 await restoreGate.wait()
             }
             let restoreTask = Task { @MainActor in
-                try await manager.setWorkspaceHiddenFromSnapshot(
-                    inventoryRetired,
+                try await manager.setWorkspaceHidden(
+                    workspaceID: inventoryRetired.id,
+                    expectedConsolidatedIntoWorkspaceID: inventoryRetired.summary.consolidatedIntoWorkspaceID,
                     hidden: false
                 )
             }
@@ -475,8 +488,9 @@ import XCTest
             XCTAssertFalse(manager.pendingConsolidatedRestoreIDs.contains(duplicate.id))
             var rejectedStaleRetiredHide = false
             do {
-                _ = try await manager.setWorkspaceHiddenFromSnapshot(
-                    inventoryRetired,
+                _ = try await manager.setWorkspaceHidden(
+                    workspaceID: inventoryRetired.id,
+                    expectedConsolidatedIntoWorkspaceID: inventoryRetired.summary.consolidatedIntoWorkspaceID,
                     hidden: true
                 )
             } catch {
@@ -558,8 +572,15 @@ import XCTest
                 through: initialSnapshot.publicationSequence
             )
             XCTAssertTrue(projectedInitial)
+            if manager.activeWorkspaceID != canonical.id {
+                let switched = await manager.requestWorkspaceSwitch(toWorkspaceID: canonical.id, saveState: false)
+                XCTAssertTrue(switched.didSwitch)
+            }
 
             let externalPrompt = "Concurrent authority winner"
+            // The merge goes out with the copy's save because the window shows the canonical
+            // workspace. Another runtime commits the canonical workspace once that save's
+            // preparation finishes.
             manager.setWorkspaceSavePreparationDidFinishHandlerForTesting { workspaceID, _, remainingRetryCount in
                 guard workspaceID == canonical.id, remainingRetryCount == 1 else { return }
                 do {
@@ -714,6 +735,398 @@ import XCTest
                 from: Data(contentsOf: finalPreservedIncomplete.document.fileURL)
             )
             XCTAssertEqual(stillRetiredOnDisk.consolidatedIntoWorkspaceID, canonical.id)
+        }
+
+        /// A canonical workspace the window doesn't show takes the merge at exactly the revision cleanup
+        /// read. When another writer commits after that read, its document stays and cleanup
+        /// reports the refused save.
+        func testCleanupKeepsACommitToAnUnshownCanonicalMadeAfterItsRead() async throws {
+            let canonical = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_200),
+                name: "Unshown Canonical",
+                repoPaths: ["/tmp/duplicate-cleanup-unshown-winner-root"],
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_200)
+            )
+            let duplicate = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_100),
+                name: "Unshown Duplicate",
+                repoPaths: canonical.repoPaths,
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_100)
+            )
+            let other = WorkspaceModel(name: "Unshown Other", repoPaths: ["/tmp/duplicate-cleanup-unshown-winner-other-root"])
+            for workspace in [other, canonical, duplicate] {
+                try fixture.writeWorkspace(workspace)
+            }
+            try fixture.writeLegacyIndex([other, canonical, duplicate])
+            let runtime = try await fixture.makeRuntime(profileIdentifier: "duplicate-cleanup-unshown-winner")
+            let otherWriter = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -799)
+            let (manager, _) = await fixture.makeProjectedManager(windowID: -798, runtime: runtime)
+            manager.setDuplicateCleanupBackupDirectoryForTesting(
+                storageRoot.appendingPathComponent("unshown-winner-backups", isDirectory: true)
+            )
+            if manager.activeWorkspaceID != other.id {
+                let switched = await manager.requestWorkspaceSwitch(toWorkspaceID: other.id, saveState: false)
+                XCTAssertTrue(switched.didSwitch, "The window must show a workspace outside the group")
+            }
+            let previousWindows = WindowStatesManager.shared.allWindows
+            WindowStatesManager.shared.allWindows = []
+            defer { WindowStatesManager.shared.allWindows = previousWindows }
+            let winnerPrompt = "Committed after the read"
+            var committedWinner = false
+            manager.contentGateway.commitSubmissionWillBeginHandlerForTesting = { workspaceID in
+                guard workspaceID == canonical.id, !committedWinner else { return }
+                committedWinner = true
+                do {
+                    let read = await otherWriter.canonicalWorkspaceSnapshot(canonical.id)
+                    let snapshot = try XCTUnwrap(read)
+                    var winner = try WorkspaceManagerViewModel.decodeDomainWorkspaceProjection(
+                        documentBytes: snapshot.document.documentBytes,
+                        fileURL: snapshot.document.fileURL
+                    )
+                    winner.currentPromptText = winnerPrompt
+                    let outcome = try await otherWriter.replaceWorking(
+                        winner,
+                        fileURL: snapshot.document.fileURL,
+                        expectedWorkspaceRevision: snapshot.revisions.workingRevision
+                    )
+                    XCTAssertEqual(outcome.disposition, .applied)
+                } catch {
+                    XCTFail("The other writer's commit failed: \(error)")
+                }
+            }
+            addTeardownBlock { @MainActor in
+                manager.contentGateway.commitSubmissionWillBeginHandlerForTesting = nil
+            }
+
+            let cleanup = await manager.consolidateDuplicateWorkspaces()
+
+            XCTAssertTrue(committedWinner)
+            XCTAssertEqual(cleanup.groupsConsolidated, 0)
+            XCTAssertTrue(cleanup.retiredWorkspaceIDs.isEmpty)
+            XCTAssertTrue(cleanup.skipped.contains {
+                $0.workspaceID == duplicate.id && $0.reason.hasPrefix("persist_failed:")
+            }, "Unexpected skips: \(cleanup.skipped)")
+            let stored = try await authoritativeWorkspace(canonical.id, in: runtime)
+            XCTAssertEqual(stored.currentPromptText, winnerPrompt)
+        }
+
+        /// Each retirement checks that the catalog still lists the canonical workspace. When another
+        /// window deletes the canonical while one duplicate's retirement is in flight, the next
+        /// duplicate stays visible and isn't marked consolidated into the deleted workspace. Here
+        /// one projection both removes the canonical and answers the first retirement, so the next
+        /// check runs right after that projection.
+        func testRetirementAfterTheCanonicalIsDeletedKeepsTheNextDuplicate() async throws {
+            let roots = ["/tmp/duplicate-cleanup-deleted-canonical-root"]
+            let canonical = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_300),
+                name: "Deleted Canonical",
+                repoPaths: roots,
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_300)
+            )
+            let firstDuplicate = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_200),
+                name: "Deleted Canonical Duplicate A",
+                repoPaths: roots,
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_200)
+            )
+            let secondDuplicate = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_100),
+                name: "Deleted Canonical Duplicate B",
+                repoPaths: roots,
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_100)
+            )
+            let shown = WorkspaceModel(name: "Deleted Canonical Shown", repoPaths: ["/tmp/duplicate-cleanup-deleted-canonical-shown-root"])
+            for workspace in [shown, canonical, firstDuplicate, secondDuplicate] {
+                try fixture.writeWorkspace(workspace)
+            }
+            try fixture.writeLegacyIndex([shown, canonical, firstDuplicate, secondDuplicate])
+            let runtime = try await fixture.makeRuntime(profileIdentifier: "duplicate-cleanup-deleted-canonical")
+            let otherWindow = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -7401)
+            let (manager, bridge) = await fixture.makeProjectedManager(windowID: -7400, runtime: runtime)
+            manager.setDuplicateCleanupBackupDirectoryForTesting(
+                storageRoot.appendingPathComponent("deleted-canonical-backups", isDirectory: true)
+            )
+            if manager.activeWorkspaceID != shown.id {
+                let switched = await manager.requestWorkspaceSwitch(toWorkspaceID: shown.id, saveState: false)
+                XCTAssertTrue(switched.didSwitch, "The window must show a workspace outside the group")
+            }
+            let previousWindows = WindowStatesManager.shared.allWindows
+            WindowStatesManager.shared.allWindows = []
+            defer { WindowStatesManager.shared.allWindows = previousWindows }
+            let duplicateIDs: Set<UUID> = [firstDuplicate.id, secondDuplicate.id]
+            // The window projects nothing from the deletion until the authority has answered the
+            // first retirement.
+            let projectionGate = WorkspaceDuplicateCleanupSuspensionGate()
+            var holdsProjection = false
+            var firstRetirementID: UUID?
+            bridge.eventConsumptionWillBeginHandlerForTesting = { _ in
+                if holdsProjection { await projectionGate.wait() }
+            }
+            manager.contentGateway.commitSubmissionWillBeginHandlerForTesting = { workspaceID in
+                guard duplicateIDs.contains(workspaceID), firstRetirementID == nil else { return }
+                firstRetirementID = workspaceID
+                do {
+                    let beforeDeletion = await runtime.workspaceStore.snapshot()
+                    let caughtUp = await bridge.waitUntilProjected(through: beforeDeletion.publicationSequence)
+                    XCTAssertTrue(caughtUp)
+                    holdsProjection = true
+                    let read = await otherWindow.canonicalWorkspaceSnapshot(canonical.id)
+                    let snapshot = try XCTUnwrap(read)
+                    let catalog = await runtime.workspaceStore.snapshot()
+                    let deletion = await otherWindow.delete(
+                        workspaceID: canonical.id,
+                        expectedCatalogRevision: catalog.catalogRevision,
+                        expectedWorkspaceRevision: snapshot.revisions.workingRevision
+                    )
+                    XCTAssertEqual(deletion.disposition, .applied)
+                } catch {
+                    XCTFail("The other window's deletion failed: \(error)")
+                }
+            }
+            manager.contentGateway.commitResultWillReturnHandlerForTesting = { workspaceID in
+                guard workspaceID == firstRetirementID, holdsProjection else { return }
+                holdsProjection = false
+                await projectionGate.open()
+            }
+            addTeardownBlock { @MainActor in
+                manager.contentGateway.commitSubmissionWillBeginHandlerForTesting = nil
+                manager.contentGateway.commitResultWillReturnHandlerForTesting = nil
+                bridge.eventConsumptionWillBeginHandlerForTesting = nil
+                await projectionGate.open()
+            }
+
+            let cleanup = await manager.consolidateDuplicateWorkspaces()
+
+            let firstRetired = try XCTUnwrap(firstRetirementID)
+            let nextID = try XCTUnwrap(duplicateIDs.subtracting([firstRetired]).first)
+            XCTAssertEqual(cleanup.groupsConsolidated, 0)
+            XCTAssertFalse(cleanup.retiredWorkspaceIDs.contains(nextID))
+            XCTAssertTrue(cleanup.skipped.contains {
+                $0.workspaceID == nextID && $0.reason.hasPrefix("persist_failed:")
+            }, "Unexpected skips: \(cleanup.skipped)")
+            let next = try await authoritativeWorkspace(nextID, in: runtime)
+            XCTAssertNil(next.consolidatedIntoWorkspaceID)
+            XCTAssertFalse(next.isHiddenInMenus)
+        }
+
+        func testDuplicateMergeLoadsOnlySelectedGroupAndPreservesUnmergedTabs() async throws {
+            let sharedRoots = ["/tmp/duplicate-merge-shared-root"]
+            let canonicalTab = ComposeTabState(
+                name: "Canonical plan",
+                selection: StoredSelection(selectedPaths: ["/tmp/duplicate-merge-shared-root/a.swift"]),
+                promptText: "Canonical prompt"
+            )
+            let canonicalStash = StashedTab(tab: ComposeTabState(name: "Canonical stash", promptText: "Parked in canonical"))
+            let canonical = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_200),
+                name: "Merge Canonical",
+                repoPaths: sharedRoots,
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_200),
+                composeTabs: [canonicalTab],
+                activeComposeTabID: canonicalTab.id,
+                stashedTabs: [canonicalStash]
+            )
+            let duplicatePlan = ComposeTabState(
+                name: "Duplicate plan",
+                isPinned: true,
+                selection: StoredSelection(
+                    selectedPaths: ["/tmp/duplicate-merge-shared-root/b.swift"],
+                    slices: ["/tmp/duplicate-merge-shared-root/c.swift": [LineRange(start: 2, end: 8)]]
+                ),
+                promptText: "Duplicate prompt"
+            )
+            let duplicateNotes = ComposeTabState(name: "Duplicate notes", promptText: "Second duplicate tab")
+            let duplicateStash = StashedTab(tab: ComposeTabState(name: "Duplicate stash", promptText: "Parked in duplicate"))
+            let duplicate = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_100),
+                name: "Merge Duplicate",
+                repoPaths: sharedRoots,
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_100),
+                composeTabs: [duplicatePlan, duplicateNotes],
+                activeComposeTabID: duplicatePlan.id,
+                stashedTabs: [duplicateStash]
+            )
+            let bystanderTab = ComposeTabState(name: "Bystander", promptText: "Not in the group")
+            let bystander = WorkspaceModel(
+                name: "Merge Bystander",
+                repoPaths: ["/tmp/duplicate-merge-bystander-root"],
+                composeTabs: [bystanderTab],
+                activeComposeTabID: bystanderTab.id,
+                stashedTabs: [StashedTab(tab: ComposeTabState(name: "Bystander stash"))]
+            )
+            let shown = WorkspaceModel(name: "Merge Shown", repoPaths: ["/tmp/duplicate-merge-shown-root"])
+            for workspace in [shown, canonical, duplicate, bystander] {
+                try fixture.writeWorkspace(workspace)
+            }
+            try fixture.writeLegacyIndex([shown, canonical, duplicate, bystander])
+            let runtime = try await fixture.makeRuntime(profileIdentifier: "duplicate-merge-selected-group")
+            let (manager, _) = await fixture.makeProjectedManager(windowID: -794, runtime: runtime)
+            manager.setDuplicateCleanupBackupDirectoryForTesting(
+                storageRoot.appendingPathComponent("merge-backups", isDirectory: true)
+            )
+            if manager.activeWorkspaceID != shown.id {
+                let switched = await manager.requestWorkspaceSwitch(toWorkspaceID: shown.id, saveState: false)
+                XCTAssertTrue(switched.didSwitch, "The window must show a workspace outside the group")
+            }
+            let bystanderURL = fixture.workspaceFileURL(for: bystander)
+            let bystanderBytes = try Data(contentsOf: bystanderURL)
+            let previousWindows = WindowStatesManager.shared.allWindows
+            WindowStatesManager.shared.allWindows = []
+            defer { WindowStatesManager.shared.allWindows = previousWindows }
+            manager.contentGateway.resetDebugLoadSnapshot()
+
+            let cleanup = await manager.consolidateDuplicateWorkspaces()
+
+            XCTAssertEqual(cleanup.groupsConsolidated, 1, "Unexpected skips: \(cleanup.skipped)")
+            XCTAssertEqual(cleanup.retiredWorkspaceIDs, [duplicate.id])
+            let merged = try await authoritativeWorkspace(canonical.id, in: runtime)
+            XCTAssertEqual(merged.composeTabs, canonical.composeTabs + duplicate.composeTabs)
+            XCTAssertEqual(merged.stashedTabs, canonical.stashedTabs + duplicate.stashedTabs)
+            let retired = try await authoritativeWorkspace(duplicate.id, in: runtime)
+            XCTAssertEqual(retired.consolidatedIntoWorkspaceID, canonical.id)
+            XCTAssertTrue(retired.isHiddenInMenus)
+            XCTAssertEqual(retired.composeTabs, duplicate.composeTabs)
+            XCTAssertEqual(retired.stashedTabs, duplicate.stashedTabs)
+
+            // The backup writes dates as ISO 8601 whole seconds, so it is compared by tab content.
+            let backupDecoder = JSONDecoder()
+            backupDecoder.dateDecodingStrategy = .iso8601
+            let backup = try backupDecoder.decode(
+                WorkspaceDuplicateCleanupBackup.self,
+                from: Data(contentsOf: XCTUnwrap(cleanup.backupURL))
+            )
+            let backupGroup = try XCTUnwrap(backup.groups.first)
+            XCTAssertEqual(backup.groups.count, 1)
+            func tabContent(_ workspace: WorkspaceModel) -> [String] {
+                (workspace.composeTabs + workspace.stashedTabs.map(\.tab)).map {
+                    "\($0.id.uuidString) \($0.promptText) \($0.selection.selectedPaths)"
+                }
+            }
+            XCTAssertEqual(tabContent(backupGroup.canonicalBeforeMerge), tabContent(canonical))
+            XCTAssertEqual(backupGroup.duplicatesBeforeDelete.map(tabContent), [tabContent(duplicate)])
+
+            XCTAssertEqual(try Data(contentsOf: bystanderURL), bystanderBytes)
+            let loads = manager.contentGateway.debugLoadSnapshot()
+            let decodedWorkspaceIDs = Set(loads.countsByWorkspaceID.keys.filter { loads.counts(for: $0).decodes > 0 })
+            XCTAssertEqual(decodedWorkspaceIDs, [canonical.id, duplicate.id])
+        }
+
+        /// A canonical workspace the window shows takes the merge in its copy, so an edit the copy
+        /// hasn't published yet stays and reaches the merged document.
+        func testShownCanonicalMergeKeepsTheCopysUnpublishedEdit() async throws {
+            let activeTab = ComposeTabState(name: "Active")
+            let inactiveTab = ComposeTabState(name: "Inactive", promptText: "Saved prompt")
+            let canonical = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_200),
+                name: "Shown Canonical",
+                repoPaths: ["/tmp/duplicate-cleanup-shown-canonical-root"],
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_200),
+                composeTabs: [activeTab, inactiveTab],
+                activeComposeTabID: activeTab.id
+            )
+            let duplicateTab = ComposeTabState(name: "Duplicate", promptText: "Duplicate prompt")
+            let duplicate = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_100),
+                name: "Shown Canonical Duplicate",
+                repoPaths: canonical.repoPaths,
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_100),
+                composeTabs: [duplicateTab],
+                activeComposeTabID: duplicateTab.id
+            )
+            try fixture.writeWorkspace(canonical)
+            try fixture.writeWorkspace(duplicate)
+            try fixture.writeLegacyIndex([canonical, duplicate])
+            let runtime = try await fixture.makeRuntime(profileIdentifier: "duplicate-cleanup-shown-canonical")
+            let (manager, _) = await fixture.makeProjectedManager(windowID: -795, runtime: runtime)
+            manager.setDuplicateCleanupBackupDirectoryForTesting(
+                storageRoot.appendingPathComponent("shown-canonical-backups", isDirectory: true)
+            )
+            if manager.activeWorkspaceID != canonical.id {
+                let switched = await manager.requestWorkspaceSwitch(toWorkspaceID: canonical.id, saveState: false)
+                XCTAssertTrue(switched.didSwitch)
+            }
+            let previousWindows = WindowStatesManager.shared.allWindows
+            WindowStatesManager.shared.allWindows = []
+            defer { WindowStatesManager.shared.allWindows = previousWindows }
+            let identity = WorkspaceSelectionIdentity(workspaceID: canonical.id, tabID: inactiveTab.id)
+            XCTAssertTrue(manager.editHeldTab(identity) { tab in
+                tab.promptText = "Unsaved prompt"
+                return true
+            })
+
+            let cleanup = await manager.consolidateDuplicateWorkspaces()
+
+            XCTAssertEqual(cleanup.groupsConsolidated, 1, "Unexpected skips: \(cleanup.skipped)")
+            XCTAssertEqual(cleanup.retiredWorkspaceIDs, [duplicate.id])
+            XCTAssertEqual(manager.contentGateway.shownComposeTab(identity)?.promptText, "Unsaved prompt")
+            let mergedCanonical = try await authoritativeWorkspace(canonical.id, in: runtime)
+            XCTAssertEqual(mergedCanonical.composeTabs.first { $0.id == inactiveTab.id }?.promptText, "Unsaved prompt")
+            XCTAssertTrue(mergedCanonical.composeTabs.contains { $0.id == duplicateTab.id })
+        }
+
+        /// Cleanup routes its merge by what the window shows when it commits. A canonical workspace
+        /// the window starts showing after cleanup read it takes the merge in its copy, so an edit
+        /// made there since stays and reaches the merged document.
+        func testCanonicalShownAfterTheReadKeepsTheCopysEdit() async throws {
+            let activeTab = ComposeTabState(name: "Active")
+            let inactiveTab = ComposeTabState(name: "Inactive", promptText: "Saved prompt")
+            let canonical = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_200),
+                name: "Late Shown Canonical",
+                repoPaths: ["/tmp/duplicate-cleanup-late-shown-root"],
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_200),
+                composeTabs: [activeTab, inactiveTab],
+                activeComposeTabID: activeTab.id
+            )
+            let duplicate = WorkspaceModel(
+                dateModified: Date(timeIntervalSinceReferenceDate: 700_000_100),
+                name: "Late Shown Duplicate",
+                repoPaths: canonical.repoPaths,
+                lastUsed: Date(timeIntervalSinceReferenceDate: 700_000_100)
+            )
+            let other = WorkspaceModel(name: "Late Shown Other", repoPaths: ["/tmp/duplicate-cleanup-late-shown-other-root"])
+            for workspace in [other, canonical, duplicate] {
+                try fixture.writeWorkspace(workspace)
+            }
+            try fixture.writeLegacyIndex([other, canonical, duplicate])
+            let runtime = try await fixture.makeRuntime(profileIdentifier: "duplicate-cleanup-late-shown-canonical")
+            let (manager, _) = await fixture.makeProjectedManager(windowID: -796, runtime: runtime)
+            manager.setDuplicateCleanupBackupDirectoryForTesting(
+                storageRoot.appendingPathComponent("late-shown-backups", isDirectory: true)
+            )
+            if manager.activeWorkspaceID != other.id {
+                let switched = await manager.requestWorkspaceSwitch(toWorkspaceID: other.id, saveState: false)
+                XCTAssertTrue(switched.didSwitch, "The window must show a workspace outside the group")
+            }
+            let previousWindows = WindowStatesManager.shared.allWindows
+            WindowStatesManager.shared.allWindows = []
+            defer { WindowStatesManager.shared.allWindows = previousWindows }
+            let identity = WorkspaceSelectionIdentity(workspaceID: canonical.id, tabID: inactiveTab.id)
+            // Cleanup reads the duplicate for the merge after it read the canonical document. The
+            // window shows the canonical workspace and edits it during that read.
+            manager.contentGateway.canonicalReadWillBeginHandlerForTesting = { workspaceID, source in
+                guard workspaceID == duplicate.id,
+                      source == "duplicateCleanupMerge",
+                      manager.activeWorkspaceID != canonical.id
+                else { return }
+                _ = await manager.requestWorkspaceSwitch(toWorkspaceID: canonical.id, saveState: false)
+                _ = manager.editHeldTab(identity) { tab in
+                    tab.promptText = "Edited after the read"
+                    return true
+                }
+            }
+            addTeardownBlock { @MainActor in
+                manager.contentGateway.canonicalReadWillBeginHandlerForTesting = nil
+            }
+
+            let cleanup = await manager.consolidateDuplicateWorkspaces()
+
+            XCTAssertEqual(manager.activeWorkspaceID, canonical.id, "The duplicate's read must show the canonical workspace")
+            XCTAssertEqual(cleanup.groupsConsolidated, 1, "Unexpected skips: \(cleanup.skipped)")
+            XCTAssertEqual(cleanup.retiredWorkspaceIDs, [duplicate.id])
+            XCTAssertEqual(manager.contentGateway.shownComposeTab(identity)?.promptText, "Edited after the read")
+            let mergedCanonical = try await authoritativeWorkspace(canonical.id, in: runtime)
+            XCTAssertEqual(mergedCanonical.composeTabs.first { $0.id == inactiveTab.id }?.promptText, "Edited after the read")
         }
 
         func testWorkspaceRetirementMarkerRoundTripsAndDefaultsToNil() throws {
@@ -1044,13 +1457,13 @@ import XCTest
             let secondProjected = await secondBridge.waitUntilProjected(through: secondSequence)
             XCTAssertTrue(secondProjected)
 
-            let secondInventory = await secondManager.loadWorkspaceSnapshotFromDisk()
-            let secondTarget = try XCTUnwrap(secondInventory.first { $0.id == workspace.id })
+            let secondInventory = await secondManager.loadWorkspaceSummarySnapshot()
+            let secondTarget = try XCTUnwrap(secondInventory.first { $0.workspaceID == workspace.id })
             XCTAssertNil(secondTarget.consolidatedIntoWorkspaceID)
             XCTAssertTrue(secondManager.pendingConsolidatedRestoreIDs.contains(workspace.id))
             XCTAssertNil(secondManager.workspace(withID: workspace.id)?.consolidatedIntoWorkspaceID)
             XCTAssertTrue(secondManager.duplicateWorkspaceGroups().isEmpty)
-            let secondSwitch = await secondManager.requestWorkspaceSwitch(to: secondTarget)
+            let secondSwitch = await secondManager.requestWorkspaceSwitch(toWorkspaceID: secondTarget.workspaceID)
             XCTAssertFalse(secondSwitch.didSwitch)
             secondBridge.stop()
 
@@ -1092,13 +1505,13 @@ import XCTest
             let restartedProjected = await restartedBridge.waitUntilProjected(through: restartedSequence)
             XCTAssertTrue(restartedProjected)
 
-            let restartedInventory = await restartedManager.loadWorkspaceSnapshotFromDisk()
-            let restartedTarget = try XCTUnwrap(restartedInventory.first { $0.id == workspace.id })
+            let restartedInventory = await restartedManager.loadWorkspaceSummarySnapshot()
+            let restartedTarget = try XCTUnwrap(restartedInventory.first { $0.workspaceID == workspace.id })
             XCTAssertNil(restartedTarget.consolidatedIntoWorkspaceID)
             XCTAssertTrue(restartedManager.pendingConsolidatedRestoreIDs.contains(workspace.id))
             XCTAssertNil(restartedManager.workspace(withID: workspace.id)?.consolidatedIntoWorkspaceID)
             XCTAssertTrue(restartedManager.duplicateWorkspaceGroups().isEmpty)
-            let restartedSwitch = await restartedManager.requestWorkspaceSwitch(to: restartedTarget)
+            let restartedSwitch = await restartedManager.requestWorkspaceSwitch(toWorkspaceID: restartedTarget.workspaceID)
             XCTAssertFalse(restartedSwitch.didSwitch)
 
             let restoreCompletionSnapshot = await restartedClient.snapshot()

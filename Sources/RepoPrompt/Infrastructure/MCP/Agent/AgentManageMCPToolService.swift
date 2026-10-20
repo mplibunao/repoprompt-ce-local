@@ -3,6 +3,17 @@ import MCP
 
 @MainActor
 struct AgentManageMCPToolService {
+    /// The listed name of the compose tab with this ID: from the window's copy of a workspace it
+    /// holds, and from the catalog summary of any other. Nil when no workspace, or more than one,
+    /// lists the tab.
+    private static func listedTabName(_ tabID: UUID, in window: WindowState) -> String? {
+        let gateway = window.workspaceManager.contentGateway
+        guard case let .unique(identity, _) = gateway.uniqueTabIdentity(tabID: tabID, includeStashed: false) else {
+            return nil
+        }
+        return gateway.listedTab(identity)?.name
+    }
+
     typealias RequestMetadata = MCPServerViewModel.RequestMetadata
     typealias OpenCodeCatalogSnapshotProvider = @MainActor (_ workspacePath: String?) async throws -> OpenCodeACPModelPollingService.Snapshot?
 
@@ -341,7 +352,7 @@ struct AgentManageMCPToolService {
 
         for session in agentModeVM.sessions.values {
             guard let activeSessionID = session.activeAgentSessionID else { continue }
-            let tabName = targetWindow.workspaceManager.composeTab(with: session.tabID)?.name
+            let tabName = Self.listedTabName(session.tabID, in: targetWindow)
             entriesByID[activeSessionID] = sessionSummaryObject(
                 sessionID: activeSessionID,
                 name: tabName ?? "Agent Session",
@@ -672,7 +683,7 @@ struct AgentManageMCPToolService {
             throw MCPError.internalError("Failed to create agent session state.")
         }
         agentModeVM.mcpAcceptSessionTarget(target)
-        let sessionName = targetWindow.workspaceManager.composeTab(with: target.tabID)?.name ?? "Agent Session"
+        let sessionName = Self.listedTabName(target.tabID, in: targetWindow) ?? "Agent Session"
         return .object(sessionSummaryObject(
             sessionID: session.activeAgentSessionID,
             name: sessionName,
@@ -856,7 +867,7 @@ struct AgentManageMCPToolService {
             throw MCPError.internalError("Failed to hydrate resumed session.")
         }
         agentModeVM.mcpAcceptSessionTarget(target)
-        let sessionName = targetWindow.workspaceManager.composeTab(with: target.tabID)?.name ?? "Agent Session"
+        let sessionName = Self.listedTabName(target.tabID, in: targetWindow) ?? "Agent Session"
         return .object(sessionSummaryObject(
             sessionID: sessionID,
             name: sessionName,
@@ -892,7 +903,7 @@ struct AgentManageMCPToolService {
             await Task.yield()
         }
 
-        let tabName = targetWindow.workspaceManager.composeTab(with: session.tabID)?.name ?? "Agent Session"
+        let tabName = Self.listedTabName(session.tabID, in: targetWindow) ?? "Agent Session"
         var summary = sessionSummaryObject(
             sessionID: sessionID,
             name: tabName,
@@ -987,7 +998,7 @@ struct AgentManageMCPToolService {
                         )
                     candidate = CleanupSessionCandidate(
                         sessionID: sessionID,
-                        name: targetWindow.workspaceManager.composeTab(with: liveSession.tabID)?.name ?? "Agent Session",
+                        name: Self.listedTabName(liveSession.tabID, in: targetWindow) ?? "Agent Session",
                         tabID: liveSession.tabID,
                         isLive: true,
                         isMCPOriginated: liveSession.isMCPOriginated,
@@ -1101,10 +1112,10 @@ struct AgentManageMCPToolService {
                     let liveSessionID = agentModeVM.sessions[tabID]?.activeAgentSessionID
                     let liveBindingMatches = liveSessionID == sessionID
                     let hasDifferentLiveBinding = liveSessionID != nil && liveSessionID != sessionID
-                    let workspaceBindingMatches = targetWindow.workspaceManager.activeAgentSessionID(
-                        forTabID: tabID,
-                        inWorkspaceID: workspace.id
-                    ) == sessionID
+                    let workspaceBindingMatches = targetWindow.workspaceManager.contentGateway.listedTab(
+                        WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID),
+                        location: nil
+                    )?.activeAgentSessionID == sessionID
                     return !hasDifferentLiveBinding && (liveBindingMatches || workspaceBindingMatches) ? tabID : nil
                 }
                 if let openTabID {
@@ -1376,7 +1387,7 @@ struct AgentManageMCPToolService {
            let sessionID = liveSession.activeAgentSessionID
         {
             let hydrated = await agentModeVM.ensureSessionReady(tabID: liveSession.tabID)
-            let liveName = targetWindow.workspaceManager.composeTab(with: hydrated.tabID)?.name
+            let liveName = Self.listedTabName(hydrated.tabID, in: targetWindow)
                 ?? agentModeVM.sessionIndex[sessionID]?.name
                 ?? "Agent Session"
             return HandoffSessionInfo(
@@ -1412,7 +1423,7 @@ struct AgentManageMCPToolService {
         }()
         let transcript = persisted.transcript
             ?? AgentTranscriptIO.importLegacyItems(persisted.items.map { $0.toItem() })
-        let sourceTabName = persisted.composeTabID.flatMap { targetWindow.workspaceManager.composeTab(with: $0)?.name }
+        let sourceTabName = persisted.composeTabID.flatMap { Self.listedTabName($0, in: targetWindow) }
             ?? persisted.name
         return HandoffSessionInfo(
             sessionID: persisted.id,

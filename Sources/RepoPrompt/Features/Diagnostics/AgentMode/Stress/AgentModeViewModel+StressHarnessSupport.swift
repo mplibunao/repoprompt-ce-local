@@ -445,7 +445,9 @@
                 guard let workspace = test_workspaceManager?.activeWorkspace else {
                     throw StressHarnessPersistenceError.noActiveWorkspace
                 }
-                guard test_workspaceManager?.composeTab(with: tabID) != nil else {
+                guard test_workspaceManager?.contentGateway.shownComposeTab(
+                    WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID)
+                ) != nil else {
                     throw StressHarnessPersistenceError.missingComposeTab(tabID)
                 }
 
