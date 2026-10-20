@@ -321,27 +321,36 @@ actor WorkspaceFileContextStore {
             let parityMatched: Bool
         }
 
+        struct RootCatalogShardPatchDebugMetrics: Equatable {
+            var normalizeNanoseconds: UInt64 = 0
+            var locateNanoseconds: UInt64 = 0
+            var deriveNanoseconds: UInt64 = 0
+            var mergeCopyNanoseconds: UInt64 = 0
+            var mergeCopiedElementCount = 0
+            var derivedEntryCount = 0
+            var projectionClassificationCount = 0
+        }
+
         /// One applied batch's catalog shard work for a root. Durations are nanoseconds; the canonical
         /// apply and mutation pass durations exclude a comparison's rebuild and parity check.
         struct RootCatalogShardBatchDebugSample: Equatable {
             let rootID: UUID
             let appliedIndexGeneration: UInt64
+            /// Upserts, removed IDs, and modified IDs in the event, before normalization. Counted from the
+            /// event, so a batch that falls back before the patch builder runs reports it too.
+            let inputSize: Int
             var rootLifetimeID: UUID?
             var topologyGeneration: UInt64?
             var servicePublicationSequence: UInt64?
             var rootFileCount = 0
             var rootFolderCount = 0
-            var inputSize = 0
             /// Input upserts and modifications that matched the shard's record, repeats included.
             var noOpCount = 0
             /// Nil when the builder didn't run or found the batch unsafe.
             var effectiveEditCount: Int?
             var outcome: RootCatalogShardBatchOutcome?
             var fallbackReason: RootCatalogShardFallbackReason?
-            var normalizeNanoseconds: UInt64 = 0
-            var locateNanoseconds: UInt64 = 0
-            var deriveNanoseconds: UInt64 = 0
-            var mergeCopyNanoseconds: UInt64 = 0
+            var patchMetrics = RootCatalogShardPatchDebugMetrics()
             var pathIndexSegmentNanoseconds: UInt64 = 0
             var publishNanoseconds: UInt64 = 0
             var rebuildNanoseconds: UInt64 = 0
@@ -349,9 +358,6 @@ actor WorkspaceFileContextStore {
             var canonicalApplyNanoseconds: UInt64?
             /// The synchronous mutation pass that applies the deltas and publishes the batch.
             var mutationPassNanoseconds: UInt64?
-            var mergeCopiedElementCount = 0
-            var derivedEntryCount = 0
-            var projectionClassificationCount = 0
             var overlayPayloadCount = 0
             var overlayMentionCount = 0
             var ingress: RootCatalogShardBatchIngressDebugTimings?
@@ -3272,8 +3278,6 @@ actor WorkspaceFileContextStore {
 
     private struct RootCatalogShardPatchAttempt {
         let outcome: RootCatalogShardPatchOutcome
-        /// Upserts, removed IDs, and modified IDs in the event, before normalization.
-        let inputSize: Int
         /// Input upserts and modifications that matched the shard's record, repeats included.
         let noOpCount: Int
         /// Inserted and removed records, so a same-path replacement with a new ID counts two.
@@ -3282,18 +3286,6 @@ actor WorkspaceFileContextStore {
             let metrics: RootCatalogShardPatchDebugMetrics
         #endif
     }
-
-    #if DEBUG
-        private struct RootCatalogShardPatchDebugMetrics {
-            var normalizeNanoseconds: UInt64 = 0
-            var locateNanoseconds: UInt64 = 0
-            var deriveNanoseconds: UInt64 = 0
-            var mergeCopyNanoseconds: UInt64 = 0
-            var mergeCopiedElementCount = 0
-            var derivedEntryCount = 0
-            var projectionClassificationCount = 0
-        }
-    #endif
 
     private struct SearchCatalogRootDependency: Hashable {
         let canonicalIdentity: String
@@ -8944,7 +8936,10 @@ actor WorkspaceFileContextStore {
         private func beginRootCatalogShardBatchSample(_ event: WorkspaceAppliedIndexBatchEvent) {
             rootCatalogShardBatchSampleInProgress = RootCatalogShardBatchDebugSample(
                 rootID: event.rootID,
-                appliedIndexGeneration: event.generation
+                appliedIndexGeneration: event.generation,
+                inputSize: event.upsertedFiles.count + event.upsertedFolders.count
+                    + event.removedFileIDs.count + event.removedFolderIDs.count
+                    + event.modifiedFileIDs.count + event.modifiedFolderIDs.count
             )
         }
 
@@ -8961,20 +8956,13 @@ actor WorkspaceFileContextStore {
 
         private func recordRootCatalogShardPatchAttempt(_ attempt: RootCatalogShardPatchAttempt, rootID: UUID) {
             guard var sample = rootCatalogShardBatchSampleInProgress, sample.rootID == rootID else { return }
-            sample.inputSize = attempt.inputSize
             sample.noOpCount = attempt.noOpCount
             if case .unsafe = attempt.outcome {
                 sample.effectiveEditCount = nil
             } else {
                 sample.effectiveEditCount = attempt.logicalMutationCount
             }
-            sample.normalizeNanoseconds = attempt.metrics.normalizeNanoseconds
-            sample.locateNanoseconds = attempt.metrics.locateNanoseconds
-            sample.deriveNanoseconds = attempt.metrics.deriveNanoseconds
-            sample.mergeCopyNanoseconds = attempt.metrics.mergeCopyNanoseconds
-            sample.mergeCopiedElementCount = attempt.metrics.mergeCopiedElementCount
-            sample.derivedEntryCount = attempt.metrics.derivedEntryCount
-            sample.projectionClassificationCount = attempt.metrics.projectionClassificationCount
+            sample.patchMetrics = attempt.metrics
             rootCatalogShardBatchSampleInProgress = sample
         }
 
@@ -9451,9 +9439,6 @@ actor WorkspaceFileContextStore {
         let root = previousShard.root
         let oldFiles = previousShard.files
         let oldFolders = previousShard.folders
-        let inputSize = event.upsertedFiles.count + event.upsertedFolders.count
-            + event.removedFileIDs.count + event.removedFolderIDs.count
-            + event.modifiedFileIDs.count + event.modifiedFolderIDs.count
         var noOpCount = 0
         var logicalMutationCount = 0
         #if DEBUG
@@ -9469,7 +9454,6 @@ actor WorkspaceFileContextStore {
             #if DEBUG
                 return RootCatalogShardPatchAttempt(
                     outcome: outcome,
-                    inputSize: inputSize,
                     noOpCount: noOpCount,
                     logicalMutationCount: logicalMutationCount,
                     metrics: metrics
@@ -9477,7 +9461,6 @@ actor WorkspaceFileContextStore {
             #else
                 return RootCatalogShardPatchAttempt(
                     outcome: outcome,
-                    inputSize: inputSize,
                     noOpCount: noOpCount,
                     logicalMutationCount: logicalMutationCount
                 )

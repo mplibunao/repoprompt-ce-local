@@ -770,7 +770,7 @@ final class WorkspaceSearchServiceTests: XCTestCase {
             if shape.sharesRecordArrays {
                 let previous = try XCTUnwrap(previousContents, label)
                 let current = try XCTUnwrap(published, label)
-                XCTAssertEqual(sample.mergeCopiedElementCount, 0, label)
+                XCTAssertEqual(sample.patchMetrics.mergeCopiedElementCount, 0, label)
                 XCTAssertTrue(Self.sharesStorage(previous.files, current.files), label)
                 XCTAssertTrue(Self.sharesStorage(previous.entries, current.entries), label)
                 XCTAssertTrue(Self.sharesStorage(previous.folders, current.folders), label)
@@ -804,6 +804,8 @@ final class WorkspaceSearchServiceTests: XCTestCase {
         struct InvalidBatch {
             let label: String
             let reason: WorkspaceFileContextStore.RootCatalogShardFallbackReason
+            let inputSize: Int
+            let expectsDefaultPatchMetrics: Bool
             let stagedRoot: WorkspaceRootRecord?
             let event: (UInt64) -> WorkspaceAppliedIndexBatchEvent
         }
@@ -813,6 +815,8 @@ final class WorkspaceSearchServiceTests: XCTestCase {
             InvalidBatch(
                 label: "same-ID upserts, one of them at another path",
                 reason: .patchApplicationBackstop,
+                inputSize: 2,
+                expectsDefaultPatchMetrics: true,
                 stagedRoot: nil
             ) {
                 WorkspaceAppliedIndexBatchEvent(
@@ -822,7 +826,13 @@ final class WorkspaceSearchServiceTests: XCTestCase {
                     upsertedFiles: [alpha, alphaElsewhere]
                 )
             },
-            InvalidBatch(label: "a removed ID without its path", reason: .patchApplicationBackstop, stagedRoot: nil) {
+            InvalidBatch(
+                label: "a removed ID without its path",
+                reason: .patchApplicationBackstop,
+                inputSize: 1,
+                expectsDefaultPatchMetrics: false,
+                stagedRoot: nil
+            ) {
                 WorkspaceAppliedIndexBatchEvent(
                     rootID: root.id,
                     rootPath: root.standardizedFullPath,
@@ -833,6 +843,8 @@ final class WorkspaceSearchServiceTests: XCTestCase {
             InvalidBatch(
                 label: "a changed root record",
                 reason: .unsafeOrAmbiguousBatch,
+                inputSize: 1,
+                expectsDefaultPatchMetrics: true,
                 stagedRoot: WorkspaceRootRecord(id: root.id, name: "RenamedRoot", fullPath: root.fullPath, kind: root.kind)
             ) {
                 WorkspaceAppliedIndexBatchEvent(
@@ -865,6 +877,18 @@ final class WorkspaceSearchServiceTests: XCTestCase {
             let sample = try XCTUnwrap(after.batches.samples.last, batch.label)
             XCTAssertEqual(sample.outcome, .rebuilt, batch.label)
             XCTAssertEqual(sample.fallbackReason, batch.reason, batch.label)
+            XCTAssertEqual(sample.inputSize, batch.inputSize, batch.label)
+            let metrics = sample.patchMetrics
+            if batch.expectsDefaultPatchMetrics {
+                XCTAssertEqual(metrics.normalizeNanoseconds, 0, batch.label)
+            }
+            // None of these batches gets past locating its edits, so no later phase recorded work.
+            XCTAssertEqual(metrics.locateNanoseconds, 0, batch.label)
+            XCTAssertEqual(metrics.deriveNanoseconds, 0, batch.label)
+            XCTAssertEqual(metrics.mergeCopyNanoseconds, 0, batch.label)
+            XCTAssertEqual(metrics.mergeCopiedElementCount, 0, batch.label)
+            XCTAssertEqual(metrics.derivedEntryCount, 0, batch.label)
+            XCTAssertEqual(metrics.projectionClassificationCount, 0, batch.label)
 
             let published = await store.rootCatalogShardContentsForTesting(rootID: root.id, pathQueries: ["Alpha", "Beta"])
             let authoritative = await store.authoritativeRootCatalogShardContentsForTesting(
