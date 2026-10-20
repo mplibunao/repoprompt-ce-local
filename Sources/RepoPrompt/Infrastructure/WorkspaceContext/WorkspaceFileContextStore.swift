@@ -574,6 +574,12 @@ actor WorkspaceFileContextStore {
     private static let maximumRetainedCodemapPresentationRecordsPerRoot = 64
     private static let maximumCodemapPresentationRequestsPerBundle = 4096
 
+    /// Change a loaded root's state where `rootStatesByID` stores it, by passing `&rootStatesByID[rootID]!`
+    /// as `inout`. A copied-out state shares its indexes' storage with the stored one, so its first edit
+    /// copies each root-sized index it touches, and holding a copy while the stored state is changed in
+    /// place makes that change copy too. A caller that changes the state keeps a `RootIdentity` instead.
+    /// A function given the stored state as `inout` must not read `rootStatesByID`, because the access
+    /// lasts for the whole call.
     private struct RootState {
         let lifetimeID: UUID
         let root: WorkspaceRootRecord
@@ -582,6 +588,17 @@ actor WorkspaceFileContextStore {
         var fileIDsByRelativePath: [String: UUID]
         var childFolderIDsByFolderID: [UUID: [UUID]]
         var childFileIDsByFolderID: [UUID: [UUID]]
+
+        var identity: RootIdentity {
+            RootIdentity(lifetimeID: lifetimeID, root: root, service: service)
+        }
+    }
+
+    /// A loaded root's lifetime, record, and service, without the indexes a `RootState` holds.
+    private struct RootIdentity {
+        let lifetimeID: UUID
+        let root: WorkspaceRootRecord
+        let service: FileSystemService
     }
 
     private struct PendingSeededRoot {
@@ -6893,16 +6910,16 @@ actor WorkspaceFileContextStore {
             deltas: [FileSystemDelta],
             servicePublicationSequence: UInt64
         ) async throws {
-            let state = try state(for: rootID)
-            let preparedDeltas = prepareObservedFileSystemDeltas(deltas, root: state.root)
+            let identity = try rootIdentity(for: rootID)
+            let preparedDeltas = prepareObservedFileSystemDeltas(deltas, root: identity.root)
             await applyPreparedIndexDeltas(
                 rootID: rootID,
                 deltas: preparedDeltas,
-                expectedLifetimeID: state.lifetimeID,
+                expectedLifetimeID: identity.lifetimeID,
                 watcherAcceptedWatermark: nil,
                 servicePublicationSequence: servicePublicationSequence,
                 publicationCorrelation: nil,
-                diagnosticRootToken: state.service.diagnosticRootToken
+                diagnosticRootToken: identity.service.diagnosticRootToken
             )
         }
 
@@ -11041,18 +11058,18 @@ actor WorkspaceFileContextStore {
 
     @discardableResult
     func reconcileLoadedRootCatalogWithDisk(rootID: UUID) async -> [FileSystemDelta] {
-        guard let state = rootStatesByID[rootID] else { return [] }
-        let root = state.root
+        guard let identity = rootStatesByID[rootID]?.identity else { return [] }
+        let root = identity.root
         let folderPaths = Set(
-            state.folderIDsByRelativePath.compactMap { relativePath, folderID -> String? in
+            rootStatesByID[rootID]?.folderIDsByRelativePath.compactMap { relativePath, folderID -> String? in
                 isDiscoverableFolderID(folderID) ? relativePath : nil
-            }
+            } ?? []
         )
         guard !folderPaths.isEmpty else { return [] }
 
         let deltas: [FileSystemDelta]
         do {
-            deltas = try await state.service.scanFoldersInParallel(folderPaths.sorted()).deltas
+            deltas = try await identity.service.scanFoldersInParallel(folderPaths.sorted()).deltas
         } catch {
             return []
         }
@@ -11122,25 +11139,25 @@ actor WorkspaceFileContextStore {
             guard codemapFencesByRootID[eligible.rootID] != nil,
                   fileIDsByStandardizedFullPath[eligible.fullPath] == nil,
                   folderIDsByStandardizedFullPath[eligible.fullPath] == nil,
-                  var state = rootStatesByID[eligible.rootID],
-                  state.root.id == eligible.rootID,
-                  state.root.standardizedFullPath == eligible.rootPath,
+                  let root = rootStatesByID[eligible.rootID]?.root,
+                  root.id == eligible.rootID,
+                  root.standardizedFullPath == eligible.rootPath,
                   rootIDsByStandardizedPath[eligible.rootPath] == eligible.rootID,
                   loadedRoot(containing: eligible.fullPath)?.id == eligible.rootID,
-                  state.fileIDsByRelativePath[eligible.relativePath] == nil,
-                  state.folderIDsByRelativePath[eligible.relativePath] == nil
+                  rootStatesByID[eligible.rootID]?.fileIDsByRelativePath[eligible.relativePath] == nil,
+                  rootStatesByID[eligible.rootID]?.folderIDsByRelativePath[eligible.relativePath] == nil
             else { continue }
             var indexes = RootIndexBuffers()
             let hierarchy = eligible.relativePath.split(separator: "/").count
+            // `indexFiles` changes the state only when it indexes the file, so a skipped file leaves it as it was.
             indexFiles(
                 [FSItemDTO(relativePath: eligible.relativePath, isDirectory: false, hierarchy: hierarchy)],
-                root: state.root,
-                state: &state,
+                root: root,
+                state: &rootStatesByID[eligible.rootID]!,
                 indexes: &indexes
             )
             guard !indexes.filesByID.isEmpty else { continue }
             commit(indexes)
-            rootStatesByID[eligible.rootID] = state
             indexed.append(eligible.fullPath)
             upsertedFilesByRoot[eligible.rootID, default: []].append(contentsOf: indexes.filesByID.values)
         }
@@ -12835,14 +12852,14 @@ actor WorkspaceFileContextStore {
         try await requirePublishedSeededAuthorityFresh(rootID: expectedRecord.rootID)
         for attempt in 0 ..< 2 {
             try Task.checkCancellation()
-            guard let state = rootStatesByID[expectedRecord.rootID],
+            guard let identity = rootStatesByID[expectedRecord.rootID]?.identity,
                   let current = file(rootID: expectedRecord.rootID, relativePath: expectedRecord.standardizedRelativePath),
                   current.id == expectedRecord.id
             else {
                 return staleSearchContentSnapshot(for: expectedRecord)
             }
 
-            let service = state.service
+            let service = identity.service
             let epoch = searchContentInvalidationEpochsByFileID[current.id] ?? 0
             let cacheKey = WorkspaceSearchContentCacheKey(
                 rootID: current.rootID,
@@ -12863,7 +12880,7 @@ actor WorkspaceFileContextStore {
                     content: cached.content,
                     modificationDate: cached.modificationDate,
                     file: current,
-                    rootLifetimeID: state.lifetimeID
+                    rootLifetimeID: identity.lifetimeID
                 )
                 try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return FileSearchContentSnapshot(
@@ -12922,7 +12939,7 @@ actor WorkspaceFileContextStore {
                     content: cached.content,
                     modificationDate: cached.modificationDate,
                     file: current,
-                    rootLifetimeID: state.lifetimeID
+                    rootLifetimeID: identity.lifetimeID
                 )
                 try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return FileSearchContentSnapshot(
@@ -12964,7 +12981,7 @@ actor WorkspaceFileContextStore {
         try await requirePublishedSeededAuthorityFresh(rootID: expectedRecord.rootID)
         for attempt in 0 ..< 2 {
             try Task.checkCancellation()
-            guard let state = rootStatesByID[expectedRecord.rootID],
+            guard let identity = rootStatesByID[expectedRecord.rootID]?.identity,
                   let current = file(
                       rootID: expectedRecord.rootID,
                       relativePath: expectedRecord.standardizedRelativePath
@@ -12974,11 +12991,11 @@ actor WorkspaceFileContextStore {
                 return nil
             }
 
-            let service = state.service
+            let service = identity.service
             let epoch = searchContentInvalidationEpochsByFileID[current.id] ?? 0
             let cacheKey = WorkspaceInteractiveReadCacheKey(
                 rootID: current.rootID,
-                rootLifetimeID: state.lifetimeID,
+                rootLifetimeID: identity.lifetimeID,
                 fileID: current.id,
                 standardizedRelativePath: current.standardizedRelativePath
             )
@@ -13039,7 +13056,7 @@ actor WorkspaceFileContextStore {
                     content: preparedContent.linesWithEndings.joined(),
                     modificationDate: fingerprint.modificationDate,
                     file: current,
-                    rootLifetimeID: state.lifetimeID
+                    rootLifetimeID: identity.lifetimeID
                 )
                 try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return WorkspaceInteractiveReadSnapshot(
@@ -18138,7 +18155,7 @@ actor WorkspaceFileContextStore {
                 throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
             }
         }
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         let codemapFence = beginCodemapPathFence(
             rootID: rootID,
@@ -18155,12 +18172,12 @@ actor WorkspaceFileContextStore {
             }
         }
         do {
-            try await state.service.createFile(atRelativePath: standardizedRelativePath, content: content)
+            try await identity.service.createFile(atRelativePath: standardizedRelativePath, content: content)
         } catch is CancellationError {
             retainedFenceUntilMutationDrain = true
             retainCodemapPathFenceUntilMutationDrain(
                 codemapFence,
-                service: state.service,
+                service: identity.service,
                 relativePaths: [standardizedRelativePath]
             )
             throw CancellationError()
@@ -18183,8 +18200,8 @@ actor WorkspaceFileContextStore {
         newContent: String,
         expectedOriginalContent: String? = nil
     ) async throws -> WorkspaceFileCatalogMaterializationResult? {
-        let state = try state(for: rootID)
-        let expectedLifetimeID = state.lifetimeID
+        let identity = try rootIdentity(for: rootID)
+        let expectedLifetimeID = identity.lifetimeID
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         let codemapFence = beginCodemapPathFence(
             rootID: rootID,
@@ -18203,14 +18220,14 @@ actor WorkspaceFileContextStore {
         let deferredPublicationToken: FileSystemDeferredEditPublicationToken
         do {
             let token = if let expectedOriginalContent {
-                try await state.service.editFileIfUnchanged(
+                try await identity.service.editFileIfUnchanged(
                     atRelativePath: standardizedRelativePath,
                     newContent: newContent,
                     expectedOriginalContent: expectedOriginalContent,
                     modificationPublicationPolicy: .deferSyntheticModificationToSuccessfulCaller
                 )
             } else {
-                try await state.service.editFile(
+                try await identity.service.editFile(
                     atRelativePath: standardizedRelativePath,
                     newContent: newContent,
                     modificationPublicationPolicy: .deferSyntheticModificationToSuccessfulCaller
@@ -18227,7 +18244,7 @@ actor WorkspaceFileContextStore {
             retainedFenceUntilMutationDrain = true
             retainCodemapPathFenceUntilMutationDrain(
                 codemapFence,
-                service: state.service,
+                service: identity.service,
                 relativePaths: [standardizedRelativePath]
             )
             throw CancellationError()
@@ -18259,7 +18276,7 @@ actor WorkspaceFileContextStore {
                 invalidateSearchContent(file)
                 publishedCanonicalModification = isDiscoverableFileID(file.id)
                 if publishedCanonicalModification {
-                    publishAppliedIndexEvent(root: state.root, modifiedFileIDs: [file.id])
+                    publishAppliedIndexEvent(root: identity.root, modifiedFileIDs: [file.id])
                     #if DEBUG
                         MCPApplyEditsRebaseProbeRecorder.recordStoreModification(
                             rootID: rootID,
@@ -18284,7 +18301,7 @@ actor WorkspaceFileContextStore {
                 }
             }
 
-            await state.service.resolveDeferredEditPublication(
+            await identity.service.resolveDeferredEditPublication(
                 deferredPublicationToken,
                 resolution: publishedCanonicalModification
                     ? .callerPublishedCanonicalModification
@@ -18292,7 +18309,7 @@ actor WorkspaceFileContextStore {
             )
             return result
         } catch {
-            await state.service.resolveDeferredEditPublication(
+            await identity.service.resolveDeferredEditPublication(
                 deferredPublicationToken,
                 resolution: .publishSyntheticFallback
             )
@@ -18301,7 +18318,7 @@ actor WorkspaceFileContextStore {
     }
 
     func moveFile(rootID: UUID, from oldRelativePath: String, to newRelativePath: String) async throws {
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let oldPath = StandardizedPath.relative(oldRelativePath)
         let newPath = StandardizedPath.relative(newRelativePath)
         let codemapFence = beginCodemapPathFence(
@@ -18321,7 +18338,7 @@ actor WorkspaceFileContextStore {
         let oldFile = file(rootID: rootID, relativePath: oldPath)
         let oldFileWasDiscoverable = oldFile.map { isDiscoverableFileID($0.id) } ?? false
         do {
-            try await state.service.moveFile(
+            try await identity.service.moveFile(
                 atRelativePath: oldPath,
                 toRelativePath: newPath
             )
@@ -18329,20 +18346,17 @@ actor WorkspaceFileContextStore {
             retainedFenceUntilMutationDrain = true
             retainCodemapPathFenceUntilMutationDrain(
                 codemapFence,
-                service: state.service,
+                service: identity.service,
                 relativePaths: [oldPath, newPath]
             )
             throw CancellationError()
         }
         didCommitCodemapMutation = true
-        let destinationRegistration = await state.service.beginExplicitlyManagedRegularFileRegistration(relativePath: newPath)
+        let destinationRegistration = await identity.service.beginExplicitlyManagedRegularFileRegistration(relativePath: newPath)
         var pendingRegistrationToken = destinationRegistration.token
         do {
             try Task.checkCancellation()
-            guard let currentState = rootStatesByID[rootID],
-                  currentState.lifetimeID == state.lifetimeID,
-                  currentState.service === state.service
-            else {
+            guard isRootCurrent(rootID: rootID, lifetimeID: identity.lifetimeID, service: identity.service) else {
                 throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
             }
             let destinationManagedOnly: Bool
@@ -18356,28 +18370,28 @@ actor WorkspaceFileContextStore {
             }
             withCodemapPathLocalCatalogMutation(rootID: rootID) {
                 removeFile(relativePath: oldPath, rootID: rootID)
-                indexFile(relativePath: newPath, root: state.root, managedOnly: destinationManagedOnly)
+                indexFile(relativePath: newPath, root: identity.root, managedOnly: destinationManagedOnly)
                 publishAppliedIndexEvent(
-                    root: state.root,
+                    root: identity.root,
                     upsertedFiles: destinationManagedOnly ? [] : (file(rootID: rootID, relativePath: newPath).map { [$0] } ?? []),
                     removedFileIDs: oldFileWasDiscoverable ? (oldFile.map { [$0.id] } ?? []) : [],
                     removedFilePaths: oldFileWasDiscoverable ? (oldFile.map { [$0.standardizedRelativePath] } ?? []) : []
                 )
             }
             if let token = pendingRegistrationToken {
-                _ = await state.service.commitExplicitlyManagedRegularFileRegistration(token)
+                _ = await identity.service.commitExplicitlyManagedRegularFileRegistration(token)
                 pendingRegistrationToken = nil
             }
         } catch {
             if let pendingRegistrationToken {
-                _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
             }
             throw error
         }
     }
 
     func deleteFile(rootID: UUID, relativePath: String) async throws {
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         let codemapFence = beginCodemapPathFence(
             rootID: rootID,
@@ -18396,12 +18410,12 @@ actor WorkspaceFileContextStore {
         let oldFile = file(rootID: rootID, relativePath: standardizedRelativePath)
         let oldFileWasDiscoverable = oldFile.map { isDiscoverableFileID($0.id) } ?? false
         do {
-            try await state.service.deleteFile(atRelativePath: standardizedRelativePath)
+            try await identity.service.deleteFile(atRelativePath: standardizedRelativePath)
         } catch is CancellationError {
             retainedFenceUntilMutationDrain = true
             retainCodemapPathFenceUntilMutationDrain(
                 codemapFence,
-                service: state.service,
+                service: identity.service,
                 relativePaths: [standardizedRelativePath]
             )
             throw CancellationError()
@@ -18421,19 +18435,19 @@ actor WorkspaceFileContextStore {
         withCodemapPathLocalCatalogMutation(rootID: rootID) {
             removeFile(relativePath: standardizedRelativePath, rootID: rootID)
             if let oldFile, oldFileWasDiscoverable {
-                publishAppliedIndexEvent(root: state.root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
+                publishAppliedIndexEvent(root: identity.root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
             }
         }
     }
 
     func moveItemToTrash(rootID: UUID, relativePath: String) async throws {
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         let oldFile = file(rootID: rootID, relativePath: standardizedRelativePath)
         let oldFileWasDiscoverable = oldFile.map { isDiscoverableFileID($0.id) } ?? false
         let oldFolder = folder(rootID: rootID, relativePath: standardizedRelativePath)
         let oldFolderWasDiscoverable = oldFolder.map { isDiscoverableFolderID($0.id) } ?? false
-        let affectedPaths: Set<String> = if oldFolder != nil {
+        let affectedPaths: Set<String> = if oldFolder != nil, let state = rootStatesByID[rootID] {
             Set(folderSubtree(
                 atRelativePath: standardizedRelativePath,
                 state: state,
@@ -18457,12 +18471,12 @@ actor WorkspaceFileContextStore {
             }
         }
         do {
-            try await state.service.moveItemToTrash(atRelativePath: standardizedRelativePath)
+            try await identity.service.moveItemToTrash(atRelativePath: standardizedRelativePath)
         } catch is CancellationError {
             retainedFenceUntilMutationDrain = true
             retainCodemapPathFenceUntilMutationDrain(
                 codemapFence,
-                service: state.service,
+                service: identity.service,
                 relativePaths: [standardizedRelativePath]
             )
             throw CancellationError()
@@ -18483,12 +18497,12 @@ actor WorkspaceFileContextStore {
             if let oldFile {
                 removeFile(relativePath: standardizedRelativePath, rootID: rootID)
                 if oldFileWasDiscoverable {
-                    publishAppliedIndexEvent(root: state.root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
+                    publishAppliedIndexEvent(root: identity.root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
                 }
             } else if let oldFolder {
                 let removal = removeFolderTree(relativePath: standardizedRelativePath, rootID: rootID)
                 publishAppliedIndexEvent(
-                    root: state.root,
+                    root: identity.root,
                     removedFileIDs: removal.fileIDs,
                     removedFolderIDs: removal.folderIDs.isEmpty && oldFolderWasDiscoverable ? [oldFolder.id] : removal.folderIDs,
                     removedFilePaths: removal.filePaths,
@@ -18530,7 +18544,7 @@ actor WorkspaceFileContextStore {
                 EditFlowPerf.Dimensions(outcome: outcome)
             )
         }
-        guard let state = rootStatesByID[file.rootID] else {
+        guard let identity = rootStatesByID[file.rootID]?.identity else {
             outcome = "unavailable"
             return .unavailable
         }
@@ -18544,10 +18558,10 @@ actor WorkspaceFileContextStore {
             outcome = "unavailable"
             return .unavailable
         }
-        let expectedLifetimeID = state.lifetimeID
+        let expectedLifetimeID = identity.lifetimeID
         let expectedFileID = current.id
         let expectedFullPath = current.standardizedFullPath
-        let exists = await state.service.regularFileExistsOnDisk(
+        let exists = await identity.service.regularFileExistsOnDisk(
             relativePath: current.standardizedRelativePath
         )
         #if DEBUG
@@ -18557,9 +18571,7 @@ actor WorkspaceFileContextStore {
             )
         #endif
         guard !Task.isCancelled,
-              let currentState = rootStatesByID[file.rootID],
-              currentState.lifetimeID == expectedLifetimeID,
-              currentState.service === state.service,
+              isRootCurrent(rootID: file.rootID, lifetimeID: expectedLifetimeID, service: identity.service),
               let currentRecord = self.file(rootID: file.rootID, relativePath: current.standardizedRelativePath),
               currentRecord.id == expectedFileID,
               currentRecord.standardizedFullPath == expectedFullPath
@@ -18572,7 +18584,7 @@ actor WorkspaceFileContextStore {
             return .current(
                 file: current,
                 rootLifetimeID: expectedLifetimeID,
-                rootService: state.service
+                rootService: identity.service
             )
         }
         let missingClassificationIsCurrent = await (try? fenceAndPruneCatalogFileMissingOnDisk(
@@ -18584,9 +18596,7 @@ actor WorkspaceFileContextStore {
         )) ?? false
         guard !Task.isCancelled,
               missingClassificationIsCurrent,
-              let currentState = rootStatesByID[file.rootID],
-              currentState.lifetimeID == expectedLifetimeID,
-              currentState.service === state.service,
+              isRootCurrent(rootID: file.rootID, lifetimeID: expectedLifetimeID, service: identity.service),
               self.file(rootID: file.rootID, relativePath: current.standardizedRelativePath) == nil
         else {
             outcome = "unavailable"
@@ -18617,7 +18627,7 @@ actor WorkspaceFileContextStore {
                 EditFlowPerf.Dimensions(outcome: outcome)
             )
         }
-        guard let state = rootStatesByID[file.rootID] else {
+        guard let identity = rootStatesByID[file.rootID]?.identity else {
             outcome = "unavailable"
             return .unavailable
         }
@@ -18631,10 +18641,10 @@ actor WorkspaceFileContextStore {
             outcome = "unavailable"
             return .unavailable
         }
-        let expectedLifetimeID = state.lifetimeID
+        let expectedLifetimeID = identity.lifetimeID
         let expectedFileID = current.id
         let expectedFullPath = current.standardizedFullPath
-        let exists = try await state.service.cancellationResponsiveRegularFileExistsOnDisk(
+        let exists = try await identity.service.cancellationResponsiveRegularFileExistsOnDisk(
             relativePath: current.standardizedRelativePath
         )
         #if DEBUG
@@ -18644,9 +18654,7 @@ actor WorkspaceFileContextStore {
             )
         #endif
         try Task.checkCancellation()
-        guard let currentState = rootStatesByID[file.rootID],
-              currentState.lifetimeID == expectedLifetimeID,
-              currentState.service === state.service,
+        guard isRootCurrent(rootID: file.rootID, lifetimeID: expectedLifetimeID, service: identity.service),
               let currentRecord = self.file(
                   rootID: file.rootID,
                   relativePath: current.standardizedRelativePath
@@ -18662,7 +18670,7 @@ actor WorkspaceFileContextStore {
             return .current(
                 file: currentRecord,
                 rootLifetimeID: expectedLifetimeID,
-                rootService: state.service
+                rootService: identity.service
             )
         }
         let missingClassificationIsCurrent = try await fenceAndPruneCatalogFileMissingOnDisk(
@@ -18674,9 +18682,7 @@ actor WorkspaceFileContextStore {
         )
         try Task.checkCancellation()
         guard missingClassificationIsCurrent,
-              let currentState = rootStatesByID[file.rootID],
-              currentState.lifetimeID == expectedLifetimeID,
-              currentState.service === state.service,
+              isRootCurrent(rootID: file.rootID, lifetimeID: expectedLifetimeID, service: identity.service),
               self.file(rootID: file.rootID, relativePath: current.standardizedRelativePath) == nil
         else {
             outcome = "unavailable"
@@ -19246,7 +19252,7 @@ actor WorkspaceFileContextStore {
                     )
                 #endif
                 try Task.checkCancellation()
-                let currentState = rootStatesByID[binding.lookupRoot.id]
+                let currentIdentity = rootStatesByID[binding.lookupRoot.id]?.identity
                 EditFlowPerf.lifecycleEvent(
                     EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
                     EditFlowPerf.Dimensions(
@@ -19259,15 +19265,15 @@ actor WorkspaceFileContextStore {
                             case .unavailable: "unavailable"
                             }
                         }(),
-                        rootToken: currentState?.service.diagnosticRootToken.uuidString,
+                        rootToken: currentIdentity?.service.diagnosticRootToken.uuidString,
                         serialPosition: serialPosition
                     )
                 )
                 switch validation {
                 case let .current(current, validatedLifetimeID, validatedService):
-                    guard let currentState,
-                          currentState.lifetimeID == validatedLifetimeID,
-                          currentState.service === validatedService,
+                    guard let currentIdentity,
+                          currentIdentity.lifetimeID == validatedLifetimeID,
+                          currentIdentity.service === validatedService,
                           let currentRecord = file(
                               rootID: current.rootID,
                               relativePath: current.standardizedRelativePath
@@ -19282,7 +19288,7 @@ actor WorkspaceFileContextStore {
                     try await bindingObservations.append(exactFileBindingObservation(
                         binding: binding,
                         relativePath: relativePath,
-                        state: currentState
+                        identity: currentIdentity
                     ))
                     matches.append(ExactFileCandidate(
                         binding: binding,
@@ -19292,7 +19298,7 @@ actor WorkspaceFileContextStore {
                     ))
                     endBindingProbe(
                         outcome: "catalogCurrent",
-                        rootToken: currentState.service.diagnosticRootToken.uuidString
+                        rootToken: currentIdentity.service.diagnosticRootToken.uuidString
                     )
                     continue
                 case .unavailable:
@@ -19303,7 +19309,7 @@ actor WorkspaceFileContextStore {
                     break
                 }
             }
-            guard let state = rootStatesByID[binding.lookupRoot.id] else {
+            guard let identity = rootStatesByID[binding.lookupRoot.id]?.identity else {
                 hasUnavailableBinding = true
                 endBindingProbe(outcome: "unavailable")
                 continue
@@ -19313,12 +19319,12 @@ actor WorkspaceFileContextStore {
                 EditFlowPerf.Dimensions(
                     runPurpose: purpose.rawValue,
                     status: "eligibilityBegan",
-                    rootToken: state.service.diagnosticRootToken.uuidString,
+                    rootToken: identity.service.diagnosticRootToken.uuidString,
                     serialPosition: serialPosition
                 )
             )
-            let expectedLifetimeID = state.lifetimeID
-            let eligibility = try await state.service.cancellationResponsiveCatalogRegularFileEligibility(
+            let expectedLifetimeID = identity.lifetimeID
+            let eligibility = try await identity.service.cancellationResponsiveCatalogRegularFileEligibility(
                 relativePath: relativePath
             )
             #if DEBUG
@@ -19328,9 +19334,7 @@ actor WorkspaceFileContextStore {
                 )
             #endif
             try Task.checkCancellation()
-            guard let currentState = rootStatesByID[binding.lookupRoot.id],
-                  currentState.lifetimeID == expectedLifetimeID,
-                  currentState.service === state.service,
+            guard isRootCurrent(rootID: binding.lookupRoot.id, lifetimeID: expectedLifetimeID, service: identity.service),
                   file(rootID: binding.lookupRoot.id, relativePath: relativePath) == nil
             else {
                 hasUnavailableBinding = true
@@ -19359,7 +19363,7 @@ actor WorkspaceFileContextStore {
                         case .ineligible: "ineligible"
                         }
                     }(),
-                    rootToken: currentState.service.diagnosticRootToken.uuidString,
+                    rootToken: identity.service.diagnosticRootToken.uuidString,
                     serialPosition: serialPosition
                 )
             )
@@ -19368,33 +19372,33 @@ actor WorkspaceFileContextStore {
                 try await bindingObservations.append(exactFileBindingObservation(
                     binding: binding,
                     relativePath: relativePath,
-                    state: currentState
+                    identity: identity
                 ))
                 matches.append(ExactFileCandidate(
                     binding: binding,
                     rootLifetimeID: expectedLifetimeID,
-                    rootService: state.service,
+                    rootService: identity.service,
                     file: nil
                 ))
                 endBindingProbe(
                     outcome: "eligible",
-                    rootToken: currentState.service.diagnosticRootToken.uuidString
+                    rootToken: identity.service.diagnosticRootToken.uuidString
                 )
             case .ineligible(.ignored):
                 try await bindingObservations.append(exactFileBindingObservation(
                     binding: binding,
                     relativePath: relativePath,
-                    state: currentState
+                    identity: identity
                 ))
                 matches.append(ExactFileCandidate(
                     binding: binding,
                     rootLifetimeID: expectedLifetimeID,
-                    rootService: state.service,
+                    rootService: identity.service,
                     file: nil
                 ))
                 endBindingProbe(
                     outcome: "ignored",
-                    rootToken: currentState.service.diagnosticRootToken.uuidString
+                    rootToken: identity.service.diagnosticRootToken.uuidString
                 )
             case .ineligible(.missingOrDirectory):
                 EditFlowPerf.lifecycleEvent(
@@ -19402,7 +19406,7 @@ actor WorkspaceFileContextStore {
                     EditFlowPerf.Dimensions(
                         runPurpose: purpose.rawValue,
                         status: "missingFilePruneBegan",
-                        rootToken: currentState.service.diagnosticRootToken.uuidString,
+                        rootToken: identity.service.diagnosticRootToken.uuidString,
                         serialPosition: serialPosition
                     )
                 )
@@ -19420,29 +19424,29 @@ actor WorkspaceFileContextStore {
                     )
                 #endif
                 try Task.checkCancellation()
-                let stateAfterPrune: RootState? = rootStatesByID[binding.lookupRoot.id].flatMap { currentState in
+                let identityAfterPrune: RootIdentity? = (rootStatesByID[binding.lookupRoot.id]?.identity).flatMap { currentIdentity in
                     guard missingClassificationIsCurrent,
-                          currentState.lifetimeID == expectedLifetimeID,
-                          currentState.service === state.service,
+                          currentIdentity.lifetimeID == expectedLifetimeID,
+                          currentIdentity.service === identity.service,
                           file(rootID: binding.lookupRoot.id, relativePath: relativePath) == nil
                     else { return nil }
-                    return currentState
+                    return currentIdentity
                 }
                 EditFlowPerf.lifecycleEvent(
                     EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
                     EditFlowPerf.Dimensions(
                         runPurpose: purpose.rawValue,
                         status: "missingFilePruneEnded",
-                        outcome: stateAfterPrune == nil ? "unavailable" : "completed",
-                        rootToken: stateAfterPrune?.service.diagnosticRootToken.uuidString,
+                        outcome: identityAfterPrune == nil ? "unavailable" : "completed",
+                        rootToken: identityAfterPrune?.service.diagnosticRootToken.uuidString,
                         serialPosition: serialPosition
                     )
                 )
-                if let stateAfterPrune {
+                if let identityAfterPrune {
                     let observation = try await exactFileBindingObservation(
                         binding: binding,
                         relativePath: relativePath,
-                        state: stateAfterPrune
+                        identity: identityAfterPrune
                     )
                     bindingObservations.append(observation)
                     if observation.diskPathState == .directory {
@@ -19452,19 +19456,19 @@ actor WorkspaceFileContextStore {
                     hasUnavailableBinding = true
                 }
                 endBindingProbe(
-                    outcome: stateAfterPrune == nil ? "unavailable" : "missingOrDirectory",
-                    rootToken: stateAfterPrune?.service.diagnosticRootToken.uuidString
+                    outcome: identityAfterPrune == nil ? "unavailable" : "missingOrDirectory",
+                    rootToken: identityAfterPrune?.service.diagnosticRootToken.uuidString
                 )
             case .ineligible:
                 try await bindingObservations.append(exactFileBindingObservation(
                     binding: binding,
                     relativePath: relativePath,
-                    state: currentState
+                    identity: identity
                 ))
                 blocked = true
                 endBindingProbe(
                     outcome: "ineligible",
-                    rootToken: currentState.service.diagnosticRootToken.uuidString
+                    rootToken: identity.service.diagnosticRootToken.uuidString
                 )
             }
         }
@@ -19480,12 +19484,12 @@ actor WorkspaceFileContextStore {
     private func exactFileBindingObservation(
         binding: WorkspaceExactFileNamespace.RootBinding,
         relativePath: String,
-        state: RootState
+        identity: RootIdentity
     ) async throws -> ExactFileBindingObservation {
         let catalogFile = file(rootID: binding.lookupRoot.id, relativePath: relativePath)
         let catalogFileID = catalogFile?.id
         let catalogFileFullPath = catalogFile?.standardizedFullPath
-        let diskPathState: ExactFileDiskPathState = switch try await state.service
+        let diskPathState: ExactFileDiskPathState = switch try await identity.service
             .cancellationResponsiveCatalogPathState(relativePath: relativePath)
         {
         case .regularFile: .regularFile
@@ -19493,9 +19497,7 @@ actor WorkspaceFileContextStore {
         case .missingOrOther: .missingOrOther
         }
         try Task.checkCancellation()
-        guard let currentState = rootStatesByID[binding.lookupRoot.id],
-              currentState.lifetimeID == state.lifetimeID,
-              currentState.service === state.service,
+        guard isRootCurrent(rootID: binding.lookupRoot.id, lifetimeID: identity.lifetimeID, service: identity.service),
               file(rootID: binding.lookupRoot.id, relativePath: relativePath)?.id == catalogFileID,
               file(rootID: binding.lookupRoot.id, relativePath: relativePath)?.standardizedFullPath == catalogFileFullPath
         else {
@@ -19505,8 +19507,8 @@ actor WorkspaceFileContextStore {
         }
         return ExactFileBindingObservation(
             rootID: binding.lookupRoot.id,
-            rootLifetimeID: state.lifetimeID,
-            rootService: state.service,
+            rootLifetimeID: identity.lifetimeID,
+            rootService: identity.service,
             catalogFileID: catalogFileID,
             catalogFileFullPath: catalogFileFullPath,
             diskPathState: diskPathState
@@ -19521,14 +19523,14 @@ actor WorkspaceFileContextStore {
         guard observations.count == bindings.count else { return false }
         for (binding, observation) in zip(bindings, observations) {
             guard observation.rootID == binding.lookupRoot.id,
-                  let state = rootStatesByID[observation.rootID],
-                  state.lifetimeID == observation.rootLifetimeID,
-                  state.service === observation.rootService
+                  let identity = rootStatesByID[observation.rootID]?.identity,
+                  identity.lifetimeID == observation.rootLifetimeID,
+                  identity.service === observation.rootService
             else { return false }
             let current = try await exactFileBindingObservation(
                 binding: binding,
                 relativePath: relativePath,
-                state: state
+                identity: identity
             )
             guard current.catalogFileID == observation.catalogFileID,
                   current.catalogFileFullPath == observation.catalogFileFullPath,
@@ -19555,10 +19557,11 @@ actor WorkspaceFileContextStore {
         guard let candidate = candidates.matches.first else {
             return candidates.blocked ? .blocked : .noCandidate
         }
-        guard let currentState = rootStatesByID[candidate.binding.lookupRoot.id],
-              currentState.lifetimeID == candidate.rootLifetimeID,
-              currentState.service === candidate.rootService
-        else { return .unavailable }
+        guard isRootCurrent(
+            rootID: candidate.binding.lookupRoot.id,
+            lifetimeID: candidate.rootLifetimeID,
+            service: candidate.rootService
+        ) else { return .unavailable }
         if let file = candidate.file {
             guard let currentFile = self.file(
                 rootID: file.rootID,
@@ -19579,10 +19582,11 @@ actor WorkspaceFileContextStore {
             expectedRootLifetimeIDs: [candidate.binding.lookupRoot.id: candidate.rootLifetimeID]
         )
         try Task.checkCancellation()
-        guard let currentState = rootStatesByID[candidate.binding.lookupRoot.id],
-              currentState.lifetimeID == candidate.rootLifetimeID,
-              currentState.service === candidate.rootService
-        else { return .unavailable }
+        guard isRootCurrent(
+            rootID: candidate.binding.lookupRoot.id,
+            lifetimeID: candidate.rootLifetimeID,
+            service: candidate.rootService
+        ) else { return .unavailable }
         switch result {
         case let .materialized(file):
             guard let currentFile = self.file(
@@ -19653,21 +19657,19 @@ actor WorkspaceFileContextStore {
         _ file: WorkspaceFileRecord,
         namespace: WorkspaceExactFileNamespace
     ) async throws -> WorkspaceExactExistingFileMatch? {
-        guard let initialState = rootStatesByID[file.rootID],
+        guard let initialIdentity = rootStatesByID[file.rootID]?.identity,
               let initialRecord = self.file(rootID: file.rootID, relativePath: file.standardizedRelativePath),
               initialRecord.id == file.id,
               initialRecord.standardizedFullPath == file.standardizedFullPath
         else { return nil }
-        let expectedLifetimeID = initialState.lifetimeID
+        let expectedLifetimeID = initialIdentity.lifetimeID
         let candidates = try await exactFileCandidates(
             relativePath: file.standardizedRelativePath,
             bindings: namespace.rootBindings,
             purpose: .canonicalCompaction
         )
         try Task.checkCancellation()
-        guard let currentState = rootStatesByID[file.rootID],
-              currentState.lifetimeID == expectedLifetimeID,
-              currentState.service === initialState.service,
+        guard isRootCurrent(rootID: file.rootID, lifetimeID: expectedLifetimeID, service: initialIdentity.service),
               let currentRecord = self.file(rootID: file.rootID, relativePath: file.standardizedRelativePath),
               currentRecord.id == file.id,
               currentRecord.standardizedFullPath == file.standardizedFullPath
@@ -19798,8 +19800,8 @@ actor WorkspaceFileContextStore {
                     serialPosition: serialPosition
                 )
             )
-            guard let state = rootStatesByID[candidate.rootID],
-                  expectedRootLifetimeIDs?[candidate.rootID].map({ $0 == state.lifetimeID }) ?? true
+            guard let identity = rootStatesByID[candidate.rootID]?.identity,
+                  expectedRootLifetimeIDs?[candidate.rootID].map({ $0 == identity.lifetimeID }) ?? true
             else {
                 foundUnavailableCandidate = expectedRootLifetimeIDs != nil
                 EditFlowPerf.lifecycleEvent(
@@ -19814,16 +19816,13 @@ actor WorkspaceFileContextStore {
                 )
                 continue
             }
-            let expectedLifetimeID = state.lifetimeID
-            let evidence = try await state.service.cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
+            let expectedLifetimeID = identity.lifetimeID
+            let evidence = try await identity.service.cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
                 relativePath: candidate.relativePath
             )
             let eligibility = evidence.eligibility
             try Task.checkCancellation()
-            guard let currentState = rootStatesByID[candidate.rootID],
-                  currentState.lifetimeID == expectedLifetimeID,
-                  currentState.service === state.service
-            else {
+            guard isRootCurrent(rootID: candidate.rootID, lifetimeID: expectedLifetimeID, service: identity.service) else {
                 foundUnavailableCandidate = expectedRootLifetimeIDs != nil
                 EditFlowPerf.lifecycleEvent(
                     EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
@@ -19851,7 +19850,7 @@ actor WorkspaceFileContextStore {
                         case .ineligible: "ineligible"
                         }
                     }(),
-                    rootToken: currentState.service.diagnosticRootToken.uuidString,
+                    rootToken: identity.service.diagnosticRootToken.uuidString,
                     serialPosition: serialPosition
                 )
             )
@@ -19861,7 +19860,7 @@ actor WorkspaceFileContextStore {
                     candidate.rootID,
                     candidate.relativePath,
                     expectedLifetimeID,
-                    state.service,
+                    identity.service,
                     evidence.eligibility,
                     evidence.policyIdentity,
                     evidence.ignoreRulesRevision
@@ -19873,7 +19872,7 @@ actor WorkspaceFileContextStore {
                     EditFlowPerf.Dimensions(
                         runPurpose: "explicitMaterialization",
                         status: "candidateMissingFilePruneBegan",
-                        rootToken: currentState.service.diagnosticRootToken.uuidString,
+                        rootToken: identity.service.diagnosticRootToken.uuidString,
                         serialPosition: serialPosition
                     )
                 )
@@ -19885,15 +19884,15 @@ actor WorkspaceFileContextStore {
                     requireCatalogFileAbsent: true
                 )
                 try Task.checkCancellation()
-                let stateAfterPrune: RootState? = rootStatesByID[candidate.rootID].flatMap { currentState in
+                let identityAfterPrune: RootIdentity? = (rootStatesByID[candidate.rootID]?.identity).flatMap { currentIdentity in
                     guard missingClassificationIsCurrent,
-                          currentState.lifetimeID == expectedLifetimeID,
-                          currentState.service === state.service,
+                          currentIdentity.lifetimeID == expectedLifetimeID,
+                          currentIdentity.service === identity.service,
                           file(rootID: candidate.rootID, relativePath: candidate.relativePath) == nil
                     else { return nil }
-                    return currentState
+                    return currentIdentity
                 }
-                if stateAfterPrune == nil {
+                if identityAfterPrune == nil {
                     foundUnavailableCandidate = true
                 }
                 EditFlowPerf.lifecycleEvent(
@@ -19902,8 +19901,8 @@ actor WorkspaceFileContextStore {
                     EditFlowPerf.Dimensions(
                         runPurpose: "explicitMaterialization",
                         status: "candidateMissingFilePruneEnded",
-                        outcome: stateAfterPrune == nil ? "unavailable" : "completed",
-                        rootToken: stateAfterPrune?.service.diagnosticRootToken.uuidString,
+                        outcome: identityAfterPrune == nil ? "unavailable" : "completed",
+                        rootToken: identityAfterPrune?.service.diagnosticRootToken.uuidString,
                         serialPosition: serialPosition
                     )
                 )
@@ -19917,22 +19916,20 @@ actor WorkspaceFileContextStore {
             return .ambiguous
         }
         guard let candidate = materializable.first,
-              let state = rootStatesByID[candidate.rootID],
-              state.lifetimeID == candidate.lifetimeID,
-              state.service === candidate.service
+              isRootCurrent(rootID: candidate.rootID, lifetimeID: candidate.lifetimeID, service: candidate.service)
         else {
             let unavailable = foundUnavailableCandidate || !materializable.isEmpty
             setTerminalOutcome(unavailable ? "unavailable" : foundBlockedCandidate ? "blocked" : "noCandidate")
             return unavailable ? .unavailable : foundBlockedCandidate ? .blocked : .noCandidate
         }
-        setDiagnosticRootToken(state.service.diagnosticRootToken)
+        setDiagnosticRootToken(candidate.service.diagnosticRootToken)
         EditFlowPerf.lifecycleEvent(
             EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
             correlation: lifecycleCorrelation,
             EditFlowPerf.Dimensions(
                 runPurpose: "explicitMaterialization",
                 status: "codemapRootFenceBegan",
-                rootToken: state.service.diagnosticRootToken.uuidString
+                rootToken: candidate.service.diagnosticRootToken.uuidString
             )
         )
         let codemapFence = await beginCodemapRootMutationFence(
@@ -19955,9 +19952,7 @@ actor WorkspaceFileContextStore {
         }
         guard let codemapFence,
               codemapFence.rootEpoch.rootLifetimeID == candidate.lifetimeID,
-              let fencedState = rootStatesByID[candidate.rootID],
-              fencedState.lifetimeID == candidate.lifetimeID,
-              fencedState.service === candidate.service
+              isRootCurrent(rootID: candidate.rootID, lifetimeID: candidate.lifetimeID, service: candidate.service)
         else {
             finishCodemapRootMutationFence(codemapFence, didCommitMutation: false)
             setTerminalOutcome("unavailable")
@@ -19975,14 +19970,11 @@ actor WorkspaceFileContextStore {
             try Task.checkCancellation()
             #if DEBUG
                 if let handler = explicitMaterializationDidAcquireCodemapFenceHandler {
-                    await handler(state.service)
+                    await handler(candidate.service)
                 }
             #endif
             try Task.checkCancellation()
-            guard let currentState = rootStatesByID[candidate.rootID],
-                  currentState.lifetimeID == candidate.lifetimeID,
-                  currentState.service === candidate.service
-            else {
+            guard isRootCurrent(rootID: candidate.rootID, lifetimeID: candidate.lifetimeID, service: candidate.service) else {
                 setTerminalOutcome("noCandidate")
                 return .noCandidate
             }
@@ -19992,22 +19984,22 @@ actor WorkspaceFileContextStore {
                 EditFlowPerf.Dimensions(
                     runPurpose: "explicitMaterialization",
                     status: "managedRegistrationBegan",
-                    rootToken: currentState.service.diagnosticRootToken.uuidString
+                    rootToken: candidate.service.diagnosticRootToken.uuidString
                 )
             )
             let registration: FileSystemExplicitlyManagedRegularFileRegistration
-            if await currentState.service.currentWorkspaceRootCatalogPolicyIdentity() != candidate.policyIdentity {
-                let refreshed = try await currentState.service.cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
+            if await candidate.service.currentWorkspaceRootCatalogPolicyIdentity() != candidate.policyIdentity {
+                let refreshed = try await candidate.service.cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
                     relativePath: candidate.relativePath
                 )
-                registration = try await currentState.service.beginExplicitlyManagedRegularFileRegistration(
+                registration = try await candidate.service.beginExplicitlyManagedRegularFileRegistration(
                     relativePath: candidate.relativePath,
                     validatedEligibility: refreshed.eligibility,
                     policyIdentity: refreshed.policyIdentity,
                     ignoreRulesRevision: refreshed.ignoreRulesRevision
                 )
             } else {
-                registration = try await currentState.service.beginExplicitlyManagedRegularFileRegistration(
+                registration = try await candidate.service.beginExplicitlyManagedRegularFileRegistration(
                     relativePath: candidate.relativePath,
                     validatedEligibility: candidate.eligibility,
                     policyIdentity: candidate.policyIdentity,
@@ -20022,9 +20014,7 @@ actor WorkspaceFileContextStore {
                 )
             #endif
             try Task.checkCancellation()
-            guard let registeredState = rootStatesByID[candidate.rootID],
-                  registeredState.lifetimeID == candidate.lifetimeID,
-                  registeredState.service === candidate.service,
+            guard isRootCurrent(rootID: candidate.rootID, lifetimeID: candidate.lifetimeID, service: candidate.service),
                   file(rootID: candidate.rootID, relativePath: candidate.relativePath) == nil
             else {
                 if let registrationToken = pendingRegistrationToken {
@@ -20050,7 +20040,7 @@ actor WorkspaceFileContextStore {
                         case .ineligible: "ineligible"
                         }
                     }(),
-                    rootToken: registeredState.service.diagnosticRootToken.uuidString
+                    rootToken: candidate.service.diagnosticRootToken.uuidString
                 )
             )
             let managedOnly: Bool
@@ -20135,9 +20125,9 @@ actor WorkspaceFileContextStore {
         relativePath: String,
         codemapPathLocalMutation: Bool = false
     ) async throws -> WorkspaceFileCatalogMaterializationResult {
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
-        let registration = await state.service.beginExplicitlyManagedRegularFileRegistration(
+        let registration = await identity.service.beginExplicitlyManagedRegularFileRegistration(
             relativePath: standardizedRelativePath
         )
         var pendingRegistrationToken = registration.token
@@ -20149,10 +20139,7 @@ actor WorkspaceFileContextStore {
 
         do {
             try Task.checkCancellation()
-            guard let currentState = rootStatesByID[rootID],
-                  currentState.lifetimeID == state.lifetimeID,
-                  currentState.service === state.service
-            else {
+            guard isRootCurrent(rootID: rootID, lifetimeID: identity.lifetimeID, service: identity.service) else {
                 throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
             }
 
@@ -20191,13 +20178,13 @@ actor WorkspaceFileContextStore {
             }
 
             if let token = pendingRegistrationToken {
-                _ = await state.service.commitExplicitlyManagedRegularFileRegistration(token)
+                _ = await identity.service.commitExplicitlyManagedRegularFileRegistration(token)
                 pendingRegistrationToken = nil
             }
             return result
         } catch {
             if let pendingRegistrationToken {
-                _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
             }
             throw error
         }
@@ -20212,13 +20199,13 @@ actor WorkspaceFileContextStore {
             })
         }
 
-        guard let initialState = exactRootState(
+        guard let initialIdentity = exactRootIdentity(
             expectedRoot: request.root,
             expectedKind: .workspaceGitData
         ) else {
             return staleRootResult()
         }
-        let expectedBatchLifetimeID = initialState.lifetimeID
+        let expectedBatchLifetimeID = initialIdentity.lifetimeID
         guard let codemapFence = await beginCodemapRootMutationFence(
             rootID: request.root.id,
             command: .catalogAdvanced
@@ -20230,10 +20217,10 @@ actor WorkspaceFileContextStore {
                 didCommitMutation: didPublishCatalogMutation
             )
         }
-        guard let fencedState = exactRootState(
+        guard let fencedIdentity = exactRootIdentity(
             expectedRoot: request.root,
             expectedKind: .workspaceGitData
-        ), fencedState.lifetimeID == expectedBatchLifetimeID else {
+        ), fencedIdentity.lifetimeID == expectedBatchLifetimeID else {
             return staleRootResult()
         }
 
@@ -20281,13 +20268,13 @@ actor WorkspaceFileContextStore {
                 continue
             }
 
-            guard let state = exactRootState(
+            guard let identity = exactRootIdentity(
                 expectedRoot: request.root,
                 expectedKind: .workspaceGitData
-            ), state.lifetimeID == expectedBatchLifetimeID else {
+            ), identity.lifetimeID == expectedBatchLifetimeID else {
                 return staleRootResult()
             }
-            let registration = await state.service.beginExplicitlyManagedRegularFileRegistration(
+            let registration = await identity.service.beginExplicitlyManagedRegularFileRegistration(
                 relativePath: relativePath
             )
             var pendingRegistrationToken = registration.token
@@ -20298,19 +20285,19 @@ actor WorkspaceFileContextStore {
             #endif
             if Task.isCancelled {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return staleRootResult()
             }
 
-            guard let revalidatedState = exactRootState(
+            guard let revalidatedIdentity = exactRootIdentity(
                 expectedRoot: request.root,
                 expectedKind: .workspaceGitData
-            ), revalidatedState.lifetimeID == expectedBatchLifetimeID,
-            revalidatedState.service === state.service
+            ), revalidatedIdentity.lifetimeID == expectedBatchLifetimeID,
+            revalidatedIdentity.service === identity.service
             else {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return staleRootResult()
             }
@@ -20323,7 +20310,7 @@ actor WorkspaceFileContextStore {
                 managedOnly = true
             case .ineligible(.missingOrDirectory):
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 pruneCatalogFileMissingOnDisk(
                     rootID: request.root.id,
@@ -20334,7 +20321,7 @@ actor WorkspaceFileContextStore {
                 continue
             case let .ineligible(reason):
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 append(artifact, .ineligible(reason: reason))
                 continue
@@ -20348,16 +20335,16 @@ actor WorkspaceFileContextStore {
                 )
                 didPublishCatalogMutation = true
                 if let token = pendingRegistrationToken {
-                    _ = await state.service.commitExplicitlyManagedRegularFileRegistration(token)
+                    _ = await identity.service.commitExplicitlyManagedRegularFileRegistration(token)
                     pendingRegistrationToken = nil
                 }
                 append(artifact, .cataloged(record: record))
             } catch {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 if !regularFileAppearsPresentOnDisk(
-                    root: revalidatedState.root,
+                    root: revalidatedIdentity.root,
                     relativePath: relativePath
                 ) {
                     append(artifact, .missingOnDisk)
@@ -20367,10 +20354,10 @@ actor WorkspaceFileContextStore {
             }
         }
 
-        guard let finalState = exactRootState(
+        guard let finalIdentity = exactRootIdentity(
             expectedRoot: request.root,
             expectedKind: .workspaceGitData
-        ), finalState.lifetimeID == expectedBatchLifetimeID else {
+        ), finalIdentity.lifetimeID == expectedBatchLifetimeID else {
             return staleRootResult()
         }
         await awaitCodemapCleanupFlights(rootIDs: [request.root.id])
@@ -20442,7 +20429,7 @@ actor WorkspaceFileContextStore {
         relativePath: String,
         managedOnly: Bool
     ) throws -> WorkspaceFileRecord {
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         if let existing = file(rootID: rootID, relativePath: standardizedRelativePath) {
             let wasManagedOnly = managedOnlyFileIDs.contains(existing.id)
@@ -20450,12 +20437,12 @@ actor WorkspaceFileContextStore {
                 promoteToDiscoverable(existing)
                 if wasManagedOnly {
                     invalidatePathMatchSnapshot(
-                        affectedRootKinds: [state.root.kind],
+                        affectedRootKinds: [identity.root.kind],
                         reason: .managedFilePromotion,
-                        affectedRootIDs: [state.root.id]
+                        affectedRootIDs: [identity.root.id]
                     )
                     publishAppliedIndexEvent(
-                        root: state.root,
+                        root: identity.root,
                         upsertedFiles: [existing],
                         upsertedFolders: discoverableParentFolders(for: standardizedRelativePath, rootID: rootID)
                     )
@@ -20464,12 +20451,12 @@ actor WorkspaceFileContextStore {
             return existing
         }
 
-        guard regularFileAppearsPresentOnDisk(root: state.root, relativePath: standardizedRelativePath) else {
+        guard regularFileAppearsPresentOnDisk(root: identity.root, relativePath: standardizedRelativePath) else {
             throw WorkspaceFileContextStoreError.catalogMaterializationFailed(
                 "eligible file disappeared before it could be added to the workspace catalog: \(standardizedRelativePath)"
             )
         }
-        indexFile(relativePath: standardizedRelativePath, root: state.root, managedOnly: managedOnly)
+        indexFile(relativePath: standardizedRelativePath, root: identity.root, managedOnly: managedOnly)
         guard let file = file(rootID: rootID, relativePath: standardizedRelativePath) else {
             throw WorkspaceFileContextStoreError.catalogMaterializationFailed(
                 "eligible file exists on disk but the workspace catalog did not return a record: \(standardizedRelativePath)"
@@ -20477,13 +20464,13 @@ actor WorkspaceFileContextStore {
         }
         if managedOnly {
             retagPublishedRootCatalogShardForProjectionNeutralGeneration(
-                root: state.root,
+                root: identity.root,
                 materializedFileID: file.id
             )
-            publishProjectionNeutralCatalogGenerationChange(root: state.root)
+            publishProjectionNeutralCatalogGenerationChange(root: identity.root)
         } else {
             publishAppliedIndexEvent(
-                root: state.root,
+                root: identity.root,
                 upsertedFiles: [file],
                 upsertedFolders: discoverableParentFolders(for: standardizedRelativePath, rootID: rootID)
             )
@@ -20539,9 +20526,9 @@ actor WorkspaceFileContextStore {
         requireCatalogFileAbsent: Bool = false
     ) async throws -> Bool {
         let path = StandardizedPath.relative(relativePath)
-        guard let initialState = rootStatesByID[rootID] else { return false }
-        let capturedLifetimeID = expectedLifetimeID ?? initialState.lifetimeID
-        guard initialState.lifetimeID == capturedLifetimeID else { return false }
+        guard let initialIdentity = rootStatesByID[rootID]?.identity else { return false }
+        let capturedLifetimeID = expectedLifetimeID ?? initialIdentity.lifetimeID
+        guard initialIdentity.lifetimeID == capturedLifetimeID else { return false }
         let capturedFile = file(rootID: rootID, relativePath: path)
         if let expectedFileID, capturedFile?.id != expectedFileID { return false }
         if requireCatalogFileAbsent, capturedFile != nil { return false }
@@ -20580,20 +20567,16 @@ actor WorkspaceFileContextStore {
 
         try Task.checkCancellation()
         if let token, token.rootEpoch.rootLifetimeID != capturedLifetimeID { return false }
-        guard let currentState = rootStatesByID[rootID],
-              currentState.lifetimeID == capturedLifetimeID,
-              currentState.service === initialState.service,
+        guard isRootCurrent(rootID: rootID, lifetimeID: capturedLifetimeID, service: initialIdentity.service),
               catalogIdentityIsCurrent()
         else { return false }
 
-        let fileExists = try await initialState.service.cancellationResponsiveRegularFileExistsOnDisk(
+        let fileExists = try await initialIdentity.service.cancellationResponsiveRegularFileExistsOnDisk(
             relativePath: path
         )
         try Task.checkCancellation()
         guard !fileExists,
-              let finalState = rootStatesByID[rootID],
-              finalState.lifetimeID == capturedLifetimeID,
-              finalState.service === initialState.service,
+              isRootCurrent(rootID: rootID, lifetimeID: capturedLifetimeID, service: initialIdentity.service),
               catalogIdentityIsCurrent()
         else { return false }
 
@@ -20615,13 +20598,13 @@ actor WorkspaceFileContextStore {
         relativePath: String,
         publishDelta: Bool
     ) -> Bool {
-        guard let state = rootStatesByID[rootID],
+        guard let root = rootStatesByID[rootID]?.root,
               let oldFile = file(rootID: rootID, relativePath: relativePath)
         else { return false }
         let oldFileWasDiscoverable = isDiscoverableFileID(oldFile.id)
         removeFile(relativePath: oldFile.standardizedRelativePath, rootID: rootID)
         if publishDelta, oldFileWasDiscoverable {
-            publishAppliedIndexEvent(root: state.root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
+            publishAppliedIndexEvent(root: root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
         }
         return true
     }
@@ -20636,14 +20619,14 @@ actor WorkspaceFileContextStore {
         if pruneCatalogFileMissingOnDisk(rootID: rootID, relativePath: standardizedRelativePath, publishDelta: publishDelta) {
             return true
         }
-        guard let state = rootStatesByID[rootID],
+        guard let root = rootStatesByID[rootID]?.root,
               let oldFolder = folder(rootID: rootID, relativePath: standardizedRelativePath)
         else { return false }
         let oldFolderWasDiscoverable = isDiscoverableFolderID(oldFolder.id)
         let removal = removeFolderTree(relativePath: standardizedRelativePath, rootID: rootID)
         if publishDelta {
             publishAppliedIndexEvent(
-                root: state.root,
+                root: root,
                 removedFileIDs: removal.fileIDs,
                 removedFolderIDs: removal.folderIDs.isEmpty && oldFolderWasDiscoverable ? [oldFolder.id] : removal.folderIDs,
                 removedFilePaths: removal.filePaths,
@@ -21337,11 +21320,11 @@ actor WorkspaceFileContextStore {
         else {
             return .blockedOrAmbiguous(.outsideAuthorizedRoot)
         }
-        guard let state = rootStatesByID[authorization.root.id] else {
+        guard let identity = rootStatesByID[authorization.root.id]?.identity else {
             return .staleAuthority(.rootID)
         }
 
-        let eligibility = await state.service.catalogRegularFileEligibility(
+        let eligibility = await identity.service.catalogRegularFileEligibility(
             relativePath: relativePath
         )
         #if DEBUG
@@ -21363,7 +21346,7 @@ actor WorkspaceFileContextStore {
                 return .resolved(files: [record], route: .catalogFile)
             }
 
-            let registration = await state.service.beginExplicitlyManagedRegularFileRegistration(
+            let registration = await identity.service.beginExplicitlyManagedRegularFileRegistration(
                 relativePath: relativePath
             )
             var pendingRegistrationToken = registration.token
@@ -21374,22 +21357,19 @@ actor WorkspaceFileContextStore {
             #endif
             if Task.isCancelled {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 throw CancellationError()
             }
-            guard let currentState = rootStatesByID[authorization.root.id],
-                  currentState.lifetimeID == state.lifetimeID,
-                  currentState.service === state.service
-            else {
+            guard isRootCurrent(rootID: authorization.root.id, lifetimeID: identity.lifetimeID, service: identity.service) else {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return .staleAuthority(.lifetime)
             }
             if let mismatch = sessionRootAuthorizationMismatch(authorization) {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return .staleAuthority(mismatch)
             }
@@ -21401,12 +21381,12 @@ actor WorkspaceFileContextStore {
                 managedOnly = true
             case .ineligible(.missingOrDirectory):
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return .noCandidate
             case let .ineligible(reason):
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return .blockedOrAmbiguous(
                     contextBuilderSelectionCandidateBlock(for: reason)
@@ -21419,7 +21399,7 @@ actor WorkspaceFileContextStore {
                     managedOnly: managedOnly
                 )
                 if let token = pendingRegistrationToken {
-                    _ = await state.service.commitExplicitlyManagedRegularFileRegistration(token)
+                    _ = await identity.service.commitExplicitlyManagedRegularFileRegistration(token)
                     pendingRegistrationToken = nil
                 }
                 if let mismatch = sessionRootAuthorizationMismatch(authorization) {
@@ -21428,7 +21408,7 @@ actor WorkspaceFileContextStore {
                 return .resolved(files: [record], route: .materializedFile)
             } catch {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return .blockedOrAmbiguous(.materializationFailed)
             }
@@ -21484,10 +21464,10 @@ actor WorkspaceFileContextStore {
         expectedRoot: WorkspaceRootRef,
         expectedKind: WorkspaceRootKind
     ) -> WorkspaceFileRecord? {
-        guard let state = exactRootState(expectedRoot: expectedRoot, expectedKind: expectedKind) else {
+        guard let identity = exactRootIdentity(expectedRoot: expectedRoot, expectedKind: expectedKind) else {
             return nil
         }
-        guard publishedSeededAuthorityIsQueryable(rootID: state.root.id) else { return nil }
+        guard publishedSeededAuthorityIsQueryable(rootID: identity.root.id) else { return nil }
 
         let trimmed = absolutePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
@@ -21496,13 +21476,13 @@ actor WorkspaceFileContextStore {
         else { return nil }
 
         let standardizedPath = StandardizedPath.absolute(trimmed)
-        guard StandardizedPath.isDescendant(standardizedPath, of: state.root.standardizedFullPath),
-              standardizedPath != state.root.standardizedFullPath
+        guard StandardizedPath.isDescendant(standardizedPath, of: identity.root.standardizedFullPath),
+              standardizedPath != identity.root.standardizedFullPath
         else { return nil }
 
-        let relativePath = relativePath(for: standardizedPath, rootPath: state.root.standardizedFullPath)
-        guard let record = file(rootID: state.root.id, relativePath: relativePath),
-              record.rootID == state.root.id,
+        let relativePath = relativePath(for: standardizedPath, rootPath: identity.root.standardizedFullPath)
+        guard let record = file(rootID: identity.root.id, relativePath: relativePath),
+              record.rootID == identity.root.id,
               record.standardizedFullPath == standardizedPath
         else { return nil }
         return record
@@ -21515,15 +21495,15 @@ actor WorkspaceFileContextStore {
         expectedRoot: WorkspaceRootRef
     ) async -> String? {
         guard await (try? requirePublishedSeededAuthorityFresh(rootID: file.rootID)) != nil else { return nil }
-        guard let state = exactRootState(expectedRoot: expectedRoot, expectedKind: .workspaceGitData),
-              file.rootID == state.root.id,
-              let current = self.file(rootID: state.root.id, relativePath: file.standardizedRelativePath),
+        guard let identity = exactRootIdentity(expectedRoot: expectedRoot, expectedKind: .workspaceGitData),
+              file.rootID == identity.root.id,
+              let current = self.file(rootID: identity.root.id, relativePath: file.standardizedRelativePath),
               current.id == file.id,
               current.standardizedFullPath == file.standardizedFullPath
         else { return nil }
 
-        let expectedLifetimeID = state.lifetimeID
-        let content = try? await state.service.loadContent(ofRelativePath: file.standardizedRelativePath)
+        let expectedLifetimeID = identity.lifetimeID
+        let content = try? await identity.service.loadContent(ofRelativePath: file.standardizedRelativePath)
 
         guard await (try? requirePublishedSeededAuthorityFresh(rootID: file.rootID)) != nil else { return nil }
 
@@ -21538,16 +21518,16 @@ actor WorkspaceFileContextStore {
         return content
     }
 
-    private func exactRootState(
+    private func exactRootIdentity(
         expectedRoot: WorkspaceRootRef,
         expectedKind: WorkspaceRootKind
-    ) -> RootState? {
-        guard let state = rootStatesByID[expectedRoot.id],
-              state.root.id == expectedRoot.id,
-              state.root.standardizedFullPath == expectedRoot.standardizedFullPath,
-              state.root.kind == expectedKind
+    ) -> RootIdentity? {
+        guard let identity = rootStatesByID[expectedRoot.id]?.identity,
+              identity.root.id == expectedRoot.id,
+              identity.root.standardizedFullPath == expectedRoot.standardizedFullPath,
+              identity.root.kind == expectedKind
         else { return nil }
-        return state
+        return identity
     }
 
     func displayRootRefsSnapshot() -> WorkspaceDisplayRootRefsSnapshot {
@@ -22481,12 +22461,12 @@ actor WorkspaceFileContextStore {
         guard let current = file(rootID: record.rootID, relativePath: record.standardizedRelativePath),
               current.id == record.id
         else { return }
-        guard let state = rootStatesByID[current.rootID] else { return }
+        guard let lifetimeID = rootStatesByID[current.rootID]?.lifetimeID else { return }
         _ = try? await fenceAndPruneCatalogFileMissingOnDisk(
             rootID: current.rootID,
             relativePath: current.standardizedRelativePath,
             publishDelta: true,
-            expectedLifetimeID: state.lifetimeID,
+            expectedLifetimeID: lifetimeID,
             expectedFileID: current.id
         )
     }
@@ -22741,11 +22721,10 @@ actor WorkspaceFileContextStore {
     }
 
     private func indexFolder(relativePath: String, root: WorkspaceRootRecord) {
-        guard var state = rootStatesByID[root.id] else { return }
+        guard rootStatesByID[root.id] != nil else { return }
         var stagedIndexes = RootIndexBuffers()
-        indexFolders([FSItemDTO(relativePath: relativePath, isDirectory: true, hierarchy: relativePath.split(separator: "/").count)], root: root, state: &state, indexes: &stagedIndexes)
+        indexFolders([FSItemDTO(relativePath: relativePath, isDirectory: true, hierarchy: relativePath.split(separator: "/").count)], root: root, state: &rootStatesByID[root.id]!, indexes: &stagedIndexes)
         commit(stagedIndexes)
-        rootStatesByID[root.id] = state
         if let folder = folder(rootID: root.id, relativePath: relativePath) {
             promoteFolderToDiscoverable(folder)
         }
@@ -22753,18 +22732,14 @@ actor WorkspaceFileContextStore {
     }
 
     private func indexFile(relativePath: String, root: WorkspaceRootRecord, managedOnly: Bool = false) {
-        guard var state = rootStatesByID[root.id] else { return }
-        let existingFolderPaths = managedOnly ? indexedAncestorFolderPaths(of: relativePath, state: state) : []
+        guard rootStatesByID[root.id] != nil else { return }
         var stagedIndexes = RootIndexBuffers()
-        indexFiles([FSItemDTO(relativePath: relativePath, isDirectory: false, hierarchy: relativePath.split(separator: "/").count)], root: root, state: &state, indexes: &stagedIndexes)
+        indexFiles([FSItemDTO(relativePath: relativePath, isDirectory: false, hierarchy: relativePath.split(separator: "/").count)], root: root, state: &rootStatesByID[root.id]!, indexes: &stagedIndexes)
         commit(stagedIndexes)
-        rootStatesByID[root.id] = state
         if let file = file(rootID: root.id, relativePath: relativePath) {
             if managedOnly {
                 managedOnlyFileIDs.insert(file.id)
-                for folder in newlyIndexedParentFolders(for: relativePath, rootID: root.id, existingFolderPaths: existingFolderPaths) {
-                    managedOnlyFolderIDs.insert(folder.id)
-                }
+                managedOnlyFolderIDs.formUnion(stagedIndexes.foldersByID.keys)
             } else {
                 promoteToDiscoverable(file)
             }
@@ -22880,11 +22855,10 @@ actor WorkspaceFileContextStore {
     }
 
     private func removeFile(relativePath: String, rootID: UUID) {
-        guard var state = rootStatesByID[rootID] else { return }
-        let removedFileID = removeFile(relativePath: relativePath, state: &state)
-        rootStatesByID[rootID] = state
+        guard let rootKind = rootStatesByID[rootID]?.root.kind else { return }
+        let removedFileID = removeFile(relativePath: relativePath, state: &rootStatesByID[rootID]!)
         if removedFileID != nil {
-            invalidatePathMatchSnapshot(affectedRootKinds: [state.root.kind], affectedRootIDs: [state.root.id])
+            invalidatePathMatchSnapshot(affectedRootKinds: [rootKind], affectedRootIDs: [rootID])
         }
     }
 
@@ -22953,12 +22927,23 @@ actor WorkspaceFileContextStore {
     }
 
     private func removeFolderTree(relativePath: String, rootID: UUID) -> (fileIDs: [UUID], folderIDs: [UUID], filePaths: [String], folderPaths: [String]) {
-        guard var state = rootStatesByID[rootID] else { return ([], [], [], []) }
         let key = StandardizedPath.relative(relativePath)
         guard !key.isEmpty,
-              let folderID = state.folderIDsByRelativePath[key],
-              let folder = foldersByID[folderID]
+              let rootKind = rootStatesByID[rootID]?.root.kind,
+              let removal = removeFolderTree(key: key, state: &rootStatesByID[rootID]!)
         else { return ([], [], [], []) }
+        invalidatePathMatchSnapshot(affectedRootKinds: [rootKind], affectedRootIDs: [rootID])
+        return removal
+    }
+
+    /// Nil when `state` has no folder at `key`.
+    private func removeFolderTree(
+        key: String,
+        state: inout RootState
+    ) -> (fileIDs: [UUID], folderIDs: [UUID], filePaths: [String], folderPaths: [String])? {
+        guard let folderID = state.folderIDsByRelativePath[key],
+              foldersByID[folderID] != nil
+        else { return nil }
 
         let subtree = folderSubtree(atRelativePath: key, state: state, purpose: .removal)
         var removedFileIDs: [UUID] = []
@@ -22990,12 +22975,6 @@ actor WorkspaceFileContextStore {
             state.childFolderIDsByFolderID.removeValue(forKey: id)
             state.childFileIDsByFolderID.removeValue(forKey: id)
         }
-
-        if let parentID = folder.parentFolderID {
-            state.childFolderIDsByFolderID[parentID]?.removeAll { $0 == folderID }
-        }
-        rootStatesByID[rootID] = state
-        invalidatePathMatchSnapshot(affectedRootKinds: [state.root.kind], affectedRootIDs: [state.root.id])
         return (removedFileIDs, removedFolderIDs, removedFilePaths, removedFolderPaths)
     }
 
@@ -23039,6 +23018,19 @@ actor WorkspaceFileContextStore {
             throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
         }
         return state
+    }
+
+    private func rootIdentity(for rootID: UUID) throws -> RootIdentity {
+        guard let identity = rootStatesByID[rootID]?.identity else {
+            throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
+        }
+        return identity
+    }
+
+    /// Whether the root is still loaded with this lifetime and service.
+    private func isRootCurrent(rootID: UUID, lifetimeID: UUID, service: FileSystemService) -> Bool {
+        guard let current = rootStatesByID[rootID]?.identity else { return false }
+        return current.lifetimeID == lifetimeID && current.service === service
     }
 
     private func managedOnlyAncestorFolderIDs(for fileIDs: Set<UUID>) -> Set<UUID> {
