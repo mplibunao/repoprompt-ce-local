@@ -170,6 +170,9 @@ final class ClaudeAgentModeCoordinator {
     private static let logger = Logger(subsystem: "com.repoprompt.agents", category: "ClaudeSteering")
     private static let flagSettingsLogger = Logger(subsystem: "com.repoprompt.agents", category: "ClaudeFlagSettings")
     private static let idleLogger = Logger(subsystem: "com.repoprompt.agents", category: "ClaudeIdleShutdown")
+    /// How long a background task the CLI reports live can keep an idle process, counted from the
+    /// idle timer's anchor. Past it the process is shut down anyway.
+    private static let backgroundTaskKeepAliveCap: Duration = .seconds(120 * 60)
 
     private weak var providerBindingService: AgentModeProviderBindingService?
     private var hostCapabilities: HostCapabilities = .noOp
@@ -732,7 +735,21 @@ final class ClaudeAgentModeCoordinator {
             rearmClaudeIdleTimer(arm, at: idleClock.now() + interval, for: session)
             return
         }
-        retireIdleClaudeController(checked.controller, arm: arm, interval: interval, session: session)
+        let now = idleClock.now()
+        let capDeadline = arm.anchor + Self.backgroundTaskKeepAliveCap
+        // A live background task keeps the process until the task ends or the cap passes. The
+        // re-arm never runs past the cap.
+        if probe.hasLiveBackgroundTasks, capDeadline > now {
+            rearmClaudeIdleTimer(arm, at: min(now + interval, capDeadline), for: session)
+            return
+        }
+        retireIdleClaudeController(
+            checked.controller,
+            arm: arm,
+            interval: interval,
+            liveBackgroundTasksAtCap: probe.hasLiveBackgroundTasks,
+            session: session
+        )
     }
 
     /// Runs the deadline checks. When one fails, it ends or re-arms the timer and returns nil.
@@ -837,6 +854,7 @@ final class ClaudeAgentModeCoordinator {
         _ controller: any NativeAgentRuntimeControlling,
         arm: IdleTimerArm,
         interval: Duration,
+        liveBackgroundTasksAtCap: Bool,
         session: AgentTabSession
     ) {
         invalidateControllerRetirement(for: session)
@@ -866,7 +884,7 @@ final class ClaudeAgentModeCoordinator {
         }
         let idleSeconds = arm.anchor.duration(to: idleClock.now()).components.seconds
         Self.idleLogger.notice(
-            "Retiring idle Claude process for tab=\(session.tabID.uuidString, privacy: .public) idleSeconds=\(idleSeconds) intervalSeconds=\(interval.components.seconds)"
+            "Retiring idle Claude process for tab=\(session.tabID.uuidString, privacy: .public) idleSeconds=\(idleSeconds) intervalSeconds=\(interval.components.seconds) liveBackgroundTasksAtCap=\(liveBackgroundTasksAtCap)"
         )
         reportIdleTimerOutcome(.retired, tabID: session.tabID)
     }

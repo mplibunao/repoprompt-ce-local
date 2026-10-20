@@ -493,6 +493,8 @@ import XCTest
         private(set) var shutdownObservations: [ShutdownObservation] = []
         /// What `idleProbe()` reports for a turn in flight, read once the probe is released.
         var probeReportsTurnInFlight = false
+        /// What `idleProbe()` reports for live background tasks, read once the probe is released.
+        var probeReportsLiveBackgroundTasks = false
         /// When set, `idleProbe()` waits for it before answering.
         var probeHold: StartupTestHeldGate?
         /// When set, `shutdown()` waits for it after it begins.
@@ -527,7 +529,10 @@ import XCTest
             if let probeHold {
                 await probeHold.wait()
             }
-            return NativeAgentRuntimeIdleProbe(turnInFlight: probeReportsTurnInFlight, hasLiveBackgroundTasks: false)
+            return NativeAgentRuntimeIdleProbe(
+                turnInFlight: probeReportsTurnInFlight,
+                hasLiveBackgroundTasks: probeReportsLiveBackgroundTasks
+            )
         }
 
         fileprivate func beginShutdown() -> StartupTestHeldGate? {

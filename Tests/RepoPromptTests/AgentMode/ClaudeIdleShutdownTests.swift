@@ -166,6 +166,32 @@ import XCTest
             }
         }
 
+        /// A live background task keeps the process until 120 minutes after the terminal that
+        /// armed the timer, and no longer. At a 7-minute setting the last re-arm is cut short to
+        /// end at that cap, not a full interval past it.
+        func testLiveBackgroundTaskKeepsProcessOnlyUntilCap() async throws {
+            let label = "live background task"
+            let fixture = makeFixture()
+            let clock = fixture.idle.clock
+            fixture.idle.idleMinutes = 7
+            try await fixture.runTurn("turn")
+            let capDeadline = clock.now + .seconds(120 * 60)
+            fixture.claude.probeReportsLiveBackgroundTasks = true
+
+            // The deadlines at 7, 14, …, 119 minutes each keep the process.
+            for deadlines in 1 ... 17 {
+                clock.advance(by: .seconds(7 * 60))
+                try await expectIdleOutcomes(Array(repeating: .rearmed, count: deadlines), on: fixture, label)
+            }
+            XCTAssertEqual(fixture.claude.shutdownsStarted, 0, label)
+            try await startupTestEventually { !clock.pendingDeadlines.isEmpty }
+            XCTAssertEqual(clock.pendingDeadlines, [capDeadline], label)
+
+            clock.advance(by: .seconds(60))
+            try await expectIdleOutcomes(Array(repeating: .rearmed, count: 17) + [.retired], on: fixture, label)
+            try await startupTestEventually { fixture.claude.shutdownObservations.count == 1 }
+        }
+
         func testTimerEndsWithoutShutdownWhenControllerReplacedOrSettingOff() async throws {
             do {
                 let fixture = makeFixture()

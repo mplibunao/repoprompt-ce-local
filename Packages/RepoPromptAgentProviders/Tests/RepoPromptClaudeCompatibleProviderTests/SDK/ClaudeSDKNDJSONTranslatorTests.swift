@@ -126,6 +126,62 @@ final class ClaudeSDKNDJSONTranslatorTests: XCTestCase {
         XCTAssertEqual(translator.cliSessionID, "claude-session-2")
     }
 
+    func testBackgroundTasksChangedReportsLiveNonAmbientTasks() {
+        var translator = ClaudeSDKNDJSONTranslator()
+        // The entry Claude Code 2.1.304 sent for a backgrounded shell command, which has no
+        // `ambient` key.
+        let shell: [String: Any] = [
+            "task_id": "b6gh9ra6z",
+            "run_id": "0mvgkv0tj-d646b612",
+            "task_type": "local_bash",
+            "description": "Sleep for 900 seconds in background"
+        ]
+        let subagent: [String: Any] = ["task_id": "a3subagent", "task_type": "local_agent", "ambient": false]
+        let monitor: [String: Any] = ["task_id": "m7monitor", "task_type": "monitor_ws", "ambient": true]
+
+        let live = translator.parseNDJSONLine(jsonLine([
+            "type": "system",
+            "subtype": "background_tasks_changed",
+            "tasks": [shell, subagent, monitor],
+            "uuid": "4f7c0a52-6a43-4d5e-9d1b-2f0e8c1b7a90",
+            "session_id": "claude-session-1"
+        ]))
+        XCTAssertEqual(live.map(\.type), ["background_tasks_changed"])
+        XCTAssertEqual(live.first?.text, "b6gh9ra6z\na3subagent")
+
+        // Each event replaces the whole set, so an empty set must still be reported.
+        let cleared = translator.parseNDJSONLine(jsonLine([
+            "type": "system",
+            "subtype": "background_tasks_changed",
+            "tasks": [Any](),
+            "session_id": "claude-session-1"
+        ]))
+        XCTAssertEqual(cleared.map(\.type), ["background_tasks_changed"])
+        XCTAssertEqual(cleared.first?.text, "")
+
+        // An entry without a usable task ID still counts as live unless it is ambient.
+        let unidentifiedTasks: [[String: Any]] = [
+            ["task_type": "local_bash"],
+            ["task_id": "  ", "task_type": "local_bash"],
+            ["task_type": "monitor_ws", "ambient": true]
+        ]
+        let unidentified = translator.parseNDJSONLine(jsonLine([
+            "type": "system",
+            "subtype": "background_tasks_changed",
+            "tasks": unidentifiedTasks
+        ]))
+        XCTAssertEqual(unidentified.map(\.type), ["background_tasks_changed"])
+        XCTAssertEqual(unidentified.first?.text?.split(separator: "\n").count, 2, "entries without a task ID")
+
+        // A payload with no `tasks` array says nothing about the set, so it yields no result.
+        let missing = translator.parseNDJSONLine(jsonLine([
+            "type": "system",
+            "subtype": "background_tasks_changed",
+            "session_id": "claude-session-1"
+        ]))
+        XCTAssertEqual(missing.map(\.type), [], "payload without a tasks array")
+    }
+
     private func jsonObject(from jsonString: String?, file: StaticString = #filePath, line: UInt = #line) throws -> [String: String] {
         let value = try XCTUnwrap(jsonString, file: file, line: line)
         let data = Data(value.utf8)

@@ -192,6 +192,11 @@ final actor ClaudeNativeProcessSessionController {
     private var pendingTurnIDHead: Int = 0
     private var turnWasInterrupted = false
 
+    /// Task IDs of the background tasks the CLI last reported live in `background_tasks_changed`,
+    /// ambient tasks left out. The CLI sends the whole set on each change and nothing at startup,
+    /// so the set is cleared whenever a process starts or exits.
+    private var liveBackgroundTaskIDs: Set<String> = []
+
     // MARK: - Authoritative lifecycle (session_state_changed)
 
     /// True once the provider has emitted at least one `session_state_changed` event in this
@@ -321,7 +326,7 @@ final actor ClaudeNativeProcessSessionController {
     }
 
     func idleProbe() -> IdleProbe {
-        IdleProbe(turnInFlight: hasTurnInFlight, hasLiveBackgroundTasks: false)
+        IdleProbe(turnInFlight: hasTurnInFlight, hasLiveBackgroundTasks: !liveBackgroundTaskIDs.isEmpty)
     }
 
     #if DEBUG
@@ -549,6 +554,7 @@ final actor ClaudeNativeProcessSessionController {
         }
         await clearExpectedAgentPIDIfNeeded()
         process = nil
+        liveBackgroundTaskIDs.removeAll()
         activeLaunchEnvironmentSignature = nil
         isInitialized = false
         hasCompletedInitialFlagSettings = false
@@ -619,7 +625,9 @@ final actor ClaudeNativeProcessSessionController {
             payload: [
                 "command": resolvedCommand,
                 "arguments": arguments,
-                "workingDirectory": workingDirectory
+                "workingDirectory": workingDirectory,
+                "pid": spawned.pid,
+                "processGroupID": spawned.processGroupID ?? NSNull()
             ] as [String: Any]
         )
         stdoutFramer = LineFramer()
@@ -628,6 +636,7 @@ final actor ClaudeNativeProcessSessionController {
         // don't inherit the previous process's capability negotiation.
         observedSessionStateChangedEvents = false
         cancelAuthoritativeLifecycleState()
+        liveBackgroundTaskIDs.removeAll()
         // Reset runtime init aggregation state so stale metadata doesn't leak across runs.
         initializeResponseSnapshot = nil
         latestRuntimeInitTools = []
@@ -1366,6 +1375,14 @@ final actor ClaudeNativeProcessSessionController {
                 continue
             }
 
+            // The CLI's live background tasks are read by the idle probe. They are not run events,
+            // so they never reach the run loop or the transcript.
+            if result.type == "background_tasks_changed" {
+                liveBackgroundTaskIDs = Set((result.text ?? "").split(separator: "\n").map(String.init))
+                writeRawEventLogRecord(kind: "translator.streamResultIntercepted", payload: logPayload)
+                continue
+            }
+
             // task_progress events flow through as run-state updates, not transcript rows
             if result.type == "task_progress" {
                 writeRawEventLogRecord(kind: "translator.streamResult", payload: logPayload)
@@ -1748,6 +1765,11 @@ final actor ClaudeNativeProcessSessionController {
                 )
             )
         }
+
+        /// Handles one stdout line as if the CLI had written it.
+        func test_handleInboundLine(_ lineData: Data) async {
+            await handleLine(lineData)
+        }
     #endif
 
     private static func extractResultErrors(from payload: [String: Any]) -> [String] {
@@ -1921,6 +1943,7 @@ final actor ClaudeNativeProcessSessionController {
         failPendingControlRequests(with: ControllerError.processNotRunning)
         cancelAuthoritativeLifecycleState()
         process = nil
+        liveBackgroundTaskIDs.removeAll()
         isInitialized = false
         hasCompletedInitialFlagSettings = false
         let staleIDs = drainAllTurnIDs()
