@@ -658,7 +658,8 @@ actor MCPCommandRunner {
             workspace unhide <name>       Restore to default lists
             workspace switch <name>       Switch to workspace in current window
             workspace switch <name> --include-hidden  Switch hidden workspace by name
-            workspace switch <name> --new-window  Open workspace in NEW window
+            workspace switch <name> --new-window  Reuse its window, or open one (returns window_id)
+                                          Reusing a window does not change focus.
             workspace create <name> --switch       Create workspace and switch to it
             workspace create <name> --folder-path <path>  Create workspace with a root folder
             workspace delete <name>       Delete workspace

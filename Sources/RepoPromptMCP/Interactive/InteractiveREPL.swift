@@ -1060,7 +1060,8 @@ actor InteractiveREPL {
           \u{001B}[32mworkspace\u{001B}[0m unhide <name>         Restore to default lists
           \u{001B}[32mworkspace\u{001B}[0m <name>                Switch to workspace
           \u{001B}[32mworkspace\u{001B}[0m <name> --include-hidden  Switch hidden workspace by name
-          \u{001B}[32mworkspace\u{001B}[0m <name> --new-window   Open workspace in NEW window
+          \u{001B}[32mworkspace\u{001B}[0m <name> --new-window   Reuse its window, or open one (returns window_id)
+                                          Reusing a window does not change focus.
           \u{001B}[32mworkspace\u{001B}[0m create <name> --new-window   Create workspace in NEW window
           \u{001B}[32mworkspace\u{001B}[0m create <name> --switch       Create workspace and switch to it
           \u{001B}[32mworkspace\u{001B}[0m create <name> --folder-path <path>  Create workspace with a root folder

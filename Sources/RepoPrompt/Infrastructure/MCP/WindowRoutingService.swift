@@ -2423,7 +2423,7 @@ final class WindowRoutingService: Service {
                 - focus: boolean                                (optional for 'select_tab' or 'create_tab'; if true, also switches the UI to show the tab)
                 - allow_active: boolean                         (optional for 'close_tab'; default false)
                 - window_id: integer                            (optional; target window, defaults to selected or only window)
-                - open_in_new_window: boolean                   (optional for 'switch' or 'create'; when true, opens workspace in a new window and binds the connection to it)
+                - open_in_new_window: boolean                   (optional for 'switch' or 'create'; when true, switch reuses a window already showing the workspace, without changing focus, or opens one if none does; create opens a new window; sets the connection's window without changing existing tab bindings)
                 - switch_to_created: boolean                    (optional for 'create'; when true, switches to the newly created workspace)
                 - close_window: boolean                         (optional for 'delete'; when true, switches away without saving, deletes the workspace, then requests window close)
                 - include_hidden: boolean                       (optional; default false. For 'list', includes hidden workspaces. For name-based 'switch'/'delete', allows hidden matches. UUID lookup remains explicit and can resolve hidden workspaces.)
@@ -2452,7 +2452,7 @@ final class WindowRoutingService: Service {
                         "window_id": .integer(description: "Optional window ID; defaults to selected or only window"),
                         "focus": .boolean(description: "For 'select_tab' or 'create_tab': if true, also switches the UI to show the tab"),
                         "allow_active": .boolean(description: "For 'close_tab': allow closing the currently active visible tab"),
-                        "open_in_new_window": .boolean(description: "For 'switch' or 'create': when true, opens workspace in a new window and binds connection to it. Returns window_id in response."),
+                        "open_in_new_window": .boolean(description: MCPManageWorkspacesPropertyDescriptions.openInNewWindow),
                         "switch_to_created": .boolean(description: "For 'create': when true, switches to the newly created workspace in the target window."),
                         "close_window": .boolean(description: "For 'delete': when true, switches away without saving, deletes the workspace, then requests window close."),
                         "include_hidden": .boolean(description: "Default false. For list, includes hidden workspaces. For name-based switch/delete, allows hidden matches; UUID lookup remains explicit.")
@@ -2533,13 +2533,13 @@ final class WindowRoutingService: Service {
                         throw MCPError.invalidParams("Missing required 'workspace' parameter (UUID or name) for 'switch' action.")
                     }
 
-                    // Check if we should open in a new window
+                    // Check whether to reuse or open a workspace window
                     let openInNewWindow = args["open_in_new_window"]?.boolValue ?? false
                     let includeHidden = args["include_hidden"]?.boolValue ?? false
 
                     if openInNewWindow {
                         // ═══════════════════════════════════════════════════════════════
-                        // OPEN IN NEW WINDOW MODE
+                        // REUSE OR OPEN A WORKSPACE WINDOW
                         // ═══════════════════════════════════════════════════════════════
 
                         // First, resolve the workspace model from disk (don't require an existing window)

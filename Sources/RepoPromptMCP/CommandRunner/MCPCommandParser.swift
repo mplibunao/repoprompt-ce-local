@@ -1422,7 +1422,7 @@ enum MCPCommandParser {
                     if let ws = flags["workspace"] ?? flags.positional.first {
                         args["workspace"] = UncheckedSendableValue(ws)
                     }
-                    // Support --new-window flag to open in a new window
+                    // --new-window reuses a window that already shows the workspace, or opens one.
                     if let newWindow = parseBoolFlag(flags["new-window"] ?? flags["new_window"]) {
                         args["open_in_new_window"] = UncheckedSendableValue(newWindow)
                     } else if flags["new-window"] != nil || flags["new_window"] != nil {
