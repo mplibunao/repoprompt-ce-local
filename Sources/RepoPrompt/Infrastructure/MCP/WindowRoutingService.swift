@@ -107,6 +107,9 @@ public struct ManageWorkspacesResponse: Codable, Sendable {
     public let status: String?
     public let windowID: Int? // For switch/create with open_in_new_window
     public let closedWindowID: Int? // For delete with close_window
+    /// For switch with open_in_new_window: true when a window already showing the workspace was
+    /// reused, false when a new window was opened.
+    public let reusedWindow: Bool?
 
     public init(
         action: String,
@@ -114,7 +117,8 @@ public struct ManageWorkspacesResponse: Codable, Sendable {
         tabs: [MCPComposeTabSummary]? = nil,
         status: String?,
         windowID: Int? = nil,
-        closedWindowID: Int? = nil
+        closedWindowID: Int? = nil,
+        reusedWindow: Bool? = nil
     ) {
         self.action = action
         self.workspaces = workspaces
@@ -122,12 +126,14 @@ public struct ManageWorkspacesResponse: Codable, Sendable {
         self.status = status
         self.windowID = windowID
         self.closedWindowID = closedWindowID
+        self.reusedWindow = reusedWindow
     }
 
     private enum CodingKeys: String, CodingKey {
         case action, workspaces, tabs, status
         case windowID = "window_id"
         case closedWindowID = "closed_window_id"
+        case reusedWindow = "reused_window"
     }
 }
 
@@ -2417,7 +2423,7 @@ final class WindowRoutingService: Service {
                 - focus: boolean                                (optional for 'select_tab' or 'create_tab'; if true, also switches the UI to show the tab)
                 - allow_active: boolean                         (optional for 'close_tab'; default false)
                 - window_id: integer                            (optional; target window, defaults to selected or only window)
-                - open_in_new_window: boolean                   (optional for 'switch' or 'create'; when true, opens workspace in a new window and binds the connection to it)
+                - open_in_new_window: boolean                   (optional for 'switch' or 'create'; when true, switch reuses a window already showing the workspace, without changing focus, or opens one if none does; create opens a new window; sets the connection's window without changing existing tab bindings)
                 - switch_to_created: boolean                    (optional for 'create'; when true, switches to the newly created workspace)
                 - close_window: boolean                         (optional for 'delete'; when true, switches away without saving, deletes the workspace, then requests window close)
                 - include_hidden: boolean                       (optional; default false. For 'list', includes hidden workspaces. For name-based 'switch'/'delete', allows hidden matches. UUID lookup remains explicit and can resolve hidden workspaces.)
@@ -2446,7 +2452,7 @@ final class WindowRoutingService: Service {
                         "window_id": .integer(description: "Optional window ID; defaults to selected or only window"),
                         "focus": .boolean(description: "For 'select_tab' or 'create_tab': if true, also switches the UI to show the tab"),
                         "allow_active": .boolean(description: "For 'close_tab': allow closing the currently active visible tab"),
-                        "open_in_new_window": .boolean(description: "For 'switch' or 'create': when true, opens workspace in a new window and binds connection to it. Returns window_id in response."),
+                        "open_in_new_window": .boolean(description: MCPManageWorkspacesPropertyDescriptions.openInNewWindow),
                         "switch_to_created": .boolean(description: "For 'create': when true, switches to the newly created workspace in the target window."),
                         "close_window": .boolean(description: "For 'delete': when true, switches away without saving, deletes the workspace, then requests window close."),
                         "include_hidden": .boolean(description: "Default false. For list, includes hidden workspaces. For name-based switch/delete, allows hidden matches; UUID lookup remains explicit.")
@@ -2527,17 +2533,71 @@ final class WindowRoutingService: Service {
                         throw MCPError.invalidParams("Missing required 'workspace' parameter (UUID or name) for 'switch' action.")
                     }
 
-                    // Check if we should open in a new window
+                    // Check whether to reuse or open a workspace window
                     let openInNewWindow = args["open_in_new_window"]?.boolValue ?? false
                     let includeHidden = args["include_hidden"]?.boolValue ?? false
 
                     if openInNewWindow {
                         // ═══════════════════════════════════════════════════════════════
-                        // OPEN IN NEW WINDOW MODE
+                        // REUSE OR OPEN A WORKSPACE WINDOW
                         // ═══════════════════════════════════════════════════════════════
 
                         // First, resolve the workspace model from disk (don't require an existing window)
                         let targetWorkspace = try await routingService.resolveWorkspaceForSwitch(rawWorkspaceParam: rawWorkspaceParam, includeHidden: includeHidden)
+
+                        // A window that already shows this workspace is reused instead of opening a
+                        // duplicate. Windows match by workspace UUID, the identity `list` reports in
+                        // showing_window_ids. Reuse only sets this connection's window affinity; the
+                        // window keeps its focus, workspace, and tabs.
+                        let targetWorkspaceID = targetWorkspace.id
+                        let connectionID = await routingService.networkMgr.currentConnectionUUID()
+                        let selectedWindowID: Int? = if let connectionID {
+                            await routingService.networkMgr.selectedWindow(for: connectionID)
+                        } else {
+                            nil
+                        }
+                        // The reuse choice and the post-write check below both use this predicate, on
+                        // windows taken from the registered window list.
+                        let isReadyShowingTarget: @MainActor (WindowState) -> Bool = { window in
+                            window.workspaceManager.activeWorkspace?.id == targetWorkspaceID
+                                && !window.isClosing
+                                && window.workspaceManager.isInitialized
+                                && !window.workspaceManager.isSwitchingWorkspace
+                        }
+                        let (reusableWindowID, hasShowingWindow) = await MainActor.run { () -> (Int?, Bool) in
+                            let windows = routingService.windowStates.allWindows
+                            let reusableID = Self.preferredOpenWindowID(
+                                showingWindowIDs: windows.filter(isReadyShowingTarget).map(\.windowID),
+                                selectedWindowID: selectedWindowID,
+                                focusedWindowID: windows.first(where: { $0.isCurrentlyFocused })?.windowID
+                            )
+                            return (reusableID, windows.contains { $0.workspaceManager.activeWorkspace?.id == targetWorkspaceID })
+                        }
+                        if let reusableWindowID {
+                            try await routingService.networkMgr.setActiveWindowForCurrentConnection(reusableWindowID)
+                            // The window can close or start switching workspaces before the affinity
+                            // write lands, and its close-time affinity cleanup may already have run.
+                            // Checking after the write means a later close schedules its cleanup after
+                            // the write.
+                            let stillReady = await MainActor.run {
+                                routingService.windowStates.allWindows.contains {
+                                    $0.windowID == reusableWindowID && isReadyShowingTarget($0)
+                                }
+                            }
+                            guard stillReady else {
+                                throw MCPError.invalidRequest("Window \(reusableWindowID) changed or closed while connection routing was being set. No replacement window was opened. Use bind_context to choose the context again.")
+                            }
+                            return ManageWorkspacesResponse(
+                                action: "switch",
+                                workspaces: nil,
+                                status: "ok",
+                                windowID: reusableWindowID,
+                                reusedWindow: true
+                            )
+                        }
+                        if hasShowingWindow {
+                            throw MCPError.invalidRequest("Workspace '\(targetWorkspace.name)' has a window that is not ready or is closing. Wait for that operation to finish, then retry.")
+                        }
 
                         // Open a new window
                         let newWindow: WindowState
@@ -2572,7 +2632,8 @@ final class WindowRoutingService: Service {
                             action: "switch",
                             workspaces: nil,
                             status: "ok",
-                            windowID: newWindow.windowID
+                            windowID: newWindow.windowID,
+                            reusedWindow: false
                         )
                     }
 

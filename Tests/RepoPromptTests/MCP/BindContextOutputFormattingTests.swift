@@ -125,6 +125,39 @@ final class BindContextOutputFormattingTests: XCTestCase {
         }
     }
 
+    func testNewWindowSwitchOutputSaysWhetherTheWindowWasReusedOrOpened() throws {
+        let cases: [(label: String, reused: Bool?, heading: String, windowLine: String)] = [
+            ("reused", true, "## Workspace Window Reused ✅", "- **Window ID**: `7`"),
+            ("opened", false, "## Workspace Opened in New Window ✅", "- **New Window ID**: `7`"),
+            ("saved result without reused_window", nil, "## Workspace Switch ✅", "- **Window**: 7")
+        ]
+        for testCase in cases {
+            let response = ManageWorkspacesResponse(
+                action: "switch",
+                workspaces: nil,
+                status: "ok",
+                windowID: 7,
+                reusedWindow: testCase.reused
+            )
+            // The argument's window_id differs from the response's, which names the destination.
+            let content = try ToolOutputFormatter.formatManageWorkspaces(
+                args: [
+                    "action": .string("switch"),
+                    "workspace": .string("Docs"),
+                    "open_in_new_window": .bool(true),
+                    "window_id": .int(3)
+                ],
+                value: Value(response)
+            )
+            let lines = content.compactMap { item -> String? in
+                if case let .text(text, _, _) = item { return text }
+                return nil
+            }.joined(separator: "\n").components(separatedBy: "\n")
+            XCTAssertEqual(lines.first, testCase.heading, testCase.label)
+            XCTAssertTrue(lines.contains(testCase.windowLine), "\(testCase.label): \(lines)")
+        }
+    }
+
     /// Every brace-delimited object in a hint is a hinted call, whichever key it starts with
     /// and whether or not the surface renders Markdown.
     private func hintedCalls(in hint: String) throws -> [String] {

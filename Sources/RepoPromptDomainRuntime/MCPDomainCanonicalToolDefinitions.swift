@@ -1132,6 +1132,9 @@ package enum MCPDomainCanonicalToolDefinitions {
         if definition.name == MCPWindowToolName.manageSelection {
             return requireClosedSliceRanges(definition)
         }
+        if definition.name == MCPGlobalToolName.manageWorkspaces {
+            return describeOpenInNewWindow(definition)
+        }
         guard definition.name == MCPGlobalToolName.bindContext,
               case var .object(schema) = definition.inputSchema,
               case var .object(properties)? = schema["properties"]
@@ -1234,6 +1237,33 @@ package enum MCPDomainCanonicalToolDefinitions {
         )
     }
 
+    /// The `open_in_new_window` property states what the flag does for each action, so the tool
+    /// description's Parameters list leaves the flag out instead of repeating it.
+    private static func describeOpenInNewWindow(
+        _ definition: MCPDomainToolDefinition
+    ) -> MCPDomainToolDefinition {
+        guard case var .object(schema) = definition.inputSchema,
+              case var .object(properties)? = schema["properties"],
+              case var .object(openInNewWindow)? = properties["open_in_new_window"]
+        else {
+            return definition
+        }
+        openInNewWindow["description"] = .string(MCPManageWorkspacesPropertyDescriptions.openInNewWindow)
+        properties["open_in_new_window"] = .object(openInNewWindow)
+        schema["properties"] = .object(properties)
+        let description = definition.description
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("- open_in_new_window:") }
+            .joined(separator: "\n")
+        return MCPDomainToolDefinition(
+            name: definition.name,
+            description: description,
+            inputSchema: .object(schema),
+            annotations: definition.annotations,
+            isEnabledByDefault: definition.isEnabledByDefault
+        )
+    }
+
     /// A client pays for this text on each `tools/list` that advertises `bind_context` to it, so
     /// it holds only what the schema cannot express: what a binding is, when listing is needed,
     /// and how the two backends differ. Each parameter fact lives once, in
@@ -1251,6 +1281,12 @@ package enum MCPBindContextPropertyDescriptions {
     package static let workingDirs = "Absolute workspace roots to bind, or one comma-separated string. Binds the active tab of the workspace with exactly these roots, else a strict superset; subpaths do not match. App-backed without window_id: a match no window shows opens in a new window."
     package static let createIfMissing = "App-backed, with working_dirs: if no workspace matches, create one in a new window after user approval."
     package static let tabName = "App-backed: name for the workspace create_if_missing creates."
+}
+
+/// Single source for the `manage_workspaces` property descriptions that the canonical schema
+/// override and the app-side raw Tool registration both publish.
+package enum MCPManageWorkspacesPropertyDescriptions {
+    package static let openInNewWindow = "When true: 'switch' reuses a window already showing the workspace, or opens one if none does; 'create' opens a new window. Returns window_id and sets this connection's window; existing tab bindings stay unchanged."
 }
 
 /// Single source for the `manage_selection` property descriptions that the canonical schema

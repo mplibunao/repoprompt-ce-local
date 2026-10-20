@@ -4156,32 +4156,29 @@ extension ToolOutputFormatter {
 
             case "switch":
                 var out: [String] = []
-                // Check if this was an open_in_new_window request
-                let openedNewWindow = args["open_in_new_window"]?.boolValue ?? false
-                // Get window_id from response (new window case) or args (explicit target)
-                let responseWindowID = obj["window_id"]?.intValue
-                let argsWindowID = args["window_id"]?.intValue
 
-                if openedNewWindow, let newWindowID = responseWindowID {
-                    out.append("## Workspace Opened in New Window ✅")
+                // open_in_new_window responses carry window_id and reused_window; a switch in place
+                // carries neither. Results saved by older builds carry window_id alone, so they get
+                // the neutral heading below with the response's window_id.
+                if let windowID = obj["window_id"]?.intValue, let reusedWindow = obj["reused_window"]?.boolValue {
+                    out.append(reusedWindow ? "## Workspace Window Reused ✅" : "## Workspace Opened in New Window ✅")
                     if let wsName = args["workspace"]?.stringValue {
                         out.append("- **Workspace**: \(wsName)")
                     }
-                    out.append("- **New Window ID**: `\(newWindowID)`")
+                    out.append("- **\(reusedWindow ? "Window ID" : "New Window ID")**: `\(windowID)`")
                     out.append("")
                     out.append("### Connection Binding")
-                    out.append("Your connection has been automatically bound to the new window (ID: \(newWindowID)).")
-                    out.append("All subsequent tool calls will target this window.")
+                    out.append("Connection window set to `\(windowID)`. Existing tab bindings are unchanged.")
                     out.append("")
                     out.append("### Next Steps")
                     out.append("- Use `bind_context` with `op=list` to see compose tabs and context_id values.")
-                    out.append("- Use `-w \(newWindowID)` when invoking CLI commands to target this window.")
+                    out.append("- Use `-w \(windowID)` when invoking CLI commands to target this window.")
                 } else {
                     out.append("## Workspace Switch ✅")
                     if let wsName = args["workspace"]?.stringValue {
                         out.append("- **Workspace**: \(wsName)")
                     }
-                    if let windowID = argsWindowID {
+                    if let windowID = obj["window_id"]?.intValue ?? args["window_id"]?.intValue {
                         out.append("- **Window**: \(windowID)")
                     }
                     out.append("")
@@ -4206,8 +4203,7 @@ extension ToolOutputFormatter {
                     out.append("- **New Window ID**: `\(newWindowID)`")
                     out.append("")
                     out.append("### Connection Binding")
-                    out.append("Your connection has been automatically bound to the new window (ID: \(newWindowID)).")
-                    out.append("All subsequent tool calls will target this window.")
+                    out.append("Connection window set to `\(newWindowID)`. Existing tab bindings are unchanged.")
                 } else {
                     out.append("## Workspace Created ✅")
                     if let name = args["name"]?.stringValue {
