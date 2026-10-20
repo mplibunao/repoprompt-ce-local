@@ -985,6 +985,47 @@ final class WorkspaceSearchServiceTests: XCTestCase {
         await assertPublishedMatchesAuthoritative("discarded rebase")
     }
 
+    func testPathIndexRebaseInFlightAtUnloadDoesNotReachReloadedRoot() async throws {
+        let rootURL = try makeTemporaryRoot(name: "PathIndexRebaseUnload")
+        try write("seed", to: rootURL.appendingPathComponent("Added/Seed.swift"))
+        let store = WorkspaceFileContextStore()
+        let oldRoot = try await store.loadRoot(path: rootURL.path)
+        _ = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
+        await store.setRootCatalogShardPatchCapOverride(1)
+        // The gate holds the flight's base build while the root unloads and reloads.
+        let build = TestAsyncGate()
+        addTeardownBlock { await build.open() }
+        await store.setPathIndexRebaseBuildHandlerForTesting { _ in await build.wait() }
+        for index in 1 ... WorkspaceFileContextStore.pathIndexRebaseOverlayPayloadThreshold {
+            let path = "Added/File\(index).swift"
+            try write("added", to: rootURL.appendingPathComponent(path))
+            await store.replayObservedFileSystemDeltas(rootID: oldRoot.id, deltas: [.fileAdded(path)])
+        }
+        let flightTask = await store.pathIndexRebaseFlightTaskForTesting(rootID: oldRoot.id)
+        let flight = try XCTUnwrap(flightTask)
+        await build.waitUntilEntered()
+
+        await store.unloadRoot(id: oldRoot.id)
+        XCTAssertTrue(flight.isCancelled)
+        let flightAfterUnload = await store.pathIndexRebaseFlightTaskForTesting(rootID: oldRoot.id)
+        XCTAssertNil(flightAfterUnload)
+
+        try FileManager.default.removeItem(at: rootURL.appendingPathComponent("Added"))
+        let newFiles = ["Reloaded/First.swift", "Reloaded/Second.swift"]
+        for path in newFiles {
+            try write("new", to: rootURL.appendingPathComponent(path))
+        }
+        let newRoot = try await store.loadRoot(path: rootURL.path)
+        // Publish the reloaded root's shard before the old flight resumes. A stale install would replace this shard.
+        _ = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
+        await build.open()
+        await flight.value
+
+        let contents = await store.rootCatalogShardContentsForTesting(rootID: newRoot.id)
+        let searchableEntries = try XCTUnwrap(contents?.searchableEntries)
+        XCTAssertEqual(searchableEntries.map(\.standardizedRelativePath).sorted(), newFiles)
+    }
+
     func testFolderRemovalVisitsOnlyItsSubtree() async throws {
         let rootURL = try makeTemporaryRoot(name: "FolderRemovalSubtree")
         let removedFiles = ["Removed/Top.swift", "Removed/Nested/Inner.swift", "Removed/Nested/Notes.md"]
