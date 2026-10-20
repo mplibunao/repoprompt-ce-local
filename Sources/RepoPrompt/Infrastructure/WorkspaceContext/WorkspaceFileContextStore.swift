@@ -21709,7 +21709,7 @@ actor WorkspaceFileContextStore {
                 rootID: root.id,
                 name: URL(fileURLWithPath: relativePath).lastPathComponent,
                 relativePath: relativePath,
-                fullPath: (root.fullPath as NSString).appendingPathComponent(relativePath),
+                fullPath: StandardizedPath.join(standardizedRoot: root.fullPath, standardizedRelativePath: relativePath),
                 parentFolderID: parentID
             )
             indexes.foldersByID[folder.id] = folder
@@ -21728,7 +21728,7 @@ actor WorkspaceFileContextStore {
                 rootID: root.id,
                 name: URL(fileURLWithPath: relativePath).lastPathComponent,
                 relativePath: relativePath,
-                fullPath: (root.fullPath as NSString).appendingPathComponent(relativePath),
+                fullPath: StandardizedPath.join(standardizedRoot: root.fullPath, standardizedRelativePath: relativePath),
                 parentFolderID: parentID
             )
             indexes.filesByID[file.id] = file
@@ -21749,7 +21749,7 @@ actor WorkspaceFileContextStore {
             rootID: root.id,
             name: URL(fileURLWithPath: key).lastPathComponent,
             relativePath: key,
-            fullPath: (root.fullPath as NSString).appendingPathComponent(key),
+            fullPath: StandardizedPath.join(standardizedRoot: root.fullPath, standardizedRelativePath: key),
             parentFolderID: parentID
         )
         indexes.foldersByID[folder.id] = folder
