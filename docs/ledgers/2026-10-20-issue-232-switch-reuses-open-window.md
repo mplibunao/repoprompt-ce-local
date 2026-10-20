@@ -9,6 +9,7 @@ Make `manage_workspaces` `switch` with `open_in_new_window: true` reuse a window
 | 1. Reuse a showing window on switch | done | pair · Orchestrate 1/2: reuse a showing window on switch | `fix(mcp): reuse a window that already shows the workspace on switch` |
 | 2. Describe the reuse on every surface | done | engineer · Orchestrate 2/2: describe the reuse on every surface | `fix(mcp): describe the switch window reuse in the tool text and help` |
 | 3. Drop the focus clause from the property text | done | engineer · Orchestrate 3/3: drop the focus clause from the property text | `fix(mcp): drop the focus clause from the open_in_new_window description` |
+| 4. Align the create output with the property text | done | orchestrator (agent starts hung) | `fix(mcp): say that create sets the connection window, not a tab binding` |
 
 ## Planning
 
@@ -72,6 +73,15 @@ Make `manage_workspaces` `switch` with `open_in_new_window: true` reuse a window
 - Evidence (size, compact JSON with sorted keys, `main` against the branch after this item, characters and whitespace-separated words, not tokens): advertised entry 7087 to 7013 characters (735 to 726 words), input schema 2294 to 2380 (185 to 197); the description and Settings rows are unchanged from item 2. This item alone removes 24 characters and 3 words from the entry and the schema.
 - Evidence: the review loop ran one Context Builder review with no findings. For the refactor analysis, Context Builder's rewritten prompt dropped the inline diff, so a follow-up in the same chat sent it again; that analysis found nothing worth changing. No explore agents ran, because the item is one string and its generated files.
 - Decision: no repeat of the debug-app check. The item changes only agent-facing text, not behavior the check covered. Source: orchestrator judgment, under the contribution guide's rule to repeat the run when a fix changes the behavior it covered.
+
+## 4. Align the create output with the property text
+
+- Decision: `create` with `open_in_new_window` sets only the connection's window affinity, as `switch` does, so its formatted output now says the same thing as `switch` and the shared property text: the connection's window is set and existing tab bindings are unchanged. It used to say the connection was bound to the new window and that every later call targets it, which is false when a tab binding exists. `create`'s behavior is unchanged. Source: Codex review finding on the pull request.
+- Decision: the orchestrator made this two-line edit itself, because `agent_run start` hung. Two starts on one tab shortly before 08:36 UTC, and one on a fresh tab from 08:36:53 to 08:42:13 UTC, each timed out after 300 s without creating a session, while session and window listing answered at once. Source: requester, after the retry on a fresh tab also hung.
+- Decision: no new test. The new text is a fixed sentence, and asserting it would restate a constant, which is also why the `switch` formatter test leaves out its routing sentence. Source: orchestrator judgment under `.agents/skills/rpce-test-quality/SKILL.md`.
+- Evidence: the review loop ran one Context Builder review; its rewritten prompt left out the diff, so a follow-up in the same chat sent the diff and branch excerpts, and the review found nothing. The refactor analysis, a separate chat, got the same material in a follow-up and found nothing worth changing. No explore agents ran, because the item is two lines of output text.
+- Decision: no repeat of the debug-app check, because the item changes output text only. Source: orchestrator judgment.
+- Evidence (focused validation, 2026-10-20, through the developer daemon): `make dev-format`, `make dev-lint`, and `make dev-swift-build PRODUCT=RepoPrompt` passed, and `BindContextOutputFormattingTests` ran 6 tests with no failures.
 
 ## Deferred
 
