@@ -3379,12 +3379,19 @@ actor WorkspaceFileContextStore {
     /// Covers overlapping readers/index builds while bounding retained full-root arrays. At the cap,
     /// callers receive an authoritative uncached rebuild until older ARC leases drain.
     private static let maxLiveRootCatalogShardGenerationsPerRoot = 8
-    // The checked-in WI-3 baseline (`docs/investigations/mcp-tool-throughput-wi3-baseline-2026-06-11.md`)
-    // records authoritative catalog rebuild work in roots/files, and its fixture
-    // proves a three-file/two-root rebuild, but it does not establish a multi-record crossover.
-    // Patch exactly one logical catalog record—the common single-file watcher case—and rebuild for
-    // every broader batch until measured evidence supports increasing this deliberately conservative cap.
-    private static let maxRootCatalogShardPatchLogicalMutationCount = 1
+    // A batch's effective edits are its file and folder record insertions plus removals, so a record
+    // that replaces another at the same path counts two. This cap gates patch eligibility. A batch over
+    // the cap, or one the store can't patch safely, requests an authoritative rebuild instead. Retention
+    // can block publishing either result, which leaves the shard dirty until a later build. A root with
+    // no published shard and no delta state for its current lifetime stays lazy whatever the batch size.
+    // The value comes from patching and rebuilding the same batches on 10,000-, 35,000-, and
+    // 100,000-file roots: adds across folders, adds into nested folders, and subtree removals of 1 to
+    // 4,096 edits. The cap is the largest measured size that passes, with every smaller size, at 35,000
+    // and 100,000 files for every shape. Passing means a patch median at most 80% of the rebuild's, a
+    // patch P95 no higher than the rebuild's, and a patched shard equal to the rebuilt one. Every size
+    // passed, so 4,096 is a lower bound on where patching stops paying off. The data is in
+    // `docs/investigations/catalog-shard-batch-patch-2026-10-20.md`.
+    private static let maxRootCatalogShardPatchLogicalMutationCount = 4096
     private static let defaultMaxPendingDeltasPerRoot = 10000
     // A patched root's path index rebases its materialized base off the actor once it carries this many
     // overlay payloads, or this many affected-entry mentions summed over them. The mention threshold
