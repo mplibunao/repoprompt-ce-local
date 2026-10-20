@@ -173,9 +173,10 @@ final class ClaudeAgentModeCoordinator {
     /// How long a background task the CLI reports live can keep an idle process, counted from the
     /// idle timer's anchor. Past it the process is shut down anyway.
     private static let backgroundTaskKeepAliveCap: Duration = .seconds(120 * 60)
-    /// Shown when a resume and its retry both failed and the session started a new conversation
-    /// with RepoPrompt's transcript handoff.
-    static let resumeFallbackNotice = "Claude couldn't resume the previous conversation, so it started a new one. The agent received a summary of this transcript without tool output."
+    /// Shown when a resume and its retry both failed and the session started a new conversation.
+    /// It doesn't say the transcript handoff arrived: the handoff goes with the message being sent
+    /// and stays staged if that send fails.
+    static let resumeFallbackNotice = "Claude couldn't resume the previous conversation and started a new one. The new conversation doesn't have this transcript's full history or tool output."
 
     private weak var providerBindingService: AgentModeProviderBindingService?
     private var hostCapabilities: HostCapabilities = .noOp
