@@ -436,6 +436,80 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
             let status = try await bindContextResponse(connection, ["op": .string("status")])
             XCTAssertEqual(status.binding.contextID, boundTabID)
         }
+
+        @MainActor
+        func testNewWindowSwitchReusesPreferredWindowAlreadyShowingWorkspace() async throws {
+            let root = try makeTemporaryRoots(count: 1)[0]
+            // The handler resolves its target from the disk snapshot, so the target goes through a
+            // workspace manager's persistence instead of an in-memory fixture.
+            let persister = makeWindowInstance()
+            await persister.workspaceManager.awaitInitialized()
+            let target = persister.workspaceManager.createWorkspace(
+                name: "Reuse Target \(UUID().uuidString)",
+                repoPaths: [root.path]
+            )
+            // Teardown blocks run in reverse order, so this runs after the window teardown below,
+            // and still runs when setup after this point throws.
+            addTeardownBlock { @MainActor in
+                let outcome = await persister.workspaceManager.deleteWorkspaceAsync(target)
+                XCTAssertEqual(outcome, .deleted)
+            }
+            // Same roots, different UUID: a window showing it does not show the target.
+            let sameRoots = WorkspaceModel(name: "Same Roots", repoPaths: [root.path])
+            let windows = try await makeRegisteredWindows(activeWorkspaces: [sameRoots, target, target])
+            let (sameRootsWindow, lower, higher) = (windows[0], windows[1], windows[2])
+            addTeardownBlock { @MainActor in
+                // Deletion is refused while a window shows the workspace.
+                for window in [lower, higher] {
+                    try? await self.configureWindow(window, activeWorkspace: sameRoots)
+                }
+            }
+            // Workspace creation persists on a background task.
+            let deadline = Date().addingTimeInterval(10)
+            while await !sameRootsWindow.workspaceManager.loadWorkspaceSnapshotFromDisk().contains(where: { $0.id == target.id }) {
+                guard Date() < deadline else { throw BindContextRoutingFixtureError.workspacePersistenceTimedOut }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            let connection = try await makeProductionMCPConnection()
+            addTeardownBlock { await connection.cleanup() }
+            let registeredWindowIDs = WindowStatesManager.shared.allWindows.map(\.windowID)
+            let shownWorkspaceIDs = windows.map(\.workspaceManager.activeWorkspaceID)
+            let activeTabIDs = windows.map { $0.workspaceManager.activeWorkspace?.activeComposeTabID }
+
+            let cases: [(label: String, selected: WindowState, focused: WindowState, expected: WindowState)] = [
+                ("connection's window wins over the focused window", higher, lower, higher),
+                ("focused window wins when the connection's window shows another workspace", sameRootsWindow, higher, higher),
+                ("lowest window ID wins when neither shows the workspace", sameRootsWindow, sameRootsWindow, lower)
+            ]
+            for testCase in cases {
+                try await ServerNetworkManager.withConnectionID(connection.connectionID) {
+                    try await ServerNetworkManager.shared.setActiveWindowForCurrentConnection(testCase.selected.windowID)
+                }
+                for window in windows {
+                    window.isCurrentlyFocused = window === testCase.focused
+                }
+
+                let result = await callTool(connection, name: "manage_workspaces", arguments: [
+                    "action": .string("switch"),
+                    "workspace": .string(target.id.uuidString),
+                    "open_in_new_window": .bool(true),
+                    "_rawJSON": .bool(true)
+                ])
+                XCTAssertFalse(result.isError, "\(testCase.label): \(result.text)")
+                let response = try JSONDecoder().decode(ManageWorkspacesResponse.self, from: Data(result.text.utf8))
+                XCTAssertEqual(response.windowID, testCase.expected.windowID, testCase.label)
+                XCTAssertEqual(response.reusedWindow, true, testCase.label)
+                let affinity = await ServerNetworkManager.shared.selectedWindow(for: connection.connectionID)
+                XCTAssertEqual(affinity, testCase.expected.windowID, testCase.label)
+                XCTAssertEqual(WindowStatesManager.shared.allWindows.map(\.windowID), registeredWindowIDs, testCase.label)
+                XCTAssertEqual(windows.map(\.workspaceManager.activeWorkspaceID), shownWorkspaceIDs, testCase.label)
+                XCTAssertEqual(
+                    windows.map { $0.workspaceManager.activeWorkspace?.activeComposeTabID },
+                    activeTabIDs,
+                    testCase.label
+                )
+            }
+        }
     #endif
 
     #if DEBUG
@@ -670,4 +744,5 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
 
 private enum BindContextRoutingFixtureError: Error {
     case workspaceActivationFailed
+    case workspacePersistenceTimedOut
 }

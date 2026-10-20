@@ -107,6 +107,9 @@ public struct ManageWorkspacesResponse: Codable, Sendable {
     public let status: String?
     public let windowID: Int? // For switch/create with open_in_new_window
     public let closedWindowID: Int? // For delete with close_window
+    /// For switch with open_in_new_window: true when a window already showing the workspace was
+    /// reused, false when a new window was opened.
+    public let reusedWindow: Bool?
 
     public init(
         action: String,
@@ -114,7 +117,8 @@ public struct ManageWorkspacesResponse: Codable, Sendable {
         tabs: [MCPComposeTabSummary]? = nil,
         status: String?,
         windowID: Int? = nil,
-        closedWindowID: Int? = nil
+        closedWindowID: Int? = nil,
+        reusedWindow: Bool? = nil
     ) {
         self.action = action
         self.workspaces = workspaces
@@ -122,12 +126,14 @@ public struct ManageWorkspacesResponse: Codable, Sendable {
         self.status = status
         self.windowID = windowID
         self.closedWindowID = closedWindowID
+        self.reusedWindow = reusedWindow
     }
 
     private enum CodingKeys: String, CodingKey {
         case action, workspaces, tabs, status
         case windowID = "window_id"
         case closedWindowID = "closed_window_id"
+        case reusedWindow = "reused_window"
     }
 }
 
@@ -2539,6 +2545,60 @@ final class WindowRoutingService: Service {
                         // First, resolve the workspace model from disk (don't require an existing window)
                         let targetWorkspace = try await routingService.resolveWorkspaceForSwitch(rawWorkspaceParam: rawWorkspaceParam, includeHidden: includeHidden)
 
+                        // A window that already shows this workspace is reused instead of opening a
+                        // duplicate. Windows match by workspace UUID, the identity `list` reports in
+                        // showing_window_ids. Reuse only sets this connection's window affinity; the
+                        // window keeps its focus, workspace, and tabs.
+                        let targetWorkspaceID = targetWorkspace.id
+                        let connectionID = await routingService.networkMgr.currentConnectionUUID()
+                        let selectedWindowID: Int? = if let connectionID {
+                            await routingService.networkMgr.selectedWindow(for: connectionID)
+                        } else {
+                            nil
+                        }
+                        // The reuse choice and the post-write check below both use this predicate, on
+                        // windows taken from the registered window list.
+                        let isReadyShowingTarget: @MainActor (WindowState) -> Bool = { window in
+                            window.workspaceManager.activeWorkspace?.id == targetWorkspaceID
+                                && !window.isClosing
+                                && window.workspaceManager.isInitialized
+                                && !window.workspaceManager.isSwitchingWorkspace
+                        }
+                        let (reusableWindowID, hasShowingWindow) = await MainActor.run { () -> (Int?, Bool) in
+                            let windows = routingService.windowStates.allWindows
+                            let reusableID = Self.preferredOpenWindowID(
+                                showingWindowIDs: windows.filter(isReadyShowingTarget).map(\.windowID),
+                                selectedWindowID: selectedWindowID,
+                                focusedWindowID: windows.first(where: { $0.isCurrentlyFocused })?.windowID
+                            )
+                            return (reusableID, windows.contains { $0.workspaceManager.activeWorkspace?.id == targetWorkspaceID })
+                        }
+                        if let reusableWindowID {
+                            try await routingService.networkMgr.setActiveWindowForCurrentConnection(reusableWindowID)
+                            // The window can close or start switching workspaces before the affinity
+                            // write lands, and its close-time affinity cleanup may already have run.
+                            // Checking after the write means a later close schedules its cleanup after
+                            // the write.
+                            let stillReady = await MainActor.run {
+                                routingService.windowStates.allWindows.contains {
+                                    $0.windowID == reusableWindowID && isReadyShowingTarget($0)
+                                }
+                            }
+                            guard stillReady else {
+                                throw MCPError.invalidRequest("Window \(reusableWindowID) changed or closed while connection routing was being set. No replacement window was opened. Use bind_context to choose the context again.")
+                            }
+                            return ManageWorkspacesResponse(
+                                action: "switch",
+                                workspaces: nil,
+                                status: "ok",
+                                windowID: reusableWindowID,
+                                reusedWindow: true
+                            )
+                        }
+                        if hasShowingWindow {
+                            throw MCPError.invalidRequest("Workspace '\(targetWorkspace.name)' has a window that is not ready or is closing. Wait for that operation to finish, then retry.")
+                        }
+
                         // Open a new window
                         let newWindow: WindowState
                         do {
@@ -2572,7 +2632,8 @@ final class WindowRoutingService: Service {
                             action: "switch",
                             workspaces: nil,
                             status: "ok",
-                            windowID: newWindow.windowID
+                            windowID: newWindow.windowID,
+                            reusedWindow: false
                         )
                     }
 
