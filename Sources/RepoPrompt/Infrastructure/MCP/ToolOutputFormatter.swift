@@ -4203,8 +4203,7 @@ extension ToolOutputFormatter {
                     out.append("- **New Window ID**: `\(newWindowID)`")
                     out.append("")
                     out.append("### Connection Binding")
-                    out.append("Your connection has been automatically bound to the new window (ID: \(newWindowID)).")
-                    out.append("All subsequent tool calls will target this window.")
+                    out.append("Connection window set to `\(newWindowID)`. Existing tab bindings are unchanged.")
                 } else {
                     out.append("## Workspace Created ✅")
                     if let name = args["name"]?.stringValue {
