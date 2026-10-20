@@ -81,6 +81,14 @@ final actor ClaudeNativeProcessSessionController {
         var sessionID: String?
     }
 
+    /// What the idle timer asks before it shuts an idle process down.
+    struct IdleProbe: Equatable {
+        /// A turn RepoPrompt sent is still running.
+        let turnInFlight: Bool
+        /// The CLI reports a background task, such as a backgrounded shell command, still running.
+        let hasLiveBackgroundTasks: Bool
+    }
+
     /// Outcome of an interrupt control request, used by the coordinator to decide
     /// whether it is safe to proceed with a superseding user turn.
     enum InterruptOutcome: Equatable {
@@ -310,6 +318,10 @@ final actor ClaudeNativeProcessSessionController {
 
     var hasTurnInFlight: Bool {
         pendingTurnIDHead < pendingTurnIDBuffer.count
+    }
+
+    func idleProbe() -> IdleProbe {
+        IdleProbe(turnInFlight: hasTurnInFlight, hasLiveBackgroundTasks: false)
     }
 
     #if DEBUG

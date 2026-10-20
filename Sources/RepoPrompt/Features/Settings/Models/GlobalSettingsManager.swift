@@ -1505,6 +1505,11 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
     nonisolated static let defaultIdleProviderShutdownMinutes = 5
     nonisolated static let idleProviderShutdownMinutesRange = 0 ... 120
 
+    /// The idle period a setting of `minutes` gives a provider process, or nil when idle shutdown is off.
+    nonisolated static func idleProviderShutdownInterval(minutes: Int) -> Duration? {
+        minutes > 0 ? .seconds(minutes * 60) : nil
+    }
+
     func idleProviderShutdownMinutes() -> Int {
         guard let minutes = scalarPreferences.agentMode?.idleProviderShutdownMinutes,
               Self.idleProviderShutdownMinutesRange.contains(minutes)

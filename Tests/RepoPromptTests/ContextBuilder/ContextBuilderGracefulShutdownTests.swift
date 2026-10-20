@@ -573,6 +573,10 @@ private actor ShutdownRecordingNativeController: NativeAgentRuntimeControlling {
 
     func respondToPermissionRequest(id: String, decision: AgentApprovalDecision) {}
 
+    func idleProbe() -> NativeAgentRuntimeIdleProbe {
+        NativeAgentRuntimeIdleProbe(turnInFlight: false, hasLiveBackgroundTasks: false)
+    }
+
     func shutdownCallCount() -> Int {
         shutdownCalls
     }

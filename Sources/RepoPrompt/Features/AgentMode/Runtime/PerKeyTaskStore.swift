@@ -8,6 +8,11 @@ final class PerKeyTaskStore<Key: Hashable> {
         tasks[key] != nil
     }
 
+    /// Whether the task stored under `key` is the one stored with `token`.
+    func hasTask(for key: Key, token: UUID) -> Bool {
+        tasks[key]?.token == token
+    }
+
     /// Stores `task` under `key`, cancelling any task already stored there. A task that
     /// removes its own entry when it finishes passes the same token to `remove(_:ifToken:)`,
     /// so a replaced task that finishes late can't remove its successor.

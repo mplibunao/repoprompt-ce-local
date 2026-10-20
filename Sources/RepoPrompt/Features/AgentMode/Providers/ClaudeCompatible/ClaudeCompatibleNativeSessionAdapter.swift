@@ -79,6 +79,10 @@ actor ClaudeCompatibleNativeSessionAdapter: NativeAgentRuntimeControlling {
         await controller.respondToPermissionRequest(id: id, decision: decision)
     }
 
+    func idleProbe() async -> NativeAgentRuntimeIdleProbe {
+        await controller.idleProbe()
+    }
+
     static func streamResult(from providerResult: ClaudeCompatiblePluginStreamResult) -> AIStreamResult {
         ClaudeCompatiblePluginBridge.streamResult(from: providerResult)
     }

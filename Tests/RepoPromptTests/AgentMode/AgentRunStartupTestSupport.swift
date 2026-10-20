@@ -17,6 +17,21 @@ import XCTest
         return condition()
     }
 
+    /// Waits until `condition` holds, as a test step: when it doesn't hold within `seconds`, the
+    /// step fails at the caller and throws.
+    @MainActor
+    func startupTestEventually(
+        seconds: TimeInterval = 5,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ condition: @MainActor () -> Bool
+    ) async throws {
+        struct ConditionTimeout: Error {}
+        if await startupTestWaitBounded(seconds: seconds, until: condition) { return }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
+        throw ConditionTimeout()
+    }
+
     /// Runs `operation` in its own task and returns a flag set when it finishes, so the caller can
     /// bound its wait for work that may never finish. The operation stays registered with
     /// `tracking` until it finishes, so that owner's teardown can cancel one a timed-out wait left
@@ -158,22 +173,34 @@ import XCTest
 
     /// A view model whose provider startup goes through `readiness` and `controller`, and, when
     /// `claude` is given, whose Claude-compatible runs use that recorder's runtimes and count as
-    /// available without an installed CLI.
+    /// available without an installed CLI. `claudeIdle`, when given, supplies the idle timer's
+    /// clock, setting, and MCP queries.
     @MainActor
     func startupTestMakeViewModel(
         storageRoot: URL,
         readiness: StartupTestGatedReadiness,
         controller: StartupTestCodexController,
-        claude: StartupTestClaudeRecorder? = nil
+        claude: StartupTestClaudeRecorder? = nil,
+        claudeIdle: StartupTestClaudeIdleEnvironment? = nil
     ) -> AgentModeViewModel {
         let viewModel = AgentModeViewModel(
             testWorkspacePath: storageRoot.path,
             testWorkspaceDirectory: storageRoot,
             codexControllerFactory: { _, _, _, _, _, _ in controller },
             claudeControllerFactory: claude.map { recorder in
-                { _, _, _, _ in MainActor.assumeIsolated { recorder.makeRuntime() } }
+                { runID, _, _, _ in MainActor.assumeIsolated { recorder.makeRuntime(runID: runID) } }
             },
-            mcpServerEnabler: { await readiness.enter() }
+            mcpServerEnabler: { await readiness.enter() },
+            testIdleProviderShutdownMinutes: claudeIdle.map { idle in
+                { MainActor.assumeIsolated { idle.idleMinutes } }
+            },
+            testClaudeIdleClock: claudeIdle?.clock.idleClock,
+            testClaudeActiveMCPToolQuery: claudeIdle.map { idle in
+                { runID in MainActor.assumeIsolated { idle.runIDsWithActiveMCPTools.contains(runID) } }
+            },
+            testClaudeActiveAgentRunWaitQuery: claudeIdle.map { idle in
+                { runID in MainActor.assumeIsolated { idle.runIDsWithActiveChildWaits.contains(runID) } }
+            }
         )
         if claude != nil {
             viewModel.test_agentAvailabilityForRunOverride = { _ in true }
@@ -433,33 +460,84 @@ import XCTest
         ).registration
     }
 
-    /// Counts the Claude-compatible runtimes a view model creates, their session starts, and the
-    /// messages sent to them.
+    /// Counts the Claude-compatible runtimes a view model creates, their session starts, the
+    /// messages sent to them, and their shutdowns, and answers their idle probes.
     @MainActor
     final class StartupTestClaudeRecorder {
+        /// A runtime lifecycle step, by the runtime's index in `runtimes`, in the order it happened.
+        enum Event: Equatable {
+            case created(runtime: Int)
+            case sessionStarted(runtime: Int)
+            case messageSent(runtime: Int)
+            case shutdownFinished(runtime: Int)
+        }
+
+        /// Whether the task running a shutdown was cancelled when it began and when it finished.
+        struct ShutdownObservation: Equatable {
+            let runtime: Int
+            let cancelledAtStart: Bool
+            let cancelledAtFinish: Bool
+        }
+
         private(set) var runtimes: [StartupTestClaudeRuntime] = []
+        /// The process run ID each runtime was created for, in creation order.
+        private(set) var runtimeRunIDs: [UUID] = []
         private(set) var sessionStarts = 0
+        /// The resume target of each session start, `nil` for a fresh start.
+        private(set) var sessionStartTargets: [String?] = []
         private(set) var sentMessages: [String] = []
         /// The provider turn each sent message started, in send order.
         private(set) var sentTurnIDs: [UUID] = []
+        private(set) var events: [Event] = []
+        private(set) var shutdownsStarted = 0
+        private(set) var shutdownObservations: [ShutdownObservation] = []
+        /// What `idleProbe()` reports for a turn in flight, read once the probe is released.
+        var probeReportsTurnInFlight = false
+        /// When set, `idleProbe()` waits for it before answering.
+        var probeHold: StartupTestHeldGate?
+        /// When set, `shutdown()` waits for it after it begins.
+        var shutdownHold: StartupTestHeldGate?
 
         var runtimesCreated: Int {
             runtimes.count
         }
 
-        func makeRuntime() -> StartupTestClaudeRuntime {
-            let runtime = StartupTestClaudeRuntime(recorder: self)
+        func makeRuntime(runID: UUID) -> StartupTestClaudeRuntime {
+            let index = runtimes.count
+            let runtime = StartupTestClaudeRuntime(recorder: self, index: index)
             runtimes.append(runtime)
+            runtimeRunIDs.append(runID)
+            events.append(.created(runtime: index))
             return runtime
         }
 
-        fileprivate func recordSessionStart() {
+        fileprivate func recordSessionStart(runtime: Int, resuming existingSessionID: String?) {
             sessionStarts += 1
+            sessionStartTargets.append(existingSessionID)
+            events.append(.sessionStarted(runtime: runtime))
         }
 
-        fileprivate func recordSentMessage(_ text: String, turnID: UUID) {
+        fileprivate func recordSentMessage(_ text: String, turnID: UUID, runtime: Int) {
             sentMessages.append(text)
             sentTurnIDs.append(turnID)
+            events.append(.messageSent(runtime: runtime))
+        }
+
+        fileprivate func answerIdleProbe() async -> NativeAgentRuntimeIdleProbe {
+            if let probeHold {
+                await probeHold.wait()
+            }
+            return NativeAgentRuntimeIdleProbe(turnInFlight: probeReportsTurnInFlight, hasLiveBackgroundTasks: false)
+        }
+
+        fileprivate func beginShutdown() -> StartupTestHeldGate? {
+            shutdownsStarted += 1
+            return shutdownHold
+        }
+
+        fileprivate func finishShutdown(_ observation: ShutdownObservation) {
+            shutdownObservations.append(observation)
+            events.append(.shutdownFinished(runtime: observation.runtime))
         }
     }
 
@@ -467,12 +545,15 @@ import XCTest
     /// sends it, so a run it receives stays running until the test ends it or cancels it.
     actor StartupTestClaudeRuntime: NativeAgentRuntimeControlling {
         private let recorder: StartupTestClaudeRecorder
+        private let index: Int
         private var sessionStarted = false
+        private var startedSessionID: String?
         private var eventStream: AsyncStream<NativeAgentRuntimeEvent>
         private var eventContinuation: AsyncStream<NativeAgentRuntimeEvent>.Continuation
 
-        init(recorder: StartupTestClaudeRecorder) {
+        init(recorder: StartupTestClaudeRecorder, index: Int) {
             self.recorder = recorder
+            self.index = index
             (eventStream, eventContinuation) = AsyncStream.makeStream()
         }
 
@@ -502,19 +583,22 @@ import XCTest
             systemPromptOverride _: String?
         ) async throws -> NativeAgentRuntimeSessionRef {
             sessionStarted = true
-            await recorder.recordSessionStart()
-            return NativeAgentRuntimeSessionRef(sessionID: existingSessionID ?? "startup-test-claude")
+            let sessionID = existingSessionID ?? "startup-test-claude"
+            startedSessionID = sessionID
+            await recorder.recordSessionStart(runtime: index, resuming: existingSessionID)
+            return NativeAgentRuntimeSessionRef(sessionID: sessionID)
         }
 
+        /// The session this runtime was started with, as a live process reports it.
         func currentSessionRef() -> NativeAgentRuntimeSessionRef {
-            NativeAgentRuntimeSessionRef(sessionID: "startup-test-claude")
+            NativeAgentRuntimeSessionRef(sessionID: startedSessionID ?? "startup-test-claude")
         }
 
         func applyModelAndEffort(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws {}
 
         func sendUserMessage(_ text: String) async throws -> UUID {
             let turnID = UUID()
-            await recorder.recordSentMessage(text, turnID: turnID)
+            await recorder.recordSentMessage(text, turnID: turnID, runtime: index)
             return turnID
         }
 
@@ -526,11 +610,78 @@ import XCTest
             .noTurnInFlight
         }
 
-        func shutdown() {
+        func shutdown() async {
+            let cancelledAtStart = Task.isCancelled
+            if let hold = await recorder.beginShutdown() {
+                await hold.wait()
+            }
+            sessionStarted = false
             eventContinuation.finish()
+            await recorder.finishShutdown(.init(
+                runtime: index,
+                cancelledAtStart: cancelledAtStart,
+                cancelledAtFinish: Task.isCancelled
+            ))
         }
 
         func respondToPermissionRequest(id _: String, decision _: AgentApprovalDecision) {}
+
+        func idleProbe() async -> NativeAgentRuntimeIdleProbe {
+            await recorder.answerIdleProbe()
+        }
+    }
+
+    /// A clock for the Claude idle timer that moves only when the test advances it. A sleeper
+    /// wakes when time reaches its deadline, not when its task is cancelled, so a replaced timer
+    /// can wake after its successor is installed.
+    @MainActor
+    final class StartupTestManualClock {
+        private(set) var now = ContinuousClock.now
+        private var sleepers: [(deadline: ContinuousClock.Instant, continuation: CheckedContinuation<Void, Error>)] = []
+
+        /// The deadline of every sleeper, in the order they began sleeping.
+        var pendingDeadlines: [ContinuousClock.Instant] {
+            sleepers.map(\.deadline)
+        }
+
+        var idleClock: ClaudeAgentModeCoordinator.IdleClock {
+            ClaudeAgentModeCoordinator.IdleClock(
+                now: { self.now },
+                sleepUntil: { deadline in try await self.sleep(until: deadline) }
+            )
+        }
+
+        func advance(by duration: Duration) {
+            now = now + duration
+            let due = sleepers.filter { $0.deadline <= now }
+            sleepers.removeAll { $0.deadline <= now }
+            due.forEach { $0.continuation.resume() }
+        }
+
+        /// Resumes every sleeper by throwing a cancellation. Teardown calls it so that no
+        /// continuation stays suspended after the test.
+        func cancelSleepers() {
+            let pending = sleepers
+            sleepers.removeAll()
+            pending.forEach { $0.continuation.resume(throwing: CancellationError()) }
+        }
+
+        private func sleep(until deadline: ContinuousClock.Instant) async throws {
+            guard deadline > now else { return }
+            try await withCheckedThrowingContinuation { continuation in
+                sleepers.append((deadline, continuation))
+            }
+        }
+    }
+
+    /// The Claude idle timer's inputs in a startup test. The gate treats a run ID in
+    /// `runIDsWithActiveMCPTools` or `runIDsWithActiveChildWaits` as having that MCP work in flight.
+    @MainActor
+    final class StartupTestClaudeIdleEnvironment {
+        let clock = StartupTestManualClock()
+        var idleMinutes = GlobalSettingsStore.defaultIdleProviderShutdownMinutes
+        var runIDsWithActiveMCPTools: Set<UUID> = []
+        var runIDsWithActiveChildWaits: Set<UUID> = []
     }
 
     /// Holds every caller of `wait()` until `release()`; later callers pass straight through.

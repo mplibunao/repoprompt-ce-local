@@ -9978,9 +9978,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         if let codexIdleShutdownDelayNanosOverride {
             return codexIdleShutdownDelayNanosOverride
         }
-        let minutes = idleProviderShutdownMinutes()
-        guard minutes > 0 else { return nil }
-        return UInt64(minutes) * 60_000_000_000
+        return GlobalSettingsStore.idleProviderShutdownInterval(minutes: idleProviderShutdownMinutes())
+            .map { UInt64($0.components.seconds) * 1_000_000_000 }
     }
 
     private func cancelCodexIdleShutdown(for tabID: UUID) {
