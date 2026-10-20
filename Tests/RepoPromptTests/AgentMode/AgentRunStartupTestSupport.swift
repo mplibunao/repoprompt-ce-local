@@ -482,9 +482,12 @@ import XCTest
         private(set) var runtimes: [StartupTestClaudeRuntime] = []
         /// The process run ID each runtime was created for, in creation order.
         private(set) var runtimeRunIDs: [UUID] = []
+        /// Session starts, counting the ones `failingStarts` failed.
         private(set) var sessionStarts = 0
         /// The resume target of each session start, `nil` for a fresh start.
         private(set) var sessionStartTargets: [String?] = []
+        /// Errors the next session starts throw, one per start in order, after the start is recorded.
+        var failingStarts: [NativeAgentRuntimeControllerError] = []
         private(set) var sentMessages: [String] = []
         /// The provider turn each sent message started, in send order.
         private(set) var sentTurnIDs: [UUID] = []
@@ -513,10 +516,16 @@ import XCTest
             return runtime
         }
 
-        fileprivate func recordSessionStart(runtime: Int, resuming existingSessionID: String?) {
+        /// Records a session start and returns the error it must fail with, if any.
+        fileprivate func recordSessionStart(
+            runtime: Int,
+            resuming existingSessionID: String?
+        ) -> NativeAgentRuntimeControllerError? {
             sessionStarts += 1
             sessionStartTargets.append(existingSessionID)
+            guard failingStarts.isEmpty else { return failingStarts.removeFirst() }
             events.append(.sessionStarted(runtime: runtime))
+            return nil
         }
 
         fileprivate func recordSentMessage(_ text: String, turnID: UUID, runtime: Int) {
@@ -587,10 +596,12 @@ import XCTest
             effortLevel _: NativeAgentRuntimeEffortLevel?,
             systemPromptOverride _: String?
         ) async throws -> NativeAgentRuntimeSessionRef {
+            if let failure = await recorder.recordSessionStart(runtime: index, resuming: existingSessionID) {
+                throw failure
+            }
             sessionStarted = true
             let sessionID = existingSessionID ?? "startup-test-claude"
             startedSessionID = sessionID
-            await recorder.recordSessionStart(runtime: index, resuming: existingSessionID)
             return NativeAgentRuntimeSessionRef(sessionID: sessionID)
         }
 

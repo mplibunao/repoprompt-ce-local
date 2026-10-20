@@ -309,6 +309,91 @@ import XCTest
             XCTAssertEqual(fixture.claude.sessionStartTargets, [nil, providerSessionID])
         }
 
+        /// A resume that fails is retried once on a new process. Only when the retry fails too does
+        /// the session start a new conversation from RepoPrompt's transcript, and say so.
+        func testFailedResumeRetriesOnceThenRestartsWithNotice() async throws {
+            let savedID = "saved-claude-session"
+            let notice = ClaudeAgentModeCoordinator.resumeFallbackNotice
+
+            do {
+                let label = "one failed resume"
+                let fixture = makeResumingFixture(providerSessionID: savedID)
+                fixture.claude.failingStarts = [.processNotRunning]
+                try await fixture.sendTurn("after one failure")
+                XCTAssertEqual(fixture.claude.events, [
+                    .created(runtime: 0),
+                    .shutdownFinished(runtime: 0),
+                    .created(runtime: 1),
+                    .sessionStarted(runtime: 1),
+                    .messageSent(runtime: 1)
+                ], label)
+                XCTAssertEqual(fixture.claude.sessionStartTargets, [savedID, savedID], label)
+                // Replacing the failed controller leaves the run's MCP tool tracking running.
+                let runID = try XCTUnwrap(fixture.session.runID, label)
+                XCTAssertEqual(fixture.coordinator.test_trackedToolRunID(for: fixture.session), runID, label)
+                let sent = try XCTUnwrap(fixture.claude.sentMessages.last, label)
+                XCTAssertFalse(sent.contains("<forked_session"), "\(label): \(sent)")
+                XCTAssertEqual(Self.systemTexts(in: fixture.session), [], label)
+                XCTAssertEqual(fixture.session.providerSessionID, savedID, label)
+            }
+
+            do {
+                let label = "two failed resumes"
+                let fixture = makeResumingFixture(providerSessionID: savedID)
+                fixture.claude.failingStarts = [.processNotRunning, .initializationFailed("no conversation found")]
+                try await fixture.sendTurn("after two failures")
+                XCTAssertEqual(fixture.claude.events, [
+                    .created(runtime: 0),
+                    .shutdownFinished(runtime: 0),
+                    .created(runtime: 1),
+                    .shutdownFinished(runtime: 1),
+                    .created(runtime: 2),
+                    .sessionStarted(runtime: 2),
+                    .messageSent(runtime: 2)
+                ], label)
+                XCTAssertEqual(fixture.claude.sessionStartTargets, [savedID, savedID, nil], label)
+                // The new conversation receives the earlier exchange ahead of the message.
+                let sent = try XCTUnwrap(fixture.claude.sentMessages.last, label)
+                let handoff = try XCTUnwrap(sent.range(of: "</forked_session>"), "\(label): \(sent)")
+                XCTAssertTrue(sent[..<handoff.lowerBound].contains("the earlier fact is 42"), "\(label): \(sent)")
+                XCTAssertTrue(sent[handoff.upperBound...].contains("after two failures"), "\(label): \(sent)")
+                XCTAssertEqual(Self.systemTexts(in: fixture.session), [notice], label)
+                // Nothing follows the notice when the provider has the message, so the reply
+                // comes after it.
+                XCTAssertEqual(fixture.session.items.last?.text, notice, label)
+            }
+
+            do {
+                let label = "the new conversation fails to start too"
+                let fixture = makeResumingFixture(providerSessionID: savedID)
+                fixture.claude.failingStarts = [.processNotRunning, .processNotRunning, .processNotRunning]
+                try await fixture.submitAndAwaitFailure("after three failures")
+                XCTAssertEqual(fixture.claude.sessionStartTargets, [savedID, savedID, nil], label)
+                XCTAssertEqual(fixture.claude.sentMessages, [], label)
+                XCTAssertEqual(Self.systemTexts(in: fixture.session), [], label)
+                XCTAssertEqual(
+                    fixture.errorTexts,
+                    ["Claude native start failed: \(NativeAgentRuntimeControllerError.processNotRunning.localizedDescription)"],
+                    label
+                )
+            }
+
+            do {
+                let label = "a failure a new process cannot fix"
+                let fixture = makeResumingFixture(providerSessionID: savedID)
+                // Every start would fail this way, so a retry would only fail again.
+                fixture.claude.failingStarts = [.liveModelSwitchRequiresRestart, .liveModelSwitchRequiresRestart]
+                try await fixture.submitAndAwaitFailure("after a model switch failure")
+                XCTAssertEqual(fixture.claude.sessionStartTargets, [savedID], label)
+                XCTAssertEqual(Self.systemTexts(in: fixture.session), [], label)
+                XCTAssertEqual(
+                    fixture.errorTexts,
+                    ["Claude native start failed: \(NativeAgentRuntimeControllerError.liveModelSwitchRequiresRestart.localizedDescription)"],
+                    label
+                )
+            }
+        }
+
         /// The session keeps its process past a deadline while `protection` holds, and retires a
         /// full interval later once it is released.
         private func expectProtectionKeepsProcess(_ protection: Protection) async throws {
@@ -407,6 +492,14 @@ import XCTest
                 try await sendTurn(text)
                 try await completeSentTurn()
             }
+
+            /// Submits `text` as a manual turn and waits until its run has ended without reaching
+            /// the provider.
+            func submitAndAwaitFailure(_ text: String) async throws {
+                let ticket = try submit(text)
+                try await startupTestJoin(ticket.task)
+                try await startupTestEventually { !self.session.runState.isActive && self.session.agentTask == nil }
+            }
         }
 
         /// Builds a Claude fixture at the default setting and registers its teardown before any
@@ -438,6 +531,26 @@ import XCTest
                 idle.clock.cancelSleepers()
             }
             return fixture
+        }
+
+        /// A fixture whose session has an earlier Claude conversation and no process, so its next
+        /// message resumes `providerSessionID`.
+        private func makeResumingFixture(providerSessionID: String) -> Fixture {
+            let fixture = makeFixture()
+            fixture.session.setItemsSilently(
+                [
+                    .user("what is the earlier fact?", sequenceIndex: 0),
+                    .assistant("the earlier fact is 42", sequenceIndex: 1)
+                ],
+                reason: .persistedSessionHydration
+            )
+            fixture.session.nextSequenceIndex = 2
+            fixture.session.providerSessionID = providerSessionID
+            return fixture
+        }
+
+        private static func systemTexts(in session: AgentModeViewModel.TabSession) -> [String] {
+            session.items.filter { $0.kind == .system }.map(\.text)
         }
 
         /// Waits until this tab's deadlines have made `expected.count` decisions and checks them.

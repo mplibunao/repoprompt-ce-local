@@ -173,6 +173,9 @@ final class ClaudeAgentModeCoordinator {
     /// How long a background task the CLI reports live can keep an idle process, counted from the
     /// idle timer's anchor. Past it the process is shut down anyway.
     private static let backgroundTaskKeepAliveCap: Duration = .seconds(120 * 60)
+    /// Shown when a resume and its retry both failed and the session started a new conversation
+    /// with RepoPrompt's transcript handoff.
+    static let resumeFallbackNotice = "Claude couldn't resume the previous conversation, so it started a new one. The agent received a summary of this transcript without tool output."
 
     private weak var providerBindingService: AgentModeProviderBindingService?
     private var hostCapabilities: HostCapabilities = .noOp
@@ -500,16 +503,11 @@ final class ClaudeAgentModeCoordinator {
                 allowNativeBashTool: effectiveAllowNativeBashTool,
                 mcpStrictMode: effectiveMCPStrictMode
             )
-            let createdController = claudeControllerFactory(
-                runID,
-                session.tabID,
-                windowID,
-                launchSettings
+            let createdController = attachNewClaudeController(
+                to: session,
+                runID: runID,
+                launchSettings: launchSettings
             )
-            invalidateControllerRetirement(for: session)
-            session.claudeController = createdController
-            controllerLaunchSettingsByTabID[session.tabID] = launchSettings
-            armClaudeIdleTimer(for: session)
             await createdController.ensureEventsStreamReady()
             guard intentIsCurrent(intent, for: session),
                   sessionOwnsClaudeController(createdController, for: session)
@@ -605,6 +603,26 @@ final class ClaudeAgentModeCoordinator {
             for: session,
             captureProviderSessionID: !runtimeVariantChanged
         )
+    }
+
+    /// Creates a controller for `runID` and attaches it to `session` with `launchSettings`. Every
+    /// attach arms the idle timer for the new controller.
+    private func attachNewClaudeController(
+        to session: AgentTabSession,
+        runID: UUID,
+        launchSettings: ControllerLaunchSettings
+    ) -> any NativeAgentRuntimeControlling {
+        let controller = claudeControllerFactory(
+            runID,
+            session.tabID,
+            windowID,
+            launchSettings
+        )
+        invalidateControllerRetirement(for: session)
+        session.claudeController = controller
+        controllerLaunchSettingsByTabID[session.tabID] = launchSettings
+        armClaudeIdleTimer(for: session)
+        return controller
     }
 
     private func detachClaudeController(
@@ -925,6 +943,11 @@ final class ClaudeAgentModeCoordinator {
             controllerLaunchSettingsByTabID[session.tabID]
         }
 
+        /// The run ID the tab's MCP tool tracking follows, or nil when nothing is tracked.
+        func test_trackedToolRunID(for session: AgentTabSession) -> UUID? {
+            toolHandlerByTabID[session.tabID]?.currentTrackedRunID
+        }
+
         func test_hasPendingOrRetiredResumeTransfers(
             for session: AgentTabSession
         ) -> Bool {
@@ -954,92 +977,103 @@ final class ClaudeAgentModeCoordinator {
         let existingSessionID = session.providerSessionID
         let systemPromptOverride = agentModeSystemPromptOverride(for: session)
         let effortLevel = currentClaudeEffortLevel(for: session)
-        do {
-            let sessionRef = try await controller.startOrResume(
-                existingSessionID: existingSessionID,
-                model: model,
-                effortLevel: effortLevel,
-                systemPromptOverride: systemPromptOverride
-            )
-            guard intentIsCurrent(intent, for: session),
-                  sessionOwnsClaudeController(controller, for: session)
-            else {
-                if !sessionOwnsClaudeController(controller, for: session) {
-                    await controller.shutdown()
-                }
-                throw ControllerLifecycleError.superseded
-            }
-            return sessionRef
-        } catch ControllerLifecycleError.superseded {
-            throw ControllerLifecycleError.superseded
-        } catch {
-            guard intentIsCurrent(intent, for: session),
-                  sessionOwnsClaudeController(controller, for: session)
-            else {
-                if !sessionOwnsClaudeController(controller, for: session) {
-                    await controller.shutdown()
-                }
-                throw ControllerLifecycleError.superseded
-            }
-            guard intent.allowsFreshStartRecovery,
-                  shouldRetryFreshStartWithoutResume(after: error, existingSessionID: existingSessionID)
-            else {
-                throw error
-            }
 
-            await hostCapabilities.stageClaudeResumeRecoveryHandoff(session)
+        /// Starts `controller`, resuming `sessionID` unless it is nil. Throws `superseded` when the
+        /// intent or the controller is no longer the session's once the start returns.
+        func start(
+            _ controller: any NativeAgentRuntimeControlling,
+            resuming sessionID: String?
+        ) async throws -> NativeAgentRuntimeSessionRef {
+            let result: Result<NativeAgentRuntimeSessionRef, Error>
+            do {
+                result = try await .success(controller.startOrResume(
+                    existingSessionID: sessionID,
+                    model: model,
+                    effortLevel: effortLevel,
+                    systemPromptOverride: systemPromptOverride
+                ))
+            } catch {
+                result = .failure(error)
+            }
+            guard intentIsCurrent(intent, for: session),
+                  sessionOwnsClaudeController(controller, for: session)
+            else {
+                if !sessionOwnsClaudeController(controller, for: session) {
+                    await controller.shutdown()
+                }
+                throw ControllerLifecycleError.superseded
+            }
+            return try result.get()
+        }
+
+        /// Shuts down the session's `failed` controller and attaches a new one with the same
+        /// launch settings. A replacement is still the same canonical run attempt: it reuses the
+        /// attempt's process identity, and the previous provider identity stays until a start
+        /// succeeds. The tab's MCP tool tracking is keyed by that run ID, so it stays running.
+        func replace(
+            _ failed: any NativeAgentRuntimeControlling
+        ) async throws -> any NativeAgentRuntimeControlling {
             guard intentIsCurrent(intent, for: session),
                   let detached = detachClaudeController(
-                      controller,
+                      failed,
                       from: session,
-                      removeToolTracking: true
+                      removeToolTracking: false
                   )
             else {
                 throw ControllerLifecycleError.superseded
             }
             await detached.controller.shutdown()
-            await stopToolTracking(detached, for: session)
             guard intentIsCurrent(intent, for: session) else {
                 throw ControllerLifecycleError.superseded
             }
-
-            // A resume fallback is still the same canonical run attempt. Reuse
-            // its process identity and retain the previous provider identity
-            // until the fresh controller has actually started successfully.
-            let retryWorkspacePath = try workspacePathProvider(session)
-            let launchSettings = ControllerLaunchSettings(
+            let launchSettings = try ControllerLaunchSettings(
                 runtimeVariant: runtimeVariant,
-                workspacePath: retryWorkspacePath,
+                workspacePath: workspacePathProvider(session),
                 permissionMode: effectivePermissionMode,
                 allowNativeBashTool: effectiveAllowNativeBashTool,
                 mcpStrictMode: effectiveMCPStrictMode
             )
-            let freshController = claudeControllerFactory(
-                intent.runID,
-                session.tabID,
-                windowID,
-                launchSettings
+            return attachNewClaudeController(
+                to: session,
+                runID: intent.runID,
+                launchSettings: launchSettings
             )
-            invalidateControllerRetirement(for: session)
-            session.claudeController = freshController
-            controllerLaunchSettingsByTabID[session.tabID] = launchSettings
-            armClaudeIdleTimer(for: session)
-            let sessionRef = try await freshController.startOrResume(
-                existingSessionID: nil,
-                model: model,
-                effortLevel: effortLevel,
-                systemPromptOverride: systemPromptOverride
-            )
-            guard intentIsCurrent(intent, for: session),
-                  sessionOwnsClaudeController(freshController, for: session)
-            else {
-                if !sessionOwnsClaudeController(freshController, for: session) {
-                    await freshController.shutdown()
-                }
-                throw ControllerLifecycleError.superseded
-            }
-            return sessionRef
         }
+
+        do {
+            return try await start(controller, resuming: existingSessionID)
+        } catch {
+            guard intent.allowsFreshStartRecovery,
+                  isRecoverableResumeFailure(after: error, existingSessionID: existingSessionID)
+            else {
+                throw error
+            }
+        }
+
+        // A resume can fail for a reason that does not recur, so it gets one more try on a new
+        // process before the conversation is given up.
+        let retryController = try await replace(controller)
+        do {
+            return try await start(retryController, resuming: existingSessionID)
+        } catch {
+            guard isRecoverableResumeFailure(after: error, existingSessionID: existingSessionID) else {
+                throw error
+            }
+        }
+
+        await hostCapabilities.stageClaudeResumeRecoveryHandoff(session)
+        let freshController = try await replace(retryController)
+        let sessionRef = try await start(freshController, resuming: nil)
+        session.appendItem(
+            AgentChatItem.system(
+                Self.resumeFallbackNotice,
+                sequenceIndex: session.nextSequenceIndex
+            )
+        )
+        session.isDirty = true
+        hostCapabilities.requestUIRefresh(session, true)
+        hostCapabilities.scheduleSave(session)
+        return sessionRef
     }
 
     private static func providerStartupFailureMessage(for error: Error) -> String {
@@ -1053,7 +1087,7 @@ final class ClaudeAgentModeCoordinator {
         return description.isEmpty ? String(describing: error) : description
     }
 
-    private func shouldRetryFreshStartWithoutResume(
+    private func isRecoverableResumeFailure(
         after error: Error,
         existingSessionID: String?
     ) -> Bool {
@@ -1065,10 +1099,10 @@ final class ClaudeAgentModeCoordinator {
             return false
         }
         switch controllerError {
-        // Any controller startup/handshake failure while attempting to resume an
-        // existing Claude session is safer to recover by starting fresh and
-        // injecting a handoff than by hard-failing the run. Fresh starts do not
-        // take this path because they have no existing session ID.
+        // A controller startup or handshake failure while resuming an existing
+        // Claude session gets one retry with the same session ID, then a fresh
+        // start with a transcript handoff, instead of failing the run. Fresh
+        // starts do not take this path because they have no existing session ID.
         case .processNotRunning,
              .inputWriteFailed,
              .initializationFailed,
