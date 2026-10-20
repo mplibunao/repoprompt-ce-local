@@ -207,7 +207,7 @@
             "type" : "string"
           },
           "open_in_new_window" : {
-            "description" : "When true: 'switch' reuses a window already showing the workspace, without changing focus, or opens one if none does; 'create' opens a new window. Returns window_id and sets this connection's window; existing tab bindings stay unchanged.",
+            "description" : "When true: 'switch' reuses a window already showing the workspace, or opens one if none does; 'create' opens a new window. Returns window_id and sets this connection's window; existing tab bindings stay unchanged.",
             "type" : "boolean"
           },
           "source_tab" : {

@@ -1286,7 +1286,7 @@ package enum MCPBindContextPropertyDescriptions {
 /// Single source for the `manage_workspaces` property descriptions that the canonical schema
 /// override and the app-side raw Tool registration both publish.
 package enum MCPManageWorkspacesPropertyDescriptions {
-    package static let openInNewWindow = "When true: 'switch' reuses a window already showing the workspace, without changing focus, or opens one if none does; 'create' opens a new window. Returns window_id and sets this connection's window; existing tab bindings stay unchanged."
+    package static let openInNewWindow = "When true: 'switch' reuses a window already showing the workspace, or opens one if none does; 'create' opens a new window. Returns window_id and sets this connection's window; existing tab bindings stay unchanged."
 }
 
 /// Single source for the `manage_selection` property descriptions that the canonical schema
