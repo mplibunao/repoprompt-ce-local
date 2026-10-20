@@ -3168,7 +3168,7 @@ actor WorkspaceFileContextStore {
         }
 
         /// `source` with another path index over the same entries: the same key, records, and applied
-        /// generation. A path-index rebase installs through this.
+        /// generation.
         init(swappingPathSearchIndexOf source: RootCatalogShard, pathSearchIndex: WorkspaceSearchRootPathIndex) {
             precondition(pathSearchIndex.identity.rootID == source.key.rootID)
             precondition(pathSearchIndex.identity.lifetimeID == source.key.lifetimeID)
@@ -8096,18 +8096,12 @@ actor WorkspaceFileContextStore {
         }
         for candidate in rootsNeedingPromotion {
             let promoted = RootCatalogShard(
-                key: candidate.shard.key,
-                root: candidate.shard.root,
-                files: candidate.shard.files,
-                precomputedProjectionFiles: candidate.shard.projectionFiles,
-                folders: candidate.shard.folders,
-                entries: candidate.shard.entries,
+                swappingPathSearchIndexOf: candidate.shard,
                 pathSearchIndex: makeRootPathSearchIndex(
                     key: candidate.shard.key,
                     root: candidate.shard.root,
                     entries: candidate.shard.entries
-                ),
-                appliedIndexGeneration: candidate.shard.appliedIndexGeneration
+                )
             )
             newlyBuiltShardsByRootID[candidate.root.id] = (promoted, .promotion)
         }
@@ -8700,13 +8694,13 @@ actor WorkspaceFileContextStore {
             )
             compareRootCatalogShardPatchIfArmed(patchedShard, requirement: fallbackRequirement)
         #endif
-        startPathIndexRebaseIfDue(rootID: event.rootID, lifetimeID: state.lifetimeID)
+        startPathIndexRebaseIfDue(rootID: event.rootID)
     }
 
     /// Starts rebuilding the published path index's materialized base off the actor once its overlays
     /// pass either threshold. Starts nothing while a flight runs for the root, or at the retention cap,
     /// where the install would be refused.
-    private func startPathIndexRebaseIfDue(rootID: UUID, lifetimeID: UUID) {
+    private func startPathIndexRebaseIfDue(rootID: UUID) {
         guard pathIndexRebaseFlightsByRootID[rootID] == nil,
               let shard = publishedRootCatalogShardsByRootID[rootID],
               let pathSearchIndex = shard.pathSearchIndex,
@@ -8748,7 +8742,7 @@ actor WorkspaceFileContextStore {
         }
         pathIndexRebaseFlightsByRootID[rootID] = PathIndexRebaseFlight(
             id: flightID,
-            lifetimeID: lifetimeID,
+            lifetimeID: shard.key.lifetimeID,
             task: task
         )
         #if DEBUG
@@ -9273,16 +9267,7 @@ actor WorkspaceFileContextStore {
                       entries: shard.entries
                   )
             else { return false }
-            let projectedShard = RootCatalogShard(
-                key: shard.key,
-                root: shard.root,
-                files: shard.files,
-                precomputedProjectionFiles: shard.projectionFiles,
-                folders: shard.folders,
-                entries: shard.entries,
-                pathSearchIndex: pathSearchIndex,
-                appliedIndexGeneration: shard.appliedIndexGeneration
-            )
+            let projectedShard = RootCatalogShard(swappingPathSearchIndexOf: shard, pathSearchIndex: pathSearchIndex)
             publishedRootCatalogShardsByRootID[rootID] = projectedShard
             retainPublishedRootCatalogShard(projectedShard)
             return true
