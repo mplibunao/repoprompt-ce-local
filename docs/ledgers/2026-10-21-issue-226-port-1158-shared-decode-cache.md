@@ -10,7 +10,7 @@ Port upstream PR 1158 (`6efc7d93`) by hand: a process-wide, content-digest-keyed
 | 2. Baseline measurement on main | done | orchestrator | |
 | 3. After measurement and functional run | done | orchestrator | |
 | 4. ADR and ledger | done | orchestrator | `docs: record the shared decode cache decision and its run ledger` |
-| 5. Pull request gates | pending | | |
+| 5. Pull request gates | done | engineer · Review: port 1158 shared decode cache; pair · Cleanup: port 1158 shared decode cache | `docs: close the port 1158 run ledger for review` |
 
 ## 1. Port the cache and synthesis marks with tests
 
@@ -22,7 +22,7 @@ Port upstream PR 1158 (`6efc7d93`) by hand: a process-wide, content-digest-keyed
 
 ## 2. Baseline measurement on main
 
-- Decision: the shown workspaces are the four largest by compose-plus-stashed tab state among the seeded workspaces that have stashed tabs and root folders on disk. A has 1,368 compose and 65 stashed tabs, B 256 and 673, C 25 and 208, D 83 and 135. `S_lower`, a lower bound of decoded tab state (UTF-8 bytes of heap-allocated strings), is 6.2, 4.2, and 0.75 MiB for B, C, and D, so ΣS_lower = 11.1 MiB. Source: approved plan.
+- Decision: the shown workspaces are the four largest by compose-plus-stashed tab state among the seeded workspaces that have stashed tabs and root folders on disk. A has 1,368 compose and 65 stashed tabs, B 256 and 673, C 25 and 208, D 83 and 135. `S_lower`, a lower bound of decoded tab state (UTF-8 bytes of heap-allocated strings), is 6.2, 4.2, and 0.75 MiB for B, C, and D, so ΣS_lower = 11.1 MiB. A's is 5.6 MiB, so all four total 16.8 MiB. Source: approved plan.
 - Decision: the seeded profile has 36 catalog workspaces, all with documents, totaling 40.0 MiB. The archive's copies total 41.4 MiB; seeding writes 27 of them back slightly smaller. That's under both cache limits, so no limit is raised. Source: approved plan (fit gate).
 - Decision: settlement means each window reports `ready` with stable catalog and search generations, no switch overlay, and no pending search, three times in a row. Then the read-only workload runs twice, and capture happens at least 360 s after the last workspace switch. The planned CPU-quiet condition was dropped, because background codemap graph indexing of the shown workspaces' roots kept the app at 100 to 300% CPU for more than 10 minutes, and that indexing retains no tab arrays. Code maps are also turned off in the snapshot's global settings (`codeMapsGloballyDisabled`) for every launch. That setting doesn't stop the graph indexing. A first 1-window launch without that setting was discarded before capture. Source: orchestrator judgment.
 - Decision: `T(N)` sums the retained size of every `[ComposeTabState]` and `[StashedTab]` array-storage row in `leaks --dominatorTree --groupByType` that has no tab-array ancestor. The output also lists nested rows, such as those under the legacy metadata cache's dictionary, and the sum includes them. Source: approved plan, adjusted after reading the output.
@@ -42,6 +42,14 @@ Port upstream PR 1158 (`6efc7d93`) by hand: a process-wide, content-digest-keyed
 ## 4. ADR and ledger
 
 - Decision: `docs/adr/2026-10-21-shared-workspace-decode-cache.md` records the choice of the shared cache over per-window shown-only decoding. Its text is the plan's approved draft with the measured numbers filled in. One sentence was corrected: the draft said one window saves nothing, and the measurement shows one window saves the legacy file-load cache's duplicate. Source: user, through the parent session, for the draft. Measurement, for the correction.
+
+## 5. Pull request gates
+
+- Decision: the independent review found no code defects. Fixed from its findings: the ADR's alternatives line gave the 50 to 100 MiB estimate made before measuring, and now gives the measured bound of at most about 40 MiB on four windows (56.9 MiB less at least 16.8 MiB of shown-workspace tab state). Item 1 now names the dropped concurrent cold-miss test and attributes the write-back test to the plan rather than upstream. "This fork" became "this repository" in the ADR and the code commit's message. Item 2 now defines the stop-line terms and explains the two catalog sizes. Source: review findings.
+- Decision: declined two review suggestions. Renaming `testChangedBytesAtSameURLDecodeCurrentContent` was declined because the name describes the real case, a file rewritten at one path. Removing the mutation half of `testIdenticalBytesReuseDecodeWithoutSharingMutations` was declined because upstream keeps the same check, and it guards against a future reference-typed field in `WorkspaceModel`. Source: orchestrator judgment.
+- Decision: item 3's trace evidence was corrected after the traces were read again. It had said two more buffers were shared like the first. Source: measurement.
+- Decision: the pull request says it relates to #226, without a closing keyword. Whether it closes #226 is decided when it merges. Source: user, through the parent session.
+- Evidence: the refactor pass made no changes. It confirmed that the cache class and `WorkspaceDecodeSynthesis` match upstream's post-image. The `pr-ready` result is in the pull request description.
 
 ## Run decisions
 
