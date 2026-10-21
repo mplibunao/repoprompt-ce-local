@@ -178,6 +178,33 @@ The `mcp_structure_settlement_snapshot` op reports one window's settlement regis
 rpce-cli-debug -w 1 -c __repoprompt_debug_diagnostics -j '{"op":"mcp_structure_settlement_snapshot","window_id":1}'
 ```
 
+### Catalog shard patch measurement
+
+A root's catalog shard is the store's sorted file, folder, and search-entry arrays for that root, with its path index. `mcp_read_search_runtime_snapshot` takes these arguments for measuring how a window's store applies a published batch of file changes to the shard:
+
+- `catalog_batch_sample_limit` (0 to 128, default 0) returns each root's most recent batch samples under `store_work.root_catalog_shards.roots[].batches`. A sample describes one applied batch: its input size, the added or modified records that matched the shard's existing record (`no_op_count`), its effective edits, its outcome (`patched`, `rebuilt`, or `retention_blocked`), any fallback reason, the duration of each timed patch phase, and `canonical_apply_us`. The store keeps the last 128 samples per root. `total_observed_count` and `dropped_count` show how many it has seen and discarded.
+  - Effective edits are file and folder record insertions plus removals, so a record that replaces another at the same path counts two.
+  - The timed phases are normalize, locate, derive, merge copy, and path-index segment, and their sum is the timed-phase total. It leaves out building `affectedFileIDs`, `changedRelativePaths`, and the patch payload, which runs after the merge-copy phase and before the path-index segment.
+  - `canonical_apply_us` runs from entering `applyPreparedIndexDeltas` to the end of the mutation pass, minus any comparison. It includes the preflight's awaited eligibility checks. It excludes the eligibility loop in `handleObservedFileSystemDeltas` and the wait to enter the store actor, so it isn't end-to-end publication latency.
+- `catalog_patch_cap_override` (0 to 1,000,000) replaces the release cap, which gates patch eligibility. A batch over the cap, or one the store can't patch safely, requests an authoritative rebuild instead. Retention can block publishing the patch or the rebuild, which leaves the shard dirty until a later build and records the outcome `retention_blocked`. A root with no published shard and no delta state for its current lifetime stays lazy whatever the batch size. 0 restores the release cap.
+- `catalog_patch_comparison` set to `next` makes the store build, and discard, an authoritative shard after the next patched batch of every root loaded at that moment. The batch's sample then includes `comparison`: the rebuild's duration, the parity check's duration, and `parity_matched`. `on` compares every patched batch, and `off` stops. The comparison runs on the store actor, and the sample's apply durations exclude its time.
+
+The cap override and the comparison mode change one window's store, so both require `window_id`. Use them only on a generated scratch root that only the debug app has as a root. Keep it in a folder under your home directory, never in a repository checkout or worktree. Arm the comparison and raise the cap in one call before each measured batch:
+
+```bash
+rpce-cli-debug -w 1 -c __repoprompt_debug_diagnostics -j '{"op":"mcp_read_search_runtime_snapshot","window_id":1,"catalog_patch_cap_override":8192,"catalog_patch_comparison":"next","catalog_batch_sample_limit":16}'
+```
+
+A measured batch counts as a valid sample when these hold:
+
+- All of the burst's effective edits landed in one batch sample, and that sample includes `comparison`. `parity_matched` is an outcome, not a condition: keep a sample whose parity failed, and mark its cell failing.
+- Its outcome is `patched` with no fallback reason, and its effective edits equal the batch's size. Modifications never count as effective edits, so size a batch of rewrites by its input size instead.
+- The shard's `lifetime_id` didn't change, and the newly observed samples fit in the returned list: the increase in `total_observed_count` across the burst is at most the number of new samples returned. Once the store holds 128 samples, every new sample evicts the oldest and advances `dropped_count`, so an advancing `dropped_count` doesn't mean a sample was lost.
+
+The watcher's scheduled coalescing delay is 0.2 s from a burst's first event, so a longer burst can arrive as several published batches, called publications. The root's `ingress.accepted_service_publication_sequence` counts them, but take the actual batching from the samples: reject an attempt only when its intended effective edits are split across samples, not because more than one publication arrived. Renaming a file is quicker than writing one, so stage a large batch outside the root and rename its files in, and rename a whole folder to add or remove a subtree in one event.
+
+When you're done, run the same operation with `"catalog_patch_cap_override":0` and `"catalog_patch_comparison":"off"` in every window you changed. Delete the scratch workspace with `manage_workspaces` (`delete` with `close_window`), and then delete the scratch folders. The [catalog shard batch patch investigation](investigations/catalog-shard-batch-patch-2026-10-20.md) records the measurement that used these arguments.
+
 ## Debug profile isolation
 
 The debug app, the debug CLI, and debug headless sessions keep runtime state in `~/Library/Application Support/RepoPrompt CE Debug` and `$TMPDIR/RepoPrompt CE Debug`. Workspaces, chat and agent history, settings, presets, window sessions, saved prompts, and the managed Codex home live there, and production's `~/Library/Application Support/RepoPrompt CE` is neither read nor written. Developer infrastructure stays in the production profile's directory: the debug bundle under `DebugApps`, conductor state under `Conductor`, and the CLI links in [Debug CLI and live MCP smoke](#debug-cli-and-live-mcp-smoke). Archive and restore keep excluding those entries and never touch the debug profile. A debug build packaged before the split still reads and writes production's profile.

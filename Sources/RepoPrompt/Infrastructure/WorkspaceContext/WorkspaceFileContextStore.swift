@@ -245,11 +245,177 @@ actor WorkspaceFileContextStore {
             let deltaStateDirty: Bool
             let backstopCount: Int
             let maxLiveGenerationCount: Int
+            let batches: RootCatalogShardBatchDebugHistory
+            let pathIndexRebase: RootCatalogShardPathIndexRebaseDebugSnapshot
+            let folderSubtreeTraversals: RootFolderSubtreeTraversalDebugSnapshot
+        }
+
+        enum RootCatalogShardPathIndexRebaseDiscardReason: String, CaseIterable, Hashable {
+            /// The root, its lifetime, or the path index's base changed after the capture.
+            case stale
+            /// Retention refused another shard generation at install.
+            case retention
+            /// Root unload or a lifetime change cancelled the flight.
+            case cancelled
+        }
+
+        /// One root's path-index rebase flights and overlay counts. Build durations cover every base
+        /// build that finished, whether it installed or not.
+        struct RootCatalogShardPathIndexRebaseDebugSnapshot: Equatable {
+            let startCount: Int
+            let installCount: Int
+            let discardCounts: [RootCatalogShardPathIndexRebaseDiscardReason: Int]
+            let isInFlight: Bool
+            let completedBuildCount: Int
+            let totalBuildNanoseconds: UInt64
+            let maxBuildNanoseconds: UInt64
+            /// The published path index's overlay counts now.
+            let overlayPayloadCount: Int
+            let overlayMentionCount: Int
+            /// The largest overlay counts a published path index of the root has carried.
+            let maxOverlayPayloadCount: Int
+            let maxOverlayMentionCount: Int
+        }
+
+        /// Records visited by folder-subtree walks: the walk that removes a folder, and the walk that
+        /// lists a removed folder's files for CodeMap invalidation.
+        struct RootFolderSubtreeTraversalDebugSnapshot: Equatable {
+            var folderRemovalCount = 0
+            var folderRemovalVisitedRecordCount = 0
+            var codemapInvalidationCount = 0
+            var codemapInvalidationVisitedRecordCount = 0
+        }
+
+        enum RootCatalogShardPatchComparisonMode: String, Equatable {
+            case off
+            /// Compare the next patched batch of each root loaded when the mode is set.
+            case next
+            /// Compare every patched batch.
+            case on
+        }
+
+        enum RootCatalogShardBatchOutcome: String, CaseIterable, Hashable {
+            case patched
+            case rebuilt
+            case retentionBlocked = "retention_blocked"
+        }
+
+        /// Per-delta ingress mutation times of one canonical apply pass, in nanoseconds.
+        struct RootCatalogShardBatchIngressDebugTimings: Equatable {
+            var addedFileCount = 0
+            var addedFileNanoseconds: UInt64 = 0
+            var maxAddedFileNanoseconds: UInt64 = 0
+            var removedFileCount = 0
+            var removedFileNanoseconds: UInt64 = 0
+            var maxRemovedFileNanoseconds: UInt64 = 0
+            var removedFolderCount = 0
+            /// Files and folders the folder removals took out, the folders included.
+            var removedFolderRecordCount = 0
+            var removedFolderNanoseconds: UInt64 = 0
+        }
+
+        struct RootCatalogShardPatchComparisonDebugResult: Equatable {
+            let rebuildNanoseconds: UInt64
+            let parityNanoseconds: UInt64
+            /// Records, entries, projection order, and the path index's searchable entries all match.
+            let parityMatched: Bool
+        }
+
+        struct RootCatalogShardPatchDebugMetrics: Equatable {
+            var normalizeNanoseconds: UInt64 = 0
+            var locateNanoseconds: UInt64 = 0
+            var deriveNanoseconds: UInt64 = 0
+            var mergeCopyNanoseconds: UInt64 = 0
+            var mergeCopiedElementCount = 0
+            var derivedEntryCount = 0
+            var projectionClassificationCount = 0
+        }
+
+        /// One applied batch's catalog shard work for a root. Durations are nanoseconds; the canonical
+        /// apply and mutation pass durations exclude a comparison's rebuild and parity check.
+        struct RootCatalogShardBatchDebugSample: Equatable {
+            let rootID: UUID
+            let appliedIndexGeneration: UInt64
+            /// Upserts, removed IDs, and modified IDs in the event, before normalization. Counted from the
+            /// event, so a batch that falls back before the patch builder runs reports it too.
+            let inputSize: Int
+            var rootLifetimeID: UUID?
+            var topologyGeneration: UInt64?
+            var servicePublicationSequence: UInt64?
+            var rootFileCount = 0
+            var rootFolderCount = 0
+            /// Input upserts and modifications that matched the shard's record, repeats included.
+            var noOpCount = 0
+            /// Nil when the builder didn't run or found the batch unsafe.
+            var effectiveEditCount: Int?
+            var outcome: RootCatalogShardBatchOutcome?
+            var fallbackReason: RootCatalogShardFallbackReason?
+            var patchMetrics = RootCatalogShardPatchDebugMetrics()
+            var pathIndexSegmentNanoseconds: UInt64 = 0
+            var publishNanoseconds: UInt64 = 0
+            var rebuildNanoseconds: UInt64 = 0
+            /// From entering the canonical apply through the end of its mutation pass, waits included.
+            var canonicalApplyNanoseconds: UInt64?
+            /// The synchronous mutation pass that applies the deltas and publishes the batch.
+            var mutationPassNanoseconds: UInt64?
+            var overlayPayloadCount = 0
+            var overlayMentionCount = 0
+            var ingress: RootCatalogShardBatchIngressDebugTimings?
+            var comparison: RootCatalogShardPatchComparisonDebugResult?
+        }
+
+        struct RootCatalogShardBatchDebugHistory: Equatable {
+            let retainedSampleLimit: Int
+            let totalObservedSampleCount: Int
+            let droppedSampleCount: Int
+            let outcomeCounts: [RootCatalogShardBatchOutcome: Int]
+            let samples: [RootCatalogShardBatchDebugSample]
+        }
+
+        /// Snapshots built on the actor because shard publication was blocked, so nothing caches them.
+        struct UncachedAuthoritativeSnapshotBuildDebugSnapshot: Equatable {
+            struct Root: Equatable {
+                let rootID: UUID
+                let buildCount: Int
+                let fileCount: Int
+                let estimatedByteCount: Int
+            }
+
+            let buildCount: Int
+            let fileCount: Int
+            let totalNanoseconds: UInt64
+            let estimatedByteCount: Int
+            let lastFileCount: Int
+            let lastNanoseconds: UInt64
+            let lastEstimatedByteCount: Int
+            let roots: [Root]
+        }
+
+        struct RootCatalogShardPathMatchForTesting: Equatable {
+            let entry: WorkspaceSearchCatalogEntry
+            let score: Int32
+            let tieBreakKey: String
+        }
+
+        struct RootCatalogShardContentsForTesting: Equatable {
+            let files: [WorkspaceFileRecord]
+            let folders: [WorkspaceFolderRecord]
+            let entries: [WorkspaceSearchCatalogEntry]
+            let projectionFileIDs: [UUID]
+            let projectionLanguages: [String]
+            /// Whether the CodeMap cursor lookup finds every projection file at its own position.
+            let projectionIndexResolvesEveryFile: Bool
+            /// The entries the path index can return, in catalog order, or nil without a path index.
+            let searchableEntries: [WorkspaceSearchCatalogEntry]?
+            /// Path-index results per query, or nil when the shard has no path index.
+            let pathMatches: [[RootCatalogShardPathMatchForTesting]]?
         }
 
         struct RootCatalogShardDebugSnapshot: Equatable {
             let liveGenerationCapPerRoot: Int
             let maxPatchLogicalMutationCount: Int
+            let patchCapOverride: Int?
+            let patchComparisonMode: RootCatalogShardPatchComparisonMode
             let publishedShardCount: Int
             let totalBuildCount: Int
             let totalBackstopCount: Int
@@ -265,6 +431,7 @@ actor WorkspaceFileContextStore {
             let invalidations: [CatalogInvalidationDebugEvent]
             let catalogRebuild: CatalogRebuildDebugSnapshot
             let rootCatalogShards: RootCatalogShardDebugSnapshot
+            let uncachedAuthoritativeSnapshotBuilds: UncachedAuthoritativeSnapshotBuildDebugSnapshot
         }
 
         struct PublishedSeededAuthorityDebugSnapshot: Equatable {
@@ -328,6 +495,56 @@ actor WorkspaceFileContextStore {
         }
 
         @TaskLocal private static var activePublicationInvalidationRecorder: PublicationInvalidationRecorder?
+
+        private struct RootCatalogShardBatchHistoryState {
+            var totalObservedSampleCount = 0
+            var outcomeCounts: [RootCatalogShardBatchOutcome: Int] = [:]
+            var samples: [RootCatalogShardBatchDebugSample] = []
+        }
+
+        private struct RootCatalogShardPathIndexRebaseDebugState {
+            var startCount = 0
+            var installCount = 0
+            var discardCounts: [RootCatalogShardPathIndexRebaseDiscardReason: Int] = [:]
+            var completedBuildCount = 0
+            var totalBuildNanoseconds: UInt64 = 0
+            var maxBuildNanoseconds: UInt64 = 0
+            var maxOverlayPayloadCount = 0
+            var maxOverlayMentionCount = 0
+        }
+
+        /// The synchronous mutation pass of one canonical apply, which publishes at most one batch.
+        private struct CanonicalApplyDebugPass {
+            let rootID: UUID
+            let startNanoseconds: UInt64
+            var ingress = RootCatalogShardBatchIngressDebugTimings()
+            var pendingSample: RootCatalogShardBatchDebugSample?
+        }
+
+        private struct CanonicalApplyDebugContext {
+            let startNanoseconds: UInt64
+            let servicePublicationSequence: UInt64?
+        }
+
+        @TaskLocal private static var activeCanonicalApplyDebugContext: CanonicalApplyDebugContext?
+
+        private struct UncachedAuthoritativeSnapshotBuildState {
+            struct Root {
+                var buildCount = 0
+                var fileCount = 0
+                var estimatedByteCount = 0
+            }
+
+            var buildCount = 0
+            var fileCount = 0
+            var totalNanoseconds: UInt64 = 0
+            var estimatedByteCount = 0
+            var lastFileCount = 0
+            var lastNanoseconds: UInt64 = 0
+            var lastEstimatedByteCount = 0
+            var rootsByID: [UUID: Root] = [:]
+        }
+
         private static let publicationInvalidationSampleLimit = 32
     #endif
 
@@ -363,6 +580,12 @@ actor WorkspaceFileContextStore {
     private static let maximumRetainedCodemapPresentationRecordsPerRoot = 64
     private static let maximumCodemapPresentationRequestsPerBundle = 4096
 
+    /// Change a loaded root's state where `rootStatesByID` stores it, by passing `&rootStatesByID[rootID]!`
+    /// as `inout`. A copied-out state shares its indexes' storage with the stored one, so its first edit
+    /// copies each root-sized index it touches, and holding a copy while the stored state is changed in
+    /// place makes that change copy too. A caller that changes the state keeps a `RootIdentity` instead.
+    /// A function given the stored state as `inout` must not read `rootStatesByID`, because the access
+    /// lasts for the whole call.
     private struct RootState {
         let lifetimeID: UUID
         let root: WorkspaceRootRecord
@@ -371,6 +594,17 @@ actor WorkspaceFileContextStore {
         var fileIDsByRelativePath: [String: UUID]
         var childFolderIDsByFolderID: [UUID: [UUID]]
         var childFileIDsByFolderID: [UUID: [UUID]]
+
+        var identity: RootIdentity {
+            RootIdentity(lifetimeID: lifetimeID, root: root, service: service)
+        }
+    }
+
+    /// A loaded root's lifetime, record, and service, without the indexes a `RootState` holds.
+    private struct RootIdentity {
+        let lifetimeID: UUID
+        let root: WorkspaceRootRecord
+        let service: FileSystemService
     }
 
     private struct PendingSeededRoot {
@@ -925,6 +1159,7 @@ actor WorkspaceFileContextStore {
         case managedFilePromotion = "managed_file_promotion"
         case catalogMutation = "catalog_mutation"
         case cacheCapacity = "cache_capacity"
+        case pathIndexRebase = "path_index_rebase"
     }
 
     private final class PublicationInvalidationBatch {
@@ -1326,6 +1561,18 @@ actor WorkspaceFileContextStore {
         private var rootCatalogShardShadowComparisonCount = 0
         private var rootCatalogShardShadowMismatchCount = 0
         private var rootCatalogShardLastShadowByteCount = 0
+        private static let rootCatalogShardBatchSampleLimit = 128
+        private var rootCatalogShardPatchCapOverride: Int?
+        private var rootCatalogShardPatchComparisonMode: RootCatalogShardPatchComparisonMode = .off
+        private var rootCatalogShardPatchComparisonArmedRootIDs: Set<UUID> = []
+        private var rootCatalogShardBatchSampleInProgress: RootCatalogShardBatchDebugSample?
+        private var canonicalApplyDebugPass: CanonicalApplyDebugPass?
+        private var rootCatalogShardBatchHistoriesByRootID: [UUID: RootCatalogShardBatchHistoryState] = [:]
+        private var heldRootCatalogShardBatchesByRootIDForTesting: [UUID: [WorkspaceAppliedIndexBatchEvent]] = [:]
+        private var uncachedAuthoritativeSnapshotBuildState = UncachedAuthoritativeSnapshotBuildState()
+        private var rootCatalogShardPathIndexRebaseDebugStatesByRootID: [UUID: RootCatalogShardPathIndexRebaseDebugState] = [:]
+        private var rootFolderSubtreeTraversalsByRootID: [UUID: RootFolderSubtreeTraversalDebugSnapshot] = [:]
+        private var pathIndexRebaseBuildHandler: (@Sendable (UUID) async -> Void)?
 
         func setCodemapGraphIndexBuildStartHandlerForTesting(
             _ handler: (@Sendable (WorkspaceCodemapRootEpoch) async -> Void)?
@@ -1337,6 +1584,16 @@ actor WorkspaceFileContextStore {
             _ handler: (@Sendable (WorkspaceCodemapRootEpoch) async -> Void)?
         ) {
             codemapGraphIndexCatalogBuildHandler = handler
+        }
+
+        /// Runs at the start of each detached path-index rebase build, with the flight's root ID.
+        func setPathIndexRebaseBuildHandlerForTesting(_ handler: (@Sendable (UUID) async -> Void)?) {
+            pathIndexRebaseBuildHandler = handler
+        }
+
+        /// The root's in-flight rebase task. It finishes after the flight installs or discards its result.
+        func pathIndexRebaseFlightTaskForTesting(rootID: UUID) -> Task<Void, Never>? {
+            pathIndexRebaseFlightsByRootID[rootID]?.task
         }
 
         func codemapGraphIndexBuildStoreEventsForTesting(
@@ -2338,7 +2595,31 @@ actor WorkspaceFileContextStore {
                     lastFileCount: catalogRebuildLastFileCount,
                     lastRootCount: catalogRebuildLastRootCount
                 ),
-                rootCatalogShards: rootCatalogShardDebugSnapshot()
+                rootCatalogShards: rootCatalogShardDebugSnapshot(),
+                uncachedAuthoritativeSnapshotBuilds: uncachedAuthoritativeSnapshotBuildDebugSnapshot()
+            )
+        }
+
+        private func uncachedAuthoritativeSnapshotBuildDebugSnapshot() -> UncachedAuthoritativeSnapshotBuildDebugSnapshot {
+            let state = uncachedAuthoritativeSnapshotBuildState
+            return UncachedAuthoritativeSnapshotBuildDebugSnapshot(
+                buildCount: state.buildCount,
+                fileCount: state.fileCount,
+                totalNanoseconds: state.totalNanoseconds,
+                estimatedByteCount: state.estimatedByteCount,
+                lastFileCount: state.lastFileCount,
+                lastNanoseconds: state.lastNanoseconds,
+                lastEstimatedByteCount: state.lastEstimatedByteCount,
+                roots: state.rootsByID
+                    .sorted { $0.key.uuidString < $1.key.uuidString }
+                    .map { rootID, root in
+                        UncachedAuthoritativeSnapshotBuildDebugSnapshot.Root(
+                            rootID: rootID,
+                            buildCount: root.buildCount,
+                            fileCount: root.fileCount,
+                            estimatedByteCount: root.estimatedByteCount
+                        )
+                    }
             )
         }
 
@@ -2416,6 +2697,15 @@ actor WorkspaceFileContextStore {
                 rootCatalogShardBackstopCountsByRootID.removeValue(forKey: rootID)
                 rootCatalogShardMaxLiveGenerationCountsByRootID.removeValue(forKey: rootID)
             }
+            for rootID in Set(rootCatalogShardBatchHistoriesByRootID.keys).subtracting(trackedRootIDs) {
+                rootCatalogShardBatchHistoriesByRootID.removeValue(forKey: rootID)
+            }
+            for rootID in Set(rootCatalogShardPathIndexRebaseDebugStatesByRootID.keys).subtracting(trackedRootIDs) {
+                rootCatalogShardPathIndexRebaseDebugStatesByRootID.removeValue(forKey: rootID)
+            }
+            for rootID in Set(rootFolderSubtreeTraversalsByRootID.keys).subtracting(trackedRootIDs) {
+                rootFolderSubtreeTraversalsByRootID.removeValue(forKey: rootID)
+            }
 
             let roots = trackedRootIDs.sorted { $0.uuidString < $1.uuidString }.map { rootID in
                 let liveShards = liveRootCatalogShards(rootID: rootID)
@@ -2457,12 +2747,20 @@ actor WorkspaceFileContextStore {
                     lastAppliedIndexGeneration: rootCatalogShardDeltaStatesByRootID[rootID]?.lastAppliedIndexGeneration,
                     deltaStateDirty: rootCatalogShardDeltaStatesByRootID[rootID]?.isDirty ?? false,
                     backstopCount: rootCatalogShardBackstopCountsByRootID[rootID] ?? 0,
-                    maxLiveGenerationCount: maxLiveCount
+                    maxLiveGenerationCount: maxLiveCount,
+                    batches: rootCatalogShardBatchDebugHistory(rootID: rootID),
+                    pathIndexRebase: rootCatalogShardPathIndexRebaseDebugSnapshot(
+                        rootID: rootID,
+                        publishedPathSearchIndex: publishedShard?.pathSearchIndex
+                    ),
+                    folderSubtreeTraversals: rootFolderSubtreeTraversalsByRootID[rootID] ?? .init()
                 )
             }
             return RootCatalogShardDebugSnapshot(
                 liveGenerationCapPerRoot: Self.maxLiveRootCatalogShardGenerationsPerRoot,
-                maxPatchLogicalMutationCount: Self.maxRootCatalogShardPatchLogicalMutationCount,
+                maxPatchLogicalMutationCount: effectiveMaxRootCatalogShardPatchLogicalMutationCount,
+                patchCapOverride: rootCatalogShardPatchCapOverride,
+                patchComparisonMode: rootCatalogShardPatchComparisonMode,
                 publishedShardCount: publishedRootCatalogShardsByRootID.count,
                 totalBuildCount: rootCatalogShardBuildCountsByRootID.values.reduce(0, +),
                 totalBackstopCount: rootCatalogShardBackstopCountsByRootID.values.reduce(0, +),
@@ -2472,6 +2770,77 @@ actor WorkspaceFileContextStore {
                 shadowMismatchCount: rootCatalogShardShadowMismatchCount,
                 lastShadowByteCount: rootCatalogShardLastShadowByteCount,
                 roots: roots
+            )
+        }
+
+        private func rootCatalogShardPathIndexRebaseDebugSnapshot(
+            rootID: UUID,
+            publishedPathSearchIndex: WorkspaceSearchRootPathIndex?
+        ) -> RootCatalogShardPathIndexRebaseDebugSnapshot {
+            let state = rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID]
+                ?? RootCatalogShardPathIndexRebaseDebugState()
+            return RootCatalogShardPathIndexRebaseDebugSnapshot(
+                startCount: state.startCount,
+                installCount: state.installCount,
+                discardCounts: state.discardCounts,
+                isInFlight: pathIndexRebaseFlightsByRootID[rootID] != nil,
+                completedBuildCount: state.completedBuildCount,
+                totalBuildNanoseconds: state.totalBuildNanoseconds,
+                maxBuildNanoseconds: state.maxBuildNanoseconds,
+                overlayPayloadCount: publishedPathSearchIndex?.overlayPayloadCount ?? 0,
+                overlayMentionCount: publishedPathSearchIndex?.overlayMentionCount ?? 0,
+                maxOverlayPayloadCount: state.maxOverlayPayloadCount,
+                maxOverlayMentionCount: state.maxOverlayMentionCount
+            )
+        }
+
+        private func recordPathIndexRebaseBuild(rootID: UUID, nanoseconds: UInt64) {
+            var state = rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID]
+                ?? RootCatalogShardPathIndexRebaseDebugState()
+            state.completedBuildCount += 1
+            state.totalBuildNanoseconds &+= nanoseconds
+            state.maxBuildNanoseconds = max(state.maxBuildNanoseconds, nanoseconds)
+            rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID] = state
+        }
+
+        private func recordPathIndexRebaseDiscard(_ reason: RootCatalogShardPathIndexRebaseDiscardReason, rootID: UUID) {
+            rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID, default: .init()]
+                .discardCounts[reason, default: 0] += 1
+        }
+
+        private func recordPathIndexOverlayCounts(_ pathSearchIndex: WorkspaceSearchRootPathIndex, rootID: UUID) {
+            var state = rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID]
+                ?? RootCatalogShardPathIndexRebaseDebugState()
+            state.maxOverlayPayloadCount = max(state.maxOverlayPayloadCount, pathSearchIndex.overlayPayloadCount)
+            state.maxOverlayMentionCount = max(state.maxOverlayMentionCount, pathSearchIndex.overlayMentionCount)
+            rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID] = state
+        }
+
+        private func recordFolderSubtreeTraversal(
+            _ purpose: FolderSubtreeTraversalPurpose,
+            rootID: UUID,
+            visitedRecordCount: Int
+        ) {
+            var traversals = rootFolderSubtreeTraversalsByRootID[rootID] ?? RootFolderSubtreeTraversalDebugSnapshot()
+            switch purpose {
+            case .removal:
+                traversals.folderRemovalCount += 1
+                traversals.folderRemovalVisitedRecordCount += visitedRecordCount
+            case .codemapInvalidation:
+                traversals.codemapInvalidationCount += 1
+                traversals.codemapInvalidationVisitedRecordCount += visitedRecordCount
+            }
+            rootFolderSubtreeTraversalsByRootID[rootID] = traversals
+        }
+
+        private func rootCatalogShardBatchDebugHistory(rootID: UUID) -> RootCatalogShardBatchDebugHistory {
+            let history = rootCatalogShardBatchHistoriesByRootID[rootID] ?? RootCatalogShardBatchHistoryState()
+            return RootCatalogShardBatchDebugHistory(
+                retainedSampleLimit: Self.rootCatalogShardBatchSampleLimit,
+                totalObservedSampleCount: history.totalObservedSampleCount,
+                droppedSampleCount: history.totalObservedSampleCount - history.samples.count,
+                outcomeCounts: history.outcomeCounts,
+                samples: history.samples
             )
         }
 
@@ -2724,7 +3093,7 @@ actor WorkspaceFileContextStore {
         let topologyGeneration: UInt64
     }
 
-    private struct RootCatalogProjectionFile {
+    private struct RootCatalogProjectionFile: Equatable {
         let file: WorkspaceFileRecord
         let language: LanguageType
     }
@@ -2734,7 +3103,6 @@ actor WorkspaceFileContextStore {
         let root: WorkspaceRootRecord
         let files: [WorkspaceFileRecord]
         let projectionFiles: [RootCatalogProjectionFile]
-        let projectionFileIndexByID: [UUID: Int]
         let folders: [WorkspaceFolderRecord]
         let entries: [WorkspaceSearchCatalogEntry]
         let pathSearchIndex: WorkspaceSearchRootPathIndex?
@@ -2757,21 +3125,11 @@ actor WorkspaceFileContextStore {
             self.key = key
             self.root = root
             self.files = files
-            let projectionFiles = precomputedProjectionFiles ?? files
-                .compactMap { file in
-                    let fileExtension = (file.name as NSString).pathExtension
-                    guard SyntaxManager.supportsCodeMap(fileExtension: fileExtension),
-                          let language = SyntaxManager.shared.language(forFileExtension: fileExtension)
-                    else { return nil }
-                    return RootCatalogProjectionFile(file: file, language: language)
-                }
+            projectionFiles = precomputedProjectionFiles ?? files
+                .compactMap(WorkspaceFileContextStore.rootCatalogProjectionFile(for:))
                 .sorted { lhs, rhs in
                     WorkspaceFileContextStore.searchRootCatalogFilePrecedes(lhs.file, rhs.file)
                 }
-            self.projectionFiles = projectionFiles
-            projectionFileIndexByID = Dictionary(
-                uniqueKeysWithValues: projectionFiles.enumerated().map { ($0.element.file.id, $0.offset) }
-            )
             self.folders = folders
             self.entries = entries
             self.pathSearchIndex = pathSearchIndex
@@ -2795,7 +3153,6 @@ actor WorkspaceFileContextStore {
             self.root = root
             files = source.files
             projectionFiles = source.projectionFiles
-            projectionFileIndexByID = source.projectionFileIndexByID
             folders = source.folders
             entries = source.entries
             pathSearchIndex = source.pathSearchIndex?.applyingPatch(
@@ -2805,9 +3162,42 @@ actor WorkspaceFileContextStore {
                     topologyGeneration: key.topologyGeneration
                 ),
                 entries: source.entries,
-                changedFileIDs: []
+                patch: .empty
             )
             appliedIndexGeneration = source.appliedIndexGeneration
+        }
+
+        /// `source` with another path index over the same entries: the same key, records, and applied
+        /// generation.
+        init(swappingPathSearchIndexOf source: RootCatalogShard, pathSearchIndex: WorkspaceSearchRootPathIndex) {
+            precondition(pathSearchIndex.identity.rootID == source.key.rootID)
+            precondition(pathSearchIndex.identity.lifetimeID == source.key.lifetimeID)
+            precondition(pathSearchIndex.count == source.entries.count)
+            key = source.key
+            root = source.root
+            files = source.files
+            projectionFiles = source.projectionFiles
+            folders = source.folders
+            entries = source.entries
+            self.pathSearchIndex = pathSearchIndex
+            appliedIndexGeneration = source.appliedIndexGeneration
+        }
+
+        /// The index of `fileID` in `projectionFiles`, found by binary search in file catalog order.
+        func projectionIndex(fileID: UUID, standardizedRelativePath: String) -> Int? {
+            let index = WorkspaceFileContextStore.catalogPartitionIndex(in: projectionFiles) { projectionFile in
+                WorkspaceFileContextStore.searchCatalogFilePrecedes(
+                    lhsPath: projectionFile.file.standardizedRelativePath,
+                    lhsID: projectionFile.file.id,
+                    rhsPath: standardizedRelativePath,
+                    rhsID: fileID
+                )
+            }
+            guard index < projectionFiles.endIndex,
+                  projectionFiles[index].file.id == fileID,
+                  projectionFiles[index].file.standardizedRelativePath == standardizedRelativePath
+            else { return nil }
+            return index
         }
     }
 
@@ -2859,13 +3249,42 @@ actor WorkspaceFileContextStore {
         case patch
         case authoritative
         case promotion
+        /// The same shard with a path index rebased off the actor.
+        case rebase
     }
 
-    private struct RootCatalogShardBuilderOutput {
+    /// A path-index base build running off the actor for one root. Its task builds the base from the
+    /// capture it holds, then installs or discards the result itself.
+    private struct PathIndexRebaseFlight {
+        let id: UUID
+        let lifetimeID: UUID
+        let task: Task<Void, Never>
+    }
+
+    /// The arrays and path-index changes of a patched shard. Kinds without edits share the previous arrays.
+    private struct RootCatalogShardPatch {
         let files: [WorkspaceFileRecord]
+        let entries: [WorkspaceSearchCatalogEntry]
+        let projectionFiles: [RootCatalogProjectionFile]
         let folders: [WorkspaceFolderRecord]
+        let pathIndexPatch: WorkspaceSearchRootPathIndexPatch
+    }
+
+    private enum RootCatalogShardPatchOutcome {
+        case unsafe
+        case overCap
+        case patched(RootCatalogShardPatch)
+    }
+
+    private struct RootCatalogShardPatchAttempt {
+        let outcome: RootCatalogShardPatchOutcome
+        /// Input upserts and modifications that matched the shard's record, repeats included.
+        let noOpCount: Int
+        /// Inserted and removed records, so a same-path replacement with a new ID counts two.
         let logicalMutationCount: Int
-        let pathIndexChangedFileIDs: Set<UUID>
+        #if DEBUG
+            let metrics: RootCatalogShardPatchDebugMetrics
+        #endif
     }
 
     private struct SearchCatalogRootDependency: Hashable {
@@ -2934,6 +3353,8 @@ actor WorkspaceFileContextStore {
     private var rootSeedSearchShadowsByRootID: [UUID: RootSeedSearchShadow] = [:]
     private var rootCatalogShardWeakReferencesByRootID: [UUID: [WeakRootCatalogShardReference]] = [:]
     private var rootCatalogShardDeltaStatesByRootID: [UUID: RootCatalogShardDeltaState] = [:]
+    /// At most one path-index rebase per root.
+    private var pathIndexRebaseFlightsByRootID: [UUID: PathIndexRebaseFlight] = [:]
     private var pathMatchSnapshotIdentitiesByScope: [WorkspaceLookupRootScope: PathMatchCacheIdentity] = [:]
     private var staticPathMatchSnapshotsByScope: [WorkspaceLookupRootScope: StaticPathMatchSnapshotCacheEntry] = [:]
     private var nextStaticPathMatchSnapshotAccessSequence: UInt64 = 0
@@ -2958,13 +3379,26 @@ actor WorkspaceFileContextStore {
     /// Covers overlapping readers/index builds while bounding retained full-root arrays. At the cap,
     /// callers receive an authoritative uncached rebuild until older ARC leases drain.
     private static let maxLiveRootCatalogShardGenerationsPerRoot = 8
-    // The checked-in WI-3 baseline (`docs/investigations/mcp-tool-throughput-wi3-baseline-2026-06-11.md`)
-    // records authoritative catalog rebuild work in roots/files, and its fixture
-    // proves a three-file/two-root rebuild, but it does not establish a multi-record crossover.
-    // Patch exactly one logical catalog record—the common single-file watcher case—and rebuild for
-    // every broader batch until measured evidence supports increasing this deliberately conservative cap.
-    private static let maxRootCatalogShardPatchLogicalMutationCount = 1
+    // A batch's effective edits are its file and folder record insertions plus removals, so a record
+    // that replaces another at the same path counts two. This cap gates patch eligibility. A batch over
+    // the cap, or one the store can't patch safely, requests an authoritative rebuild instead. Retention
+    // can block publishing either result, which leaves the shard dirty until a later build. A root with
+    // no published shard and no delta state for its current lifetime stays lazy whatever the batch size.
+    // The value comes from patching and rebuilding the same batches on 10,000-, 35,000-, and
+    // 100,000-file roots: adds across folders, adds into nested folders, and subtree removals of 1 to
+    // 4,096 edits. The cap is the largest measured size that passes, with every smaller size, at 35,000
+    // and 100,000 files for every shape. Passing means a patch median at most 80% of the rebuild's, a
+    // patch P95 no higher than the rebuild's, and a patched shard equal to the rebuilt one. Every size
+    // passed, so 4,096 is a lower bound on where patching stops paying off. The data is in
+    // `docs/investigations/catalog-shard-batch-patch-2026-10-20.md`.
+    private static let maxRootCatalogShardPatchLogicalMutationCount = 4096
     private static let defaultMaxPendingDeltasPerRoot = 10000
+    // A patched root's path index rebases its materialized base off the actor once it carries this many
+    // overlay payloads, or this many affected-entry mentions summed over them. The mention threshold
+    // scales with the root's file count, so each rebase costs about the same per mention it removes.
+    static let pathIndexRebaseOverlayPayloadThreshold = 32
+    private static let pathIndexRebaseMinimumMentionThreshold = 2048
+    private static let pathIndexRebaseMentionThresholdFileCountDivisor = 16
     private let pathMatchWorker = PathMatchWorker()
     private let deferredReplayBuffer = DeferredReplayBufferActor(
         maxPendingDeltasPerRoot: WorkspaceFileContextStore.defaultMaxPendingDeltasPerRoot
@@ -6482,16 +6916,16 @@ actor WorkspaceFileContextStore {
             deltas: [FileSystemDelta],
             servicePublicationSequence: UInt64
         ) async throws {
-            let state = try state(for: rootID)
-            let preparedDeltas = prepareObservedFileSystemDeltas(deltas, root: state.root)
+            let identity = try rootIdentity(for: rootID)
+            let preparedDeltas = prepareObservedFileSystemDeltas(deltas, root: identity.root)
             await applyPreparedIndexDeltas(
                 rootID: rootID,
                 deltas: preparedDeltas,
-                expectedLifetimeID: state.lifetimeID,
+                expectedLifetimeID: identity.lifetimeID,
                 watcherAcceptedWatermark: nil,
                 servicePublicationSequence: servicePublicationSequence,
                 publicationCorrelation: nil,
-                diagnosticRootToken: state.service.diagnosticRootToken
+                diagnosticRootToken: identity.service.diagnosticRootToken
             )
         }
 
@@ -7469,6 +7903,7 @@ actor WorkspaceFileContextStore {
             snapshot = composedSnapshot
         } else {
             #if DEBUG
+                let uncachedBuildStart = WorkspaceFileSearchDebugTiming.now()
                 snapshot = WorkspaceFileSearchDebugContext.$catalogBuildObserver.withValue(
                     catalogBuildObserver
                 ) {
@@ -7479,6 +7914,14 @@ actor WorkspaceFileContextStore {
                         requirement: requirement
                     )
                 }
+                recordUncachedAuthoritativeSnapshotBuild(
+                    snapshot,
+                    includesPathIndexes: requirement.requiresPathIndexes,
+                    nanoseconds: WorkspaceFileSearchDebugTiming.elapsed(
+                        since: uncachedBuildStart,
+                        through: WorkspaceFileSearchDebugTiming.now()
+                    )
+                )
             #else
                 snapshot = buildAuthoritativeSearchCatalogSnapshot(
                     rootScope: rootScope,
@@ -7667,17 +8110,12 @@ actor WorkspaceFileContextStore {
         }
         for candidate in rootsNeedingPromotion {
             let promoted = RootCatalogShard(
-                key: candidate.shard.key,
-                root: candidate.shard.root,
-                files: candidate.shard.files,
-                folders: candidate.shard.folders,
-                entries: candidate.shard.entries,
+                swappingPathSearchIndexOf: candidate.shard,
                 pathSearchIndex: makeRootPathSearchIndex(
                     key: candidate.shard.key,
                     root: candidate.shard.root,
                     entries: candidate.shard.entries
-                ),
-                appliedIndexGeneration: candidate.shard.appliedIndexGeneration
+                )
             )
             newlyBuiltShardsByRootID[candidate.root.id] = (promoted, .promotion)
         }
@@ -7707,7 +8145,7 @@ actor WorkspaceFileContextStore {
                     isDirty: false,
                     capability: built.shard.pathSearchIndex == nil ? .recordsOnly : .recordsAndPathIndexes
                 )
-            case .patch:
+            case .patch, .rebase:
                 break
             }
             registerPublishedRootCatalogShard(built.shard, kind: built.kind)
@@ -7884,7 +8322,11 @@ actor WorkspaceFileContextStore {
                 rootCatalogShardAuthoritativeRebuildCountsByRootID[shard.key.rootID, default: 0] += 1
             case .promotion:
                 break
+            case .rebase:
+                rootCatalogShardPathIndexRebaseDebugStatesByRootID[shard.key.rootID, default: .init()].installCount += 1
             }
+            // A rebased base was built off the actor, so it isn't a full path-index build; its install
+            // count above is its counter.
             switch shard.pathSearchIndex?.buildKind {
             case .full:
                 rootCatalogShardFullPathIndexBuildCountsByRootID[shard.key.rootID, default: 0] += 1
@@ -7892,8 +8334,11 @@ actor WorkspaceFileContextStore {
                 rootCatalogShardOverlayPathIndexBuildCountsByRootID[shard.key.rootID, default: 0] += 1
             case .projectedReuse:
                 rootCatalogShardOverlayPathIndexBuildCountsByRootID[shard.key.rootID, default: 0] += 1
-            case .reused, nil:
+            case .reused, .rebase, nil:
                 break
+            }
+            if let pathSearchIndex = shard.pathSearchIndex {
+                recordPathIndexOverlayCounts(pathSearchIndex, rootID: shard.key.rootID)
             }
         #endif
     }
@@ -7968,7 +8413,16 @@ actor WorkspaceFileContextStore {
     private func applyAppliedIndexEventToRootCatalogShard(_ event: WorkspaceAppliedIndexBatchEvent) {
         // Any post-initialization filesystem publication invalidates the one-shot shadow plan.
         invalidateRootSeedSearchShadow(rootID: event.rootID)
+        #if DEBUG
+            if !event.isRootUnload, heldRootCatalogShardBatchesByRootIDForTesting[event.rootID] != nil {
+                heldRootCatalogShardBatchesByRootIDForTesting[event.rootID]?.append(event)
+                return
+            }
+            beginRootCatalogShardBatchSample(event)
+            defer { finishRootCatalogShardBatchSample() }
+        #endif
         if event.isRootUnload {
+            cancelPathIndexRebaseFlight(rootID: event.rootID)
             publishedRootCatalogShardsByRootID.removeValue(forKey: event.rootID)
             rootCatalogShardDeltaStatesByRootID.removeValue(forKey: event.rootID)
             return
@@ -7978,9 +8432,13 @@ actor WorkspaceFileContextStore {
               state.root.standardizedFullPath == StandardizedPath.absolute(event.rootPath),
               let currentKey = rootCatalogShardKey(for: state.root)
         else {
+            cancelPathIndexRebaseFlight(rootID: event.rootID)
             publishedRootCatalogShardsByRootID.removeValue(forKey: event.rootID)
             rootCatalogShardDeltaStatesByRootID.removeValue(forKey: event.rootID)
             return
+        }
+        if let flight = pathIndexRebaseFlightsByRootID[event.rootID], flight.lifetimeID != state.lifetimeID {
+            cancelPathIndexRebaseFlight(rootID: event.rootID)
         }
 
         guard let previousShard = publishedRootCatalogShardsByRootID[event.rootID] else {
@@ -8018,7 +8476,9 @@ actor WorkspaceFileContextStore {
         guard deltaState.lifetimeID == state.lifetimeID,
               previousShard.key.lifetimeID == state.lifetimeID,
               previousShard.key.rootID == event.rootID,
-              previousShard.key.canonicalConfigurationIdentity == currentKey.canonicalConfigurationIdentity
+              previousShard.key.canonicalConfigurationIdentity == currentKey.canonicalConfigurationIdentity,
+              // Retained entries embed the root's name and path, which the shard key doesn't cover.
+              previousShard.root == state.root
         else {
             #if DEBUG
                 recordRootCatalogShardFallback(
@@ -8100,12 +8560,7 @@ actor WorkspaceFileContextStore {
             return
         }
 
-        let hasTopologyMutation = !event.upsertedFiles.isEmpty
-            || !event.upsertedFolders.isEmpty
-            || !event.removedFileIDs.isEmpty
-            || !event.removedFolderIDs.isEmpty
-            || !event.removedFilePaths.isEmpty
-            || !event.removedFolderPaths.isEmpty
+        let hasTopologyMutation = Self.changesCatalogTopology(event)
         let expectedTopologyGeneration: UInt64
         if hasTopologyMutation {
             guard previousShard.key.topologyGeneration != UInt64.max else {
@@ -8144,7 +8599,17 @@ actor WorkspaceFileContextStore {
             )
             return
         }
-        guard let builderOutput = buildRootCatalogShardPatch(event: event, previousShard: previousShard) else {
+        let attempt = buildRootCatalogShardPatch(
+            event: event,
+            previousShard: previousShard,
+            maximumLogicalMutationCount: effectiveMaxRootCatalogShardPatchLogicalMutationCount
+        )
+        #if DEBUG
+            recordRootCatalogShardPatchAttempt(attempt, rootID: event.rootID)
+        #endif
+        let patch: RootCatalogShardPatch
+        switch attempt.outcome {
+        case .unsafe:
             #if DEBUG
                 recordRootCatalogShardFallback(
                     rootID: event.rootID,
@@ -8159,8 +8624,7 @@ actor WorkspaceFileContextStore {
                 requirement: fallbackRequirement
             )
             return
-        }
-        guard builderOutput.logicalMutationCount <= Self.maxRootCatalogShardPatchLogicalMutationCount else {
+        case .overCap:
             #if DEBUG
                 recordRootCatalogShardFallback(
                     rootID: event.rootID,
@@ -8175,6 +8639,8 @@ actor WorkspaceFileContextStore {
                 requirement: fallbackRequirement
             )
             return
+        case let .patched(value):
+            patch = value
         }
         guard canPublishAnotherRootCatalogShard(rootID: event.rootID) else {
             #if DEBUG
@@ -8183,6 +8649,7 @@ actor WorkspaceFileContextStore {
                     lifetimeID: state.lifetimeID,
                     reason: .retentionBoundary
                 )
+                setRootCatalogShardBatchOutcome(.retentionBlocked, rootID: event.rootID)
             #endif
             markRootCatalogShardDirty(
                 rootID: event.rootID,
@@ -8194,22 +8661,28 @@ actor WorkspaceFileContextStore {
             return
         }
 
-        let patchedEntries = builderOutput.files.map { WorkspaceSearchCatalogEntry(file: $0, root: state.root) }
+        #if DEBUG
+            let pathIndexSegmentStart = WorkspaceFileSearchDebugTiming.now()
+        #endif
         let patchedPathSearchIndex = previousShard.pathSearchIndex?.applyingPatch(
             identity: WorkspaceSearchRootPathIndexIdentity(
                 rootID: currentKey.rootID,
                 lifetimeID: currentKey.lifetimeID,
                 topologyGeneration: currentKey.topologyGeneration
             ),
-            entries: patchedEntries,
-            changedFileIDs: builderOutput.pathIndexChangedFileIDs
+            entries: patch.entries,
+            patch: patch.pathIndexPatch
         )
+        #if DEBUG
+            let publishStart = WorkspaceFileSearchDebugTiming.now()
+        #endif
         let patchedShard = RootCatalogShard(
             key: currentKey,
             root: state.root,
-            files: builderOutput.files,
-            folders: builderOutput.folders,
-            entries: patchedEntries,
+            files: patch.files,
+            precomputedProjectionFiles: patch.projectionFiles,
+            folders: patch.folders,
+            entries: patch.entries,
             pathSearchIndex: patchedPathSearchIndex,
             appliedIndexGeneration: event.generation
         )
@@ -8223,6 +8696,128 @@ actor WorkspaceFileContextStore {
             capability: fallbackRequirement
         )
         registerPublishedRootCatalogShard(patchedShard, kind: .patch)
+        #if DEBUG
+            let publishEnd = WorkspaceFileSearchDebugTiming.now()
+            recordRootCatalogShardPatchPublication(
+                rootID: event.rootID,
+                pathIndexSegmentNanoseconds: WorkspaceFileSearchDebugTiming.elapsed(
+                    since: pathIndexSegmentStart,
+                    through: publishStart
+                ),
+                publishNanoseconds: WorkspaceFileSearchDebugTiming.elapsed(since: publishStart, through: publishEnd)
+            )
+            compareRootCatalogShardPatchIfArmed(patchedShard, requirement: fallbackRequirement)
+        #endif
+        startPathIndexRebaseIfDue(rootID: event.rootID)
+    }
+
+    /// Starts rebuilding the published path index's materialized base off the actor once its overlays
+    /// pass either threshold. Starts nothing while a flight runs for the root, or at the retention cap,
+    /// where the install would be refused.
+    private func startPathIndexRebaseIfDue(rootID: UUID) {
+        guard pathIndexRebaseFlightsByRootID[rootID] == nil,
+              let shard = publishedRootCatalogShardsByRootID[rootID],
+              let pathSearchIndex = shard.pathSearchIndex,
+              pathSearchIndex.overlayPayloadCount >= Self.pathIndexRebaseOverlayPayloadThreshold
+              || pathSearchIndex.overlayMentionCount >= max(
+                  Self.pathIndexRebaseMinimumMentionThreshold,
+                  shard.files.count / Self.pathIndexRebaseMentionThresholdFileCountDivisor
+              ),
+              liveRootCatalogShards(rootID: rootID).count < Self.maxLiveRootCatalogShardGenerationsPerRoot,
+              let capture = pathSearchIndex.rebaseCapture()
+        else { return }
+
+        let flightID = UUID()
+        #if DEBUG
+            let buildHandler = pathIndexRebaseBuildHandler
+        #endif
+        // A detached task inherits no task-local values, so the base build reports nothing to the
+        // actor's catalog build observer; the flight times itself instead.
+        let task = Task.detached(priority: .utility) { [weak self, capture] in
+            #if DEBUG
+                if let buildHandler {
+                    await buildHandler(rootID)
+                }
+            #endif
+            guard !Task.isCancelled else { return }
+            #if DEBUG
+                let buildStart = WorkspaceFileSearchDebugTiming.now()
+            #endif
+            let rebased = WorkspaceSearchRootPathIndex.buildRebasedBase(capture)
+            #if DEBUG
+                let buildNanoseconds = WorkspaceFileSearchDebugTiming.elapsed(
+                    since: buildStart,
+                    through: WorkspaceFileSearchDebugTiming.now()
+                )
+                // Recorded even when the flight was cancelled mid-build, since the build ran.
+                await self?.recordPathIndexRebaseBuild(rootID: rootID, nanoseconds: buildNanoseconds)
+            #endif
+            await self?.installPathIndexRebase(rebased, rootID: rootID, flightID: flightID)
+        }
+        pathIndexRebaseFlightsByRootID[rootID] = PathIndexRebaseFlight(
+            id: flightID,
+            lifetimeID: shard.key.lifetimeID,
+            task: task
+        )
+        #if DEBUG
+            rootCatalogShardPathIndexRebaseDebugStatesByRootID[rootID, default: .init()].startCount += 1
+        #endif
+    }
+
+    /// Publishes the root's shard again with its path index on the rebased base, keeping the overlays
+    /// appended since the capture. Discards the result when the root, its lifetime, or the index's base
+    /// changed since the capture, or when retention refuses another shard generation.
+    private func installPathIndexRebase(
+        _ rebased: WorkspaceSearchRootPathIndex.RebasedBase,
+        rootID: UUID,
+        flightID: UUID
+    ) {
+        guard pathIndexRebaseFlightsByRootID[rootID]?.id == flightID,
+              let flight = pathIndexRebaseFlightsByRootID.removeValue(forKey: rootID)
+        else { return }
+        guard let state = rootStatesByID[rootID],
+              state.lifetimeID == flight.lifetimeID,
+              let current = publishedRootCatalogShardsByRootID[rootID],
+              current.key.rootID == rootID,
+              current.key.lifetimeID == flight.lifetimeID,
+              let rebasedIndex = current.pathSearchIndex?.rebased(onto: rebased)
+        else {
+            #if DEBUG
+                recordPathIndexRebaseDiscard(.stale, rootID: rootID)
+            #endif
+            return
+        }
+        // Overlays keep growing until a later patch starts another flight.
+        guard canPublishAnotherRootCatalogShard(rootID: rootID) else {
+            #if DEBUG
+                recordPathIndexRebaseDiscard(.retention, rootID: rootID)
+            #endif
+            return
+        }
+        let rebasedShard = RootCatalogShard(swappingPathSearchIndexOf: current, pathSearchIndex: rebasedIndex)
+        publishedRootCatalogShardsByRootID[rootID] = rebasedShard
+        registerPublishedRootCatalogShard(rebasedShard, kind: .rebase)
+        // The install keeps every catalog generation, so cached snapshots that include the root would
+        // keep serving the old index and holding its base. Drop them; the next request composes from
+        // the rebased shard. Readers that already hold a snapshot keep the old base until they let go.
+        let scopesHoldingOldIndex = Set(searchCatalogSnapshotsByScope.compactMap { scope, entry in
+            entry.snapshot.roots.contains { $0.id == rootID } ? scope : nil
+        })
+        guard !scopesHoldingOldIndex.isEmpty else { return }
+        evictSearchCatalogSnapshots(
+            scopes: scopesHoldingOldIndex,
+            reasons: [.pathIndexRebase],
+            affectedRootIDs: [rootID],
+            affectedRootKinds: [current.root.kind]
+        )
+    }
+
+    private func cancelPathIndexRebaseFlight(rootID: UUID) {
+        guard let flight = pathIndexRebaseFlightsByRootID.removeValue(forKey: rootID) else { return }
+        flight.task.cancel()
+        #if DEBUG
+            recordPathIndexRebaseDiscard(.cancelled, rootID: rootID)
+        #endif
     }
 
     private func rebuildRootCatalogShardAuthoritatively(
@@ -8246,8 +8841,14 @@ actor WorkspaceFileContextStore {
                 capability: requirement
             )
             publishedRootCatalogShardsByRootID.removeValue(forKey: root.id)
+            #if DEBUG
+                setRootCatalogShardBatchOutcome(.retentionBlocked, rootID: root.id)
+            #endif
             return
         }
+        #if DEBUG
+            let rebuildStart = WorkspaceFileSearchDebugTiming.now()
+        #endif
         let rebuiltShard = buildAuthoritativeRootCatalogShard(
             root: root,
             key: key,
@@ -8264,6 +8865,32 @@ actor WorkspaceFileContextStore {
             capability: requirement
         )
         registerPublishedRootCatalogShard(rebuiltShard, kind: .authoritative)
+        #if DEBUG
+            recordRootCatalogShardBatchRebuild(
+                rootID: root.id,
+                nanoseconds: WorkspaceFileSearchDebugTiming.elapsed(
+                    since: rebuildStart,
+                    through: WorkspaceFileSearchDebugTiming.now()
+                )
+            )
+        #endif
+    }
+
+    private static func changesCatalogTopology(_ event: WorkspaceAppliedIndexBatchEvent) -> Bool {
+        !event.upsertedFiles.isEmpty
+            || !event.upsertedFolders.isEmpty
+            || !event.removedFileIDs.isEmpty
+            || !event.removedFolderIDs.isEmpty
+            || !event.removedFilePaths.isEmpty
+            || !event.removedFolderPaths.isEmpty
+    }
+
+    private var effectiveMaxRootCatalogShardPatchLogicalMutationCount: Int {
+        #if DEBUG
+            rootCatalogShardPatchCapOverride ?? Self.maxRootCatalogShardPatchLogicalMutationCount
+        #else
+            Self.maxRootCatalogShardPatchLogicalMutationCount
+        #endif
     }
 
     private func markRootCatalogShardDirty(
@@ -8306,42 +8933,559 @@ actor WorkspaceFileContextStore {
                 rootCatalogShardFallbackCountsByRootID[rootID]
                     == rootCatalogShardFallbackReasonCountsByRootID[rootID]?.values.reduce(0, +)
             )
-        }
-    #endif
-
-    private func buildRootCatalogShardPatch(
-        event: WorkspaceAppliedIndexBatchEvent,
-        previousShard: RootCatalogShard
-    ) -> RootCatalogShardBuilderOutput? {
-        let oldFilesByID = Dictionary(uniqueKeysWithValues: previousShard.files.map { ($0.id, $0) })
-        let oldFileIDsByPath = Dictionary(
-            previousShard.files.map { ($0.standardizedRelativePath, $0.id) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        let oldFoldersByID = Dictionary(uniqueKeysWithValues: previousShard.folders.map { ($0.id, $0) })
-        let oldFolderIDsByPath = Dictionary(
-            previousShard.folders.map { ($0.standardizedRelativePath, $0.id) },
-            uniquingKeysWith: { first, _ in first }
-        )
-
-        let upsertedFilesByID = Dictionary(event.upsertedFiles.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
-        let upsertedFoldersByID = Dictionary(event.upsertedFolders.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
-        guard upsertedFilesByID.count == event.upsertedFiles.count,
-              upsertedFoldersByID.count == event.upsertedFolders.count,
-              event.upsertedFiles.allSatisfy({ $0.rootID == event.rootID && filesByID[$0.id] == $0 }),
-              event.upsertedFolders.allSatisfy({ $0.rootID == event.rootID && foldersByID[$0.id] == $0 })
-        else { return nil }
-        let representedFolderIDs = Set(oldFoldersByID.keys).union(upsertedFoldersByID.keys)
-        for file in upsertedFilesByID.values {
-            var parentFolderID = file.parentFolderID
-            while let folderID = parentFolderID {
-                guard representedFolderIDs.contains(folderID),
-                      let folder = foldersByID[folderID]
-                else { return nil }
-                parentFolderID = folder.parentFolderID
+            // The first reason caused the fallback; a retention boundary can follow it during the rebuild.
+            if rootCatalogShardBatchSampleInProgress?.rootID == rootID,
+               rootCatalogShardBatchSampleInProgress?.fallbackReason == nil
+            {
+                rootCatalogShardBatchSampleInProgress?.fallbackReason = reason
             }
         }
 
+        private func beginRootCatalogShardBatchSample(_ event: WorkspaceAppliedIndexBatchEvent) {
+            rootCatalogShardBatchSampleInProgress = RootCatalogShardBatchDebugSample(
+                rootID: event.rootID,
+                appliedIndexGeneration: event.generation,
+                inputSize: event.upsertedFiles.count + event.upsertedFolders.count
+                    + event.removedFileIDs.count + event.removedFolderIDs.count
+                    + event.modifiedFileIDs.count + event.modifiedFolderIDs.count
+            )
+        }
+
+        private func setRootCatalogShardBatchOutcome(_ outcome: RootCatalogShardBatchOutcome, rootID: UUID) {
+            guard rootCatalogShardBatchSampleInProgress?.rootID == rootID else { return }
+            rootCatalogShardBatchSampleInProgress?.outcome = outcome
+        }
+
+        private func recordRootCatalogShardBatchRebuild(rootID: UUID, nanoseconds: UInt64) {
+            guard rootCatalogShardBatchSampleInProgress?.rootID == rootID else { return }
+            rootCatalogShardBatchSampleInProgress?.outcome = .rebuilt
+            rootCatalogShardBatchSampleInProgress?.rebuildNanoseconds = nanoseconds
+        }
+
+        private func recordRootCatalogShardPatchAttempt(_ attempt: RootCatalogShardPatchAttempt, rootID: UUID) {
+            guard var sample = rootCatalogShardBatchSampleInProgress, sample.rootID == rootID else { return }
+            sample.noOpCount = attempt.noOpCount
+            if case .unsafe = attempt.outcome {
+                sample.effectiveEditCount = nil
+            } else {
+                sample.effectiveEditCount = attempt.logicalMutationCount
+            }
+            sample.patchMetrics = attempt.metrics
+            rootCatalogShardBatchSampleInProgress = sample
+        }
+
+        private func recordRootCatalogShardPatchPublication(
+            rootID: UUID,
+            pathIndexSegmentNanoseconds: UInt64,
+            publishNanoseconds: UInt64
+        ) {
+            guard rootCatalogShardBatchSampleInProgress?.rootID == rootID else { return }
+            rootCatalogShardBatchSampleInProgress?.outcome = .patched
+            rootCatalogShardBatchSampleInProgress?.pathIndexSegmentNanoseconds = pathIndexSegmentNanoseconds
+            rootCatalogShardBatchSampleInProgress?.publishNanoseconds = publishNanoseconds
+        }
+
+        /// Builds, and discards, an authoritative shard at the patched shard's generation, on the actor,
+        /// and records its duration and whether its records match the patch's.
+        private func compareRootCatalogShardPatchIfArmed(
+            _ patchedShard: RootCatalogShard,
+            requirement: WorkspaceSearchCatalogAccessRequirement
+        ) {
+            let rootID = patchedShard.key.rootID
+            switch rootCatalogShardPatchComparisonMode {
+            case .off:
+                return
+            case .next:
+                guard rootCatalogShardPatchComparisonArmedRootIDs.remove(rootID) != nil else { return }
+                if rootCatalogShardPatchComparisonArmedRootIDs.isEmpty {
+                    rootCatalogShardPatchComparisonMode = .off
+                }
+            case .on:
+                break
+            }
+            let rebuildStart = WorkspaceFileSearchDebugTiming.now()
+            let authoritativeShard = buildAuthoritativeRootCatalogShard(
+                root: patchedShard.root,
+                key: patchedShard.key,
+                appliedIndexGeneration: patchedShard.appliedIndexGeneration,
+                requirement: requirement
+            )
+            let parityStart = WorkspaceFileSearchDebugTiming.now()
+            let parityMatched = Self.rootCatalogShardsMatch(patchedShard, authoritativeShard)
+            let parityEnd = WorkspaceFileSearchDebugTiming.now()
+            guard rootCatalogShardBatchSampleInProgress?.rootID == rootID else { return }
+            rootCatalogShardBatchSampleInProgress?.comparison = RootCatalogShardPatchComparisonDebugResult(
+                rebuildNanoseconds: WorkspaceFileSearchDebugTiming.elapsed(since: rebuildStart, through: parityStart),
+                parityNanoseconds: WorkspaceFileSearchDebugTiming.elapsed(since: parityStart, through: parityEnd),
+                parityMatched: parityMatched
+            )
+        }
+
+        /// Equal arrays imply the patched ones are sorted, since the authoritative build sorts its own.
+        /// The path indexes must make the same entries searchable, whether materialized or projected.
+        private static func rootCatalogShardsMatch(_ patched: RootCatalogShard, _ authoritative: RootCatalogShard) -> Bool {
+            guard patched.files == authoritative.files,
+                  patched.folders == authoritative.folders,
+                  patched.entries == authoritative.entries,
+                  patched.projectionFiles == authoritative.projectionFiles
+            else { return false }
+            return searchableEntriesInCatalogOrder(patched.pathSearchIndex)
+                == searchableEntriesInCatalogOrder(authoritative.pathSearchIndex)
+        }
+
+        private static func searchableEntriesInCatalogOrder(
+            _ pathSearchIndex: WorkspaceSearchRootPathIndex?
+        ) -> [WorkspaceSearchCatalogEntry]? {
+            pathSearchIndex?.searchableEntriesForVerification().sorted(by: searchCatalogEntryPrecedes)
+        }
+
+        private func finishRootCatalogShardBatchSample() {
+            guard var sample = rootCatalogShardBatchSampleInProgress else { return }
+            rootCatalogShardBatchSampleInProgress = nil
+            guard sample.outcome != nil else { return }
+            if let state = rootStatesByID[sample.rootID] {
+                sample.rootLifetimeID = state.lifetimeID
+                sample.rootFileCount = state.fileIDsByRelativePath.count
+                sample.rootFolderCount = state.folderIDsByRelativePath.count
+            }
+            sample.topologyGeneration = catalogGenerationsByRootID[sample.rootID]
+            if let pathSearchIndex = publishedRootCatalogShardsByRootID[sample.rootID]?.pathSearchIndex {
+                sample.overlayPayloadCount = pathSearchIndex.overlayPayloadCount
+                sample.overlayMentionCount = pathSearchIndex.overlayMentionCount
+            }
+            if canonicalApplyDebugPass?.rootID == sample.rootID {
+                // The canonical apply pass adds its ingress timings and job durations when it ends.
+                canonicalApplyDebugPass?.pendingSample = sample
+            } else {
+                appendRootCatalogShardBatchSample(sample)
+            }
+        }
+
+        private func appendRootCatalogShardBatchSample(_ sample: RootCatalogShardBatchDebugSample) {
+            var history = rootCatalogShardBatchHistoriesByRootID[sample.rootID] ?? RootCatalogShardBatchHistoryState()
+            history.totalObservedSampleCount += 1
+            if let outcome = sample.outcome {
+                history.outcomeCounts[outcome, default: 0] += 1
+            }
+            history.samples.append(sample)
+            if history.samples.count > Self.rootCatalogShardBatchSampleLimit {
+                history.samples.removeFirst(history.samples.count - Self.rootCatalogShardBatchSampleLimit)
+            }
+            rootCatalogShardBatchHistoriesByRootID[sample.rootID] = history
+        }
+
+        private func beginCanonicalApplyDebugPass(rootID: UUID) {
+            canonicalApplyDebugPass = CanonicalApplyDebugPass(
+                rootID: rootID,
+                startNanoseconds: WorkspaceFileSearchDebugTiming.now()
+            )
+        }
+
+        private func recordCanonicalApplyDeltaTiming(
+            _ delta: FileSystemDelta,
+            nanoseconds: UInt64,
+            removedRecordCount: Int
+        ) {
+            guard var ingress = canonicalApplyDebugPass?.ingress else { return }
+            switch delta {
+            case .fileAdded:
+                ingress.addedFileCount += 1
+                ingress.addedFileNanoseconds &+= nanoseconds
+                ingress.maxAddedFileNanoseconds = max(ingress.maxAddedFileNanoseconds, nanoseconds)
+            case .fileRemoved:
+                ingress.removedFileCount += 1
+                ingress.removedFileNanoseconds &+= nanoseconds
+                ingress.maxRemovedFileNanoseconds = max(ingress.maxRemovedFileNanoseconds, nanoseconds)
+            case .folderRemoved:
+                ingress.removedFolderCount += 1
+                ingress.removedFolderRecordCount += removedRecordCount
+                ingress.removedFolderNanoseconds &+= nanoseconds
+            case .folderAdded, .fileModified, .folderModified:
+                return
+            }
+            canonicalApplyDebugPass?.ingress = ingress
+        }
+
+        /// Ends the canonical apply pass and records its pending batch sample with the pass's ingress
+        /// timings and job durations. A comparison's rebuild and parity check are excluded from the durations.
+        private func finishCanonicalApplyDebugPass() {
+            guard let pass = canonicalApplyDebugPass else { return }
+            canonicalApplyDebugPass = nil
+            guard var sample = pass.pendingSample else { return }
+            let passEnd = WorkspaceFileSearchDebugTiming.now()
+            let comparisonNanoseconds = sample.comparison.map { $0.rebuildNanoseconds &+ $0.parityNanoseconds } ?? 0
+            func excludingComparison(_ nanoseconds: UInt64) -> UInt64 {
+                nanoseconds >= comparisonNanoseconds ? nanoseconds - comparisonNanoseconds : 0
+            }
+            sample.mutationPassNanoseconds = excludingComparison(
+                WorkspaceFileSearchDebugTiming.elapsed(since: pass.startNanoseconds, through: passEnd)
+            )
+            if let context = Self.activeCanonicalApplyDebugContext {
+                sample.servicePublicationSequence = context.servicePublicationSequence
+                sample.canonicalApplyNanoseconds = excludingComparison(
+                    WorkspaceFileSearchDebugTiming.elapsed(since: context.startNanoseconds, through: passEnd)
+                )
+            }
+            sample.ingress = pass.ingress
+            appendRootCatalogShardBatchSample(sample)
+        }
+
+        private func recordUncachedAuthoritativeSnapshotBuild(
+            _ snapshot: WorkspaceSearchCatalogSnapshot,
+            includesPathIndexes: Bool,
+            nanoseconds: UInt64
+        ) {
+            var buildByteCount = 0
+            var rootTotals: [UUID: (fileCount: Int, byteCount: Int)] = [:]
+            for entry in snapshot.entries {
+                let byteCount = Self.estimatedUncachedSnapshotByteCount(
+                    for: entry,
+                    includesPathIndexes: includesPathIndexes
+                )
+                buildByteCount += byteCount
+                rootTotals[entry.rootID, default: (0, 0)].fileCount += 1
+                rootTotals[entry.rootID, default: (0, 0)].byteCount += byteCount
+            }
+            var state = uncachedAuthoritativeSnapshotBuildState
+            state.buildCount += 1
+            state.fileCount += snapshot.entries.count
+            state.totalNanoseconds &+= nanoseconds
+            state.estimatedByteCount += buildByteCount
+            state.lastFileCount = snapshot.entries.count
+            state.lastNanoseconds = nanoseconds
+            state.lastEstimatedByteCount = buildByteCount
+            for root in snapshot.roots {
+                let totals = rootTotals[root.id] ?? (0, 0)
+                var rootState = state.rootsByID[root.id] ?? UncachedAuthoritativeSnapshotBuildState.Root()
+                rootState.buildCount += 1
+                rootState.fileCount += totals.fileCount
+                rootState.estimatedByteCount += totals.byteCount
+                state.rootsByID[root.id] = rootState
+            }
+            uncachedAuthoritativeSnapshotBuildState = state
+        }
+
+        /// Approximate heap bytes one file adds to an uncached snapshot: its record and entry array
+        /// slots, the entry's derived display path, and with path indexes the index key string, its
+        /// three C copies, and the C filename copy. Strings shared with the store's records aren't counted.
+        private static func estimatedUncachedSnapshotByteCount(
+            for entry: WorkspaceSearchCatalogEntry,
+            includesPathIndexes: Bool
+        ) -> Int {
+            func mallocByteCount(_ byteCount: Int) -> Int {
+                (byteCount + 15) / 16 * 16
+            }
+            func swiftStringHeapByteCount(_ utf8Count: Int) -> Int {
+                utf8Count <= 15 ? 0 : mallocByteCount(32 + utf8Count + 1)
+            }
+            let displayPathByteCount = entry.displayPath.utf8.count
+            var byteCount = MemoryLayout<WorkspaceFileRecord>.stride
+                + MemoryLayout<WorkspaceSearchCatalogEntry>.stride
+                + swiftStringHeapByteCount(displayPathByteCount)
+            if includesPathIndexes {
+                let keyByteCount = displayPathByteCount + 1 + entry.standardizedFullPath.utf8.count
+                byteCount += swiftStringHeapByteCount(keyByteCount)
+                    + 3 * mallocByteCount(keyByteCount + 1)
+                    + mallocByteCount(entry.name.utf8.count + 1)
+            }
+            return byteCount
+        }
+
+        func setRootCatalogShardPatchCapOverride(_ cap: Int?) {
+            precondition(cap.map { $0 >= 0 } ?? true, "A catalog patch cap can't be negative")
+            rootCatalogShardPatchCapOverride = cap
+        }
+
+        /// `.next` arms one comparison for each root loaded now; `.on` compares every patched batch.
+        func setRootCatalogShardPatchComparisonMode(_ mode: RootCatalogShardPatchComparisonMode) {
+            rootCatalogShardPatchComparisonMode = mode
+            rootCatalogShardPatchComparisonArmedRootIDs = mode == .next ? Set(rootStatesByID.keys) : []
+            if mode == .next, rootCatalogShardPatchComparisonArmedRootIDs.isEmpty {
+                rootCatalogShardPatchComparisonMode = .off
+            }
+        }
+
+        func rootCatalogShardContentsForTesting(
+            rootID: UUID,
+            pathQueries: [String] = []
+        ) -> RootCatalogShardContentsForTesting? {
+            publishedRootCatalogShardsByRootID[rootID].map {
+                Self.rootCatalogShardContentsForTesting($0, pathQueries: pathQueries)
+            }
+        }
+
+        /// The contents of a fresh authoritative shard with path indexes for the root's current records.
+        /// The store doesn't publish or retain it.
+        func authoritativeRootCatalogShardContentsForTesting(
+            rootID: UUID,
+            pathQueries: [String] = []
+        ) -> RootCatalogShardContentsForTesting? {
+            guard let state = rootStatesByID[rootID], let key = rootCatalogShardKey(for: state.root) else { return nil }
+            let shard = buildAuthoritativeRootCatalogShard(
+                root: state.root,
+                key: key,
+                appliedIndexGeneration: appliedIndexGenerationsByRootID[rootID] ?? 0,
+                requirement: .recordsAndPathIndexes
+            )
+            return Self.rootCatalogShardContentsForTesting(shard, pathQueries: pathQueries)
+        }
+
+        private static func rootCatalogShardContentsForTesting(
+            _ shard: RootCatalogShard,
+            pathQueries: [String]
+        ) -> RootCatalogShardContentsForTesting {
+            RootCatalogShardContentsForTesting(
+                files: shard.files,
+                folders: shard.folders,
+                entries: shard.entries,
+                projectionFileIDs: shard.projectionFiles.map(\.file.id),
+                projectionLanguages: shard.projectionFiles.map(\.language.rawValue),
+                projectionIndexResolvesEveryFile: shard.projectionFiles.indices.allSatisfy { index in
+                    let file = shard.projectionFiles[index].file
+                    return shard.projectionIndex(
+                        fileID: file.id,
+                        standardizedRelativePath: file.standardizedRelativePath
+                    ) == index
+                },
+                searchableEntries: searchableEntriesInCatalogOrder(shard.pathSearchIndex),
+                pathMatches: shard.pathSearchIndex.map { pathSearchIndex in
+                    pathQueries.map { query in
+                        pathSearchIndex.search(query, limit: 64).map { candidate in
+                            RootCatalogShardPathMatchForTesting(
+                                entry: candidate.entry,
+                                score: candidate.score,
+                                tieBreakKey: candidate.tieBreakKey
+                            )
+                        }
+                    }
+                }
+            )
+        }
+
+        /// Republishes the root's shard with a projected path index over `snapshot`, built from the
+        /// shard's entries, which is the index shape a seeded session-worktree root publishes. Every
+        /// snapshot path must have an entry. Returns false when the index can't be built.
+        @discardableResult
+        func installProjectedPathIndexForTesting(rootID: UUID, snapshot: WorkspaceRootReusableSnapshot) -> Bool {
+            guard let shard = publishedRootCatalogShardsByRootID[rootID],
+                  let pathSearchIndex = WorkspaceSearchRootPathIndex(
+                      identity: WorkspaceSearchRootPathIndexIdentity(
+                          rootID: shard.key.rootID,
+                          lifetimeID: shard.key.lifetimeID,
+                          topologyGeneration: shard.key.topologyGeneration
+                      ),
+                      root: shard.root,
+                      projectedSnapshot: snapshot,
+                      changedRelativeFilePaths: [],
+                      tombstonedBaseRelativeFilePaths: [],
+                      entries: shard.entries
+                  )
+            else { return false }
+            let projectedShard = RootCatalogShard(swappingPathSearchIndexOf: shard, pathSearchIndex: pathSearchIndex)
+            publishedRootCatalogShardsByRootID[rootID] = projectedShard
+            retainPublishedRootCatalogShard(projectedShard)
+            return true
+        }
+
+        /// Keeps the root's applied batches away from its shard until they're taken, so the shard's
+        /// records can lag the store's by several batches.
+        func holdRootCatalogShardBatchesForTesting(rootID: UUID) {
+            if heldRootCatalogShardBatchesByRootIDForTesting[rootID] == nil {
+                heldRootCatalogShardBatchesByRootIDForTesting[rootID] = []
+            }
+        }
+
+        func takeHeldRootCatalogShardBatchesForTesting(rootID: UUID) -> [WorkspaceAppliedIndexBatchEvent] {
+            heldRootCatalogShardBatchesByRootIDForTesting.removeValue(forKey: rootID) ?? []
+        }
+
+        /// Republishes the root's shard as the predecessor of `event`, then applies `event` to it. The
+        /// predecessor keeps the shard's records; with `stagedRoot`, its root record and entries come from
+        /// that root record instead. Its applied generation is `event.generation - 1`, and its topology
+        /// generation is one below the store's when `event` changes topology. Returns false when the
+        /// root has no shard to stage.
+        @discardableResult
+        func applyAppliedIndexEventToStagedRootCatalogShardForTesting(
+            _ event: WorkspaceAppliedIndexBatchEvent,
+            stagedRoot: WorkspaceRootRecord? = nil
+        ) -> Bool {
+            guard event.generation > 0,
+                  let shard = publishedRootCatalogShardsByRootID[event.rootID],
+                  let state = rootStatesByID[event.rootID],
+                  let currentKey = rootCatalogShardKey(for: state.root),
+                  let deltaState = rootCatalogShardDeltaStatesByRootID[event.rootID]
+            else { return false }
+            let changesTopology = Self.changesCatalogTopology(event)
+            guard !changesTopology || currentKey.topologyGeneration > 0 else { return false }
+            let stagedShard = RootCatalogShard(
+                key: RootCatalogShardKey(
+                    canonicalConfigurationIdentity: currentKey.canonicalConfigurationIdentity,
+                    rootID: currentKey.rootID,
+                    lifetimeID: currentKey.lifetimeID,
+                    topologyGeneration: changesTopology
+                        ? currentKey.topologyGeneration - 1
+                        : currentKey.topologyGeneration
+                ),
+                root: stagedRoot ?? shard.root,
+                files: shard.files,
+                precomputedProjectionFiles: shard.projectionFiles,
+                folders: shard.folders,
+                entries: stagedRoot.map { stagedRoot in
+                    shard.files.map { WorkspaceSearchCatalogEntry(file: $0, root: stagedRoot) }
+                } ?? shard.entries,
+                pathSearchIndex: shard.pathSearchIndex,
+                appliedIndexGeneration: event.generation - 1
+            )
+            publishedRootCatalogShardsByRootID[event.rootID] = stagedShard
+            retainPublishedRootCatalogShard(stagedShard)
+            rootCatalogShardDeltaStatesByRootID[event.rootID] = RootCatalogShardDeltaState(
+                lifetimeID: deltaState.lifetimeID,
+                lastAppliedIndexGeneration: event.generation - 1,
+                isDirty: false,
+                capability: deltaState.capability
+            )
+            applyAppliedIndexEventToRootCatalogShard(event)
+            return true
+        }
+    #endif
+
+    /// One record kind's edits against a sorted shard array, as indices into that array.
+    private struct RootCatalogShardKindEdits<Record> {
+        private(set) var removedIndices: [Int] = []
+        private(set) var insertions: [(index: Int, element: Record)] = []
+        /// Old records that leave the array: removed or displaced.
+        private(set) var vacatedRecords: [Record] = []
+        var noOpCount = 0
+
+        var logicalMutationCount: Int {
+            removedIndices.count + insertions.count
+        }
+
+        mutating func remove(_ record: Record, at index: Int) {
+            removedIndices.append(index)
+            vacatedRecords.append(record)
+        }
+
+        mutating func insert(_ record: Record, at index: Int) {
+            insertions.append((index, record))
+        }
+
+        /// Sorts the edits for the run merge. Returns false when two edits remove the same index.
+        mutating func sortForMerge(by precedes: (Record, Record) -> Bool) -> Bool {
+            removedIndices.sort()
+            insertions.sort { precedes($0.element, $1.element) }
+            return zip(removedIndices, removedIndices.dropFirst()).allSatisfy { $0 < $1 }
+        }
+    }
+
+    /// The distinct upserted records in catalog order, or nil when a record isn't the store's current
+    /// one or two IDs share a path. Records that share an ID are all the current one, so they collapse.
+    private static func normalizedCatalogUpserts<Record: Identifiable>(
+        _ records: [Record],
+        precedes: (Record, Record) -> Bool,
+        sharesPath: (Record, Record) -> Bool,
+        isCurrent: (Record) -> Bool
+    ) -> [Record]? where Record.ID == UUID {
+        var recordsByID: [UUID: Record] = [:]
+        recordsByID.reserveCapacity(records.count)
+        for record in records {
+            guard isCurrent(record) else { return nil }
+            recordsByID[record.id] = record
+        }
+        let sorted = recordsByID.values.sorted(by: precedes)
+        guard !zip(sorted, sorted.dropFirst()).contains(where: { sharesPath($0, $1) }) else { return nil }
+        return sorted
+    }
+
+    /// Records how `record`, the store's current record for its ID, changes `oldRecords`, given the
+    /// old records at its path: nothing when the old record is equal, as one with the same ID always is
+    /// because the store never changes a record under its ID; a displacement when another ID holds the
+    /// path; and an insertion when no record does. Returns false when more than one old record holds
+    /// the path.
+    private static func locateCatalogRecord<Record: Equatable>(
+        _ record: Record,
+        in oldRecords: [Record],
+        samePath: Range<Int>,
+        precedes: (Record, Record) -> Bool,
+        edits: inout RootCatalogShardKindEdits<Record>
+    ) -> Bool {
+        switch samePath.count {
+        case 0:
+            edits.insert(record, at: samePath.lowerBound)
+        case 1:
+            let oldIndex = samePath.lowerBound
+            let old = oldRecords[oldIndex]
+            if old == record {
+                edits.noOpCount += 1
+            } else {
+                edits.remove(old, at: oldIndex)
+                edits.insert(record, at: catalogPartitionIndex(in: oldRecords) { precedes($0, record) })
+            }
+        default:
+            return false
+        }
+        return true
+    }
+
+    /// Patches `previousShard` with `event` in one pass: normalize the batch, locate each edit by
+    /// binary search, check the inserted records' folder ancestry, check the cap, derive entries and
+    /// projections for the arriving records only, and merge each edited array once.
+    private func buildRootCatalogShardPatch(
+        event: WorkspaceAppliedIndexBatchEvent,
+        previousShard: RootCatalogShard,
+        maximumLogicalMutationCount: Int
+    ) -> RootCatalogShardPatchAttempt {
+        let root = previousShard.root
+        let oldFiles = previousShard.files
+        let oldFolders = previousShard.folders
+        var noOpCount = 0
+        var logicalMutationCount = 0
+        #if DEBUG
+            var metrics = RootCatalogShardPatchDebugMetrics()
+            var phaseStart = WorkspaceFileSearchDebugTiming.now()
+            func endPhase(_ phase: WritableKeyPath<RootCatalogShardPatchDebugMetrics, UInt64>) {
+                let phaseEnd = WorkspaceFileSearchDebugTiming.now()
+                metrics[keyPath: phase] = WorkspaceFileSearchDebugTiming.elapsed(since: phaseStart, through: phaseEnd)
+                phaseStart = phaseEnd
+            }
+        #endif
+        func attempt(_ outcome: RootCatalogShardPatchOutcome) -> RootCatalogShardPatchAttempt {
+            #if DEBUG
+                return RootCatalogShardPatchAttempt(
+                    outcome: outcome,
+                    noOpCount: noOpCount,
+                    logicalMutationCount: logicalMutationCount,
+                    metrics: metrics
+                )
+            #else
+                return RootCatalogShardPatchAttempt(
+                    outcome: outcome,
+                    noOpCount: noOpCount,
+                    logicalMutationCount: logicalMutationCount
+                )
+            #endif
+        }
+
+        // 1. Normalize: collapse repeated upserts, such as the ancestor folders every file add
+        // republishes, and keep the guards that the batch matches the store and doesn't overlap.
+        guard previousShard.entries.count == oldFiles.count,
+              let upsertedFiles = Self.normalizedCatalogUpserts(
+                  event.upsertedFiles,
+                  precedes: Self.searchRootCatalogFilePrecedes,
+                  sharesPath: {
+                      Self.compareUTF8Binary($0.standardizedRelativePath, $1.standardizedRelativePath) == .orderedSame
+                  },
+                  isCurrent: { $0.rootID == event.rootID && filesByID[$0.id] == $0 }
+              ),
+              let upsertedFolders = Self.normalizedCatalogUpserts(
+                  event.upsertedFolders,
+                  precedes: Self.searchCatalogFolderPrecedes,
+                  sharesPath: { $0.standardizedFullPath == $1.standardizedFullPath },
+                  isCurrent: { $0.rootID == event.rootID && foldersByID[$0.id] == $0 }
+              )
+        else { return attempt(.unsafe) }
+        let upsertedFileIDs = Set(upsertedFiles.map(\.id))
+        let upsertedFolderIDs = Set(upsertedFolders.map(\.id))
         let removedFileIDs = Set(event.removedFileIDs)
         let removedFolderIDs = Set(event.removedFolderIDs)
         let removedFilePaths = Set(event.removedFilePaths.map(StandardizedPath.relative))
@@ -8353,124 +9497,216 @@ actor WorkspaceFileContextStore {
               modifiedFileIDs.count == event.modifiedFileIDs.count,
               modifiedFolderIDs.count == event.modifiedFolderIDs.count,
               modifiedFileIDs.allSatisfy({ filesByID[$0]?.rootID == event.rootID }),
-              modifiedFolderIDs.allSatisfy({ foldersByID[$0]?.rootID == event.rootID })
-        else { return nil }
-
-        var touchedFileIDs = Set(upsertedFilesByID.keys)
-        var touchedFolderIDs = Set(upsertedFoldersByID.keys)
-        for id in removedFileIDs {
-            guard oldFilesByID[id] != nil else { return nil }
-            touchedFileIDs.insert(id)
-        }
-        for path in removedFilePaths {
-            guard let id = oldFileIDsByPath[path] else { return nil }
-            touchedFileIDs.insert(id)
-        }
-        for id in modifiedFileIDs {
-            guard oldFilesByID[id] != nil else { return nil }
-            touchedFileIDs.insert(id)
-        }
-        for id in removedFolderIDs {
-            guard oldFoldersByID[id] != nil else { return nil }
-            touchedFolderIDs.insert(id)
-        }
-        for path in removedFolderPaths {
-            guard let id = oldFolderIDsByPath[path] else { return nil }
-            touchedFolderIDs.insert(id)
-        }
-        for id in modifiedFolderIDs {
-            guard oldFoldersByID[id] != nil else { return nil }
-            touchedFolderIDs.insert(id)
-        }
-
-        let upsertedFilePaths = Set(upsertedFilesByID.values.map(\.standardizedRelativePath))
-        let upsertedFolderPaths = Set(upsertedFoldersByID.values.map(\.standardizedRelativePath))
-        var pathIndexChangedFileIDs = touchedFileIDs
-        for path in removedFilePaths.union(upsertedFilePaths) {
-            if let oldFileID = oldFileIDsByPath[path] {
-                pathIndexChangedFileIDs.insert(oldFileID)
-            }
-        }
-        guard removedFileIDs.isDisjoint(with: upsertedFilesByID.keys),
-              removedFolderIDs.isDisjoint(with: upsertedFoldersByID.keys),
-              removedFilePaths.isDisjoint(with: upsertedFilePaths),
-              removedFolderPaths.isDisjoint(with: upsertedFolderPaths),
+              modifiedFolderIDs.allSatisfy({ foldersByID[$0]?.rootID == event.rootID }),
+              removedFileIDs.isDisjoint(with: upsertedFileIDs),
+              removedFolderIDs.isDisjoint(with: upsertedFolderIDs),
+              removedFilePaths.isDisjoint(with: upsertedFiles.lazy.map(\.standardizedRelativePath)),
+              removedFolderPaths.isDisjoint(with: upsertedFolders.lazy.map(\.standardizedRelativePath)),
               modifiedFileIDs.isDisjoint(with: removedFileIDs),
               modifiedFolderIDs.isDisjoint(with: removedFolderIDs)
-        else { return nil }
+        else { return attempt(.unsafe) }
+        #if DEBUG
+            endPhase(\.normalizeNanoseconds)
+        #endif
 
-        let logicalMutationCount = touchedFileIDs.count + touchedFolderIDs.count
-        guard logicalMutationCount <= Self.maxRootCatalogShardPatchLogicalMutationCount else {
-            return RootCatalogShardBuilderOutput(
-                files: previousShard.files,
-                folders: previousShard.folders,
-                logicalMutationCount: logicalMutationCount,
-                pathIndexChangedFileIDs: []
+        /// 2. Locate every edit by binary search through the comparators that sorted the arrays.
+        /// Paths locate records because a record ID never changes path: re-indexing a path creates a
+        /// new ID, and every upsert equals the store's current record.
+        func oldFileRange(atPath path: String) -> Range<Int> {
+            let lowerBound = Self.catalogPartitionIndex(in: oldFiles) {
+                Self.compareUTF8Binary($0.standardizedRelativePath, path) == .orderedAscending
+            }
+            let upperBound = Self.catalogPartitionIndex(in: oldFiles[lowerBound...]) {
+                Self.compareUTF8Binary($0.standardizedRelativePath, path) == .orderedSame
+            }
+            return lowerBound ..< upperBound
+        }
+        func oldFolderRange(atFullPath path: String) -> Range<Int> {
+            let lowerBound = Self.catalogPartitionIndex(in: oldFolders) { $0.standardizedFullPath < path }
+            let upperBound = Self.catalogPartitionIndex(in: oldFolders[lowerBound...]) {
+                $0.standardizedFullPath == path
+            }
+            return lowerBound ..< upperBound
+        }
+
+        var fileEdits = RootCatalogShardKindEdits<WorkspaceFileRecord>()
+        var folderEdits = RootCatalogShardKindEdits<WorkspaceFolderRecord>()
+        // Removal publishers sort the path arrays apart from the ID arrays, so match them as sets.
+        var resolvedRemovedFileIDs = Set<UUID>()
+        for path in removedFilePaths {
+            let samePath = oldFileRange(atPath: path)
+            guard samePath.count == 1 else { return attempt(.unsafe) }
+            let old = oldFiles[samePath.lowerBound]
+            guard removedFileIDs.contains(old.id), resolvedRemovedFileIDs.insert(old.id).inserted else {
+                return attempt(.unsafe)
+            }
+            fileEdits.remove(old, at: samePath.lowerBound)
+        }
+        var resolvedRemovedFolderIDs = Set<UUID>()
+        for path in removedFolderPaths {
+            // Folders sort by full path. The root folder record supplies the prefix the store stamped
+            // on every folder record; rebuilding it with `standardizingPath` would consult the disk,
+            // which answers differently once the folder is gone.
+            let fullPath = StandardizedPath.join(
+                standardizedRoot: root.standardizedFullPath,
+                standardizedRelativePath: path
             )
+            let samePath = oldFolderRange(atFullPath: fullPath)
+            guard samePath.count == 1 else { return attempt(.unsafe) }
+            let old = oldFolders[samePath.lowerBound]
+            guard old.standardizedRelativePath == path,
+                  removedFolderIDs.contains(old.id),
+                  resolvedRemovedFolderIDs.insert(old.id).inserted
+            else { return attempt(.unsafe) }
+            folderEdits.remove(old, at: samePath.lowerBound)
         }
+        guard resolvedRemovedFileIDs.count == removedFileIDs.count,
+              resolvedRemovedFolderIDs.count == removedFolderIDs.count
+        else { return attempt(.unsafe) }
 
-        func insertFile(_ file: WorkspaceFileRecord, into files: inout [WorkspaceFileRecord]) {
-            var lowerBound = 0
-            var upperBound = files.count
-            while lowerBound < upperBound {
-                let midpoint = (lowerBound + upperBound) / 2
-                if Self.searchRootCatalogFilePrecedes(files[midpoint], file) {
-                    lowerBound = midpoint + 1
-                } else {
-                    upperBound = midpoint
+        // An upsert of the same ID covers a modification. A modification changes no record, so one
+        // without an upsert only needs the shard to hold the store's record at its path.
+        for fileID in modifiedFileIDs where !upsertedFileIDs.contains(fileID) {
+            guard let current = filesByID[fileID] else { return attempt(.unsafe) }
+            let samePath = oldFileRange(atPath: current.standardizedRelativePath)
+            guard samePath.count == 1, oldFiles[samePath.lowerBound] == current else { return attempt(.unsafe) }
+            fileEdits.noOpCount += 1
+        }
+        for folderID in modifiedFolderIDs where !upsertedFolderIDs.contains(folderID) {
+            guard let current = foldersByID[folderID] else { return attempt(.unsafe) }
+            let samePath = oldFolderRange(atFullPath: current.standardizedFullPath)
+            guard samePath.count == 1, oldFolders[samePath.lowerBound] == current else { return attempt(.unsafe) }
+            folderEdits.noOpCount += 1
+        }
+        for file in upsertedFiles {
+            guard Self.locateCatalogRecord(
+                file,
+                in: oldFiles,
+                samePath: oldFileRange(atPath: file.standardizedRelativePath),
+                precedes: Self.searchRootCatalogFilePrecedes,
+                edits: &fileEdits
+            ) else { return attempt(.unsafe) }
+        }
+        for folder in upsertedFolders {
+            guard Self.locateCatalogRecord(
+                folder,
+                in: oldFolders,
+                samePath: oldFolderRange(atFullPath: folder.standardizedFullPath),
+                precedes: Self.searchCatalogFolderPrecedes,
+                edits: &folderEdits
+            ) else { return attempt(.unsafe) }
+        }
+        guard fileEdits.sortForMerge(by: Self.searchRootCatalogFilePrecedes),
+              folderEdits.sortForMerge(by: Self.searchCatalogFolderPrecedes)
+        else { return attempt(.unsafe) }
+
+        // 3. Every inserted record needs its folder ancestry in the patched shard: each
+        // ancestor stays in the old shard or arrives in this batch. Verified ancestors are memoized.
+        let arrivingFolderIDs = Set(folderEdits.insertions.map(\.element.id))
+        let leavingFolderIDs = Set(folderEdits.vacatedRecords.map(\.id))
+        var representedFolderIDs = Set<UUID>()
+        func ancestryIsRepresented(from parentFolderID: UUID?) -> Bool {
+            var verifiedChain: [UUID] = []
+            var nextFolderID = parentFolderID
+            while let folderID = nextFolderID, !representedFolderIDs.contains(folderID) {
+                guard !leavingFolderIDs.contains(folderID), let folder = foldersByID[folderID] else { return false }
+                if !arrivingFolderIDs.contains(folderID) {
+                    let index = Self.catalogPartitionIndex(in: oldFolders) {
+                        Self.searchCatalogFolderPrecedes($0, folder)
+                    }
+                    guard index < oldFolders.endIndex, oldFolders[index].id == folderID else { return false }
                 }
+                verifiedChain.append(folderID)
+                nextFolderID = folder.parentFolderID
             }
-            files.insert(file, at: lowerBound)
+            representedFolderIDs.formUnion(verifiedChain)
+            return true
         }
+        guard fileEdits.insertions.allSatisfy({ ancestryIsRepresented(from: $0.element.parentFolderID) }),
+              folderEdits.insertions.allSatisfy({ ancestryIsRepresented(from: $0.element.parentFolderID) })
+        else { return attempt(.unsafe) }
+        noOpCount = event.upsertedFiles.count - upsertedFiles.count
+            + event.upsertedFolders.count - upsertedFolders.count
+            + fileEdits.noOpCount + folderEdits.noOpCount
+        logicalMutationCount = fileEdits.logicalMutationCount + folderEdits.logicalMutationCount
+        #if DEBUG
+            endPhase(\.locateNanoseconds)
+        #endif
 
-        func insertFolder(_ folder: WorkspaceFolderRecord, into folders: inout [WorkspaceFolderRecord]) {
-            var lowerBound = 0
-            var upperBound = folders.count
-            while lowerBound < upperBound {
-                let midpoint = (lowerBound + upperBound) / 2
-                if Self.searchCatalogFolderPrecedes(folders[midpoint], folder) {
-                    lowerBound = midpoint + 1
-                } else {
-                    upperBound = midpoint
-                }
-            }
-            folders.insert(folder, at: lowerBound)
+        // 4. Check the cap before building anything.
+        guard logicalMutationCount <= maximumLogicalMutationCount else { return attempt(.overCap) }
+
+        // 5. Derive entries and projections for the arriving records only.
+        let entryInsertions = fileEdits.insertions.map { insertion in
+            (index: insertion.index, element: WorkspaceSearchCatalogEntry(file: insertion.element, root: root))
         }
-
-        var files = previousShard.files
-        if let touchedFileID = touchedFileIDs.first {
-            files.removeAll { file in
-                file.id == touchedFileID
-                    || removedFilePaths.contains(file.standardizedRelativePath)
-                    || upsertedFilePaths.contains(file.standardizedRelativePath)
+        let projectionRemovals = fileEdits.vacatedRecords
+            .compactMap { previousShard.projectionIndex(fileID: $0.id, standardizedRelativePath: $0.standardizedRelativePath) }
+            .sorted()
+        let projectionInsertions = fileEdits.insertions.compactMap {
+            insertion -> (index: Int, element: RootCatalogProjectionFile)? in
+            guard let projectionFile = Self.rootCatalogProjectionFile(for: insertion.element) else { return nil }
+            let index = Self.catalogPartitionIndex(in: previousShard.projectionFiles) {
+                Self.searchRootCatalogFilePrecedes($0.file, insertion.element)
             }
-            if let upserted = upsertedFilesByID[touchedFileID] {
-                insertFile(upserted, into: &files)
-            } else if modifiedFileIDs.contains(touchedFileID), let modified = filesByID[touchedFileID] {
-                insertFile(modified, into: &files)
-            }
+            return (index, projectionFile)
         }
+        #if DEBUG
+            metrics.derivedEntryCount = entryInsertions.count
+            metrics.projectionClassificationCount = fileEdits.insertions.count
+            endPhase(\.deriveNanoseconds)
+        #endif
 
-        var folders = previousShard.folders
-        if let touchedFolderID = touchedFolderIDs.first {
-            folders.removeAll { folder in
-                folder.id == touchedFolderID
-                    || removedFolderPaths.contains(folder.standardizedRelativePath)
-                    || upsertedFolderPaths.contains(folder.standardizedRelativePath)
-            }
-            if let upserted = upsertedFoldersByID[touchedFolderID] {
-                insertFolder(upserted, into: &folders)
-            } else if modifiedFolderIDs.contains(touchedFolderID), let modified = foldersByID[touchedFolderID] {
-                insertFolder(modified, into: &folders)
-            }
-        }
-
-        return RootCatalogShardBuilderOutput(
-            files: files,
-            folders: folders,
-            logicalMutationCount: logicalMutationCount,
-            pathIndexChangedFileIDs: pathIndexChangedFileIDs
+        // 6. Merge each edited array once; an array without edits is shared as is. `entries` merges
+        // with the same edits as `files`, so `entries[i]` stays the entry for `files[i]`.
+        let files = Self.mergedCatalogRecords(
+            oldFiles,
+            removing: fileEdits.removedIndices,
+            inserting: fileEdits.insertions
         )
+        let entries = Self.mergedCatalogRecords(
+            previousShard.entries,
+            removing: fileEdits.removedIndices,
+            inserting: entryInsertions
+        )
+        let projectionFiles = Self.mergedCatalogRecords(
+            previousShard.projectionFiles,
+            removing: projectionRemovals,
+            inserting: projectionInsertions
+        )
+        let folders = Self.mergedCatalogRecords(
+            oldFolders,
+            removing: folderEdits.removedIndices,
+            inserting: folderEdits.insertions
+        )
+        #if DEBUG
+            let filesMerged = !fileEdits.removedIndices.isEmpty || !fileEdits.insertions.isEmpty
+            let projectionMerged = !projectionRemovals.isEmpty || !projectionInsertions.isEmpty
+            let foldersMerged = !folderEdits.removedIndices.isEmpty || !folderEdits.insertions.isEmpty
+            metrics.mergeCopiedElementCount = (filesMerged ? files.count + entries.count : 0)
+                + (projectionMerged ? projectionFiles.count : 0)
+                + (foldersMerged ? folders.count : 0)
+            endPhase(\.mergeCopyNanoseconds)
+        #endif
+
+        // 7. The path index takes the changed entries and the affected files' old and new paths.
+        var affectedFileIDs = Set(fileEdits.vacatedRecords.map(\.id))
+        var changedRelativePaths = Set(fileEdits.vacatedRecords.map(\.standardizedRelativePath))
+        for insertion in fileEdits.insertions {
+            affectedFileIDs.insert(insertion.element.id)
+            changedRelativePaths.insert(insertion.element.standardizedRelativePath)
+        }
+        return attempt(.patched(RootCatalogShardPatch(
+            files: files,
+            entries: entries,
+            projectionFiles: projectionFiles,
+            folders: folders,
+            pathIndexPatch: WorkspaceSearchRootPathIndexPatch(
+                affectedFileIDs: affectedFileIDs,
+                changedEntries: entryInsertions.map(\.element),
+                changedRelativePaths: changedRelativePaths
+            )
+        )))
     }
 
     private func buildAuthoritativeCatalogComponents(
@@ -8813,6 +10049,84 @@ actor WorkspaceFileContextStore {
             return lhs.id.uuidString < rhs.id.uuidString
         }
         return lhs.standardizedFullPath < rhs.standardizedFullPath
+    }
+
+    private static func rootCatalogProjectionFile(for file: WorkspaceFileRecord) -> RootCatalogProjectionFile? {
+        let fileExtension = (file.name as NSString).pathExtension
+        guard SyntaxManager.supportsCodeMap(fileExtension: fileExtension),
+              let language = SyntaxManager.shared.language(forFileExtension: fileExtension)
+        else { return nil }
+        return RootCatalogProjectionFile(file: file, language: language)
+    }
+
+    /// The first index of `records` whose element doesn't satisfy `precedesTarget`, by binary search.
+    /// `precedesTarget` must hold for a prefix of `records` and fail for the rest, as it does when it
+    /// compares through the comparator that sorted them.
+    private static func catalogPartitionIndex<Records: RandomAccessCollection>(
+        in records: Records,
+        where precedesTarget: (Records.Element) -> Bool
+    ) -> Records.Index {
+        var lowerBound = records.startIndex
+        var remaining = records.count
+        while remaining > 0 {
+            let half = remaining / 2
+            let middle = records.index(lowerBound, offsetBy: half)
+            if precedesTarget(records[middle]) {
+                lowerBound = records.index(after: middle)
+                remaining -= half + 1
+            } else {
+                remaining = half
+            }
+        }
+        return lowerBound
+    }
+
+    /// Appends `records` to `merged` in one pass, copying the runs between edits, skipping the
+    /// elements at `removedIndices`, and placing each insertion before the element at its index
+    /// (at the end for `endIndex`). `removedIndices` must ascend strictly, and `insertions` must be
+    /// ordered by index and then by the comparator that sorted `records`.
+    private static func appendCatalogRunMerge<Records: RandomAccessCollection>(
+        of records: Records,
+        removing removedIndices: [Records.Index],
+        inserting insertions: [(index: Records.Index, element: Records.Element)],
+        into merged: inout [Records.Element]
+    ) {
+        var runStart = records.startIndex
+        var removalCursor = removedIndices.startIndex
+        var insertionCursor = insertions.startIndex
+        while true {
+            let nextRemoval = removalCursor < removedIndices.endIndex
+                ? removedIndices[removalCursor]
+                : records.endIndex
+            let nextInsertion = insertionCursor < insertions.endIndex
+                ? insertions[insertionCursor].index
+                : records.endIndex
+            let runEnd = min(nextRemoval, nextInsertion)
+            merged.append(contentsOf: records[runStart ..< runEnd])
+            runStart = runEnd
+            while insertionCursor < insertions.endIndex, insertions[insertionCursor].index == runStart {
+                merged.append(insertions[insertionCursor].element)
+                insertionCursor += 1
+            }
+            if removalCursor < removedIndices.endIndex, removedIndices[removalCursor] == runStart {
+                runStart = records.index(after: runStart)
+                removalCursor += 1
+            } else if runStart == records.endIndex {
+                return
+            }
+        }
+    }
+
+    private static func mergedCatalogRecords<Record>(
+        _ records: [Record],
+        removing removedIndices: [Int],
+        inserting insertions: [(index: Int, element: Record)]
+    ) -> [Record] {
+        guard !removedIndices.isEmpty || !insertions.isEmpty else { return records }
+        var merged: [Record] = []
+        merged.reserveCapacity(records.count - removedIndices.count + insertions.count)
+        appendCatalogRunMerge(of: records[...], removing: removedIndices, inserting: insertions, into: &merged)
+        return merged
     }
 
     #if DEBUG
@@ -9726,18 +11040,18 @@ actor WorkspaceFileContextStore {
 
     @discardableResult
     func reconcileLoadedRootCatalogWithDisk(rootID: UUID) async -> [FileSystemDelta] {
-        guard let state = rootStatesByID[rootID] else { return [] }
-        let root = state.root
+        guard let identity = rootStatesByID[rootID]?.identity else { return [] }
+        let root = identity.root
         let folderPaths = Set(
-            state.folderIDsByRelativePath.compactMap { relativePath, folderID -> String? in
+            rootStatesByID[rootID]?.folderIDsByRelativePath.compactMap { relativePath, folderID -> String? in
                 isDiscoverableFolderID(folderID) ? relativePath : nil
-            }
+            } ?? []
         )
         guard !folderPaths.isEmpty else { return [] }
 
         let deltas: [FileSystemDelta]
         do {
-            deltas = try await state.service.scanFoldersInParallel(folderPaths.sorted()).deltas
+            deltas = try await identity.service.scanFoldersInParallel(folderPaths.sorted()).deltas
         } catch {
             return []
         }
@@ -9807,25 +11121,25 @@ actor WorkspaceFileContextStore {
             guard codemapFencesByRootID[eligible.rootID] != nil,
                   fileIDsByStandardizedFullPath[eligible.fullPath] == nil,
                   folderIDsByStandardizedFullPath[eligible.fullPath] == nil,
-                  var state = rootStatesByID[eligible.rootID],
-                  state.root.id == eligible.rootID,
-                  state.root.standardizedFullPath == eligible.rootPath,
+                  let root = rootStatesByID[eligible.rootID]?.root,
+                  root.id == eligible.rootID,
+                  root.standardizedFullPath == eligible.rootPath,
                   rootIDsByStandardizedPath[eligible.rootPath] == eligible.rootID,
                   loadedRoot(containing: eligible.fullPath)?.id == eligible.rootID,
-                  state.fileIDsByRelativePath[eligible.relativePath] == nil,
-                  state.folderIDsByRelativePath[eligible.relativePath] == nil
+                  rootStatesByID[eligible.rootID]?.fileIDsByRelativePath[eligible.relativePath] == nil,
+                  rootStatesByID[eligible.rootID]?.folderIDsByRelativePath[eligible.relativePath] == nil
             else { continue }
             var indexes = RootIndexBuffers()
             let hierarchy = eligible.relativePath.split(separator: "/").count
+            // `indexFiles` changes the state only when it indexes the file, so a skipped file leaves it as it was.
             indexFiles(
                 [FSItemDTO(relativePath: eligible.relativePath, isDirectory: false, hierarchy: hierarchy)],
-                root: state.root,
-                state: &state,
+                root: root,
+                state: &rootStatesByID[eligible.rootID]!,
                 indexes: &indexes
             )
             guard !indexes.filesByID.isEmpty else { continue }
             commit(indexes)
-            rootStatesByID[eligible.rootID] = state
             indexed.append(eligible.fullPath)
             upsertedFilesByRoot[eligible.rootID, default: []].append(contentsOf: indexes.filesByID.values)
         }
@@ -11520,14 +12834,14 @@ actor WorkspaceFileContextStore {
         try await requirePublishedSeededAuthorityFresh(rootID: expectedRecord.rootID)
         for attempt in 0 ..< 2 {
             try Task.checkCancellation()
-            guard let state = rootStatesByID[expectedRecord.rootID],
+            guard let identity = rootStatesByID[expectedRecord.rootID]?.identity,
                   let current = file(rootID: expectedRecord.rootID, relativePath: expectedRecord.standardizedRelativePath),
                   current.id == expectedRecord.id
             else {
                 return staleSearchContentSnapshot(for: expectedRecord)
             }
 
-            let service = state.service
+            let service = identity.service
             let epoch = searchContentInvalidationEpochsByFileID[current.id] ?? 0
             let cacheKey = WorkspaceSearchContentCacheKey(
                 rootID: current.rootID,
@@ -11548,7 +12862,7 @@ actor WorkspaceFileContextStore {
                     content: cached.content,
                     modificationDate: cached.modificationDate,
                     file: current,
-                    rootLifetimeID: state.lifetimeID
+                    rootLifetimeID: identity.lifetimeID
                 )
                 try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return FileSearchContentSnapshot(
@@ -11607,7 +12921,7 @@ actor WorkspaceFileContextStore {
                     content: cached.content,
                     modificationDate: cached.modificationDate,
                     file: current,
-                    rootLifetimeID: state.lifetimeID
+                    rootLifetimeID: identity.lifetimeID
                 )
                 try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return FileSearchContentSnapshot(
@@ -11649,7 +12963,7 @@ actor WorkspaceFileContextStore {
         try await requirePublishedSeededAuthorityFresh(rootID: expectedRecord.rootID)
         for attempt in 0 ..< 2 {
             try Task.checkCancellation()
-            guard let state = rootStatesByID[expectedRecord.rootID],
+            guard let identity = rootStatesByID[expectedRecord.rootID]?.identity,
                   let current = file(
                       rootID: expectedRecord.rootID,
                       relativePath: expectedRecord.standardizedRelativePath
@@ -11659,11 +12973,11 @@ actor WorkspaceFileContextStore {
                 return nil
             }
 
-            let service = state.service
+            let service = identity.service
             let epoch = searchContentInvalidationEpochsByFileID[current.id] ?? 0
             let cacheKey = WorkspaceInteractiveReadCacheKey(
                 rootID: current.rootID,
-                rootLifetimeID: state.lifetimeID,
+                rootLifetimeID: identity.lifetimeID,
                 fileID: current.id,
                 standardizedRelativePath: current.standardizedRelativePath
             )
@@ -11724,7 +13038,7 @@ actor WorkspaceFileContextStore {
                     content: preparedContent.linesWithEndings.joined(),
                     modificationDate: fingerprint.modificationDate,
                     file: current,
-                    rootLifetimeID: state.lifetimeID
+                    rootLifetimeID: identity.lifetimeID
                 )
                 try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return WorkspaceInteractiveReadSnapshot(
@@ -15336,10 +16650,10 @@ actor WorkspaceFileContextStore {
 
         let startIndex: Int
         if let cursor = request.cursor {
-            guard let cursorIndex = current.shard.projectionFileIndexByID[cursor.fileID],
-                  current.shard.projectionFiles[cursorIndex].file.standardizedRelativePath
-                  == cursor.standardizedRelativePath
-            else { return .stale }
+            guard let cursorIndex = current.shard.projectionIndex(
+                fileID: cursor.fileID,
+                standardizedRelativePath: cursor.standardizedRelativePath
+            ) else { return .stale }
             startIndex = cursorIndex + 1
         } else {
             startIndex = 0
@@ -16099,8 +17413,10 @@ actor WorkspaceFileContextStore {
         else { return }
 
         for path in standardizedRelativePaths {
+            // The shard orders by the record's own path bytes, which a canonically equal key may not share.
             guard let fileID = state.fileIDsByRelativePath[path],
-                  shard.projectionFileIndexByID[fileID] != nil,
+                  let file = filesByID[fileID],
+                  shard.projectionIndex(fileID: fileID, standardizedRelativePath: file.standardizedRelativePath) != nil,
                   baseline.invalidatedCandidateFileIDs.insert(fileID).inserted
             else { continue }
             baseline.retainedCandidateCount = baseline.retainedCandidateCount > 0
@@ -16821,7 +18137,7 @@ actor WorkspaceFileContextStore {
                 throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
             }
         }
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         let codemapFence = beginCodemapPathFence(
             rootID: rootID,
@@ -16838,12 +18154,12 @@ actor WorkspaceFileContextStore {
             }
         }
         do {
-            try await state.service.createFile(atRelativePath: standardizedRelativePath, content: content)
+            try await identity.service.createFile(atRelativePath: standardizedRelativePath, content: content)
         } catch is CancellationError {
             retainedFenceUntilMutationDrain = true
             retainCodemapPathFenceUntilMutationDrain(
                 codemapFence,
-                service: state.service,
+                service: identity.service,
                 relativePaths: [standardizedRelativePath]
             )
             throw CancellationError()
@@ -16866,8 +18182,8 @@ actor WorkspaceFileContextStore {
         newContent: String,
         expectedOriginalContent: String? = nil
     ) async throws -> WorkspaceFileCatalogMaterializationResult? {
-        let state = try state(for: rootID)
-        let expectedLifetimeID = state.lifetimeID
+        let identity = try rootIdentity(for: rootID)
+        let expectedLifetimeID = identity.lifetimeID
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         let codemapFence = beginCodemapPathFence(
             rootID: rootID,
@@ -16886,14 +18202,14 @@ actor WorkspaceFileContextStore {
         let deferredPublicationToken: FileSystemDeferredEditPublicationToken
         do {
             let token = if let expectedOriginalContent {
-                try await state.service.editFileIfUnchanged(
+                try await identity.service.editFileIfUnchanged(
                     atRelativePath: standardizedRelativePath,
                     newContent: newContent,
                     expectedOriginalContent: expectedOriginalContent,
                     modificationPublicationPolicy: .deferSyntheticModificationToSuccessfulCaller
                 )
             } else {
-                try await state.service.editFile(
+                try await identity.service.editFile(
                     atRelativePath: standardizedRelativePath,
                     newContent: newContent,
                     modificationPublicationPolicy: .deferSyntheticModificationToSuccessfulCaller
@@ -16910,7 +18226,7 @@ actor WorkspaceFileContextStore {
             retainedFenceUntilMutationDrain = true
             retainCodemapPathFenceUntilMutationDrain(
                 codemapFence,
-                service: state.service,
+                service: identity.service,
                 relativePaths: [standardizedRelativePath]
             )
             throw CancellationError()
@@ -16942,7 +18258,7 @@ actor WorkspaceFileContextStore {
                 invalidateSearchContent(file)
                 publishedCanonicalModification = isDiscoverableFileID(file.id)
                 if publishedCanonicalModification {
-                    publishAppliedIndexEvent(root: state.root, modifiedFileIDs: [file.id])
+                    publishAppliedIndexEvent(root: identity.root, modifiedFileIDs: [file.id])
                     #if DEBUG
                         MCPApplyEditsRebaseProbeRecorder.recordStoreModification(
                             rootID: rootID,
@@ -16967,7 +18283,7 @@ actor WorkspaceFileContextStore {
                 }
             }
 
-            await state.service.resolveDeferredEditPublication(
+            await identity.service.resolveDeferredEditPublication(
                 deferredPublicationToken,
                 resolution: publishedCanonicalModification
                     ? .callerPublishedCanonicalModification
@@ -16975,7 +18291,7 @@ actor WorkspaceFileContextStore {
             )
             return result
         } catch {
-            await state.service.resolveDeferredEditPublication(
+            await identity.service.resolveDeferredEditPublication(
                 deferredPublicationToken,
                 resolution: .publishSyntheticFallback
             )
@@ -16984,7 +18300,7 @@ actor WorkspaceFileContextStore {
     }
 
     func moveFile(rootID: UUID, from oldRelativePath: String, to newRelativePath: String) async throws {
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let oldPath = StandardizedPath.relative(oldRelativePath)
         let newPath = StandardizedPath.relative(newRelativePath)
         let codemapFence = beginCodemapPathFence(
@@ -17004,7 +18320,7 @@ actor WorkspaceFileContextStore {
         let oldFile = file(rootID: rootID, relativePath: oldPath)
         let oldFileWasDiscoverable = oldFile.map { isDiscoverableFileID($0.id) } ?? false
         do {
-            try await state.service.moveFile(
+            try await identity.service.moveFile(
                 atRelativePath: oldPath,
                 toRelativePath: newPath
             )
@@ -17012,20 +18328,17 @@ actor WorkspaceFileContextStore {
             retainedFenceUntilMutationDrain = true
             retainCodemapPathFenceUntilMutationDrain(
                 codemapFence,
-                service: state.service,
+                service: identity.service,
                 relativePaths: [oldPath, newPath]
             )
             throw CancellationError()
         }
         didCommitCodemapMutation = true
-        let destinationRegistration = await state.service.beginExplicitlyManagedRegularFileRegistration(relativePath: newPath)
+        let destinationRegistration = await identity.service.beginExplicitlyManagedRegularFileRegistration(relativePath: newPath)
         var pendingRegistrationToken = destinationRegistration.token
         do {
             try Task.checkCancellation()
-            guard let currentState = rootStatesByID[rootID],
-                  currentState.lifetimeID == state.lifetimeID,
-                  currentState.service === state.service
-            else {
+            guard isRootCurrent(rootID: rootID, lifetimeID: identity.lifetimeID, service: identity.service) else {
                 throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
             }
             let destinationManagedOnly: Bool
@@ -17039,28 +18352,28 @@ actor WorkspaceFileContextStore {
             }
             withCodemapPathLocalCatalogMutation(rootID: rootID) {
                 removeFile(relativePath: oldPath, rootID: rootID)
-                indexFile(relativePath: newPath, root: state.root, managedOnly: destinationManagedOnly)
+                indexFile(relativePath: newPath, root: identity.root, managedOnly: destinationManagedOnly)
                 publishAppliedIndexEvent(
-                    root: state.root,
+                    root: identity.root,
                     upsertedFiles: destinationManagedOnly ? [] : (file(rootID: rootID, relativePath: newPath).map { [$0] } ?? []),
                     removedFileIDs: oldFileWasDiscoverable ? (oldFile.map { [$0.id] } ?? []) : [],
                     removedFilePaths: oldFileWasDiscoverable ? (oldFile.map { [$0.standardizedRelativePath] } ?? []) : []
                 )
             }
             if let token = pendingRegistrationToken {
-                _ = await state.service.commitExplicitlyManagedRegularFileRegistration(token)
+                _ = await identity.service.commitExplicitlyManagedRegularFileRegistration(token)
                 pendingRegistrationToken = nil
             }
         } catch {
             if let pendingRegistrationToken {
-                _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
             }
             throw error
         }
     }
 
     func deleteFile(rootID: UUID, relativePath: String) async throws {
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         let codemapFence = beginCodemapPathFence(
             rootID: rootID,
@@ -17079,12 +18392,12 @@ actor WorkspaceFileContextStore {
         let oldFile = file(rootID: rootID, relativePath: standardizedRelativePath)
         let oldFileWasDiscoverable = oldFile.map { isDiscoverableFileID($0.id) } ?? false
         do {
-            try await state.service.deleteFile(atRelativePath: standardizedRelativePath)
+            try await identity.service.deleteFile(atRelativePath: standardizedRelativePath)
         } catch is CancellationError {
             retainedFenceUntilMutationDrain = true
             retainCodemapPathFenceUntilMutationDrain(
                 codemapFence,
-                service: state.service,
+                service: identity.service,
                 relativePaths: [standardizedRelativePath]
             )
             throw CancellationError()
@@ -17104,22 +18417,24 @@ actor WorkspaceFileContextStore {
         withCodemapPathLocalCatalogMutation(rootID: rootID) {
             removeFile(relativePath: standardizedRelativePath, rootID: rootID)
             if let oldFile, oldFileWasDiscoverable {
-                publishAppliedIndexEvent(root: state.root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
+                publishAppliedIndexEvent(root: identity.root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
             }
         }
     }
 
     func moveItemToTrash(rootID: UUID, relativePath: String) async throws {
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         let oldFile = file(rootID: rootID, relativePath: standardizedRelativePath)
         let oldFileWasDiscoverable = oldFile.map { isDiscoverableFileID($0.id) } ?? false
         let oldFolder = folder(rootID: rootID, relativePath: standardizedRelativePath)
         let oldFolderWasDiscoverable = oldFolder.map { isDiscoverableFolderID($0.id) } ?? false
-        let affectedPaths: Set<String> = if oldFolder != nil {
-            Set(state.fileIDsByRelativePath.keys.filter {
-                $0 == standardizedRelativePath || $0.hasPrefix(standardizedRelativePath + "/")
-            })
+        let affectedPaths: Set<String> = if oldFolder != nil, let state = rootStatesByID[rootID] {
+            Set(folderSubtree(
+                atRelativePath: standardizedRelativePath,
+                state: state,
+                purpose: .codemapInvalidation
+            ).filePaths)
         } else {
             [standardizedRelativePath]
         }
@@ -17138,12 +18453,12 @@ actor WorkspaceFileContextStore {
             }
         }
         do {
-            try await state.service.moveItemToTrash(atRelativePath: standardizedRelativePath)
+            try await identity.service.moveItemToTrash(atRelativePath: standardizedRelativePath)
         } catch is CancellationError {
             retainedFenceUntilMutationDrain = true
             retainCodemapPathFenceUntilMutationDrain(
                 codemapFence,
-                service: state.service,
+                service: identity.service,
                 relativePaths: [standardizedRelativePath]
             )
             throw CancellationError()
@@ -17164,12 +18479,12 @@ actor WorkspaceFileContextStore {
             if let oldFile {
                 removeFile(relativePath: standardizedRelativePath, rootID: rootID)
                 if oldFileWasDiscoverable {
-                    publishAppliedIndexEvent(root: state.root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
+                    publishAppliedIndexEvent(root: identity.root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
                 }
             } else if let oldFolder {
                 let removal = removeFolderTree(relativePath: standardizedRelativePath, rootID: rootID)
                 publishAppliedIndexEvent(
-                    root: state.root,
+                    root: identity.root,
                     removedFileIDs: removal.fileIDs,
                     removedFolderIDs: removal.folderIDs.isEmpty && oldFolderWasDiscoverable ? [oldFolder.id] : removal.folderIDs,
                     removedFilePaths: removal.filePaths,
@@ -17211,7 +18526,7 @@ actor WorkspaceFileContextStore {
                 EditFlowPerf.Dimensions(outcome: outcome)
             )
         }
-        guard let state = rootStatesByID[file.rootID] else {
+        guard let identity = rootStatesByID[file.rootID]?.identity else {
             outcome = "unavailable"
             return .unavailable
         }
@@ -17225,10 +18540,10 @@ actor WorkspaceFileContextStore {
             outcome = "unavailable"
             return .unavailable
         }
-        let expectedLifetimeID = state.lifetimeID
+        let expectedLifetimeID = identity.lifetimeID
         let expectedFileID = current.id
         let expectedFullPath = current.standardizedFullPath
-        let exists = await state.service.regularFileExistsOnDisk(
+        let exists = await identity.service.regularFileExistsOnDisk(
             relativePath: current.standardizedRelativePath
         )
         #if DEBUG
@@ -17238,9 +18553,7 @@ actor WorkspaceFileContextStore {
             )
         #endif
         guard !Task.isCancelled,
-              let currentState = rootStatesByID[file.rootID],
-              currentState.lifetimeID == expectedLifetimeID,
-              currentState.service === state.service,
+              isRootCurrent(rootID: file.rootID, lifetimeID: expectedLifetimeID, service: identity.service),
               let currentRecord = self.file(rootID: file.rootID, relativePath: current.standardizedRelativePath),
               currentRecord.id == expectedFileID,
               currentRecord.standardizedFullPath == expectedFullPath
@@ -17253,7 +18566,7 @@ actor WorkspaceFileContextStore {
             return .current(
                 file: current,
                 rootLifetimeID: expectedLifetimeID,
-                rootService: state.service
+                rootService: identity.service
             )
         }
         let missingClassificationIsCurrent = await (try? fenceAndPruneCatalogFileMissingOnDisk(
@@ -17265,9 +18578,7 @@ actor WorkspaceFileContextStore {
         )) ?? false
         guard !Task.isCancelled,
               missingClassificationIsCurrent,
-              let currentState = rootStatesByID[file.rootID],
-              currentState.lifetimeID == expectedLifetimeID,
-              currentState.service === state.service,
+              isRootCurrent(rootID: file.rootID, lifetimeID: expectedLifetimeID, service: identity.service),
               self.file(rootID: file.rootID, relativePath: current.standardizedRelativePath) == nil
         else {
             outcome = "unavailable"
@@ -17298,7 +18609,7 @@ actor WorkspaceFileContextStore {
                 EditFlowPerf.Dimensions(outcome: outcome)
             )
         }
-        guard let state = rootStatesByID[file.rootID] else {
+        guard let identity = rootStatesByID[file.rootID]?.identity else {
             outcome = "unavailable"
             return .unavailable
         }
@@ -17312,10 +18623,10 @@ actor WorkspaceFileContextStore {
             outcome = "unavailable"
             return .unavailable
         }
-        let expectedLifetimeID = state.lifetimeID
+        let expectedLifetimeID = identity.lifetimeID
         let expectedFileID = current.id
         let expectedFullPath = current.standardizedFullPath
-        let exists = try await state.service.cancellationResponsiveRegularFileExistsOnDisk(
+        let exists = try await identity.service.cancellationResponsiveRegularFileExistsOnDisk(
             relativePath: current.standardizedRelativePath
         )
         #if DEBUG
@@ -17325,9 +18636,7 @@ actor WorkspaceFileContextStore {
             )
         #endif
         try Task.checkCancellation()
-        guard let currentState = rootStatesByID[file.rootID],
-              currentState.lifetimeID == expectedLifetimeID,
-              currentState.service === state.service,
+        guard isRootCurrent(rootID: file.rootID, lifetimeID: expectedLifetimeID, service: identity.service),
               let currentRecord = self.file(
                   rootID: file.rootID,
                   relativePath: current.standardizedRelativePath
@@ -17343,7 +18652,7 @@ actor WorkspaceFileContextStore {
             return .current(
                 file: currentRecord,
                 rootLifetimeID: expectedLifetimeID,
-                rootService: state.service
+                rootService: identity.service
             )
         }
         let missingClassificationIsCurrent = try await fenceAndPruneCatalogFileMissingOnDisk(
@@ -17355,9 +18664,7 @@ actor WorkspaceFileContextStore {
         )
         try Task.checkCancellation()
         guard missingClassificationIsCurrent,
-              let currentState = rootStatesByID[file.rootID],
-              currentState.lifetimeID == expectedLifetimeID,
-              currentState.service === state.service,
+              isRootCurrent(rootID: file.rootID, lifetimeID: expectedLifetimeID, service: identity.service),
               self.file(rootID: file.rootID, relativePath: current.standardizedRelativePath) == nil
         else {
             outcome = "unavailable"
@@ -17927,7 +19234,7 @@ actor WorkspaceFileContextStore {
                     )
                 #endif
                 try Task.checkCancellation()
-                let currentState = rootStatesByID[binding.lookupRoot.id]
+                let currentIdentity = rootStatesByID[binding.lookupRoot.id]?.identity
                 EditFlowPerf.lifecycleEvent(
                     EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
                     EditFlowPerf.Dimensions(
@@ -17940,15 +19247,15 @@ actor WorkspaceFileContextStore {
                             case .unavailable: "unavailable"
                             }
                         }(),
-                        rootToken: currentState?.service.diagnosticRootToken.uuidString,
+                        rootToken: currentIdentity?.service.diagnosticRootToken.uuidString,
                         serialPosition: serialPosition
                     )
                 )
                 switch validation {
                 case let .current(current, validatedLifetimeID, validatedService):
-                    guard let currentState,
-                          currentState.lifetimeID == validatedLifetimeID,
-                          currentState.service === validatedService,
+                    guard let currentIdentity,
+                          currentIdentity.lifetimeID == validatedLifetimeID,
+                          currentIdentity.service === validatedService,
                           let currentRecord = file(
                               rootID: current.rootID,
                               relativePath: current.standardizedRelativePath
@@ -17963,7 +19270,7 @@ actor WorkspaceFileContextStore {
                     try await bindingObservations.append(exactFileBindingObservation(
                         binding: binding,
                         relativePath: relativePath,
-                        state: currentState
+                        identity: currentIdentity
                     ))
                     matches.append(ExactFileCandidate(
                         binding: binding,
@@ -17973,7 +19280,7 @@ actor WorkspaceFileContextStore {
                     ))
                     endBindingProbe(
                         outcome: "catalogCurrent",
-                        rootToken: currentState.service.diagnosticRootToken.uuidString
+                        rootToken: currentIdentity.service.diagnosticRootToken.uuidString
                     )
                     continue
                 case .unavailable:
@@ -17984,7 +19291,7 @@ actor WorkspaceFileContextStore {
                     break
                 }
             }
-            guard let state = rootStatesByID[binding.lookupRoot.id] else {
+            guard let identity = rootStatesByID[binding.lookupRoot.id]?.identity else {
                 hasUnavailableBinding = true
                 endBindingProbe(outcome: "unavailable")
                 continue
@@ -17994,12 +19301,12 @@ actor WorkspaceFileContextStore {
                 EditFlowPerf.Dimensions(
                     runPurpose: purpose.rawValue,
                     status: "eligibilityBegan",
-                    rootToken: state.service.diagnosticRootToken.uuidString,
+                    rootToken: identity.service.diagnosticRootToken.uuidString,
                     serialPosition: serialPosition
                 )
             )
-            let expectedLifetimeID = state.lifetimeID
-            let eligibility = try await state.service.cancellationResponsiveCatalogRegularFileEligibility(
+            let expectedLifetimeID = identity.lifetimeID
+            let eligibility = try await identity.service.cancellationResponsiveCatalogRegularFileEligibility(
                 relativePath: relativePath
             )
             #if DEBUG
@@ -18009,9 +19316,7 @@ actor WorkspaceFileContextStore {
                 )
             #endif
             try Task.checkCancellation()
-            guard let currentState = rootStatesByID[binding.lookupRoot.id],
-                  currentState.lifetimeID == expectedLifetimeID,
-                  currentState.service === state.service,
+            guard isRootCurrent(rootID: binding.lookupRoot.id, lifetimeID: expectedLifetimeID, service: identity.service),
                   file(rootID: binding.lookupRoot.id, relativePath: relativePath) == nil
             else {
                 hasUnavailableBinding = true
@@ -18040,7 +19345,7 @@ actor WorkspaceFileContextStore {
                         case .ineligible: "ineligible"
                         }
                     }(),
-                    rootToken: currentState.service.diagnosticRootToken.uuidString,
+                    rootToken: identity.service.diagnosticRootToken.uuidString,
                     serialPosition: serialPosition
                 )
             )
@@ -18049,33 +19354,33 @@ actor WorkspaceFileContextStore {
                 try await bindingObservations.append(exactFileBindingObservation(
                     binding: binding,
                     relativePath: relativePath,
-                    state: currentState
+                    identity: identity
                 ))
                 matches.append(ExactFileCandidate(
                     binding: binding,
                     rootLifetimeID: expectedLifetimeID,
-                    rootService: state.service,
+                    rootService: identity.service,
                     file: nil
                 ))
                 endBindingProbe(
                     outcome: "eligible",
-                    rootToken: currentState.service.diagnosticRootToken.uuidString
+                    rootToken: identity.service.diagnosticRootToken.uuidString
                 )
             case .ineligible(.ignored):
                 try await bindingObservations.append(exactFileBindingObservation(
                     binding: binding,
                     relativePath: relativePath,
-                    state: currentState
+                    identity: identity
                 ))
                 matches.append(ExactFileCandidate(
                     binding: binding,
                     rootLifetimeID: expectedLifetimeID,
-                    rootService: state.service,
+                    rootService: identity.service,
                     file: nil
                 ))
                 endBindingProbe(
                     outcome: "ignored",
-                    rootToken: currentState.service.diagnosticRootToken.uuidString
+                    rootToken: identity.service.diagnosticRootToken.uuidString
                 )
             case .ineligible(.missingOrDirectory):
                 EditFlowPerf.lifecycleEvent(
@@ -18083,7 +19388,7 @@ actor WorkspaceFileContextStore {
                     EditFlowPerf.Dimensions(
                         runPurpose: purpose.rawValue,
                         status: "missingFilePruneBegan",
-                        rootToken: currentState.service.diagnosticRootToken.uuidString,
+                        rootToken: identity.service.diagnosticRootToken.uuidString,
                         serialPosition: serialPosition
                     )
                 )
@@ -18101,29 +19406,29 @@ actor WorkspaceFileContextStore {
                     )
                 #endif
                 try Task.checkCancellation()
-                let stateAfterPrune: RootState? = rootStatesByID[binding.lookupRoot.id].flatMap { currentState in
+                let identityAfterPrune: RootIdentity? = (rootStatesByID[binding.lookupRoot.id]?.identity).flatMap { currentIdentity in
                     guard missingClassificationIsCurrent,
-                          currentState.lifetimeID == expectedLifetimeID,
-                          currentState.service === state.service,
+                          currentIdentity.lifetimeID == expectedLifetimeID,
+                          currentIdentity.service === identity.service,
                           file(rootID: binding.lookupRoot.id, relativePath: relativePath) == nil
                     else { return nil }
-                    return currentState
+                    return currentIdentity
                 }
                 EditFlowPerf.lifecycleEvent(
                     EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
                     EditFlowPerf.Dimensions(
                         runPurpose: purpose.rawValue,
                         status: "missingFilePruneEnded",
-                        outcome: stateAfterPrune == nil ? "unavailable" : "completed",
-                        rootToken: stateAfterPrune?.service.diagnosticRootToken.uuidString,
+                        outcome: identityAfterPrune == nil ? "unavailable" : "completed",
+                        rootToken: identityAfterPrune?.service.diagnosticRootToken.uuidString,
                         serialPosition: serialPosition
                     )
                 )
-                if let stateAfterPrune {
+                if let identityAfterPrune {
                     let observation = try await exactFileBindingObservation(
                         binding: binding,
                         relativePath: relativePath,
-                        state: stateAfterPrune
+                        identity: identityAfterPrune
                     )
                     bindingObservations.append(observation)
                     if observation.diskPathState == .directory {
@@ -18133,19 +19438,19 @@ actor WorkspaceFileContextStore {
                     hasUnavailableBinding = true
                 }
                 endBindingProbe(
-                    outcome: stateAfterPrune == nil ? "unavailable" : "missingOrDirectory",
-                    rootToken: stateAfterPrune?.service.diagnosticRootToken.uuidString
+                    outcome: identityAfterPrune == nil ? "unavailable" : "missingOrDirectory",
+                    rootToken: identityAfterPrune?.service.diagnosticRootToken.uuidString
                 )
             case .ineligible:
                 try await bindingObservations.append(exactFileBindingObservation(
                     binding: binding,
                     relativePath: relativePath,
-                    state: currentState
+                    identity: identity
                 ))
                 blocked = true
                 endBindingProbe(
                     outcome: "ineligible",
-                    rootToken: currentState.service.diagnosticRootToken.uuidString
+                    rootToken: identity.service.diagnosticRootToken.uuidString
                 )
             }
         }
@@ -18161,12 +19466,12 @@ actor WorkspaceFileContextStore {
     private func exactFileBindingObservation(
         binding: WorkspaceExactFileNamespace.RootBinding,
         relativePath: String,
-        state: RootState
+        identity: RootIdentity
     ) async throws -> ExactFileBindingObservation {
         let catalogFile = file(rootID: binding.lookupRoot.id, relativePath: relativePath)
         let catalogFileID = catalogFile?.id
         let catalogFileFullPath = catalogFile?.standardizedFullPath
-        let diskPathState: ExactFileDiskPathState = switch try await state.service
+        let diskPathState: ExactFileDiskPathState = switch try await identity.service
             .cancellationResponsiveCatalogPathState(relativePath: relativePath)
         {
         case .regularFile: .regularFile
@@ -18174,9 +19479,7 @@ actor WorkspaceFileContextStore {
         case .missingOrOther: .missingOrOther
         }
         try Task.checkCancellation()
-        guard let currentState = rootStatesByID[binding.lookupRoot.id],
-              currentState.lifetimeID == state.lifetimeID,
-              currentState.service === state.service,
+        guard isRootCurrent(rootID: binding.lookupRoot.id, lifetimeID: identity.lifetimeID, service: identity.service),
               file(rootID: binding.lookupRoot.id, relativePath: relativePath)?.id == catalogFileID,
               file(rootID: binding.lookupRoot.id, relativePath: relativePath)?.standardizedFullPath == catalogFileFullPath
         else {
@@ -18186,8 +19489,8 @@ actor WorkspaceFileContextStore {
         }
         return ExactFileBindingObservation(
             rootID: binding.lookupRoot.id,
-            rootLifetimeID: state.lifetimeID,
-            rootService: state.service,
+            rootLifetimeID: identity.lifetimeID,
+            rootService: identity.service,
             catalogFileID: catalogFileID,
             catalogFileFullPath: catalogFileFullPath,
             diskPathState: diskPathState
@@ -18202,14 +19505,14 @@ actor WorkspaceFileContextStore {
         guard observations.count == bindings.count else { return false }
         for (binding, observation) in zip(bindings, observations) {
             guard observation.rootID == binding.lookupRoot.id,
-                  let state = rootStatesByID[observation.rootID],
-                  state.lifetimeID == observation.rootLifetimeID,
-                  state.service === observation.rootService
+                  let identity = rootStatesByID[observation.rootID]?.identity,
+                  identity.lifetimeID == observation.rootLifetimeID,
+                  identity.service === observation.rootService
             else { return false }
             let current = try await exactFileBindingObservation(
                 binding: binding,
                 relativePath: relativePath,
-                state: state
+                identity: identity
             )
             guard current.catalogFileID == observation.catalogFileID,
                   current.catalogFileFullPath == observation.catalogFileFullPath,
@@ -18236,10 +19539,11 @@ actor WorkspaceFileContextStore {
         guard let candidate = candidates.matches.first else {
             return candidates.blocked ? .blocked : .noCandidate
         }
-        guard let currentState = rootStatesByID[candidate.binding.lookupRoot.id],
-              currentState.lifetimeID == candidate.rootLifetimeID,
-              currentState.service === candidate.rootService
-        else { return .unavailable }
+        guard isRootCurrent(
+            rootID: candidate.binding.lookupRoot.id,
+            lifetimeID: candidate.rootLifetimeID,
+            service: candidate.rootService
+        ) else { return .unavailable }
         if let file = candidate.file {
             guard let currentFile = self.file(
                 rootID: file.rootID,
@@ -18260,10 +19564,11 @@ actor WorkspaceFileContextStore {
             expectedRootLifetimeIDs: [candidate.binding.lookupRoot.id: candidate.rootLifetimeID]
         )
         try Task.checkCancellation()
-        guard let currentState = rootStatesByID[candidate.binding.lookupRoot.id],
-              currentState.lifetimeID == candidate.rootLifetimeID,
-              currentState.service === candidate.rootService
-        else { return .unavailable }
+        guard isRootCurrent(
+            rootID: candidate.binding.lookupRoot.id,
+            lifetimeID: candidate.rootLifetimeID,
+            service: candidate.rootService
+        ) else { return .unavailable }
         switch result {
         case let .materialized(file):
             guard let currentFile = self.file(
@@ -18334,21 +19639,19 @@ actor WorkspaceFileContextStore {
         _ file: WorkspaceFileRecord,
         namespace: WorkspaceExactFileNamespace
     ) async throws -> WorkspaceExactExistingFileMatch? {
-        guard let initialState = rootStatesByID[file.rootID],
+        guard let initialIdentity = rootStatesByID[file.rootID]?.identity,
               let initialRecord = self.file(rootID: file.rootID, relativePath: file.standardizedRelativePath),
               initialRecord.id == file.id,
               initialRecord.standardizedFullPath == file.standardizedFullPath
         else { return nil }
-        let expectedLifetimeID = initialState.lifetimeID
+        let expectedLifetimeID = initialIdentity.lifetimeID
         let candidates = try await exactFileCandidates(
             relativePath: file.standardizedRelativePath,
             bindings: namespace.rootBindings,
             purpose: .canonicalCompaction
         )
         try Task.checkCancellation()
-        guard let currentState = rootStatesByID[file.rootID],
-              currentState.lifetimeID == expectedLifetimeID,
-              currentState.service === initialState.service,
+        guard isRootCurrent(rootID: file.rootID, lifetimeID: expectedLifetimeID, service: initialIdentity.service),
               let currentRecord = self.file(rootID: file.rootID, relativePath: file.standardizedRelativePath),
               currentRecord.id == file.id,
               currentRecord.standardizedFullPath == file.standardizedFullPath
@@ -18479,8 +19782,8 @@ actor WorkspaceFileContextStore {
                     serialPosition: serialPosition
                 )
             )
-            guard let state = rootStatesByID[candidate.rootID],
-                  expectedRootLifetimeIDs?[candidate.rootID].map({ $0 == state.lifetimeID }) ?? true
+            guard let identity = rootStatesByID[candidate.rootID]?.identity,
+                  expectedRootLifetimeIDs?[candidate.rootID].map({ $0 == identity.lifetimeID }) ?? true
             else {
                 foundUnavailableCandidate = expectedRootLifetimeIDs != nil
                 EditFlowPerf.lifecycleEvent(
@@ -18495,16 +19798,13 @@ actor WorkspaceFileContextStore {
                 )
                 continue
             }
-            let expectedLifetimeID = state.lifetimeID
-            let evidence = try await state.service.cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
+            let expectedLifetimeID = identity.lifetimeID
+            let evidence = try await identity.service.cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
                 relativePath: candidate.relativePath
             )
             let eligibility = evidence.eligibility
             try Task.checkCancellation()
-            guard let currentState = rootStatesByID[candidate.rootID],
-                  currentState.lifetimeID == expectedLifetimeID,
-                  currentState.service === state.service
-            else {
+            guard isRootCurrent(rootID: candidate.rootID, lifetimeID: expectedLifetimeID, service: identity.service) else {
                 foundUnavailableCandidate = expectedRootLifetimeIDs != nil
                 EditFlowPerf.lifecycleEvent(
                     EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
@@ -18532,7 +19832,7 @@ actor WorkspaceFileContextStore {
                         case .ineligible: "ineligible"
                         }
                     }(),
-                    rootToken: currentState.service.diagnosticRootToken.uuidString,
+                    rootToken: identity.service.diagnosticRootToken.uuidString,
                     serialPosition: serialPosition
                 )
             )
@@ -18542,7 +19842,7 @@ actor WorkspaceFileContextStore {
                     candidate.rootID,
                     candidate.relativePath,
                     expectedLifetimeID,
-                    state.service,
+                    identity.service,
                     evidence.eligibility,
                     evidence.policyIdentity,
                     evidence.ignoreRulesRevision
@@ -18554,7 +19854,7 @@ actor WorkspaceFileContextStore {
                     EditFlowPerf.Dimensions(
                         runPurpose: "explicitMaterialization",
                         status: "candidateMissingFilePruneBegan",
-                        rootToken: currentState.service.diagnosticRootToken.uuidString,
+                        rootToken: identity.service.diagnosticRootToken.uuidString,
                         serialPosition: serialPosition
                     )
                 )
@@ -18566,15 +19866,15 @@ actor WorkspaceFileContextStore {
                     requireCatalogFileAbsent: true
                 )
                 try Task.checkCancellation()
-                let stateAfterPrune: RootState? = rootStatesByID[candidate.rootID].flatMap { currentState in
+                let identityAfterPrune: RootIdentity? = (rootStatesByID[candidate.rootID]?.identity).flatMap { currentIdentity in
                     guard missingClassificationIsCurrent,
-                          currentState.lifetimeID == expectedLifetimeID,
-                          currentState.service === state.service,
+                          currentIdentity.lifetimeID == expectedLifetimeID,
+                          currentIdentity.service === identity.service,
                           file(rootID: candidate.rootID, relativePath: candidate.relativePath) == nil
                     else { return nil }
-                    return currentState
+                    return currentIdentity
                 }
-                if stateAfterPrune == nil {
+                if identityAfterPrune == nil {
                     foundUnavailableCandidate = true
                 }
                 EditFlowPerf.lifecycleEvent(
@@ -18583,8 +19883,8 @@ actor WorkspaceFileContextStore {
                     EditFlowPerf.Dimensions(
                         runPurpose: "explicitMaterialization",
                         status: "candidateMissingFilePruneEnded",
-                        outcome: stateAfterPrune == nil ? "unavailable" : "completed",
-                        rootToken: stateAfterPrune?.service.diagnosticRootToken.uuidString,
+                        outcome: identityAfterPrune == nil ? "unavailable" : "completed",
+                        rootToken: identityAfterPrune?.service.diagnosticRootToken.uuidString,
                         serialPosition: serialPosition
                     )
                 )
@@ -18598,22 +19898,20 @@ actor WorkspaceFileContextStore {
             return .ambiguous
         }
         guard let candidate = materializable.first,
-              let state = rootStatesByID[candidate.rootID],
-              state.lifetimeID == candidate.lifetimeID,
-              state.service === candidate.service
+              isRootCurrent(rootID: candidate.rootID, lifetimeID: candidate.lifetimeID, service: candidate.service)
         else {
             let unavailable = foundUnavailableCandidate || !materializable.isEmpty
             setTerminalOutcome(unavailable ? "unavailable" : foundBlockedCandidate ? "blocked" : "noCandidate")
             return unavailable ? .unavailable : foundBlockedCandidate ? .blocked : .noCandidate
         }
-        setDiagnosticRootToken(state.service.diagnosticRootToken)
+        setDiagnosticRootToken(candidate.service.diagnosticRootToken)
         EditFlowPerf.lifecycleEvent(
             EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
             correlation: lifecycleCorrelation,
             EditFlowPerf.Dimensions(
                 runPurpose: "explicitMaterialization",
                 status: "codemapRootFenceBegan",
-                rootToken: state.service.diagnosticRootToken.uuidString
+                rootToken: candidate.service.diagnosticRootToken.uuidString
             )
         )
         let codemapFence = await beginCodemapRootMutationFence(
@@ -18636,9 +19934,7 @@ actor WorkspaceFileContextStore {
         }
         guard let codemapFence,
               codemapFence.rootEpoch.rootLifetimeID == candidate.lifetimeID,
-              let fencedState = rootStatesByID[candidate.rootID],
-              fencedState.lifetimeID == candidate.lifetimeID,
-              fencedState.service === candidate.service
+              isRootCurrent(rootID: candidate.rootID, lifetimeID: candidate.lifetimeID, service: candidate.service)
         else {
             finishCodemapRootMutationFence(codemapFence, didCommitMutation: false)
             setTerminalOutcome("unavailable")
@@ -18656,14 +19952,11 @@ actor WorkspaceFileContextStore {
             try Task.checkCancellation()
             #if DEBUG
                 if let handler = explicitMaterializationDidAcquireCodemapFenceHandler {
-                    await handler(state.service)
+                    await handler(candidate.service)
                 }
             #endif
             try Task.checkCancellation()
-            guard let currentState = rootStatesByID[candidate.rootID],
-                  currentState.lifetimeID == candidate.lifetimeID,
-                  currentState.service === candidate.service
-            else {
+            guard isRootCurrent(rootID: candidate.rootID, lifetimeID: candidate.lifetimeID, service: candidate.service) else {
                 setTerminalOutcome("noCandidate")
                 return .noCandidate
             }
@@ -18673,22 +19966,22 @@ actor WorkspaceFileContextStore {
                 EditFlowPerf.Dimensions(
                     runPurpose: "explicitMaterialization",
                     status: "managedRegistrationBegan",
-                    rootToken: currentState.service.diagnosticRootToken.uuidString
+                    rootToken: candidate.service.diagnosticRootToken.uuidString
                 )
             )
             let registration: FileSystemExplicitlyManagedRegularFileRegistration
-            if await currentState.service.currentWorkspaceRootCatalogPolicyIdentity() != candidate.policyIdentity {
-                let refreshed = try await currentState.service.cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
+            if await candidate.service.currentWorkspaceRootCatalogPolicyIdentity() != candidate.policyIdentity {
+                let refreshed = try await candidate.service.cancellationResponsiveCatalogRegularFileEligibilityWithPolicy(
                     relativePath: candidate.relativePath
                 )
-                registration = try await currentState.service.beginExplicitlyManagedRegularFileRegistration(
+                registration = try await candidate.service.beginExplicitlyManagedRegularFileRegistration(
                     relativePath: candidate.relativePath,
                     validatedEligibility: refreshed.eligibility,
                     policyIdentity: refreshed.policyIdentity,
                     ignoreRulesRevision: refreshed.ignoreRulesRevision
                 )
             } else {
-                registration = try await currentState.service.beginExplicitlyManagedRegularFileRegistration(
+                registration = try await candidate.service.beginExplicitlyManagedRegularFileRegistration(
                     relativePath: candidate.relativePath,
                     validatedEligibility: candidate.eligibility,
                     policyIdentity: candidate.policyIdentity,
@@ -18703,9 +19996,7 @@ actor WorkspaceFileContextStore {
                 )
             #endif
             try Task.checkCancellation()
-            guard let registeredState = rootStatesByID[candidate.rootID],
-                  registeredState.lifetimeID == candidate.lifetimeID,
-                  registeredState.service === candidate.service,
+            guard isRootCurrent(rootID: candidate.rootID, lifetimeID: candidate.lifetimeID, service: candidate.service),
                   file(rootID: candidate.rootID, relativePath: candidate.relativePath) == nil
             else {
                 if let registrationToken = pendingRegistrationToken {
@@ -18731,7 +20022,7 @@ actor WorkspaceFileContextStore {
                         case .ineligible: "ineligible"
                         }
                     }(),
-                    rootToken: registeredState.service.diagnosticRootToken.uuidString
+                    rootToken: candidate.service.diagnosticRootToken.uuidString
                 )
             )
             let managedOnly: Bool
@@ -18816,9 +20107,9 @@ actor WorkspaceFileContextStore {
         relativePath: String,
         codemapPathLocalMutation: Bool = false
     ) async throws -> WorkspaceFileCatalogMaterializationResult {
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
-        let registration = await state.service.beginExplicitlyManagedRegularFileRegistration(
+        let registration = await identity.service.beginExplicitlyManagedRegularFileRegistration(
             relativePath: standardizedRelativePath
         )
         var pendingRegistrationToken = registration.token
@@ -18830,10 +20121,7 @@ actor WorkspaceFileContextStore {
 
         do {
             try Task.checkCancellation()
-            guard let currentState = rootStatesByID[rootID],
-                  currentState.lifetimeID == state.lifetimeID,
-                  currentState.service === state.service
-            else {
+            guard isRootCurrent(rootID: rootID, lifetimeID: identity.lifetimeID, service: identity.service) else {
                 throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
             }
 
@@ -18872,13 +20160,13 @@ actor WorkspaceFileContextStore {
             }
 
             if let token = pendingRegistrationToken {
-                _ = await state.service.commitExplicitlyManagedRegularFileRegistration(token)
+                _ = await identity.service.commitExplicitlyManagedRegularFileRegistration(token)
                 pendingRegistrationToken = nil
             }
             return result
         } catch {
             if let pendingRegistrationToken {
-                _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
             }
             throw error
         }
@@ -18893,13 +20181,13 @@ actor WorkspaceFileContextStore {
             })
         }
 
-        guard let initialState = exactRootState(
+        guard let initialIdentity = exactRootIdentity(
             expectedRoot: request.root,
             expectedKind: .workspaceGitData
         ) else {
             return staleRootResult()
         }
-        let expectedBatchLifetimeID = initialState.lifetimeID
+        let expectedBatchLifetimeID = initialIdentity.lifetimeID
         guard let codemapFence = await beginCodemapRootMutationFence(
             rootID: request.root.id,
             command: .catalogAdvanced
@@ -18911,10 +20199,10 @@ actor WorkspaceFileContextStore {
                 didCommitMutation: didPublishCatalogMutation
             )
         }
-        guard let fencedState = exactRootState(
+        guard let fencedIdentity = exactRootIdentity(
             expectedRoot: request.root,
             expectedKind: .workspaceGitData
-        ), fencedState.lifetimeID == expectedBatchLifetimeID else {
+        ), fencedIdentity.lifetimeID == expectedBatchLifetimeID else {
             return staleRootResult()
         }
 
@@ -18962,13 +20250,13 @@ actor WorkspaceFileContextStore {
                 continue
             }
 
-            guard let state = exactRootState(
+            guard let identity = exactRootIdentity(
                 expectedRoot: request.root,
                 expectedKind: .workspaceGitData
-            ), state.lifetimeID == expectedBatchLifetimeID else {
+            ), identity.lifetimeID == expectedBatchLifetimeID else {
                 return staleRootResult()
             }
-            let registration = await state.service.beginExplicitlyManagedRegularFileRegistration(
+            let registration = await identity.service.beginExplicitlyManagedRegularFileRegistration(
                 relativePath: relativePath
             )
             var pendingRegistrationToken = registration.token
@@ -18979,19 +20267,19 @@ actor WorkspaceFileContextStore {
             #endif
             if Task.isCancelled {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return staleRootResult()
             }
 
-            guard let revalidatedState = exactRootState(
+            guard let revalidatedIdentity = exactRootIdentity(
                 expectedRoot: request.root,
                 expectedKind: .workspaceGitData
-            ), revalidatedState.lifetimeID == expectedBatchLifetimeID,
-            revalidatedState.service === state.service
+            ), revalidatedIdentity.lifetimeID == expectedBatchLifetimeID,
+            revalidatedIdentity.service === identity.service
             else {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return staleRootResult()
             }
@@ -19004,7 +20292,7 @@ actor WorkspaceFileContextStore {
                 managedOnly = true
             case .ineligible(.missingOrDirectory):
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 pruneCatalogFileMissingOnDisk(
                     rootID: request.root.id,
@@ -19015,7 +20303,7 @@ actor WorkspaceFileContextStore {
                 continue
             case let .ineligible(reason):
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 append(artifact, .ineligible(reason: reason))
                 continue
@@ -19029,16 +20317,16 @@ actor WorkspaceFileContextStore {
                 )
                 didPublishCatalogMutation = true
                 if let token = pendingRegistrationToken {
-                    _ = await state.service.commitExplicitlyManagedRegularFileRegistration(token)
+                    _ = await identity.service.commitExplicitlyManagedRegularFileRegistration(token)
                     pendingRegistrationToken = nil
                 }
                 append(artifact, .cataloged(record: record))
             } catch {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 if !regularFileAppearsPresentOnDisk(
-                    root: revalidatedState.root,
+                    root: revalidatedIdentity.root,
                     relativePath: relativePath
                 ) {
                     append(artifact, .missingOnDisk)
@@ -19048,10 +20336,10 @@ actor WorkspaceFileContextStore {
             }
         }
 
-        guard let finalState = exactRootState(
+        guard let finalIdentity = exactRootIdentity(
             expectedRoot: request.root,
             expectedKind: .workspaceGitData
-        ), finalState.lifetimeID == expectedBatchLifetimeID else {
+        ), finalIdentity.lifetimeID == expectedBatchLifetimeID else {
             return staleRootResult()
         }
         await awaitCodemapCleanupFlights(rootIDs: [request.root.id])
@@ -19123,7 +20411,7 @@ actor WorkspaceFileContextStore {
         relativePath: String,
         managedOnly: Bool
     ) throws -> WorkspaceFileRecord {
-        let state = try state(for: rootID)
+        let identity = try rootIdentity(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         if let existing = file(rootID: rootID, relativePath: standardizedRelativePath) {
             let wasManagedOnly = managedOnlyFileIDs.contains(existing.id)
@@ -19131,12 +20419,12 @@ actor WorkspaceFileContextStore {
                 promoteToDiscoverable(existing)
                 if wasManagedOnly {
                     invalidatePathMatchSnapshot(
-                        affectedRootKinds: [state.root.kind],
+                        affectedRootKinds: [identity.root.kind],
                         reason: .managedFilePromotion,
-                        affectedRootIDs: [state.root.id]
+                        affectedRootIDs: [identity.root.id]
                     )
                     publishAppliedIndexEvent(
-                        root: state.root,
+                        root: identity.root,
                         upsertedFiles: [existing],
                         upsertedFolders: discoverableParentFolders(for: standardizedRelativePath, rootID: rootID)
                     )
@@ -19145,12 +20433,12 @@ actor WorkspaceFileContextStore {
             return existing
         }
 
-        guard regularFileAppearsPresentOnDisk(root: state.root, relativePath: standardizedRelativePath) else {
+        guard regularFileAppearsPresentOnDisk(root: identity.root, relativePath: standardizedRelativePath) else {
             throw WorkspaceFileContextStoreError.catalogMaterializationFailed(
                 "eligible file disappeared before it could be added to the workspace catalog: \(standardizedRelativePath)"
             )
         }
-        indexFile(relativePath: standardizedRelativePath, root: state.root, managedOnly: managedOnly)
+        indexFile(relativePath: standardizedRelativePath, root: identity.root, managedOnly: managedOnly)
         guard let file = file(rootID: rootID, relativePath: standardizedRelativePath) else {
             throw WorkspaceFileContextStoreError.catalogMaterializationFailed(
                 "eligible file exists on disk but the workspace catalog did not return a record: \(standardizedRelativePath)"
@@ -19158,13 +20446,13 @@ actor WorkspaceFileContextStore {
         }
         if managedOnly {
             retagPublishedRootCatalogShardForProjectionNeutralGeneration(
-                root: state.root,
+                root: identity.root,
                 materializedFileID: file.id
             )
-            publishProjectionNeutralCatalogGenerationChange(root: state.root)
+            publishProjectionNeutralCatalogGenerationChange(root: identity.root)
         } else {
             publishAppliedIndexEvent(
-                root: state.root,
+                root: identity.root,
                 upsertedFiles: [file],
                 upsertedFolders: discoverableParentFolders(for: standardizedRelativePath, rootID: rootID)
             )
@@ -19220,9 +20508,9 @@ actor WorkspaceFileContextStore {
         requireCatalogFileAbsent: Bool = false
     ) async throws -> Bool {
         let path = StandardizedPath.relative(relativePath)
-        guard let initialState = rootStatesByID[rootID] else { return false }
-        let capturedLifetimeID = expectedLifetimeID ?? initialState.lifetimeID
-        guard initialState.lifetimeID == capturedLifetimeID else { return false }
+        guard let initialIdentity = rootStatesByID[rootID]?.identity else { return false }
+        let capturedLifetimeID = expectedLifetimeID ?? initialIdentity.lifetimeID
+        guard initialIdentity.lifetimeID == capturedLifetimeID else { return false }
         let capturedFile = file(rootID: rootID, relativePath: path)
         if let expectedFileID, capturedFile?.id != expectedFileID { return false }
         if requireCatalogFileAbsent, capturedFile != nil { return false }
@@ -19261,20 +20549,16 @@ actor WorkspaceFileContextStore {
 
         try Task.checkCancellation()
         if let token, token.rootEpoch.rootLifetimeID != capturedLifetimeID { return false }
-        guard let currentState = rootStatesByID[rootID],
-              currentState.lifetimeID == capturedLifetimeID,
-              currentState.service === initialState.service,
+        guard isRootCurrent(rootID: rootID, lifetimeID: capturedLifetimeID, service: initialIdentity.service),
               catalogIdentityIsCurrent()
         else { return false }
 
-        let fileExists = try await initialState.service.cancellationResponsiveRegularFileExistsOnDisk(
+        let fileExists = try await initialIdentity.service.cancellationResponsiveRegularFileExistsOnDisk(
             relativePath: path
         )
         try Task.checkCancellation()
         guard !fileExists,
-              let finalState = rootStatesByID[rootID],
-              finalState.lifetimeID == capturedLifetimeID,
-              finalState.service === initialState.service,
+              isRootCurrent(rootID: rootID, lifetimeID: capturedLifetimeID, service: initialIdentity.service),
               catalogIdentityIsCurrent()
         else { return false }
 
@@ -19296,13 +20580,13 @@ actor WorkspaceFileContextStore {
         relativePath: String,
         publishDelta: Bool
     ) -> Bool {
-        guard let state = rootStatesByID[rootID],
+        guard let root = rootStatesByID[rootID]?.root,
               let oldFile = file(rootID: rootID, relativePath: relativePath)
         else { return false }
         let oldFileWasDiscoverable = isDiscoverableFileID(oldFile.id)
         removeFile(relativePath: oldFile.standardizedRelativePath, rootID: rootID)
         if publishDelta, oldFileWasDiscoverable {
-            publishAppliedIndexEvent(root: state.root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
+            publishAppliedIndexEvent(root: root, removedFileIDs: [oldFile.id], removedFilePaths: [oldFile.standardizedRelativePath])
         }
         return true
     }
@@ -19317,14 +20601,14 @@ actor WorkspaceFileContextStore {
         if pruneCatalogFileMissingOnDisk(rootID: rootID, relativePath: standardizedRelativePath, publishDelta: publishDelta) {
             return true
         }
-        guard let state = rootStatesByID[rootID],
+        guard let root = rootStatesByID[rootID]?.root,
               let oldFolder = folder(rootID: rootID, relativePath: standardizedRelativePath)
         else { return false }
         let oldFolderWasDiscoverable = isDiscoverableFolderID(oldFolder.id)
         let removal = removeFolderTree(relativePath: standardizedRelativePath, rootID: rootID)
         if publishDelta {
             publishAppliedIndexEvent(
-                root: state.root,
+                root: root,
                 removedFileIDs: removal.fileIDs,
                 removedFolderIDs: removal.folderIDs.isEmpty && oldFolderWasDiscoverable ? [oldFolder.id] : removal.folderIDs,
                 removedFilePaths: removal.filePaths,
@@ -19344,6 +20628,34 @@ actor WorkspaceFileContextStore {
             publicationCorrelation: EditFlowPerf.LifecycleCorrelation? = nil,
             diagnosticRootToken: UUID? = nil,
             requiresFullResync: Bool = false
+        ) async {
+            let context = CanonicalApplyDebugContext(
+                startNanoseconds: WorkspaceFileSearchDebugTiming.now(),
+                servicePublicationSequence: servicePublicationSequence
+            )
+            await Self.$activeCanonicalApplyDebugContext.withValue(context) {
+                await applyPreparedIndexDeltasRecordingDiagnostics(
+                    rootID: rootID,
+                    deltas: deltas,
+                    expectedLifetimeID: expectedLifetimeID,
+                    watcherAcceptedWatermark: watcherAcceptedWatermark,
+                    servicePublicationSequence: servicePublicationSequence,
+                    publicationCorrelation: publicationCorrelation,
+                    diagnosticRootToken: diagnosticRootToken,
+                    requiresFullResync: requiresFullResync
+                )
+            }
+        }
+
+        private func applyPreparedIndexDeltasRecordingDiagnostics(
+            rootID: UUID,
+            deltas: [PreparedFileSystemDelta],
+            expectedLifetimeID: UUID?,
+            watcherAcceptedWatermark: FileSystemWatcherIngressMailbox.Watermark?,
+            servicePublicationSequence: UInt64?,
+            publicationCorrelation: EditFlowPerf.LifecycleCorrelation?,
+            diagnosticRootToken: UUID?,
+            requiresFullResync: Bool
         ) async {
             guard let servicePublicationSequence else {
                 await applyPreparedIndexDeltasBody(
@@ -19438,11 +20750,9 @@ actor WorkspaceFileContextStore {
                 commands.append(.deleted([prepared.relativePath]))
             case .folderRemoved:
                 let folderPath = StandardizedPath.relative(prepared.relativePath)
-                let descendantPaths = Set(
-                    rootStatesByID[rootID]?.fileIDsByRelativePath.keys.filter {
-                        $0 == folderPath || $0.hasPrefix(folderPath + "/")
-                    } ?? []
-                )
+                let descendantPaths = rootStatesByID[rootID].map { state in
+                    Set(folderSubtree(atRelativePath: folderPath, state: state, purpose: .codemapInvalidation).filePaths)
+                } ?? []
                 if !descendantPaths.isEmpty {
                     commands.append(.deleted(descendantPaths))
                 }
@@ -19628,6 +20938,10 @@ actor WorkspaceFileContextStore {
         let invalidationBatch = PublicationInvalidationBatch()
         activePublicationInvalidationBatch = invalidationBatch
         defer { activePublicationInvalidationBatch = nil }
+        #if DEBUG
+            beginCanonicalApplyDebugPass(rootID: rootID)
+            defer { finishCanonicalApplyDebugPass() }
+        #endif
 
         var upsertedFiles: [WorkspaceFileRecord] = []
         var upsertedFolders: [WorkspaceFolderRecord] = []
@@ -19639,6 +20953,10 @@ actor WorkspaceFileContextStore {
         var modifiedFolderIDs: [UUID] = []
         for prepared in deltas {
             let relativePath = prepared.relativePath
+            #if DEBUG
+                let deltaStart = WorkspaceFileSearchDebugTiming.now()
+                var removedFolderRecordCount = 0
+            #endif
             switch prepared.delta {
             case .fileAdded:
                 guard regularFileAppearsPresentOnDisk(root: root, relativePath: relativePath) else { continue }
@@ -19647,7 +20965,9 @@ actor WorkspaceFileContextStore {
                 if let existingFile {
                     invalidateSearchContent(existingFile)
                 }
-                let existingFolderPaths = Set(rootStatesByID[rootID].map { Array($0.folderIDsByRelativePath.keys) } ?? [])
+                let existingFolderPaths = rootStatesByID[rootID].map {
+                    indexedAncestorFolderPaths(of: relativePath, state: $0)
+                } ?? []
                 indexFile(relativePath: relativePath, root: root)
                 if let file = file(rootID: rootID, relativePath: relativePath) {
                     // Publish existing records too: file-system deltas may have already
@@ -19680,6 +21000,9 @@ actor WorkspaceFileContextStore {
                 if let oldFolder = folder(rootID: rootID, relativePath: relativePath) {
                     let oldFolderWasDiscoverable = isDiscoverableFolderID(oldFolder.id)
                     let removal = removeFolderTree(relativePath: relativePath, rootID: rootID)
+                    #if DEBUG
+                        removedFolderRecordCount = removal.fileIDs.count + removal.folderIDs.count
+                    #endif
                     removedFileIDs.append(contentsOf: removal.fileIDs)
                     removedFolderIDs.append(contentsOf: removal.folderIDs.isEmpty && oldFolderWasDiscoverable ? [oldFolder.id] : removal.folderIDs)
                     removedFilePaths.append(contentsOf: removal.filePaths)
@@ -19695,6 +21018,16 @@ actor WorkspaceFileContextStore {
                     modifiedFolderIDs.append(folder.id)
                 }
             }
+            #if DEBUG
+                recordCanonicalApplyDeltaTiming(
+                    prepared.delta,
+                    nanoseconds: WorkspaceFileSearchDebugTiming.elapsed(
+                        since: deltaStart,
+                        through: WorkspaceFileSearchDebugTiming.now()
+                    ),
+                    removedRecordCount: removedFolderRecordCount
+                )
+            #endif
         }
 
         finalizePublicationInvalidations(invalidationBatch)
@@ -19969,11 +21302,11 @@ actor WorkspaceFileContextStore {
         else {
             return .blockedOrAmbiguous(.outsideAuthorizedRoot)
         }
-        guard let state = rootStatesByID[authorization.root.id] else {
+        guard let identity = rootStatesByID[authorization.root.id]?.identity else {
             return .staleAuthority(.rootID)
         }
 
-        let eligibility = await state.service.catalogRegularFileEligibility(
+        let eligibility = await identity.service.catalogRegularFileEligibility(
             relativePath: relativePath
         )
         #if DEBUG
@@ -19995,7 +21328,7 @@ actor WorkspaceFileContextStore {
                 return .resolved(files: [record], route: .catalogFile)
             }
 
-            let registration = await state.service.beginExplicitlyManagedRegularFileRegistration(
+            let registration = await identity.service.beginExplicitlyManagedRegularFileRegistration(
                 relativePath: relativePath
             )
             var pendingRegistrationToken = registration.token
@@ -20006,22 +21339,19 @@ actor WorkspaceFileContextStore {
             #endif
             if Task.isCancelled {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 throw CancellationError()
             }
-            guard let currentState = rootStatesByID[authorization.root.id],
-                  currentState.lifetimeID == state.lifetimeID,
-                  currentState.service === state.service
-            else {
+            guard isRootCurrent(rootID: authorization.root.id, lifetimeID: identity.lifetimeID, service: identity.service) else {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return .staleAuthority(.lifetime)
             }
             if let mismatch = sessionRootAuthorizationMismatch(authorization) {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return .staleAuthority(mismatch)
             }
@@ -20033,12 +21363,12 @@ actor WorkspaceFileContextStore {
                 managedOnly = true
             case .ineligible(.missingOrDirectory):
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return .noCandidate
             case let .ineligible(reason):
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return .blockedOrAmbiguous(
                     contextBuilderSelectionCandidateBlock(for: reason)
@@ -20051,7 +21381,7 @@ actor WorkspaceFileContextStore {
                     managedOnly: managedOnly
                 )
                 if let token = pendingRegistrationToken {
-                    _ = await state.service.commitExplicitlyManagedRegularFileRegistration(token)
+                    _ = await identity.service.commitExplicitlyManagedRegularFileRegistration(token)
                     pendingRegistrationToken = nil
                 }
                 if let mismatch = sessionRootAuthorizationMismatch(authorization) {
@@ -20060,7 +21390,7 @@ actor WorkspaceFileContextStore {
                 return .resolved(files: [record], route: .materializedFile)
             } catch {
                 if let pendingRegistrationToken {
-                    _ = await state.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
+                    _ = await identity.service.rollbackExplicitlyManagedRegularFileRegistration(pendingRegistrationToken)
                 }
                 return .blockedOrAmbiguous(.materializationFailed)
             }
@@ -20116,10 +21446,10 @@ actor WorkspaceFileContextStore {
         expectedRoot: WorkspaceRootRef,
         expectedKind: WorkspaceRootKind
     ) -> WorkspaceFileRecord? {
-        guard let state = exactRootState(expectedRoot: expectedRoot, expectedKind: expectedKind) else {
+        guard let identity = exactRootIdentity(expectedRoot: expectedRoot, expectedKind: expectedKind) else {
             return nil
         }
-        guard publishedSeededAuthorityIsQueryable(rootID: state.root.id) else { return nil }
+        guard publishedSeededAuthorityIsQueryable(rootID: identity.root.id) else { return nil }
 
         let trimmed = absolutePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
@@ -20128,13 +21458,13 @@ actor WorkspaceFileContextStore {
         else { return nil }
 
         let standardizedPath = StandardizedPath.absolute(trimmed)
-        guard StandardizedPath.isDescendant(standardizedPath, of: state.root.standardizedFullPath),
-              standardizedPath != state.root.standardizedFullPath
+        guard StandardizedPath.isDescendant(standardizedPath, of: identity.root.standardizedFullPath),
+              standardizedPath != identity.root.standardizedFullPath
         else { return nil }
 
-        let relativePath = relativePath(for: standardizedPath, rootPath: state.root.standardizedFullPath)
-        guard let record = file(rootID: state.root.id, relativePath: relativePath),
-              record.rootID == state.root.id,
+        let relativePath = relativePath(for: standardizedPath, rootPath: identity.root.standardizedFullPath)
+        guard let record = file(rootID: identity.root.id, relativePath: relativePath),
+              record.rootID == identity.root.id,
               record.standardizedFullPath == standardizedPath
         else { return nil }
         return record
@@ -20147,15 +21477,15 @@ actor WorkspaceFileContextStore {
         expectedRoot: WorkspaceRootRef
     ) async -> String? {
         guard await (try? requirePublishedSeededAuthorityFresh(rootID: file.rootID)) != nil else { return nil }
-        guard let state = exactRootState(expectedRoot: expectedRoot, expectedKind: .workspaceGitData),
-              file.rootID == state.root.id,
-              let current = self.file(rootID: state.root.id, relativePath: file.standardizedRelativePath),
+        guard let identity = exactRootIdentity(expectedRoot: expectedRoot, expectedKind: .workspaceGitData),
+              file.rootID == identity.root.id,
+              let current = self.file(rootID: identity.root.id, relativePath: file.standardizedRelativePath),
               current.id == file.id,
               current.standardizedFullPath == file.standardizedFullPath
         else { return nil }
 
-        let expectedLifetimeID = state.lifetimeID
-        let content = try? await state.service.loadContent(ofRelativePath: file.standardizedRelativePath)
+        let expectedLifetimeID = identity.lifetimeID
+        let content = try? await identity.service.loadContent(ofRelativePath: file.standardizedRelativePath)
 
         guard await (try? requirePublishedSeededAuthorityFresh(rootID: file.rootID)) != nil else { return nil }
 
@@ -20170,16 +21500,16 @@ actor WorkspaceFileContextStore {
         return content
     }
 
-    private func exactRootState(
+    private func exactRootIdentity(
         expectedRoot: WorkspaceRootRef,
         expectedKind: WorkspaceRootKind
-    ) -> RootState? {
-        guard let state = rootStatesByID[expectedRoot.id],
-              state.root.id == expectedRoot.id,
-              state.root.standardizedFullPath == expectedRoot.standardizedFullPath,
-              state.root.kind == expectedKind
+    ) -> RootIdentity? {
+        guard let identity = rootStatesByID[expectedRoot.id]?.identity,
+              identity.root.id == expectedRoot.id,
+              identity.root.standardizedFullPath == expectedRoot.standardizedFullPath,
+              identity.root.kind == expectedKind
         else { return nil }
-        return state
+        return identity
     }
 
     func displayRootRefsSnapshot() -> WorkspaceDisplayRootRefsSnapshot {
@@ -21113,12 +22443,12 @@ actor WorkspaceFileContextStore {
         guard let current = file(rootID: record.rootID, relativePath: record.standardizedRelativePath),
               current.id == record.id
         else { return }
-        guard let state = rootStatesByID[current.rootID] else { return }
+        guard let lifetimeID = rootStatesByID[current.rootID]?.lifetimeID else { return }
         _ = try? await fenceAndPruneCatalogFileMissingOnDisk(
             rootID: current.rootID,
             relativePath: current.standardizedRelativePath,
             publishDelta: true,
-            expectedLifetimeID: state.lifetimeID,
+            expectedLifetimeID: lifetimeID,
             expectedFileID: current.id
         )
     }
@@ -21373,11 +22703,10 @@ actor WorkspaceFileContextStore {
     }
 
     private func indexFolder(relativePath: String, root: WorkspaceRootRecord) {
-        guard var state = rootStatesByID[root.id] else { return }
+        guard rootStatesByID[root.id] != nil else { return }
         var stagedIndexes = RootIndexBuffers()
-        indexFolders([FSItemDTO(relativePath: relativePath, isDirectory: true, hierarchy: relativePath.split(separator: "/").count)], root: root, state: &state, indexes: &stagedIndexes)
+        indexFolders([FSItemDTO(relativePath: relativePath, isDirectory: true, hierarchy: relativePath.split(separator: "/").count)], root: root, state: &rootStatesByID[root.id]!, indexes: &stagedIndexes)
         commit(stagedIndexes)
-        rootStatesByID[root.id] = state
         if let folder = folder(rootID: root.id, relativePath: relativePath) {
             promoteFolderToDiscoverable(folder)
         }
@@ -21385,18 +22714,14 @@ actor WorkspaceFileContextStore {
     }
 
     private func indexFile(relativePath: String, root: WorkspaceRootRecord, managedOnly: Bool = false) {
-        guard var state = rootStatesByID[root.id] else { return }
-        let existingFolderPaths = Set(state.folderIDsByRelativePath.keys)
+        guard rootStatesByID[root.id] != nil else { return }
         var stagedIndexes = RootIndexBuffers()
-        indexFiles([FSItemDTO(relativePath: relativePath, isDirectory: false, hierarchy: relativePath.split(separator: "/").count)], root: root, state: &state, indexes: &stagedIndexes)
+        indexFiles([FSItemDTO(relativePath: relativePath, isDirectory: false, hierarchy: relativePath.split(separator: "/").count)], root: root, state: &rootStatesByID[root.id]!, indexes: &stagedIndexes)
         commit(stagedIndexes)
-        rootStatesByID[root.id] = state
         if let file = file(rootID: root.id, relativePath: relativePath) {
             if managedOnly {
                 managedOnlyFileIDs.insert(file.id)
-                for folder in newlyIndexedParentFolders(for: relativePath, rootID: root.id, existingFolderPaths: existingFolderPaths) {
-                    managedOnlyFolderIDs.insert(folder.id)
-                }
+                managedOnlyFolderIDs.formUnion(stagedIndexes.foldersByID.keys)
             } else {
                 promoteToDiscoverable(file)
             }
@@ -21406,48 +22731,52 @@ actor WorkspaceFileContextStore {
 
     private func discoverableParentFolders(for fileRelativePath: String, rootID: UUID) -> [WorkspaceFolderRecord] {
         guard let state = rootStatesByID[rootID] else { return [] }
-        let standardizedPath = StandardizedPath.relative(fileRelativePath)
-        var current = (standardizedPath as NSString).deletingLastPathComponent
-        var folders: [WorkspaceFolderRecord] = []
-        while !current.isEmpty, current != "." {
-            let key = StandardizedPath.relative(current)
-            if let folderID = state.folderIDsByRelativePath[key],
-               isDiscoverableFolderID(folderID),
-               let folder = foldersByID[folderID]
-            {
-                folders.append(folder)
+        return Self.ancestorFolderKeys(ofFile: fileRelativePath)
+            .compactMap { key -> WorkspaceFolderRecord? in
+                guard let folderID = state.folderIDsByRelativePath[key], isDiscoverableFolderID(folderID) else {
+                    return nil
+                }
+                return foldersByID[folderID]
             }
-            let next = (key as NSString).deletingLastPathComponent
-            guard next != key else { break }
-            current = next
-        }
-        return folders.sorted { $0.standardizedRelativePath < $1.standardizedRelativePath }
+            .sorted { $0.standardizedRelativePath < $1.standardizedRelativePath }
     }
 
+    /// `existingFolderPaths` needs only the file's ancestors that were indexed before the file, as
+    /// `indexedAncestorFolderPaths` returns them.
     private func newlyIndexedParentFolders(
         for fileRelativePath: String,
         rootID: UUID,
         existingFolderPaths: Set<String>
     ) -> [WorkspaceFolderRecord] {
         guard let state = rootStatesByID[rootID] else { return [] }
-        let standardizedPath = StandardizedPath.relative(fileRelativePath)
-        let parentPath = (standardizedPath as NSString).deletingLastPathComponent
-        guard !parentPath.isEmpty, parentPath != "." else { return [] }
-        var folders: [WorkspaceFolderRecord] = []
-        var current = parentPath
+        return Self.ancestorFolderKeys(ofFile: fileRelativePath)
+            .compactMap { key -> WorkspaceFolderRecord? in
+                guard !existingFolderPaths.contains(key), let folderID = state.folderIDsByRelativePath[key] else {
+                    return nil
+                }
+                return foldersByID[folderID]
+            }
+            .sorted { $0.standardizedRelativePath < $1.standardizedRelativePath }
+    }
+
+    /// The ancestor folder paths of a file that the root already indexes, found in O(depth) by walking
+    /// up the file's path rather than copying every folder path of the root.
+    private func indexedAncestorFolderPaths(of fileRelativePath: String, state: RootState) -> Set<String> {
+        Set(Self.ancestorFolderKeys(ofFile: fileRelativePath).filter { state.folderIDsByRelativePath[$0] != nil })
+    }
+
+    /// The standardized relative paths of a file's ancestor folders, nearest first, without the root.
+    private static func ancestorFolderKeys(ofFile fileRelativePath: String) -> [String] {
+        var keys: [String] = []
+        var current = (StandardizedPath.relative(fileRelativePath) as NSString).deletingLastPathComponent
         while !current.isEmpty, current != "." {
             let key = StandardizedPath.relative(current)
-            if !existingFolderPaths.contains(key),
-               let folderID = state.folderIDsByRelativePath[key],
-               let folder = foldersByID[folderID]
-            {
-                folders.append(folder)
-            }
+            keys.append(key)
             let next = (key as NSString).deletingLastPathComponent
             guard next != key else { break }
             current = next
         }
-        return folders.sorted { $0.standardizedRelativePath < $1.standardizedRelativePath }
+        return keys
     }
 
     private func publishAppliedIndexEvent(
@@ -21508,11 +22837,10 @@ actor WorkspaceFileContextStore {
     }
 
     private func removeFile(relativePath: String, rootID: UUID) {
-        guard var state = rootStatesByID[rootID] else { return }
-        let removedFileID = removeFile(relativePath: relativePath, state: &state)
-        rootStatesByID[rootID] = state
+        guard let rootKind = rootStatesByID[rootID]?.root.kind else { return }
+        let removedFileID = removeFile(relativePath: relativePath, state: &rootStatesByID[rootID]!)
         if removedFileID != nil {
-            invalidatePathMatchSnapshot(affectedRootKinds: [state.root.kind], affectedRootIDs: [state.root.id])
+            invalidatePathMatchSnapshot(affectedRootKinds: [rootKind], affectedRootIDs: [rootID])
         }
     }
 
@@ -21533,19 +22861,76 @@ actor WorkspaceFileContextStore {
         return fileID
     }
 
+    private enum FolderSubtreeTraversalPurpose {
+        case removal
+        case codemapInvalidation
+    }
+
+    /// The files and folders under the folder at `relativePath`, the folder included, found by walking
+    /// the root's child indexes, so the cost follows the subtree rather than the root. Folder IDs come
+    /// parents first. File paths also include a file stored at the folder's own path, so a removal
+    /// reported as a folder clears a file record left there. Walk again after an `await` rather than
+    /// reuse the result.
+    private func folderSubtree(
+        atRelativePath relativePath: String,
+        state: RootState,
+        purpose: FolderSubtreeTraversalPurpose
+    ) -> (filePaths: [String], folderIDs: [UUID]) {
+        guard !relativePath.isEmpty else { return ([], []) }
+        var filePaths: [String] = state.fileIDsByRelativePath[relativePath] == nil ? [] : [relativePath]
+        var folderIDs: [UUID] = []
+        if let folderID = state.folderIDsByRelativePath[relativePath] {
+            folderIDs.append(folderID)
+            var visitedFolderIDs: Set<UUID> = [folderID]
+            var nextFolderIndex = 0
+            while nextFolderIndex < folderIDs.count {
+                let currentFolderID = folderIDs[nextFolderIndex]
+                nextFolderIndex += 1
+                for fileID in state.childFileIDsByFolderID[currentFolderID] ?? [] {
+                    if let file = filesByID[fileID] {
+                        filePaths.append(file.standardizedRelativePath)
+                    }
+                }
+                for childFolderID in state.childFolderIDsByFolderID[currentFolderID] ?? []
+                    where visitedFolderIDs.insert(childFolderID).inserted
+                {
+                    folderIDs.append(childFolderID)
+                }
+            }
+        }
+        #if DEBUG
+            recordFolderSubtreeTraversal(
+                purpose,
+                rootID: state.root.id,
+                visitedRecordCount: filePaths.count + folderIDs.count
+            )
+        #endif
+        return (filePaths, folderIDs)
+    }
+
     private func removeFolderTree(relativePath: String, rootID: UUID) -> (fileIDs: [UUID], folderIDs: [UUID], filePaths: [String], folderPaths: [String]) {
-        guard var state = rootStatesByID[rootID] else { return ([], [], [], []) }
         let key = StandardizedPath.relative(relativePath)
         guard !key.isEmpty,
-              let folderID = state.folderIDsByRelativePath[key],
-              let folder = foldersByID[folderID]
+              let rootKind = rootStatesByID[rootID]?.root.kind,
+              let removal = removeFolderTree(key: key, state: &rootStatesByID[rootID]!)
         else { return ([], [], [], []) }
+        invalidatePathMatchSnapshot(affectedRootKinds: [rootKind], affectedRootIDs: [rootID])
+        return removal
+    }
 
-        let filePaths = state.fileIDsByRelativePath.keys
-            .filter { $0 == key || $0.hasPrefix(key + "/") }
+    /// Nil when `state` has no folder at `key`.
+    private func removeFolderTree(
+        key: String,
+        state: inout RootState
+    ) -> (fileIDs: [UUID], folderIDs: [UUID], filePaths: [String], folderPaths: [String])? {
+        guard let folderID = state.folderIDsByRelativePath[key],
+              foldersByID[folderID] != nil
+        else { return nil }
+
+        let subtree = folderSubtree(atRelativePath: key, state: state, purpose: .removal)
         var removedFileIDs: [UUID] = []
         var removedFilePaths: [String] = []
-        for path in filePaths {
+        for path in subtree.filePaths {
             let wasDiscoverable = state.fileIDsByRelativePath[path].map(isDiscoverableFileID) ?? false
             if let removedFileID = removeFile(relativePath: path, state: &state), wasDiscoverable {
                 removedFileIDs.append(removedFileID)
@@ -21553,19 +22938,16 @@ actor WorkspaceFileContextStore {
             }
         }
 
-        let folderPaths = state.folderIDsByRelativePath.keys
-            .filter { $0 == key || $0.hasPrefix(key + "/") }
-            .sorted { $0.count > $1.count }
         var removedFolderIDs: [UUID] = []
         var removedFolderPaths: [String] = []
-        for path in folderPaths {
-            guard let id = state.folderIDsByRelativePath.removeValue(forKey: path),
-                  let removed = foldersByID.removeValue(forKey: id)
-            else { continue }
+        // Children before parents.
+        for id in subtree.folderIDs.reversed() {
+            guard let removed = foldersByID.removeValue(forKey: id) else { continue }
+            state.folderIDsByRelativePath.removeValue(forKey: removed.standardizedRelativePath)
             let wasDiscoverable = isDiscoverableFolderID(id)
             if wasDiscoverable {
                 removedFolderIDs.append(id)
-                removedFolderPaths.append(path)
+                removedFolderPaths.append(removed.standardizedRelativePath)
             }
             managedOnlyFolderIDs.remove(id)
             folderIDsByStandardizedFullPath.removeValue(forKey: removed.standardizedFullPath)
@@ -21575,12 +22957,6 @@ actor WorkspaceFileContextStore {
             state.childFolderIDsByFolderID.removeValue(forKey: id)
             state.childFileIDsByFolderID.removeValue(forKey: id)
         }
-
-        if let parentID = folder.parentFolderID {
-            state.childFolderIDsByFolderID[parentID]?.removeAll { $0 == folderID }
-        }
-        rootStatesByID[rootID] = state
-        invalidatePathMatchSnapshot(affectedRootKinds: [state.root.kind], affectedRootIDs: [state.root.id])
         return (removedFileIDs, removedFolderIDs, removedFilePaths, removedFolderPaths)
     }
 
@@ -21624,6 +23000,19 @@ actor WorkspaceFileContextStore {
             throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
         }
         return state
+    }
+
+    private func rootIdentity(for rootID: UUID) throws -> RootIdentity {
+        guard let identity = rootStatesByID[rootID]?.identity else {
+            throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
+        }
+        return identity
+    }
+
+    /// Whether the root is still loaded with this lifetime and service.
+    private func isRootCurrent(rootID: UUID, lifetimeID: UUID, service: FileSystemService) -> Bool {
+        guard let current = rootStatesByID[rootID]?.identity else { return false }
+        return current.lifetimeID == lifetimeID && current.service === service
     }
 
     private func managedOnlyAncestorFolderIDs(for fileIDs: Set<UUID>) -> Set<UUID> {

@@ -82,12 +82,18 @@ final class StoreBackedWorkspaceSearchTests: XCTestCase {
 
     func testExactAbsoluteScopeHelperExcludesManagedOnlyIgnoredFiles() async throws {
         let root = try makeTemporaryRoot(name: "IgnoredDiscoverability")
-        try write("*.ignored\n", to: root.appendingPathComponent(".gitignore"))
+        try write("*.ignored\nGenerated/\n", to: root.appendingPathComponent(".gitignore"))
         let ignoredURL = root.appendingPathComponent("Hidden.ignored")
+        let visibleFolderURL = root.appendingPathComponent("Visible", isDirectory: true)
+        let nestedIgnoredURL = visibleFolderURL.appendingPathComponent("Generated/Deep/First.swift")
+        let siblingIgnoredURL = visibleFolderURL.appendingPathComponent("Generated/Sibling/Second.swift")
         try write("hidden", to: ignoredURL)
+        try write("visible", to: visibleFolderURL.appendingPathComponent("Keep.swift"))
+        try write("first", to: nestedIgnoredURL)
+        try write("second", to: siblingIgnoredURL)
 
         let store = WorkspaceFileContextStore()
-        _ = try await store.loadRoot(path: root.path)
+        let record = try await store.loadRoot(path: root.path)
         let readableService = WorkspaceReadableFileService(store: store)
         let readable = try await readableService.resolveReadableFile(
             ignoredURL.path,
@@ -104,6 +110,43 @@ final class StoreBackedWorkspaceSearchTests: XCTestCase {
         XCTAssertNil(searchHit)
         let snapshot = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
         XCTAssertFalse(snapshot.files.contains { $0.standardizedFullPath == ignoredURL.path })
+
+        let createdFolderPaths = ["Visible/Generated", "Visible/Generated/Deep", "Visible/Generated/Sibling"]
+        for path in createdFolderPaths {
+            let loadedFolder = await store.folder(rootID: record.id, relativePath: path)
+            XCTAssertNil(loadedFolder, "\(path) is ignored, so loading must not index it")
+        }
+
+        // The first file creates Generated and Deep under the discoverable Visible folder. The second
+        // creates only Sibling, under Generated, which is already managed-only by then.
+        for url in [nestedIgnoredURL, siblingIgnoredURL] {
+            let nestedReadable = try await readableService.resolveReadableFile(url.path, rootScope: .visibleWorkspace)
+            guard case .workspace = nestedReadable else {
+                return XCTFail("Expected \(url.lastPathComponent) to materialize a managed-only record")
+            }
+        }
+
+        let visibleHit = await store.lookupDiscoverableCatalogPathForExactAbsoluteSearchScope(
+            visibleFolderURL.path,
+            rootScope: .visibleWorkspace
+        )
+        XCTAssertEqual(visibleHit?.folder?.standardizedRelativePath, "Visible")
+        for path in createdFolderPaths {
+            let createdFolder = await store.folder(rootID: record.id, relativePath: path)
+            XCTAssertNotNil(createdFolder, "Materialization should index \(path)")
+            let folderHit = await store.lookupDiscoverableCatalogPathForExactAbsoluteSearchScope(
+                root.appendingPathComponent(path).path,
+                rootScope: .visibleWorkspace
+            )
+            XCTAssertNil(folderHit, "\(path) exists only for ignored files, so it must not be discoverable")
+        }
+        for url in [nestedIgnoredURL, siblingIgnoredURL] {
+            let fileHit = await store.lookupDiscoverableCatalogPathForExactAbsoluteSearchScope(
+                url.path,
+                rootScope: .visibleWorkspace
+            )
+            XCTAssertNil(fileHit, "\(url.lastPathComponent) must not be discoverable")
+        }
     }
 
     func testExactAbsoluteScopeHelperHonorsVisibleGitDataAndSessionBoundScopes() async throws {
