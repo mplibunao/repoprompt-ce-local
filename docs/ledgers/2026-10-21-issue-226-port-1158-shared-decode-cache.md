@@ -1,0 +1,53 @@
+# Run ledger: Port upstream PR 1158, shared workspace decode cache
+
+Request: #226 (related) · Plan: `port-1158-shared-decode-cache-2026-10-21.md`
+
+Port upstream PR 1158 (`6efc7d93`) by hand: a process-wide, content-digest-keyed decode cache so windows that decode the same workspace documents share one decoded copy. Measure retained tab storage before and after on the debug app, and record the decision in `docs/adr/2026-10-21-shared-workspace-decode-cache.md`.
+
+| Item | Outcome | Agent session | Commits |
+|------|---------|---------------|---------|
+| 1. Port the cache and synthesis marks with tests | done | engineer · Orchestrate 1/5: port 1158 cache and tests | `perf(workspaces): reuse digest-keyed workspace decodes across windows` |
+| 2. Baseline measurement on main | done | orchestrator | |
+| 3. After measurement and functional run | done | orchestrator | |
+| 4. ADR and ledger | done | orchestrator | `docs: record the shared decode cache decision and its run ledger` |
+| 5. Pull request gates | pending | | |
+
+## 1. Port the cache and synthesis marks with tests
+
+- Decision: `WorkspaceFileDecodeCache` matches upstream's post-image of `6efc7d93` line for line, with the same limits and the plain DEBUG limit setter. `WorkspaceModel.swift` marks upstream's six fallbacks, main's `lastUsed ?? Date()`, and the default-tab creation. Source: approved plan.
+- Decision: the normalization mark is `WorkspaceDecodeSynthesis.mark(())` without upstream's `_ =`, which this toolchain warns is redundant on a Void result. Source: the engineer agent's judgment.
+- Decision: upstream's ten cache tests become seven in `Tests/RepoPromptTests/Workspaces/WorkspaceDigestDecodeCacheTests.swift`, with a local fixture, because main lacks upstream's decode-diagnostics fixture. The failure assertions fold into the changed-bytes test, the caller-mutation check into the identical-bytes test, one table drives both eviction tests, and one test covers both synthesis tests. Upstream's concurrent cold-miss test is dropped, because its two detached decodes don't guarantee two cold misses; `testRepeatedDigestStoreChargesOneEntry` covers the replacement store directly. Two tests are new: oversized documents, and a model-level save-flag test that the plan chose over a disk write-back test, because production never schedules that write-back (`scheduleNormalizationWriteback: domainWorkspaceAuthorityClient == nil`). Source: approved plan, design critique, refactor review.
+- Decision: declined a review suggestion to also test the save flag through the legacy file loader, which gates only that unscheduled write-back and DEBUG counters. Also declined a refactor suggestion to build the repair test's input from typed fields instead of JSON edits: it was cosmetic. Source: orchestrator judgment.
+- Evidence: `make dev-format`, `make dev-lint`, `make guardrails`, `make dev-swift-build PRODUCT=RepoPrompt`, and focused `make dev-test` for `WorkspaceDigestDecodeCacheTests` (7), `WorkspaceDuplicateCleanupTests` (8), and `WorkspaceRootSyncTests` (15) pass. Removing the `lastUsed` mark fails only that synthesis row. Skipping the store for decodes that need a save fails only the save-flag test.
+
+## 2. Baseline measurement on main
+
+- Decision: the shown workspaces are the four largest by compose-plus-stashed tab state among the seeded workspaces that have stashed tabs and root folders on disk. A has 1,368 compose and 65 stashed tabs, B 256 and 673, C 25 and 208, D 83 and 135. `S_lower`, a lower bound of decoded tab state (UTF-8 bytes of heap-allocated strings), is 6.2, 4.2, and 0.75 MiB for B, C, and D, so ΣS_lower = 11.1 MiB. Source: approved plan.
+- Decision: the seeded profile has 36 catalog workspaces, all with documents, totaling 40.0 MiB. The archive's copies total 41.4 MiB; seeding writes 27 of them back slightly smaller. That's under both cache limits, so no limit is raised. Source: approved plan (fit gate).
+- Decision: settlement means each window reports `ready` with stable catalog and search generations, no switch overlay, and no pending search, three times in a row. Then the read-only workload runs twice, and capture happens at least 360 s after the last workspace switch. The planned CPU-quiet condition was dropped, because background codemap graph indexing of the shown workspaces' roots kept the app at 100 to 300% CPU for more than 10 minutes, and that indexing retains no tab arrays. Code maps are also turned off in the snapshot's global settings (`codeMapsGloballyDisabled`) for every launch. That setting doesn't stop the graph indexing. A first 1-window launch without that setting was discarded before capture. Source: orchestrator judgment.
+- Decision: `T(N)` sums the retained size of every `[ComposeTabState]` and `[StashedTab]` array-storage row in `leaks --dominatorTree --groupByType` that has no tab-array ancestor. The output also lists nested rows, such as those under the legacy metadata cache's dictionary, and the sum includes them. Source: approved plan, adjusted after reading the output.
+- Evidence: main `b67399ddb`, debug build. 1 window: `T` = 94.6 MiB, of which 64.8 MiB are arrays shared by the window's manager and bridge, and 29.5 MiB a second copy held by the legacy metadata-keyed file cache; 64 `[ComposeTabState]` and 23 `[StashedTab]` buffers. 4 windows: `T` = 213.0 MiB, with 177 and 55 buffers. The 256 KiB stash buffers number 4 with 1 window and 10 with 4 windows.
+- Evidence: the stop line's inputs. `C` is the 1-window `T` on main, 94.6 MiB. `D` is the seeded documents' size, 40.0 MiB, and `L` the cache's byte limit, 64 MiB. `r` = `C` / `D` = 2.36 decoded bytes per input byte. `E` = `C` + `r` × max(0, `L` − `D`) = 151.3 MiB is one catalog copy plus a full byte budget of stale cache entries. `R` = 1.1 × `E` + 4 MiB = 170.5 MiB, and the stop line is max(150, 1.2 × `R`) = 204.6 MiB.
+
+## 3. After measurement and functional run
+
+- Evidence: port `4c35bee80`, debug build, same snapshot and settlement as item 2. 1 window: `T` = 59.5 MiB (main 94.6). 46.7 MiB are arrays shared by the window and the digest cache. 12.8 MiB are versions that only the cache references, from documents saved again during launch. Buffers: 42 `[ComposeTabState]` and 14 `[StashedTab]` (main 64 and 23). The legacy metadata cache's second copy no longer costs extra, because its models now come from the digest cache.
+- Evidence: 4 windows: `T` = 56.9 MiB (main 213.0), about one catalog copy (main's 1-window manager and bridge arrays: 64.8 MiB). Buffers: 57 and 20 (main 177 and 55). The 256 KiB stash buffers number 4 (main 10). `T` is under `R` (170.5 MiB) and not within 20% of it, so no repeat launches were needed.
+- Evidence: owner traces (`leaks --traceTree`) of the four 256 KiB stash buffers in the 4-window graph. Three distinct `WorkspaceManagerViewModel` instances (`_workspaces`), three distinct `DomainWorkspacePresentationBridge` instances (`projectedModels`), and the cache's `DigestCachedDecode` dictionary reference the first. Two windows' managers and bridges and the cache reference the second. Only the cache references the third, a version no window uses any more. One window references the fourth and the cache doesn't, which fits a shown workspace's copy-on-write copy. On main, none of the three stash buffers traced had more than one window as an owner.
+- Evidence: total `Swift.StringStorage` falls by 32.8 MiB with 1 window and 169.7 MiB with 4, in line with `T` (−35.1 and −156.1 MiB). The strings are retained once, not moved outside the counted rows.
+- Evidence: #226's per-window criterion. `T(4) − T(1)` = −2.6 MiB ≤ ΣS_lower(B, C, D) = 11.1 MiB. Each added window adds no more than its shown workspace's tab state. #226's other criterion, decoded tabs only for the shown workspace, isn't implemented, by decision.
+- Evidence: functional run on the port build. A prompt set over MCP stays in the window's live state until a capture publishes it, so window 1 was switched away from A to publish. The saved document then contained the marker. Window 2, which had A in its catalog, switched to A and read the marker; window 1 read it after switching back. A stale decode would have shown the old empty prompt. Switching window 2 away and back kept the marker. `make dev-smoke` passed.
+- Decision: the planned check that two windows showing one workspace mirror each other's live prompt edits was dropped. It depends on capture and publish rules this port doesn't change, and the changed-bytes check above already exercises the cache. Source: orchestrator judgment.
+
+## 4. ADR and ledger
+
+- Decision: `docs/adr/2026-10-21-shared-workspace-decode-cache.md` records the choice of the shared cache over per-window shown-only decoding. Its text is the plan's approved draft with the measured numbers filled in. One sentence was corrected: the draft said one window saves nothing, and the measurement shows one window saves the legacy file-load cache's duplicate. Source: user, through the parent session, for the draft. Measurement, for the correction.
+
+## Run decisions
+
+- Decision: keep every window's synchronous full-catalog model and share decodes through upstream PR 1158's cache instead of finishing per-window shown-only decoding. Source: user. The reasoning is in `docs/adr/2026-10-21-shared-workspace-decode-cache.md`.
+- Decision: keep upstream's limits (128 entries, 64 MiB of input) unless the measured catalog exceeds one. If it does, raise that limit to 1.5 × the measured catalog and record it as a deliberate difference from upstream. Source: user, through the parent session.
+- Decision: the release archive `local/v1.4.0-b56` lists 112 runtime-catalog entries, of which 36 have documents (41.4 MiB, largest 10.6 MiB). The other 76 are dead entries: 74 point at temporary test-fixture folders and 2 at deleted workspaces. No limit is raised. Source: read-only inventory of the archive.
+- Decision: the measurement seeds the debug profile once from the archive, then restores an APFS clone of it before every launch, so all four launches start from the same input. Source: user, through the parent session.
+- Decision: the stop line for the 4-window after measurement is `max(150 MiB, 1.2 × R)`, where `R = 1.1 × (C + r × max(0, L − D)) + 4 MiB` comes from the baseline. Source: user, through the parent session.
+- Decision: the port doesn't copy upstream-head code outside `6efc7d93` (`documentPreparation`, `isSavedWorkspace`, `pinnedOrder`, upstream's `lastUsed` fallback chain). Main's own `lastUsed ?? Date()` fallback is marked instead. Source: approved plan.
