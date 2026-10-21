@@ -820,8 +820,8 @@ private enum AppSettingsMCPRegistry {
             write: { try $0.setCodeMapsGloballyDisabled(requiredBool(from: $1)) }
         ),
 
-        // Agent Mode behavior. This exposes durable prompt-shaping preferences only;
-        // internal provider/runtime toggles remain omitted.
+        // Agent Mode behavior: durable user preferences. Internal provider and
+        // runtime toggles stay out of this catalog.
         boolSetting(
             key: "agent_mode.show_built_in_workflow_cleanup_guidance",
             group: "agent_mode",
@@ -859,6 +859,15 @@ private enum AppSettingsMCPRegistry {
                 }
                 store.setProviderConversationCleanupAction(action)
             }
+        ),
+        wholeNumberSetting(
+            key: "agent_mode.idle_provider_shutdown_minutes",
+            group: "agent_mode",
+            label: "Idle Provider Shutdown",
+            description: "Minutes an idle Agent Mode session keeps its provider process (Claude Code, Claude-compatible backends, and Codex) before RepoPrompt stops it. The next message resumes the conversation. Whole number from 0 to 120, default 5, where 0 never stops it. A change applies to sessions that finish a turn after it, and 0 also stops shutdowns already scheduled.",
+            range: GlobalSettingsStore.idleProviderShutdownMinutesRange,
+            read: { .int($0.idleProviderShutdownMinutes()) },
+            write: { try $0.setIdleProviderShutdownMinutes(requiredInt(from: $1)) }
         ),
 
         // File-system / ignore preferences. Local .repo_ignore file content remains
@@ -1134,6 +1143,29 @@ private enum AppSettingsMCPRegistry {
         )
     }
 
+    private static func wholeNumberSetting(
+        key: String,
+        group: String,
+        label: String? = nil,
+        description: String,
+        range: ClosedRange<Int>,
+        read: @escaping @MainActor (GlobalSettingsStore) -> Value,
+        write: @escaping @MainActor (GlobalSettingsStore, Value) throws -> Void
+    ) -> AppSettingDefinition {
+        AppSettingDefinition(
+            key: key,
+            group: group,
+            valueType: .number,
+            label: label,
+            description: description,
+            allowedValues: nil,
+            read: read,
+            validate: { value in try validateWholeNumber(value, key: key, range: range) },
+            write: write,
+            afterWrite: nil
+        )
+    }
+
     private static func validateBool(_ value: Value, key: String) throws -> Value {
         switch value {
         case let .bool(bool):
@@ -1232,6 +1264,17 @@ private enum AppSettingsMCPRegistry {
         return .double(number)
     }
 
+    private static func validateWholeNumber(_ value: Value, key: String, range: ClosedRange<Int>) throws -> Value {
+        let number = try numericValue(value, key: key)
+        guard let whole = Int(exactly: number) else {
+            throw MCPError.invalidParams("Setting '\(key)' requires a whole number.")
+        }
+        guard range.contains(whole) else {
+            throw MCPError.invalidParams("Setting '\(key)' must be between \(range.lowerBound) and \(range.upperBound).")
+        }
+        return .int(whole)
+    }
+
     private static func numericValue(_ value: Value, key: String) throws -> Double {
         let number: Double
         switch value {
@@ -1308,6 +1351,13 @@ private enum AppSettingsMCPRegistry {
             throw MCPError.invalidParams("Expected normalized numeric value.")
         }
         return double
+    }
+
+    private static func requiredInt(from value: Value) throws -> Int {
+        guard case let .int(int) = value else {
+            throw MCPError.invalidParams("Expected normalized whole-number value.")
+        }
+        return int
     }
 
     private static func stringOrNull(_ value: String?) -> Value {

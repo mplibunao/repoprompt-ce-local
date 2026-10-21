@@ -1096,5 +1096,9 @@ import XCTest
         }
 
         func respondToPermissionRequest(id: String, decision: AgentApprovalDecision) {}
+
+        func idleProbe() -> NativeAgentRuntimeIdleProbe {
+            NativeAgentRuntimeIdleProbe(turnInFlight: turnInFlight, hasLiveBackgroundTasks: false)
+        }
     }
 #endif

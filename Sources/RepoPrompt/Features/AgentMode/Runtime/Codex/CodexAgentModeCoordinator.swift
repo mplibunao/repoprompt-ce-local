@@ -451,7 +451,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     private let commandRunningLiveOutputCoalesceDelayNanos: UInt64 = 225_000_000
     private let assistantDeltaFlushDelayNanos: UInt64 = 75_000_000
     private let codexLeaseRoutingTimeoutMs: Int
-    private let codexIdleShutdownDelayNanos: UInt64
+    private let idleProviderShutdownMinutes: () -> Int
+    private let codexIdleShutdownDelayNanosOverride: UInt64?
     private let codexStallWatchdogPollIntervalNanos: UInt64
     private let codexStallWatchdogProbeThreshold: TimeInterval
     private let codexStallWatchdogRecoveryThreshold: TimeInterval
@@ -557,11 +558,12 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         codexCapabilitiesForLaunch: @escaping (_ isMCPRelated: Bool) -> CodexCapabilitySettings = { _ in .disabled },
         authRecovery: any CodexManagedAuthRecovering = CodexManagedAuthRecoveryService.shared,
         codexHookApprovalSettings: any CodexHookApprovalSettingsProviding,
+        idleProviderShutdownMinutes: @escaping () -> Int,
         activeToolQuery: @escaping ActiveToolQuery = { _ in false },
         activeAgentRunWaitQuery: @escaping ActiveAgentRunWaitQuery = { _ in false },
         activeAgentRunWaitDrain: @escaping ActiveAgentRunWaitDrain = { _, _, _, _ in true },
         leaseRoutingTimeoutMs: Int = 10000,
-        idleShutdownDelayNanos: UInt64 = 300_000_000_000,
+        idleShutdownDelayNanosOverride: UInt64? = nil,
         stallWatchdogPollIntervalNanos: UInt64 = 5_000_000_000,
         stallWatchdogProbeThreshold: TimeInterval = 0,
         stallWatchdogRecoveryThreshold: TimeInterval = 0,
@@ -579,11 +581,12 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         self.shouldManageCodexTooling = shouldManageCodexTooling
         self.authRecovery = authRecovery
         self.codexHookApprovalSettings = codexHookApprovalSettings
+        self.idleProviderShutdownMinutes = idleProviderShutdownMinutes
         self.activeToolQuery = activeToolQuery
         self.activeAgentRunWaitQuery = activeAgentRunWaitQuery
         self.activeAgentRunWaitDrain = activeAgentRunWaitDrain
         codexLeaseRoutingTimeoutMs = max(500, leaseRoutingTimeoutMs)
-        codexIdleShutdownDelayNanos = max(1_000_000, idleShutdownDelayNanos)
+        codexIdleShutdownDelayNanosOverride = idleShutdownDelayNanosOverride.map { max(1_000_000, $0) }
         codexStallWatchdogPollIntervalNanos = max(10_000_000, stallWatchdogPollIntervalNanos)
         let normalizedProbeThreshold = max(0, stallWatchdogProbeThreshold)
         let normalizedRecoveryThreshold = max(0, stallWatchdogRecoveryThreshold)
@@ -9932,27 +9935,30 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         guard session.selectedAgent == .codexExec,
               session.codexController != nil,
               session.pendingApproval == nil,
-              !runState.isActive
+              !runState.isActive,
+              let delayNanos = codexIdleShutdownDelayNanos()
         else {
             cancelCodexIdleShutdown(for: session.tabID)
             return
         }
         cancelCodexIdleShutdown(for: session.tabID)
         let tabID = session.tabID
-        let delayNanos = codexIdleShutdownDelayNanos
-        logCodex("[AgentModeVM][CodexIdle] scheduled shutdown in 300s for tab \(tabID) reason=\(reason)")
+        let token = UUID()
+        logCodex("[AgentModeVM][CodexIdle] scheduled shutdown in \(Double(delayNanos) / 1_000_000_000)s for tab \(tabID) reason=\(reason)")
         codexIdleShutdownTasksByTabID.set(
             tabID,
+            token: token,
             task: Task { [weak self, weak session] in
                 guard let self else { return }
                 try? await Task.sleep(nanoseconds: delayNanos)
-                defer { self.codexIdleShutdownTasksByTabID.remove(tabID) }
+                defer { self.codexIdleShutdownTasksByTabID.remove(tabID, ifToken: token) }
                 guard !Task.isCancelled else { return }
                 guard let session else { return }
                 guard session.selectedAgent == .codexExec,
                       session.codexController != nil,
                       session.pendingApproval == nil,
-                      !session.runState.isActive
+                      !session.runState.isActive,
+                      codexIdleShutdownDelayNanos() != nil
                 else {
                     return
                 }
@@ -9965,6 +9971,15 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 viewModel?.scheduleSave(for: tabID)
             }
         )
+    }
+
+    /// Returns nil when idle shutdown is off. A delay passed at init overrides the setting.
+    private func codexIdleShutdownDelayNanos() -> UInt64? {
+        if let codexIdleShutdownDelayNanosOverride {
+            return codexIdleShutdownDelayNanosOverride
+        }
+        return GlobalSettingsStore.idleProviderShutdownInterval(minutes: idleProviderShutdownMinutes())
+            .map { UInt64($0.components.seconds) * 1_000_000_000 }
     }
 
     private func cancelCodexIdleShutdown(for tabID: UUID) {

@@ -2306,6 +2306,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 providerBindingService.codexCapabilitiesForLaunch(isMCPRelated: isMCPRelated)
             },
             codexHookApprovalSettings: GlobalSettingsStore.shared,
+            idleProviderShutdownMinutes: { GlobalSettingsStore.shared.idleProviderShutdownMinutes() },
             activeToolQuery: { [weak mcpServer] runID in
                 mcpServer?.hasActiveToolExecutions(runID: runID) ?? false
             },
@@ -2320,6 +2321,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         claudeCoordinator = ClaudeAgentModeCoordinator(
             windowID: windowID,
             workspacePathProvider: sessionWorkspacePathProvider,
+            idleProviderShutdownMinutes: { GlobalSettingsStore.shared.idleProviderShutdownMinutes() },
             awaitNoActiveMCPTools: { [weak mcpServer] runID in
                 guard let mcpServer else { return }
                 try await mcpServer.awaitNoActiveToolExecutions(runID: runID)
@@ -2454,6 +2456,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             testCodexStallWatchdogRecoveryThreshold: TimeInterval? = nil,
             testCodexStallWatchdogInactivityThreshold: TimeInterval? = nil,
             testCodexTransportClosedRecoveryGraceInterval: TimeInterval? = nil,
+            testIdleProviderShutdownMinutes: (() -> Int)? = nil,
+            testClaudeIdleClock: ClaudeAgentModeCoordinator.IdleClock? = nil,
+            testClaudeActiveMCPToolQuery: ClaudeAgentModeCoordinator.MCPActiveToolQuery? = nil,
+            testClaudeActiveAgentRunWaitQuery: ClaudeAgentModeCoordinator.ActiveAgentRunWaitQuery? = nil,
             testUsesProductionAgentDefaultsAndModelPolling: Bool = false,
             testOpenCodeModelParameterStreamProvider: ((String?, String) async -> AsyncStream<OpenCodeACPModelParameterSnapshot>)? = nil
         ) {
@@ -2501,6 +2507,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             usesProductionAgentDefaultsAndModelPolling = testUsesProductionAgentDefaultsAndModelPolling
             let legacyWatchdogThreshold = testCodexStallWatchdogInactivityThreshold
             let testWatchdogProbeThreshold = testCodexStallWatchdogProbeThreshold ?? legacyWatchdogThreshold ?? 0
+            let idleProviderShutdownMinutes = testIdleProviderShutdownMinutes
+                ?? { GlobalSettingsStore.defaultIdleProviderShutdownMinutes }
             let testWatchdogRecoveryThreshold: TimeInterval = if let explicitRecoveryThreshold = testCodexStallWatchdogRecoveryThreshold {
                 explicitRecoveryThreshold
             } else if testCodexStallWatchdogProbeThreshold == nil, let legacyWatchdogThreshold {
@@ -2517,6 +2525,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 codexCapabilitiesForLaunch: testCodexCapabilitiesForLaunch,
                 authRecovery: testCodexManagedAuthRecovery ?? CodexManagedAuthRecoveryService.shared,
                 codexHookApprovalSettings: testCodexHookApprovalSettingsProvider ?? GlobalSettingsStore.shared,
+                idleProviderShutdownMinutes: idleProviderShutdownMinutes,
                 activeToolQuery: testCodexActiveToolQuery
                     ?? { [weak testMCPServer] runID in
                         testMCPServer?.hasActiveToolExecutions(runID: runID) ?? false
@@ -2537,7 +2546,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                         )
                     },
                 leaseRoutingTimeoutMs: testCodexLeaseRoutingTimeoutMs ?? 10000,
-                idleShutdownDelayNanos: testCodexIdleShutdownDelayNanos ?? 300_000_000_000,
+                idleShutdownDelayNanosOverride: testCodexIdleShutdownDelayNanos,
                 stallWatchdogPollIntervalNanos: testCodexStallWatchdogPollIntervalNanos ?? 5_000_000_000,
                 stallWatchdogProbeThreshold: testWatchdogProbeThreshold,
                 stallWatchdogRecoveryThreshold: testWatchdogRecoveryThreshold,
@@ -2548,16 +2557,20 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             claudeCoordinator = ClaudeAgentModeCoordinator(
                 windowID: testWindowID,
                 workspacePathProvider: sessionWorkspacePathProvider,
+                idleProviderShutdownMinutes: idleProviderShutdownMinutes,
+                idleClock: testClaudeIdleClock ?? .continuous,
                 claudeControllerFactory: claudeControllerFactory,
                 toolEndedCount: { [weak testMCPServer] runID in
                     testMCPServer?.toolEndedCount(runID: runID) ?? 0
                 },
-                hasActiveMCPTools: { [weak testMCPServer] runID in
-                    testMCPServer?.hasActiveToolExecutions(runID: runID) ?? false
-                },
-                hasActiveChildAgentRunWaits: { [weak testMCPServer] runID in
-                    testMCPServer?.hasActiveChildAgentRunWaits(runID: runID) ?? false
-                }
+                hasActiveMCPTools: testClaudeActiveMCPToolQuery
+                    ?? { [weak testMCPServer] runID in
+                        testMCPServer?.hasActiveToolExecutions(runID: runID) ?? false
+                    },
+                hasActiveChildAgentRunWaits: testClaudeActiveAgentRunWaitQuery
+                    ?? { [weak testMCPServer] runID in
+                        testMCPServer?.hasActiveChildAgentRunWaits(runID: runID) ?? false
+                    }
             )
             self.clearConsumedAttachmentsAfterProviderConsumption = clearConsumedAttachmentsAfterProviderConsumption
             workspaceSwitchProvider = AgentModeWorkspaceSwitchCleanupProvider(

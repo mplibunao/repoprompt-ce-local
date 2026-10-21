@@ -177,6 +177,23 @@ public struct ClaudeSDKNDJSONTranslator {
             return [ClaudeProviderStreamResult(type: "task_progress", text: fragments.joined(separator: " — "))]
         }
 
+        // Claude Code lifecycle: background_tasks_changed lists every live background task each
+        // time the set changes. The text has one line per entry not marked `ambient: true` (the
+        // CLI's own housekeeping): its task ID, or a placeholder from its position when it has
+        // none, so it still counts as live. The text is empty when no tasks are left. A payload
+        // without a `tasks` array says nothing about the set and yields no result.
+        if subtype == "background_tasks_changed" {
+            guard let tasks = json["tasks"] as? [Any] else { return [] }
+            let liveTaskIDs = tasks.enumerated().compactMap { index, entry -> String? in
+                let task = (entry as? [String: Any]) ?? [:]
+                guard (task["ambient"] as? Bool) != true else { return nil }
+                let taskID = firstString(in: task, keys: ["task_id"])?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return taskID.isEmpty ? "unidentified-task-\(index)" : taskID
+            }
+            return [ClaudeProviderStreamResult(type: "background_tasks_changed", text: liveTaskIDs.joined(separator: "\n"))]
+        }
+
         if let message = firstString(in: json, keys: ["message"]), !message.isEmpty {
             return [ClaudeProviderStreamResult(type: "system", text: message)]
         }

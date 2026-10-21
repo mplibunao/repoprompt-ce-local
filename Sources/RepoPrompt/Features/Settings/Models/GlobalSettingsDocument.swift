@@ -827,6 +827,7 @@ struct GlobalScalarPreferences: Codable, Equatable {
         var providerConversationCleanupAction: String?
         var restrictMCPAgentDiscoveryToRoleLabels: Bool?
         var agentSessionHandoffInstructions: String?
+        var idleProviderShutdownMinutes: Int?
 
         init(
             proEditAgentMode: Bool? = nil,
@@ -847,7 +848,8 @@ struct GlobalScalarPreferences: Codable, Equatable {
             codexHookApprovalStrictModeWorkspaceOverrides: [String: Bool]? = nil,
             providerConversationCleanupAction: String? = nil,
             restrictMCPAgentDiscoveryToRoleLabels: Bool? = nil,
-            agentSessionHandoffInstructions: String? = nil
+            agentSessionHandoffInstructions: String? = nil,
+            idleProviderShutdownMinutes: Int? = nil
         ) {
             self.proEditAgentMode = proEditAgentMode
             self.proEditAgentKind = proEditAgentKind
@@ -868,6 +870,7 @@ struct GlobalScalarPreferences: Codable, Equatable {
             self.providerConversationCleanupAction = providerConversationCleanupAction
             self.restrictMCPAgentDiscoveryToRoleLabels = restrictMCPAgentDiscoveryToRoleLabels
             self.agentSessionHandoffInstructions = agentSessionHandoffInstructions
+            self.idleProviderShutdownMinutes = idleProviderShutdownMinutes
         }
     }
 }

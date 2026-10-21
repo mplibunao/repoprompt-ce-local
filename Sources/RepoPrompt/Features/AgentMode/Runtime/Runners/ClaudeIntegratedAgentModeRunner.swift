@@ -390,7 +390,10 @@ final class ClaudeIntegratedAgentModeRunner {
             attachmentDisposition: .deleteFiles,
             finalizeNonCodexUsage: true,
             supportsFollowUp: true,
-            notifyTurnComplete: false
+            notifyTurnComplete: false,
+            postCommit: { [claudeCoordinator] in
+                claudeCoordinator.armClaudeIdleTimer(for: session)
+            }
         ))
     }
 
@@ -430,6 +433,10 @@ final class ClaudeIntegratedAgentModeRunner {
                     )
                     await claudeCoordinator.awaitPendingClaudeResumeTransferIfNeeded(for: session)
                 }
+            },
+            // Restarts the idle timer from this terminal, whatever its publication result.
+            postCommit: { [claudeCoordinator] in
+                claudeCoordinator.armClaudeIdleTimer(for: session)
             }
         ))
     }

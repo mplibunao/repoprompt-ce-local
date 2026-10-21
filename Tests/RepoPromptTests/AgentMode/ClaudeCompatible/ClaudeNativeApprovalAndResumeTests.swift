@@ -100,6 +100,43 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
         XCTAssertFalse(sameEnvironmentRequiresRestart)
     }
 
+    func testBackgroundTasksChangedFeedsIdleProbeWithoutReachingRunLoop() async {
+        let controller = ClaudeNativeProcessSessionController(
+            runID: UUID(),
+            tabID: UUID(),
+            windowID: 1,
+            workspacePath: nil,
+            config: .discovery(commandName: "/usr/bin/false")
+        )
+        // The line Claude Code 2.1.304 sent after the agent backgrounded `sleep 900`.
+        await controller.test_handleInboundLine(Data(#"""
+        {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b6gh9ra6z","run_id":"0mvgkv0tj-d646b612","task_type":"local_bash","description":"Sleep for 900 seconds in background"}],"uuid":"4f7c0a52-6a43-4d5e-9d1b-2f0e8c1b7a90","session_id":"claude-session-1"}
+        """#.utf8))
+        await controller.test_handleInboundLine(Data(#"""
+        {"type":"system","subtype":"session_state_changed","state":"idle","session_id":"claude-session-1"}
+        """#.utf8))
+        let whileLive = await controller.idleProbe()
+        XCTAssertTrue(whileLive.hasLiveBackgroundTasks)
+
+        await controller.test_handleInboundLine(Data(#"""
+        {"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"claude-session-1"}
+        """#.utf8))
+        let afterClear = await controller.idleProbe()
+        XCTAssertFalse(afterClear.hasLiveBackgroundTasks)
+
+        // Shutting down finishes the event stream, so every event the three lines produced can be
+        // read. The first line's new session ID also emits a runtime-init event, which is not a
+        // stream result.
+        await controller.shutdown()
+        var streamResultTypes: [String] = []
+        for await event in await controller.events {
+            if case let .stream(result) = event {
+                streamResultTypes.append(result.type)
+            }
+        }
+        XCTAssertEqual(streamResultTypes, ["session_state_changed"])
+    }
+
     func testRepoPromptPermissionAutoApprovalAndAllowPayloadPreserveToolUseID() throws {
         let repoPromptPayload: [String: Any] = [
             "tool_name": "mcp__RepoPromptCE__read_file",

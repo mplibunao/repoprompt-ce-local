@@ -29,6 +29,8 @@ protocol NativeAgentRuntimeControlling: Actor {
     func cleanupConversation(_ handle: ProviderConversationCleanupHandle, action: ProviderConversationCleanupAction) async -> ProviderConversationCleanupOutcome
     func shutdown() async
     func respondToPermissionRequest(id: String, decision: AgentApprovalDecision) async
+    /// Reports, in one call, whether the process still has work the idle timer must not cut off.
+    func idleProbe() async -> NativeAgentRuntimeIdleProbe
 }
 
 extension NativeAgentRuntimeControlling {
@@ -51,6 +53,7 @@ typealias NativeAgentRuntimeTurnStatus = ClaudeNativeProcessSessionController.Tu
 typealias NativeAgentRuntimeRuntimeInitStatus = ClaudeNativeProcessSessionController.RuntimeInitStatus
 typealias NativeAgentRuntimeInterruptOutcome = ClaudeNativeProcessSessionController.InterruptOutcome
 typealias NativeAgentRuntimeControllerError = ClaudeNativeProcessSessionController.ControllerError
+typealias NativeAgentRuntimeIdleProbe = ClaudeNativeProcessSessionController.IdleProbe
 typealias NativeAgentRuntimeEffortLevel = ClaudeCodeEffortLevel
 
 extension ClaudeNativeProcessSessionController: NativeAgentRuntimeControlling {}

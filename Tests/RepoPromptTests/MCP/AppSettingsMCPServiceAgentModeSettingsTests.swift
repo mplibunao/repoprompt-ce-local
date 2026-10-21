@@ -60,6 +60,107 @@ final class AppSettingsMCPServiceAgentModeSettingsTests: XCTestCase {
         XCTAssertFalse(store.codexReasoningSummariesEnabled())
     }
 
+    func testIdleProviderShutdownSettingDefaultsAndPersists() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AppSettingsMCPServiceAgentModeSettingsTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let suiteName = "AppSettingsMCPServiceAgentModeSettingsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let fileURL = root.appendingPathComponent("globalSettings.json")
+        let store = GlobalSettingsStore(defaults: defaults, fileStore: GlobalSettingsFileStore(fileURL: fileURL))
+        let service = AppSettingsMCPService(store: store)
+        let key = "agent_mode.idle_provider_shutdown_minutes"
+
+        let listed = try await service.handleForTesting([
+            "op": .string("list"),
+            "group": .string("agent_mode"),
+            "detailed": .bool(true)
+        ])
+        let settings = try XCTUnwrap(listed.objectValue?["settings"]?.arrayValue)
+        let catalog = try XCTUnwrap(settings.first { $0.objectValue?["key"]?.stringValue == key })
+        XCTAssertEqual(catalog.objectValue?["type"]?.stringValue, "number")
+        XCTAssertEqual(catalog.objectValue?["value"]?.intValue, 5)
+
+        let getDefault = try await service.handleForTesting([
+            "op": .string("get"),
+            "key": .string(key)
+        ])
+        XCTAssertEqual(getDefault.objectValue?["values"]?.objectValue?[key]?.intValue, 5)
+
+        let set = try await service.handleForTesting([
+            "op": .string("set"),
+            "key": .string(key),
+            "value": .int(15)
+        ])
+        XCTAssertEqual(set.objectValue?["status"]?.stringValue, "ok")
+        XCTAssertEqual(set.objectValue?["old_value"]?.intValue, 5)
+        XCTAssertEqual(set.objectValue?["new_value"]?.intValue, 15)
+        XCTAssertEqual(set.objectValue?["changed"]?.boolValue, true)
+        XCTAssertEqual(store.idleProviderShutdownMinutes(), 15)
+
+        let persisted = try GlobalSettingsFileStore(fileURL: fileURL).load()
+        XCTAssertEqual(persisted.scalarPreferences?.agentMode?.idleProviderShutdownMinutes, 15)
+        let reloaded = GlobalSettingsStore(defaults: defaults, fileStore: GlobalSettingsFileStore(fileURL: fileURL))
+        XCTAssertEqual(reloaded.idleProviderShutdownMinutes(), 15)
+    }
+
+    func testIdleProviderShutdownSettingRejectsInvalidValuesWithoutMutation() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AppSettingsMCPServiceAgentModeSettingsTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let suiteName = "AppSettingsMCPServiceAgentModeSettingsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let fileURL = root.appendingPathComponent("globalSettings.json")
+        let store = GlobalSettingsStore(defaults: defaults, fileStore: GlobalSettingsFileStore(fileURL: fileURL))
+        let service = AppSettingsMCPService(store: store)
+        let key = "agent_mode.idle_provider_shutdown_minutes"
+
+        func set(_ value: Value) async throws -> Value {
+            try await service.handleForTesting([
+                "op": .string("set"),
+                "key": .string(key),
+                "value": value
+            ])
+        }
+
+        _ = try await set(.int(10))
+        let fileBeforeInvalidWrites = try String(contentsOf: fileURL, encoding: .utf8)
+
+        for (label, value) in [
+            ("fraction", Value.double(1.5)),
+            ("fraction string", .string("1.5")),
+            ("negative", .int(-1)),
+            ("above maximum", .int(121)),
+            ("non-finite", .double(.infinity)),
+            ("non-numeric string", .string("ten")),
+            ("boolean", .bool(true)),
+            ("null", .null)
+        ] {
+            do {
+                _ = try await set(value)
+                XCTFail("Expected \(label) to be rejected")
+            } catch {}
+            XCTAssertEqual(store.idleProviderShutdownMinutes(), 10, label)
+            XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), fileBeforeInvalidWrites, label)
+        }
+        XCTAssertFalse(store.setIdleProviderShutdownMinutes(121))
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), fileBeforeInvalidWrites)
+
+        let disabled = try await set(.int(0))
+        XCTAssertEqual(disabled.objectValue?["new_value"]?.intValue, 0)
+        XCTAssertEqual(try GlobalSettingsFileStore(fileURL: fileURL).load().scalarPreferences?.agentMode?.idleProviderShutdownMinutes, 0)
+        let reloaded = GlobalSettingsStore(defaults: defaults, fileStore: GlobalSettingsFileStore(fileURL: fileURL))
+        XCTAssertEqual(reloaded.idleProviderShutdownMinutes(), 0)
+    }
+
     func testAgentChatsPresentationPreferenceRemainsOutsideAppSettingsCatalog() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppSettingsMCPServiceAgentModeSettingsTests-\(UUID().uuidString)", isDirectory: true)

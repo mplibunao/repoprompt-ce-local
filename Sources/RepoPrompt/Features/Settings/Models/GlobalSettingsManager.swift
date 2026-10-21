@@ -1501,6 +1501,35 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
         }
     }
 
+    /// Whole minutes an idle Agent Mode session keeps its provider process. 0 means never shut it down.
+    nonisolated static let defaultIdleProviderShutdownMinutes = 5
+    nonisolated static let idleProviderShutdownMinutesRange = 0 ... 120
+
+    /// The idle period a setting of `minutes` gives a provider process, or nil when idle shutdown is off.
+    nonisolated static func idleProviderShutdownInterval(minutes: Int) -> Duration? {
+        minutes > 0 ? .seconds(minutes * 60) : nil
+    }
+
+    func idleProviderShutdownMinutes() -> Int {
+        guard let minutes = scalarPreferences.agentMode?.idleProviderShutdownMinutes,
+              Self.idleProviderShutdownMinutesRange.contains(minutes)
+        else {
+            return Self.defaultIdleProviderShutdownMinutes
+        }
+        return minutes
+    }
+
+    @discardableResult
+    func setIdleProviderShutdownMinutes(_ minutes: Int, commit: Bool = true) -> Bool {
+        guard Self.idleProviderShutdownMinutesRange.contains(minutes) else {
+            return false
+        }
+        updateAgentModeScalar(commit: commit) { settings in
+            settings.idleProviderShutdownMinutes = minutes
+        }
+        return true
+    }
+
     func agentSessionHandoffInstructions() -> String {
         scalarPreferences.agentMode?.agentSessionHandoffInstructions ?? ""
     }
