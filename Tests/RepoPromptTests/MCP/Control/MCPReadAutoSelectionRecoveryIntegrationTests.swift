@@ -180,12 +180,79 @@ import XCTest
                     )
                     XCTAssertFalse(text.contains(Self.contextBuilderBusyText), "attempt \(attempt): \(text)")
                 }
+
+                _ = try await held.refusalText(
+                    MCPWindowToolName.manageSelection,
+                    ["op": "add", "paths": [held.addedURL.path]],
+                    code: "selection_prerequisite_deferred"
+                )
+                _ = try await held.refusalText(
+                    MCPWindowToolName.workspaceContext,
+                    ["include": ["selection"]],
+                    code: "selection_prerequisite_deferred"
+                )
+
+                let oracleSends = OracleSendCounter()
+                held.server.setOracleChatSendOverrideForTesting { _, _, _, _ in
+                    oracleSends.count += 1
+                    return [:]
+                }
+                defer { held.server.setOracleChatSendOverrideForTesting(nil) }
+                // Over the socket, ask_oracle needs a discovery or Agent Mode grant, so this row calls it in process.
+                let oracleError = try await held.inProcessCallError(
+                    MCPWindowToolName.askOracle,
+                    ["message": .string("selection prerequisite regression")]
+                )
+                let oracleText = oracleError?.localizedDescription ?? "ask_oracle completed"
+                XCTAssertTrue(oracleText.hasPrefix("selection_prerequisite_deferred:"), oracleText)
+                XCTAssertEqual(oracleSends.count, 0, "A refused ask_oracle sent an Oracle request")
+                XCTAssertEqual(held.storedSelection, held.expectedSelection, "ask_oracle changed the selection")
+
+                let operationID = "selection-prerequisite-export-\(UUID().uuidString)"
+                let exportURL = held.context.rootURL.appendingPathComponent("\(operationID).md")
+                _ = try await held.refusalText(
+                    MCPWindowToolName.prompt,
+                    ["op": "export", "path": exportURL.path, "operation_id": operationID],
+                    code: "selection_prerequisite_deferred"
+                )
+                XCTAssertFalse(FileManager.default.fileExists(atPath: exportURL.path), "A refused export wrote its file")
+                let journal = try await AppDomainRuntimeComposition.shared.runtime.mutationJournal.snapshot()
+                let records = journal.recordSnapshots.filter { $0.operationID == operationID }
+                XCTAssertEqual(records.map(\.status), [.failedBeforeCommit])
+            }
+        }
+
+        func testCanonicalSelectionPrerequisiteInvalidatedIsReportedAsItsOwnError() async throws {
+            let rows: [(tool: String, arguments: [String: Any])] = [
+                (MCPWindowToolName.manageSelection, ["op": "get"]),
+                (MCPWindowToolName.getFileTree, ["mode": "selected"]),
+                // Without paths, get_code_structure starts from the selection.
+                (MCPWindowToolName.getCodeStructure, [:])
+            ]
+            // Each row removes the connection's binding, so each row gets its own fixture.
+            for (tool, arguments) in rows {
+                try await withHeldCanonicalRead(label: tool) { held in
+                    let waiting = held.probe.expect(.waiterRegistered, on: .canonical)
+                    let endpoint = held.endpoint
+                    let call = Task { @MainActor in
+                        try await endpoint.callTool(name: tool, arguments: arguments)
+                    }
+                    _ = await Self.awaitEvent(waiting)
+                    held.server.removeTabContext(
+                        forConnectionID: endpoint.connectionID,
+                        clientName: nil,
+                        windowID: held.context.window.windowID
+                    )
+                    let text = try await Self.toolResultText(call.value)
+                    XCTAssertTrue(text.hasPrefix("Error: selection_prerequisite_invalidated:"), "\(tool): \(text)")
+                    XCTAssertEqual(held.storedSelection, held.expectedSelection, tool)
+                }
             }
         }
 
         func testSelectionPrerequisiteWaitCancelledByCallerStaysCancellation() async throws {
             enum Row: CaseIterable {
-                case contextBuilder
+                case contextBuilder, manageSelection
             }
 
             for row in Row.allCases {
@@ -195,6 +262,11 @@ import XCTest
                         try await held.cancelWhileWaiting(MCPWindowToolName.contextBuilder, [
                             "instructions": .string("selection prerequisite regression"),
                             "response_type": .string("clarify")
+                        ])
+                    case .manageSelection:
+                        try await held.cancelWhileWaiting(MCPWindowToolName.manageSelection, [
+                            "op": .string("add"),
+                            "paths": .array([.string(held.addedURL.path)])
                         ])
                     }
                     XCTAssertTrue(error is MCPToolExecutionCancelledError, "\(row): \(String(describing: error))")
@@ -215,6 +287,7 @@ import XCTest
         }
 
         private static let contextBuilderBusyText = "Context Builder is already running for this tab."
+        private static let addedRelativePath = "Sources/PrerequisiteAddition.swift"
 
         /// A real bound read whose selection prerequisite can't complete while a test hook holds one of its lanes.
         @MainActor
@@ -235,6 +308,11 @@ import XCTest
 
             var coordinator: MCPReadFileAutoSelectionCoordinator {
                 server.readFileAutoSelectionCoordinator
+            }
+
+            /// A file the read didn't select, for rows that add to the selection.
+            var addedURL: URL {
+                context.rootURL.appendingPathComponent(MCPReadAutoSelectionRecoveryIntegrationTests.addedRelativePath)
             }
 
             var storedSelection: StoredSelection? {
@@ -342,6 +420,11 @@ import XCTest
                     await fixture.cleanup()
                 }
 
+                _ = try await context.window.workspaceFileContextStore.createFile(
+                    rootID: context.rootID,
+                    relativePath: Self.addedRelativePath,
+                    content: SwiftFixtureSource.emptyStruct("PrerequisiteAddition")
+                )
                 do {
                     try await fixture.registerDomainWorkspace(context)
                     try await Self.activateWorkspace(context)
@@ -379,6 +462,80 @@ import XCTest
             }
         }
 
+        /// Runs `body` while a bound Agent Mode read's canonical apply is held, so its selection hasn't
+        /// landed and a canonical drain waits until the test resolves it.
+        private func withHeldCanonicalRead(
+            label: String,
+            _ body: @MainActor (HeldRead) async throws -> Void
+        ) async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let probe = SelectionLaneProbe(context: context)
+                let canonicalGate = MCPExecutionIgnoringCancellationGate()
+                let canonicalEntered = XCTestExpectation(description: "the read's canonical apply reached its gate")
+                canonicalEntered.assertForOverFulfill = false
+                var endpoint: PersistentMCPTestEndpoint?
+                var canonicalHeld = false
+                @MainActor
+                func releaseHeldRead() async {
+                    let canonicalStopped = probe.expect(.workerStopped, on: .canonical)
+                    await canonicalGate.release()
+                    if canonicalHeld {
+                        _ = await Self.awaitEvent(canonicalStopped)
+                    }
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    MCPReadFileAutoSelectionDiagnosticTracer.setTestSink(nil)
+                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager) }
+                    endpoint = nil
+                    await fixture.cleanup()
+                }
+
+                do {
+                    try await fixture.registerDomainWorkspace(context)
+                    try await Self.activateWorkspace(context)
+                    let caller = try await Self.makeBoundEndpoint(
+                        label: "canonical-\(label)",
+                        fixture: fixture,
+                        agentModeRunID: UUID()
+                    )
+                    endpoint = caller
+                    _ = try await caller.callTool(name: MCPWindowToolName.manageSelection, arguments: ["op": "clear"])
+                    let before = try XCTUnwrap(Self.storedSelection(context))
+                    MCPReadFileAutoSelectionDiagnosticTracer.setTestSink { probe.record($0) }
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting {
+                        canonicalEntered.fulfill()
+                        await canonicalGate.enterAndWait()
+                    }
+                    let read = Task { @MainActor in
+                        try await caller.callTool(
+                            name: MCPWindowToolName.readFile,
+                            arguments: ["path": context.fileURL.path]
+                        )
+                    }
+                    canonicalHeld = await Self.awaitEvent(canonicalEntered)
+                    let readReply = try await read.value
+                    XCTAssertFalse(readReply.rawJSON.contains("\"isError\":true"), readReply.rawJSON)
+                    XCTAssertEqual(Self.storedSelection(context), before)
+                    try await body(HeldRead(
+                        fixture: fixture,
+                        endpoint: caller,
+                        probe: probe,
+                        expectedSelection: before
+                    ))
+                    await releaseHeldRead()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await releaseHeldRead()
+                    throw error
+                }
+            }
+        }
+
         /// Waits up to 10 s for `expectation`, records a failure if it expires, and reports whether it was fulfilled.
         private static func awaitEvent(
             _ expectation: XCTestExpectation,
@@ -390,12 +547,27 @@ import XCTest
             return result == .completed
         }
 
+        /// Opens a socket client and binds it to `contextA`'s tab. With `agentModeRunID`, the
+        /// connection is an Agent Mode run's, whose reads reply before their selection lands.
         private static func makeBoundEndpoint(
             label: String,
-            fixture: PersistentMCPTestFixture
+            fixture: PersistentMCPTestFixture,
+            agentModeRunID: UUID? = nil
         ) async throws -> PersistentMCPTestEndpoint {
             let manager = fixture.networkManager
+            let context = fixture.contextA
             let clientName = "read-recovery-\(label)-\(UUID().uuidString)"
+            if let agentModeRunID {
+                await manager.installClientConnectionPolicy(
+                    for: clientName,
+                    windowID: context.window.windowID,
+                    restrictedTools: [],
+                    tabID: context.tabID,
+                    runID: agentModeRunID,
+                    additionalTools: [],
+                    purpose: .agentModeRun
+                )
+            }
             let endpoint = try await PersistentMCPTestEndpoint.make(
                 label: label,
                 networkManager: manager,
@@ -411,10 +583,33 @@ import XCTest
             )
             let bind = try await endpoint.callTool(
                 name: "bind_context",
-                arguments: ["op": "bind", "context_id": fixture.contextA.tabID.uuidString]
+                arguments: ["op": "bind", "context_id": context.tabID.uuidString]
             )
             XCTAssertFalse(bind.rawJSON.contains("\"isError\":true"), bind.rawJSON)
-            await fixture.contextA.window.mcpServer.domainRoutingPublishTask?.value
+            if let agentModeRunID {
+                await manager.setRunPurpose(.agentModeRun, for: endpoint.connectionID)
+                await manager.debugSeedConnectionRunRouting(
+                    connectionID: endpoint.connectionID,
+                    runID: agentModeRunID,
+                    purpose: .agentModeRun,
+                    windowID: context.window.windowID
+                )
+                let routing = AppDomainRuntimeComposition.shared.runtime.routingCoordinator
+                let registration = try await routing.currentRegistration(connectionID: endpoint.connectionID)
+                let outcome = await routing.bind(
+                    connection: registration,
+                    binding: .runScoped(
+                        runID: agentModeRunID,
+                        context: .init(workspaceID: context.workspaceID, contextID: context.tabID)
+                    ),
+                    operationID: UUID()
+                )
+                XCTAssertTrue(
+                    outcome.disposition == .applied || outcome.disposition == .unchanged,
+                    outcome.diagnostic ?? "Domain run routing was not established"
+                )
+            }
+            await context.window.mcpServer.domainRoutingPublishTask?.value
             return endpoint
         }
 
@@ -498,5 +693,10 @@ import XCTest
             let expectation = lock.withLock { pending.removeValue(forKey: Trigger(kind: event.kind, lane: event.lane)) }
             expectation?.fulfill()
         }
+    }
+
+    @MainActor
+    private final class OracleSendCounter {
+        var count = 0
     }
 #endif
