@@ -113,6 +113,16 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
     private var sessionActivationGeneration: Int = 0
     private(set) var workspaceSwitchInFlight = false
+    private var settledWorkspaceSwitchEpoch: UInt64 = 0
+
+    /// True from the moment a workspace-switch notification arrives until its handler returns.
+    /// A session admitted before then is discarded with the previous workspace's sessions, or
+    /// loses its approval scopes to the handler's window-wide cleanup. Unlike
+    /// `workspaceSwitchInFlight`, this does not wait for the active tab's transcript load,
+    /// which never runs while Agent Mode is hidden.
+    var hasPendingWorkspaceSwitchDiscard: Bool {
+        sessionIndexStore.sessionIndexActivationEpoch > settledWorkspaceSwitchEpoch
+    }
 
     /// Working-thread rows for the active tab. This is the bounded equilibrium view.
     var items: [AgentChatItem] {
@@ -14041,6 +14051,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         _ workspace: WorkspaceModel?,
         owner: SessionIndexOwner
     ) async {
+        defer { settledWorkspaceSwitchEpoch = max(settledWorkspaceSwitchEpoch, owner.activationEpoch) }
         guard sessionIndexStore.isWorkspaceActivationCurrent(owner, workspace: workspace) else { return }
         ui.sessionSidebar.invalidateSelectionForWorkspaceChange()
         sessionSidebarArchivedVisibleSessionCount = Self.sessionSidebarArchivedPageSize

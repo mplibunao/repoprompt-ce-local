@@ -766,6 +766,116 @@ import XCTest
             XCTAssertEqual(providerCount, 0)
         }
 
+        func testAgentRunStartDuringLaunchRestoreIsRefusedUntilTheRestoreSettles() async throws {
+            let fixture = try await DurableAgentAdmissionFixture.make()
+            let restoreHold = AdmissionSaveGate()
+            let window = fixture.window
+            let manager = window.workspaceManager
+            let windowStates = WindowStatesManager.shared
+            trackCleanup {
+                await restoreHold.open()
+                manager.setWorkspaceRootHydrationWillSpawnHandlerForTesting(nil)
+                if windowStates.isRestoreSessionLoadPending {
+                    windowStates.finishRestoreSessionLoadForTesting(entries: [])
+                }
+                await fixture.cleanup()
+            }
+            let restoredWorkspace = try XCTUnwrap(manager.activeWorkspace)
+            let systemWorkspace = try XCTUnwrap(manager.workspaces.first(where: \.isSystemWorkspace))
+            // A relaunched window registers on the system workspace while the saved window
+            // session is still loading.
+            let resetResult = await manager.switchWorkspace(
+                to: systemWorkspace,
+                saveState: false,
+                reason: "launchRestoreAdmission.reset"
+            )
+            XCTAssertTrue(resetResult.didSwitch, resetResult.message ?? "")
+            windowStates.beginRestoreSessionLoadForTesting()
+
+            let recorder = AdmissionProviderRecorder(expectedCount: 1, blockProviders: false)
+            let service = makeAgentRunStartService(window: window, recorder: recorder)
+            let startArgs: [String: Value] = [
+                "op": .string("start"),
+                "message": .string("start during launch restore"),
+                "detach": .bool(true),
+                "timeout": .int(0)
+            ]
+            func assertStartRefusedAsSwitchInFlight(_ phase: String) async {
+                do {
+                    let admitted = try await service.execute(args: startArgs)
+                    XCTFail("agent_run start was admitted \(phase): \(admitted)")
+                } catch {
+                    guard let mcpError = error as? MCPError,
+                          case let .invalidParams(message) = mcpError
+                    else {
+                        return XCTFail("Expected the retryable switch rejection \(phase), got \(error)")
+                    }
+                    XCTAssertEqual(
+                        message,
+                        AgentRunMCPToolService.workspaceSwitchPendingStartRejectionMessage,
+                        phase
+                    )
+                }
+            }
+
+            await assertStartRefusedAsSwitchInFlight("before the saved window session loaded")
+
+            // Hold the restore after the restored workspace became active, which is where an
+            // admitted run would later be discarded by Agent Mode's switch teardown.
+            manager.setWorkspaceRootHydrationWillSpawnHandlerForTesting { workspaceID in
+                guard workspaceID == restoredWorkspace.id else { return }
+                await restoreHold.enterFirstAndWait()
+            }
+            guard windowStates.allWindows.map(\.windowID) == [window.windowID] else {
+                return XCTFail("The loaded session hands its entry to the first registered window, which must be this one.")
+            }
+            windowStates.finishRestoreSessionLoadForTesting(entries: [
+                WindowSessionEntry(
+                    windowKind: .standard,
+                    workspaceID: restoredWorkspace.id,
+                    workspaceName: restoredWorkspace.name,
+                    isSystemWorkspace: false,
+                    isEphemeral: false,
+                    primaryRepoPath: nil,
+                    lastFocused: true,
+                    workspaceInstanceNumber: nil
+                )
+            ])
+            try await waitUntil("the restore to hold with its workspace active") {
+                await restoreHold.hasEntered()
+            }
+            XCTAssertEqual(manager.activeWorkspaceID, restoredWorkspace.id)
+
+            await assertStartRefusedAsSwitchInFlight("while the restore was switching the window")
+            let providerCountDuringRestore = await recorder.count()
+            XCTAssertEqual(providerCountDuringRestore, 0)
+
+            await restoreHold.open()
+
+            // A caller retries on the retryable rejection; once Agent Mode has handled the
+            // restored workspace, the start is admitted and the restore no longer discards it.
+            var unexpectedError: Error?
+            try await waitUntil("a start to be admitted after the restore settles") {
+                do {
+                    _ = try await service.execute(args: startArgs)
+                    return true
+                } catch let MCPError.invalidParams(message)
+                    where message == AgentRunMCPToolService.workspaceSwitchPendingStartRejectionMessage
+                {
+                    return false
+                } catch {
+                    unexpectedError = error
+                    return true
+                }
+            }
+            XCTAssertNil(unexpectedError)
+            XCTAssertEqual(manager.activeWorkspaceID, restoredWorkspace.id)
+            let admittedRuns = await recorder.observations()
+            XCTAssertEqual(admittedRuns.count, 1)
+            let admittedTabID = try XCTUnwrap(admittedRuns.first?.tabID)
+            XCTAssertNotNil(window.agentModeViewModel.session(for: admittedTabID, createIfNeeded: false))
+        }
+
         func testCanonicalAdmissionRefreshRejectsDuplicateTabIDWithoutMutationOrDispatch() async throws {
             let (_, storageOverride, runtime) = try makeIsolatedRuntime(
                 container: makeTemporaryDirectory(named: "MalformedCanonicalIdentity"),

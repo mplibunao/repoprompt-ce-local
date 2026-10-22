@@ -329,6 +329,21 @@ struct AgentRunMCPToolService {
         }
     }
 
+    static let workspaceSwitchPendingStartRejectionMessage = "Retryable workspace_switch_in_flight: This window is still restoring or switching its workspace, so no run was started. Retry agent_run op=start after the switch finishes."
+
+    /// Agent Mode discards every session when it handles a workspace switch, so a run admitted
+    /// before the window's restore or switch settles would be returned as running and then
+    /// cancelled. Refusing it with a retryable error lets the caller start on the settled
+    /// workspace instead. A start that passes this check before a later switch begins belongs
+    /// to the previous workspace, and that switch cancels it.
+    static func requireSettledWorkspaceForStart(in window: WindowState) throws {
+        guard window.isWorkspaceRestoreInFlight
+            || window.workspaceManager.isSwitchingWorkspace
+            || window.agentModeViewModel.hasPendingWorkspaceSwitchDiscard
+        else { return }
+        throw MCPError.invalidParams(workspaceSwitchPendingStartRejectionMessage)
+    }
+
     private func executeStart(args: [String: Value]) async throws -> Value {
         let message = try resolveMessage(args["message"], name: "message")
         let workflow = try resolveWorkflow(args: args)
@@ -348,6 +363,7 @@ struct AgentRunMCPToolService {
 
         let metadata = await captureRequestMetadata()
         let targetWindow = try requireTargetWindow()
+        try Self.requireSettledWorkspaceForStart(in: targetWindow)
         guard let workspace = targetWindow.workspaceManager.activeWorkspace else {
             throw MCPError.invalidParams("No active workspace available for agent_run.start.")
         }
