@@ -201,6 +201,165 @@ final class WorkspaceSelectionMirrorRecoveryTests: XCTestCase {
         assertFullyReclaimed(coordinator, deadlinesFired: 0)
     }
 
+    func testFocusChangeDuringMirrorPreservesIdentityAndCancellation() async throws {
+        enum Transition: CaseIterable {
+            case background, backgroundSelectionChanged, removed, cancelled
+
+            var expected: WorkspaceSelectionCoordinator.SelectionMirrorOutcome {
+                switch self {
+                case .background, .backgroundSelectionChanged: .converged
+                case .removed: .invalidated
+                case .cancelled: .cancelled
+                }
+            }
+        }
+
+        for transition in Transition.allCases {
+            let readTab = ComposeTabState(name: "Read")
+            let otherTab = ComposeTabState(name: "Other")
+            let workspace = WorkspaceModel(
+                name: "Read selection mirror",
+                repoPaths: [],
+                composeTabs: [readTab, otherTab],
+                activeComposeTabID: readTab.id
+            )
+            let fixture = makeReadMirrorFixture(workspaces: [workspace], active: workspace)
+            let manager = fixture.manager
+            let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: readTab.id)
+            let readSelection = selection("read")
+            var tab = try XCTUnwrap(manager.composeTab(for: identity))
+            tab.selection = readSelection
+            XCTAssertTrue(manager.updateComposeTabStoredOnly(tab, inWorkspaceID: workspace.id))
+            let gate = SelectionMirrorRecoveryGate()
+            manager.selectionMirrorWillApply = { await gate.enter() }
+            let mirror = Task { @MainActor in
+                await manager.applyStoredSelectionMirrorForReadFileAutoSelection(for: identity)
+            }
+            let entered = await gate.waitUntilEntered()
+            XCTAssertTrue(entered, "\(transition): the physical mirror attempt never started")
+
+            let index = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == workspace.id })
+            manager.workspaces[index].activeComposeTabID = otherTab.id
+            var expectedSelection = readSelection
+            switch transition {
+            case .background:
+                break
+            case .backgroundSelectionChanged:
+                tab.selection = selection("changed")
+                XCTAssertTrue(manager.updateComposeTabStoredOnly(tab, inWorkspaceID: workspace.id))
+                expectedSelection = tab.selection
+            case .removed:
+                manager.workspaces[index].composeTabs.removeAll { $0.id == readTab.id }
+            case .cancelled:
+                mirror.cancel()
+            }
+            await gate.release()
+            let outcome = await mirror.value
+            await awaitPhysicalMirrorExit(fixture.coordinator)
+            await fixture.deadline.cancelAll()
+
+            XCTAssertEqual(outcome, transition.expected, "\(transition)")
+            if transition != .removed {
+                XCTAssertEqual(manager.composeTab(for: identity)?.selection, expectedSelection, "\(transition)")
+            }
+            if transition.expected == .converged {
+                // The header of a tab off screen shows its newest stored selection.
+                let presented = fixture.prompt.currentComposeTabs.first { $0.id == readTab.id }
+                XCTAssertEqual(presented?.selection, expectedSelection, "\(transition)")
+            }
+        }
+    }
+
+    func testReadAutoSelectionMirrorForInactiveWorkspaceTabIsInvalidated() async {
+        // The shown workspace has a tab with the target's ID, so a lookup by tab ID alone finds the wrong tab.
+        let sharedTabID = UUID()
+        let shownActiveTab = ComposeTabState(name: "Shown")
+        let shownSameIDTab = ComposeTabState(id: sharedTabID, name: "Same ID")
+        let shown = WorkspaceModel(
+            name: "Shown workspace",
+            repoPaths: [],
+            composeTabs: [shownActiveTab, shownSameIDTab],
+            activeComposeTabID: shownActiveTab.id
+        )
+        var target = ComposeTabState(id: sharedTabID, name: "Target")
+        target.selection = selection("inactive")
+        let inactive = WorkspaceModel(
+            name: "Inactive workspace",
+            repoPaths: [],
+            composeTabs: [target],
+            activeComposeTabID: target.id
+        )
+        let fixture = makeReadMirrorFixture(workspaces: [shown, inactive], active: shown)
+        let presentedBefore = fixture.prompt.currentComposeTabs
+
+        let outcome = await fixture.manager.applyStoredSelectionMirrorForReadFileAutoSelection(
+            for: WorkspaceSelectionIdentity(workspaceID: inactive.id, tabID: sharedTabID)
+        )
+
+        XCTAssertEqual(outcome, .invalidated)
+        XCTAssertEqual(fixture.prompt.currentComposeTabs, presentedBefore)
+    }
+
+    private struct ReadMirrorFixture {
+        let manager: ReadMirrorGatedManager
+        let prompt: PromptViewModel
+        let coordinator: WorkspaceSelectionCoordinator
+        let deadline: ManualSelectionMirrorDeadline
+    }
+
+    /// A manager over in-memory workspaces with no roots that mirrors through a real selection
+    /// coordinator, as a window does.
+    private func makeReadMirrorFixture(
+        workspaces: [WorkspaceModel],
+        active: WorkspaceModel
+    ) -> ReadMirrorFixture {
+        let files = WorkspaceFilesViewModel()
+        let keyManager = KeyManager(secureService: SecureKeysService(secureStorage: TestSecureStorageBackend()))
+        let apiSettings = APISettingsViewModel(
+            aiQueriesService: AIQueriesService(keyManager: keyManager),
+            keyManager: keyManager,
+            loadStoredDataOnInit: false
+        )
+        let prompt = PromptViewModel(
+            fileManager: files,
+            apiSettingsViewModel: apiSettings,
+            windowID: -1,
+            settingsManager: WindowSettingsManager(windowID: -1)
+        )
+        let manager = ReadMirrorGatedManager(
+            fileManager: files,
+            promptViewModel: prompt,
+            performInitialWorkspaceActivation: false
+        )
+        manager.workspaces = workspaces
+        manager.activeWorkspace = active
+        prompt.loadComposeTabsFromWorkspace(active)
+        let deadline = ManualSelectionMirrorDeadline()
+        let coordinator = WorkspaceSelectionCoordinator(
+            workspaceManager: manager,
+            store: files.workspaceFileContextStore,
+            mcpSelectionMirrorTimeout: .seconds(10),
+            waitForMCPSelectionMirrorDeadline: { _ in
+                try await deadline.wait()
+            }
+        )
+        manager.attachSelectionCoordinator(coordinator)
+        return ReadMirrorFixture(manager: manager, prompt: prompt, coordinator: coordinator, deadline: deadline)
+    }
+
+    /// A caller can return before the physical worker it started has exited.
+    private func awaitPhysicalMirrorExit(
+        _ coordinator: WorkspaceSelectionCoordinator,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0 ..< selectionMirrorRecoveryHangGuardYieldLimit {
+            guard coordinator.selectionMirrorDebugSnapshot().activePhysicalWorkerCount != 0 else { return }
+            await Task.yield()
+        }
+        XCTFail("Bounded yield guard expired while waiting for the physical mirror worker to exit", file: file, line: line)
+    }
+
     private func makeCoordinator(
         host: SelectionMirrorRecoveryHost,
         deadline: ManualSelectionMirrorDeadline
@@ -272,6 +431,24 @@ final class WorkspaceSelectionMirrorRecoveryTests: XCTestCase {
 
 /// Ordering remains continuation-driven; this bound only fails open when a regression would otherwise hang the suite.
 private let selectionMirrorRecoveryHangGuardYieldLimit = 10000
+
+/// Holds the read mirror's next physical attempt, so a test can move focus while it is in flight.
+private final class ReadMirrorGatedManager: WorkspaceManagerViewModel {
+    /// Runs once, before the next physical attempt; a coordinator repair attempt after it isn't held.
+    var selectionMirrorWillApply: (() async -> Void)?
+
+    override func applySelectionMirrorAttempt(
+        _ selection: StoredSelection,
+        forTabID tabID: UUID,
+        workspaceID: UUID
+    ) async {
+        if let hook = selectionMirrorWillApply {
+            selectionMirrorWillApply = nil
+            await hook()
+        }
+        await super.applySelectionMirrorAttempt(selection, forTabID: tabID, workspaceID: workspaceID)
+    }
+}
 
 private actor SelectionMirrorRecoveryGate {
     private struct EnteredWaiter {

@@ -312,6 +312,62 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         assertFullyReclaimed(coordinator)
     }
 
+    func testSelectionPrerequisiteTypesUnsatisfiedDrainsAndKeepsCancellation() async {
+        enum Outcome: Equatable {
+            case completes, cancellation, prerequisite(MCPSelectionPrerequisiteError), other(String)
+        }
+        let cases: [(MCPReadFileAutoSelectionCoordinator.DrainResult, Outcome)] = [
+            (.completed, .completes),
+            (.cancelled, .cancellation),
+            (.deferred, .prerequisite(.deferred)),
+            (.invalidated, .prerequisite(.invalidated))
+        ]
+        for (result, expected) in cases {
+            let observed: Outcome
+            do {
+                try await MCPServerViewModel.requireReadFileAutoSelectionPrerequisite { result }
+                observed = .completes
+            } catch let error as MCPSelectionPrerequisiteError {
+                observed = .prerequisite(error)
+            } catch is CancellationError {
+                observed = .cancellation
+            } catch {
+                observed = .other(String(describing: error))
+            }
+            XCTAssertEqual(observed, expected, "\(result)")
+        }
+
+        struct DrainFailure: Error, Equatable {}
+        do {
+            try await MCPServerViewModel.requireReadFileAutoSelectionPrerequisite { throw DrainFailure() }
+            XCTFail("A throwing drain must not complete")
+        } catch {
+            XCTAssertEqual(error as? DrainFailure, DrainFailure(), "A drain error must reach the caller unchanged: \(error)")
+        }
+    }
+
+    func testSelectionPrerequisiteReportsTaskCancellationOverEveryDrainResult() async {
+        // The task is cancelled before its body starts, so the check after the drain sees it.
+        for result: MCPReadFileAutoSelectionCoordinator.DrainResult in [.completed, .deferred, .invalidated] {
+            let task = Task { @MainActor () -> (drained: Bool, error: Error?) in
+                var drained = false
+                do {
+                    try await MCPServerViewModel.requireReadFileAutoSelectionPrerequisite {
+                        drained = true
+                        return result
+                    }
+                    return (drained, nil)
+                } catch {
+                    return (drained, error)
+                }
+            }
+            task.cancel()
+            let outcome = await task.value
+            XCTAssertTrue(outcome.drained, "\(result): the drain must run before the cancellation check")
+            XCTAssertTrue(outcome.error is CancellationError, "\(result): \(String(describing: outcome.error))")
+        }
+    }
+
     private func contextKey(
         tabID: UUID = UUID(),
         workspaceID: UUID = UUID(),

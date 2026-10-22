@@ -389,11 +389,8 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                         MCPServerViewModel.codeStructureSeedLimit(for: request)
                     )
                 } else {
-                    guard try await dependencies.files.drainReadFileAutoSelection(
-                        metadata,
-                        .canonicalSelection
-                    ) == .completed else {
-                        throw CancellationError()
+                    try await MCPServerViewModel.requireReadFileAutoSelectionPrerequisite {
+                        try await dependencies.files.drainReadFileAutoSelection(metadata, .canonicalSelection)
                     }
                     files = try await dependencies.context.resolveSelectedFilesForCodeStructure(
                         metadata,
@@ -485,8 +482,8 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait, transition: .completed)
                 await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction)
                 if mode.lowercased() == "selected" {
-                    guard try await dependencies.files.drainReadFileAutoSelection(metadata, .canonicalSelection) == .completed else {
-                        throw CancellationError()
+                    try await MCPServerViewModel.requireReadFileAutoSelectionPrerequisite {
+                        try await dependencies.files.drainReadFileAutoSelection(metadata, .canonicalSelection)
                     }
                 }
                 let worktreeScope = ToolResultDTOs.WorktreeScopeDTO.sessionBound(from: lookupContext.bindingProjection)
