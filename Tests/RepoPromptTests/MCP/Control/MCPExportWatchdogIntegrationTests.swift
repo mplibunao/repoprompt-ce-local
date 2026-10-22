@@ -131,6 +131,49 @@ import XCTest
             }
         }
 
+        func testPromptSetMatchingStoredTextStillReplacesUnstoredEditorEdit() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let editor = context.window.promptManager
+
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, context.tabID)
+                    let stored = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "stored prompt"]
+                    )
+                    XCTAssertFalse(stored.rawJSON.contains("\"isError\":true"), stored.rawJSON)
+                    // Suspended snapshot commits keep the editor's edit out of the stored tab while
+                    // the next call is in flight, as before its debounced snapshot lands.
+                    manager.setSnapshotsSuspended(true, forTabID: context.tabID)
+                    editor.promptText = "unstored edit"
+
+                    let unchanged = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "stored prompt"]
+                    )
+                    XCTAssertFalse(unchanged.rawJSON.contains("\"isError\":true"), unchanged.rawJSON)
+                    XCTAssertEqual(manager.composeTab(with: context.tabID)?.promptText, "stored prompt")
+                    XCTAssertEqual(editor.promptText, "stored prompt")
+
+                    manager.setSnapshotsSuspended(false, forTabID: context.tabID)
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    manager.setSnapshotsSuspended(false, forTabID: context.tabID)
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
         func testPromptMutationTimeoutDetachesWithoutTerminatingConnection() async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
