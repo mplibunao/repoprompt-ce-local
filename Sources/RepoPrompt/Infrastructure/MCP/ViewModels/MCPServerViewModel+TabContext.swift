@@ -4428,10 +4428,16 @@ extension MCPServerViewModel {
               let tabIndex = manager.workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == context.tabID })
         else { return }
 
-        var updatedTab = manager.workspaces[workspaceIndex].composeTabs[tabIndex]
-        updatedTab.promptText = context.promptText
-        updatedTab.lastModified = Date()
-        guard manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspaceID) else { return }
+        // Writing the stored tab bumps the workspace state version, and the next scoped read then
+        // re-registers the whole workspace, so an unchanged prompt skips the write. The active
+        // tab's editor still takes the text, since it can hold an edit that isn't stored yet.
+        let storedTab = manager.workspaces[workspaceIndex].composeTabs[tabIndex]
+        if storedTab.promptText != context.promptText {
+            var updatedTab = storedTab
+            updatedTab.promptText = context.promptText
+            updatedTab.lastModified = Date()
+            guard manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspaceID) else { return }
+        }
 
         let isActive = manager.workspaces[workspaceIndex].activeComposeTabID == context.tabID
         guard isActive else { return }

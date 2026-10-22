@@ -78,6 +78,59 @@ import XCTest
             }
         }
 
+        func testPromptSetBumpsWorkspaceStateVersionOnlyWhenTextChanges() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                // The live editor's debounced observers bump the state version on their own
+                // timers, so a background tab keeps them out of the measurement.
+                let backgroundTabID = UUID()
+
+                do {
+                    let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == context.workspaceID })
+                    manager.workspaces[workspaceIndex].composeTabs.append(
+                        ComposeTabState(id: backgroundTabID, name: "Background")
+                    )
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    let bindResponse = try await endpoint.callTool(
+                        name: "bind_context",
+                        arguments: ["op": "bind", "context_id": backgroundTabID.uuidString]
+                    )
+                    let bindText = try Self.toolResultText(bindResponse)
+                    XCTAssertFalse(bindText.contains("Error:"), bindText)
+                    XCTAssertNotEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, backgroundTabID)
+
+                    let versionBeforeChange = manager.debugStateVersionForWorkspace(context.workspaceID)
+                    let changed = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "background prompt"]
+                    )
+                    XCTAssertFalse(changed.rawJSON.contains("\"isError\":true"), changed.rawJSON)
+                    XCTAssertEqual(manager.composeTab(with: backgroundTabID)?.promptText, "background prompt")
+                    let versionAfterChange = manager.debugStateVersionForWorkspace(context.workspaceID)
+                    XCTAssertGreaterThan(versionAfterChange, versionBeforeChange)
+
+                    let unchanged = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "background prompt"]
+                    )
+                    XCTAssertFalse(unchanged.rawJSON.contains("\"isError\":true"), unchanged.rawJSON)
+                    XCTAssertEqual(manager.debugStateVersionForWorkspace(context.workspaceID), versionAfterChange)
+
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
         func testPromptMutationTimeoutDetachesWithoutTerminatingConnection() async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
