@@ -20,6 +20,14 @@ import Foundation
         private static let bufferLock = NSLock()
         private static var processOverrideEnabled: Bool?
         private static var recentMetricLines: [String] = []
+        private static var timedEventTotals: [String: TimedEventTotal] = [:]
+
+        private struct TimedEventTotal {
+            var count = 0
+            var totalMS = 0.0
+            var maxMS = 0.0
+            var totalBytes = 0
+        }
 
         static var isEnabled: Bool {
             if let override = debugProcessOverrideEnabled {
@@ -90,15 +98,39 @@ import Foundation
             log(renderEvent(name, fields: fields))
         }
 
+        /// Logs `name` with `duration` and `bytes` fields and adds them to the per-name totals in
+        /// `debugStateSnapshot`. The totals keep an exact count after the line buffer drops lines.
+        static func timedEvent(
+            _ name: String,
+            durationMS: Double,
+            bytes: Int,
+            fields: [String: String] = [:]
+        ) {
+            guard isEnabled else { return }
+            bufferLock.lock()
+            var total = timedEventTotals[name, default: TimedEventTotal()]
+            total.count += 1
+            total.totalMS += durationMS
+            total.maxMS = max(total.maxMS, durationMS)
+            total.totalBytes += bytes
+            timedEventTotals[name] = total
+            bufferLock.unlock()
+            var payload = fields
+            payload["duration"] = formatMS(durationMS)
+            payload["bytes"] = "\(bytes)"
+            event(name, fields: payload)
+        }
+
         static func setDebugProcessOverrideEnabled(_ enabled: Bool?) {
             bufferLock.lock()
             processOverrideEnabled = enabled
             bufferLock.unlock()
         }
 
-        static func clearRecentMetricLines() {
+        static func clearRecentMetrics() {
             bufferLock.lock()
             recentMetricLines.removeAll(keepingCapacity: true)
+            timedEventTotals.removeAll()
             bufferLock.unlock()
         }
 
@@ -112,6 +144,9 @@ import Foundation
 
         static func debugStateSnapshot(lineLimit: Int) -> [String: Any] {
             let lines = recentMetricLinesSnapshot(limit: lineLimit)
+            bufferLock.lock()
+            let totals = timedEventTotals
+            bufferLock.unlock()
             return [
                 "enabled": isEnabled,
                 "defaults_enabled": defaultsEnabled,
@@ -119,7 +154,15 @@ import Foundation
                 "process_override_enabled": debugProcessOverrideEnabled ?? NSNull(),
                 "line_count": lines.count,
                 "buffer_limit": bufferLimit,
-                "lines": lines
+                "lines": lines,
+                "timed_event_totals": totals.mapValues { total in
+                    [
+                        "count": total.count,
+                        "total_ms": (total.totalMS * 10).rounded() / 10,
+                        "max_ms": (total.maxMS * 10).rounded() / 10,
+                        "total_bytes": total.totalBytes
+                    ] as [String: Any]
+                }
             ]
         }
 

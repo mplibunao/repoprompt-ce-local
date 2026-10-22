@@ -395,7 +395,7 @@ import MCP
                     WorkspaceRestorePerfLog.setDebugProcessOverrideEnabled(enable)
                 }
                 if debugBool(arguments, "clear") == true {
-                    WorkspaceRestorePerfLog.clearRecentMetricLines()
+                    WorkspaceRestorePerfLog.clearRecentMetrics()
                 }
                 if debugBool(arguments, "emit_probe") == true {
                     WorkspaceRestorePerfLog.log("restore.metrics probe source=debugDiagnostics")
@@ -422,6 +422,14 @@ import MCP
                 }
 
                 var payload = WorkspaceRestorePerfLog.debugStateSnapshot(lineLimit: limit)
+                // Process-lifetime counters of the digest-keyed decode cache; `clear` doesn't reset them.
+                let decodeCache = WorkspaceFileDecodeCache.shared.digestDecodeStatsForTesting()
+                payload["workspace_decode_cache"] = [
+                    "hits": decodeCache.hits,
+                    "misses": decodeCache.misses,
+                    "entries": decodeCache.entries,
+                    "input_bytes": decodeCache.inputBytes
+                ]
                 payload["ok"] = true
                 payload["op"] = op
                 if let emittedMark {

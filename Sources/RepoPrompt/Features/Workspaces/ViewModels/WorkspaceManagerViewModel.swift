@@ -12195,11 +12195,32 @@ class WorkspaceManagerViewModel: ObservableObject {
             // This is intentionally the predecessor ordinary-save merge behavior. The preservation
             // flag is narrowed only for the feature-owned exact path above.
             await Task.detached(priority: .utility) {
+                #if DEBUG
+                    let decodeStartMS = WorkspaceRestorePerfLog.timestampMSIfEnabled()
+                #endif
                 let diskWorkspace: WorkspaceModel? = if FileManager.default.fileExists(atPath: targetURL.path) {
                     try? Self.loadWorkspaceFromFile(at: targetURL, scheduleNormalizationWriteback: false)
                 } else {
                     nil
                 }
+                #if DEBUG
+                    if let decodeStartMS {
+                        let durationMS = WorkspaceRestorePerfLog.elapsedMS(since: decodeStartMS)
+                        // No size means no file was there to decode.
+                        if let bytes = (try? FileManager.default.attributesOfItem(atPath: targetURL.path))?[.size] as? Int {
+                            WorkspaceRestorePerfLog.timedEvent(
+                                "workspaceSave.domain.preSaveDecode",
+                                durationMS: durationMS,
+                                bytes: bytes,
+                                fields: [
+                                    "workspaceID": WorkspaceRestorePerfLog.shortID(workspace.id),
+                                    "decoded": "\(diskWorkspace != nil)",
+                                    "url": targetURL.lastPathComponent
+                                ]
+                            )
+                        }
+                    }
+                #endif
                 return Self.workspaceForSavePreservingDiskRepoPaths(
                     current: workspace,
                     diskWorkspace: diskWorkspace,
