@@ -15,6 +15,7 @@ import io
 import json
 import os
 import plistlib
+import shutil
 import signal
 import sys
 import tarfile
@@ -32,6 +33,8 @@ import seed_debug_profile as seed  # noqa: E402
 from script_test_support import directory_snapshot, enter_context, temporary_directory  # noqa: E402
 
 TAG = "local/v1.4.0-b99"
+# The state tarball name each writer codec produces; `zst` needs Python 3.14 to write or read.
+STATE_NAMES = {"gz": "application-support.tar.gz", "zst": "application-support.tar.zst"}
 # The archived profile path recorded in the manifest. It never exists on disk, so a rewrite
 # that keyed off the current HOME instead of the manifest would be caught.
 SOURCE_ROOT = "/Users/archived-user/Library/Application Support/RepoPrompt CE"
@@ -162,9 +165,11 @@ def default_state() -> dict[str, object]:
     }
 
 
-def write_state_archive(path: Path, state: dict[str, object], raw_members: tuple[str, ...] = ()) -> None:
+def write_state_archive(
+    path: Path, state: dict[str, object], raw_members: tuple[str, ...] = (), codec: str = "gz"
+) -> None:
     """Writes `./`-prefixed members, parents first, the way local_release_archive.sh does."""
-    with tarfile.open(path, "w:gz") as archive:
+    with tarfile.open(path, f"w:{codec}") as archive:
         directories: set[str] = set()
 
         def add_directory(name: str) -> None:
@@ -262,15 +267,22 @@ class SeedDebugProfileTests(unittest.TestCase):
         raw_members: tuple[str, ...] = (),
         epoch: float = 1_790_000_000.0,
         manifest: dict[str, object] | None = None,
+        codec: str = "gz",
+        state_bytes: bytes | None = None,
     ) -> Path:
         archive = directory or self.archive_root / tag
         archive.mkdir(parents=True)
-        write_state_archive(archive / seed.STATE_ARCHIVE_NAME, default_state() if state is None else state, raw_members)
+        state_name = STATE_NAMES[codec]
+        if state_bytes is None:
+            write_state_archive(archive / state_name, default_state() if state is None else state, raw_members, codec)
+        else:
+            # A payload that is not a tarball, for cases that must refuse before reading it.
+            (archive / state_name).write_bytes(state_bytes)
         (archive / "app.zip").write_bytes(b"app bundle")
         (archive / "defaults.plist").write_bytes(b"preferences")
         (archive / "local-signing-identity-v1.json").write_bytes(b'{"record": "fixture"}')
         files: dict[str, object] = {}
-        for name in ("app.zip", seed.STATE_ARCHIVE_NAME, "defaults.plist", "local-signing-identity-v1.json"):
+        for name in ("app.zip", state_name, "defaults.plist", "local-signing-identity-v1.json"):
             digest = hashlib.sha256((archive / name).read_bytes()).hexdigest()
             (archive / f"{name}.sha256").write_text(f"{digest}  {name}\n", encoding="utf-8")
             files[name] = {"sha256": digest, "bytes": (archive / name).stat().st_size}
@@ -319,7 +331,16 @@ class SeedDebugProfileTests(unittest.TestCase):
     # -- tests ------------------------------------------------------------------------------
 
     def test_seeds_allowlisted_state_and_rewrites_production_paths(self) -> None:
-        self.write_archive()
+        for codec in ("gz", "zst"):
+            with self.subTest(codec=codec):
+                if codec == "zst" and not seed.ZSTD_READABLE:
+                    self.skipTest("this Python cannot read zstd")
+                shutil.rmtree(self.archive_root, ignore_errors=True)
+                shutil.rmtree(self.debug, ignore_errors=True)
+                self.assert_seeds_allowlisted_state(codec)
+
+    def assert_seeds_allowlisted_state(self, codec: str) -> None:
+        self.write_archive(codec=codec)
         production_before = self.production_snapshot()
 
         code, stdout, stderr = self.run_seed()
@@ -587,21 +608,33 @@ class SeedDebugProfileTests(unittest.TestCase):
             (archive / "app.zip.sha256").unlink()
 
         def tamper_state(archive: Path) -> None:
-            data = bytearray((archive / seed.STATE_ARCHIVE_NAME).read_bytes())
+            data = bytearray((archive / STATE_NAMES["gz"]).read_bytes())
             data[-10] ^= 0xFF
-            (archive / seed.STATE_ARCHIVE_NAME).write_bytes(bytes(data))
+            (archive / STATE_NAMES["gz"]).write_bytes(bytes(data))
 
         def alter_manifest_checksum(archive: Path) -> None:
             manifest = json.loads((archive / seed.MANIFEST_NAME).read_text(encoding="utf-8"))
             manifest["files"]["local-signing-identity-v1.json"]["sha256"] = "f" * 64
             (archive / seed.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
 
+        def list_neither_state_archive(archive: Path) -> None:
+            manifest = json.loads((archive / seed.MANIFEST_NAME).read_text(encoding="utf-8"))
+            del manifest["files"][STATE_NAMES["gz"]]
+            (archive / seed.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+
+        def list_both_state_archives(archive: Path) -> None:
+            manifest = json.loads((archive / seed.MANIFEST_NAME).read_text(encoding="utf-8"))
+            manifest["files"][STATE_NAMES["zst"]] = dict(manifest["files"][STATE_NAMES["gz"]])
+            (archive / seed.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+
         cases = {
             "missing manifest": (remove_manifest, "manifest.json is written last and is missing"),
             "sidecar mismatch": (corrupt_sidecar, "Checksum mismatch for defaults.plist"),
             "missing sidecar": (remove_sidecar, "Missing checksum sidecar for app.zip"),
-            "tampered state archive": (tamper_state, f"Checksum mismatch for {seed.STATE_ARCHIVE_NAME}"),
+            "tampered state archive": (tamper_state, f"Checksum mismatch for {STATE_NAMES['gz']}"),
             "manifest checksum mismatch": (alter_manifest_checksum, "Checksum mismatch for local-signing-identity-v1.json"),
+            "no state archive listed": (list_neither_state_archive, "must list exactly one state archive"),
+            "both state archives listed": (list_both_state_archives, "must list exactly one state archive"),
         }
         for label, (damage, expected) in cases.items():
             with self.subTest(label=label):
@@ -613,6 +646,20 @@ class SeedDebugProfileTests(unittest.TestCase):
                 self.assert_refused(code, stderr, expected)
                 self.assertFalse(os.path.lexists(self.debug))
                 self.assert_left_no_trace()
+
+    def test_zstd_archive_refuses_on_a_python_without_zstd(self) -> None:
+        archive = self.write_archive(codec="zst", state_bytes=b"placeholder that is never read")
+        production_before = self.production_snapshot()
+
+        with mock.patch.object(seed, "ZSTD_READABLE", False):
+            for mode in (("--dry-run",), ()):
+                with self.subTest(mode=mode or "real run"):
+                    code, _stdout, stderr = self.run_seed("--archive", str(archive), *mode)
+
+                    self.assert_refused(code, stderr, "needs Python 3.14 or newer with zstd support")
+                    self.assertFalse(os.path.lexists(self.debug))
+                    self.assert_left_no_trace()
+                    self.assertEqual(self.production_snapshot(), production_before)
 
     def test_running_debug_app_or_helper_refuses_but_production_does_not(self) -> None:
         self.write_archive()

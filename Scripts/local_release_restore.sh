@@ -8,7 +8,10 @@ set -euo pipefail
 # shellcheck source=Scripts/local_release_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/local_release_env.sh"
 
-REQUIRED_ARCHIVE_FILES=("app.zip" "application-support.tar.gz" "defaults.plist")
+# The state tarball is not listed here: the manifest names exactly one of
+# application-support.tar.zst and application-support.tar.gz (older archives), and the
+# parser below selects it.
+REQUIRED_ARCHIVE_FILES=("app.zip" "defaults.plist")
 
 RESCUE_DIR=""
 RESCUED_ENTRY_LIST=""
@@ -62,11 +65,20 @@ files = manifest.get("files")
 if not isinstance(files, dict) or not files:
     sys.exit(f"manifest {path} lists no archive files")
 plain_names(sorted(files), "files")
+state_archives = [
+    name for name in ("application-support.tar.gz", "application-support.tar.zst") if name in files
+]
+if len(state_archives) != 1:
+    sys.exit(
+        f"manifest {path} must list exactly one state archive: "
+        "application-support.tar.gz or application-support.tar.zst"
+    )
 state = manifest.get("applicationSupport")
 if not isinstance(state, dict) or "excludedNames" not in state:
     sys.exit(f"manifest {path} is missing applicationSupport.excludedNames")
 excluded = plain_names(state["excludedNames"], "applicationSupport.excludedNames")
 
+print(f"STATE\t{state_archives[0]}")
 for name in sorted(files):
     print(f"FILE\t{name}")
 for name in excluded:
@@ -76,8 +88,10 @@ PY
 
 ARCHIVE_FILES=()
 EXCLUDED_STATE_NAMES=()
+STATE_ARCHIVE_NAME=""
 while IFS=$'\t' read -r kind value; do
     case "$kind" in
+        STATE) STATE_ARCHIVE_NAME="$value" ;;
         FILE) ARCHIVE_FILES+=("$value") ;;
         EXCLUDE) EXCLUDED_STATE_NAMES+=("$value") ;;
         "") ;;
@@ -105,6 +119,13 @@ for name in "${ARCHIVE_FILES[@]}"; do
 done
 (( VERIFIED == ${#ARCHIVE_FILES[@]} )) || fail "Verified $VERIFIED of ${#ARCHIVE_FILES[@]} archive files; refusing to restore."
 printf 'Verified %d archive files.\n' "$VERIFIED"
+
+# tar runs zstd to read a .tar.zst. Checked before the guard and the rescue directory so a
+# missing decoder is found while nothing has been moved.
+if [[ "$STATE_ARCHIVE_NAME" == *.tar.zst ]]; then
+    command -v zstd >/dev/null ||
+        fail "zstd is required to restore this archive. Install zstd (brew install zstd), ensure it is on PATH, and retry; nothing was moved."
+fi
 
 require_no_running_repoprompt_processes "restoring"
 
@@ -143,7 +164,8 @@ if [[ -e "$LOCAL_APP_SUPPORT_DIR" || -L "$LOCAL_APP_SUPPORT_DIR" ]]; then
     mv "$LOCAL_APP_SUPPORT_DIR" "$RESCUED_STATE"
 fi
 mkdir -p "$LOCAL_APP_SUPPORT_DIR"
-tar -xzf "$ARCHIVE_DIR/application-support.tar.gz" -C "$LOCAL_APP_SUPPORT_DIR"
+# tar detects gzip and zstd from the stream and exits nonzero on a bad one.
+tar -xf "$ARCHIVE_DIR/$STATE_ARCHIVE_NAME" -C "$LOCAL_APP_SUPPORT_DIR"
 # Excluded top-level entries move back from the rescue copy. Manifest rules ending in
 # `*` match by prefix; every other rule matches an exact file or directory name.
 if [[ -d "$RESCUED_STATE" ]]; then
