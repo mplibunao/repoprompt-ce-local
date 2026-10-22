@@ -9,21 +9,52 @@ present; the previous install and its state are archived first so the step is re
 
 Before you start:
 
-- The [rollback unit](#rollback-unit) restore has been rehearsed at least once on this machine.
+- The [rollback unit](#rollback-unit) restore has been rehearsed on this machine since the
+  last change to the archive format or to how restore extracts it.
 - `main` is pushed at the commit to promote, which is the tip of a landed release candidate
   ([`CONTRIBUTING.md`](../CONTRIBUTING.md), "Landing"), and the tracked tree is clean, so
   [build provenance](#build-provenance) records that commit with `dirty: false`.
 - `BUILD_NUMBER` in [`version.env`](../version.env) is bumped for this build.
+- `zstd` is on `PATH`. The archive and the restore both need it.
+- The signing registry already records the Apple Development team the build will use.
+  Preparation refuses a first install, a move from self-signed signing, and a rotation. A
+  first install has nothing to archive: use the
+  [one-run install](#install-a-local-production-build). For a move from self-signed
+  signing or a rotation, skip steps 1 and 3: quit and archive as step 2 describes, without
+  its prepared-bundle check, then run the one-run install with production still quit.
 
-1. Quit the debug app and production, then archive the current install:
+1. Build, sign, and verify the candidate from the `main` checkout while production is still
+   running:
+
+   ```bash
+   make dev-prepare-local-production
+   ```
+
+   `make prepare-local-production` runs the same step without the developer daemon.
+   Preparation installs nothing and doesn't write the signing registry. It saves the signed
+   bundle at `.build/local-production/RepoPrompt.app`, and it fails before finishing when
+   the bundle fails the same checks step 3 lists, for example provenance that doesn't
+   record the checkout's `HEAD` with `dirty: false`, or a version that differs from
+   `version.env`. If it fails, production keeps running. Fix the cause and prepare again.
+   Don't commit, check out, or run `make clean` in the checkout until step 3 finishes.
+
+2. Confirm that the prepared bundle's provenance still records the checkout's commit:
+
+   ```bash
+   [[ "$(plutil -extract commit raw .build/local-production/RepoPrompt.app/Contents/Resources/RepoPromptProvenance.json)" == "$(git rev-parse HEAD)" ]] && echo "prepared bundle matches HEAD" || echo "MISMATCH: prepare again before you quit production"
+   ```
+
+   Quit the debug app and production only after it prints the match line, then archive the
+   current install:
 
    ```bash
    ./Scripts/local_release_archive.sh local/v1.4.0-b37
    ```
 
-2. Compare the archived and candidate working-journal schema versions before replacing
-   the app. The archived build's supported version is `working_journal_schema_version` in
-   the new archive's `manifest.json`. The archive determines it automatically in this order:
+   Then compare the archived and candidate working-journal schema versions before
+   replacing the app. The archived build's supported version is
+   `working_journal_schema_version` in the new archive's `manifest.json`. The archive
+   determines it automatically in this order:
 
    - `from_bundle`: read `RepoPromptWorkingJournalSchemaVersion` from the archived app's
      `Contents/Info.plist`.
@@ -36,9 +67,8 @@ Before you start:
    `provenance_commit_working_journal_schema_version` records the clean commit-derived value.
    This value selects the archived version when the bundle key is absent. When the key is
    present, the field is an audit value. Pre-key bundles packaged before the `git_status`
-   provenance field resolve as `unknown`. This includes the currently installed production
-   build, so its next promotion requires the rollback notes below. The candidate build's
-   supported version is `DomainWorkingJournal.schemaVersion` in
+   provenance field resolve as `unknown` and require the rollback notes below. The
+   candidate build's supported version is `DomainWorkingJournal.schemaVersion` in
    [`Sources/RepoPromptDomainRuntime/DomainPersistence.swift`](../Sources/RepoPromptDomainRuntime/DomainPersistence.swift).
 
    Working journals don't identify the app build that wrote them, so they never select the
@@ -49,8 +79,9 @@ Before you start:
    RepoPrompt CE and move the journal files to a backup directory using the path in the
    rollback template below.
    Relaunch the currently installed build, then quit it after it writes fresh journals.
-   Re-run step 1 with `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`. Continue only when the replacement
-   archive contains no observed version higher than the candidate.
+   Re-run the archive command in this step with `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`.
+   Continue only when the replacement archive contains no observed version higher than the
+   candidate.
 
    If the archived and candidate schema versions differ, promotion is blocked until
    the release notes include usable rollback instructions. Start with this template and
@@ -63,14 +94,27 @@ Before you start:
    > `<tested conversion procedure>`. Relaunch the archived build; affected workspaces load
    > from their saved workspace documents and write fresh journals.
 
-3. Install the new build from the `main` checkout:
+3. Install the prepared build:
 
    ```bash
-   CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make install-local-production
+   CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make install-prepared-local-production
    ```
 
-4. Launch production and run the [acceptance matrix](#acceptance-matrix) once from Claude
-   Code and once from Codex. Confirm the bundle provenance names the promoted commit:
+   This copies the prepared bundle into place without compiling, packaging, or signing. It
+   runs as plain `make`, not through the developer daemon, so it never waits behind other
+   jobs while production is down. Before replacing anything it checks the copy: the
+   signature and designated requirement, the signing team and Keychain service against the
+   registry, provenance naming the checkout's `HEAD` with `dirty: false` and
+   `git_status: "ok"`, and the version and build against `version.env`. If it refuses,
+   nothing was installed. Fix the cause the refusal names first. Either relaunch the
+   installed build, prepare again, and repeat step 2 with
+   `LOCAL_RELEASE_ARCHIVE_OVERWRITE=1`, or, with production still quit, run the one-run
+   install, `CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make install-local-production`, which
+   compiles while production is stopped.
+
+4. Launch production and run the [acceptance matrix](#acceptance-matrix) from Claude Code
+   and Codex, with both client arms running together and the quit arm last. Confirm the
+   bundle provenance names the promoted commit:
 
    ```bash
    cat "/Applications/RepoPrompt CE.app/Contents/Resources/RepoPromptProvenance.json"
@@ -112,7 +156,10 @@ Before you start:
 
 ## Install a local production build
 
-The command-line paths are the coordinated alias and its direct fallback:
+These commands build and install in one run, with production quit throughout. A promotion
+normally splits the run so the build happens while production is still running. The
+[promotion procedure](#promotion-procedure) gives those commands. The command-line paths
+are the coordinated alias and its direct fallback:
 
 ```bash
 CONFIRM_LOCAL_PRODUCTION_INSTALL=1 make dev-install-local-production
@@ -128,10 +175,12 @@ terminal window open so build results stay visible.
 Local production packaging requires a full Xcode installation. The installer preserves an
 explicit compatible `DEVELOPER_DIR`; otherwise it uses the selected full Xcode or discovers
 a compatible Xcode app for that process without changing the system-wide `xcode-select`
-setting. It first confirms that the installed app isn't running, before any signing or
-packaging work. It checks again before staging the new bundle and before replacing the
-installed app. These checks match only the installed app's executable, so a running debug
-app does not block installation.
+setting. The one-run install confirms that the installed app isn't running before any
+signing or packaging work, again before staging the new bundle, and again before
+replacing the installed app. The prepared install makes the last two checks; preparation
+makes none, because it installs nothing and doesn't write the signing registry. These
+checks match only the installed app's executable, so a running debug app does not block
+installation.
 
 The installer signs the app with an Apple Development certificate from the login keychain.
 A free Personal Team certificate works; create one in Xcode under Settings > Accounts >
@@ -204,8 +253,15 @@ the debug app.
 ```
 
 The archive lands in `~/Archives/repoprompt-ce/<tag>/` and holds `app.zip`,
-`application-support.tar.gz`, `defaults.plist`, `local-signing-identity-v1.json` when the
-record exists, a `.sha256` sidecar per file, and `manifest.json`. The manifest is written
+`application-support.tar.zst`, `defaults.plist`, `local-signing-identity-v1.json` when the
+record exists, a `.sha256` sidecar per file, and `manifest.json`. The state tarball is
+compressed with `zstd -T0 -3`, which uses every core and keeps the archive step short while
+production is stopped. Older archives hold `application-support.tar.gz` instead. Restore
+and the seed script read both formats and use the state file that the manifest's `files`
+object lists. Archiving and restoring a zstd archive need `zstd` on `PATH`, and both
+scripts check for it before they change anything. Restore with the scripts from the
+current checkout: older copies of the scripts refuse a zstd archive without changing
+anything. The manifest is written
 last, so its absence marks an incomplete archive and the restore refuses one. It records the
 tag, timestamps, bundle identifier, version, build, signing mode, and the commit read from
 the bundle's provenance file. The archive records `working_journal_schema_version` with
@@ -248,9 +304,11 @@ moves the excluded top-level entries back from the rescue copy, clears the prefe
 domain and imports the archived one, and restores the signing identity record. It prints the
 rescue directory path; remove it once the restore is confirmed good.
 
-Rehearse the restore against the current install before the first promotion, and time it. A
-rehearsal that takes more than ten minutes means the unit needs work before it is trusted as
-a rollback path.
+Rehearse the restore against the current install before the first promotion, and again
+after any change to the archive format or to how restore extracts the archive. Time each
+rehearsal. A rehearsal that takes more than ten minutes means the unit needs work before it
+is trusted as a rollback path. Stopping production for a rehearsal needs approval
+(`AGENTS.md`, "Commit preflight").
 
 ## Build provenance
 
@@ -270,10 +328,10 @@ lifecycle](testing.md#live-debug-app-identity-and-lifecycle) describes both.
 
 ## Acceptance matrix
 
-Run this against the launched production app, once from Claude Code and once from Codex.
-Running it "from" a client means issuing at least one of these calls as a RepoPrompt MCP
-tool call inside that client's own session: raw CLI output cannot prove client-side
-selector and routing behavior.
+Run this against the launched production app from Claude Code and from Codex, with both
+client arms running together. Running it "from" a client means issuing at least one of
+these calls as a RepoPrompt MCP tool call inside that client's own session: raw CLI output
+cannot prove client-side selector and routing behavior.
 
 `$CLI` is the user-space CLI link the app maintains for the release build
 (`MCPFilesystemIdentity.userSpaceCLIURL()`), which resolves to the installed bundle's
@@ -293,26 +351,32 @@ sessions started with `rpce-cli-debug … agent_run`, each making at least one m
 a RepoPrompt tool call, whether the agent running the checklist is in RepoPrompt Agent Mode,
 Claude Code, or Codex.
 
-Production can run its Codex arm the same way. Start a session with
-`"$CLI" -w "$W1" -t "$T1" -c agent_run` and a `codexExec` model, and tell it to make the `$W1`
-selection, roots, Context Builder, and Oracle rows through its own RepoPrompt tools. Without
-`-t`, the session starts from the window's active tab instead of the background tab `$T1`
-described below. The operator then runs only the
-remaining rows with `$CLI`: the agent starts, the steer, the worktree run, and
-`list_sessions`. The session's transcript from
-`"$CLI" -w "$W1" -c agent_manage -j '{"op":"get_log","session_id":"<id>"}'` lists each of its
-calls as a `tool_call` entry, which is the evidence the receipt cites.
+Production runs both client arms the same way, started together. Start a Claude Code
+session and a Codex session, each with `"$CLI" -w "$W1" -t "$T1" -c agent_run` naming that
+arm's own `$T1`, one with a `claudeCode` model and one with a `codexExec` model, and tell
+each to make the `$W1` selection, roots, Context Builder, and Oracle rows through its own
+RepoPrompt tools. Start the second without waiting for the first. Without `-t`, a session
+starts from the window's active tab instead of its background tab. While they work, the
+operator runs the agent starts, the steer, and the worktree run with `$CLI`. The operator
+also runs the `$W2` lines: set the `$W2` selection before you start the client arms and
+read it back after both finish, so the read-back shows whether either arm's selection
+reached `$W2`. Run `list_sessions` last, once both client sessions and the operator's
+agents are terminal. Each client session's transcript from
+`"$CLI" -w "$W1" -c agent_manage -j '{"op":"get_log","session_id":"<id>"}'` lists each of
+its calls as a `tool_call` entry, which is the evidence the receipt cites.
 
 Run against what production already has open; don't create workspaces, windows, or
-worktrees for acceptance. `$W1` is a window from the first arm. `$FILE` is a file in that
-window's workspace, and `$WT` is the path of any existing linked worktree of it. Select in
-background compose tabs made for the arms, so no tab in use changes:
+worktrees for acceptance. `$W1` is a window ID from the `windows` row in the block below.
+`$FILE` is a file in that window's workspace, and `$WT` is the path of any existing linked
+worktree of it. Each client arm selects in its own background compose tab, so no tab in
+use changes and the two arms never share a selection:
 `"$CLI" -w "$W1" -c manage_workspaces -j '{"action":"create_tab","name":"acceptance"}'`
-creates one, and `$T1` is the `context_id` in its reply, which is also the tab's ID. The two
-`$W2` lines run only when a second window is already open; otherwise the receipt records them
-as not run. When they run, create `$T2` the same way with `-w "$W2"`. After the arms, close
-each tab in its own window with `{"action":"close_tab","tab":"<tab ID>"}`. Close them by ID
-rather than name, because Context Builder renames the tab it runs in.
+creates one, and that arm's `$T1` is the `context_id` in its reply, which is also the tab's
+ID. Create one per client arm. The two `$W2` lines run only when a second window is already
+open; otherwise the receipt records them as not run. When they run, create one `$T2` the
+same way with `-w "$W2"`. The operator uses it for the whole run. After the arms, close
+each tab in its own window with `{"action":"close_tab","tab":"<tab ID>"}`. Close them by
+ID rather than name, because Context Builder renames the tab it runs in.
 
 The Codex and Claude Code arms use `codexExec:gpt-6-luna-low` and
 `claudeCode:haiku:low`. Update these when a provider retires a model. If
@@ -328,14 +392,14 @@ model doesn't exist, look up a current one:
    alternative, and avoid `-fast` identifiers.
 3. Turn the setting back on. A typed-in identifier keeps working while it is on.
 
-Every arm must pass:
+Every row must pass, the client arms making their own rows and the operator the rest, as
+described above:
 
 ```bash
 "$CLI" -e 'windows'                                                              # window IDs
+"$CLI" -w "$W2" -t "$T2" -c manage_selection -j '{"op":"set","paths":["<another file>"]}'  # run before the client arms start
 "$CLI" -w "$W1" -t "$T1" -c manage_selection -j '{"op":"set","paths":["'"$FILE"'"]}'
-"$CLI" -w "$W2" -t "$T2" -c manage_selection -j '{"op":"set","paths":["<another file>"]}'
-"$CLI" -w "$W1" -t "$T1" -c manage_selection -j '{"op":"get","view":"files"}'     # still $FILE only
-"$CLI" -w "$W2" -t "$T2" -c manage_selection -j '{"op":"get","view":"files"}'     # only the $W2 file
+"$CLI" -w "$W1" -t "$T1" -c manage_selection -j '{"op":"get","view":"files"}'     # $FILE only
 "$CLI" -w "$W1" -t "$T1" -c context_builder -j '{"instructions":"Reply with the selected file and its root.","response_type":"question"}' # names $FILE, never the $W2 file
 "$CLI" -w "$W1" -t "$T1" -c oracle_send -j '{"message":"Reply ORACLE_OK and identify the selected root."}' # terminal ORACLE_OK, reusable chat_id
 "$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"codexExec:gpt-6-luna-low","message":"Reply CODEX_OK.","detach":true}'
@@ -345,6 +409,7 @@ Every arm must pass:
 "$CLI" -w "$W1" -c agent_run -j '{"op":"wait","session_id":"<claude session>","timeout":180}' # terminal state carrying CLAUDE_STEER_OK
 "$CLI" -w "$W1" -c agent_run -j '{"op":"start","model_id":"explore","worktree":"'"$WT"'","message":"Report pwd and branch.","detach":true}'
 "$CLI" -w "$W1" -c agent_run -j '{"op":"wait","session_id":"<explore session>","timeout":180}' # reports $WT, not the main checkout
+"$CLI" -w "$W2" -t "$T2" -c manage_selection -j '{"op":"get","view":"files"}'     # only the $W2 file; run after both client arms finish
 "$CLI" -w "$W1" -c agent_manage -j '{"op":"list_sessions"}'                      # child binding and provenance exact, no orphan active run
 ```
 
