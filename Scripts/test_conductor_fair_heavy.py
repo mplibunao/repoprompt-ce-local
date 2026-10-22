@@ -516,8 +516,6 @@ class FairHeavyAdmissionTests(unittest.TestCase):
 
 
 class ReleaseRoutingTests(unittest.TestCase):
-    # Keeps the release build subcommands named below on the global heavy slot and the
-    # release timeout.
     def test_release_builds_take_the_heavy_slot_and_release_timeout(self) -> None:
         registry = conductor.OperationRegistry(SCRIPT_DIR.parent)
         for subcommand in ("package", "local-install", "local-prepare"):

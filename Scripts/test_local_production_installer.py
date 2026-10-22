@@ -80,6 +80,14 @@ def self_signed_registry(fingerprint: str, generation: int) -> dict[str, Any]:
     }
 
 
+def version_env(marketing_version: str, build_number: str) -> str:
+    return (
+        'APP_NAME=RepoPrompt\nDISPLAY_NAME="RepoPrompt CE"\n'
+        f"BUNDLE_ID=com.pvncher.repoprompt.ce\nMARKETING_VERSION={marketing_version}\n"
+        f"BUILD_NUMBER={build_number}\nSIGNING_TEAM_ID=ABC123\n"
+    )
+
+
 class LocalProductionIdentityToolTests(unittest.TestCase):
     def test_command_inventory_reads_apple_development_identities_independent_of_output_order(self) -> None:
         spec = importlib.util.spec_from_file_location("local_signing_identity", SCRIPT_DIR / "local_signing_identity.py")
@@ -818,26 +826,12 @@ class LocalProductionInstallerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-        (root / "version.env").write_text(
-            (
-                'APP_NAME=RepoPrompt\nDISPLAY_NAME="RepoPrompt CE"\n'
-                'BUNDLE_ID=com.pvncher.repoprompt.ce\nMARKETING_VERSION=1.0.0\n'
-                'BUILD_NUMBER=1\nSIGNING_TEAM_ID=ABC123\n'
-            ),
-            encoding="utf-8",
-        )
+        (root / "version.env").write_text(version_env("1.0.0", "1"), encoding="utf-8")
 
         release_source_root = temp_dir / "release-source" if split_release_source_root else root
         if split_release_source_root:
             release_source_root.mkdir()
-            (release_source_root / "version.env").write_text(
-                (
-                    'APP_NAME=RepoPrompt\nDISPLAY_NAME="RepoPrompt CE"\n'
-                    'BUNDLE_ID=com.pvncher.repoprompt.ce\nMARKETING_VERSION=2.0.0\n'
-                    'BUILD_NUMBER=7\nSIGNING_TEAM_ID=ABC123\n'
-                ),
-                encoding="utf-8",
-            )
+            (release_source_root / "version.env").write_text(version_env("2.0.0", "7"), encoding="utf-8")
         build_dir = release_source_root / ".build" / "release"
         install_dir = temp_dir / "Applications"
         installed_app = install_dir / "RepoPrompt CE.app"

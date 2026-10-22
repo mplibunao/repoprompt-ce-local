@@ -184,6 +184,10 @@ acquire_registry_lock() {
     REGISTRY_BACKUP_PATH="$TMP_DIR/local-signing-identity-registry.backup"
 }
 
+set_local_signing_requirement() {
+    LOCAL_SIGNING_REQUIREMENT="anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$RESOLVED_SIGNING_TEAM_ID\" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists"
+}
+
 plan_signing_identity() {
     INVENTORY_PATH="$TMP_DIR/identity-inventory.json"
     PLAN_PATH="$TMP_DIR/identity-plan.json"
@@ -206,6 +210,7 @@ plan_signing_identity() {
     RESOLVED_SIGNING_TEAM_ID="$(json_field "$PLAN_PATH" teamIdentifier)"
     LOCAL_KEYCHAIN_SERVICE="$(json_field "$PLAN_PATH" keychainService)"
     REGISTRY_NEEDS_WRITE="$(json_field "$PLAN_PATH" registryNeedsWrite)"
+    set_local_signing_requirement
 }
 
 # The prepared install signs nothing, so it takes the team and Keychain service from the
@@ -228,10 +233,6 @@ read_registered_signing_identity() {
     set_local_signing_requirement
 }
 
-set_local_signing_requirement() {
-    LOCAL_SIGNING_REQUIREMENT="anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$RESOLVED_SIGNING_TEAM_ID\" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists"
-}
-
 announce_signing_plan() {
     case "$IDENTITY_ACTION" in
         rotate)
@@ -245,7 +246,6 @@ announce_signing_plan() {
             ;;
     esac
 
-    set_local_signing_requirement
     printf 'Local signing identity action: %s\n' "$IDENTITY_ACTION"
     printf 'Selected signing certificate: %s\n' "$SIGNING_CERTIFICATE_NAME"
     printf 'Selected local signing team: %s\n' "$RESOLVED_SIGNING_TEAM_ID"
