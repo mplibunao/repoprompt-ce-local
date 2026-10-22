@@ -39,6 +39,10 @@ SHA1_C = "3" * 40
 SHA1_A_RENEWED = "4" * 40
 SELF_SIGNED_SHA256 = "A" * 64
 SERVICE_A = f"com.pvncher.repoprompt.ce.local-apple-development.{TEAM_A}.keychain.v{(1 << 61) + 5}"
+SERVICE_A_ROTATED = f"com.pvncher.repoprompt.ce.local-apple-development.{TEAM_A}.keychain.v{(1 << 61) + 6}"
+SERVICE_B = f"com.pvncher.repoprompt.ce.local-apple-development.{TEAM_B}.keychain.v{(1 << 61) + 7}"
+HEAD_COMMIT = "c" * 40
+OTHER_COMMIT = "d" * 40
 SELF_SIGNED_SERVICE = f"com.pvncher.repoprompt.ce.local-self-signed.{SELF_SIGNED_SHA256.lower()}.keychain.v7"
 FRESH_SERVICE = re.compile(
     r"^com\.pvncher\.repoprompt\.ce\.local-apple-development\.(?P<team>[0-9A-Z]{10})\.keychain\.v(?P<generation>[0-9]+)$"
@@ -190,17 +194,105 @@ class LocalProductionInstallerTests(unittest.TestCase):
         )
 
     def test_installer_reads_packaged_app_from_split_release_source_root(self) -> None:
-        result, context = self.run_installer(
-            [certificate(SHA1_A, TEAM_A)],
-            expected_team=TEAM_A,
-            split_release_source_root=True,
-        )
+        with self.subTest(mode="combined"):
+            result, context = self.run_installer(
+                [certificate(SHA1_A, TEAM_A)],
+                expected_team=TEAM_A,
+                split_release_source_root=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                (context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(encoding="utf-8"),
+                "new\n",
+            )
+            self.assertFalse((context["tooling_root"] / ".build" / "release" / "RepoPrompt.app").exists())
+
+        # The split root has its own version.env, and the git stub answers only for it, so
+        # checking HEAD or versions against the control-plane checkout fails.
+        with self.subTest(mode="prepare, then install-prepared"):
+            context = self.prepare(split_release_source_root=True)
+            self.assertTrue(context["prepared_app"].is_dir())
+            self.assertFalse((context["tooling_root"] / ".build" / "local-production").exists())
+            result = self.invoke(context, "install-prepared")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((context["installed_app"] / "payload.txt").read_text(encoding="utf-8"), "new\n")
+
+    def test_prepare_runs_beside_running_production_and_changes_nothing_installed(self) -> None:
+        context = self.prepare(processes=[{"pid": 4242, "name": "RepoPrompt", "path": "{production_executable}"}])
+        self.assertEqual(context["process_guard"].calls, 0)
+        self.assertEqual(directory_snapshot(context["install_dir"]), context["install_dir_before"])
+        self.assert_registry_unchanged(context)
+        self.assertEqual(self.prepared_provenance(context)["commit"], HEAD_COMMIT)
+        self.assertEqual(list(context["prepared_app"].parent.glob("*.preparing.*")), [])
+        self.assertEqual(len(context["package_capture"].read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_prepare_refuses_a_build_that_does_not_match_head_and_keeps_the_previous_bundle(self) -> None:
+        context = self.prepare()
+        previous = directory_snapshot(context["prepared_app"])
+        result = self.invoke(context, "prepare", {"FAKE_PROVENANCE_COMMIT": OTHER_COMMIT})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"provenance commit is not HEAD {HEAD_COMMIT}", result.stderr)
+        self.assertEqual(directory_snapshot(context["prepared_app"]), previous)
+        self.assertEqual(list(context["prepared_app"].parent.glob("*.preparing.*")), [])
+
+    def test_prepare_refuses_signing_plans_that_would_write_the_registry(self) -> None:
+        scenarios = [
+            ("first use", {}),
+            ("self-signed registry", {"registry": self_signed_registry(SELF_SIGNED_SHA256, 7)}),
+            ("rotation", {"registry": team_registry(TEAM_A, SERVICE_A), "rotate": True}),
+        ]
+        for name, kwargs in scenarios:
+            with self.subTest(name):
+                result, context = self.run_installer(
+                    [certificate(SHA1_A, TEAM_A)], expected_team=TEAM_A, mode="prepare", **kwargs
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Split preparation requires an existing Apple Development signing registry", result.stderr)
+                self.assertFalse(context["package_capture"].exists())
+                self.assert_registry_unchanged(context)
+                self.assertFalse(context["prepared_app"].exists())
+
+    def test_install_prepared_installs_the_prepared_bundle_without_packaging(self) -> None:
+        context = self.prepare()
+        (context["build_dir"] / "RepoPrompt.app" / "payload.txt").write_text("rebuilt after preparation\n", encoding="utf-8")
+        for tool in (
+            context["scripts"] / "package_app.sh",
+            context["scripts"] / "resolve_full_xcode_developer_dir.sh",
+            context["bin_dir"] / "security",
+        ):
+            write_executable(tool, "#!/bin/sh\nexit 98\n")
+        result = self.invoke(context, "install-prepared", {"LOCAL_SIGNING_TEAM_ID": f" {TEAM_A.lower()} "})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            (context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(encoding="utf-8"),
-            "new\n",
-        )
-        self.assertFalse((context["tooling_root"] / ".build" / "release" / "RepoPrompt.app").exists())
+        self.assertEqual((context["installed_app"] / "payload.txt").read_text(encoding="utf-8"), "new\n")
+        self.assert_registry_unchanged(context)
+
+    def test_install_prepared_refuses_a_bundle_that_does_not_match(self) -> None:
+        cases = [
+            ("prepared bundle missing", lambda context: shutil.rmtree(context["prepared_app"])),
+            ("HEAD moved after preparation", lambda context: context["env"].update(FAKE_HEAD_COMMIT=OTHER_COMMIT)),
+            ("dirty provenance", lambda context: self.edit_prepared_provenance(context, dirty=True)),
+            ("git status unavailable", lambda context: self.edit_prepared_provenance(context, git_status="unavailable")),
+            ("build number changed after preparation", lambda context: self.set_build_number(context, "2")),
+            (
+                "registry service changed after preparation",
+                lambda context: self.write_registry(context, team_registry(TEAM_A, SERVICE_A_ROTATED)),
+            ),
+            (
+                "registry team changed after preparation",
+                lambda context: self.write_registry(context, team_registry(TEAM_B, SERVICE_B)),
+            ),
+            ("staged copy fails verification", lambda context: context["env"].update(FAIL_STAGED_CODESIGN="1")),
+        ]
+        for name, change in cases:
+            with self.subTest(name):
+                context = self.prepare()
+                change(context)
+                context["registry_before"] = context["registry"].read_bytes()
+                result = self.invoke(context, "install-prepared")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("nothing was installed", result.stderr)
+                self.assert_no_install_mutation(context, packaged=True)
+                self.assert_registry_unchanged(context)
 
     def test_multiple_first_use_teams_fail_with_teams_and_explicit_selection_succeeds(self) -> None:
         certificates = [certificate(SHA1_B, TEAM_B), certificate(SHA1_A, TEAM_A)]
@@ -393,30 +485,48 @@ class LocalProductionInstallerTests(unittest.TestCase):
         self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
 
     def test_failed_replacement_restores_prior_app_and_does_not_write_registry(self) -> None:
-        result, context = self.run_installer(
-            [certificate(SHA1_A, TEAM_A)],
-            expected_team=TEAM_A,
-            fail_final_install_move=True,
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "old\n")
-        self.assertFalse(context["registry"].exists())
+        with self.subTest(mode="combined"):
+            result, context = self.run_installer(
+                [certificate(SHA1_A, TEAM_A)],
+                expected_team=TEAM_A,
+                fail_final_install_move=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "old\n")
+            self.assertFalse(context["registry"].exists())
+
+        with self.subTest(mode="install-prepared"):
+            context = self.prepare(fail_final_install_move=True)
+            result = self.invoke(context, "install-prepared")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((context["install_dir"] / "RepoPrompt CE.app" / "payload.txt").read_text(), "old\n")
+            self.assert_registry_unchanged(context)
 
     def test_running_production_app_stops_install_before_any_mutation(self) -> None:
-        result, context = self.run_installer(
-            [certificate(SHA1_A, TEAM_A)],
-            expected_team=TEAM_A,
-            processes=[{"pid": 4242, "name": "RepoPrompt", "path": "{production_executable}"}],
-            record_pgrep_calls=True,
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Quit RepoPrompt CE before building a replacement", result.stderr)
-        self.assertIn("4242", result.stderr)
-        self.assertIn(str(context["production_executable"].resolve()), result.stderr)
-        self.assert_no_install_mutation(context, packaged=False)
-        self.assertFalse(context["registry"].parent.exists())
-        self.assertEqual(list(context["tmp_root"].iterdir()), [])
-        self.assertFalse(context["pgrep_log"].exists())
+        with self.subTest(mode="combined"):
+            result, context = self.run_installer(
+                [certificate(SHA1_A, TEAM_A)],
+                expected_team=TEAM_A,
+                processes=[{"pid": 4242, "name": "RepoPrompt", "path": "{production_executable}"}],
+                record_pgrep_calls=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Quit RepoPrompt CE before building a replacement", result.stderr)
+            self.assertIn("4242", result.stderr)
+            self.assertIn(str(context["production_executable"].resolve()), result.stderr)
+            self.assert_no_install_mutation(context, packaged=False)
+            self.assertFalse(context["registry"].parent.exists())
+            self.assertEqual(list(context["tmp_root"].iterdir()), [])
+            self.assertFalse(context["pgrep_log"].exists())
+
+        with self.subTest(mode="install-prepared"):
+            context = self.prepare(processes=[{"pid": 4242, "name": "RepoPrompt", "path": "{production_executable}"}])
+            result = self.invoke(context, "install-prepared")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Quit RepoPrompt CE before staging the prepared build", result.stderr)
+            self.assertIn("4242", result.stderr)
+            self.assert_no_install_mutation(context, packaged=True)
+            self.assert_registry_unchanged(context)
 
     def test_rollback_guard_override_does_not_redirect_the_production_guard(self) -> None:
         result, context = self.run_installer(
@@ -519,15 +629,28 @@ class LocalProductionInstallerTests(unittest.TestCase):
         self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
 
     def test_production_opened_during_staging_stops_before_replacement(self) -> None:
-        result, context = self.run_installer(
-            [certificate(SHA1_A, TEAM_A), certificate(SHA1_B, TEAM_B)],
-            processes=[{"pid": 801, "name": "RepoPrompt", "path": "{production_executable}", "from_call": 3}],
-            **self.ROTATION,
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Quit RepoPrompt CE before replacing", result.stderr)
-        self.assert_no_install_mutation(context, packaged=True)
-        self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
+        with self.subTest(mode="combined"):
+            result, context = self.run_installer(
+                [certificate(SHA1_A, TEAM_A), certificate(SHA1_B, TEAM_B)],
+                processes=[{"pid": 801, "name": "RepoPrompt", "path": "{production_executable}", "from_call": 3}],
+                **self.ROTATION,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Quit RepoPrompt CE before replacing", result.stderr)
+            self.assert_no_install_mutation(context, packaged=True)
+            self.assertEqual(self.registry(context), team_registry(TEAM_A, SERVICE_A))
+
+        # Preparation doesn't call the guard, so the prepared install's second call is the
+        # check before replacing.
+        with self.subTest(mode="install-prepared"):
+            context = self.prepare(
+                processes=[{"pid": 801, "name": "RepoPrompt", "path": "{production_executable}", "from_call": 2}]
+            )
+            result = self.invoke(context, "install-prepared")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Quit RepoPrompt CE before replacing", result.stderr)
+            self.assert_no_install_mutation(context, packaged=True)
+            self.assert_registry_unchanged(context)
 
     def test_absent_installation_installs_through_all_checkpoints(self) -> None:
         result, context = self.run_installer(
@@ -559,6 +682,25 @@ class LocalProductionInstallerTests(unittest.TestCase):
         self.assertEqual(list(context["install_dir"].glob(".RepoPrompt CE.app.backup.*")), [])
         self.assertFalse(Path(f"{context['registry']}.lock").exists())
 
+    def assert_registry_unchanged(self, context: dict[str, Any]) -> None:
+        if context["registry_before"] is None:
+            self.assertFalse(context["registry"].exists())
+            return
+        self.assertEqual(context["registry"].read_bytes(), context["registry_before"])
+        self.assertEqual(context["registry"].stat().st_mode & 0o777, 0o600)
+
+    def prepare(self, **kwargs: Any) -> dict[str, Any]:
+        """Runs a successful preparation against a registered team A identity."""
+        result, context = self.run_installer(
+            [certificate(SHA1_A, TEAM_A)],
+            registry=team_registry(TEAM_A, SERVICE_A),
+            expected_team=TEAM_A,
+            mode="prepare",
+            **kwargs,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return context
+
     def run_installer(
         self,
         certificates: list[dict[str, Any]],
@@ -580,6 +722,7 @@ class LocalProductionInstallerTests(unittest.TestCase):
         installed: bool = True,
         record_pgrep_calls: bool = False,
         extra_env: dict[str, str] | None = None,
+        mode: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         temp_dir = enter_context(self, temporary_directory())
         installer_tmp = temp_dir / "tmp"
@@ -635,6 +778,16 @@ class LocalProductionInstallerTests(unittest.TestCase):
         )
 
         release_source_root = temp_dir / "release-source" if split_release_source_root else root
+        if split_release_source_root:
+            release_source_root.mkdir()
+            (release_source_root / "version.env").write_text(
+                (
+                    'APP_NAME=RepoPrompt\nDISPLAY_NAME="RepoPrompt CE"\n'
+                    'BUNDLE_ID=com.pvncher.repoprompt.ce\nMARKETING_VERSION=2.0.0\n'
+                    'BUILD_NUMBER=7\nSIGNING_TEAM_ID=ABC123\n'
+                ),
+                encoding="utf-8",
+            )
         build_dir = release_source_root / ".build" / "release"
         install_dir = temp_dir / "Applications"
         installed_app = install_dir / "RepoPrompt CE.app"
@@ -669,23 +822,33 @@ class LocalProductionInstallerTests(unittest.TestCase):
             (lock_path / "pid").write_text("99999\n", encoding="utf-8")
 
         package_capture = temp_dir / "package-capture.txt"
+        # Like the real packager, it reads version.env from REPOPROMPT_RELEASE_SOURCE_ROOT when
+        # set and records HEAD in the provenance. FAKE_PROVENANCE_COMMIT simulates a commit
+        # landing during the build.
         write_executable(
             scripts / "package_app.sh",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
                 set -euo pipefail
+                source_root="${REPOPROMPT_RELEASE_SOURCE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+                source "$source_root/version.env"
                 app="$FAKE_BUILD_DIR/RepoPrompt.app"
-                mkdir -p "$app/Contents"
+                mkdir -p "$app/Contents/Resources"
                 printf 'new\\n' > "$app/payload.txt"
                 printf '%s|%s|%s\\n' "$SIGN_IDENTITY" "$LOCAL_SIGNING_TEAM_ID" "$LOCAL_KEYCHAIN_SERVICE" >> "$PACKAGE_CAPTURE"
                 cat > "$app/Contents/Info.plist" <<EOF
                 <?xml version="1.0" encoding="UTF-8"?>
                 <plist version="1.0"><dict>
+                  <key>CFBundleShortVersionString</key><string>$MARKETING_VERSION</string>
+                  <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
                   <key>RepoPromptSigningMode</key><string>local-apple-development</string>
                   <key>RepoPromptLocalSigningTeamIdentifier</key><string>$LOCAL_SIGNING_TEAM_ID</string>
                   <key>RepoPromptLocalKeychainService</key><string>$LOCAL_KEYCHAIN_SERVICE</string>
                 </dict></plist>
+                EOF
+                cat > "$app/Contents/Resources/RepoPromptProvenance.json" <<EOF
+                {"version": 1, "commit": "${FAKE_PROVENANCE_COMMIT:-$FAKE_HEAD_COMMIT}", "dirty": false, "git_status": "ok"}
                 EOF
                 """
             ),
@@ -722,6 +885,10 @@ class LocalProductionInstallerTests(unittest.TestCase):
             bin_dir,
             "codesign",
             """\
+            if [[ "${FAIL_STAGED_CODESIGN:-0}" == "1" && "$1" == "--verify" && "${!#}" == *".installing."* ]]; then
+                printf '%s: a sealed resource is missing or invalid\\n' "${!#}" >&2
+                exit 1
+            fi
             if [[ "$1" == "-d" && "$2" == "-r-" ]]; then
                 printf 'designated => anchor apple generic and identifier "com.pvncher.repoprompt.ce" and certificate leaf[subject.OU] = "%s" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists\\n' "$FAKE_DESIGNATED_TEAM" >&2
             fi
@@ -732,6 +899,21 @@ class LocalProductionInstallerTests(unittest.TestCase):
         if record_pgrep_calls:
             write_bash_stub(bin_dir, "pgrep", 'printf "%s\\n" "$*" >> "$PGREP_LOG"\nexit 1\n')
         write_bash_stub(bin_dir, "ditto", 'cp -R "$1" "$2"\n')
+        # The stub answers only `rev-parse HEAD` run in the release source root. That keeps the
+        # fixture hermetic and makes a HEAD read from any other checkout fail.
+        write_bash_stub(
+            bin_dir,
+            "git",
+            """\
+            if [[ "$#" == 4 && "$1" == "-C" && "$3" == "rev-parse" && "$4" == "HEAD" ]] &&
+                [[ "$(cd "$2" && pwd -P)" == "$(cd "$FAKE_GIT_ROOT" && pwd -P)" ]]; then
+                printf '%s\\n' "$FAKE_HEAD_COMMIT"
+                exit 0
+            fi
+            printf 'fake git: unsupported invocation: %s\\n' "$*" >&2
+            exit 1
+            """,
+        )
         write_bash_stub(
             bin_dir,
             "cp",
@@ -787,6 +969,8 @@ class LocalProductionInstallerTests(unittest.TestCase):
                 "FAKE_INSTALLED_APP": str(installed_app),
                 "DEVELOPER_DIR": str(fake_developer_dir),
                 "PGREP_LOG": str(pgrep_log),
+                "FAKE_HEAD_COMMIT": HEAD_COMMIT,
+                "FAKE_GIT_ROOT": str(release_source_root),
             }
         )
         if selected_team:
@@ -808,23 +992,57 @@ class LocalProductionInstallerTests(unittest.TestCase):
             "swift_log": swift_log,
             "tmp_root": installer_tmp,
             "tooling_root": root,
+            "scripts": scripts,
+            "bin_dir": bin_dir,
+            "release_source_root": release_source_root,
+            "build_dir": build_dir,
+            "prepared_app": release_source_root / ".build" / "local-production" / "RepoPrompt.app",
+            "install_dir_before": directory_snapshot(install_dir),
             "installed_app": installed_app,
             "installed_app_before": directory_snapshot(installed_app),
+            "registry_before": registry_path.read_bytes() if registry else None,
             "production_executable": production_executable,
             "process_guard": process_guard,
             "pgrep_log": pgrep_log,
         }
-        return self.invoke(context), context
+        return self.invoke(context, mode), context
 
     @staticmethod
-    def invoke(context: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+    def invoke(
+        context: dict[str, Any],
+        mode: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            context["command"],
-            env=context["env"],
+            [*context["command"], *([mode] if mode else [])],
+            env={**context["env"], **(extra_env or {})},
             text=True,
             capture_output=True,
             timeout=15,
         )
+
+    @staticmethod
+    def prepared_provenance(context: dict[str, Any]) -> dict[str, Any]:
+        path = context["prepared_app"] / "Contents" / "Resources" / "RepoPromptProvenance.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @classmethod
+    def edit_prepared_provenance(cls, context: dict[str, Any], **fields: Any) -> None:
+        path = context["prepared_app"] / "Contents" / "Resources" / "RepoPromptProvenance.json"
+        path.write_text(json.dumps({**cls.prepared_provenance(context), **fields}), encoding="utf-8")
+
+    @staticmethod
+    def set_build_number(context: dict[str, Any], build_number: str) -> None:
+        path = context["release_source_root"] / "version.env"
+        path.write_text(
+            re.sub(r"^BUILD_NUMBER=.*$", f"BUILD_NUMBER={build_number}", path.read_text(encoding="utf-8"), flags=re.M),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def write_registry(context: dict[str, Any], record: dict[str, Any]) -> None:
+        context["registry"].write_text(json.dumps(record), encoding="utf-8")
+        context["registry"].chmod(0o600)
 
     @staticmethod
     def registry(context: dict[str, Any]) -> dict[str, Any]:

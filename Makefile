@@ -1,4 +1,4 @@
-.PHONY: help doctor setup install-format-tools format-tools-status format format-check lint install-debug-cli uninstall-debug-cli debug-cli-status codex-acquire codex-status codex-update-candidate resolve build run test guardrails codex-schema-check conductor-selftest ci-app-test-runner-selftest release-selftest release-sync-cli-version release-preflight release-artifact install-local-production xcode xcode-open xcode-generate xcode-check xcode-validate xcode-clean dev-status dev-build dev-swift-build dev-run dev-launch-existing dev-codex-schema-check dev-test dev-provider-test dev-smoke dev-smoke-launch dev-format dev-format-check dev-lint dev-format-tools-status dev-check-format-tools dev-install-format-tools dev-release-preflight dev-release-artifact dev-install-local-production dev-stop-app dev-daemon-stop clean
+.PHONY: help doctor setup install-format-tools format-tools-status format format-check lint install-debug-cli uninstall-debug-cli debug-cli-status codex-acquire codex-status codex-update-candidate resolve build run test guardrails codex-schema-check conductor-selftest ci-app-test-runner-selftest release-selftest release-sync-cli-version release-preflight release-artifact install-local-production prepare-local-production install-prepared-local-production xcode xcode-open xcode-generate xcode-check xcode-validate xcode-clean dev-status dev-build dev-swift-build dev-run dev-launch-existing dev-codex-schema-check dev-test dev-provider-test dev-smoke dev-smoke-launch dev-format dev-format-check dev-lint dev-format-tools-status dev-check-format-tools dev-install-format-tools dev-release-preflight dev-release-artifact dev-install-local-production dev-prepare-local-production dev-stop-app dev-daemon-stop clean
 
 PRODUCT ?= all
 CODEX_ARCH ?= all
@@ -56,9 +56,12 @@ help:
 	@printf '  %-30s %s\n' 'release-preflight' 'Run release preflight directly'
 	@printf '  %-30s %s\n' 'release-artifact' 'Build release artifact directly'
 	@printf '  %-30s %s\n' 'install-local-production' 'Install a local production app'
+	@printf '  %-30s %s\n' 'prepare-local-production' 'Prepare a signed local production app without installing'
+	@printf '  %-30s %s\n' 'install-prepared-local-production' 'Install the prepared local production app without building'
 	@printf '  %-30s %s\n' 'dev-release-preflight' 'Coordinated release preflight'
 	@printf '  %-30s %s\n' 'dev-release-artifact' 'Coordinated release artifact build'
 	@printf '  %-30s %s\n' 'dev-install-local-production' 'Coordinated local production install'
+	@printf '  %-30s %s\n' 'dev-prepare-local-production' 'Coordinated local production preparation'
 	@printf '\n%s\n' 'Internal/test targets:'
 	@printf '  %-30s %s\n' 'resolve' 'Resolve Swift packages'
 	@printf '  %-30s %s\n' 'conductor-selftest' 'Run conductor/tooling self-tests'
@@ -167,6 +170,12 @@ release-artifact:
 install-local-production:
 	./Scripts/install_local_production.sh
 
+prepare-local-production:
+	./Scripts/install_local_production.sh prepare
+
+install-prepared-local-production:
+	./Scripts/install_local_production.sh install-prepared
+
 xcode: xcode-open
 
 xcode-open: xcode-generate
@@ -240,6 +249,9 @@ dev-release-artifact:
 
 dev-install-local-production:
 	./conductor release local-install
+
+dev-prepare-local-production:
+	./conductor release local-prepare
 
 dev-stop-app:
 	./conductor app stop

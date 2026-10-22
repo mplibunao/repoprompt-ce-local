@@ -256,7 +256,7 @@ Operation commands:
   ./conductor cache drop <compatibility-key> [--json]
   ./conductor diagnostics focused-build [--product <name>] [--test] [--filter <filter>]
   ./conductor diagnostics high-output [--lines <n>] [--warnings <n>] [--exit-code <n>] [--linger <s>]
-  ./conductor release preflight|artifact|package|local-install
+  ./conductor release preflight|artifact|package|local-install|local-prepare
 
 Foundation validation operation:
   ./conductor sleep <seconds> [--lane <lane>]... [--message <text>] [--exit-code <n>]
@@ -2956,7 +2956,7 @@ def operation_requires_global_heavy_slot(operation: str, args: Dict[str, Any]) -
         return True
     if operation in {"sleep", "fake-sleep"} and "build" in set(args.get("lanes") or []):
         return True
-    if operation == "release" and args.get("subcommand") in {"artifact", "package", "local-install"}:
+    if operation == "release" and args.get("subcommand") in {"artifact", "package", "local-install", "local-prepare"}:
         return True
     if operation == "diagnostics" and args.get("subcommand") == "focused-build":
         return True
@@ -3399,6 +3399,8 @@ class OperationRegistry:
                 return [script("package_app.sh"), "release"], ["build", "debugArtifact", "release"], cwd, env, effective_timeout
             if subcommand == "local-install":
                 return [script("install_local_production.sh")], ["build", "debugArtifact", "release"], cwd, env, effective_timeout
+            if subcommand == "local-prepare":
+                return [script("install_local_production.sh"), "prepare"], ["build", "debugArtifact", "release"], cwd, env, effective_timeout
             if subcommand == "artifact":
                 return [script("release.sh"), "artifact"], ["build", "debugArtifact", "release"], cwd, env, effective_timeout
             if subcommand == "preflight":
@@ -3507,7 +3509,7 @@ class OperationRegistry:
             return SHORT_TIMEOUT_SECONDS
         if operation == "release" and args.get("subcommand") == "artifact":
             return RELEASE_ARTIFACT_TIMEOUT_SECONDS
-        if operation in {"package", "release"} and (args.get("config") == "release" or args.get("subcommand") in {"package", "local-install"}):
+        if operation in {"package", "release"} and (args.get("config") == "release" or args.get("subcommand") in {"package", "local-install", "local-prepare"}):
             return RELEASE_TIMEOUT_SECONDS
         if operation == "smoke" and args.get("agentRun"):
             return MEDIUM_TIMEOUT_SECONDS
@@ -8679,7 +8681,7 @@ def handle_real_operation(paths: Paths, operation: str, argv: List[str]) -> int:
             })
     elif operation == "release":
         parser = argparse.ArgumentParser(prog="conductor release")
-        parser.add_argument("subcommand", choices=["preflight", "artifact", "package", "local-install"])
+        parser.add_argument("subcommand", choices=["preflight", "artifact", "package", "local-install", "local-prepare"])
         ns = parser.parse_args(rest)
         args["subcommand"] = ns.subcommand
     else:
