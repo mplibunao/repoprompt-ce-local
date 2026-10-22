@@ -233,7 +233,133 @@ import XCTest
                 skipPartialParseAndSave: true
             )
         }
+
+        func testPreparedOverridePreservesDeletionPatchAtTransport() async throws {
+            let fixture = try await MCPOracleCompletionPolicyFixture.make(name: "prepared-deletion-patch")
+            addTeardownBlock { await fixture.cleanup() }
+            let rawPrompt = "Review the removal of obsolete settings."
+            let deletionPatch = """
+            diff --git a/obsolete.txt b/obsolete.txt
+            deleted file mode 100644
+            --- a/obsolete.txt
+            +++ /dev/null
+            @@ -1,3 +0,0 @@
+            -ORACLE_DELETION_ALPHA
+            -ORACLE_DELETION_BETA
+            -ORACLE_DELETION_GAMMA
+
+            """
+            let preparedMessage = PromptPackagingService.buildAIMessage(
+                systemPrompt: "Prepared review system sentinel.",
+                metaInstructions: [],
+                fileTree: "",
+                fileContents: [],
+                gitDiff: deletionPatch,
+                conversation: [ConversationEntry(role: .user, content: rawPrompt)],
+                temperature: nil,
+                promptSectionsOrder: PromptSection.allCases,
+                disabledPromptSections: []
+            )
+            let submissions = TransportSubmissions()
+            let stream = fixture.stream
+            fixture.window.oracleViewModel.setOraclePostPackagingTransportOverrideForTesting { message, _ in
+                submissions.messages.append(message)
+                return await stream.makeStream()
+            }
+
+            let startedQueryID = await fixture.window.oracleViewModel.sendMessage(
+                rawPrompt,
+                sessionID: fixture.sessionID,
+                overrideModel: fixture.model,
+                overrideMode: .review,
+                selectionOverride: StoredSelection(),
+                overrideAIMessage: preparedMessage,
+                completionPolicy: .contextBuilderStrict
+            )
+            let queryID = try XCTUnwrap(startedQueryID)
+            await fixture.stream.waitUntilReady()
+            await fixture.stream.yield(ChatStreamOutput(
+                text: "Prepared payload received.",
+                reasoning: nil,
+                tokens: ChatTokenInfo()
+            ))
+            await fixture.stream.yield(ChatStreamOutput(
+                text: "",
+                reasoning: nil,
+                tokens: ChatTokenInfo(),
+                terminalOutcome: .completed
+            ))
+            await fixture.stream.finish()
+            let response = try await fixture.window.oracleViewModel.waitForContextBuilderCompletion(queryID)
+            XCTAssertEqual(response, "Prepared payload received.")
+
+            XCTAssertEqual(submissions.messages.count, 1)
+            let submitted = try XCTUnwrap(submissions.messages.first)
+            XCTAssertEqual(submitted.gitDiff, deletionPatch)
+            XCTAssertEqual(submitted.systemPrompt, "Prepared review system sentinel.")
+            XCTAssertEqual(
+                submitted.conversationMessages.last(where: { $0.role == .user })?.content,
+                "<user_instructions>\nReview the removal of obsolete settings.\n</user_instructions>"
+            )
+        }
+
+        func testStrictRejectedOverrideFailsWithoutTransportSubmission() async throws {
+            let fixture = try await MCPOracleCompletionPolicyFixture.make(name: "strict-override-rejection")
+            addTeardownBlock { await fixture.cleanup() }
+            let mismatchedMessage = PromptPackagingService.buildAIMessage(
+                systemPrompt: "Prepared review system sentinel.",
+                metaInstructions: [],
+                fileTree: "",
+                fileContents: [],
+                gitDiff: nil,
+                conversation: [ConversationEntry(role: .user, content: "Different request.")],
+                temperature: nil,
+                promptSectionsOrder: PromptSection.allCases,
+                disabledPromptSections: []
+            )
+            let submissions = TransportSubmissions()
+            fixture.window.oracleViewModel.setOraclePostPackagingTransportOverrideForTesting { message, _ in
+                submissions.messages.append(message)
+                throw UnexpectedTransportSubmission()
+            }
+
+            let startedQueryID = await fixture.window.oracleViewModel.sendMessage(
+                "Review the prepared request.",
+                sessionID: fixture.sessionID,
+                overrideModel: fixture.model,
+                overrideMode: .review,
+                selectionOverride: StoredSelection(),
+                overrideAIMessage: mismatchedMessage,
+                completionPolicy: .contextBuilderStrict
+            )
+            let queryID = try XCTUnwrap(startedQueryID)
+            let rejection = "Context Builder prepared message was rejected: "
+                + "The prepared message's last user entry is missing or does not match the current send input. "
+                + "No request was sent to the provider."
+
+            XCTAssertEqual(
+                fixture.window.oracleViewModel.finalizedAssistantContent(for: queryID, in: fixture.sessionID),
+                "Error: \(rejection)"
+            )
+            do {
+                _ = try await fixture.window.oracleViewModel.waitForContextBuilderCompletion(queryID)
+                XCTFail("Expected the rejected override to fail the query")
+            } catch let error as OracleContextBuilderCompletionError {
+                XCTAssertEqual(error, .providerStreamFailed(message: rejection))
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(submissions.messages.count, 0)
+            XCTAssertNil(fixture.window.oracleViewModel.activeQueryId(for: fixture.sessionID))
+        }
     }
+
+    @MainActor
+    private final class TransportSubmissions {
+        var messages: [AIMessage] = []
+    }
+
+    private struct UnexpectedTransportSubmission: Error {}
 
     @MainActor
     private struct MCPOracleCompletionPolicyFixture {
@@ -334,6 +460,7 @@ import XCTest
             window.beginClose()
             WindowStatesManager.shared.unregisterWindowState(window)
             GlobalSettingsStore.shared.setMCPShowModelPresets(previousShowModelPresets, commit: false)
+            await window.oracleViewModel.drainTrackedAutosaves(for: workspaceID)
             await ChatDataService.test_setWorkspaceRootOverride(nil)
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: storageRoot)

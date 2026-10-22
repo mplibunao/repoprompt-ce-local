@@ -5599,7 +5599,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             } else {
                 session.backgroundPlanResponseText = nil
                 session.backgroundPlanReasoningText = nil
-                session.backgroundPlanError = error.asFriendlyString()
+                session.backgroundPlanError = (error as? OracleContextBuilderCompletionError)?.errorDescription
+                    ?? error.asFriendlyString()
             }
             session.isBackgroundPlanGenerating = false
             session.followUpOracleSessionID = nil
