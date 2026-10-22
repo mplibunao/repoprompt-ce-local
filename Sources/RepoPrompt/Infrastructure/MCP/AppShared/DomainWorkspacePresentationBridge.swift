@@ -44,7 +44,32 @@ struct DomainWorkspaceAuthorityClient {
         _ workspace: WorkspaceModel,
         fileURL: URL
     ) async throws -> DomainWorkspaceSnapshot {
-        try await store.registerReadDocument(document(for: workspace, fileURL: fileURL))
+        #if DEBUG
+            let startMS = WorkspaceRestorePerfLog.timestampMSIfEnabled()
+        #endif
+        let document = try document(for: workspace, fileURL: fileURL)
+        #if DEBUG
+            let encodedMS = startMS.map { _ in WorkspaceRestorePerfLog.timestampMS() }
+        #endif
+        let snapshot = await store.registerReadDocument(document)
+        #if DEBUG
+            if let startMS, let encodedMS {
+                let endMS = WorkspaceRestorePerfLog.timestampMS()
+                WorkspaceRestorePerfLog.timedEvent(
+                    "domainRead.registration",
+                    durationMS: endMS - startMS,
+                    bytes: document.documentBytes.count,
+                    fields: [
+                        "workspaceID": WorkspaceRestorePerfLog.shortID(workspace.id),
+                        "windowID": "\(windowID)",
+                        "tabs": "\(document.metadata.contexts.count)",
+                        "encodeDuration": WorkspaceRestorePerfLog.formatMS(encodedMS - startMS),
+                        "runtimeDuration": WorkspaceRestorePerfLog.formatMS(endMS - encodedMS)
+                    ]
+                )
+            }
+        #endif
+        return snapshot
     }
 
     func create(
