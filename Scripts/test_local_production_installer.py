@@ -267,29 +267,79 @@ class LocalProductionInstallerTests(unittest.TestCase):
         self.assert_registry_unchanged(context)
 
     def test_install_prepared_refuses_a_bundle_that_does_not_match(self) -> None:
+        # The last item of each row is the message of the one check that must refuse, so a row
+        # cannot pass on another check's refusal.
         cases = [
-            ("prepared bundle missing", lambda context: shutil.rmtree(context["prepared_app"])),
-            ("HEAD moved after preparation", lambda context: context["env"].update(FAKE_HEAD_COMMIT=OTHER_COMMIT)),
-            ("dirty provenance", lambda context: self.edit_prepared_provenance(context, dirty=True)),
-            ("git status unavailable", lambda context: self.edit_prepared_provenance(context, git_status="unavailable")),
-            ("build number changed after preparation", lambda context: self.set_build_number(context, "2")),
+            (
+                "prepared bundle missing",
+                lambda context: shutil.rmtree(context["prepared_app"]),
+                "No prepared local production app at",
+            ),
+            (
+                "HEAD moved after preparation",
+                lambda context: context["env"].update(FAKE_HEAD_COMMIT=OTHER_COMMIT),
+                f"its provenance commit is not HEAD {OTHER_COMMIT}",
+            ),
+            (
+                "dirty provenance",
+                lambda context: self.edit_prepared_provenance(context, dirty=True),
+                "its provenance does not record a clean worktree",
+            ),
+            (
+                "git status unavailable",
+                lambda context: self.edit_prepared_provenance(context, git_status="unavailable"),
+                "its provenance git_status is not ok",
+            ),
+            (
+                "provenance version is not 1",
+                lambda context: self.edit_prepared_provenance(context, version=2),
+                "its provenance is missing or is not version 1",
+            ),
+            (
+                "marketing version changed after preparation",
+                lambda context: self.set_version_env(context, "MARKETING_VERSION", "1.0.1"),
+                "its version is not 1.0.1 from version.env",
+            ),
+            (
+                "build number changed after preparation",
+                lambda context: self.set_version_env(context, "BUILD_NUMBER", "2"),
+                "its build is not 2 from version.env",
+            ),
             (
                 "registry service changed after preparation",
                 lambda context: self.write_registry(context, team_registry(TEAM_A, SERVICE_A_ROTATED)),
+                f"its Keychain service is not {SERVICE_A_ROTATED}",
             ),
             (
                 "registry team changed after preparation",
                 lambda context: self.write_registry(context, team_registry(TEAM_B, SERVICE_B)),
+                f"its designated requirement is not anchored to team {TEAM_B}",
             ),
-            ("staged copy fails verification", lambda context: context["env"].update(FAIL_STAGED_CODESIGN="1")),
+            (
+                # The designated requirement still names the registered team, so only the plist check refuses.
+                "Info.plist team differs from the registry",
+                lambda context: self.edit_prepared_info_plist(context, RepoPromptLocalSigningTeamIdentifier=TEAM_B),
+                f"its signing team is not {TEAM_A}",
+            ),
+            (
+                "signing mode marker is not local Apple Development",
+                lambda context: self.edit_prepared_info_plist(context, RepoPromptSigningMode="local-self-signed"),
+                "it is not marked as a local Apple Development build",
+            ),
+            (
+                "staged copy fails verification",
+                lambda context: context["env"].update(FAIL_STAGED_CODESIGN="1"),
+                f"the signature does not verify against the team {TEAM_A} requirement",
+            ),
         ]
-        for name, change in cases:
+        for name, change, refusal in cases:
             with self.subTest(name):
                 context = self.prepare()
                 change(context)
                 context["registry_before"] = context["registry"].read_bytes()
                 result = self.invoke(context, "install-prepared")
                 self.assertNotEqual(result.returncode, 0)
+                self.assertIn(refusal, result.stderr)
                 self.assertIn("nothing was installed", result.stderr)
                 self.assert_no_install_mutation(context, packaged=True)
                 self.assert_registry_unchanged(context)
@@ -1032,10 +1082,15 @@ class LocalProductionInstallerTests(unittest.TestCase):
         path.write_text(json.dumps({**cls.prepared_provenance(context), **fields}), encoding="utf-8")
 
     @staticmethod
-    def set_build_number(context: dict[str, Any], build_number: str) -> None:
+    def edit_prepared_info_plist(context: dict[str, Any], **fields: Any) -> None:
+        path = context["prepared_app"] / "Contents" / "Info.plist"
+        path.write_bytes(plistlib.dumps({**plistlib.loads(path.read_bytes()), **fields}))
+
+    @staticmethod
+    def set_version_env(context: dict[str, Any], key: str, value: str) -> None:
         path = context["release_source_root"] / "version.env"
         path.write_text(
-            re.sub(r"^BUILD_NUMBER=.*$", f"BUILD_NUMBER={build_number}", path.read_text(encoding="utf-8"), flags=re.M),
+            re.sub(rf"^{key}=.*$", f"{key}={value}", path.read_text(encoding="utf-8"), flags=re.M),
             encoding="utf-8",
         )
 

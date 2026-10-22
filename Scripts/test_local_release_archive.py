@@ -325,10 +325,16 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
             # not the directory, so this must play no part.
             zstd_path.write_bytes(b"junk that is not a zstd stream")
 
-        self.assert_round_trip_reproduces_baseline(rewrite_archive=reencode_state_as_gzip)
+        # Restore runs without zstd on PATH: a gzip archive needs no zstd, and the re-encoding
+        # above runs with the normal PATH.
+        self.assert_round_trip_reproduces_baseline(
+            rewrite_archive=reencode_state_as_gzip, PATH=self.path_without_zstd()
+        )
 
-    def assert_round_trip_reproduces_baseline(self, rewrite_archive: Callable[[Path], None] | None = None) -> None:
-        """Archives the baseline, optionally rewrites the archive, diverges live state, restores, and compares."""
+    def assert_round_trip_reproduces_baseline(
+        self, rewrite_archive: Callable[[Path], None] | None = None, **restore_overrides: str
+    ) -> None:
+        """Archives the baseline, optionally rewrites it, diverges live state, restores, and compares."""
         self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})
         app_before = directory_snapshot(self.app)
         state_before = directory_snapshot(self.state)
@@ -348,7 +354,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         (self.state / "DebugApps" / "marker.txt").write_text("debug-after\n", encoding="utf-8")
         (self.state / "Rollbacks" / "marker.txt").write_text("rollback-after\n", encoding="utf-8")
 
-        self.restore()
+        self.restore(**restore_overrides)
 
         self.assertEqual(directory_snapshot(self.app), app_before)
         restored_state = directory_snapshot(self.state)

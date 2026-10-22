@@ -36,7 +36,8 @@ Before you start:
    the bundle fails the same checks step 3 lists, for example provenance that doesn't
    record the checkout's `HEAD` with `dirty: false`, or a version that differs from
    `version.env`. If it fails, production keeps running. Fix the cause and prepare again.
-   Don't commit, check out, or run `make clean` in the checkout until step 3 finishes.
+   Don't commit, check out, edit tracked files, or run `make clean` in the checkout until
+   step 3 finishes.
 
 2. Confirm that the prepared bundle's provenance still records the checkout's commit:
 
