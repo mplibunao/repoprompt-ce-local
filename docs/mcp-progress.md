@@ -113,12 +113,21 @@ retried.
 | Another window that shows the same workspace holds the same tab | The same error |
 | The tab or its window is closing when the call claims the tab | Error `Tool execution was cancelled.` |
 | The call loses its tab after it was admitted | The same cancellation, before the call's next step |
+| An earlier `read_file` or `file_search` on the connection selected files, and that selection hadn't reached the tab by the end of the wait | Error `context_builder_selection_prerequisite_deferred: Context Builder discovery was not started because its selection prerequisite was deferred.` |
+| That selection could no longer reach the tab, for example because the connection's binding changed or the tab's workspace isn't the one the window shows | Error `context_builder_selection_prerequisite_invalidated: Context Builder discovery was not started because its selection prerequisite was invalidated.` |
 | A provider restarts its process inside a run and RepoPrompt CE can't prepare a connection policy for the new process | The run fails with `RepoPrompt could not prepare this run's MCP connection policy for a restarted agent process, so the process was not started.` |
 
 A call refused for an occupied tab changes nothing. It binds no caller
 connection and drains no read-file auto-selection, and it starts no provider
 and records no run. The operation that holds the tab keeps its state and its
 log. A cancelled run reports its cancellation, never the restart failure.
+
+A call refused because of its selection prerequisite was already admitted
+for the tab, and discovery doesn't start. The earlier read's selection and
+the caller's binding stay as they were. A deferred refusal can repeat while
+that selection still hasn't reached the tab; check the connection's binding
+and that tab's selection. Cancelling the call, or closing the tab or window
+that holds it, still reports `Tool execution was cancelled.`
 
 One caller connection reaches two tabs only by rebinding between its
 requests. Each request keeps the tab it was admitted for, and a later rebind

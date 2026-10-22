@@ -1,4 +1,5 @@
 import Foundation
+import MCP
 @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import XCTest
@@ -167,6 +168,228 @@ import XCTest
             }
         }
 
+        func testDeferredSelectionPrerequisiteIsReportedAsItsOwnErrorNotCancellation() async throws {
+            // A zero mirror wait defers every drain while the read's mirror is held.
+            try await withHeldMirrorRead(label: "deferred", mirrorWaitTimeout: .zero) { held in
+                // A repeated call gets the same refusal, not a busy tab, because the first released its admission.
+                for attempt in 1 ... 2 {
+                    let text = try await held.refusalText(
+                        MCPWindowToolName.contextBuilder,
+                        ["instructions": "selection prerequisite regression", "response_type": "clarify"],
+                        code: "context_builder_selection_prerequisite_deferred"
+                    )
+                    XCTAssertFalse(text.contains(Self.contextBuilderBusyText), "attempt \(attempt): \(text)")
+                }
+            }
+        }
+
+        func testSelectionPrerequisiteWaitCancelledByCallerStaysCancellation() async throws {
+            enum Row: CaseIterable {
+                case contextBuilder
+            }
+
+            for row in Row.allCases {
+                try await withHeldMirrorRead(label: "cancelled-\(row)", mirrorWaitTimeout: .seconds(60)) { held in
+                    let error: Error? = switch row {
+                    case .contextBuilder:
+                        try await held.cancelWhileWaiting(MCPWindowToolName.contextBuilder, [
+                            "instructions": .string("selection prerequisite regression"),
+                            "response_type": .string("clarify")
+                        ])
+                    }
+                    XCTAssertTrue(error is MCPToolExecutionCancelledError, "\(row): \(String(describing: error))")
+                    XCTAssertEqual(held.coordinator.debugSnapshot().mirrorWaiterCount, 0, "\(row)")
+                    XCTAssertEqual(held.storedSelection, held.expectedSelection, "\(row)")
+                    if row == .contextBuilder {
+                        // The cancelled call released its admission, so the next call isn't refused as busy.
+                        held.coordinator.setMirrorWaitTimeoutForTesting(.zero)
+                        let reply = try await held.endpoint.callTool(
+                            name: MCPWindowToolName.contextBuilder,
+                            arguments: ["instructions": "selection prerequisite regression", "response_type": "clarify"]
+                        )
+                        let text = try Self.toolResultText(reply)
+                        XCTAssertFalse(text.contains(Self.contextBuilderBusyText), text)
+                    }
+                }
+            }
+        }
+
+        private static let contextBuilderBusyText = "Context Builder is already running for this tab."
+
+        /// A real bound read whose selection prerequisite can't complete while a test hook holds one of its lanes.
+        @MainActor
+        private struct HeldRead {
+            let fixture: PersistentMCPTestFixture
+            let endpoint: PersistentMCPTestEndpoint
+            let probe: SelectionLaneProbe
+            /// The stored selection a refused or cancelled tool must leave in place.
+            let expectedSelection: StoredSelection
+
+            var context: PersistentMCPTestContext {
+                fixture.contextA
+            }
+
+            var server: MCPServerViewModel {
+                context.window.mcpServer
+            }
+
+            var coordinator: MCPReadFileAutoSelectionCoordinator {
+                server.readFileAutoSelectionCoordinator
+            }
+
+            var storedSelection: StoredSelection? {
+                MCPReadAutoSelectionRecoveryIntegrationTests.storedSelection(context)
+            }
+
+            /// Calls `tool` on the bound connection, checks that it was refused with `code` and
+            /// changed no selection, and returns the reply text.
+            func refusalText(
+                _ tool: String,
+                _ arguments: [String: Any],
+                code: String,
+                file: StaticString = #filePath,
+                line: UInt = #line
+            ) async throws -> String {
+                let reply = try await endpoint.callTool(name: tool, arguments: arguments)
+                let text = try MCPReadAutoSelectionRecoveryIntegrationTests.toolResultText(reply)
+                XCTAssertTrue(reply.rawJSON.contains("\"isError\":true"), "\(tool): \(reply.rawJSON)", file: file, line: line)
+                XCTAssertTrue(text.hasPrefix("Error: \(code):"), "\(tool): \(text)", file: file, line: line)
+                XCTAssertFalse(
+                    text.contains(MCPToolExecutionCancelledError().localizedDescription),
+                    "\(tool): \(text)",
+                    file: file,
+                    line: line
+                )
+                XCTAssertEqual(storedSelection, expectedSelection, "\(tool) changed the selection", file: file, line: line)
+                return text
+            }
+
+            /// Calls `toolName` in process for the bound connection and returns what it threw, or nil.
+            /// `whileRunning` receives the call's task once it has started.
+            func inProcessCallError(
+                _ toolName: String,
+                _ arguments: [String: Value],
+                whileRunning: @MainActor (Task<Error?, Never>) async -> Void = { _ in }
+            ) async throws -> Error? {
+                let tools = await server.windowMCPTools
+                let tool = try XCTUnwrap(tools.first { $0.name == toolName }, "\(toolName) is not a window tool")
+                let connectionID = endpoint.connectionID
+                server.setRequestMetadataOverrideForTesting(.init(
+                    connectionID: connectionID,
+                    clientName: nil,
+                    windowID: context.window.windowID
+                ))
+                defer { server.setRequestMetadataOverrideForTesting(nil) }
+                let invocation = Task { @MainActor () -> Error? in
+                    do {
+                        // context_builder finds the caller's binding through this task-local, as a socket call does.
+                        _ = try await ServerNetworkManager.$currentConnectionID.withValue(connectionID) {
+                            try await tool(arguments)
+                        }
+                        return nil
+                    } catch {
+                        return error
+                    }
+                }
+                await whileRunning(invocation)
+                return await invocation.value
+            }
+
+            /// Calls `toolName` in process, cancels the caller once its drain waits on the held mirror,
+            /// and returns what the call threw.
+            func cancelWhileWaiting(_ toolName: String, _ arguments: [String: Value]) async throws -> Error? {
+                let waiting = probe.expect(.waiterRegistered, on: .mirror)
+                return try await inProcessCallError(toolName, arguments) { invocation in
+                    _ = await MCPReadAutoSelectionRecoveryIntegrationTests.awaitEvent(waiting)
+                    invocation.cancel()
+                }
+            }
+        }
+
+        /// Runs `body` while a bound read's physical mirror is held, so a mirrored drain waits at most
+        /// `mirrorWaitTimeout` and then defers.
+        private func withHeldMirrorRead(
+            label: String,
+            mirrorWaitTimeout: Duration,
+            _ body: @MainActor (HeldRead) async throws -> Void
+        ) async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let coordinator = server.readFileAutoSelectionCoordinator
+                let probe = SelectionLaneProbe(context: context)
+                let mirrorGate = MCPExecutionIgnoringCancellationGate()
+                let mirrorEntered = XCTestExpectation(description: "the read's mirror reached its gate")
+                mirrorEntered.assertForOverFulfill = false
+                var endpoint: PersistentMCPTestEndpoint?
+                var mirrorHeld = false
+                @MainActor
+                func releaseHeldRead() async {
+                    coordinator.setMirrorWaitTimeoutForTesting(.seconds(10))
+                    let mirrorStopped = probe.expect(.workerStopped, on: .mirror)
+                    await mirrorGate.release()
+                    if mirrorHeld {
+                        _ = await Self.awaitEvent(mirrorStopped)
+                    }
+                    server.setReadFileAutoSelectionMirrorGateForTesting(nil)
+                    MCPReadFileAutoSelectionDiagnosticTracer.setTestSink(nil)
+                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager) }
+                    endpoint = nil
+                    await fixture.cleanup()
+                }
+
+                do {
+                    try await fixture.registerDomainWorkspace(context)
+                    try await Self.activateWorkspace(context)
+                    let caller = try await Self.makeBoundEndpoint(label: "prerequisite-\(label)", fixture: fixture)
+                    endpoint = caller
+                    _ = try await caller.callTool(name: MCPWindowToolName.manageSelection, arguments: ["op": "clear"])
+                    MCPReadFileAutoSelectionDiagnosticTracer.setTestSink { probe.record($0) }
+                    server.setReadFileAutoSelectionMirrorGateForTesting {
+                        mirrorEntered.fulfill()
+                        await mirrorGate.enterAndWait()
+                    }
+                    // A CLI read waits for its own mirror before it replies; a zero wait lets it reply while the mirror is held.
+                    coordinator.setMirrorWaitTimeoutForTesting(.zero)
+                    let read = try await caller.callTool(
+                        name: MCPWindowToolName.readFile,
+                        arguments: ["path": context.fileURL.path]
+                    )
+                    XCTAssertFalse(read.rawJSON.contains("\"isError\":true"), read.rawJSON)
+                    mirrorHeld = await Self.awaitEvent(mirrorEntered)
+                    coordinator.setMirrorWaitTimeoutForTesting(mirrorWaitTimeout)
+                    let accepted = try XCTUnwrap(Self.storedSelection(context))
+                    XCTAssertTrue(accepted.selectedPaths.contains(context.fileURL.path))
+                    try await body(HeldRead(
+                        fixture: fixture,
+                        endpoint: caller,
+                        probe: probe,
+                        expectedSelection: accepted
+                    ))
+                    await releaseHeldRead()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await releaseHeldRead()
+                    throw error
+                }
+            }
+        }
+
+        /// Waits up to 10 s for `expectation`, records a failure if it expires, and reports whether it was fulfilled.
+        private static func awaitEvent(
+            _ expectation: XCTestExpectation,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async -> Bool {
+            let result = await XCTWaiter.fulfillment(of: [expectation], timeout: 10)
+            XCTAssertEqual(result, .completed, "Timed out waiting until \(expectation.description)", file: file, line: line)
+            return result == .completed
+        }
+
         private static func makeBoundEndpoint(
             label: String,
             fixture: PersistentMCPTestFixture
@@ -236,6 +459,44 @@ import XCTest
             let result = try XCTUnwrap(object["result"] as? [String: Any])
             let content = try XCTUnwrap(result["content"] as? [[String: Any]])
             return try XCTUnwrap(content.first?["text"] as? String)
+        }
+    }
+
+    /// Read auto-selection lane events for one tab, so a test can wait for a drain to start waiting or
+    /// for a held worker to stop without polling. An expectation is fulfilled by the first matching
+    /// event after it is requested.
+    private final class SelectionLaneProbe: @unchecked Sendable {
+        private struct Trigger: Hashable {
+            let kind: MCPReadFileAutoSelectionDiagnosticEvent.Kind
+            let lane: MCPReadFileAutoSelectionDiagnosticEvent.Lane
+        }
+
+        private let windowID: Int
+        private let workspaceID: UUID
+        private let tabID: UUID
+        private let lock = NSLock()
+        private var pending: [Trigger: XCTestExpectation] = [:]
+
+        @MainActor
+        init(context: PersistentMCPTestContext) {
+            windowID = context.window.windowID
+            workspaceID = context.workspaceID
+            tabID = context.tabID
+        }
+
+        func expect(
+            _ kind: MCPReadFileAutoSelectionDiagnosticEvent.Kind,
+            on lane: MCPReadFileAutoSelectionDiagnosticEvent.Lane
+        ) -> XCTestExpectation {
+            let expectation = XCTestExpectation(description: "the \(lane.rawValue) lane reports \(kind.rawValue)")
+            lock.withLock { pending[Trigger(kind: kind, lane: lane)] = expectation }
+            return expectation
+        }
+
+        func record(_ event: MCPReadFileAutoSelectionDiagnosticEvent) {
+            guard event.windowID == windowID, event.workspaceID == workspaceID, event.tabID == tabID else { return }
+            let expectation = lock.withLock { pending.removeValue(forKey: Trigger(kind: event.kind, lane: event.lane)) }
+            expectation?.fulfill()
         }
     }
 #endif
