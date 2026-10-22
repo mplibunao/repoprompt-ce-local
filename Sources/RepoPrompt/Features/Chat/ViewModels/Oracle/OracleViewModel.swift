@@ -3161,27 +3161,28 @@ class OracleViewModel: ObservableObject {
         await sendMessage(newContent)
     }
 
-    private func validatedOverrideAIMessage(
+    /// Returns why a prepared message can't be sent for this input, or `nil` when it can. A prepared
+    /// message needs its selection and mode so the chat's metadata matches the prompt scope, and its
+    /// last user entry must be the send text, either raw or as `buildAIMessage` wraps it.
+    private func overrideAIMessageRejectionReason(
         _ overrideAIMessage: AIMessage,
         newUserMessage: String,
         selectionOverride: StoredSelection?,
         overrideMode: PromptViewModel.PlanActMode?
-    ) -> AIMessage? {
+    ) -> String? {
         guard selectionOverride != nil else {
-            print("Warning: Ignoring overrideAIMessage without selectionOverride to keep prompt scope aligned with UI metadata.")
-            return nil
+            return "selectionOverride is missing."
         }
         guard overrideMode != nil else {
-            print("Warning: Ignoring overrideAIMessage without overrideMode.")
-            return nil
+            return "overrideMode is missing."
         }
         guard let lastUserMessage = overrideAIMessage.conversationMessages.last(where: { $0.role == .user })?.content,
               lastUserMessage == newUserMessage
+              || lastUserMessage == PromptPackagingService.wrappingUserInstructionsIfNeeded(newUserMessage)
         else {
-            print("Warning: Ignoring overrideAIMessage because its final user message does not match the current send input.")
-            return nil
+            return "The prepared message's last user entry is missing or does not match the current send input."
         }
-        return overrideAIMessage
+        return nil
     }
 
     // MARK: - Main Send/Receive Flow
@@ -3268,6 +3269,44 @@ class OracleViewModel: ObservableObject {
             return errorMessage.id
         }
 
+        let acceptedOverrideAIMessage: AIMessage?
+        if let overrideAIMessage,
+           let rejectionReason = overrideAIMessageRejectionReason(
+               overrideAIMessage,
+               newUserMessage: newUserMessage,
+               selectionOverride: selectionOverride,
+               overrideMode: overrideMode
+           )
+        {
+            switch completionPolicy {
+            case .contextBuilderStrict:
+                // A rebuild from the chat preset would drop the prepared message's frozen review
+                // context, so a strict send fails here, before anything reaches the provider.
+                let rejection = "Context Builder prepared message was rejected: \(rejectionReason) "
+                    + "No request was sent to the provider."
+                let errorMessage = AIChatMessage(
+                    content: "Error: \(rejection)",
+                    isUser: false,
+                    isFinalized: true,
+                    sequenceIndex: nextSequenceIndex(for: targetSessionID)
+                )
+                withSessionMessages(targetSessionID) { msgs in
+                    msgs.append(errorMessage)
+                }
+                registerMessage(errorMessage.id, sessionID: targetSessionID)
+                clearMCPSessionUIState(for: targetSessionID)
+                autosaveChatHistory(for: targetSessionID)
+                // Chat display and the MCP reply each add their own "Error:" prefix.
+                await finalisationHub.fulfil(errorMessage.id, outcome: .failed(message: rejection))
+                return errorMessage.id
+            case .interactive:
+                print("Warning: Ignoring overrideAIMessage: \(rejectionReason) Rebuilding from the current chat preset.")
+                acceptedOverrideAIMessage = nil
+            }
+        } else {
+            acceptedOverrideAIMessage = overrideAIMessage
+        }
+
         // Derive a string representation for storage / UI
         let modelDisplayName = model.displayName
 
@@ -3313,15 +3352,8 @@ class OracleViewModel: ObservableObject {
                 }
 
                 let aiMessage: AIMessage
-                if let overrideAIMessage = overrideAIMessage.flatMap({
-                    self.validatedOverrideAIMessage(
-                        $0,
-                        newUserMessage: newUserMessage,
-                        selectionOverride: selectionOverride,
-                        overrideMode: overrideMode
-                    )
-                }) {
-                    aiMessage = overrideAIMessage
+                if let acceptedOverrideAIMessage {
+                    aiMessage = acceptedOverrideAIMessage
                 } else {
                     // Build override context from the specified chat preset or current one
                     let chatPreset: ChatPreset = if let presetID = overrideChatPresetID,

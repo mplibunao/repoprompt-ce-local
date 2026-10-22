@@ -273,7 +273,32 @@ final class ContextBuilderFollowUpFinalizationMonitorTests: XCTestCase {
         XCTAssertEqual(cancellationCount, 0)
     }
 
-    private func makeSettlementFixture(partialText: String) async throws -> ContextBuilderTimeoutSettlementFixture {
+    func testUIFollowUpShowsTypedCompletionErrorDescription() async throws {
+        let (composition, _, tabID) = try await makeCompositionWithComposeTab(
+            workspaceName: "Context Builder UI follow-up failure"
+        )
+        let viewModel = composition.contextBuilderAgentViewModel
+        let message = "Context Builder prepared message was rejected."
+        viewModel.installRunTestHooks(.init(
+            beforeProcessingProviderEvent: nil,
+            providerEventDisposition: nil,
+            teardownCompleted: nil,
+            runUIFollowUp: { _, _ in
+                throw OracleContextBuilderCompletionError.providerStreamFailed(message: message)
+            }
+        ))
+
+        viewModel.startBackgroundPlanGeneration(tabID: tabID, oracleViewModel: composition.oracleViewModel)
+        let session = try XCTUnwrap(viewModel.sessions[tabID])
+        let followUp = try XCTUnwrap(session.backgroundPlanTask)
+        await followUp.value
+
+        XCTAssertEqual(session.backgroundPlanError, message)
+    }
+
+    private func makeCompositionWithComposeTab(
+        workspaceName: String
+    ) async throws -> (composition: WindowStateComposition, workspace: WorkspaceModel, tabID: UUID) {
         let composition = WindowStateCompositionFactory.make(
             windowID: -704,
             deferredInitialAgentSystemWorkspaceRefresh: true,
@@ -285,7 +310,7 @@ final class ContextBuilderFollowUpFinalizationMonitorTests: XCTestCase {
             .appendingPathComponent("Repository-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: repoRoot, withIntermediateDirectories: true)
         let workspace = composition.workspaceManager.createWorkspace(
-            name: "Context Builder timeout settlement",
+            name: workspaceName,
             repoPaths: [repoRoot.path],
             ephemeral: true
         )
@@ -304,6 +329,13 @@ final class ContextBuilderFollowUpFinalizationMonitorTests: XCTestCase {
         composition.promptManager.loadComposeTabsFromWorkspace(
             composition.workspaceManager.workspaces[workspaceIndex],
             syncPromptText: true
+        )
+        return (composition, workspace, tabID)
+    }
+
+    private func makeSettlementFixture(partialText: String) async throws -> ContextBuilderTimeoutSettlementFixture {
+        let (composition, workspace, tabID) = try await makeCompositionWithComposeTab(
+            workspaceName: "Context Builder timeout settlement"
         )
 
         let created = try await composition.oracleViewModel.createSessionFromHeadlessRun(

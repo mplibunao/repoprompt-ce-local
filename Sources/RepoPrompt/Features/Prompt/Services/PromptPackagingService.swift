@@ -42,6 +42,14 @@ enum PromptPackagingService {
         """
     }
 
+    /// Wraps the final user instructions in `<user_instructions>` unless the text already contains
+    /// the opening tag. Oracle's prepared-message check accepts exactly this form, so packaging and
+    /// that check must share this helper.
+    static func wrappingUserInstructionsIfNeeded(_ text: String) -> String {
+        guard !text.contains("<user_instructions>") else { return text }
+        return "<user_instructions>\n" + text + "\n</user_instructions>"
+    }
+
     /// Build an AIMessage that includes:
     /// - system prompt
     /// - meta prompts
@@ -72,16 +80,7 @@ enum PromptPackagingService {
         var updatedConversation = conversation
         if let lastUserIndex = updatedConversation.lastIndex(where: { $0.role == .user }) {
             let lastUserEntry = updatedConversation[lastUserIndex]
-            var newContent = lastUserEntry.content
-
-            // Wrap in <user_instructions> … </user_instructions> if not already wrapped
-            if !newContent.contains("<user_instructions>") {
-                newContent = """
-                <user_instructions>
-                \(newContent)
-                </user_instructions>
-                """
-            }
+            let newContent = wrappingUserInstructionsIfNeeded(lastUserEntry.content)
 
             // Replace the immutable entry with a new one
             updatedConversation[lastUserIndex] =

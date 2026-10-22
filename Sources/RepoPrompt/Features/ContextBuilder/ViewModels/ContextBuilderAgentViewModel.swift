@@ -4630,6 +4630,12 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         return errorMessage
     }
 
+    /// `asFriendlyString()` doesn't read `LocalizedError`, so a Context Builder completion error
+    /// would otherwise show as `Unknown error [...]` instead of its description.
+    private func backgroundPlanErrorMessage(from error: Error) -> String {
+        (error as? OracleContextBuilderCompletionError)?.errorDescription ?? error.asFriendlyString()
+    }
+
     /// Formats tool arguments JSON into a compact, readable summary for display.
     /// Shows key parameters like paths, patterns, queries in a concise format.
     private func formatToolArgsSummary(_ argsJSON: String?) -> String? {
@@ -4995,7 +5001,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                     session.backgroundPlanReasoningText = nil
                     session.backgroundPlanError = nil
                 } else {
-                    session.backgroundPlanError = error.asFriendlyString()
+                    session.backgroundPlanError = backgroundPlanErrorMessage(from: error)
                 }
                 session.isBackgroundPlanGenerating = false
                 clearPendingBackgroundPlanUIRefresh(for: tabID)
@@ -5599,7 +5605,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             } else {
                 session.backgroundPlanResponseText = nil
                 session.backgroundPlanReasoningText = nil
-                session.backgroundPlanError = error.asFriendlyString()
+                session.backgroundPlanError = backgroundPlanErrorMessage(from: error)
             }
             session.isBackgroundPlanGenerating = false
             session.followUpOracleSessionID = nil
