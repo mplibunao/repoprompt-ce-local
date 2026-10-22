@@ -94,7 +94,6 @@ package struct DomainContextMetadata: Codable, Equatable {
     package let name: String
     package let activeAgentSessionID: UUID?
     package let activeChatSessionID: UUID?
-    package let documentBytes: Data
     package let contentDigest: String
 
     package init(
@@ -102,14 +101,12 @@ package struct DomainContextMetadata: Codable, Equatable {
         name: String,
         activeAgentSessionID: UUID?,
         activeChatSessionID: UUID?,
-        documentBytes: Data,
         contentDigest: String
     ) {
         self.identity = identity
         self.name = name
         self.activeAgentSessionID = activeAgentSessionID
         self.activeChatSessionID = activeChatSessionID
-        self.documentBytes = documentBytes
         self.contentDigest = contentDigest
     }
 }
@@ -304,7 +301,6 @@ private enum DomainWorkspaceDocumentDecoder {
                 name: context["name"] as? String ?? "Untitled",
                 activeAgentSessionID: (context["activeAgentSessionID"] as? String).flatMap(UUID.init(uuidString:)),
                 activeChatSessionID: (context["activeChatSessionID"] as? String).flatMap(UUID.init(uuidString:)),
-                documentBytes: bytes,
                 contentDigest: DomainContentDigest.sha256(bytes)
             )
         }
