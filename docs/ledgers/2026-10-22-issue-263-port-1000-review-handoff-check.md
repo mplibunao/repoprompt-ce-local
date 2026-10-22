@@ -1,0 +1,56 @@
+# Run ledger: Port upstream PR 1000 review handoff check
+
+Request: #263 · Plan: `2026-10-22-port-1000-review-handoff-check.md`
+
+Re-implement upstream PR 1000's override-acceptance change (`b4c8501e`) by hand, so the message Context Builder prepares with `PromptPackagingService.buildAIMessage` reaches the provider unchanged, including its `<git_diff>`, and a rejected prepared message under a strict review fails with an error instead of being rebuilt from the chat preset. Validate it with two handoff tests and two debug-app review runs: a staged deletion and a committed range.
+
+| Item | Outcome | Agent session | Commits |
+|------|---------|---------------|---------|
+| 1. Shared wrap helper, strict rejection, UI error text, and two handoff tests | done | pair · 263 1/4: implement review handoff check | `fix(context-builder): send the prepared follow-up message unchanged` |
+| 2. Debug-app review of a staged deletion and a committed range | done | pair · 263 2/4: debug-app review acceptance | |
+| 3. Independent review and refactor pass | done | engineer · 263 3/4: review port 1000 handoff check; pair · 263 3/4: cleanup port 1000 handoff check | |
+| 4. `pr-ready` and the pull request | done | orchestrator; pair · 263 1/4: implement review handoff check | `docs: add the run ledger for the port 1000 handoff check` |
+
+## 1. Shared wrap helper, strict rejection, UI error text, and two handoff tests
+
+- Decision: port only upstream PR 1000's override-acceptance change. Its Model Presets and multiple-Oracle changes are a separate feature this distribution hasn't ported, and its move of `concludeFinalisation` in two cancellation paths is unrelated to #263, so both stay out. Source: approved plan.
+- Decision: `PromptPackagingService.wrappingUserInstructionsIfNeeded(_:)` is the one wrap, called by `buildAIMessage` and by the override check, instead of upstream's inline copy of the wrapped string, so the wrap and the check can't drift apart. Clipboard assembly keeps its own `<user_instructions>` format. Source: approved plan.
+- Decision: a supplied `overrideAIMessage` that fails the check under `.contextBuilderStrict` now fails the query with a finalized error message and no provider submission; under `.interactive` it still logs a warning and rebuilds. The guard is keyed to a supplied override because `oracle_send` sends strictly without one. Upstream still rebuilds silently. Source: approved plan.
+- Decision: the rejection fulfils the finalisation hub with the reason text and no `Error:` prefix, because the chat message and the MCP reply each add their own; it also clears the session's MCP UI state, which the model-unavailable branch doesn't do. That branch is left unchanged. Source: approved plan.
+- Decision: the catch in `ContextBuilderAgentViewModel.runFollowUpOracleStream` stores an `OracleContextBuilderCompletionError`'s `errorDescription` as the session's error text. `asFriendlyString()` and the other two catches are unchanged. Source: approved plan.
+- Decision: the `MCPOracleCompletionPolicyTests` fixture drains tracked chat autosaves before resetting the chat storage override, so a late save can't write a test session into real chat storage. Source: approved plan.
+- Decision: both tests record transport submissions in one `@MainActor` array; the drain runs after `beginClose()`, and the strict rejection is written inline beside the model-unavailable branch. Source: the coding agent's judgment (simpler state, a drain that also covers saves started during teardown, and the mirrored branches kept together).
+- Evidence: on `ba03d9e97`, `testPreparedOverridePreservesDeletionPatchAtTransport` failed on `gitDiff` (nil) and on the system prompt (the chat preset's), and `testStrictRejectedOverrideFailsWithoutTransportSubmission` failed on the finalized content (nil), the failure message (`Unknown error [...]`), and one transport call. Neither hung.
+- Evidence: with the fix, `make dev-format` left the files unchanged, `make dev-lint` passed, both new tests passed, `MCPOracleCompletionPolicyTests` (6 tests) and `ContextBuilderFollowUpFinalizationMonitorTests` (6 tests) passed, `make dev-swift-build PRODUCT=RepoPrompt` succeeded, and the commit preflight passed.
+- Deferred: upstream PR 1000's Model Presets and multiple-Oracle changes. No issue tracks them yet, and filing one is a parked decision below.
+- Decision: the independent review and the refactor pass run after the debug-app run and the pull request draft, not before the first commit, because `CONTRIBUTING.md` step 4 orders them that way and the review prompts quote the draft. Source: orchestrator judgment.
+
+## 2. Debug-app review of a staged deletion and a committed range
+
+- Evidence: on 2026-10-22, `make dev-smoke-launch` built the debug app from `768671bef` on a clean tree and passed. A debug workspace contained two disposable git repositories, `primary` first and `review-fixture` second, the only review target. Each check ran in its own debug-app `pair` Agent Mode session (Codex CLI, GPT-6.1 Sol High) with that workspace active, because a review started outside Agent Mode fails on #260. Both review instructions left out `<user_instructions>`.
+- Evidence: staged deletion. With only `obsolete-staged.txt` deleted in the index, the session selected the file's per-file patch from a `staged` git snapshot together with `remaining.txt` and ran `context_builder` with `response_type: "review"`. The review succeeded, and its stored response quoted all three removed lines verbatim. Context Builder's rewritten prompt didn't contain them.
+- Evidence: committed range. With the staged deletion committed and `obsolete-range.txt` deleted in the next commit, on a clean tree, a fresh session selected the per-file patch for that two-commit range with `remaining.txt` and ran the same review. Its stored response quoted all three removed lines verbatim.
+- Evidence: both reviews completed without a frozen-target error, an empty diff, or the new rejection error. Both sessions were stopped and deleted, the scratch workspace and directories were removed, and the debug app was stopped. The production app kept the same process throughout.
+- Decision: the scratch workspace's agent sessions were deleted before the workspace itself. `manage_workspaces delete` refuses a workspace that still has agent-session tabs, but it switches the window to `Default` first, and `cleanup_sessions` then can't find those sessions. Source: validating agent's observation during cleanup.
+
+## 3. Independent review and refactor pass
+
+- Decision: the review found that the UI follow-up launcher's catch in `ContextBuilderAgentViewModel` formats the error again with `asFriendlyString()`, so the `errorDescription` text set in `runFollowUpOracleStream` shows in the Context Builder UI only when an MCP `context_builder` call ran the follow-up. The approved plan leaves that catch unchanged. The code stays as planned, the pull request text states the narrower scope, and extending the fallback is a parked decision below. Source: review finding.
+- Decision: the review noted that after a future regression either new test would hang at an unbounded wait instead of failing. Declined: the approved test design keeps the suite's existing stream pattern, the sibling tests wait the same way, and a hang still stops the test run. Source: review finding, declined by orchestrator judgment.
+- Decision: the review noted that the deferred upstream remainder has no tracking issue. No issue covers it, so filing one is a parked decision below, and the pull request text says the distribution hasn't ported those changes. Source: review finding.
+- Evidence: the review confirmed the rejection's place in `sendMessage`, that a strict rejection doesn't create a placeholder, policy entry, task, or watchdog, that the hub outcome is stored before `sendMessage` returns, the wrap helper's byte identity, the unchanged interactive and `oracle_send` paths, one `Error:` prefix on the chat message and the MCP reply, and that the commit names upstream in plain text.
+- Evidence: the refactor pass left the code as it was. It weighed sharing code between the strict rejection and the model-unavailable branch and kept them apart, because they differ in the sequence index, the MCP UI cleanup, and the hub message.
+- Decision: no explore scouts before the refactor pass, because the four-file diff was already mapped by the review. Source: orchestrator judgment.
+
+## 4. `pr-ready` and the pull request
+
+- Evidence: `pr-ready` ran against `main` on all of the branch's commits, this ledger's commit included, before the first push. The pull request description records its result.
+- Decision: the pull request opens ready for review with the `port` and `area:context-builder` labels and closes #263. Source: approved plan.
+- Evidence: the first commit preflight for this ledger stalled for about 10 minutes in `Scripts/source_layout_guardrails.sh`. The shell (bash 5.3) was blocked writing a 15.6 KB here-document into a pipe that `python3` hadn't started reading. After that process tree was stopped, a rerun passed in 9 seconds. The cause isn't confirmed.
+
+## Parked decisions
+
+- File an issue for `manage_workspaces delete` switching the window to `Default` when it refuses a workspace that still has agent-session tabs, which hides those sessions from `cleanup_sessions` until the window is switched back? Options: file it through `rpce-issue-creator`, or leave it as a cleanup-order note. Recommendation: file it. Blocks: nothing.
+- Add the same `errorDescription` fallback to the UI follow-up launcher's catch in `ContextBuilderAgentViewModel`, so follow-ups started from the Context Builder UI also show a typed failure's own text? Options: add the one-line fallback in this pull request, or keep the approved plan's decision and leave that catch unchanged. Recommendation: add it, because without it the UI path still shows `Unknown error [...]` for the same errors. It changes an approved plan decision, so it waits for the requester. Blocks: nothing. A yes adds one commit to the open pull request.
+- File an issue for porting upstream PR 1000's Model Presets and multiple-Oracle changes? Options: file it through `rpce-issue-creator`, or leave the remainder untracked. Recommendation: file it, because the repository records deferrals as issues. Blocks: nothing.
+- File an issue for the intermittent stall in `Scripts/source_layout_guardrails.sh`, where the shell blocks writing a large here-document into a pipe before `python3` reads it? Options: file it through `rpce-issue-creator`, or wait for it to recur. Recommendation: file it, because it can stall any commit or push preflight. Blocks: nothing.
