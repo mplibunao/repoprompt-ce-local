@@ -3,13 +3,13 @@ import Foundation
 import XCTest
 
 final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
-    func testReleasedProviderLimitBlockageClearsWhenBlockingSiblingSettles() {
+    func testReleasedProviderLimitBlockageClearsWhenBlockingSiblingSettles() throws {
         let registry = MCPCodeStructureSettlementRegistry()
         let windowID = 71
         let firstInvocationID = UUID()
         let secondInvocationID = UUID()
 
-        let firstSlot = admittedSlot(
+        let firstSlot = try admittedSlot(
             registry,
             windowID: windowID,
             invocationID: firstInvocationID,
@@ -21,7 +21,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
 
         // The recovery horizon releases the first cancellation-ignoring provider
         // so one new call may run, but preserves that provider's exact lease.
-        let secondSlot = admittedSlot(
+        let secondSlot = try admittedSlot(
             registry,
             windowID: windowID,
             invocationID: secondInvocationID,
@@ -59,7 +59,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
             now: { clock.now }
         )
 
-        let released = admittedSlot(
+        let released = try admittedSlot(
             registry,
             windowID: windowID,
             invocationID: UUID(),
@@ -72,7 +72,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         XCTAssertEqual(released.activateDetach(), .activated)
 
         // Admission after the recovery horizon releases the first lease.
-        let blocking = admittedSlot(
+        let blocking = try admittedSlot(
             registry,
             windowID: windowID,
             invocationID: UUID(),
@@ -140,10 +140,10 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         let liveReadFence = MCPDomainInvocationFence()
         let promptCommit = DomainMutationCommitState()
 
-        let detachedRead = admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: .zero, fence: detachedReadFence)
-        let liveRead = admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: .seconds(1), fence: liveReadFence)
+        let detachedRead = try admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: .zero, fence: detachedReadFence)
+        let liveRead = try admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: .seconds(1), fence: liveReadFence)
         escape(detachedRead, at: .seconds(35))
-        let stuckPrompt = admittedSlot(
+        let stuckPrompt = try admittedSlot(
             registry,
             windowID: windowID,
             invocationID: UUID(),
@@ -153,7 +153,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         escape(stuckPrompt, at: .seconds(100))
         XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
 
-        let recovering = admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: .seconds(101))
+        let recovering = try admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: .seconds(101))
         let recovery = try XCTUnwrap(recovering.recovery)
         XCTAssertEqual(
             recovery.quarantinedCalls.map(\.invocationID),
@@ -170,7 +170,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
             registry.snapshot(windowID: windowID),
             .init(activeCount: 4, detachedCount: 2, releasedCount: 0, quarantinedCount: 2)
         )
-        let next = admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: .seconds(102))
+        let next = try admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: .seconds(102))
         XCTAssertNil(next.recovery)
         XCTAssertEqual(next.closeBeforeExecutionExit(), .released)
         XCTAssertEqual(recovering.closeBeforeExecutionExit(), .released)
@@ -187,71 +187,124 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         XCTAssertEqual(registry.snapshot(windowID: windowID).activeCount, 0)
     }
 
-    /// Recovery stops at two outstanding recoveries in a window and eight quarantined calls in the app.
-    /// Past either limit the cap rejects calls with the usage, closing a window refunds nothing, and only
-    /// completions do.
-    func testRecoveryIsRefusedPastItsPerWindowOrAppWideLimit() throws {
+    /// One recovery quarantines every escaped call in the window, and a window has at most two recoveries
+    /// whose calls haven't all finished. A refused recovery quarantines nothing, and completing a recovery's
+    /// calls makes room for the next one.
+    func testAWindowRecoversEveryEscapedCallAtOnceAndAtMostTwiceUntilTheyFinish() throws {
         let registry = MCPCodeStructureSettlementRegistry()
-        let first = 91
-        let second = 92
-        var escaped: [MCPCodeStructureSettlementRegistry.Slot] = []
+        let windowID = 91
 
-        // Three calls admitted together escape at once; one recovery quarantines all three.
-        let together = (0 ..< 3).map { _ in admittedSlot(registry, windowID: first, invocationID: UUID(), now: .zero) }
-        XCTAssertEqual(together[0].resolveGraceExpiry(now: .seconds(35)), .detach)
-        XCTAssertEqual(together[0].activateDetach(), .activated)
-        XCTAssertEqual(together[1].resolveGraceExpiry(now: .seconds(35)), .forceDisconnect)
-        XCTAssertEqual(together[2].resolveGraceExpiry(now: .seconds(35)), .forceDisconnect)
-        let firstRecovery = try recover(registry, windowID: first, at: .seconds(36))
-        XCTAssertEqual(firstRecovery.quarantinedCalls.count, 3)
-        escaped += together
-
-        let firstWindowSecondCap = capWindow(registry, windowID: first, from: .seconds(100))
-        escaped += firstWindowSecondCap
+        let together = try escapeTogether(registry, windowID: windowID, count: 3, at: .zero)
+        XCTAssertEqual(try recover(registry, windowID: windowID, at: .seconds(36)).quarantinedCalls.count, 3)
+        let secondCap = try capWindow(registry, windowID: windowID, from: .seconds(100))
         XCTAssertEqual(
-            try recover(registry, windowID: first, at: .seconds(201)).quarantine,
+            try recover(registry, windowID: windowID, at: .seconds(201)).quarantine,
             .init(windowQuarantinedCount: 5, windowOutstandingRecoveryCount: 2, appQuarantinedCount: 5)
         )
-        let firstWindowThirdCap = capWindow(registry, windowID: first, from: .seconds(300))
-        escaped += firstWindowThirdCap
+        let thirdCap = try capWindow(registry, windowID: windowID, from: .seconds(300))
         assertCapRejected(
             registry,
-            windowID: first,
+            windowID: windowID,
             at: .seconds(401),
             quarantine: .init(windowQuarantinedCount: 5, windowOutstandingRecoveryCount: 2, appQuarantinedCount: 5)
         )
+        XCTAssertEqual(registry.snapshot(windowID: windowID).quarantinedCount, 5)
 
-        escaped += capWindow(registry, windowID: second, from: .zero)
-        XCTAssertEqual(try recover(registry, windowID: second, at: .seconds(101)).quarantine.appQuarantinedCount, 7)
-        let secondWindowCap = capWindow(registry, windowID: second, from: .seconds(200))
-        escaped += secondWindowCap
-        assertCapRejected(
-            registry,
-            windowID: second,
-            at: .seconds(301),
-            quarantine: .init(windowQuarantinedCount: 2, windowOutstandingRecoveryCount: 1, appQuarantinedCount: 7)
-        )
-
-        // Closing a window revokes its calls and refunds nothing.
-        registry.revokeWindow(windowID: second)
-        XCTAssertEqual(registry.diagnostics(windowID: second, now: .seconds(302)).quarantine.appQuarantinedCount, 7)
-
-        // Completing the first recovery's calls frees its slot in the first window and three app-wide.
         for slot in together {
             _ = slot.recordCompletion(.success)
         }
         XCTAssertEqual(
-            try recover(registry, windowID: first, at: .seconds(402)).quarantine,
-            .init(windowQuarantinedCount: 4, windowOutstandingRecoveryCount: 2, appQuarantinedCount: 6)
+            try recover(registry, windowID: windowID, at: .seconds(402)).quarantine,
+            .init(windowQuarantinedCount: 4, windowOutstandingRecoveryCount: 2, appQuarantinedCount: 4)
         )
-        XCTAssertEqual(try recover(registry, windowID: second, at: .seconds(303)).quarantine.appQuarantinedCount, 8)
 
-        for slot in escaped {
+        for slot in secondCap + thirdCap {
             _ = slot.recordCompletion(.success)
         }
-        XCTAssertEqual(registry.snapshot(windowID: first).activeCount, 0)
-        XCTAssertEqual(registry.snapshot(windowID: second).activeCount, 0)
-        XCTAssertEqual(registry.diagnostics(windowID: first, now: .seconds(500)).quarantine.appQuarantinedCount, 0)
+        XCTAssertEqual(registry.snapshot(windowID: windowID).activeCount, 0)
+        XCTAssertEqual(registry.diagnostics(windowID: windowID, now: .seconds(500)).quarantine.appQuarantinedCount, 0)
+    }
+
+    /// A recovery that would pass eight quarantined calls app-wide quarantines none of the window's calls.
+    /// Closing another window's calls frees nothing; only their completions make room.
+    func testARecoveryPastTheAppWideLimitQuarantinesNothingUntilCompletionsMakeRoom() throws {
+        let registry = MCPCodeStructureSettlementRegistry()
+        let windowID = 92
+        let otherWindowID = 93
+        let closingWindowID = 94
+
+        let closing = try escapeTogether(registry, windowID: closingWindowID, count: 3, at: .zero)
+        _ = try recover(registry, windowID: closingWindowID, at: .seconds(36))
+        let other = try escapeTogether(registry, windowID: otherWindowID, count: 4, at: .zero)
+        XCTAssertEqual(try recover(registry, windowID: otherWindowID, at: .seconds(36)).quarantine.appQuarantinedCount, 7)
+
+        let capped = try capWindow(registry, windowID: windowID, from: .zero)
+        let refused = MCPCodeStructureSettlementRegistry.QuarantineUsage(
+            windowQuarantinedCount: 0,
+            windowOutstandingRecoveryCount: 0,
+            appQuarantinedCount: 7
+        )
+        assertCapRejected(registry, windowID: windowID, at: .seconds(101), quarantine: refused)
+        XCTAssertEqual(registry.snapshot(windowID: windowID).quarantinedCount, 0)
+
+        registry.revokeWindow(windowID: closingWindowID)
+        assertCapRejected(registry, windowID: windowID, at: .seconds(102), quarantine: refused)
+
+        for slot in closing {
+            _ = slot.recordCompletion(.success)
+        }
+        XCTAssertEqual(
+            try recover(registry, windowID: windowID, at: .seconds(103)).quarantine,
+            .init(windowQuarantinedCount: 2, windowOutstandingRecoveryCount: 1, appQuarantinedCount: 6)
+        )
+
+        for slot in other + capped {
+            _ = slot.recordCompletion(.success)
+        }
+        XCTAssertEqual(registry.diagnostics(windowID: windowID, now: .seconds(200)).quarantine.appQuarantinedCount, 0)
+    }
+
+    /// Closing a connection revokes that connection's calls in every window, and closing a window revokes
+    /// that window's calls. Each revocation keeps the origin that came first, and every lease stays tracked
+    /// until its call completes.
+    func testClosingAWindowOrAConnectionRevokesOnlyItsOwnCalls() throws {
+        let registry = MCPCodeStructureSettlementRegistry()
+        let connectionA = UUID()
+        let connectionB = UUID()
+        let firstWindowID = 111
+        let secondWindowID = 112
+        let readOnAInFirst = MCPDomainInvocationFence()
+        let promptOnAInFirst = DomainMutationCommitState()
+        let readOnBInFirst = MCPDomainInvocationFence()
+        let readOnAInSecond = MCPDomainInvocationFence()
+        let promptOnBInSecond = DomainMutationCommitState()
+        let slots = try [
+            admittedSlot(registry, windowID: firstWindowID, connectionID: connectionA, now: .zero, fence: readOnAInFirst),
+            admittedSlot(registry, windowID: firstWindowID, connectionID: connectionA, now: .zero, commitState: promptOnAInFirst),
+            admittedSlot(registry, windowID: firstWindowID, connectionID: connectionB, now: .zero, fence: readOnBInFirst),
+            admittedSlot(registry, windowID: secondWindowID, connectionID: connectionA, now: .zero, fence: readOnAInSecond),
+            admittedSlot(registry, windowID: secondWindowID, connectionID: connectionB, now: .zero, commitState: promptOnBInSecond)
+        ]
+
+        registry.revokeConnection(connectionA)
+        XCTAssertEqual(readOnAInFirst.revocationOrigin, .connectionClosed)
+        XCTAssertEqual(promptOnAInFirst.currentPhase, .revoked(.connectionClosed))
+        XCTAssertEqual(readOnAInSecond.revocationOrigin, .connectionClosed)
+        XCTAssertFalse(readOnBInFirst.isRevoked)
+        XCTAssertEqual(promptOnBInSecond.currentPhase, .preCommit)
+
+        registry.revokeWindow(windowID: secondWindowID)
+        XCTAssertEqual(promptOnBInSecond.currentPhase, .revoked(.windowClosed))
+        XCTAssertEqual(readOnAInSecond.revocationOrigin, .connectionClosed)
+        XCTAssertFalse(readOnBInFirst.isRevoked)
+
+        XCTAssertEqual(registry.snapshot(windowID: firstWindowID).activeCount, 3)
+        XCTAssertEqual(registry.snapshot(windowID: secondWindowID).activeCount, 2)
+        for slot in slots {
+            XCTAssertEqual(slot.recordCompletion(.success), .deliver)
+        }
+        XCTAssertEqual(registry.snapshot(windowID: firstWindowID).activeCount, 0)
+        XCTAssertEqual(registry.snapshot(windowID: secondWindowID).activeCount, 0)
     }
 
     private final class ManualClock: @unchecked Sendable {
@@ -281,13 +334,31 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         _ registry: MCPCodeStructureSettlementRegistry,
         windowID: Int,
         from start: Duration
-    ) -> [MCPCodeStructureSettlementRegistry.Slot] {
-        let released = admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: start)
+    ) throws -> [MCPCodeStructureSettlementRegistry.Slot] {
+        let released = try admittedSlot(registry, windowID: windowID, now: start)
         escape(released, at: start + .seconds(35))
-        let blocking = admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: start + .seconds(65))
+        let blocking = try admittedSlot(registry, windowID: windowID, now: start + .seconds(65))
         escape(blocking, at: start + .seconds(100))
         XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
         return [released, blocking]
+    }
+
+    /// Admits `count` calls at once and lets their deadline pass: the first detaches and the rest are
+    /// force-disconnected, so they all escape together and cap the window.
+    private func escapeTogether(
+        _ registry: MCPCodeStructureSettlementRegistry,
+        windowID: Int,
+        count: Int,
+        at start: Duration
+    ) throws -> [MCPCodeStructureSettlementRegistry.Slot] {
+        let slots = try (0 ..< count).map { _ in try admittedSlot(registry, windowID: windowID, now: start) }
+        XCTAssertEqual(slots[0].resolveGraceExpiry(now: start + .seconds(35)), .detach)
+        XCTAssertEqual(slots[0].activateDetach(), .activated)
+        for slot in slots.dropFirst() {
+            XCTAssertEqual(slot.resolveGraceExpiry(now: start + .seconds(35)), .forceDisconnect)
+        }
+        XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
+        return slots
     }
 
     /// Quarantines eight calls from two other windows, which uses up the app-wide limit, so a capped
@@ -297,9 +368,9 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
     ) throws -> [MCPCodeStructureSettlementRegistry.Slot] {
         var quarantined: [MCPCodeStructureSettlementRegistry.Slot] = []
         for windowID in [1001, 1002] {
-            quarantined += capWindow(registry, windowID: windowID, from: .zero)
+            quarantined += try capWindow(registry, windowID: windowID, from: .zero)
             _ = try recover(registry, windowID: windowID, at: .seconds(101))
-            quarantined += capWindow(registry, windowID: windowID, from: .seconds(200))
+            quarantined += try capWindow(registry, windowID: windowID, from: .seconds(200))
             _ = try recover(registry, windowID: windowID, at: .seconds(301))
         }
         return quarantined
@@ -311,7 +382,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         windowID: Int,
         at now: Duration
     ) throws -> MCPCodeStructureSettlementRegistry.Recovery {
-        let slot = admittedSlot(registry, windowID: windowID, invocationID: UUID(), now: now)
+        let slot = try admittedSlot(registry, windowID: windowID, now: now)
         defer { _ = slot.closeBeforeExecutionExit() }
         return try XCTUnwrap(slot.recovery)
     }
@@ -341,18 +412,30 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         }
     }
 
+    private struct AdmissionRefused: Error, CustomStringConvertible {
+        let reason: MCPCodeStructureSettlementRegistry.BusyReason
+
+        var description: String {
+            "expected registry admission, but the registry refused the call: \(reason)"
+        }
+    }
+
+    /// Admits a call, or throws if the registry refuses it. The slot is held until teardown, after the
+    /// test's registry is released, so a test that stops early reports its failure instead of tripping the
+    /// registry's leak assertion when its locals go away.
     private func admittedSlot(
         _ registry: MCPCodeStructureSettlementRegistry,
         windowID: Int,
-        invocationID: UUID,
+        invocationID: UUID = UUID(),
+        connectionID: UUID = UUID(),
         now: Duration,
         handlerPhaseRecorder: MCPToolExecutionHandlerPhaseRecorder? = nil,
         commitState: DomainMutationCommitState? = nil,
         fence: MCPDomainInvocationFence? = nil
-    ) -> MCPCodeStructureSettlementRegistry.Slot {
+    ) throws -> MCPCodeStructureSettlementRegistry.Slot {
         switch registry.admit(
             windowID: windowID,
-            connectionID: UUID(),
+            connectionID: connectionID,
             invocationID: invocationID,
             toolName: "get_code_structure",
             now: now,
@@ -361,10 +444,10 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
             fence: fence
         ) {
         case let .admitted(slot):
+            addTeardownBlock { _ = slot.recordCompletion(.success) }
             return slot
-        case .busy:
-            XCTFail("expected registry admission")
-            fatalError("unreachable after XCTFail")
+        case let .busy(busy):
+            throw AdmissionRefused(reason: busy.reason)
         }
     }
 }
