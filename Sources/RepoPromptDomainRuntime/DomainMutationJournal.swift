@@ -407,17 +407,157 @@ package actor DomainMutationJournal {
     }
 }
 
-package actor DomainMutationCommitState {
-    private var didBeginCommit = false
+/// Thrown by `willCommit` after a deadline or cancellation revoked the mutation before its commit began.
+package struct DomainMutationCommitRevokedError: Error, Equatable, LocalizedError, Sendable {
+    package let origin: MCPToolExecutionCancellationOrigin?
 
-    package func beginIfNeeded(_ operation: @Sendable () async throws -> Void) async throws {
-        guard !didBeginCommit else { return }
-        try await operation()
-        didBeginCommit = true
+    package init(origin: MCPToolExecutionCancellationOrigin?) {
+        self.origin = origin
+    }
+
+    package var errorDescription: String? {
+        if let origin {
+            return "The mutation was revoked by \(origin.rawValue) before its commit began; nothing was applied."
+        }
+        return "The mutation was already finalizing, so its commit could not begin; nothing was applied."
+    }
+}
+
+/// Decides, for one protected mutation invocation, whether its commit begins or a deadline or
+/// cancellation revokes it first. Both decisions are taken under one lock, so exactly one wins, and the
+/// watchdog can read and revoke synchronously.
+package final class DomainMutationCommitState: @unchecked Sendable {
+    package enum Phase: Equatable, Sendable {
+        case preCommit
+        case revoked(MCPToolExecutionCancellationOrigin)
+        case preparingCommit
+        case preparationFailed
+        case commitStarted
+        case finalizing(afterCommit: Bool)
+        case settled(DomainProtectedMutationState)
+    }
+
+    package enum FinalizationRoute: Equatable, Sendable {
+        case beforeCommit(revoked: Bool)
+        case afterCommit
+        case alreadyFinalizing
+    }
+
+    private let lock = NSLock()
+    private var phase: Phase = .preCommit
+    private var preparation: Task<Void, Error>?
+
+    package init() {}
+
+    package var currentPhase: Phase {
+        lock.withLock { phase }
+    }
+
+    /// The mutation state a reply chosen now may claim. Once preparation has begun, the commit may have
+    /// started, so the state stays indeterminate until finalization settles it.
+    package var replyState: DomainProtectedMutationState {
+        switch currentPhase {
+        case .preCommit:
+            .unknown
+        case .revoked, .preparationFailed, .finalizing(afterCommit: false):
+            .notApplied
+        case .preparingCommit, .commitStarted, .finalizing(afterCommit: true):
+            .indeterminateAfterCommit
+        case let .settled(state):
+            state
+        }
     }
 
     package func hasBegunCommit() -> Bool {
-        didBeginCommit
+        lock.withLock {
+            switch phase {
+            case .commitStarted, .finalizing(afterCommit: true):
+                true
+            case let .settled(state):
+                state == .applied || state == .indeterminateAfterCommit
+            case .preCommit, .revoked, .preparingCommit, .preparationFailed, .finalizing(afterCommit: false):
+                false
+            }
+        }
+    }
+
+    /// Begins the commit unless a revocation won first. Concurrent callers share one preparation, and
+    /// the phase leaves `preCommit` before the preparation is awaited, so a revocation arriving during
+    /// preparation loses.
+    package func beginIfNeeded(_ prepare: @escaping @Sendable () async throws -> Void) async throws {
+        let task: Task<Void, Error> = try lock.withLock {
+            switch phase {
+            case .preCommit:
+                try Task.checkCancellation()
+                phase = .preparingCommit
+                let task = Task { try await prepare() }
+                preparation = task
+                return task
+            case let .revoked(origin):
+                throw DomainMutationCommitRevokedError(origin: origin)
+            case .preparingCommit, .preparationFailed, .commitStarted:
+                guard let preparation else {
+                    preconditionFailure("A started commit keeps its preparation task")
+                }
+                return preparation
+            case .finalizing, .settled:
+                throw DomainMutationCommitRevokedError(origin: nil)
+            }
+        }
+        let result = await withTaskCancellationHandler {
+            await task.result
+        } onCancel: {
+            task.cancel()
+        }
+        lock.withLock {
+            if phase == .preparingCommit {
+                if case .success = result {
+                    phase = .commitStarted
+                } else {
+                    phase = .preparationFailed
+                }
+            }
+        }
+        try result.get()
+    }
+
+    /// Revokes the mutation if its commit has not begun. Returns whether the revocation won.
+    @discardableResult
+    package func revoke(origin: MCPToolExecutionCancellationOrigin) -> Bool {
+        lock.withLock {
+            switch phase {
+            case .preCommit:
+                phase = .revoked(origin)
+                return true
+            case .revoked:
+                return true
+            case .preparingCommit, .preparationFailed, .commitStarted, .finalizing, .settled:
+                return false
+            }
+        }
+    }
+
+    /// Claims the single finalization for this invocation and says which journal path it takes.
+    package func beginFinalization() -> FinalizationRoute {
+        lock.withLock {
+            switch phase {
+            case .preCommit, .preparationFailed:
+                phase = .finalizing(afterCommit: false)
+                return .beforeCommit(revoked: false)
+            case .revoked:
+                phase = .finalizing(afterCommit: false)
+                return .beforeCommit(revoked: true)
+            case .preparingCommit, .commitStarted:
+                phase = .finalizing(afterCommit: true)
+                return .afterCommit
+            case .finalizing, .settled:
+                return .alreadyFinalizing
+            }
+        }
+    }
+
+    package func settle(_ state: DomainProtectedMutationState) {
+        lock.withLock { phase = .settled(state) }
     }
 }
 
@@ -432,21 +572,25 @@ package struct DomainMutationPhysicalRootMapping: Hashable, Sendable {
 }
 
 package struct DomainMutationCommitController: Sendable {
+    package let operationID: String?
     private let admitOperation: @Sendable ([String], [DomainMutationPhysicalRootMapping]) async throws -> Void
     private let physicalGuardOperation: @Sendable () async throws -> DomainMutationPhysicalCommitGuard?
     private let commitOperation: @Sendable () async throws -> Void
 
     package init(
+        operationID: String? = nil,
         admitPhysicalTargets: @Sendable @escaping ([String], [DomainMutationPhysicalRootMapping]) async throws -> Void = { _, _ in },
         physicalMutationGuard: @Sendable @escaping () async throws -> DomainMutationPhysicalCommitGuard? = { nil },
         willCommit: @Sendable @escaping () async throws -> Void
     ) {
+        self.operationID = operationID
         admitOperation = admitPhysicalTargets
         physicalGuardOperation = physicalMutationGuard
         commitOperation = willCommit
     }
 
     package init(operation: @Sendable @escaping () async throws -> Void) {
+        operationID = nil
         admitOperation = { _, _ in }
         physicalGuardOperation = { nil }
         commitOperation = operation
@@ -470,6 +614,14 @@ package struct DomainMutationCommitController: Sendable {
 
 package enum MCPDomainMutationCommitContext {
     @TaskLocal package static var controller: DomainMutationCommitController?
+    /// The arbiter the MCP host created for this invocation, so its watchdog and the protected provider
+    /// share one commit decision. Direct and headless execution leave it unset.
+    @TaskLocal package static var invocationCommitState: DomainMutationCommitState?
+
+    /// The protected mutation's operation identity: the supplied `operation_id`, else the server invocation ID.
+    package static var operationID: String? {
+        controller?.operationID
+    }
 
     package static func admitPhysicalTargets(
         _ paths: [String],

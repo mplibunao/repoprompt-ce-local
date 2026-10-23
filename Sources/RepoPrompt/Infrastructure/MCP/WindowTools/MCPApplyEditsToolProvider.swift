@@ -113,7 +113,7 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
         _ input: WorkspaceExactFileInput,
         namespace: WorkspaceExactFileNamespace,
         store: WorkspaceFileContextStore,
-        timeout: Duration = .seconds(MCPTimeoutPolicy.workspaceFreshnessWaitTimeoutSeconds)
+        timeout: Duration
     ) async throws -> WorkspaceExactExistingFileResolution {
         MCPToolExecutionHandlerPhaseContext.report(.applyEditsFreshness)
         _ = try await store.awaitAppliedIngressForExplicitRequest(
@@ -130,6 +130,13 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
     }
 
     private func executeApplyEdits(args: [String: Value]) async throws -> EditSummary {
+        // The protected-mutation wrapper owns the identity: the supplied operation_id, else the server
+        // invocation ID. The fallbacks serve direct calls that bypass the wrapper.
+        let suppliedOperationID = args["operation_id"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let operationID = MCPDomainMutationCommitContext.operationID
+            ?? suppliedOperationID.flatMap { $0.isEmpty ? nil : $0 }
+            ?? MCPDomainInvocationSecurityContext.current?.invocationID.uuidString
         var requestPath: String? = nil
         var requestForRetryableFailure: ApplyEditsRequest?
         do {
@@ -138,9 +145,6 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
             }
             requestPath = request.path
             requestForRetryableFailure = request
-            let suppliedOperationID = args["operation_id"]?.stringValue?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let operationID = suppliedOperationID.flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
             MCPToolExecutionHandlerPhaseContext.report(.applyEditsRouting)
             let metadata = await dependencies.context.captureRequestMetadata()
             let (resolvedContext, lookupContext) = try await dependencies.selection.resolveMutationFileToolContext(
@@ -150,13 +154,13 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
             if let failure = MCPMutationRetryableFailure.unresolvedRouteFailure(
                 for: resolvedContext.snapshot
             ) {
-                return Self.retryableFailureSummary(request: request, failure: failure)
+                return Self.retryableFailureSummary(request: request, failure: failure, operationID: operationID)
             }
             if let failure = await MCPMutationRetryableFailure.mutationScopeFailure(
                 for: lookupContext,
                 store: dependencies.context.promptVM.workspaceFileContextStore
             ) {
-                return Self.retryableFailureSummary(request: request, failure: failure)
+                return Self.retryableFailureSummary(request: request, failure: failure, operationID: operationID)
             }
             let exactInput: WorkspaceExactFileInput
             do {
@@ -173,12 +177,14 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
                 resolution = try await Self.resolveMutationTargetAfterFreshness(
                     exactInput,
                     namespace: namespace,
-                    store: store
+                    store: store,
+                    timeout: MCPTimeoutPolicy.mutationPreflightFreshnessWaitTimeout
                 )
             } catch is WorkspaceAppliedIngressWaitError {
                 return Self.retryableFailureSummary(
                     request: request,
-                    failure: .workspaceFreshnessUnavailable()
+                    failure: .workspaceFreshnessUnavailable(),
+                    operationID: operationID
                 )
             }
             let effectivePath: String
@@ -271,7 +277,7 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
                 let preview = try await service.preview(previewRequest)
                 let previewResult = preview.result
                 if previewResult.editsApplied == 0 {
-                    return editSummary(from: previewResult, path: displayPath)
+                    return editSummary(from: previewResult, path: displayPath, operationID: operationID)
                 }
                 let reviewUnifiedDiff = previewResult.unifiedDiffForToolCard(filePath: displayPath)
                     ?? "No textual diff available for this apply_edits request."
@@ -342,7 +348,9 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
                         noteOverride: "Rejected by user: \(reason)",
                         reviewStatus: "rejected",
                         rejectionReason: reason,
-                        requiresUserApproval: true
+                        requiresUserApproval: true,
+                        operationID: operationID,
+                        mutationApplied: false
                     )
                 case .timeout:
                     return editSummary(
@@ -351,7 +359,9 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
                         statusOverride: "failed",
                         noteOverride: "Timed out waiting for apply_edits review approval",
                         reviewStatus: "timeout",
-                        requiresUserApproval: true
+                        requiresUserApproval: true,
+                        operationID: operationID,
+                        mutationApplied: false
                     )
                 case let .cancelled(reason):
                     return editSummary(
@@ -361,7 +371,9 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
                         noteOverride: "Apply edits review was cancelled: \(reason)",
                         reviewStatus: "cancelled",
                         rejectionReason: reason,
-                        requiresUserApproval: true
+                        requiresUserApproval: true,
+                        operationID: operationID,
+                        mutationApplied: false
                     )
                 }
             }
@@ -396,14 +408,18 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
             return editSummary(
                 from: result,
                 path: displayPath,
-                operationID: result.editsApplied > 0 ? operationID : nil,
+                operationID: operationID,
                 freshness: freshness
             )
         } catch is CancellationError {
             throw CancellationError()
         } catch let failure as MCPMutationRetryableFailure {
             guard let requestForRetryableFailure else { throw MCPError.internalError(failure.errorMessage) }
-            return Self.retryableFailureSummary(request: requestForRetryableFailure, failure: failure)
+            return Self.retryableFailureSummary(
+                request: requestForRetryableFailure,
+                failure: failure,
+                operationID: operationID
+            )
         } catch let error as FileManagerError {
             throw await dependencies.context.mapFileManagerErrorToMCP(error, MCPWindowToolName.applyEdits, requestPath)
         } catch let error as ApplyEditsError {
@@ -436,7 +452,8 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
 
     private static func retryableFailureSummary(
         request: ApplyEditsRequest,
-        failure: MCPMutationRetryableFailure
+        failure: MCPMutationRetryableFailure,
+        operationID: String?
     ) -> EditSummary {
         EditSummary(
             status: "failed",
@@ -459,7 +476,9 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
             errorCode: failure.errorCode,
             retryable: failure.retryable,
             retryAfterMilliseconds: failure.retryAfterMilliseconds,
-            suggestion: failure.suggestion
+            suggestion: failure.suggestion,
+            operationID: operationID,
+            mutationState: operationID == nil ? nil : "not_applied"
         )
     }
 
@@ -505,10 +524,12 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
         reviewStatus: String? = nil,
         rejectionReason: String? = nil,
         requiresUserApproval: Bool? = nil,
-        operationID: String? = nil,
+        operationID: String?,
+        mutationApplied: Bool? = nil,
         freshness: String? = nil
     ) -> EditSummary {
         let lineStats = result.toolCardLineStats()
+        let applied = mutationApplied ?? (result.editsApplied > 0)
         return EditSummary(
             status: statusOverride ?? result.status.rawValue,
             editsRequested: result.editsRequested,
@@ -527,7 +548,7 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
             rejectionReason: rejectionReason,
             requiresUserApproval: requiresUserApproval,
             operationID: operationID,
-            mutationState: operationID == nil ? nil : "applied",
+            mutationState: operationID == nil ? nil : (applied ? "applied" : "not_applied"),
             freshness: freshness
         )
     }

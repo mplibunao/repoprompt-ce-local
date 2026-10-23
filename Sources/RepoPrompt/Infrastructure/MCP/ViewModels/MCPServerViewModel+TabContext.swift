@@ -4398,12 +4398,21 @@ extension MCPServerViewModel {
         return .restored
     }
 
+    /// Commits the protected mutation in progress, if any, after the context resolves and right before
+    /// the change publishes, so a deadline that lands while the context is still resolving revokes the
+    /// mutation and nothing publishes.
     @MainActor
     func updateCurrentTabContext(
         toolName: String,
         mutation: (inout TabContextSnapshot) -> Void
     ) async throws {
         var (connectionID, context) = try await contextForCurrentRequest(toolName: toolName)
+        #if DEBUG
+            if let debugBeforeTabContextMutationCommitForTesting {
+                await debugBeforeTabContextMutationCommitForTesting()
+            }
+        #endif
+        try await MCPDomainMutationCommitContext.willCommit()
         let previousPrompt = context.promptText
         mutation(&context)
         if context.promptText != previousPrompt {

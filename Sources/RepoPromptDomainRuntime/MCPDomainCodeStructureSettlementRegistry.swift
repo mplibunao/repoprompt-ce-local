@@ -100,6 +100,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         package let providerCompleted: Bool
         package let handlerPhase: MCPToolExecutionHandlerPhaseSnapshot?
         package let handlerPhaseAge: Duration?
+        /// Set for a protected mutation: what it may claim was applied when the snapshot was taken.
+        package let mutationState: DomainProtectedMutationState?
     }
 
     package struct Diagnostics: Equatable, Sendable {
@@ -200,6 +202,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         let invocationID: UUID
         let toolName: String
         let handlerPhaseRecorder: MCPToolExecutionHandlerPhaseRecorder?
+        let commitState: DomainMutationCommitState?
         let admittedAt: Duration
         var state: State
         var blockingSince: Duration?
@@ -234,7 +237,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         invocationID: UUID,
         toolName: String,
         now: Duration,
-        handlerPhaseRecorder: MCPToolExecutionHandlerPhaseRecorder? = nil
+        handlerPhaseRecorder: MCPToolExecutionHandlerPhaseRecorder? = nil,
+        commitState: DomainMutationCommitState? = nil
     ) -> Admission {
         let decision: AdmissionDecision = lock.withLock {
             var entries = entriesByWindowID[windowID, default: [:]]
@@ -280,6 +284,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                 invocationID: invocationID,
                 toolName: toolName,
                 handlerPhaseRecorder: handlerPhaseRecorder,
+                commitState: commitState,
                 admittedAt: now,
                 state: .reserved,
                 blockingSince: nil,
@@ -354,7 +359,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                     isReleased: entry.isReleased,
                     providerCompleted: entry.state.providerCompleted,
                     handlerPhase: handlerPhase,
-                    handlerPhaseAge: handlerPhaseAge
+                    handlerPhaseAge: handlerPhaseAge,
+                    mutationState: entry.commitState?.replyState
                 )
             }
         return Diagnostics(

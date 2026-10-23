@@ -128,6 +128,58 @@ import XCTest
             XCTAssertEqual(cleanupDisposition, .detachAndSettle)
         }
 
+        func testMutationCommitAndRevocationHaveOneWinner() async throws {
+            let rootURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MutationCommitRevocation-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: rootURL) }
+            let service = try await FileSystemService(path: rootURL.path)
+
+            // Revocation first: the write is refused at its commit, after the path reservation and before
+            // any I/O, and the refusal releases the reservation.
+            let revoked = DomainMutationCommitState()
+            XCTAssertTrue(revoked.revoke(origin: .watchdogDeadline))
+            let revokedController = DomainMutationCommitController(willCommit: {
+                try await revoked.beginIfNeeded {
+                    XCTFail("A revoked mutation must not prepare its commit")
+                }
+            })
+            do {
+                try await MCPDomainMutationCommitContext.$controller.withValue(revokedController) {
+                    try await service.createFile(atRelativePath: "Target.txt", content: "late\n")
+                }
+                XCTFail("Expected the revoked commit to be refused")
+            } catch let error as DomainMutationCommitRevokedError {
+                XCTAssertEqual(error.origin, .watchdogDeadline)
+            }
+            let targetPath = rootURL.appendingPathComponent("Target.txt").path
+            XCTAssertFalse(FileManager.default.fileExists(atPath: targetPath))
+            XCTAssertEqual(revoked.replyState, .notApplied)
+            try await service.createFile(atRelativePath: "Target.txt", content: "next\n")
+            XCTAssertEqual(try String(contentsOfFile: targetPath, encoding: .utf8), "next\n")
+
+            // Commit first: once preparation has begun, revocation loses, the reply stays indeterminate,
+            // and a competing caller shares the one preparation.
+            let committing = DomainMutationCommitState()
+            let preparation = MCPExecutionIgnoringCancellationGate()
+            let owner = Task {
+                try await committing.beginIfNeeded { await preparation.enterAndWait() }
+            }
+            try await preparation.waitUntilEntered(count: 1)
+            XCTAssertFalse(committing.revoke(origin: .watchdogDeadline))
+            XCTAssertEqual(committing.replyState, .indeterminateAfterCommit)
+            let competitor = Task {
+                try await committing.beginIfNeeded { await preparation.enterAndWait() }
+            }
+            await preparation.release()
+            try await owner.value
+            try await competitor.value
+            let preparationCount = await preparation.enteredCount()
+            XCTAssertEqual(preparationCount, 1)
+            XCTAssertTrue(committing.hasBegunCommit())
+            XCTAssertEqual(committing.beginFinalization(), .afterCommit)
+        }
+
         func testConnectionPermitReleasedWhenDeadlineExpiresImmediatelyAfterHandoff() async throws {
             let limiter = MCPDomainAsyncLimiter(limit: 1)
             let holderGate = AdmissionDeadlineGate()

@@ -48,6 +48,9 @@ package struct ApplyEditsEngine {
                 replaceAll: false,
                 treatAsRewrite: true
             )
+            guard let single else {
+                return unchangedResult(originalText: originalText)
+            }
             return buildResult(
                 originalText: originalText,
                 updatedText: single.updatedText,
@@ -71,6 +74,9 @@ package struct ApplyEditsEngine {
                 replaceAll: replaceAll,
                 treatAsRewrite: false
             )
+            guard let single else {
+                return unchangedResult(originalText: originalText)
+            }
             return buildResult(
                 originalText: originalText,
                 updatedText: single.updatedText,
@@ -96,6 +102,8 @@ package struct ApplyEditsEngine {
         }
     }
 
+    /// Returns nil when the request leaves the file as it is: a rewrite with the file's current content,
+    /// or a replacement whose text equals the text it matched.
     private func applySingle(
         filePath: String,
         originalText: String,
@@ -103,7 +111,7 @@ package struct ApplyEditsEngine {
         replace: String,
         replaceAll: Bool,
         treatAsRewrite: Bool
-    ) async throws -> (updatedText: String, diffChunks: [DiffChunk]) {
+    ) async throws -> (updatedText: String, diffChunks: [DiffChunk])? {
         var effectiveSearch = search
         var effectiveReplace = replace
         if let search, !treatAsRewrite {
@@ -126,6 +134,10 @@ package struct ApplyEditsEngine {
                 treatAsRewrite: treatAsRewrite
             )
         }
+        let isLiteralNoOp = treatAsRewrite ? effectiveReplace == originalText : effectiveSearch == effectiveReplace
+        if diffChunks.isEmpty, isLiteralNoOp {
+            return nil
+        }
         let updatedText = try EditFlowPerf.measure(
             EditFlowPerf.Stage.ApplyEdits.patchApply,
             EditFlowPerf.Dimensions(chunkCount: diffChunks.count)
@@ -136,6 +148,23 @@ package struct ApplyEditsEngine {
             )
         }
         return (updatedText: updatedText, diffChunks: diffChunks)
+    }
+
+    private func unchangedResult(originalText: String) -> ApplyEditsResult {
+        ApplyEditsResult(
+            updatedText: originalText,
+            diffChunks: [],
+            unifiedDiff: nil,
+            toolCardUnifiedDiff: nil,
+            stats: nil,
+            note: "The requested content already matches the file; nothing was written.",
+            fileCreated: false,
+            fileOverwritten: false,
+            editsRequested: 1,
+            editsApplied: 0,
+            status: .success,
+            outcomes: nil
+        )
     }
 
     private func applyBatch(

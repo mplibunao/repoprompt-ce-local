@@ -587,6 +587,13 @@ final class MCPServerViewModel: ObservableObject {
         var debugBeforeFileToolLookupContextResolutionForTesting: (@MainActor @Sendable () async -> Void)?
         var debugAfterFileToolLookupContextRootValidationForTesting: (@MainActor @Sendable () async -> Void)?
         var debugFileToolLookupContextDidCoalesceForTesting: (@MainActor @Sendable () async -> Void)?
+        var debugBeforeTabContextMutationCommitForTesting: (@MainActor @Sendable () async -> Void)?
+
+        func setBeforeTabContextMutationCommitForTesting(
+            _ handler: (@MainActor @Sendable () async -> Void)?
+        ) {
+            debugBeforeTabContextMutationCommitForTesting = handler
+        }
 
         func setBeforeFileToolLookupContextResolutionForTesting(
             _ handler: (@MainActor @Sendable () async -> Void)?

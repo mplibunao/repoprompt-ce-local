@@ -201,9 +201,12 @@ import RepoPromptShared
                     executionDeadlineSeconds: deadline.mcpSeconds,
                     cleanupGraceSeconds: cancellationGrace.mcpSeconds,
                     cleanupDisposition: cleanupDisposition,
-                    expectedActiveDuration: "Ordinary dispatch must complete within \(MCPTimeoutPolicy.boundedToolExecutionDeadlineSeconds) seconds.",
+                    expectedActiveDuration: "Ordinary dispatch must complete within \(deadline.mcpSeconds.formatted()) seconds.",
                     evidence: "ServerNetworkManager applies MCPToolExecutionWatchdog at the resolved provider boundary.",
                     qualification: cleanupDisposition == .detachAndSettle
+                        && MCPToolExecutionContractCatalog.slotlessDetachToolNames.contains(toolName)
+                        ? "A deadline revokes a mutation whose commit has not begun. A provider that ignores cancellation detaches without a settlement slot, so it never fences the window's reads; its journal record and filesystem mutation authority keep it accounted until it finishes."
+                        : cleanupDisposition == .detachAndSettle
                         ? "A per-window settlement fence rejects later structure calls while any detached, abandoned, or force-disconnecting lease remains. The number that may remain fenced after ordinary permits and publication ownership are released is bounded by the already-admitted same-window calls: only one grace-expiring call may detach, request-cancelled calls become abandoned, and competing grace expiry resolves atomically to force-disconnect. Exact late settlement clears only its invocation lease. The provider's fixed 10-second readiness ceiling remains the liveness guarantee without a second registry TTL."
                         : "Cancellation must release provider, limiter, ownership, and run-registration state; an uncooperative handler force-disconnects its connection after grace.",
                     semanticWaitMaximumSeconds: semanticWaitMaximumSeconds,

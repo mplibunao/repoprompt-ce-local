@@ -250,7 +250,7 @@ package struct MCPDomainProtectedMutationToolProvider: Sendable {
             MCPDomainProtectedMutationSettlementContext.report(.applied, operationID: operationID)
             return result
         case let .execute(ticket):
-            let commitState = DomainMutationCommitState()
+            let commitState = Self.adoptedCommitState() ?? DomainMutationCommitState()
             let admissionState = DomainMutationPhysicalAdmissionState(
                 operation: operation,
                 securityContext: securityContext,
@@ -261,12 +261,13 @@ package struct MCPDomainProtectedMutationToolProvider: Sendable {
                 ticket: ticket
             )
             let controller = DomainMutationCommitController(
+                operationID: operationID,
                 admitPhysicalTargets: { paths, mappings in
                     MCPToolExecutionHandlerPhaseContext.report(.protectedMutationPhysicalAdmission)
                     try await admissionState.admit(paths: paths, rootMappings: mappings)
                 },
                 physicalMutationGuard: {
-                    guard await commitState.hasBegunCommit() else { return nil }
+                    guard commitState.hasBegunCommit() else { return nil }
                     MCPToolExecutionHandlerPhaseContext.report(.protectedMutationPhysicalGuard)
                     return try await admissionState.physicalMutationGuard()
                 },
@@ -277,40 +278,69 @@ package struct MCPDomainProtectedMutationToolProvider: Sendable {
                     }
                 }
             )
+            let outcome: Result<Value, Error>
             do {
-                let result = try await MCPDomainMutationCommitContext.$controller.withValue(controller) {
+                outcome = try await .success(MCPDomainMutationCommitContext.$controller.withValue(controller) {
                     try await binding(effectiveArguments)
-                }
-                MCPToolExecutionHandlerPhaseContext.report(.protectedMutationJournalFinalization)
-                let didBeginCommit = await commitState.hasBegunCommit()
-                if Task.isCancelled, didBeginCommit {
-                    try await finishIndeterminateAfterCommitAndThrow(
-                        journal: journal,
-                        ticket: ticket,
-                        operationID: operationID
-                    )
-                }
-                try await detachedFinishApplied(journal: journal, ticket: ticket, result: result)
-                MCPDomainProtectedMutationSettlementContext.report(.applied, operationID: operationID)
-                return result
+                })
             } catch let error as DomainProtectedMutationError {
                 throw error
             } catch {
-                MCPToolExecutionHandlerPhaseContext.report(.protectedMutationJournalFinalization)
-                let didBeginCommit = await commitState.hasBegunCommit()
-                if didBeginCommit {
+                outcome = .failure(error)
+            }
+            MCPToolExecutionHandlerPhaseContext.report(.protectedMutationJournalFinalization)
+            switch (commitState.beginFinalization(), outcome) {
+            case (.alreadyFinalizing, _):
+                // Another protected binding in this invocation already owns finalization.
+                throw DomainMutationJournalError.ownershipLost(operationID)
+            case let (.afterCommit, .success(result)):
+                if Task.isCancelled {
                     try await finishIndeterminateAfterCommitAndThrow(
                         journal: journal,
                         ticket: ticket,
+                        commitState: commitState,
                         operationID: operationID
                     )
                 }
                 do {
+                    try await detachedFinishApplied(journal: journal, ticket: ticket, result: result)
+                } catch {
+                    try await finishIndeterminateAfterCommitAndThrow(
+                        journal: journal,
+                        ticket: ticket,
+                        commitState: commitState,
+                        operationID: operationID
+                    )
+                }
+                commitState.settle(.applied)
+                MCPDomainProtectedMutationSettlementContext.report(.applied, operationID: operationID)
+                return result
+            case (.afterCommit, .failure):
+                try await finishIndeterminateAfterCommitAndThrow(
+                    journal: journal,
+                    ticket: ticket,
+                    commitState: commitState,
+                    operationID: operationID
+                )
+            case let (.beforeCommit(revoked), .success(result)):
+                // The provider answered without committing: a rejected or timed-out review, a no-op, or a
+                // retryable refusal. The reply stands; the journal records that nothing was applied.
+                try? await detachedFinishBeforeCommit(
+                    journal: journal,
+                    ticket: ticket,
+                    cancelled: revoked || Task.isCancelled
+                )
+                commitState.settle(.notApplied)
+                MCPDomainProtectedMutationSettlementContext.report(.notApplied, operationID: operationID)
+                return result
+            case let (.beforeCommit(revoked), .failure(error)):
+                do {
                     try await detachedFinishBeforeCommit(
                         journal: journal,
                         ticket: ticket,
-                        cancelled: MCPToolExecutionCancelledError.matches(error)
+                        cancelled: revoked || MCPToolExecutionCancelledError.matches(error)
                     )
+                    commitState.settle(.notApplied)
                     MCPDomainProtectedMutationSettlementContext.report(.notApplied, operationID: operationID)
                 } catch {
                     // Preserve the provider failure while leaving settlement unknown if the authority
@@ -319,6 +349,22 @@ package struct MCPDomainProtectedMutationToolProvider: Sendable {
                 throw error
             }
         }
+    }
+
+    /// Adopts the host's arbiter only while no other protected binding has used it, so one invocation
+    /// keeps one commit decision and one finalization owner.
+    private static func adoptedCommitState() -> DomainMutationCommitState? {
+        guard let commitState = MCPDomainMutationCommitContext.invocationCommitState else { return nil }
+        switch commitState.currentPhase {
+        case .preCommit, .revoked:
+            return commitState
+        case .preparingCommit, .preparationFailed, .commitStarted, .finalizing, .settled:
+            return nil
+        }
+    }
+
+    package static func isDurableMutation(toolName: String, arguments: [String: Value]) -> Bool {
+        isDurableMutationFamily(toolName) && operation(toolName: toolName, arguments: arguments) != nil
     }
 
     private static func isDurableMutationFamily(_ toolName: String) -> Bool {
@@ -425,9 +471,11 @@ package struct MCPDomainProtectedMutationToolProvider: Sendable {
     private static func finishIndeterminateAfterCommitAndThrow(
         journal: DomainMutationJournal,
         ticket: DomainMutationJournalTicket,
+        commitState: DomainMutationCommitState,
         operationID: String
     ) async throws -> Never {
         try? await detachedFinishIndeterminate(journal: journal, ticket: ticket)
+        commitState.settle(.indeterminateAfterCommit)
         MCPDomainProtectedMutationSettlementContext.report(
             .indeterminateAfterCommit,
             operationID: operationID

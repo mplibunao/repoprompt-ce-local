@@ -162,7 +162,6 @@ final class MCPPromptContextToolProvider {
             return try Value(simplePromptReply(tabContext.promptText, op: operation.rawValue))
         case .set:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for set") }
-            try await MCPDomainMutationCommitContext.willCommit()
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
             try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText = text }
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationReplyConstruction)
@@ -170,14 +169,12 @@ final class MCPPromptContextToolProvider {
             return try Value(simplePromptReply(context.promptText, op: operation.rawValue))
         case .append:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for append") }
-            try await MCPDomainMutationCommitContext.willCommit()
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
             try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText += text }
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationReplyConstruction)
             let context = try await dependencies.execution.requireCurrentTabContext(MCPWindowToolName.prompt)
             return try Value(simplePromptReply(context.promptText, op: operation.rawValue))
         case .clear:
-            try await MCPDomainMutationCommitContext.willCommit()
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
             try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText = "" }
             return try Value(simplePromptReply("", op: operation.rawValue))
@@ -188,13 +185,20 @@ final class MCPPromptContextToolProvider {
                 throw MCPError.invalidParams("select_preset requires an explicitly bound tab (bind_context or _tabID). It is disabled for run-based bindings; use copy_preset override in workspace_context or export instead.")
             }
             let preset = try await resolveRequiredPreset(args["preset"])
-            try await MCPDomainMutationCommitContext.willCommit()
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
-            await MainActor.run { dependencies.context.promptVM.selectCopyPreset(preset.id) }
+            try await publishAfterCommit { dependencies.context.promptVM.selectCopyPreset(preset.id) }
             return try Value(ToolResultDTOs.PromptToolEnvelope.forSelectPreset(dependencies.prompt.copyPresetDescriptorDTO(preset)))
         case .snapshot, .listPresets, .unknown:
             throw MCPError.invalidParams("Unsupported op '\(operation.rawValue)' for prompt when tab context is active")
         }
+    }
+
+    /// Commits the protected mutation in progress and then publishes on the main actor with no
+    /// suspension between them, so a deadline before the commit leaves nothing published.
+    @MainActor
+    private func publishAfterCommit(_ publish: @MainActor () -> Void) async throws {
+        try await MCPDomainMutationCommitContext.willCommit()
+        publish()
     }
 
     /// Refreshes only the exact canonical selection consumed after the legacy selection queue

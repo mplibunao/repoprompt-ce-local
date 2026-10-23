@@ -68,6 +68,9 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
     /// always-emitted events of window-scoped calls.
     let blockingProviderCount: Int?
     let releasedProviderCount: Int?
+    /// Set for protected mutations: what the call may claim was applied when the event was built.
+    let mutationState: DomainProtectedMutationState?
+    let mutationOperationID: String?
 
     init(
         toolName: String,
@@ -92,7 +95,9 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         handlerPhaseAgeMilliseconds: Double?,
         windowID: Int? = nil,
         blockingProviderCount: Int? = nil,
-        releasedProviderCount: Int? = nil
+        releasedProviderCount: Int? = nil,
+        mutationState: DomainProtectedMutationState? = nil,
+        mutationOperationID: String? = nil
     ) {
         self.toolName = toolName
         self.operationIdentity = operationIdentity
@@ -117,6 +122,8 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         self.windowID = windowID
         self.blockingProviderCount = blockingProviderCount
         self.releasedProviderCount = releasedProviderCount
+        self.mutationState = mutationState
+        self.mutationOperationID = mutationOperationID
     }
 
     var isAlwaysEmitted: Bool {
@@ -168,6 +175,8 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         }
         if let blockingProviderCount { fields.append("blocking_count=\(blockingProviderCount)") }
         if let releasedProviderCount { fields.append("released_count=\(releasedProviderCount)") }
+        if let mutationState { fields.append("mutation_state=\(mutationState.rawValue)") }
+        if let mutationOperationID { fields.append("operation_id=\(mutationOperationID)") }
         return fields.joined(separator: " ")
     }
 }

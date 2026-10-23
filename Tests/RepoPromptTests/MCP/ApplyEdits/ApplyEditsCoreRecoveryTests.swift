@@ -174,6 +174,23 @@ final class ApplyEditsCoreRecoveryTests: XCTestCase {
         }
     }
 
+    func testRequestsThatLeaveTheFileAsItIsReturnAnUnchangedResult() async throws {
+        let original = "let value = 1\n"
+        for mode in [
+            ApplyEditsMode.rewrite(newText: original, onMissing: .error),
+            .single(search: "value", replace: "value", replaceAll: false)
+        ] {
+            let result = try await ApplyEditsEngine.default.apply(
+                request: ApplyEditsRequest(path: "file.swift", mode: mode, verbose: true),
+                to: original
+            )
+            XCTAssertEqual(result.status, .success, "\(mode)")
+            XCTAssertEqual(result.editsApplied, 0, "\(mode)")
+            XCTAssertEqual(result.updatedText, original, "\(mode)")
+            XCTAssertTrue(result.diffChunks.isEmpty, "\(mode)")
+        }
+    }
+
     func testRequestBuilderAcceptsBatchPayloadShapes() throws {
         struct Case {
             let name: String

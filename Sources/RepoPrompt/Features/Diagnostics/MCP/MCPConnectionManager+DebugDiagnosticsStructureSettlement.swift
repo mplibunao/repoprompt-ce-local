@@ -71,6 +71,9 @@ import MCP
                 if let handlerPhaseAge = lease.handlerPhaseAge {
                     entry["handler_phase_age_ms"] = handlerPhaseAge.mcpMilliseconds
                 }
+                if let mutationState = lease.mutationState {
+                    entry["mutation_state"] = mutationState.rawValue
+                }
                 return entry
             }
             return debugDiagnosticsResult([

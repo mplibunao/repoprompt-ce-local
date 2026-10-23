@@ -1187,9 +1187,18 @@ actor ServerNetworkManager {
         }
     }
 
-    private final class PromptExportMutationSettlementObservation: @unchecked Sendable {
+    /// What a protected mutation reported when it settled, and, for window mutations, the commit arbiter
+    /// that classifies a reply chosen before the provider settles.
+    private final class ProtectedMutationSettlementObservation: @unchecked Sendable {
         private let lock = NSLock()
         private var settlement: DomainProtectedMutationSettlement?
+        private let operationID: String
+        let commitState: DomainMutationCommitState?
+
+        init(operationID: String, commitState: DomainMutationCommitState? = nil) {
+            self.operationID = operationID
+            self.commitState = commitState
+        }
 
         func record(_ settlement: DomainProtectedMutationSettlement) {
             lock.lock()
@@ -1205,15 +1214,27 @@ actor ServerNetworkManager {
             return settlement
         }
 
+        /// The reported settlement once the provider has one; before that, the arbiter's classification.
+        var state: DomainProtectedMutationState {
+            if let reported = snapshot()?.state, reported != .unknown {
+                return reported
+            }
+            return commitState?.replyState ?? .unknown
+        }
+
+        var reportedOrResolvedOperationID: String {
+            snapshot()?.operationID ?? operationID
+        }
+
         func errorMetadata(toolName: String) -> [String: Value] {
-            let settlement = snapshot()
+            let state = state
             var metadata: [String: Value] = [
-                "mutation_state": .string(settlement?.state.rawValue ?? "unknown"),
-                "retryable": .bool(settlement?.state == .notApplied),
+                "mutation_state": .string(state.rawValue),
+                "retryable": .bool(state == .notApplied),
                 "tool": .string(toolName)
             ]
-            if let settlement {
-                metadata["operation_id"] = .string(settlement.operationID)
+            if commitState != nil || snapshot() != nil {
+                metadata["operation_id"] = .string(reportedOrResolvedOperationID)
             }
             return metadata
         }
@@ -1237,6 +1258,55 @@ actor ServerNetworkManager {
     }
 
     private struct PromptExportPublicationAuthorityLost: Error {}
+
+    /// Where a call's admission budget ran out.
+    enum CallAdmissionStage: String {
+        case connectionLane = "connection_lane"
+        case windowExclusive = "window_exclusive"
+        case preProvider = "pre_provider"
+    }
+
+    static func windowExclusiveAdmissionTimeout(
+        toolName: String,
+        stage: CallAdmissionStage,
+        invocationID: UUID,
+        operationID: String
+    ) -> (message: String, metadata: [String: Value]) {
+        (
+            message: "Tool '\(toolName)' did not start within its \(MCPTimeoutPolicy.windowExclusiveAdmissionTimeoutSeconds)-second admission budget (stage: \(stage.rawValue)). Another call held this connection's queue or this window's exclusive slot. Nothing was applied; retry shortly.",
+            metadata: [
+                "retryable": .bool(true),
+                "retry_after_ms": .int(1000),
+                "mutation_state": .string(DomainProtectedMutationState.notApplied.rawValue),
+                "admission_stage": .string(stage.rawValue),
+                "invocation_id": .string(invocationID.uuidString),
+                "operation_id": .string(operationID),
+                "tool": .string(toolName),
+                "settlement": .string("admission_timeout")
+            ]
+        )
+    }
+
+    static func windowExclusiveAdmissionTimeoutResult(
+        rawJSON: Bool,
+        toolName: String,
+        stage: CallAdmissionStage,
+        invocationID: UUID,
+        operationID: String
+    ) -> CallTool.Result {
+        let timeout = windowExclusiveAdmissionTimeout(
+            toolName: toolName,
+            stage: stage,
+            invocationID: invocationID,
+            operationID: operationID
+        )
+        return executionContractToolErrorResult(
+            rawJSON: rawJSON,
+            code: "tool_execution_admission_timeout",
+            message: timeout.message,
+            metadata: timeout.metadata
+        )
+    }
 
     static func executionContractToolErrorResult(
         rawJSON: Bool,
@@ -11678,7 +11748,8 @@ actor ServerNetworkManager {
             let capturedRawJSON = extractedRawJSON
             let isPromptExport = (toolName == "prompt" || toolName == "workspace_context")
                 && MCPPromptContextOperation.parse(toolName: toolName, arguments: cleanedArguments) == .export
-            let promptExportOperationID: String = {
+            // The protected-mutation identity: the supplied operation_id, else the server invocation ID.
+            let resolvedOperationID: String = {
                 let supplied = cleanedArguments["operation_id"]?.stringValue?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 return supplied.isEmpty ? invocationID.uuidString : supplied
@@ -11691,7 +11762,7 @@ actor ServerNetworkManager {
                     metadata: [
                         "retryable": .bool(false),
                         "mutation_state": .string("not_applied"),
-                        "operation_id": .string(promptExportOperationID),
+                        "operation_id": .string(resolvedOperationID),
                         "tool": .string(toolName)
                     ]
                 )
@@ -11743,8 +11814,38 @@ actor ServerNetworkManager {
                     cancellationOrigin: cancellationOrigin
                 )
             }()
-            func promptExportAdmissionTimeoutResultIfExpired() -> CallTool.Result? {
-                guard let promptExportExecutionEnvelope else { return nil }
+            // Window-exclusive calls share one admission budget, counted from arrival, across the
+            // connection lane, the window's exclusive lease, and the checks before provider entry.
+            let windowExclusiveAdmissionDeadline: MCPDomainAdmissionDeadline? = {
+                guard !isPromptExport,
+                      let catalogEntry = MCPDomainToolCatalog.entry(named: toolName),
+                      catalogEntry.scope == .window,
+                      catalogEntry.admissionClass == .exclusive
+                else { return nil }
+                return MCPDomainAdmissionDeadline(
+                    instant: executionWatchdogEnvironment.now() + MCPTimeoutPolicy.windowExclusiveAdmissionTimeout,
+                    now: executionWatchdogEnvironment.now,
+                    sleep: executionWatchdogEnvironment.sleep
+                )
+            }()
+            let callAdmissionDeadline = promptExportExecutionEnvelope?.admissionDeadline
+                ?? windowExclusiveAdmissionDeadline
+            @Sendable func admissionTimeoutResultIfExpired(stage: CallAdmissionStage) -> CallTool.Result? {
+                guard let promptExportExecutionEnvelope else {
+                    guard let windowExclusiveAdmissionDeadline else { return nil }
+                    do {
+                        try windowExclusiveAdmissionDeadline.check()
+                        return nil
+                    } catch {
+                        return Self.windowExclusiveAdmissionTimeoutResult(
+                            rawJSON: capturedRawJSON,
+                            toolName: toolName,
+                            stage: stage,
+                            invocationID: invocationID,
+                            operationID: resolvedOperationID
+                        )
+                    }
+                }
                 do {
                     try promptExportExecutionEnvelope.admissionDeadline.check()
                     return nil
@@ -11756,7 +11857,7 @@ actor ServerNetworkManager {
                         metadata: [
                             "retryable": .bool(true),
                             "mutation_state": .string("not_applied"),
-                            "operation_id": .string(promptExportOperationID),
+                            "operation_id": .string(resolvedOperationID),
                             "tool": .string(toolName),
                             "cancellation_origin": .string(promptExportExecutionEnvelope.cancellationOrigin.rawValue),
                             "settlement": .string("admission_timeout")
@@ -11764,7 +11865,7 @@ actor ServerNetworkManager {
                     )
                 }
             }
-            if let admissionTimeout = promptExportAdmissionTimeoutResultIfExpired() {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
                 return admissionTimeout
             }
             if let responseDeliveryRequestToken, let promptExportExecutionEnvelope {
@@ -11872,7 +11973,7 @@ actor ServerNetworkManager {
                     }
                 }
             }
-            if let admissionTimeout = promptExportAdmissionTimeoutResultIfExpired() {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
                 return admissionTimeout
             }
 
@@ -11991,7 +12092,7 @@ actor ServerNetworkManager {
                 )
             }
 
-            if let admissionTimeout = promptExportAdmissionTimeoutResultIfExpired() {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
                 return admissionTimeout
             }
 
@@ -12001,11 +12102,25 @@ actor ServerNetworkManager {
             let capturedPreResolvedWindowID = preResolvedWindowID
             let capturedArguments = dispatchArguments
             let capturedArgsForFormatter = argsForFormatter
-            let promptExportMutationObservation: PromptExportMutationSettlementObservation? = if isPromptExport {
-                PromptExportMutationSettlementObservation()
+            let promptExportMutationObservation: ProtectedMutationSettlementObservation? = if isPromptExport {
+                ProtectedMutationSettlementObservation(operationID: resolvedOperationID)
             } else {
                 nil
             }
+            // A window mutation gets one commit arbiter, shared by its watchdog and its protected provider,
+            // so a deadline or cancellation either revokes the mutation before its commit or loses to it.
+            let windowMutationObservation: ProtectedMutationSettlementObservation? =
+                if !isPromptExport,
+                MCPDomainProtectedMutationToolProvider.isDurableMutation(toolName: toolName, arguments: cleanedArguments) {
+                    ProtectedMutationSettlementObservation(
+                        operationID: resolvedOperationID,
+                        commitState: DomainMutationCommitState()
+                    )
+                } else {
+                    nil
+                }
+            let mutationObservation = promptExportMutationObservation ?? windowMutationObservation
+            let mutationCommitState = windowMutationObservation?.commitState
             let promptExportPublicationAuthorityObservation: PromptExportPublicationAuthorityObservation? = if isPromptExport {
                 PromptExportPublicationAuthorityObservation()
             } else {
@@ -12036,7 +12151,7 @@ actor ServerNetworkManager {
             // after window routing chooses the canonical application/window scope.
             let bypassWindowRoutingForSnapshot = Self.shouldBypassWindowRouting(for: toolName)
             connectionLog("tools/call \(toolName): reading MainActor routing state")
-            if let admissionTimeout = promptExportAdmissionTimeoutResultIfExpired() {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
                 return await finishRequestProgress(admissionTimeout)
             }
             let routingSnapshot: (Int, Bool) = await EditFlowPerf.measure(
@@ -12052,7 +12167,7 @@ actor ServerNetworkManager {
                     return (windows.count, effectiveMode)
                 }
             }
-            if let admissionTimeout = promptExportAdmissionTimeoutResultIfExpired() {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
                 return await finishRequestProgress(admissionTimeout)
             }
             connectionLog("tools/call \(toolName): routing state windowCount=\(routingSnapshot.0) multi=\(routingSnapshot.1)")
@@ -12067,7 +12182,7 @@ actor ServerNetworkManager {
             let admissionClass = preAdmissionDecision.admissionClass
             let callLane = admissionClass.connectionLane
             connectionLog("tools/call \(toolName): acquiring limiter lane=\(callLane.rawValue)")
-            if let admissionTimeout = promptExportAdmissionTimeoutResultIfExpired() {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
                 return await finishRequestProgress(admissionTimeout)
             }
             let limiterResolution = await EditFlowPerf.measure(
@@ -12172,13 +12287,13 @@ actor ServerNetworkManager {
                     resolution: limiterResolution,
                     toolName: toolName,
                     lifecycleCorrelation: lifecycleCorrelation,
-                    admissionDeadline: promptExportExecutionEnvelope?.admissionDeadline,
+                    admissionDeadline: callAdmissionDeadline,
                     admissionTimeoutResult: {
-                        promptExportAdmissionTimeoutResultIfExpired()
+                        admissionTimeoutResultIfExpired(stage: .connectionLane)
                             ?? Self.executionContractToolErrorResult(
                                 rawJSON: capturedRawJSON,
                                 code: "tool_execution_admission_timeout",
-                                message: "Tool '\(toolName)' could not enter its provider while preserving the export execution envelope."
+                                message: "Tool '\(toolName)' could not enter its provider before its admission deadline."
                             )
                     },
                     cancellationResult: {
@@ -12195,7 +12310,7 @@ actor ServerNetworkManager {
                         )
                     }
                 ) {
-                    if let admissionTimeout = promptExportAdmissionTimeoutResultIfExpired() {
+                    if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
                         return admissionTimeout
                     }
                     MCPToolConcurrencyEvidenceRecorder.shared.recordLaneAdmitted(
@@ -12430,7 +12545,7 @@ actor ServerNetworkManager {
                                         ? nil
                                         : await self.runIDForConnection(connectionID)
                                 }
-                                if let admissionTimeout = promptExportAdmissionTimeoutResultIfExpired() {
+                                if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .windowExclusive) {
                                     return admissionTimeout
                                 }
                                 let mutationAdmissionLease: MCPDomainToolResourceAdmissionController.Lease?
@@ -12451,7 +12566,7 @@ actor ServerNetworkManager {
                                         let evidenceLeaseWaitStart = evidenceClock.now
                                         mutationAdmissionLease = try await self.domainHost.acquireMutationResourceAdmission(
                                             mutationResource,
-                                            admissionDeadline: promptExportExecutionEnvelope?.admissionDeadline
+                                            admissionDeadline: callAdmissionDeadline
                                         )
                                         MCPToolConcurrencyEvidenceRecorder.shared.recordLeaseWait(
                                             classKey: evidenceClass,
@@ -12465,7 +12580,7 @@ actor ServerNetworkManager {
                                             reason: .leaseWaitTermination(for: error)
                                         )
                                         if error is MCPDomainAdmissionDeadline.Expired,
-                                           let timeoutResult = promptExportAdmissionTimeoutResultIfExpired()
+                                           let timeoutResult = admissionTimeoutResultIfExpired(stage: .windowExclusive)
                                         {
                                             return timeoutResult
                                         }
@@ -12493,7 +12608,7 @@ actor ServerNetworkManager {
                                         let evidenceLeaseWaitStart = evidenceClock.now
                                         smallReadAdmissionLease = try await self.domainHost.acquireSmallReadResourceAdmission(
                                             windowID: chosenID,
-                                            admissionDeadline: promptExportExecutionEnvelope?.admissionDeadline
+                                            admissionDeadline: callAdmissionDeadline
                                         )
                                         MCPToolConcurrencyEvidenceRecorder.shared.recordLeaseWait(
                                             classKey: evidenceClass,
@@ -12507,7 +12622,7 @@ actor ServerNetworkManager {
                                             reason: .leaseWaitTermination(for: error)
                                         )
                                         if error is MCPDomainAdmissionDeadline.Expired,
-                                           let timeoutResult = promptExportAdmissionTimeoutResultIfExpired()
+                                           let timeoutResult = admissionTimeoutResultIfExpired(stage: .windowExclusive)
                                         {
                                             return timeoutResult
                                         }
@@ -12535,7 +12650,7 @@ actor ServerNetworkManager {
                                         let evidenceLeaseWaitStart = evidenceClock.now
                                         fileReadAdmissionLease = try await self.domainHost.acquireFileReadResourceAdmission(
                                             windowID: chosenID,
-                                            admissionDeadline: promptExportExecutionEnvelope?.admissionDeadline
+                                            admissionDeadline: callAdmissionDeadline
                                         )
                                         MCPToolConcurrencyEvidenceRecorder.shared.recordLeaseWait(
                                             classKey: evidenceClass,
@@ -12549,7 +12664,7 @@ actor ServerNetworkManager {
                                             reason: .leaseWaitTermination(for: error)
                                         )
                                         if error is MCPDomainAdmissionDeadline.Expired,
-                                           let timeoutResult = promptExportAdmissionTimeoutResultIfExpired()
+                                           let timeoutResult = admissionTimeoutResultIfExpired(stage: .windowExclusive)
                                         {
                                             return timeoutResult
                                         }
@@ -12595,7 +12710,7 @@ actor ServerNetworkManager {
                                     releaseResourceAdmissionLeases(outcome: "provider_error")
                                 }
 
-                                if let admissionTimeout = promptExportAdmissionTimeoutResultIfExpired() {
+                                if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .preProvider) {
                                     return admissionTimeout
                                 }
                                 let toolCardOwnershipLease: MCPToolCardOwnershipLedger.Lease?
@@ -12748,25 +12863,25 @@ actor ServerNetworkManager {
                                 @Sendable func dispatchResolvedProvider(
                                     _ operation: @escaping @Sendable (PromptExportProviderEntryBridge?) async throws -> Value
                                 ) async throws -> Value {
-                                    try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                    try callAdmissionDeadline?.check()
                                     guard await self.isCurrentConnectionCallLimiterResolution(
                                         limiterResolution,
                                         connectionID: connectionID
                                     ) else {
                                         throw ToolDispatchAdmissionError.connectionTerminal
                                     }
-                                    try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                    try callAdmissionDeadline?.check()
                                     if let authorization = Self.currentToolDispatchAuthorization {
                                         guard await self.isCurrentToolDispatchAuthorization(authorization) else {
                                             throw ToolDispatchAdmissionError.connectionTerminal
                                         }
-                                        try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                        try callAdmissionDeadline?.check()
                                         if let windowIdentity = authorization.windowIdentity,
                                            await !(self.isCurrentWindowToolDispatchIdentity(windowIdentity))
                                         {
                                             throw ToolDispatchAdmissionError.windowTerminal
                                         }
-                                        try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                        try callAdmissionDeadline?.check()
                                     }
                                     guard let contract = selectedExecutionContract else {
                                         throw MCPToolExecutionDispatchError.missingContract(toolName: toolName)
@@ -12777,7 +12892,7 @@ actor ServerNetworkManager {
                                         slot: MCPCodeStructureSettlementRegistry.Slot?
                                     )
                                     if contract.cleanupDisposition == .detachAndSettle,
-                                       toolName != MCPWindowToolName.fileActions
+                                       !MCPToolExecutionContractCatalog.slotlessDetachToolNames.contains(toolName)
                                     {
                                         guard let windowID = Self.currentToolDispatchAuthorization?.windowIdentity?.windowID else {
                                             throw MCPToolExecutionDispatchError.structureSettlementWindowUnresolved
@@ -12788,7 +12903,8 @@ actor ServerNetworkManager {
                                             invocationID: invocationID,
                                             toolName: toolName,
                                             now: executionWatchdogEnvironment.now(),
-                                            handlerPhaseRecorder: handlerPhaseRecorder
+                                            handlerPhaseRecorder: handlerPhaseRecorder,
+                                            commitState: mutationCommitState
                                         ) {
                                         case let .admitted(slot):
                                             if let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSuccessfulAdmission(
@@ -12860,14 +12976,18 @@ actor ServerNetworkManager {
                                             handlerPhaseAgeMilliseconds: handlerPhaseAgeMilliseconds,
                                             windowID: traceWindowID,
                                             blockingProviderCount: settlementPopulation?.blockingCount,
-                                            releasedProviderCount: settlementPopulation?.counts.releasedCount
+                                            releasedProviderCount: settlementPopulation?.counts.releasedCount,
+                                            mutationState: phase.isAlwaysEmitted ? windowMutationObservation?.state : nil,
+                                            mutationOperationID: phase.isAlwaysEmitted
+                                                ? windowMutationObservation?.reportedOrResolvedOperationID
+                                                : nil
                                         ))
                                     }
 
                                     await emitExecutionTrace(.contractSelected)
-                                    try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                    try callAdmissionDeadline?.check()
                                     await emitExecutionTrace(.started)
-                                    try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                    try callAdmissionDeadline?.check()
                                     EditFlowPerf.lifecycleEvent(
                                         EditFlowPerf.Lifecycle.MCPToolCall.resolvedProviderBegan,
                                         correlation: lifecycleCorrelation,
@@ -12889,42 +13009,47 @@ actor ServerNetworkManager {
                                     )
 
                                     let tracedOperation: @Sendable (PromptExportProviderEntryBridge?) async throws -> Value = { providerEntryBridge in
-                                        try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                        try callAdmissionDeadline?.check()
                                         guard await self.isCurrentConnectionCallLimiterResolution(
                                             limiterResolution,
                                             connectionID: connectionID
                                         ) else {
                                             throw ToolDispatchAdmissionError.connectionTerminal
                                         }
-                                        try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                        try callAdmissionDeadline?.check()
                                         if let authorization = Self.currentToolDispatchAuthorization {
                                             guard await self.isCurrentToolDispatchAuthorization(authorization) else {
                                                 throw ToolDispatchAdmissionError.connectionTerminal
                                             }
-                                            try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                            try callAdmissionDeadline?.check()
                                             if let windowIdentity = authorization.windowIdentity,
                                                await !(self.isCurrentWindowToolDispatchIdentity(windowIdentity))
                                             {
                                                 throw ToolDispatchAdmissionError.windowTerminal
                                             }
-                                            try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                            try callAdmissionDeadline?.check()
                                         }
                                         return try await MCPToolExecutionHandlerPhaseContext.$recorder.withValue(handlerPhaseRecorder) {
                                             let executeOperation = {
-                                                try promptExportExecutionEnvelope?.admissionDeadline.check()
+                                                try callAdmissionDeadline?.check()
                                                 return try await EditFlowPerf.measure(
                                                     EditFlowPerf.Stage.MCPToolCall.resolvedProviderDispatch,
                                                     EditFlowPerf.Dimensions(toolName: toolName),
                                                     operation: { try await operation(providerEntryBridge) }
                                                 )
                                             }
-                                            guard let promptExportMutationObservation else {
+                                            guard let mutationObservation else {
                                                 return try await executeOperation()
                                             }
                                             return try await MCPDomainProtectedMutationSettlementContext.$observer.withValue(
-                                                { promptExportMutationObservation.record($0) },
-                                                operation: executeOperation
-                                            )
+                                                { mutationObservation.record($0) }
+                                            ) {
+                                                try await MCPDomainMutationCommitContext.$invocationCommitState.withValue(
+                                                    mutationCommitState
+                                                ) {
+                                                    try await executeOperation()
+                                                }
+                                            }
                                         }
                                     }
 
@@ -13214,6 +13339,9 @@ actor ServerNetworkManager {
                                                 onAbandonedSettlement: recordAbandonedSettlement,
                                                 onForceDisconnectedSettlement: recordForceDisconnectedSettlement,
                                                 operationCompletionInstant: operationCompletionInstant,
+                                                revokeBeforeCancellation: mutationCommitState.map { commitState in
+                                                    { @Sendable origin in commitState.revoke(origin: origin) }
+                                                },
                                                 operation: watchdogOperation
                                             )
                                         } catch MCPToolExecutionWatchdogError.cleanupUnresponsive {
@@ -13232,7 +13360,11 @@ actor ServerNetworkManager {
                                          .interactiveCancellable,
                                          .workspaceLifecycleCancellable:
                                         do {
-                                            let value = try await tracedOperation(nil)
+                                            let value = try await withTaskCancellationHandler {
+                                                try await tracedOperation(nil)
+                                            } onCancel: {
+                                                mutationCommitState?.revoke(origin: .requestCancellation)
+                                            }
                                             await recordSynchronousSettlement(.success)
                                             return value
                                         } catch {
@@ -13430,6 +13562,19 @@ actor ServerNetworkManager {
                                         outcome = "executionStructureSettlementWindowUnresolved"
                                         shouldForceDisconnect = false
                                         errorMetadata = ["retryable": .bool(false)]
+                                    case is MCPDomainAdmissionDeadline.Expired
+                                        where promptExportExecutionEnvelope == nil && windowExclusiveAdmissionDeadline != nil:
+                                        let timeout = Self.windowExclusiveAdmissionTimeout(
+                                            toolName: toolName,
+                                            stage: .preProvider,
+                                            invocationID: invocationID,
+                                            operationID: resolvedOperationID
+                                        )
+                                        code = "tool_execution_admission_timeout"
+                                        message = timeout.message
+                                        outcome = "executionAdmissionTimeout"
+                                        shouldForceDisconnect = false
+                                        errorMetadata = timeout.metadata
                                     case is MCPDomainAdmissionDeadline.Expired,
                                          MCPToolExecutionWatchdogError.admissionEnvelopeExpired:
                                         code = "tool_execution_admission_timeout"
@@ -13439,7 +13584,7 @@ actor ServerNetworkManager {
                                         errorMetadata = [
                                             "retryable": .bool(true),
                                             "mutation_state": .string("not_applied"),
-                                            "operation_id": .string(promptExportOperationID),
+                                            "operation_id": .string(resolvedOperationID),
                                             "tool": .string(toolName),
                                             "cancellation_origin": .string(
                                                 promptExportExecutionEnvelope?.cancellationOrigin.rawValue
@@ -13456,26 +13601,37 @@ actor ServerNetworkManager {
                                             "cancellation_origin": .string(MCPToolExecutionCancellationOrigin.watchdogDeadline.rawValue),
                                             "settlement": .string(settlement.rawValue)
                                         ].merging(
-                                            promptExportMutationObservation?.errorMetadata(toolName: toolName) ?? [:],
+                                            mutationObservation?.errorMetadata(toolName: toolName) ?? [:],
                                             uniquingKeysWith: { _, authorityValue in authorityValue }
                                         )
                                     case MCPToolExecutionWatchdogError.executionDetached:
-                                        let mutationOutcomeMayStillReconcile = [
+                                        // A revoked mutation never commits, so its reply can say nothing was
+                                        // applied; any other mutation outcome may still reconcile.
+                                        let mutationWasRevoked = mutationObservation?.state == .notApplied
+                                        let mutationOutcomeMayStillReconcile = !mutationWasRevoked && [
                                             MCPWindowToolName.fileActions,
                                             MCPWindowToolName.prompt,
-                                            MCPWindowToolName.workspaceContext
+                                            MCPWindowToolName.workspaceContext,
+                                            MCPWindowToolName.applyEdits
                                         ].contains(toolName)
                                         code = "tool_execution_timeout"
-                                        message = mutationOutcomeMayStillReconcile
-                                            ? "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract. Watchdog cancellation did not settle the mutation provider during grace, so it was detached for eventual reconciliation. Inspect affected state before issuing another mutation."
-                                            : "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract. Watchdog cancellation did not settle the read-only provider during grace, so it was detached for eventual cleanup."
+                                        message = if mutationWasRevoked {
+                                            "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract before its change was committed, so nothing was applied. Watchdog cancellation did not settle the provider during grace, so it was detached for eventual cleanup."
+                                        } else if mutationOutcomeMayStillReconcile {
+                                            "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract. Watchdog cancellation did not settle the mutation provider during grace, so it was detached for eventual reconciliation. Inspect affected state before issuing another mutation."
+                                        } else {
+                                            "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract. Watchdog cancellation did not settle the read-only provider during grace, so it was detached for eventual cleanup."
+                                        }
                                         outcome = "executionDetached"
                                         shouldForceDisconnect = false
                                         errorMetadata = [
                                             "retryable": .bool(!mutationOutcomeMayStillReconcile),
                                             "cancellation_origin": .string(MCPToolExecutionCancellationOrigin.watchdogDeadline.rawValue),
                                             "settlement": .string("detached")
-                                        ]
+                                        ].merging(
+                                            mutationObservation?.errorMetadata(toolName: toolName) ?? [:],
+                                            uniquingKeysWith: { _, authorityValue in authorityValue }
+                                        )
                                     case MCPToolExecutionWatchdogError.cleanupUnresponsive:
                                         code = "tool_execution_cleanup_unresponsive"
                                         message = "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract and did not stop during cancellation grace. The MCP connection was force-disconnected."
@@ -13486,11 +13642,11 @@ actor ServerNetworkManager {
                                             "cancellation_origin": .string(MCPToolExecutionCancellationOrigin.watchdogDeadline.rawValue),
                                             "settlement": .string("force_disconnect")
                                         ].merging(
-                                            promptExportMutationObservation?.errorMetadata(toolName: toolName) ?? [:],
+                                            mutationObservation?.errorMetadata(toolName: toolName) ?? [:],
                                             uniquingKeysWith: { _, authorityValue in authorityValue }
                                         )
                                     case let protectedError as DomainProtectedMutationError
-                                        where promptExportMutationObservation != nil:
+                                        where mutationObservation != nil:
                                         let settlement = protectedError.settlement
                                         code = "protected_mutation_indeterminate_after_commit"
                                         message = protectedError.localizedDescription
@@ -13667,7 +13823,7 @@ actor ServerNetworkManager {
                                             arguments: effectiveArgs,
                                             securityContext: invocationSecurityContext,
                                             admittedContext: admittedDomainContext,
-                                            admissionDeadline: promptExportExecutionEnvelope?.admissionDeadline,
+                                            admissionDeadline: callAdmissionDeadline,
                                             onProviderEntry: { try providerEntryBridge?.providerWillEnter() }
                                         ))
                                     }

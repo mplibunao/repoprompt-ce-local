@@ -72,6 +72,21 @@ public enum MCPTimeoutPolicy {
         fileActionTrashExecutionDeadlineSeconds
     )
 
+    /// The time an edit call may spend on work outside its review: routing, freshness, preview, write,
+    /// and reply. Review time counts inside the same fixed limit, so a review that ends near the limit
+    /// leaves the write little time.
+    public static let applyEditsWorkAllowanceSeconds: TimeInterval = 120
+    public static let applyEditsExecutionDeadline: Duration = .seconds(
+        applyEditsWorkAllowanceSeconds + applyEditsApprovalTimeoutSeconds
+    )
+
+    /// One budget, counted from the call's arrival, for a call to a window-exclusive tool to pass its
+    /// connection lane, the window's exclusive lease, and the checks before its provider starts.
+    public static let windowExclusiveAdmissionTimeoutSeconds = 20
+    public static let windowExclusiveAdmissionTimeout: Duration = .seconds(
+        windowExclusiveAdmissionTimeoutSeconds
+    )
+
     public static let workspaceFreshnessWaitTimeoutSeconds = 30
     public static let workspaceFreshnessWaitTimeout: Duration = .seconds(workspaceFreshnessWaitTimeoutSeconds)
 
