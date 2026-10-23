@@ -152,9 +152,10 @@ class WindowState: ObservableObject {
     /// Called whenever `isCurrentlyFocused` changes.
     var onFocusChanged: ((Bool) -> Void)?
 
-    /// One-shot hook that runs the first time this window is key, then clears itself. The launch
-    /// restore sets it on a window it opened, to hand key focus back to the window in use.
-    var onFirstBecameKey: (() -> Void)?
+    /// One-shot hook the launch restore sets on a window it opened, to hand key focus back to the
+    /// window in use. It runs when this window attaches if opening made it key, and is cleared
+    /// either way, so a later click on this window is never undone.
+    var onAttachedAsKey: (() -> Void)?
 
     // MARK: - Per-Window View Models
 
@@ -314,7 +315,7 @@ class WindowState: ObservableObject {
         }
         closeCoordinator.beginClose()
         onFocusChanged = nil
-        onFirstBecameKey = nil
+        onAttachedAsKey = nil
         removeFocusObservers()
         pendingWindowTitleUpdateTask?.cancel()
         pendingWindowTitleUpdateTask = nil
@@ -619,15 +620,19 @@ class WindowState: ObservableObject {
         requestWindowTitleUpdate(reason: .windowAttached)
         // Install Agent mode titlebar accessory if requested before window was attached
         applyAgentTitlebarAccessoryIfPossible()
-        // A new window can become key before this attachment subscribes to key changes.
-        runFirstBecameKeyHookIfKey()
+        // Opening the window makes it key before it attaches, so attachment is where that key
+        // change can be told apart from a later click.
+        resolveAttachedAsKeyHook()
     }
 
-    /// Runs `onFirstBecameKey` if this window is key now.
-    func runFirstBecameKeyHookIfKey() {
-        guard nsWindow?.isKeyWindow == true, let hook = onFirstBecameKey else { return }
-        onFirstBecameKey = nil
-        hook()
+    /// Runs `onAttachedAsKey` if this window is attached and key, then clears it. Does nothing
+    /// before the window attaches.
+    func resolveAttachedAsKeyHook() {
+        guard let window = nsWindow, let hook = onAttachedAsKey else { return }
+        onAttachedAsKey = nil
+        if window.isKeyWindow {
+            hook()
+        }
     }
 
     private func configureWindowChrome(for window: NSWindow) {
@@ -676,7 +681,6 @@ class WindowState: ObservableObject {
                 guard let self else { return }
                 let appIsActive = NSApplication.shared.isActive
                 scheduleFocusUpdate(appIsActive)
-                runFirstBecameKeyHookIfKey()
             }
             .store(in: &focusCancellables)
 

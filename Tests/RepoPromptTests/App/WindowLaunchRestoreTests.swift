@@ -1,3 +1,4 @@
+import Combine
 @testable import RepoPromptApp
 import XCTest
 
@@ -132,6 +133,7 @@ import XCTest
         private func makeSavedWorkspaces(count: Int) async throws -> [WorkspaceModel] {
             let persister = makeWindow()
             await persister.workspaceManager.awaitInitialized()
+            let announcements = WorkspaceListChangeCounter()
             let workspaces = (1 ... count).map {
                 persister.workspaceManager.createWorkspace(name: "Launch Restore \($0) \(UUID().uuidString)", repoPaths: [])
             }
@@ -144,10 +146,11 @@ import XCTest
                 persister.beginClose()
                 await persister.tearDown()
             }
-            // Workspace creation persists on a background task.
-            try await waitUntil("the saved workspaces to reach disk") {
-                let onDisk = await persister.workspaceManager.loadWorkspaceSnapshotFromDisk().map(\.id)
-                return workspaces.allSatisfy { onDisk.contains($0.id) }
+            // Workspace creation persists on a background task and then announces the new catalog.
+            // Windows created after every announcement load the workspaces and get no late reload,
+            // which could put a restoring window back on the workspace it showed before.
+            try await waitUntil("the saved workspaces' creation to be announced") {
+                announcements.count >= count
             }
             return workspaces
         }
@@ -245,6 +248,24 @@ import XCTest
     @MainActor
     private final class OpenRequestCounter {
         var requestCount = 0
+    }
+
+    /// Counts `.workspaceListDidChange` posts from its creation on. A workspace manager posts one
+    /// after a created workspace reaches disk, and every other open window reloads its catalog when
+    /// it receives one. A reload that starts before a window's restore switch commits applies the
+    /// workspace that was active when it started, so tests create their windows after the posts.
+    @MainActor
+    final class WorkspaceListChangeCounter {
+        private(set) var count = 0
+        private var subscription: AnyCancellable?
+
+        init() {
+            // Workspace managers post on the main actor.
+            subscription = NotificationCenter.default.publisher(for: .workspaceListDidChange)
+                .sink { [weak self] _ in
+                    MainActor.assumeIsolated { self?.count += 1 }
+                }
+        }
     }
 
     /// Holds one restore attempt at its first matching activation until opened.

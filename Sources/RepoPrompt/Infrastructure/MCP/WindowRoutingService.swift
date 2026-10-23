@@ -318,6 +318,27 @@ private extension Array {
     }
 }
 
+/// Why a request can't get a window for a workspace yet. Every reason is retryable.
+enum WorkspaceWindowNotReadyReason {
+    /// A window shows the workspace but is switching, closing, or still restoring.
+    case windowNotReady
+    /// The saved window session is still loading at launch, so any saved window may be for it.
+    case savedWindowsLoading
+    /// A saved window for the workspace is still to reopen, or is restoring, at launch.
+    case savedWindowReopening
+
+    func error(workspaceName: String) -> MCPError {
+        switch self {
+        case .windowNotReady:
+            MCPError.invalidRequest("Workspace '\(workspaceName)' has a window that is not ready or is closing. Wait for that operation to finish, then retry.")
+        case .savedWindowsLoading:
+            MCPError.invalidRequest("Saved windows are still loading after launch, so no window was opened for workspace '\(workspaceName)'. Wait a moment, then retry.")
+        case .savedWindowReopening:
+            MCPError.invalidRequest("Workspace '\(workspaceName)' has a saved window that is still reopening after launch, so no other window was opened. Wait for it to restore, then retry.")
+        }
+    }
+}
+
 @MainActor
 final class WindowRoutingService: Service {
     let domainRegistrationID = MCPDomainToolRegistrationID()
@@ -1367,12 +1388,6 @@ final class WindowRoutingService: Service {
         )
     }
 
-    /// The retryable error for a workspace whose window can't be reused yet: it is switching,
-    /// closing, or a saved window for it is still to reopen at launch.
-    nonisolated static func workspaceWindowNotReadyError(workspaceName: String) -> MCPError {
-        MCPError.invalidRequest("Workspace '\(workspaceName)' has a window that is not ready or is closing. Wait for that operation to finish, then retry.")
-    }
-
     private func openRoutingWindow(deferringInitialAgentSystemWorkspaceRefresh: Bool = false) async throws -> WindowState {
         do {
             return try await windowStates.openNewMainWindow(
@@ -1592,10 +1607,11 @@ final class WindowRoutingService: Service {
 
         // The launch restore reopens saved windows one at a time, so a window opened here for a
         // saved workspace would later be duplicated by the restore.
-        if windowStates.isRestoreSessionLoadPending
-            || windowStates.hasPendingLaunchRestore(workspaceID: match.workspace.id)
-        {
-            throw Self.workspaceWindowNotReadyError(workspaceName: match.workspace.name)
+        if windowStates.isRestoreSessionLoadPending {
+            throw WorkspaceWindowNotReadyReason.savedWindowsLoading.error(workspaceName: match.workspace.name)
+        }
+        if windowStates.hasPendingLaunchRestore(workspaceID: match.workspace.id) {
+            throw WorkspaceWindowNotReadyReason.savedWindowReopening.error(workspaceName: match.workspace.name)
         }
         let newWindow = try await openNewWindowShowingWorkspace(match.workspace)
         return workingDirsResolution(
@@ -2578,23 +2594,25 @@ final class WindowRoutingService: Service {
                                 && !window.workspaceManager.isSwitchingWorkspace
                                 && !window.isWorkspaceRestoreInFlight
                         }
-                        let (reusableWindowID, hasShowingWindow) = await MainActor.run { () -> (Int?, Bool) in
+                        let (reusableWindowID, notReadyReason) = await MainActor.run { () -> (Int?, WorkspaceWindowNotReadyReason?) in
                             let windowStates = routingService.windowStates
                             // Until the saved session loads, any saved window may be for this
                             // workspace, and a window opened now could later be duplicated by the
                             // launch restore.
-                            guard !windowStates.isRestoreSessionLoadPending else { return (nil, true) }
+                            guard !windowStates.isRestoreSessionLoadPending else { return (nil, .savedWindowsLoading) }
                             let windows = windowStates.allWindows
                             let reusableID = Self.preferredOpenWindowID(
                                 showingWindowIDs: windows.filter(isReadyShowingTarget).map(\.windowID),
                                 selectedWindowID: selectedWindowID,
                                 focusedWindowID: windows.first(where: { $0.isCurrentlyFocused })?.windowID
                             )
-                            // A saved window for this workspace that hasn't reopened yet counts as
-                            // a window that isn't ready.
-                            let hasShowingWindow = windows.contains { $0.workspaceManager.activeWorkspace?.id == targetWorkspaceID }
-                                || windowStates.hasPendingLaunchRestore(workspaceID: targetWorkspaceID)
-                            return (reusableID, hasShowingWindow)
+                            if windows.contains(where: { $0.workspaceManager.activeWorkspace?.id == targetWorkspaceID }) {
+                                return (reusableID, .windowNotReady)
+                            }
+                            if windowStates.hasPendingLaunchRestore(workspaceID: targetWorkspaceID) {
+                                return (reusableID, .savedWindowReopening)
+                            }
+                            return (reusableID, nil)
                         }
                         if let reusableWindowID {
                             try await routingService.networkMgr.setActiveWindowForCurrentConnection(reusableWindowID)
@@ -2618,8 +2636,8 @@ final class WindowRoutingService: Service {
                                 reusedWindow: true
                             )
                         }
-                        if hasShowingWindow {
-                            throw Self.workspaceWindowNotReadyError(workspaceName: targetWorkspace.name)
+                        if let notReadyReason {
+                            throw notReadyReason.error(workspaceName: targetWorkspace.name)
                         }
 
                         // Open a new window
