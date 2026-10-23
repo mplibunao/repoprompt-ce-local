@@ -220,10 +220,13 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
             quarantine: .init(windowQuarantinedCount: 5, windowOutstandingRecoveryCount: 2, appQuarantinedCount: 5)
         )
         XCTAssertEqual(registry.snapshot(windowID: windowID).quarantinedCount, 5)
+        XCTAssertTrue(registry.isRecoveryExhausted(windowID: windowID))
 
         for slot in together {
             _ = slot.recordCompletion(.success)
         }
+        XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
+        XCTAssertFalse(registry.isRecoveryExhausted(windowID: windowID))
         XCTAssertEqual(
             try recover(registry, windowID: windowID, at: .seconds(402)).quarantine,
             .init(windowQuarantinedCount: 4, windowOutstandingRecoveryCount: 2, appQuarantinedCount: 4)
@@ -257,6 +260,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         )
         assertCapRejected(registry, windowID: windowID, at: .seconds(101), quarantine: refused)
         XCTAssertEqual(registry.snapshot(windowID: windowID).quarantinedCount, 0)
+        XCTAssertTrue(registry.isRecoveryExhausted(windowID: windowID))
 
         registry.revokeWindow(windowID: closingWindowID)
         assertCapRejected(registry, windowID: windowID, at: .seconds(102), quarantine: refused)
@@ -264,6 +268,8 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         for slot in closing {
             _ = slot.recordCompletion(.success)
         }
+        XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
+        XCTAssertFalse(registry.isRecoveryExhausted(windowID: windowID))
         XCTAssertEqual(
             try recover(registry, windowID: windowID, at: .seconds(103)).quarantine,
             .init(windowQuarantinedCount: 2, windowOutstandingRecoveryCount: 1, appQuarantinedCount: 6)

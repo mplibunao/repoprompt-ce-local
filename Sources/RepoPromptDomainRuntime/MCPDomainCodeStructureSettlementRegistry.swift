@@ -518,12 +518,25 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
     /// remain owned and transitioned by the existing admission/completion paths.
     package func hasReleasedProviderLimitBlockage(windowID: Int) -> Bool {
         lock.withLock {
-            let entries = entriesByWindowID[windowID, default: [:]]
-            let blockingCount = entries.values.count(where: \.blocksAdmission)
-            let releasedCount = entries.values.count(where: \.holdsReleasedSlot)
-            return blockingCount > 0
-                && releasedCount + blockingCount > Self.releasedProviderLimit
+            Self.isCapped(entriesByWindowID[windowID, default: [:]])
         }
+    }
+
+    /// Whether the window is capped and recovering it wouldn't fit the limits, so its next call would be
+    /// refused. Completions that refund a recovery end this even while the window stays capped.
+    package func isRecoveryExhausted(windowID: Int) -> Bool {
+        lock.withLock {
+            let entries = entriesByWindowID[windowID, default: [:]]
+            return Self.isCapped(entries)
+                && !recoveryFits(windowID: windowID, quarantining: entries.values.count(where: \.isEscaped))
+        }
+    }
+
+    private static func isCapped(_ entries: [UUID: Entry]) -> Bool {
+        let blockingCount = entries.values.count(where: \.blocksAdmission)
+        let releasedCount = entries.values.count(where: \.holdsReleasedSlot)
+        return blockingCount > 0
+            && releasedCount + blockingCount > releasedProviderLimit
     }
 
     package func awaitDrained(windowID: Int) async {

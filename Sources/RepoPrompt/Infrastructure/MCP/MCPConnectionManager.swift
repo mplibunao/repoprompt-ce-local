@@ -1559,11 +1559,17 @@ actor ServerNetworkManager {
 
     private var nextCodeStructureSettlementLimitNoticeGeneration: UInt64 = 0
     private var codeStructureSettlementLimitNoticeByWindowID: [Int: CodeStructureSettlementLimitNoticeProjection] = [:]
+    /// Each window's latest recovery notice, shown again whenever the window still has quarantined calls
+    /// and isn't exhausted.
+    private var latestCodeStructureRecoveryNoticeByWindowID: [Int: MCPServerViewModel.CodeStructureSettlementLimitNotice.Kind] = [:]
 
     private func recordCodeStructureSettlementLimitNotice(
         windowID: Int,
         kind: MCPServerViewModel.CodeStructureSettlementLimitNotice.Kind
     ) -> CodeStructureSettlementLimitNoticeProjection {
+        if case .recovered = kind {
+            latestCodeStructureRecoveryNoticeByWindowID[windowID] = kind
+        }
         nextCodeStructureSettlementLimitNoticeGeneration &+= 1
         let projection = CodeStructureSettlementLimitNoticeProjection(
             generation: nextCodeStructureSettlementLimitNoticeGeneration,
@@ -1574,7 +1580,7 @@ actor ServerNetworkManager {
     }
 
     /// Whether the registry still shows what a notice reports: a recovery notice lasts while the window
-    /// has quarantined calls, and an exhaustion notice while the released-provider cap blocks it.
+    /// has quarantined calls, and an exhaustion notice while the window is capped and a recovery wouldn't fit.
     private nonisolated static func isCodeStructureSettlementNoticeCurrent(
         _ kind: MCPServerViewModel.CodeStructureSettlementLimitNotice.Kind,
         windowID: Int,
@@ -1584,7 +1590,40 @@ actor ServerNetworkManager {
         case .recovered:
             registry.snapshot(windowID: windowID).quarantinedCount > 0
         case .recoveryExhausted:
-            registry.hasReleasedProviderLimitBlockage(windowID: windowID)
+            registry.isRecoveryExhausted(windowID: windowID)
+        }
+    }
+
+    /// The notice the registry's state calls for: the exhaustion warning while the window is capped and a
+    /// recovery wouldn't fit, the window's latest recovery while it has quarantined calls, and otherwise none.
+    private func codeStructureSettlementNoticeKind(
+        windowID: Int
+    ) -> MCPServerViewModel.CodeStructureSettlementLimitNotice.Kind? {
+        let registry = codeStructureSettlementRegistry
+        if registry.isRecoveryExhausted(windowID: windowID) {
+            return .recoveryExhausted
+        }
+        guard registry.snapshot(windowID: windowID).quarantinedCount > 0 else {
+            latestCodeStructureRecoveryNoticeByWindowID.removeValue(forKey: windowID)
+            return nil
+        }
+        return latestCodeStructureRecoveryNoticeByWindowID[windowID]
+    }
+
+    /// Re-derives a window's notice after an admission or a settlement and publishes it if it changed, so an
+    /// exhaustion warning that clears while calls are still quarantined gives way to the recovery notice.
+    /// A window with neither a notice nor a recovery returns without reading the registry or hopping to the UI.
+    private func reconcileCodeStructureSettlementLimitNotice(windowID: Int) async {
+        let current = codeStructureSettlementLimitNoticeByWindowID[windowID]
+        guard current != nil || latestCodeStructureRecoveryNoticeByWindowID[windowID] != nil else { return }
+        let wanted = codeStructureSettlementNoticeKind(windowID: windowID)
+        guard wanted != current?.kind else { return }
+        if let wanted {
+            let projection = recordCodeStructureSettlementLimitNotice(windowID: windowID, kind: wanted)
+            await presentCodeStructureSettlementLimitNotice(windowID: windowID, projection: projection)
+        } else if let current {
+            codeStructureSettlementLimitNoticeByWindowID.removeValue(forKey: windowID)
+            await clearCodeStructureSettlementLimitNotice(windowID: windowID, projection: current)
         }
     }
 
@@ -1630,38 +1669,6 @@ actor ServerNetworkManager {
             WindowStatesManager.shared.window(withID: windowID)?
                 .mcpServer.clearCodeStructureSettlementLimitNotice(generation: projection.generation)
         }
-    }
-
-    /// An admission proves the registry allowed a new provider at that instant, which ends an exhaustion
-    /// notice. A recovery notice stays, because the admission that recovered the window is one of these.
-    /// Recheck when this actor resumes so a newer blocker cannot lose its warning.
-    /// The ordinary no-notice path returns without a UI actor hop.
-    private func takeCodeStructureSettlementLimitNoticeAfterSuccessfulAdmission(
-        windowID: Int
-    ) -> CodeStructureSettlementLimitNoticeProjection? {
-        guard let projection = codeStructureSettlementLimitNoticeByWindowID[windowID],
-              case .recoveryExhausted = projection.kind,
-              !codeStructureSettlementRegistry.hasReleasedProviderLimitBlockage(windowID: windowID)
-        else { return nil }
-        codeStructureSettlementLimitNoticeByWindowID.removeValue(forKey: windowID)
-        return projection
-    }
-
-    /// A settlement clears its projection only when the registry's read-only
-    /// state no longer shows what the notice reports. The projection token
-    /// fences delayed UI work; it is not an authority signal.
-    private func takeCodeStructureSettlementLimitNoticeAfterSettlement(
-        slot: MCPCodeStructureSettlementRegistry.Slot
-    ) -> CodeStructureSettlementLimitNoticeProjection? {
-        guard let projection = codeStructureSettlementLimitNoticeByWindowID[slot.windowID],
-              !Self.isCodeStructureSettlementNoticeCurrent(
-                  projection.kind,
-                  windowID: slot.windowID,
-                  registry: codeStructureSettlementRegistry
-              )
-        else { return nil }
-        codeStructureSettlementLimitNoticeByWindowID.removeValue(forKey: slot.windowID)
-        return projection
     }
 
     #if DEBUG
@@ -2716,6 +2723,7 @@ actor ServerNetworkManager {
         // The window's calls keep their settlement leases until they finish, but none may publish.
         codeStructureSettlementRegistry.revokeWindow(windowID: windowID)
         codeStructureSettlementLimitNoticeByWindowID.removeValue(forKey: windowID)
+        latestCodeStructureRecoveryNoticeByWindowID.removeValue(forKey: windowID)
         #if DEBUG
             MCPStuckToolScenarioRegistry.shared.releaseWindow(windowID)
         #endif
@@ -13035,13 +13043,8 @@ actor ServerNetworkManager {
                                                     windowID: windowID,
                                                     projection: noticeProjection
                                                 )
-                                            } else if let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSuccessfulAdmission(
-                                                windowID: windowID
-                                            ) {
-                                                await self.clearCodeStructureSettlementLimitNotice(
-                                                    windowID: windowID,
-                                                    projection: noticeProjection
-                                                )
+                                            } else {
+                                                await self.reconcileCodeStructureSettlementLimitNotice(windowID: windowID)
                                             }
                                             settlementAdmission = (.detachAndSettle, slot)
                                         case let .busy(context):
@@ -13185,15 +13188,8 @@ actor ServerNetworkManager {
                                     @Sendable func recordSynchronousSettlement(
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
-                                        if let slot = settlementAdmission.slot,
-                                           let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSettlement(
-                                               slot: slot
-                                           )
-                                        {
-                                            await self.clearCodeStructureSettlementLimitNotice(
-                                                windowID: slot.windowID,
-                                                projection: noticeProjection
-                                            )
+                                        if let slot = settlementAdmission.slot {
+                                            await self.reconcileCodeStructureSettlementLimitNotice(windowID: slot.windowID)
                                         }
                                         let outcome = providerSettlement.rawValue
                                         await emitExecutionTrace(.handlerCompleted, cancellationOutcome: outcome)
@@ -13222,15 +13218,8 @@ actor ServerNetworkManager {
                                     @Sendable func recordDetachedSettlement(
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
-                                        if let slot = settlementAdmission.slot,
-                                           let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSettlement(
-                                               slot: slot
-                                           )
-                                        {
-                                            await self.clearCodeStructureSettlementLimitNotice(
-                                                windowID: slot.windowID,
-                                                projection: noticeProjection
-                                            )
+                                        if let slot = settlementAdmission.slot {
+                                            await self.reconcileCodeStructureSettlementLimitNotice(windowID: slot.windowID)
                                         }
                                         await emitExecutionTrace(
                                             .detachedSettled,
@@ -13268,15 +13257,8 @@ actor ServerNetworkManager {
                                     @Sendable func recordAbandonedSettlement(
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
-                                        if let slot = settlementAdmission.slot,
-                                           let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSettlement(
-                                               slot: slot
-                                           )
-                                        {
-                                            await self.clearCodeStructureSettlementLimitNotice(
-                                                windowID: slot.windowID,
-                                                projection: noticeProjection
-                                            )
+                                        if let slot = settlementAdmission.slot {
+                                            await self.reconcileCodeStructureSettlementLimitNotice(windowID: slot.windowID)
                                         }
                                         await emitExecutionTrace(
                                             .handlerCompleted,
@@ -13304,15 +13286,8 @@ actor ServerNetworkManager {
                                     @Sendable func recordForceDisconnectedSettlement(
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
-                                        if let slot = settlementAdmission.slot,
-                                           let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSettlement(
-                                               slot: slot
-                                           )
-                                        {
-                                            await self.clearCodeStructureSettlementLimitNotice(
-                                                windowID: slot.windowID,
-                                                projection: noticeProjection
-                                            )
+                                        if let slot = settlementAdmission.slot {
+                                            await self.reconcileCodeStructureSettlementLimitNotice(windowID: slot.windowID)
                                         }
                                         await emitExecutionTrace(
                                             .lateSettled,
