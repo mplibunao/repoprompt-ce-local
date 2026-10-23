@@ -135,11 +135,16 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
         return args
     }
 
+    /// Parses one stdout line into events. A line that isn't JSON, such as a CLI diagnostic, has none.
+    ///
+    /// - Throws: The error the run ends with, when the line is a `result` that reports a failed or
+    ///   cancelled turn.
     func parseStreamEvents(_ lineData: Data) throws -> [AgentStreamEvent] {
-        guard let trimmed = trimmedASCIIWhitespace(lineData), !trimmed.isEmpty else { return [] }
-        let raw = try JSONSerialization.jsonObject(with: trimmed)
+        guard let trimmed = trimmedASCIIWhitespace(lineData), !trimmed.isEmpty,
+              let raw = try? JSONSerialization.jsonObject(with: trimmed)
+        else { return [] }
         if let json = raw as? [String: Any] {
-            return parseEventDictionary(json)
+            return try parseEventDictionary(json)
         } else if let array = raw as? [Any] {
             var events: [AgentStreamEvent] = []
             for element in array {
@@ -151,7 +156,7 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
                     }
                     continue
                 }
-                let parsed = parseEventDictionary(dict)
+                let parsed = try parseEventDictionary(dict)
                 events.append(contentsOf: parsed)
             }
             return events
@@ -167,7 +172,7 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
 
     /// Parse a single event dictionary into one or more AgentStreamEvents.
     /// Returns an array because some events (like `result`) emit multiple events.
-    private func parseEventDictionary(_ json: [String: Any]) -> [AgentStreamEvent] {
+    private func parseEventDictionary(_ json: [String: Any]) throws -> [AgentStreamEvent] {
         guard let type = json["type"] as? String else {
             if enableDebugLogging {
                 print("[DEBUG] ClaudeCodeAgent: Missing type field in event payload")
@@ -274,6 +279,15 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
 
             // Extract final result text if present
             let finalText = json["result"] as? String
+
+            switch ClaudeResultOutcome(resultPayload: json, stopReasonHint: stopReason) {
+            case .completed:
+                break
+            case .cancelled:
+                throw CancellationError()
+            case .failed:
+                throw Self.cliFailureError(detail: Self.failedResultDetail(json, resultText: finalText))
+            }
 
             // Build events: optional stop-reason system message, final message, then completion
             var events: [AgentStreamEvent] = []
@@ -436,6 +450,8 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
                                 var timedOut = false
                                 var eventCount = 0
                                 var sawCompletion = false
+                                // Set when a `result` line reports a failed or cancelled turn; the stream ends with it.
+                                var resultError: Error?
 
                                 do {
                                     outerLoop: for try await event in stream {
@@ -450,17 +466,23 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
                                                 if Task.isCancelled {
                                                     return
                                                 }
-                                                if let events = try? self.parseStreamEvents(lineData), !events.isEmpty {
-                                                    for event in events {
-                                                        let mapped = self.mapToAIStreamResult(event)
-                                                        if mapped.type == "message_stop" {
-                                                            sawCompletion = true
-                                                            sawStopThisChunk = true
-                                                        }
-                                                        continuation.yield(mapped)
-                                                        eventCount += 1
-                                                        if sawStopThisChunk { break }
+                                                let events: [AgentStreamEvent]
+                                                do {
+                                                    events = try self.parseStreamEvents(lineData)
+                                                } catch {
+                                                    resultError = error
+                                                    sawStopThisChunk = true
+                                                    return
+                                                }
+                                                for event in events {
+                                                    let mapped = self.mapToAIStreamResult(event)
+                                                    if mapped.type == "message_stop" {
+                                                        sawCompletion = true
+                                                        sawStopThisChunk = true
                                                     }
+                                                    continuation.yield(mapped)
+                                                    eventCount += 1
+                                                    if sawStopThisChunk { break }
                                                 }
                                             }
                                             if sawStopThisChunk {
@@ -481,17 +503,27 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
                                 }
 
                                 framer.flush { lineData in
-                                    guard !lineData.isEmpty else { return }
-                                    if let events = try? self.parseStreamEvents(lineData), !events.isEmpty {
-                                        for event in events {
-                                            let mapped = self.mapToAIStreamResult(event)
-                                            if mapped.type == "message_stop" {
-                                                sawCompletion = true
-                                            }
-                                            continuation.yield(mapped)
-                                            eventCount += 1
-                                        }
+                                    guard resultError == nil, !lineData.isEmpty else { return }
+                                    let events: [AgentStreamEvent]
+                                    do {
+                                        events = try self.parseStreamEvents(lineData)
+                                    } catch {
+                                        resultError = error
+                                        return
                                     }
+                                    for event in events {
+                                        let mapped = self.mapToAIStreamResult(event)
+                                        if mapped.type == "message_stop" {
+                                            sawCompletion = true
+                                        }
+                                        continuation.yield(mapped)
+                                        eventCount += 1
+                                    }
+                                }
+
+                                // The process may still be running; the enclosing cleanup cancels the runner.
+                                if let resultError {
+                                    throw resultError
                                 }
 
                                 // If we saw completion but no explicit termination yet,
@@ -522,12 +554,7 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
                                 let status = exitStatus ?? 0
                                 if status != 0 || timedOut {
                                     if let humanMessage = self.extractCLIErrorDetail(fromStdout: stdoutTail) {
-                                        // Check for credit balance error and provide helpful guidance
-                                        let lowerMessage = humanMessage.lowercased()
-                                        if lowerMessage.contains("credit balance") || lowerMessage.contains("balance too low") || lowerMessage.contains("api balance") {
-                                            throw AIProviderError.invalidConfiguration(detail: "Credit balance is too low. To use Claude Code with your Max plan via RepoPrompt, remove the ANTHROPIC_API_KEY from your environment variables and restart the app. The CLI will then use your Max plan subscription instead of the API key.")
-                                        }
-                                        throw AIProviderError.invalidConfiguration(detail: humanMessage)
+                                        throw Self.cliFailureError(detail: humanMessage)
                                     }
                                     let stderrString = String(data: stderrTail, encoding: .utf8) ?? ""
                                     if self.enableDebugLogging {
@@ -682,6 +709,32 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
             }
         }
         return nil
+    }
+
+    /// The error for a failure the Claude CLI described in `detail`. A low credit balance gets setup guidance instead.
+    private static func cliFailureError(detail: String) -> AIProviderError {
+        let lowerDetail = detail.lowercased()
+        if lowerDetail.contains("credit balance") || lowerDetail.contains("balance too low") || lowerDetail.contains("api balance") {
+            return .invalidConfiguration(detail: "Credit balance is too low. To use Claude Code with your Max plan via RepoPrompt, remove the ANTHROPIC_API_KEY from your environment variables and restart the app. The CLI will then use your Max plan subscription instead of the API key.")
+        }
+        return .invalidConfiguration(detail: detail)
+    }
+
+    /// What a failed `result` says went wrong: its `errors`, else its `result` text.
+    private static func failedResultDetail(_ json: [String: Any], resultText: String?) -> String {
+        let errors = ClaudeResultOutcome.errorMessages(in: json)
+        if !errors.isEmpty {
+            return errors.joined(separator: "\n")
+        }
+        if let text = resultText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            return text
+        }
+        if let subtype = (json["subtype"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           subtype.lowercased().contains("error")
+        {
+            return "Claude CLI ended the run with an error result (\(subtype))."
+        }
+        return "Claude CLI ended the run with an error result."
     }
 
     private func mapProcessFailure(exitCode: Int32, stderr: String, timedOut: Bool) -> Error {
