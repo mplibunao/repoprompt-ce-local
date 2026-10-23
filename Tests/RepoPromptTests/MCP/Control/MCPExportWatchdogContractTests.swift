@@ -226,6 +226,63 @@ import XCTest
             XCTAssertEqual(failing.beginFinalization(), .beforeCommit(revoked: false))
         }
 
+        func testClientIDsInTheExecutionLogAreQuotedAndEscaped() {
+            let forged = #"op" phase=forged"#
+            let cases: [(label: String, value: String, quoted: String)] = [
+                ("quote", forged, #""op\" phase=forged""#),
+                ("backslash", #"a\b"#, #""a\\b""#),
+                ("newline", "a\nphase=forged", #""a\nphase=forged""#),
+                ("C1 control", "a\u{85}b", #""a\u0085b""#),
+                ("line separator", "a\u{2028}b", #""a\u2028b""#),
+                ("bidi override", "a\u{202E}b", #""a\u202Eb""#),
+                ("over 128 characters", String(repeating: "x", count: 130), "\"\(String(repeating: "x", count: 128))...\"")
+            ]
+            for testCase in cases {
+                XCTAssertEqual(MCPToolExecutionTraceEvent.quotedClientValue(testCase.value), testCase.quoted, testCase.label)
+            }
+
+            let event = MCPToolExecutionTraceEvent(
+                toolName: MCPWindowToolName.applyEdits,
+                operationIdentity: MCPToolAdmissionPolicy.operationIdentity(
+                    forCanonicalToolName: MCPWindowToolName.applyEdits,
+                    arguments: [:]
+                ),
+                connectionID: UUID(),
+                invocationID: UUID(),
+                runID: nil,
+                contractKind: .bounded,
+                executionDeadlineSeconds: nil,
+                cleanupGraceSeconds: nil,
+                cleanupDisposition: nil,
+                phase: .deadlineExpired,
+                elapsedMilliseconds: 0,
+                cancellationRequested: nil,
+                cancellationOutcome: nil,
+                cancellationOrigin: nil,
+                settlement: nil,
+                graceOutcome: nil,
+                escalationReason: nil,
+                handlerPhase: nil,
+                handlerPhaseAgeMilliseconds: nil,
+                mutationOperationID: forged
+            )
+            XCTAssertTrue(event.description.hasSuffix(#" operation_id="op\" phase=forged""#), event.description)
+        }
+
+        func testWindowExclusiveHolderRecordEndsOnlyForItsOwnInvocation() {
+            let holders = ServerNetworkManager.WindowExclusiveHolders()
+            let first = UUID()
+            let second = UUID()
+            holders.begin(windowID: 1, invocationID: first, toolName: MCPWindowToolName.applyEdits)
+            holders.end(windowID: 1, invocationID: first)
+            holders.begin(windowID: 1, invocationID: second, toolName: MCPWindowToolName.manageWorktree)
+            // The first holder's scope-exit cleanup runs after the slot has passed to the second.
+            holders.end(windowID: 1, invocationID: first)
+            XCTAssertEqual(holders.toolName(windowID: 1), MCPWindowToolName.manageWorktree)
+            holders.end(windowID: 1, invocationID: second)
+            XCTAssertNil(holders.toolName(windowID: 1))
+        }
+
         func testConnectionPermitReleasedWhenDeadlineExpiresImmediatelyAfterHandoff() async throws {
             let limiter = MCPDomainAsyncLimiter(limit: 1)
             let holderGate = AdmissionDeadlineGate()

@@ -180,8 +180,9 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         return fields.joined(separator: " ")
     }
 
-    /// Quotes a client-supplied value, escaping quotes, backslashes, and control characters and keeping
-    /// at most 128 characters, so the value can't add fields to the line.
+    /// Quotes a client-supplied value, escaping quotes, backslashes, control characters, line separators,
+    /// and bidirectional controls and keeping at most 128 characters, so the value can't add fields to the
+    /// line or reorder how it displays.
     static func quotedClientValue(_ value: String) -> String {
         let limit = 128
         var escaped = ""
@@ -193,7 +194,7 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
             case "\r": escaped += "\\r"
             case "\t": escaped += "\\t"
             case _ where scalar.value < 0x20 || (0x7F ... 0x9F).contains(scalar.value)
-                || scalar.value == 0x2028 || scalar.value == 0x2029:
+                || (0x2028 ... 0x202E).contains(scalar.value) || (0x2066 ... 0x2069).contains(scalar.value):
                 escaped += String(format: "\\u%04X", scalar.value)
             default:
                 escaped.unicodeScalars.append(scalar)
