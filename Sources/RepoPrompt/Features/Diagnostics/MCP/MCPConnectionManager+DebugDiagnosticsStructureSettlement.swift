@@ -74,6 +74,13 @@ import MCP
                 if let mutationState = lease.mutationState {
                     entry["mutation_state"] = mutationState.rawValue
                 }
+                entry["quarantined"] = lease.recoveryID != nil
+                if let recoveryID = lease.recoveryID {
+                    entry["recovery_id"] = recoveryID.uuidString
+                }
+                if let quarantineAge = lease.quarantineAge {
+                    entry["quarantine_age_ms"] = quarantineAge.mcpMilliseconds
+                }
                 return entry
             }
             return debugDiagnosticsResult([
@@ -84,6 +91,11 @@ import MCP
                 "detached_count": diagnostics.counts.detachedCount,
                 "released_count": diagnostics.counts.releasedCount,
                 "blocking_count": diagnostics.blockingCount,
+                "quarantined_count": diagnostics.counts.quarantinedCount,
+                "window_outstanding_recoveries": diagnostics.quarantine.windowOutstandingRecoveryCount,
+                "window_recovery_limit": MCPCodeStructureSettlementRegistry.outstandingRecoveryLimitPerWindow,
+                "app_quarantined_count": diagnostics.quarantine.appQuarantinedCount,
+                "app_quarantine_limit": MCPCodeStructureSettlementRegistry.quarantinedCallLimit,
                 "leases": leases
             ])
         }

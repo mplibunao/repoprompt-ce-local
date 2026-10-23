@@ -169,9 +169,10 @@ private struct CodeStructureSettlementLimitNoticeBanner: View {
 
     var body: some View {
         if let notice = server.codeStructureSettlementLimitNotice {
+            let tint: Color = notice.isWarning ? .orange : .blue
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                Image(systemName: notice.isWarning ? "exclamationmark.triangle.fill" : "arrow.clockwise.circle.fill")
+                    .foregroundStyle(tint)
                     .font(.title3)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(notice.title)
@@ -187,7 +188,7 @@ private struct CodeStructureSettlementLimitNoticeBanner: View {
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(.orange.opacity(0.5), lineWidth: 1)
+                    .strokeBorder(tint.opacity(0.5), lineWidth: 1)
             )
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(notice.title). \(notice.message)")
