@@ -1259,32 +1259,71 @@ actor ServerNetworkManager {
 
     private struct PromptExportPublicationAuthorityLost: Error {}
 
-    /// Where a call's admission budget ran out.
+    /// Where a call's admission budget ran out: waiting in its connection's queue, waiting for its
+    /// window's exclusive slot, or routing and checking the call before its provider started.
     enum CallAdmissionStage: String {
         case connectionLane = "connection_lane"
         case windowExclusive = "window_exclusive"
         case preProvider = "pre_provider"
     }
 
+    /// The call holding each window's exclusive slot, so a call that times out waiting for the slot
+    /// can name the tool it waited behind.
+    final class WindowExclusiveHolders: @unchecked Sendable {
+        private let lock = NSLock()
+        private var holderByWindowID: [Int: (invocationID: UUID, toolName: String)] = [:]
+
+        func begin(windowID: Int, invocationID: UUID, toolName: String) {
+            lock.withLock { holderByWindowID[windowID] = (invocationID, toolName) }
+        }
+
+        func end(windowID: Int, invocationID: UUID) {
+            lock.withLock {
+                if holderByWindowID[windowID]?.invocationID == invocationID {
+                    holderByWindowID.removeValue(forKey: windowID)
+                }
+            }
+        }
+
+        func toolName(windowID: Int) -> String? {
+            lock.withLock { holderByWindowID[windowID]?.toolName }
+        }
+    }
+
     static func windowExclusiveAdmissionTimeout(
         toolName: String,
         stage: CallAdmissionStage,
         invocationID: UUID,
-        operationID: String
+        operationID: String,
+        windowID: Int? = nil,
+        holderToolName: String? = nil
     ) -> (message: String, metadata: [String: Value]) {
-        (
-            message: "Tool '\(toolName)' did not start within its \(MCPTimeoutPolicy.windowExclusiveAdmissionTimeoutSeconds)-second admission budget (stage: \(stage.rawValue)). Another call held this connection's queue or this window's exclusive slot. Nothing was applied; retry shortly.",
-            metadata: [
-                "retryable": .bool(true),
-                "retry_after_ms": .int(1000),
-                "mutation_state": .string(DomainProtectedMutationState.notApplied.rawValue),
-                "admission_stage": .string(stage.rawValue),
-                "invocation_id": .string(invocationID.uuidString),
-                "operation_id": .string(operationID),
-                "tool": .string(toolName),
-                "settlement": .string("admission_timeout")
-            ]
-        )
+        let budget = "Tool '\(toolName)' didn't start within its \(MCPTimeoutPolicy.windowExclusiveAdmissionTimeoutSeconds)-second admission budget."
+        let message = switch stage {
+        case .connectionLane:
+            "\(budget) It was still queued behind an earlier call on this connection to a tool that takes a window's exclusive slot. Nothing was applied. Retry after that earlier call returns."
+        case .windowExclusive:
+            "\(budget) It was still waiting for \(windowID.map { "window \($0)'s" } ?? "its window's") exclusive slot, which \(holderToolName.map { "a '\($0)' call" } ?? "another call") holds. A call can hold the slot for minutes, such as an edit waiting for review or a worktree merge waiting for approval. Nothing was applied. Retry after that call finishes."
+        case .preProvider:
+            "\(budget) Routing the call and checking it before its provider started took that long, which usually means the app is busy. Nothing was applied. Retry in a few seconds."
+        }
+        var metadata: [String: Value] = [
+            "retryable": .bool(true),
+            "retry_after_ms": .int(1000),
+            "mutation_state": .string(DomainProtectedMutationState.notApplied.rawValue),
+            "admission_stage": .string(stage.rawValue),
+            "invocation_id": .string(invocationID.uuidString),
+            "operation_id": .string(operationID),
+            "tool": .string(toolName),
+            "settlement": .string("admission_timeout")
+        ]
+        if let windowID {
+            metadata["window_id"] = .int(windowID)
+        }
+        if let holderToolName {
+            metadata["holder_tool"] = .string(holderToolName)
+        }
+        return (message, metadata)
     }
 
     static func windowExclusiveAdmissionTimeoutResult(
@@ -1292,13 +1331,17 @@ actor ServerNetworkManager {
         toolName: String,
         stage: CallAdmissionStage,
         invocationID: UUID,
-        operationID: String
+        operationID: String,
+        windowID: Int? = nil,
+        holderToolName: String? = nil
     ) -> CallTool.Result {
         let timeout = windowExclusiveAdmissionTimeout(
             toolName: toolName,
             stage: stage,
             invocationID: invocationID,
-            operationID: operationID
+            operationID: operationID,
+            windowID: windowID,
+            holderToolName: holderToolName
         )
         return executionContractToolErrorResult(
             rawJSON: rawJSON,
@@ -1529,6 +1572,7 @@ actor ServerNetworkManager {
 
     private nonisolated let codeStructureSettlementRegistry = MCPCodeStructureSettlementRegistry()
     private nonisolated let toolCardOwnershipLedger = MCPToolCardOwnershipLedger()
+    private nonisolated let windowExclusiveHolders = WindowExclusiveHolders()
 
     /// The registry remains the lease owner. This actor keeps only the identity
     /// of a warning projected into each window, so healthy calls do not hop to
@@ -11830,7 +11874,11 @@ actor ServerNetworkManager {
             }()
             let callAdmissionDeadline = promptExportExecutionEnvelope?.admissionDeadline
                 ?? windowExclusiveAdmissionDeadline
-            @Sendable func admissionTimeoutResultIfExpired(stage: CallAdmissionStage) -> CallTool.Result? {
+            /// `stage` names the segment that ran since the previous check, where the budget ran out.
+            @Sendable func admissionTimeoutResultIfExpired(
+                stage: CallAdmissionStage,
+                windowID: Int? = nil
+            ) -> CallTool.Result? {
                 guard let promptExportExecutionEnvelope else {
                     guard let windowExclusiveAdmissionDeadline else { return nil }
                     do {
@@ -11842,7 +11890,9 @@ actor ServerNetworkManager {
                             toolName: toolName,
                             stage: stage,
                             invocationID: invocationID,
-                            operationID: resolvedOperationID
+                            operationID: resolvedOperationID,
+                            windowID: windowID,
+                            holderToolName: windowID.flatMap { self.windowExclusiveHolders.toolName(windowID: $0) }
                         )
                     }
                 }
@@ -11865,7 +11915,7 @@ actor ServerNetworkManager {
                     )
                 }
             }
-            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .preProvider) {
                 return admissionTimeout
             }
             if let responseDeliveryRequestToken, let promptExportExecutionEnvelope {
@@ -11973,7 +12023,7 @@ actor ServerNetworkManager {
                     }
                 }
             }
-            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .preProvider) {
                 return admissionTimeout
             }
 
@@ -12092,7 +12142,7 @@ actor ServerNetworkManager {
                 )
             }
 
-            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .preProvider) {
                 return admissionTimeout
             }
 
@@ -12151,7 +12201,7 @@ actor ServerNetworkManager {
             // after window routing chooses the canonical application/window scope.
             let bypassWindowRoutingForSnapshot = Self.shouldBypassWindowRouting(for: toolName)
             connectionLog("tools/call \(toolName): reading MainActor routing state")
-            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .preProvider) {
                 return await finishRequestProgress(admissionTimeout)
             }
             let routingSnapshot: (Int, Bool) = await EditFlowPerf.measure(
@@ -12167,7 +12217,7 @@ actor ServerNetworkManager {
                     return (windows.count, effectiveMode)
                 }
             }
-            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .preProvider) {
                 return await finishRequestProgress(admissionTimeout)
             }
             connectionLog("tools/call \(toolName): routing state windowCount=\(routingSnapshot.0) multi=\(routingSnapshot.1)")
@@ -12182,7 +12232,7 @@ actor ServerNetworkManager {
             let admissionClass = preAdmissionDecision.admissionClass
             let callLane = admissionClass.connectionLane
             connectionLog("tools/call \(toolName): acquiring limiter lane=\(callLane.rawValue)")
-            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .connectionLane) {
+            if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .preProvider) {
                 return await finishRequestProgress(admissionTimeout)
             }
             let limiterResolution = await EditFlowPerf.measure(
@@ -12545,7 +12595,7 @@ actor ServerNetworkManager {
                                         ? nil
                                         : await self.runIDForConnection(connectionID)
                                 }
-                                if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .windowExclusive) {
+                                if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .preProvider) {
                                     return admissionTimeout
                                 }
                                 let mutationAdmissionLease: MCPDomainToolResourceAdmissionController.Lease?
@@ -12580,7 +12630,10 @@ actor ServerNetworkManager {
                                             reason: .leaseWaitTermination(for: error)
                                         )
                                         if error is MCPDomainAdmissionDeadline.Expired,
-                                           let timeoutResult = admissionTimeoutResultIfExpired(stage: .windowExclusive)
+                                           let timeoutResult = admissionTimeoutResultIfExpired(
+                                               stage: .windowExclusive,
+                                               windowID: chosenID
+                                           )
                                         {
                                             return timeoutResult
                                         }
@@ -12684,6 +12737,12 @@ actor ServerNetworkManager {
                                     ? "app_wide"
                                     : resourceAdmissionWindowID.map { "window:\($0)" }
                                 @Sendable func releaseResourceAdmissionLeases(outcome: String) {
+                                    if let resourceAdmissionWindowID {
+                                        self.windowExclusiveHolders.end(
+                                            windowID: resourceAdmissionWindowID,
+                                            invocationID: invocationID
+                                        )
+                                    }
                                     let releasedMutation = mutationAdmissionLease?.release() ?? false
                                     let releasedSmallRead = smallReadAdmissionLease?.release() ?? false
                                     let releasedFileRead = fileReadAdmissionLease?.release() ?? false
@@ -12710,8 +12769,33 @@ actor ServerNetworkManager {
                                     releaseResourceAdmissionLeases(outcome: "provider_error")
                                 }
 
-                                if let admissionTimeout = admissionTimeoutResultIfExpired(stage: .preProvider) {
+                                if let admissionTimeout = admissionTimeoutResultIfExpired(
+                                    stage: .windowExclusive,
+                                    windowID: chosenID
+                                ) {
                                     return admissionTimeout
+                                }
+                                let exclusiveHolderWindowID: Int? = if mutationAdmissionLease != nil,
+                                                                       !MCPGlobalToolName.orderedToolNames.contains(toolName)
+                                {
+                                    chosenID
+                                } else {
+                                    nil
+                                }
+                                if let exclusiveHolderWindowID {
+                                    self.windowExclusiveHolders.begin(
+                                        windowID: exclusiveHolderWindowID,
+                                        invocationID: invocationID,
+                                        toolName: toolName
+                                    )
+                                }
+                                defer {
+                                    if let exclusiveHolderWindowID {
+                                        self.windowExclusiveHolders.end(
+                                            windowID: exclusiveHolderWindowID,
+                                            invocationID: invocationID
+                                        )
+                                    }
                                 }
                                 let toolCardOwnershipLease: MCPToolCardOwnershipLedger.Lease?
                                 if let runID = observerRunIDForCallbacksFinal, let chosenID {
