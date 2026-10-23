@@ -5038,6 +5038,7 @@ final class MCPServerViewModel: ObservableObject {
             intent: intent,
             authority: authority,
             coverageIdentity: coverageIdentity,
+            fence: MCPDomainInvocationFence.current,
             for: key
         ) else {
             throw FileToolAuthorityFailure.superseded
@@ -5657,8 +5658,33 @@ final class MCPServerViewModel: ObservableObject {
         return selection
     }
 
+    /// A read revoked while its batch applies must not publish its path. The selection write refuses a batch
+    /// with a revoked contribution, and the rest of the batch is applied again without it; paths that already
+    /// published make the second apply a no-op for them.
     @MainActor
     private func applyReadFileAutoSelectionBatch(
+        _ batch: MCPReadFileAutoSelectionCoordinator.CanonicalBatch,
+        for key: MCPReadFileAutoSelectionCoordinator.ContextKey
+    ) async -> MCPReadFileAutoSelectionCoordinator.CanonicalApplyResult {
+        var pending: MCPReadFileAutoSelectionCoordinator.CanonicalBatch? = batch
+        var result = MCPReadFileAutoSelectionCoordinator.CanonicalApplyResult.unchanged
+        var changed = false
+        while let live = pending {
+            result = await applyLiveReadFileAutoSelectionBatch(live, for: key)
+            changed = changed || result.disposition == .changed
+            guard live.hasRevokedContribution else { break }
+            pending = live.withoutRevokedContributions()
+        }
+        guard changed, result.disposition != .changed else { return result }
+        return MCPReadFileAutoSelectionCoordinator.CanonicalApplyResult(
+            mirrorKey: key.mirrorKey,
+            disposition: .changed,
+            coverageCertificateOutcome: result.coverageCertificateOutcome
+        )
+    }
+
+    @MainActor
+    private func applyLiveReadFileAutoSelectionBatch(
         _ batch: MCPReadFileAutoSelectionCoordinator.CanonicalBatch,
         for key: MCPReadFileAutoSelectionCoordinator.ContextKey
     ) async -> MCPReadFileAutoSelectionCoordinator.CanonicalApplyResult {
@@ -5753,8 +5779,12 @@ final class MCPServerViewModel: ObservableObject {
                 lookupContext: authoritativeLookupContext,
                 contextKey: key,
                 expectedBaseSelection: initialSelection,
-                automaticCodemapDisposition: batch.automaticCodemapDisposition
-            ) else { continue }
+                automaticCodemapDisposition: batch.automaticCodemapDisposition,
+                publicationRevoked: { batch.hasRevokedContribution }
+            ) else {
+                if batch.hasRevokedContribution { break }
+                continue
+            }
 
             verifiedCanonicalChange = verifiedCanonicalChange || !authoritativeResult.canonicalUnchanged
             let minted = await mintReadFileAutoSelectionCoverageCertificate(

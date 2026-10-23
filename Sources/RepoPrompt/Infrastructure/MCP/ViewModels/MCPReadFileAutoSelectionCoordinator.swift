@@ -272,7 +272,15 @@ final class MCPReadFileAutoSelectionCoordinator {
     }
 
     struct CanonicalBatch {
+        /// One read's intent, kept so the batch can be rebuilt without a read that was revoked after it joined.
+        private struct Contribution {
+            let intent: Intent
+            let coverageIdentity: CoverageIdentity?
+            let fence: MCPDomainInvocationFence?
+        }
+
         let authority: MCPServerViewModel.FrozenFileToolAuthority
+        private var contributions: [Contribution] = []
         private(set) var fullPaths: [String] = []
         private(set) var sliceEntries: [WorkspaceSelectionSliceInput] = []
         private(set) var coverageIdentity: CoverageIdentity?
@@ -287,15 +295,52 @@ final class MCPReadFileAutoSelectionCoordinator {
         init(
             intent: Intent,
             authority: MCPServerViewModel.FrozenFileToolAuthority,
-            coverageIdentity: CoverageIdentity? = nil
+            coverageIdentity: CoverageIdentity? = nil,
+            fence: MCPDomainInvocationFence? = nil
         ) {
             self.authority = authority
             self.coverageIdentity = nil
             coveragePermitted = coverageIdentity != nil
-            merge(intent, coverageIdentity: coverageIdentity)
+            merge(intent, coverageIdentity: coverageIdentity, fence: fence)
         }
 
-        mutating func merge(_ intent: Intent, coverageIdentity incomingCoverageIdentity: CoverageIdentity? = nil) {
+        /// Whether a read that contributed to this batch has been revoked since.
+        var hasRevokedContribution: Bool {
+            contributions.contains { $0.fence?.isRevoked == true }
+        }
+
+        /// The batch rebuilt from the contributions whose reads are not revoked, or nil when every one is.
+        /// Rebuilding replays the merges, so a slice that a revoked full-file read had replaced comes back.
+        func withoutRevokedContributions() -> CanonicalBatch? {
+            let live = contributions.filter { $0.fence?.isRevoked != true }
+            guard live.count < contributions.count else { return self }
+            guard let first = live.first else { return nil }
+            var rebuilt = CanonicalBatch(
+                intent: first.intent,
+                authority: authority,
+                coverageIdentity: first.coverageIdentity,
+                fence: first.fence
+            )
+            for contribution in live.dropFirst() {
+                rebuilt.merge(
+                    contribution.intent,
+                    coverageIdentity: contribution.coverageIdentity,
+                    fence: contribution.fence
+                )
+            }
+            return rebuilt
+        }
+
+        mutating func merge(
+            _ intent: Intent,
+            coverageIdentity incomingCoverageIdentity: CoverageIdentity? = nil,
+            fence: MCPDomainInvocationFence? = nil
+        ) {
+            contributions.append(Contribution(
+                intent: intent,
+                coverageIdentity: incomingCoverageIdentity,
+                fence: fence
+            ))
             automaticCodemapDisposition = automaticCodemapDisposition.merging(intent.automaticCodemapDisposition)
             if coveragePermitted {
                 if let incomingCoverageIdentity {
@@ -573,11 +618,14 @@ final class MCPReadFileAutoSelectionCoordinator {
         self.mirrorWaitTimeout = mirrorWaitTimeout
     }
 
+    /// `fence` belongs to the read that produced the intent: once it is revoked, the intent is dropped,
+    /// here or when its batch applies.
     @discardableResult
     func enqueue(
         intent: Intent,
         authority: MCPServerViewModel.FrozenFileToolAuthority,
         coverageIdentity: CoverageIdentity? = nil,
+        fence: MCPDomainInvocationFence? = nil,
         for key: ContextKey,
         lifecycleCorrelation: EditFlowPerf.LifecycleCorrelation? = EditFlowPerf.currentLifecycleCorrelation
     ) -> Bool {
@@ -598,6 +646,10 @@ final class MCPReadFileAutoSelectionCoordinator {
             outcome = "invalidated"
             return false
         }
+        guard fence?.isRevoked != true else {
+            outcome = "revoked"
+            return false
+        }
 
         var lane = canonicalLanes[key] ?? CanonicalLane()
         if let pending = lane.pending,
@@ -611,7 +663,7 @@ final class MCPReadFileAutoSelectionCoordinator {
         let previousAcceptedSequence = lane.acceptedSequence
         lane.acceptedSequence = sequence
         if var pending = lane.pending {
-            pending.batch.merge(intent, coverageIdentity: coverageIdentity)
+            pending.batch.merge(intent, coverageIdentity: coverageIdentity, fence: fence)
             pending.highestSequence = sequence
             pending.acceptedIntentCount &+= 1
             pending.lifecycleCorrelation = lifecycleCorrelation ?? pending.lifecycleCorrelation
@@ -627,7 +679,8 @@ final class MCPReadFileAutoSelectionCoordinator {
                 batch: CanonicalBatch(
                     intent: intent,
                     authority: authority,
-                    coverageIdentity: coverageIdentity
+                    coverageIdentity: coverageIdentity,
+                    fence: fence
                 ),
                 lowestSequence: sequence,
                 highestSequence: sequence,
@@ -842,7 +895,11 @@ final class MCPReadFileAutoSelectionCoordinator {
             workerID: workerID
         )
         Task { @MainActor [weak self] in
-            await self?.runCanonicalWorker(for: key, workerID: workerID)
+            // The worker serves every read in the context, so it must not inherit the fence of the read
+            // that happened to start it; each intent carries its own.
+            await MCPDomainInvocationFence.$current.withValue(nil) {
+                await self?.runCanonicalWorker(for: key, workerID: workerID)
+            }
         }
     }
 
@@ -885,8 +942,11 @@ final class MCPReadFileAutoSelectionCoordinator {
                     }
                 #endif
                 // The debug gate models any suspension before mutation. Revalidate identity
-                // afterward so an invalidated or replaced route can never apply stale work.
-                if !invalidatedContexts.contains(key), isContextCurrent(key) {
+                // afterward so an invalidated or replaced route can never apply stale work, and
+                // drop the intents of reads revoked while the batch waited.
+                if !invalidatedContexts.contains(key), isContextCurrent(key),
+                   let batch = queued.batch.withoutRevokedContributions()
+                {
                     #if DEBUG
                         let debugMutationClock = ContinuousClock()
                         let debugMutationStartedAt = debugMutationClock.now
@@ -896,7 +956,7 @@ final class MCPReadFileAutoSelectionCoordinator {
                             EditFlowPerf.Stage.ReadFile.AutoSelect.canonicalMutation,
                             EditFlowPerf.Dimensions(status: key.route.diagnosticScope)
                         ) {
-                            await applyCanonical(key, queued.batch)
+                            await applyCanonical(key, batch)
                         }
                     }
                     #if DEBUG

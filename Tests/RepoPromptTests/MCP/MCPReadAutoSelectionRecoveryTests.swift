@@ -48,6 +48,45 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         assertFullyReclaimed(coordinator)
     }
 
+    /// A read revoked after its intent joined a batch must not publish, and the reads it shares the batch
+    /// with still do, including a slice the revoked read's full-file intent had absorbed.
+    func testRevokedReadIsDroppedFromItsBatchWhileLiveReadsInTheSameBatchApply() async {
+        let recorder = RecoveryBatchRecorder()
+        let probe = RecoveryDiagnosticEventProbe()
+        let key = contextKey()
+        let coordinator = MCPReadFileAutoSelectionCoordinator(
+            isContextCurrent: { $0 == key },
+            applyCanonical: { _, batch in
+                await recorder.record(.init(fullPaths: batch.fullPaths, slicePaths: batch.sliceEntries.map(\.path)))
+                return .unchanged
+            },
+            applyMirror: { _ in .converged },
+            diagnosticObserver: { probe.record($0) }
+        )
+        let revokedRead = MCPDomainInvocationFence()
+        let liveSliceRead = MCPDomainInvocationFence()
+        let liveFullRead = MCPDomainInvocationFence()
+
+        // The worker can't run until this test suspends, so the three intents share one batch.
+        XCTAssertTrue(coordinator.enqueue(intent: .full(paths: ["/tmp/Shared.swift"]), fence: revokedRead, for: key))
+        XCTAssertTrue(coordinator.enqueue(
+            intent: .slices(entries: [WorkspaceSelectionSliceInput(path: "/tmp/Shared.swift", ranges: [LineRange(start: 2, end: 4)])]),
+            fence: liveSliceRead,
+            for: key
+        ))
+        XCTAssertTrue(coordinator.enqueue(intent: .full(paths: ["/tmp/Live.swift"]), fence: liveFullRead, for: key))
+        revokedRead.revoke(origin: .watchdogDeadline)
+        XCTAssertFalse(coordinator.enqueue(intent: .full(paths: ["/tmp/Late.swift"]), fence: revokedRead, for: key))
+
+        let drained = await coordinator.drain(.canonicalSelection, for: key)
+        XCTAssertEqual(drained, .completed)
+        let batches = await recorder.batches()
+        XCTAssertEqual(batches, [RecoveryBatchRecorder.Batch(fullPaths: ["/tmp/Live.swift"], slicePaths: ["/tmp/Shared.swift"])])
+        _ = await probe.waitFor(kind: .workerStopped, lane: .canonical)
+        coordinator.invalidate(context: key)
+        assertFullyReclaimed(coordinator)
+    }
+
     func testCancellingCanonicalDrainReleasesWaiterWhilePhysicalWorkerContinues() async {
         let gate = RecoveryCancellationIgnoringGate()
         let recorder = RecoveryInvocationRecorder()
@@ -406,7 +445,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
 
 private extension MCPReadFileAutoSelectionCoordinator {
     @discardableResult
-    func enqueue(intent: Intent, for key: ContextKey) -> Bool {
+    func enqueue(intent: Intent, fence: MCPDomainInvocationFence? = nil, for key: ContextKey) -> Bool {
         let workspaceID = key.workspaceID ?? key.tabID
         let authority = MCPServerViewModel.FrozenFileToolAuthority(
             lookupContext: .visibleWorkspace,
@@ -422,7 +461,24 @@ private extension MCPReadFileAutoSelectionCoordinator {
             sessionRootLifetimeSnapshot: nil,
             sourceIdentity: nil
         )
-        return enqueue(intent: intent, authority: authority, for: key)
+        return enqueue(intent: intent, authority: authority, fence: fence, for: key)
+    }
+}
+
+private actor RecoveryBatchRecorder {
+    struct Batch: Equatable {
+        let fullPaths: [String]
+        let slicePaths: [String]
+    }
+
+    private var recorded: [Batch] = []
+
+    func record(_ batch: Batch) {
+        recorded.append(batch)
+    }
+
+    func batches() -> [Batch] {
+        recorded
     }
 }
 

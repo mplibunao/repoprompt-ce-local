@@ -12955,9 +12955,15 @@ actor ServerNetworkManager {
                                         cleanupDisposition: MCPToolExecutionCleanupDisposition?,
                                         slot: MCPCodeStructureSettlementRegistry.Slot?
                                     )
-                                    if contract.cleanupDisposition == .detachAndSettle,
-                                       !MCPToolExecutionContractCatalog.slotlessDetachToolNames.contains(toolName)
-                                    {
+                                    let admitsSettlementLease = contract.cleanupDisposition == .detachAndSettle
+                                        && !MCPToolExecutionContractCatalog.slotlessDetachToolNames.contains(toolName)
+                                    // A leased call that commits no protected mutation gets a fence, revoked at the
+                                    // same points as an arbiter, so a selection its read queued can't publish after
+                                    // the call is revoked.
+                                    let invocationFence: MCPDomainInvocationFence? = admitsSettlementLease && mutationCommitState == nil
+                                        ? MCPDomainInvocationFence()
+                                        : nil
+                                    if admitsSettlementLease {
                                         guard let windowID = Self.currentToolDispatchAuthorization?.windowIdentity?.windowID else {
                                             throw MCPToolExecutionDispatchError.structureSettlementWindowUnresolved
                                         }
@@ -12968,7 +12974,8 @@ actor ServerNetworkManager {
                                             toolName: toolName,
                                             now: executionWatchdogEnvironment.now(),
                                             handlerPhaseRecorder: handlerPhaseRecorder,
-                                            commitState: mutationCommitState
+                                            commitState: mutationCommitState,
+                                            fence: invocationFence
                                         ) {
                                         case let .admitted(slot):
                                             if let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSuccessfulAdmission(
@@ -13102,7 +13109,9 @@ actor ServerNetworkManager {
                                                 )
                                             }
                                             guard let mutationObservation else {
-                                                return try await executeOperation()
+                                                return try await MCPDomainInvocationFence.$current.withValue(invocationFence) {
+                                                    try await executeOperation()
+                                                }
                                             }
                                             return try await MCPDomainProtectedMutationSettlementContext.$observer.withValue(
                                                 { mutationObservation.record($0) }
@@ -13402,9 +13411,12 @@ actor ServerNetworkManager {
                                                 onAbandonedSettlement: recordAbandonedSettlement,
                                                 onForceDisconnectedSettlement: recordForceDisconnectedSettlement,
                                                 operationCompletionInstant: operationCompletionInstant,
-                                                revokeBeforeCancellation: mutationCommitState.map { commitState in
-                                                    { @Sendable origin in commitState.revoke(origin: origin) }
-                                                },
+                                                revokeBeforeCancellation: mutationCommitState == nil && invocationFence == nil
+                                                    ? nil
+                                                    : { @Sendable origin in
+                                                        mutationCommitState?.revoke(origin: origin)
+                                                        invocationFence?.revoke(origin: origin)
+                                                    },
                                                 operation: watchdogOperation
                                             )
                                         } catch MCPToolExecutionWatchdogError.cleanupUnresponsive {

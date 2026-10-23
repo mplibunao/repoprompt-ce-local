@@ -2,6 +2,7 @@ import Foundation
 import MCP
 @testable import RepoPromptApp
 import RepoPromptDomainRuntime
+import RepoPromptShared
 import XCTest
 
 #if DEBUG
@@ -59,6 +60,79 @@ import XCTest
                     try await fixture.assertCleanedUp()
                 } catch {
                     if let endpoint { await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager) }
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        /// A read that times out while its automatic selection waits to apply doesn't add its file to the
+        /// selection afterwards, and the next read of the file still does.
+        func testTimedOutReadDoesNotAddItsFileToSelectionLater() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let manager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let gate = MCPExecutionIgnoringCancellationGate()
+                var endpoint: PersistentMCPTestEndpoint?
+                do {
+                    try await fixture.registerDomainWorkspace(context)
+                    try await Self.activateWorkspace(context)
+                    let caller = try await Self.makeBoundEndpoint(label: "timed-out-reader", fixture: fixture)
+                    endpoint = caller
+                    _ = try await caller.callTool(name: MCPWindowToolName.manageSelection, arguments: ["op": "clear"])
+                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting {
+                        await gate.enterAndWait()
+                    }
+
+                    // The read waits for its selection to apply, so the deadline lands while its intent is queued.
+                    let read = Task {
+                        try await caller.callTool(
+                            name: MCPWindowToolName.readFile,
+                            arguments: ["path": context.fileURL.path, "_rawJSON": true]
+                        )
+                    }
+                    try await gate.waitUntilEntered(count: 1)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolExecutionDeadline)
+                    let timedOut = try await read.value
+                    XCTAssertTrue(timedOut.rawJSON.contains("tool_execution_timeout"), timedOut.rawJSON)
+
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    await gate.release()
+                    let metadata = MCPServerViewModel.RequestMetadata(
+                        connectionID: caller.connectionID, clientName: nil, windowID: context.window.windowID
+                    )
+                    let drained = try await server.drainReadFileAutoSelection(
+                        metadata: metadata,
+                        requirement: .canonicalSelection
+                    )
+                    XCTAssertEqual(drained, .completed)
+                    XCTAssertFalse(try XCTUnwrap(Self.storedSelection(context)).selectedPaths.contains(context.fileURL.path))
+
+                    let reread = try await caller.callTool(
+                        name: MCPWindowToolName.readFile,
+                        arguments: ["path": context.fileURL.path]
+                    )
+                    XCTAssertFalse(reread.rawJSON.contains("\"isError\":true"), reread.rawJSON)
+                    XCTAssertTrue(try XCTUnwrap(Self.storedSelection(context)).selectedPaths.contains(context.fileURL.path))
+
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await Self.cleanupEndpoint(caller, manager: manager)
+                    endpoint = nil
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    await gate.release()
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: manager) }
                     await fixture.cleanup()
                     throw error
                 }
