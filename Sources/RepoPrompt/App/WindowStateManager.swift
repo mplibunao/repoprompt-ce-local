@@ -743,10 +743,8 @@ class WindowStatesManager: ObservableObject {
         let windowID = state.windowID
         restorePersistenceGate.beginRestoringWindow(windowID)
         restoringEntryWorkspaceIDByWindowID[windowID] = entry.workspaceID
-        state.applyWindowRestoreEntry(entry) { [weak self, weak state] in
+        state.applyWindowRestoreEntry(entry) { [weak self] in
             guard let self else { return }
-            // A later click on the window must not send it behind again.
-            state?.onAttachedAsKey = nil
             restoringEntryWorkspaceIDByWindowID.removeValue(forKey: windowID)
             restorePersistenceGate.finishRestoringWindow(windowID)
             flushDeferredWindowSessionPersistIfRestoreIdle()
@@ -837,12 +835,14 @@ class WindowStatesManager: ObservableObject {
             do {
                 _ = try await openNewMainWindow(takingLaunchRestoreEntry: true)
             } catch {
-                // Nothing retries on its own: the next restore event advances the driver again, and
-                // the entries stay in the session file meanwhile.
+                // The driver stops for the rest of this run: it opens a window only when no restore
+                // is running, so no restore event is left to call it again. The entries stay in the
+                // session file and reopen at the next launch, and routing refuses their workspaces
+                // until then.
                 launchRestoreOpenInFlight = false
                 launchRestoreFocusReturnWindow = nil
                 windowRestoreLog.warning(
-                    "Launch restore could not open a window for a saved entry (\(error.localizedDescription)). The \(restoreQueue.count) saved windows that haven't reopened stay in the session file."
+                    "Launch restore could not open a window for a saved entry (\(error.localizedDescription)). The \(restoreQueue.count) saved windows that haven't reopened stay in the session file and reopen at the next launch."
                 )
                 #if DEBUG
                     WorkspaceRestorePerfLog.log("restore.driver openFailed error=\(String(describing: error))")
