@@ -289,7 +289,7 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
                 // This provider never interrupts the CLI, and a caller's stop cancels this task. A result
                 // that reads as cancelled without that is an abort inside the CLI, such as a request
                 // timeout, and the caller needs its message.
-                throw Self.cliFailureError(detail: Self.failedResultDetail(json, resultText: finalText))
+                throw Self.cliFailureError(detail: Self.failedResultDetail(json))
             }
 
             // Build events: optional stop-reason system message, final message, then completion
@@ -724,12 +724,12 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
     }
 
     /// What a failed `result` says went wrong: its `errors`, else its `result` text.
-    private static func failedResultDetail(_ json: [String: Any], resultText: String?) -> String {
+    private static func failedResultDetail(_ json: [String: Any]) -> String {
         let errors = ClaudeResultOutcome.errorMessages(in: json)
         if !errors.isEmpty {
             return errors.joined(separator: "\n")
         }
-        if let text = resultText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+        if let text = (json["result"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
             return text
         }
         if let subtype = (json["subtype"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),

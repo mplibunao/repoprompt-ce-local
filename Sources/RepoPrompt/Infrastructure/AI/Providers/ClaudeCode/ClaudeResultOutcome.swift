@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Agent Mode's session controller and the headless provider that runs Context Builder discovery both
 /// classify `result` payloads here, so they agree on which turns failed and which were cancelled.
-enum ClaudeResultOutcome: Equatable {
+enum ClaudeResultOutcome {
     case completed
     case cancelled
     case failed
