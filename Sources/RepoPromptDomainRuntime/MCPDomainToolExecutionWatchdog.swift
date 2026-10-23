@@ -245,6 +245,7 @@ package enum MCPToolExecutionWatchdog {
         onAbandonedSettlement: @escaping @Sendable (MCPToolExecutionSettlement) async -> Void = { _ in },
         onForceDisconnectedSettlement: @escaping @Sendable (MCPToolExecutionSettlement) async -> Void = { _ in },
         operationCompletionInstant: @escaping @Sendable () -> Duration? = { nil },
+        revokeBeforeCancellation: (@Sendable (MCPToolExecutionCancellationOrigin) -> Void)? = nil,
         operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         let watchdogStart = environment.now()
@@ -399,6 +400,8 @@ package enum MCPToolExecutionWatchdog {
                     }
                     guard !deadlineDidExpire else { continue }
                     deadlineDidExpire = true
+                    // Revoke before cancelling, so a commit that has not begun can no longer begin.
+                    revokeBeforeCancellation?(.watchdogDeadline)
                     operationTask.cancel()
                     await environment.beforeCleanupGraceTaskRegistration()
                     let cancellationStart = environment.now()
@@ -519,6 +522,7 @@ package enum MCPToolExecutionWatchdog {
             tasks.cancelAll()
             throw CancellationError()
         } onCancel: {
+            revokeBeforeCancellation?(.requestCancellation)
             Task {
                 await onEvent(.cancellationRequested(origin: .requestCancellation))
             }

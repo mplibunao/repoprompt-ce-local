@@ -25,16 +25,16 @@ import MCP
             // the main actor is slowest exactly when a stall is being sampled, so the window
             // lookup runs only to tell an empty registry from a mistyped window ID. The registry
             // is read again after the lookup so an entry admitted during it is still reported.
-            let snapshot = debugCodeStructureSettlementSnapshot(windowID: windowID)
-            if snapshot.activeCount > 0 {
-                return debugStructureSettlementSnapshotResult(op: op, windowID: windowID, snapshot: snapshot)
+            let diagnostics = debugCodeStructureSettlementDiagnostics(windowID: windowID)
+            if diagnostics.counts.activeCount > 0 {
+                return debugStructureSettlementSnapshotResult(op: op, windowID: windowID, diagnostics: diagnostics)
             }
 
             let windowExists = await MainActor.run {
                 WindowStatesManager.shared.hasWindow(id: windowID)
             }
-            let latestSnapshot = debugCodeStructureSettlementSnapshot(windowID: windowID)
-            guard windowExists || latestSnapshot.activeCount > 0 else {
+            let latestDiagnostics = debugCodeStructureSettlementDiagnostics(windowID: windowID)
+            guard windowExists || latestDiagnostics.counts.activeCount > 0 else {
                 return debugDiagnosticsError(
                     op: op,
                     code: "no_window",
@@ -42,21 +42,49 @@ import MCP
                 )
             }
 
-            return debugStructureSettlementSnapshotResult(op: op, windowID: windowID, snapshot: latestSnapshot)
+            return debugStructureSettlementSnapshotResult(op: op, windowID: windowID, diagnostics: latestDiagnostics)
         }
 
         private nonisolated func debugStructureSettlementSnapshotResult(
             op: String,
             windowID: Int,
-            snapshot: MCPCodeStructureSettlementRegistry.Snapshot
+            diagnostics: MCPCodeStructureSettlementRegistry.Diagnostics
         ) -> CallTool.Result {
-            debugDiagnosticsResult([
+            let leases: [[String: Any]] = diagnostics.leases.map { lease in
+                var entry: [String: Any] = [
+                    "lease_id": lease.leaseID.uuidString,
+                    "invocation_id": lease.invocationID.uuidString,
+                    "connection_id": lease.connectionID.uuidString,
+                    "tool": lease.toolName,
+                    "state": lease.state,
+                    "admission_age_ms": lease.admissionAge.mcpMilliseconds,
+                    "released": lease.isReleased,
+                    "provider_completed": lease.providerCompleted
+                ]
+                if let blockingAge = lease.blockingAge {
+                    entry["blocking_age_ms"] = blockingAge.mcpMilliseconds
+                }
+                if let handlerPhase = lease.handlerPhase {
+                    entry["handler_phase"] = handlerPhase.phase.rawValue
+                    entry["handler_phase_transition"] = handlerPhase.transition.rawValue
+                }
+                if let handlerPhaseAge = lease.handlerPhaseAge {
+                    entry["handler_phase_age_ms"] = handlerPhaseAge.mcpMilliseconds
+                }
+                if let mutationState = lease.mutationState {
+                    entry["mutation_state"] = mutationState.rawValue
+                }
+                return entry
+            }
+            return debugDiagnosticsResult([
                 "ok": true,
                 "op": op,
                 "window_id": windowID,
-                "active_count": snapshot.activeCount,
-                "detached_count": snapshot.detachedCount,
-                "released_count": snapshot.releasedCount
+                "active_count": diagnostics.counts.activeCount,
+                "detached_count": diagnostics.counts.detachedCount,
+                "released_count": diagnostics.counts.releasedCount,
+                "blocking_count": diagnostics.blockingCount,
+                "leases": leases
             ])
         }
     }

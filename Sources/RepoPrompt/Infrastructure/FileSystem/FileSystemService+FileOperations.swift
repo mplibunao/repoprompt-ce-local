@@ -118,6 +118,9 @@ extension FileSystemService {
             #if DEBUG
                 let willBegin = mutationIOWillBeginHandler
                 let willExecute = mutationIOWillExecuteHandler
+                if let willCommit = mutationWillCommitHandler {
+                    await willCommit(operation)
+                }
             #else
                 let willBegin: (@Sendable (FileSystemUncancellableMutation) async -> Void)? = nil
                 let willExecute: (@Sendable (FileSystemUncancellableMutation) -> Void)? = nil
@@ -163,6 +166,7 @@ extension FileSystemService {
             try completion.get()
             return
         }
+        MCPToolExecutionHandlerPhaseContext.report(.filesystemMutationIOWait)
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
                 if Task.isCancelled {

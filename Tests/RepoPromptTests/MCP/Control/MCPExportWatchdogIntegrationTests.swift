@@ -1,3 +1,4 @@
+import Combine
 import Darwin
 import Foundation
 import JSONSchema
@@ -174,33 +175,301 @@ import XCTest
             }
         }
 
-        func testPromptMutationTimeoutDetachesWithoutTerminatingConnection() async throws {
+        func testPromptAppendKeepsTabStateWrittenWhileItCommits() async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
                     lease: lease,
                     domainRuntime: AppDomainRuntimeComposition.shared.runtime
                 )
                 let endpoint = try fixture.endpointA()
-                let manager = fixture.networkManager
-                let clock = MCPExportWatchdogManualClock()
-                let gate = MCPExecutionIgnoringCancellationGate()
-                let recorder = MCPExecutionTraceRecorder()
-                var responseTask: Task<PersistentMCPTestRPCResponse, Error>?
-
-                MCPToolExecutionTracer.setTestSink { recorder.append($0) }
+                let context = fixture.contextA
+                let server = context.window.mcpServer
                 do {
                     try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
-                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
-                    await manager.debugSetResolvedToolOperationOverride(toolName: MCPWindowToolName.prompt) {
+                    let before = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "stored"]
+                    )
+                    XCTAssertFalse(before.rawJSON.contains("\"isError\":true"), before.rawJSON)
+                    let connectionID = endpoint.connectionID
+                    let writtenGeneration = (server.tabContextByConnectionID[connectionID]?.readFileAutoSelectionGeneration ?? 0) + 1
+                    // Between resolving the tab and committing, the editor's text reaches the snapshot and
+                    // a read's auto-selection advances its generation, as the mirror and auto-selection do.
+                    server.setBeforeTabContextMutationCommitForTesting { @MainActor in
+                        server.tabContextByConnectionID[connectionID]?.promptText = "typed meanwhile"
+                        server.tabContextByConnectionID[connectionID]?.readFileAutoSelectionGeneration = writtenGeneration
+                    }
+
+                    let appended = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "append", "text": " then appended", "_rawJSON": true]
+                    )
+                    server.setBeforeTabContextMutationCommitForTesting(nil)
+                    XCTAssertFalse(appended.rawJSON.contains("\"isError\":true"), appended.rawJSON)
+                    XCTAssertTrue(appended.rawJSON.contains("typed meanwhile then appended"), appended.rawJSON)
+                    XCTAssertEqual(
+                        context.window.workspaceManager.composeTab(with: context.tabID)?.promptText,
+                        "typed meanwhile then appended"
+                    )
+                    XCTAssertEqual(server.tabContextByConnectionID[connectionID]?.promptText, "typed meanwhile then appended")
+                    XCTAssertEqual(
+                        server.tabContextByConnectionID[connectionID]?.readFileAutoSelectionGeneration,
+                        writtenGeneration
+                    )
+
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    server.setBeforeTabContextMutationCommitForTesting(nil)
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testHintedPromptAppendKeepsUnsavedEditorText() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let editor = context.window.promptManager
+                do {
+                    // No binding: each call reaches the tab through a one-shot context hint, so the
+                    // connection holds no snapshot of the tab when the append commits.
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                    XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, context.tabID)
+                    let stored = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "stored", "context_id": context.tabID.uuidString]
+                    )
+                    XCTAssertFalse(stored.rawJSON.contains("\"isError\":true"), stored.rawJSON)
+                    // The editor holds text the stored tab doesn't have yet.
+                    manager.setSnapshotsSuspended(true, forTabID: context.tabID)
+                    editor.promptText = "unsaved"
+                    let server = context.window.mcpServer
+                    let connectionID = endpoint.connectionID
+                    var snapshotPresentAtCommit: Bool?
+                    server.setBeforeTabContextMutationCommitForTesting { @MainActor in
+                        snapshotPresentAtCommit = server.tabContextByConnectionID[connectionID] != nil
+                    }
+
+                    let appended = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: [
+                            "op": "append",
+                            "text": " then appended",
+                            "context_id": context.tabID.uuidString,
+                            "_rawJSON": true
+                        ]
+                    )
+                    server.setBeforeTabContextMutationCommitForTesting(nil)
+                    XCTAssertEqual(snapshotPresentAtCommit, false)
+                    XCTAssertFalse(appended.rawJSON.contains("\"isError\":true"), appended.rawJSON)
+                    XCTAssertTrue(appended.rawJSON.contains("unsaved then appended"), appended.rawJSON)
+                    XCTAssertEqual(manager.composeTab(with: context.tabID)?.promptText, "unsaved then appended")
+                    XCTAssertEqual(editor.promptText, "unsaved then appended")
+
+                    manager.setSnapshotsSuspended(false, forTabID: context.tabID)
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    context.window.mcpServer.setBeforeTabContextMutationCommitForTesting(nil)
+                    manager.setSnapshotsSuspended(false, forTabID: context.tabID)
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testHintedPromptChangeDoesNotMirrorItsTabIntoALaterBinding() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let manager = context.window.workspaceManager
+                let otherTabID = UUID()
+                do {
+                    let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == context.workspaceID })
+                    manager.workspaces[workspaceIndex].composeTabs.append(ComposeTabState(id: otherTabID, name: "Other"))
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                    XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, context.tabID)
+
+                    // A hinted prompt change on tab A, then a binding to the other tab and a change there.
+                    let hinted = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "hinted text", "context_id": context.tabID.uuidString]
+                    )
+                    XCTAssertFalse(hinted.rawJSON.contains("\"isError\":true"), hinted.rawJSON)
+                    let bind = try await endpoint.callTool(
+                        name: "bind_context",
+                        arguments: ["op": "bind", "context_id": otherTabID.uuidString]
+                    )
+                    let bindText = try Self.toolResultText(bind)
+                    XCTAssertFalse(bindText.contains("Error:"), bindText)
+                    let bound = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "other tab text"]
+                    )
+                    XCTAssertFalse(bound.rawJSON.contains("\"isError\":true"), bound.rawJSON)
+                    XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.tabID, otherTabID)
+
+                    let watched = await Self.editActiveTabAndWaitForItsMirrors(
+                        manager: manager,
+                        editor: context.window.promptManager,
+                        tabID: context.tabID,
+                        text: "edited in tab A"
+                    )
+                    XCTAssertTrue(watched)
+                    let binding = server.tabContextByConnectionID[endpoint.connectionID]
+                    XCTAssertEqual(binding?.tabID, otherTabID)
+                    XCTAssertEqual(binding?.promptText, "other tab text")
+                    XCTAssertEqual(binding?.tabName, "Other")
+
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testHintedPromptChangeRevokedBeforeCommitDoesNotMirrorIntoABindingMadeWhileItWaited() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let manager = context.window.workspaceManager
+                let networkManager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let gate = MCPExecutionIgnoringCancellationGate()
+                let operationID = "hinted-prompt-revoked-\(UUID().uuidString)"
+                let otherTabID = UUID()
+                var responseTask: Task<PersistentMCPTestRPCResponse, Error>?
+                do {
+                    let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == context.workspaceID })
+                    manager.workspaces[workspaceIndex].composeTabs.append(
+                        ComposeTabState(id: otherTabID, name: "Other", promptText: "other tab text")
+                    )
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                    await networkManager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+
+                    // A hinted prompt change on tab A, held before its commit, ignoring cancellation, until its
+                    // deadline revokes it and the reply detaches.
+                    server.setBeforeTabContextMutationCommitForTesting {
                         await gate.enterAndWait()
-                        return .object(["ok": .bool(true)])
                     }
                     let activeResponseTask = Task {
                         try await endpoint.callTool(
                             name: MCPWindowToolName.prompt,
                             arguments: [
                                 "op": "set",
-                                "text": "ignored-until-release",
+                                "text": "hinted text",
+                                "context_id": context.tabID.uuidString,
+                                "operation_id": operationID,
+                                "_rawJSON": true
+                            ]
+                        )
+                    }
+                    responseTask = activeResponseTask
+                    try await gate.waitUntilEntered(count: 1)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolExecutionDeadline)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolCancellationCleanupGrace)
+                    let response = try await activeResponseTask.value
+                    responseTask = nil
+                    XCTAssertEqual(try Self.toolResultObject(response)["mutation_state"] as? String, "not_applied")
+                    server.setBeforeTabContextMutationCommitForTesting(nil)
+
+                    // While the revoked call still waits, the connection binds the other tab.
+                    let bind = try await endpoint.callTool(
+                        name: "bind_context",
+                        arguments: ["op": "bind", "context_id": otherTabID.uuidString]
+                    )
+                    let bindText = try Self.toolResultText(bind)
+                    XCTAssertFalse(bindText.contains("Error:"), bindText)
+                    XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.promptText, "other tab text")
+
+                    await gate.release()
+                    let settled = await Self.waitForJournalStatus(.cancelledBeforeCommit, operationID: operationID)
+                    XCTAssertTrue(settled)
+
+                    let watched = await Self.editActiveTabAndWaitForItsMirrors(
+                        manager: manager,
+                        editor: context.window.promptManager,
+                        tabID: context.tabID,
+                        text: "edited in tab A"
+                    )
+                    XCTAssertTrue(watched)
+                    let binding = server.tabContextByConnectionID[endpoint.connectionID]
+                    XCTAssertEqual(binding?.tabID, otherTabID)
+                    XCTAssertEqual(binding?.promptText, "other tab text")
+                    XCTAssertEqual(binding?.tabName, "Other")
+
+                    await networkManager.debugResetToolExecutionWatchdogEnvironment()
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    responseTask?.cancel()
+                    await gate.release()
+                    if let responseTask { _ = try? await responseTask.value }
+                    server.setBeforeTabContextMutationCommitForTesting(nil)
+                    await networkManager.debugResetToolExecutionWatchdogEnvironment()
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testPromptMutationTimedOutBeforeCommitIsNotAppliedAndDetaches() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let manager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let gate = MCPExecutionIgnoringCancellationGate()
+                let recorder = MCPExecutionTraceRecorder()
+                let operationID = "prompt-detach-\(UUID().uuidString)"
+                var responseTask: Task<PersistentMCPTestRPCResponse, Error>?
+
+                MCPToolExecutionTracer.setTestSink { recorder.append($0) }
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    let before = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "before timeout"]
+                    )
+                    XCTAssertFalse(before.rawJSON.contains("\"isError\":true"), before.rawJSON)
+                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+                    // Hold the real provider after its tab context resolves and before it commits,
+                    // ignoring cancellation, so the deadline lands while nothing has been published.
+                    context.window.mcpServer.setBeforeTabContextMutationCommitForTesting {
+                        await gate.enterAndWait()
+                    }
+                    let activeResponseTask = Task {
+                        try await endpoint.callTool(
+                            name: MCPWindowToolName.prompt,
+                            arguments: [
+                                "op": "set",
+                                "text": "late text",
+                                "operation_id": operationID,
                                 "_rawJSON": true
                             ]
                         )
@@ -217,27 +486,35 @@ import XCTest
                     let payload = try Self.toolResultObject(response)
                     XCTAssertEqual(payload["code"] as? String, "tool_execution_timeout")
                     XCTAssertEqual(payload["settlement"] as? String, "detached")
-                    XCTAssertEqual(payload["retryable"] as? Bool, false)
+                    XCTAssertEqual(payload["mutation_state"] as? String, "not_applied")
+                    XCTAssertEqual(payload["operation_id"] as? String, operationID)
+                    XCTAssertEqual(payload["retryable"] as? Bool, true)
                     let isTerminal = await manager.debugIsExecutionWatchdogTerminal(connectionID: endpoint.connectionID)
                     XCTAssertFalse(isTerminal)
                     let events = recorder.snapshot().filter {
                         $0.connectionID == endpoint.connectionID && $0.toolName == MCPWindowToolName.prompt
                     }
-                    XCTAssertTrue(events.contains { $0.phase == .deadlineExpired })
+                    XCTAssertTrue(events.contains { $0.phase == .deadlineExpired && $0.mutationState == .notApplied })
                     XCTAssertTrue(events.contains { $0.phase == .cleanupGraceExpired })
                     XCTAssertFalse(events.contains { $0.phase == .connectionForceDisconnectRequested })
 
-                    await manager.debugSetResolvedToolOperationOverride(
-                        toolName: MCPWindowToolName.prompt,
-                        operation: nil
-                    )
+                    context.window.mcpServer.setBeforeTabContextMutationCommitForTesting(nil)
                     let probe = try await endpoint.callTool(
                         name: MCPWindowToolName.prompt,
                         arguments: ["op": "get"]
                     )
                     XCTAssertFalse(probe.rawJSON.contains("\"isError\":true"), probe.rawJSON)
 
+                    // Released, the escaped provider finds its commit revoked: the journal records a
+                    // before-commit cancellation and the prompt keeps its earlier text.
                     await gate.release()
+                    let settled = await Self.waitForJournalStatus(.cancelledBeforeCommit, operationID: operationID)
+                    XCTAssertTrue(settled)
+                    XCTAssertEqual(
+                        context.window.workspaceManager.composeTab(with: context.tabID)?.promptText,
+                        "before timeout"
+                    )
+
                     MCPToolExecutionTracer.setTestSink(nil)
                     await manager.debugResetToolExecutionWatchdogEnvironment()
                     await fixture.cleanup()
@@ -246,11 +523,327 @@ import XCTest
                     responseTask?.cancel()
                     await gate.release()
                     if let responseTask { _ = try? await responseTask.value }
-                    await manager.debugSetResolvedToolOperationOverride(
-                        toolName: MCPWindowToolName.prompt,
-                        operation: nil
-                    )
+                    context.window.mcpServer.setBeforeTabContextMutationCommitForTesting(nil)
                     MCPToolExecutionTracer.setTestSink(nil)
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testWindowExclusiveCallsShareOneAdmissionDeadline() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let manager = fixture.networkManager
+                let recorder = MCPExecutionTraceRecorder()
+                var heldEdit: HeldEdit?
+                var queuedEndpoint: PersistentMCPTestEndpoint?
+
+                MCPToolExecutionTracer.setTestSink { recorder.append($0) }
+                do {
+                    let held = try await Self.startHeldEdit(fixture)
+                    heldEdit = held
+                    let queued = try await Self.makeAgentRunEndpoint(fixture, label: "queued-exclusive")
+                    queuedEndpoint = queued
+
+                    // Two exclusive calls arrive together: the first waits for the window's exclusive slot
+                    // and the second waits behind it in its connection's lane. Both spend one budget.
+                    let queuedCalls = (0 ..< 2).map { _ in
+                        Task {
+                            try await queued.callTool(
+                                name: MCPWindowToolName.manageSelection,
+                                arguments: ["op": "get", "_rawJSON": true],
+                                timeoutSeconds: 30
+                            )
+                        }
+                    }
+                    try await held.clock.waitForSleeperCount(3)
+                    try await held.clock.advanceSleeper(expected: MCPTimeoutPolicy.windowExclusiveAdmissionTimeout)
+                    var payloadsByStage: [String: [String: Any]] = [:]
+                    for call in queuedCalls {
+                        let payload = try await Self.toolResultObject(call.value)
+                        XCTAssertEqual(payload["code"] as? String, "tool_execution_admission_timeout")
+                        XCTAssertEqual(payload["mutation_state"] as? String, "not_applied")
+                        XCTAssertEqual(payload["retryable"] as? Bool, true)
+                        XCTAssertEqual(payload["retry_after_ms"] as? Int, 1000)
+                        payloadsByStage[payload["admission_stage"] as? String ?? "missing"] = payload
+                    }
+                    XCTAssertEqual(Set(payloadsByStage.keys), ["window_exclusive", "connection_lane"])
+                    XCTAssertEqual(payloadsByStage["window_exclusive"]?["holder_tool"] as? String, MCPWindowToolName.applyEdits)
+                    // The lane wait did not start a second budget once the first call left the queue.
+                    XCTAssertEqual(held.clock.currentTime(), MCPTimeoutPolicy.windowExclusiveAdmissionTimeout)
+                    XCTAssertFalse(recorder.snapshot().contains { $0.connectionID == queued.connectionID })
+
+                    await held.finish(manager: manager)
+                    heldEdit = nil
+                    MCPToolExecutionTracer.setTestSink(nil)
+                    await Self.cleanupEndpoint(queued, manager: manager)
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await heldEdit?.finish(manager: manager)
+                    MCPToolExecutionTracer.setTestSink(nil)
+                    if let queuedEndpoint { await Self.cleanupEndpoint(queuedEndpoint, manager: manager) }
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testApplyEditsDeadlineDetachesHeldEditAndRefusesItsLateCommit() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let manager = fixture.networkManager
+                var heldEdit: HeldEdit?
+                var queuedEndpoint: PersistentMCPTestEndpoint?
+
+                do {
+                    let held = try await Self.startHeldEdit(fixture)
+                    heldEdit = held
+                    let queued = try await Self.makeAgentRunEndpoint(fixture, label: "after-detach")
+                    queuedEndpoint = queued
+
+                    try await held.clock.advanceSleeper(expected: MCPTimeoutPolicy.applyEditsExecutionDeadline)
+                    try await held.clock.waitForSleeper(expected: MCPTimeoutPolicy.boundedToolCancellationCleanupGrace)
+                    try await held.clock.advanceSleeper(expected: MCPTimeoutPolicy.boundedToolCancellationCleanupGrace)
+                    let editPayload = try await Self.toolResultObject(held.editTask.value)
+                    XCTAssertEqual(editPayload["code"] as? String, "tool_execution_timeout")
+                    XCTAssertEqual(editPayload["settlement"] as? String, "detached")
+                    XCTAssertEqual(editPayload["mutation_state"] as? String, "not_applied")
+                    XCTAssertEqual(editPayload["operation_id"] as? String, held.operationID)
+                    XCTAssertEqual(editPayload["retryable"] as? Bool, true)
+
+                    // The detached edit no longer holds the window's exclusive slot.
+                    let afterDetach = try await queued.callTool(
+                        name: MCPWindowToolName.manageSelection,
+                        arguments: ["op": "get"]
+                    )
+                    XCTAssertFalse(afterDetach.rawJSON.contains("\"isError\":true"), afterDetach.rawJSON)
+
+                    // Released, the escaped edit finds its commit revoked and writes nothing.
+                    await held.commitGate.release()
+                    let settled = await Self.waitForJournalStatus(.cancelledBeforeCommit, operationID: held.operationID)
+                    XCTAssertTrue(settled)
+                    XCTAssertEqual(try String(contentsOf: fixture.contextA.fileURL, encoding: .utf8), held.originalText)
+
+                    await held.finish(manager: manager)
+                    heldEdit = nil
+                    await Self.cleanupEndpoint(queued, manager: manager)
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await heldEdit?.finish(manager: manager)
+                    if let queuedEndpoint { await Self.cleanupEndpoint(queuedEndpoint, manager: manager) }
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testCancelledNotificationRevokesInFlightEditAndRemovesQueuedEdit() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let manager = fixture.networkManager
+                let commitGate = MCPExecutionIgnoringCancellationGate()
+                let recorder = MCPExecutionTraceRecorder()
+                let inFlightOperationID = "edit-cancel-in-flight-\(UUID().uuidString)"
+                let queuedOperationID = "edit-cancel-queued-\(UUID().uuidString)"
+                let originalText = try String(contentsOf: context.fileURL, encoding: .utf8)
+                let rootFileService = await context.window.workspaceFileContextStore
+                    .fileSystemServiceForTesting(rootID: context.rootID)
+                let fileService = try XCTUnwrap(rootFileService)
+                var queuedEndpoint: PersistentMCPTestEndpoint?
+                var pendingTasks: [Task<PersistentMCPTestRPCResponse, Error>] = []
+
+                MCPToolExecutionTracer.setTestSink { recorder.append($0) }
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    let queued = try await Self.makeAgentRunEndpoint(fixture, label: "queued-edit")
+                    queuedEndpoint = queued
+                    await fileService.setMutationWillCommitHandlerForTesting { _ in
+                        await commitGate.enterAndWait()
+                    }
+                    let inFlightRequestID = endpoint.client.nextRequestIDForTesting()
+                    pendingTasks.append(Task {
+                        try await endpoint.callTool(
+                            name: MCPWindowToolName.applyEdits,
+                            arguments: [
+                                "path": context.fileURL.path,
+                                "rewrite": "in-flight content\n",
+                                "operation_id": inFlightOperationID
+                            ]
+                        )
+                    })
+                    try await commitGate.waitUntilEntered(count: 1)
+
+                    // A second edit waits for the window's exclusive slot; cancel it there.
+                    let queuedRequestID = queued.client.nextRequestIDForTesting()
+                    pendingTasks.append(Task {
+                        try await queued.callTool(
+                            name: MCPWindowToolName.applyEdits,
+                            arguments: [
+                                "path": context.fileURL.path,
+                                "rewrite": "queued content\n",
+                                "operation_id": queuedOperationID
+                            ]
+                        )
+                    })
+                    let queuedWaiting = await Self.waitUntil {
+                        await manager.hasInFlightCalls(for: queued.connectionID)
+                    }
+                    XCTAssertTrue(queuedWaiting)
+                    try queued.client.sendNotification(
+                        method: "notifications/cancelled",
+                        params: ["requestId": queuedRequestID, "reason": "issue-213 validation"]
+                    )
+                    let queuedLeft = await Self.waitUntil {
+                        await !manager.hasInFlightCalls(for: queued.connectionID)
+                    }
+                    XCTAssertTrue(queuedLeft)
+
+                    // Cancel the in-flight edit while its provider is held before the commit.
+                    try endpoint.client.sendNotification(
+                        method: "notifications/cancelled",
+                        params: ["requestId": inFlightRequestID, "reason": "issue-213 validation"]
+                    )
+                    let cancellationTraced = await Self.waitUntil {
+                        recorder.snapshot().contains {
+                            $0.connectionID == endpoint.connectionID
+                                && $0.phase == .cancellationRequested
+                                && $0.cancellationOrigin == .requestCancellation
+                                && $0.mutationState == .notApplied
+                        }
+                    }
+                    XCTAssertTrue(cancellationTraced)
+
+                    await commitGate.release()
+                    let settled = await Self.waitForJournalStatus(.cancelledBeforeCommit, operationID: inFlightOperationID)
+                    XCTAssertTrue(settled)
+                    let journal = try await AppDomainRuntimeComposition.shared.runtime.mutationJournal.snapshot()
+                    XCTAssertFalse(journal.recordSnapshots.contains { $0.operationID == queuedOperationID })
+                    XCTAssertEqual(try String(contentsOf: context.fileURL, encoding: .utf8), originalText)
+
+                    // Both connections stay usable and the window's exclusive slot is free.
+                    let probe = try await endpoint.callTool(name: MCPWindowToolName.prompt, arguments: ["op": "get"])
+                    XCTAssertFalse(probe.rawJSON.contains("\"isError\":true"), probe.rawJSON)
+                    let queuedProbe = try await queued.callTool(
+                        name: MCPWindowToolName.manageSelection,
+                        arguments: ["op": "get"]
+                    )
+                    XCTAssertFalse(queuedProbe.rawJSON.contains("\"isError\":true"), queuedProbe.rawJSON)
+
+                    pendingTasks.forEach { $0.cancel() }
+                    await fileService.setMutationWillCommitHandlerForTesting(nil)
+                    MCPToolExecutionTracer.setTestSink(nil)
+                    await Self.cleanupEndpoint(queued, manager: manager)
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    pendingTasks.forEach { $0.cancel() }
+                    await commitGate.release()
+                    await fileService.setMutationWillCommitHandlerForTesting(nil)
+                    MCPToolExecutionTracer.setTestSink(nil)
+                    if let queuedEndpoint { await Self.cleanupEndpoint(queuedEndpoint, manager: manager) }
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testCommittedEditReconcilesAfterDeadlineWithoutEarlyPathRelease() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let manager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let ioGate = MCPExecutionIgnoringCancellationGate()
+                let operationID = "edit-committed-\(UUID().uuidString)"
+                let rootFileService = await context.window.workspaceFileContextStore
+                    .fileSystemServiceForTesting(rootID: context.rootID)
+                let fileService = try XCTUnwrap(rootFileService)
+                var editTask: Task<PersistentMCPTestRPCResponse, Error>?
+
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+                    // Hold the dispatched write: the commit has begun and the I/O has not landed.
+                    await fileService.setMutationIOWillBeginHandlerForTesting { _ in
+                        await ioGate.enterAndWait()
+                    }
+                    let activeEditTask = Task {
+                        try await endpoint.callTool(
+                            name: MCPWindowToolName.applyEdits,
+                            arguments: [
+                                "path": context.fileURL.path,
+                                "rewrite": "committed content\n",
+                                "operation_id": operationID,
+                                "_rawJSON": true
+                            ]
+                        )
+                    }
+                    editTask = activeEditTask
+                    try await ioGate.waitUntilEntered(count: 1)
+                    try await clock.waitForSleeper(expected: MCPTimeoutPolicy.applyEditsExecutionDeadline)
+                    try await clock.advanceSleeper(expected: MCPTimeoutPolicy.applyEditsExecutionDeadline)
+
+                    let payload = try await Self.toolResultObject(activeEditTask.value)
+                    editTask = nil
+                    XCTAssertEqual(payload["code"] as? String, "tool_execution_timeout")
+                    XCTAssertEqual(payload["mutation_state"] as? String, "indeterminate_after_commit")
+                    XCTAssertEqual(payload["operation_id"] as? String, operationID)
+                    XCTAssertEqual(payload["retryable"] as? Bool, false)
+
+                    // The dispatched write keeps its path: a conflicting edit is refused meanwhile.
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    let conflict = try await endpoint.callTool(
+                        name: MCPWindowToolName.applyEdits,
+                        arguments: ["path": context.fileURL.path, "rewrite": "conflicting content\n"]
+                    )
+                    XCTAssertTrue(conflict.rawJSON.contains("\"isError\":true"), conflict.rawJSON)
+
+                    await ioGate.release()
+                    let landed = await Self.waitUntil {
+                        (try? String(contentsOf: context.fileURL, encoding: .utf8)) == "committed content\n"
+                    }
+                    XCTAssertTrue(landed)
+                    let record = try await Self.journalRecord(operationID: operationID)
+                    XCTAssertEqual(record.status.rawValue, DomainMutationJournalStatus.indeterminateAfterCommit.rawValue)
+
+                    // Once the write reconciles, the path accepts the next edit.
+                    await fileService.setMutationIOWillBeginHandlerForTesting(nil)
+                    let reconciled = await Self.waitUntil {
+                        guard let next = try? await endpoint.callTool(
+                            name: MCPWindowToolName.applyEdits,
+                            arguments: ["path": context.fileURL.path, "rewrite": "next content\n"]
+                        ) else { return false }
+                        return !next.rawJSON.contains("\"isError\":true")
+                    }
+                    XCTAssertTrue(reconciled)
+                    XCTAssertEqual(try String(contentsOf: context.fileURL, encoding: .utf8), "next content\n")
+
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    editTask?.cancel()
+                    await ioGate.release()
+                    if let editTask { _ = try? await editTask.value }
+                    await fileService.setMutationIOWillBeginHandlerForTesting(nil)
                     await manager.debugResetToolExecutionWatchdogEnvironment()
                     await fixture.cleanup()
                     throw error
@@ -1720,6 +2313,59 @@ import XCTest
             XCTAssertFalse(bindingInvoked.wasInvoked)
         }
 
+        func testApplyEditsFailureAfterCommitReturnsIndeterminateProtectedMutationMetadata() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let operationID = "edit-failed-after-commit-\(UUID().uuidString)"
+                let targetURL = context.rootURL.appendingPathComponent("CreatedAfterCommit.txt")
+                let rootFileService = await context.window.workspaceFileContextStore
+                    .fileSystemServiceForTesting(rootID: context.rootID)
+                let fileService = try XCTUnwrap(rootFileService)
+                struct WriteFailedAfterCommit: Error {}
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    // The create's write fails in its detached worker, after the commit began.
+                    await fileService.setCreateFileDataPreparationForTesting { _ in
+                        throw WriteFailedAfterCommit()
+                    }
+                    let response = try await endpoint.callTool(
+                        name: MCPWindowToolName.applyEdits,
+                        arguments: [
+                            "path": targetURL.path,
+                            "rewrite": "created\n",
+                            "on_missing": "create",
+                            "operation_id": operationID,
+                            "_rawJSON": true
+                        ]
+                    )
+                    let payload = try Self.toolResultObject(response)
+                    XCTAssertEqual(payload["code"] as? String, "protected_mutation_indeterminate_after_commit")
+                    XCTAssertEqual(payload["mutation_state"] as? String, "indeterminate_after_commit")
+                    XCTAssertEqual(payload["retryable"] as? Bool, false)
+                    XCTAssertEqual(payload["operation_id"] as? String, operationID)
+                    XCTAssertEqual(payload["tool"] as? String, MCPWindowToolName.applyEdits)
+                    let record = try await Self.journalRecord(operationID: operationID)
+                    XCTAssertEqual(
+                        record.status.rawValue,
+                        DomainMutationJournalStatus.indeterminateAfterCommit.rawValue
+                    )
+
+                    await fileService.setCreateFileDataPreparationForTesting(nil)
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await fileService.setCreateFileDataPreparationForTesting(nil)
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
         func testPostCommitCancellationReturnsIndeterminateProtectedMutationMetadata() async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
@@ -3182,6 +3828,8 @@ import XCTest
         }
 
         private static let expectedExportPhaseTrace = [
+            "protected_mutation.authorization:started",
+            "protected_mutation.journal_begin:started",
             "prompt_export.selection_drain:started",
             "prompt_export.selection_drain:completed",
             "prompt_export.preset_resolution:started",
@@ -3193,11 +3841,17 @@ import XCTest
             "prompt_export.destination_authorization:started",
             "prompt_export.destination_authorization:completed",
             "prompt_export.durable_write:started",
+            "protected_mutation.physical_admission:started",
+            "protected_mutation.commit_preparation:started",
+            "protected_mutation.physical_guard:started",
+            "filesystem_mutation.io_wait:started",
+            "workspace_store.edit_publication:started",
             "prompt_export.durable_write:completed",
             "prompt_export.ingress_wait:started",
             "prompt_export.ingress_wait:completed",
             "prompt_export.reply_assembly:started",
             "prompt_export.reply_assembly:completed",
+            "protected_mutation.journal_finalization:started",
             "prompt_export.formatting:started",
             "prompt_export.formatting:completed",
             "prompt_export.publication:started",
@@ -3206,7 +3860,8 @@ import XCTest
 
         private static func prepareProtectedExportFixture(
             _ fixture: PersistentMCPTestFixture,
-            endpoint: PersistentMCPTestEndpoint
+            endpoint: PersistentMCPTestEndpoint,
+            bindTab: Bool = true
         ) async throws {
             let context = fixture.contextA
             let workspace = try XCTUnwrap(
@@ -3228,6 +3883,7 @@ import XCTest
                 )
             )
             try await activateWorkspace(for: context)
+            guard bindTab else { return }
             let bindResponse = try await endpoint.callTool(
                 name: "bind_context",
                 arguments: ["op": "bind", "context_id": context.tabID.uuidString]
@@ -3522,6 +4178,16 @@ import XCTest
             )
         }
 
+        private static func waitForJournalStatus(
+            _ status: DomainMutationJournalStatus,
+            operationID: String
+        ) async -> Bool {
+            await waitUntil {
+                guard let record = try? await journalRecord(operationID: operationID) else { return false }
+                return record.status.rawValue == status.rawValue
+            }
+        }
+
         private static func activateWorkspace(for context: PersistentMCPTestContext) async throws {
             let workspace = try XCTUnwrap(
                 context.window.workspaceManager.workspaces.first { $0.id == context.workspaceID }
@@ -3550,6 +4216,123 @@ import XCTest
                 try? await Task.sleep(for: .milliseconds(10))
             }
             return await condition()
+        }
+
+        /// An `apply_edits` call on window A, held after it reserves its path and before it commits while
+        /// ignoring cancellation, with the watchdog on a manual clock that has registered the edit's deadline.
+        struct HeldEdit {
+            let clock: MCPExportWatchdogManualClock
+            let commitGate: MCPExecutionIgnoringCancellationGate
+            let fileService: FileSystemService
+            let operationID: String
+            let originalText: String
+            let editTask: Task<PersistentMCPTestRPCResponse, Error>
+
+            func finish(manager: ServerNetworkManager) async {
+                await commitGate.release()
+                _ = try? await editTask.value
+                await fileService.setMutationWillCommitHandlerForTesting(nil)
+                await manager.debugResetToolExecutionWatchdogEnvironment()
+            }
+        }
+
+        private static func startHeldEdit(_ fixture: PersistentMCPTestFixture) async throws -> HeldEdit {
+            let endpoint = try fixture.endpointA()
+            let context = fixture.contextA
+            let clock = MCPExportWatchdogManualClock()
+            let commitGate = MCPExecutionIgnoringCancellationGate()
+            let operationID = "held-edit-\(UUID().uuidString)"
+            let originalText = try String(contentsOf: context.fileURL, encoding: .utf8)
+            let rootFileService = await context.window.workspaceFileContextStore
+                .fileSystemServiceForTesting(rootID: context.rootID)
+            let fileService = try XCTUnwrap(rootFileService)
+            try await prepareProtectedExportFixture(fixture, endpoint: endpoint)
+            await fixture.networkManager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+            await fileService.setMutationWillCommitHandlerForTesting { _ in
+                await commitGate.enterAndWait()
+            }
+            let editTask = Task {
+                try await endpoint.callTool(
+                    name: MCPWindowToolName.applyEdits,
+                    arguments: [
+                        "path": context.fileURL.path,
+                        "rewrite": "late content\n",
+                        "operation_id": operationID,
+                        "_rawJSON": true
+                    ]
+                )
+            }
+            let held = HeldEdit(
+                clock: clock,
+                commitGate: commitGate,
+                fileService: fileService,
+                operationID: operationID,
+                originalText: originalText,
+                editTask: editTask
+            )
+            do {
+                try await commitGate.waitUntilEntered(count: 1)
+                try await clock.waitForSleeper(expected: MCPTimeoutPolicy.applyEditsExecutionDeadline)
+            } catch {
+                await held.finish(manager: fixture.networkManager)
+                throw error
+            }
+            return held
+        }
+
+        @MainActor
+        final class WatchedPrompts {
+            var values: [String] = []
+        }
+
+        /// Edits the active tab and returns whether a watcher saw the edit. The watcher subscribes after the
+        /// connection's own subscriptions, so by the time it sees the edit, any mirror still attached to the
+        /// tab has handled it too.
+        @MainActor
+        private static func editActiveTabAndWaitForItsMirrors(
+            manager: WorkspaceManagerViewModel,
+            editor: PromptViewModel,
+            tabID: UUID,
+            text: String
+        ) async -> Bool {
+            let watchedPrompts = WatchedPrompts()
+            let watch = manager.composeTabSnapshotPublisher(for: tabID)
+                .receive(on: RunLoop.main)
+                .sink { snapshot in
+                    Task { @MainActor in watchedPrompts.values.append(snapshot.promptText) }
+                }
+            defer { watch.cancel() }
+            editor.promptText = text
+            manager.publishActiveComposeTabSnapshot(commitToMemory: true, touchModified: false)
+            return await waitUntil { watchedPrompts.values.contains(text) }
+        }
+
+        /// A second connection bound to window A's tab, as an Agent Mode run's connection is.
+        private static func makeAgentRunEndpoint(
+            _ fixture: PersistentMCPTestFixture,
+            label: String
+        ) async throws -> PersistentMCPTestEndpoint {
+            let clientName = "\(label)-\(UUID().uuidString)"
+            await fixture.networkManager.installClientConnectionPolicy(
+                for: clientName,
+                windowID: fixture.contextA.window.windowID,
+                restrictedTools: [],
+                tabID: fixture.contextA.tabID,
+                runID: UUID(),
+                additionalTools: [],
+                purpose: .agentModeRun
+            )
+            let endpoint = try await PersistentMCPTestEndpoint.make(
+                label: label,
+                networkManager: fixture.networkManager,
+                clientName: clientName,
+                requiredToolNames: [MCPWindowToolName.manageSelection, MCPWindowToolName.applyEdits]
+            )
+            await fixture.networkManager.debugSetDomainPeerIdentityForTesting(
+                connectionID: endpoint.connectionID,
+                identity: .verified(processID: Int(getpid()), fingerprint: "test:verified:\(label)")
+            )
+            return endpoint
         }
 
         private static func cleanupEndpoint(

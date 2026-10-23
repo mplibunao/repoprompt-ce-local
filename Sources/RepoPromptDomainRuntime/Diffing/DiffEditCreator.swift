@@ -22,6 +22,17 @@ package class DiffEditCreator {
         // Step 1: Initialize variables
         let n = oldLines.count
         let m = newLines.count
+        // With one side empty the only edit script is every line of the other side, in order, at
+        // distance n + m. The general search below would reach it only after visiting every
+        // distance and copying its frontier at each, which is quadratic in file size.
+        if n == 0 || m == 0 {
+            if let maximumEditDistance, n + m > maximumEditDistance {
+                return []
+            }
+            return n == 0
+                ? newLines.map { DiffEdit(type: .addition, lines: [$0]) }
+                : oldLines.map { DiffEdit(type: .deletion, lines: [$0]) }
+        }
         let max = n + m
         var v = [Int: Int]()
         v[1] = 0

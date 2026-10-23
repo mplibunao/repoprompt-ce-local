@@ -18,6 +18,25 @@ final class UnifiedDiffGeneratorRecoveryTests: XCTestCase {
         XCTAssertEqual(deleteDiff, "--- a/Repo Root/Sources/Removed File.swift\n+++ /dev/null\n")
     }
 
+    /// A create diffs against an empty file and a full deletion against an empty result; both take
+    /// a shortcut past the general edit search, which must leave their hunks and the distance cap
+    /// exactly as the search produced them.
+    func testEmptySideDiffsAreOneHunkOfEveryLineFromLineOne() {
+        XCTAssertEqual(
+            UnifiedDiffGenerator.diffChunks(oldLines: [], newLines: ["a", "a", "b"]),
+            [DiffChunk(lines: [DiffLine(content: "+a"), DiffLine(content: "+a"), DiffLine(content: "+b")], startLine: 1)]
+        )
+        XCTAssertEqual(
+            UnifiedDiffGenerator.diffChunks(oldLines: ["x", "y"], newLines: []),
+            [DiffChunk(lines: [DiffLine(content: "-x"), DiffLine(content: "-y")], startLine: 1)]
+        )
+        XCTAssertTrue(DiffEditCreator.myersDiff(oldLines: [], newLines: ["a", "b"], maximumEditDistance: 1).isEmpty)
+        XCTAssertEqual(
+            DiffEditCreator.myersDiff(oldLines: [], newLines: ["a", "b"], maximumEditDistance: 2).count,
+            2
+        )
+    }
+
     func testBuildFromEditChunksCarriesCumulativeDeltaAcrossSortedHunks() {
         let laterChunk = DiffChunk(
             lines: [

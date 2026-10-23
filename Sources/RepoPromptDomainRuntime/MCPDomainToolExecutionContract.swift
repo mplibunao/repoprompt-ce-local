@@ -84,6 +84,14 @@ package enum MCPToolExecutionContractCatalog {
 
     package static let orderedAdvertisedToolNames = MCPGlobalToolName.orderedToolNames + MCPWindowToolName.orderedToolNames
 
+    /// Mutations that detach without a settlement slot when they ignore cancellation. Their journal
+    /// records and filesystem mutation authority keep escaped work accounted, and a slot would fence the
+    /// window's reads.
+    package static let slotlessDetachToolNames: Set<String> = [
+        MCPWindowToolName.fileActions,
+        MCPWindowToolName.applyEdits
+    ]
+
     package static let contracts: [String: MCPToolExecutionContract] = {
         let bounded = MCPToolExecutionContract.bounded(
             deadline: MCPTimeoutPolicy.boundedToolExecutionDeadline,
@@ -122,8 +130,15 @@ package enum MCPToolExecutionContractCatalog {
             result[toolName] = .lifecycleManagedCancellable
         }
 
+        // An edit has a fixed limit that includes its review. A deadline revokes an edit whose commit
+        // has not begun; one that ignores cancellation detaches without a settlement slot.
+        result[MCPWindowToolName.applyEdits] = .bounded(
+            deadline: MCPTimeoutPolicy.applyEditsExecutionDeadline,
+            cancellationGrace: MCPTimeoutPolicy.boundedToolCancellationCleanupGrace,
+            cleanupDisposition: .detachAndSettle
+        )
+
         for toolName in [
-            MCPWindowToolName.applyEdits,
             MCPWindowToolName.askUser,
             MCPWindowToolName.waitForNextInstruction
         ] {

@@ -172,11 +172,34 @@ rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.perf_diagn
 
 If a key is unavailable, confirm that `rpce-cli-debug --version` resolves to the current CE debug build before falling back to lower-level defaults.
 
-The `mcp_structure_settlement_snapshot` op reports one window's settlement registry counts of active, detached, and released entries:
+The `mcp_structure_settlement_snapshot` op reports one window's settlement registry: the counts of active, detached, released, and blocking entries, and a `leases` array, oldest admission first. Each lease gives its lease, invocation, and connection IDs, its tool, state, admission age, and blocking age, its `released` and `provider_completed` flags, and the handler phase its invocation last reported, with that report's transition and age. A handler phase is the await the call most recently reached. A `started` phase with a large age is the await that hasn't returned. A lease held by a protected mutation, such as `prompt set`, also gives its `mutation_state`. The state is `not_applied` once a deadline or cancellation has revoked the mutation before its commit, and `indeterminate_after_commit` once its commit has begun.
 
 ```bash
 rpce-cli-debug -w 1 -c __repoprompt_debug_diagnostics -j '{"op":"mcp_structure_settlement_snapshot","window_id":1}'
 ```
+
+Debug and release builds also write each watchdog escalation (deadline expiry, request cancellation, cleanup-grace expiry, detach, force-disconnect), each late settlement of a timed-out or cancelled provider, and each rejection at a window's released-provider limit to the unified log, with the tool, the invocation and connection IDs, the window, the handler phase and its age, and the window's blocking and released counts. Entries for a protected mutation, such as `apply_edits`, add its `mutation_state` and `operation_id`. The log records the first rejection for one blockage and then at most one more every 30 seconds. Read them from the debug or production app with:
+
+```bash
+log show --last 1h --style compact --predicate 'subsystem == "com.repoprompt.mcp" AND category == "ToolExecution"'
+```
+
+### Reproducing a stuck tool call
+
+Run a stuck-call reproduction only against the debug app, never production. Confirm the target PID runs from the `DebugApps` bundle with `ps -o comm= -p <pid>` before pointing any tool at it. Record the workspace list and each window's tabs first, and compare them after cleanup.
+
+1. Create the scratch roots under `/tmp` and add them as a scratch workspace by their `/tmp/...` paths. A root registered as `/tmp/...` doesn't resolve a `/private/tmp/...` path.
+2. Drive each workload for a bounded time, one at a time:
+   - concurrent `apply_edits` rewrites and creates, with `read_file` and `get_file_tree` loops, on one root
+   - the same loops while a second root takes repeated Git commits
+   - about 450 new directories in a minute while reads and edits continue
+   - a create or rewrite of a megabyte or more
+   - stopping an `rpce-cli-debug` client while its edit runs
+3. While a workload runs, poll `mcp_structure_settlement_snapshot` for the scratch window every one or two seconds. Follow the unified log with `log stream` and the `ToolExecution` predicate, and take stacks with `sample <pid> 10` whenever a call stops returning.
+4. You have found the wait when a lease stays in one `started` handler phase with a growing age, `sample` shows the same frame across samples, and the same workload reproduces it again.
+5. Delete the scratch workspace, list the windows, and close any window the delete left open.
+
+`swift-inspect` can't attach to the debug app. The debug bundle lacks the `get-task-allow` entitlement, so the task port request fails with `(os/kern) failure 0x5`. Use `sample` for stacks.
 
 ### Catalog shard patch measurement
 

@@ -128,6 +128,161 @@ import XCTest
             XCTAssertEqual(cleanupDisposition, .detachAndSettle)
         }
 
+        func testMutationCommitAndRevocationHaveOneWinner() async throws {
+            let rootURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MutationCommitRevocation-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: rootURL) }
+            let service = try await FileSystemService(path: rootURL.path)
+
+            // Revocation first: the write is refused at its commit, after the path reservation and before
+            // any I/O, and the refusal releases the reservation.
+            let revoked = DomainMutationCommitState()
+            XCTAssertTrue(revoked.revoke(origin: .watchdogDeadline))
+            let revokedController = DomainMutationCommitController(willCommit: {
+                try await revoked.beginIfNeeded {
+                    XCTFail("A revoked mutation must not prepare its commit")
+                }
+            })
+            do {
+                try await MCPDomainMutationCommitContext.$controller.withValue(revokedController) {
+                    try await service.createFile(atRelativePath: "Target.txt", content: "late\n")
+                }
+                XCTFail("Expected the revoked commit to be refused")
+            } catch let error as DomainMutationCommitRevokedError {
+                XCTAssertEqual(error.origin, .watchdogDeadline)
+            }
+            let targetPath = rootURL.appendingPathComponent("Target.txt").path
+            XCTAssertFalse(FileManager.default.fileExists(atPath: targetPath))
+            XCTAssertEqual(revoked.replyState, .notApplied)
+            try await service.createFile(atRelativePath: "Target.txt", content: "next\n")
+            XCTAssertEqual(try String(contentsOfFile: targetPath, encoding: .utf8), "next\n")
+
+            // A cancelled caller is refused before preparing, so a later revocation still wins.
+            let cancelledCaller = DomainMutationCommitState()
+            let cancelledPreparations = MCPExecutionIgnoringCancellationGate()
+            await cancelledPreparations.release()
+            let cancelledAttempt = Task {
+                withUnsafeCurrentTask { $0?.cancel() }
+                try await cancelledCaller.beginIfNeeded { await cancelledPreparations.enterAndWait() }
+            }
+            do {
+                try await cancelledAttempt.value
+                XCTFail("Expected the cancelled caller to be refused")
+            } catch is CancellationError {}
+            let cancelledPreparationCount = await cancelledPreparations.enteredCount()
+            XCTAssertEqual(cancelledPreparationCount, 0)
+            XCTAssertEqual(cancelledCaller.currentPhase, .preCommit)
+            XCTAssertTrue(cancelledCaller.revoke(origin: .requestCancellation))
+
+            // Commit first: once preparation has begun, revocation loses, the reply stays indeterminate,
+            // and a competing caller shares the one preparation.
+            let committing = DomainMutationCommitState()
+            let preparation = MCPExecutionIgnoringCancellationGate()
+            let owner = Task {
+                try await committing.beginIfNeeded { await preparation.enterAndWait() }
+            }
+            addTeardownBlock {
+                await preparation.release()
+                _ = try? await owner.value
+            }
+            try await preparation.waitUntilEntered(count: 1)
+            XCTAssertFalse(committing.revoke(origin: .watchdogDeadline))
+            XCTAssertEqual(committing.replyState, .indeterminateAfterCommit)
+            let competitor = Task {
+                try await committing.beginIfNeeded { await preparation.enterAndWait() }
+            }
+            addTeardownBlock {
+                await preparation.release()
+                _ = try? await competitor.value
+            }
+            await preparation.release()
+            try await owner.value
+            try await competitor.value
+            let preparationCount = await preparation.enteredCount()
+            XCTAssertEqual(preparationCount, 1)
+            XCTAssertTrue(committing.hasBegunCommit())
+            XCTAssertEqual(committing.beginFinalization(), .afterCommit)
+
+            // A failed preparation means the commit never began: the mutation finalizes before commit
+            // as not applied, and a later caller gets the same failure without preparing again.
+            struct PreparationFailed: Error {}
+            let failing = DomainMutationCommitState()
+            let failingPreparations = MCPExecutionIgnoringCancellationGate()
+            await failingPreparations.release()
+            for attempt in 1 ... 2 {
+                do {
+                    try await failing.beginIfNeeded {
+                        await failingPreparations.enterAndWait()
+                        throw PreparationFailed()
+                    }
+                    XCTFail("Expected attempt \(attempt) to fail")
+                } catch is PreparationFailed {}
+            }
+            let failingPreparationCount = await failingPreparations.enteredCount()
+            XCTAssertEqual(failingPreparationCount, 1)
+            XCTAssertFalse(failing.hasBegunCommit())
+            XCTAssertEqual(failing.replyState, .notApplied)
+            XCTAssertEqual(failing.beginFinalization(), .beforeCommit(revoked: false))
+        }
+
+        func testClientIDsInTheExecutionLogAreQuotedAndEscaped() {
+            let forged = #"op" phase=forged"#
+            let cases: [(label: String, value: String, quoted: String)] = [
+                ("quote", forged, #""op\" phase=forged""#),
+                ("backslash", #"a\b"#, #""a\\b""#),
+                ("newline", "a\nphase=forged", #""a\nphase=forged""#),
+                ("C1 control", "a\u{85}b", #""a\u0085b""#),
+                ("line separator", "a\u{2028}b", #""a\u2028b""#),
+                ("bidi override", "a\u{202E}b", #""a\u202Eb""#),
+                ("over 128 characters", String(repeating: "x", count: 130), "\"\(String(repeating: "x", count: 128))...\"")
+            ]
+            for testCase in cases {
+                XCTAssertEqual(MCPToolExecutionTraceEvent.quotedClientValue(testCase.value), testCase.quoted, testCase.label)
+            }
+
+            let event = MCPToolExecutionTraceEvent(
+                toolName: MCPWindowToolName.applyEdits,
+                operationIdentity: MCPToolAdmissionPolicy.operationIdentity(
+                    forCanonicalToolName: MCPWindowToolName.applyEdits,
+                    arguments: [:]
+                ),
+                connectionID: UUID(),
+                invocationID: UUID(),
+                runID: nil,
+                contractKind: .bounded,
+                executionDeadlineSeconds: nil,
+                cleanupGraceSeconds: nil,
+                cleanupDisposition: nil,
+                phase: .deadlineExpired,
+                elapsedMilliseconds: 0,
+                cancellationRequested: nil,
+                cancellationOutcome: nil,
+                cancellationOrigin: nil,
+                settlement: nil,
+                graceOutcome: nil,
+                escalationReason: nil,
+                handlerPhase: nil,
+                handlerPhaseAgeMilliseconds: nil,
+                mutationOperationID: forged
+            )
+            XCTAssertTrue(event.description.hasSuffix(#" operation_id="op\" phase=forged""#), event.description)
+        }
+
+        func testWindowExclusiveHolderRecordEndsOnlyForItsOwnInvocation() {
+            let holders = ServerNetworkManager.WindowExclusiveHolders()
+            let first = UUID()
+            let second = UUID()
+            holders.begin(windowID: 1, invocationID: first, toolName: MCPWindowToolName.applyEdits)
+            holders.end(windowID: 1, invocationID: first)
+            holders.begin(windowID: 1, invocationID: second, toolName: MCPWindowToolName.manageWorktree)
+            // The first holder's scope-exit cleanup runs after the slot has passed to the second.
+            holders.end(windowID: 1, invocationID: first)
+            XCTAssertEqual(holders.toolName(windowID: 1), MCPWindowToolName.manageWorktree)
+            holders.end(windowID: 1, invocationID: second)
+            XCTAssertNil(holders.toolName(windowID: 1))
+        }
+
         func testConnectionPermitReleasedWhenDeadlineExpiresImmediatelyAfterHandoff() async throws {
             let limiter = MCPDomainAsyncLimiter(limit: 1)
             let holderGate = AdmissionDeadlineGate()

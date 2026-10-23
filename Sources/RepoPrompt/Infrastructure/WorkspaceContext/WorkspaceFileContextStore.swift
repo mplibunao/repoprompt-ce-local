@@ -3,6 +3,7 @@ import CoreServices
 import Dispatch
 import Foundation
 import RepoPromptCodeMapCore
+import RepoPromptShared
 #if DEBUG
     import CryptoKit
     import os
@@ -1495,6 +1496,7 @@ actor WorkspaceFileContextStore {
         private nonisolated let appliedIngressWaitTimeoutOverrideForTesting = OSAllocatedUnfairLock<Duration?>(
             initialState: nil
         )
+        private var codemapFenceWaitTimeoutOverrideForTesting: Duration?
         private enum ExactFileGateTargetForTesting {
             case candidateProbe(
                 purpose: ExactFileCandidatePurpose,
@@ -2313,6 +2315,11 @@ actor WorkspaceFileContextStore {
         /// Replaces the bound of every timed freshness wait on this store while set.
         func setAppliedIngressWaitTimeoutOverrideForTesting(_ timeout: Duration?) {
             appliedIngressWaitTimeoutOverrideForTesting.withLock { $0 = timeout }
+        }
+
+        /// Replaces the bound of an explicit request's codemap fence wait while set.
+        func setCodemapFenceWaitTimeoutOverrideForTesting(_ timeout: Duration?) {
+            codemapFenceWaitTimeoutOverrideForTesting = timeout
         }
 
         func setExactFileCandidateProbeGateForTesting(
@@ -3481,10 +3488,10 @@ actor WorkspaceFileContextStore {
         WorkspaceCodemapRootEpoch: CodemapRootMutationFenceToken
     ] = [:]
     private var codemapRootMutationFenceWaitersByRootEpoch: [
-        WorkspaceCodemapRootEpoch: [UUID: CheckedContinuation<Void, Never>]
+        WorkspaceCodemapRootEpoch: [UUID: WorkspaceCodemapFenceWaitSignal]
     ] = [:]
     private var codemapPathQuiescenceWaitersByRootEpoch: [
-        WorkspaceCodemapRootEpoch: [UUID: CheckedContinuation<Void, Never>]
+        WorkspaceCodemapRootEpoch: [UUID: WorkspaceCodemapFenceWaitSignal]
     ] = [:]
     private var codemapGraphIndexBuildReschedulePendingRootEpochs: Set<WorkspaceCodemapRootEpoch> = []
     private var codemapSuspendedRootEpochs: Set<WorkspaceCodemapRootEpoch> = []
@@ -12475,14 +12482,14 @@ actor WorkspaceFileContextStore {
             let rootMutationWaiters = codemapRootMutationFenceWaitersByRootEpoch.removeValue(
                 forKey: rootEpoch
             ) ?? [:]
-            for continuation in rootMutationWaiters.values {
-                continuation.resume()
+            for signal in rootMutationWaiters.values {
+                signal.resolve(.woken)
             }
             let pathQuiescenceWaiters = codemapPathQuiescenceWaitersByRootEpoch.removeValue(
                 forKey: rootEpoch
             ) ?? [:]
-            for continuation in pathQuiescenceWaiters.values {
-                continuation.resume()
+            for signal in pathQuiescenceWaiters.values {
+                signal.resolve(.woken)
             }
             codemapGraphIndexBuildReschedulePendingRootEpochs.remove(rootEpoch)
             codemapSuspendedRootEpochs.remove(rootEpoch)
@@ -12960,6 +12967,7 @@ actor WorkspaceFileContextStore {
     private func interactiveReadSnapshotWithinForegroundActivity(
         for expectedRecord: WorkspaceFileRecord
     ) async throws -> WorkspaceInteractiveReadSnapshot? {
+        MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadSeededAuthority)
         try await requirePublishedSeededAuthorityFresh(rootID: expectedRecord.rootID)
         for attempt in 0 ..< 2 {
             try Task.checkCancellation()
@@ -12983,6 +12991,7 @@ actor WorkspaceFileContextStore {
             )
             let schedulerOwnerID = interactiveReadSchedulerOwnerID
             let fingerprint: FileContentFingerprint
+            MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadFingerprint)
             do {
                 fingerprint = try await service.contentFingerprint(
                     ofRelativePath: current.standardizedRelativePath,
@@ -13011,6 +13020,7 @@ actor WorkspaceFileContextStore {
                 return nil
             }
 
+            MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadCachedContent)
             do {
                 let cached = try await interactiveReadCache.snapshot(
                     for: cacheKey,
@@ -13040,6 +13050,7 @@ actor WorkspaceFileContextStore {
                     file: current,
                     rootLifetimeID: identity.lifetimeID
                 )
+                MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadSeededAuthority)
                 try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return WorkspaceInteractiveReadSnapshot(
                     preparedContent: preparedContent,
@@ -17351,7 +17362,7 @@ actor WorkspaceFileContextStore {
                 diagnosticRootToken: diagnosticRootToken,
                 servicePublicationSequence: servicePublicationSequence
             )
-            guard await waitForCodemapRootMutationFenceIfNeeded(rootEpoch: rootEpoch) else {
+            guard await waitForCodemapRootMutationFenceIfNeeded(rootEpoch: rootEpoch, deadline: nil) == .ready else {
                 await finishCodemapPathInvalidation(flightID: flightID, authority: session.authority)
                 return
             }
@@ -17882,22 +17893,61 @@ actor WorkspaceFileContextStore {
         continuation.resume(throwing: CancellationError())
     }
 
+    private enum CodemapFenceWaitResult {
+        case ready
+        case unavailable
+        case timedOut
+    }
+
+    private enum CodemapRootMutationFenceAcquisition {
+        case acquired(CodemapRootMutationFenceToken)
+        case unavailable
+        case timedOut
+    }
+
+    private var codemapFenceWaitTimeout: Duration {
+        #if DEBUG
+            codemapFenceWaitTimeoutOverrideForTesting ?? MCPTimeoutPolicy.codemapFenceWaitTimeout
+        #else
+            MCPTimeoutPolicy.codemapFenceWaitTimeout
+        #endif
+    }
+
     private func beginCodemapRootMutationFence(
         rootID: UUID,
         command: CodemapInvalidationCommand
     ) async -> CodemapRootMutationFenceToken? {
-        guard let initialState = rootStatesByID[rootID] else { return nil }
+        guard case let .acquired(token) = await acquireCodemapRootMutationFence(
+            rootID: rootID,
+            command: command,
+            deadline: nil
+        ) else { return nil }
+        return token
+    }
+
+    /// `deadline` bounds both waits for a request-driven caller. A timeout leaves every fence it
+    /// waited on in place.
+    private func acquireCodemapRootMutationFence(
+        rootID: UUID,
+        command: CodemapInvalidationCommand,
+        deadline: ContinuousClock.Instant?
+    ) async -> CodemapRootMutationFenceAcquisition {
+        guard let initialState = rootStatesByID[rootID] else { return .unavailable }
         let rootEpoch = WorkspaceCodemapRootEpoch(
             rootID: rootID,
             rootLifetimeID: initialState.lifetimeID
         )
         let token: CodemapRootMutationFenceToken
         while true {
-            guard await waitForCodemapRootMutationFenceIfNeeded(rootEpoch: rootEpoch),
-                  !Task.isCancelled,
+            switch await waitForCodemapRootMutationFenceIfNeeded(rootEpoch: rootEpoch, deadline: deadline) {
+            case .ready: break
+            case .unavailable: return .unavailable
+            case .timedOut: return .timedOut
+            }
+            guard !Task.isCancelled,
                   rootStatesByID[rootID]?.lifetimeID == rootEpoch.rootLifetimeID
             else {
-                return nil
+                return .unavailable
             }
             if codemapPathWorkIsQuiescent(rootEpoch: rootEpoch) {
                 token = CodemapRootMutationFenceToken(id: UUID(), rootEpoch: rootEpoch)
@@ -17908,8 +17958,10 @@ actor WorkspaceFileContextStore {
             // already-held root fence, so installing the root fence first would make each side
             // wait for the other. After path work drains, loop back through the root-fence lane so
             // competing root mutations remain serialized.
-            guard await waitForCodemapPathQuiescenceIfNeeded(rootEpoch: rootEpoch) else {
-                return nil
+            switch await waitForCodemapPathQuiescenceIfNeeded(rootEpoch: rootEpoch, deadline: deadline) {
+            case .ready: continue
+            case .unavailable: return .unavailable
+            case .timedOut: return .timedOut
             }
         }
         var didTransferFenceOwnership = false
@@ -17922,10 +17974,10 @@ actor WorkspaceFileContextStore {
         guard !Task.isCancelled,
               rootStatesByID[rootID]?.lifetimeID == rootEpoch.rootLifetimeID
         else {
-            return nil
+            return .unavailable
         }
         didTransferFenceOwnership = true
-        return token
+        return .acquired(token)
     }
 
     private func codemapPathWorkIsQuiescent(
@@ -17936,42 +17988,37 @@ actor WorkspaceFileContextStore {
     }
 
     private func waitForCodemapPathQuiescenceIfNeeded(
-        rootEpoch: WorkspaceCodemapRootEpoch
-    ) async -> Bool {
+        rootEpoch: WorkspaceCodemapRootEpoch,
+        deadline: ContinuousClock.Instant?
+    ) async -> CodemapFenceWaitResult {
         while !codemapPathWorkIsQuiescent(rootEpoch: rootEpoch) {
-            let waiterID = UUID()
-            await withTaskCancellationHandler {
-                await withCheckedContinuation { continuation in
-                    if codemapPathWorkIsQuiescent(rootEpoch: rootEpoch) ||
-                        Task.isCancelled ||
-                        rootStatesByID[rootEpoch.rootID]?.lifetimeID != rootEpoch.rootLifetimeID
-                    {
-                        continuation.resume()
-                    } else {
-                        codemapPathQuiescenceWaitersByRootEpoch[rootEpoch, default: [:]][waiterID] = continuation
-                    }
-                }
-            } onCancel: {
-                Task { await self.cancelCodemapPathQuiescenceWaiter(rootEpoch: rootEpoch, waiterID: waiterID) }
-            }
             guard !Task.isCancelled,
                   rootStatesByID[rootEpoch.rootID]?.lifetimeID == rootEpoch.rootLifetimeID
-            else { return false }
+            else { return .unavailable }
+            MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreCodemapPathQuiescenceWait)
+            let waiterID = UUID()
+            let signal = WorkspaceCodemapFenceWaitSignal()
+            codemapPathQuiescenceWaitersByRootEpoch[rootEpoch, default: [:]][waiterID] = signal
+            let outcome = await signal.wait(until: deadline)
+            removeCodemapPathQuiescenceWaiter(rootEpoch: rootEpoch, waiterID: waiterID)
+            if outcome == .timedOut { return .timedOut }
+            guard !Task.isCancelled,
+                  rootStatesByID[rootEpoch.rootID]?.lifetimeID == rootEpoch.rootLifetimeID
+            else { return .unavailable }
+            MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreCodemapPathQuiescenceWait, transition: .completed)
         }
-        return true
+        return .ready
     }
 
-    private func cancelCodemapPathQuiescenceWaiter(
+    private func removeCodemapPathQuiescenceWaiter(
         rootEpoch: WorkspaceCodemapRootEpoch,
         waiterID: UUID
     ) {
-        guard let continuation = codemapPathQuiescenceWaitersByRootEpoch[rootEpoch]?
-            .removeValue(forKey: waiterID)
+        guard codemapPathQuiescenceWaitersByRootEpoch[rootEpoch]?.removeValue(forKey: waiterID) != nil
         else { return }
         if codemapPathQuiescenceWaitersByRootEpoch[rootEpoch]?.isEmpty == true {
             codemapPathQuiescenceWaitersByRootEpoch.removeValue(forKey: rootEpoch)
         }
-        continuation.resume()
     }
 
     private func resumeCodemapPathQuiescenceWaitersIfNeeded(
@@ -17979,45 +18026,41 @@ actor WorkspaceFileContextStore {
     ) {
         guard codemapPathWorkIsQuiescent(rootEpoch: rootEpoch) else { return }
         let waiters = codemapPathQuiescenceWaitersByRootEpoch.removeValue(forKey: rootEpoch) ?? [:]
-        for continuation in waiters.values {
-            continuation.resume()
+        for signal in waiters.values {
+            signal.resolve(.woken)
         }
     }
 
     private func waitForCodemapRootMutationFenceIfNeeded(
-        rootEpoch: WorkspaceCodemapRootEpoch
-    ) async -> Bool {
+        rootEpoch: WorkspaceCodemapRootEpoch,
+        deadline: ContinuousClock.Instant?
+    ) async -> CodemapFenceWaitResult {
         while codemapRootMutationFenceTokensByRootEpoch[rootEpoch] != nil {
+            guard !Task.isCancelled else { return .unavailable }
+            MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreCodemapRootFenceWait)
             let waiterID = UUID()
-            await withTaskCancellationHandler {
-                await withCheckedContinuation { continuation in
-                    if codemapRootMutationFenceTokensByRootEpoch[rootEpoch] == nil || Task.isCancelled {
-                        continuation.resume()
-                    } else {
-                        codemapRootMutationFenceWaitersByRootEpoch[rootEpoch, default: [:]][waiterID] = continuation
-                    }
-                }
-            } onCancel: {
-                Task { await self.cancelCodemapRootMutationFenceWaiter(rootEpoch: rootEpoch, waiterID: waiterID) }
-            }
+            let signal = WorkspaceCodemapFenceWaitSignal()
+            codemapRootMutationFenceWaitersByRootEpoch[rootEpoch, default: [:]][waiterID] = signal
+            let outcome = await signal.wait(until: deadline)
+            removeCodemapRootMutationFenceWaiter(rootEpoch: rootEpoch, waiterID: waiterID)
+            if outcome == .timedOut { return .timedOut }
             guard !Task.isCancelled,
                   rootStatesByID[rootEpoch.rootID]?.lifetimeID == rootEpoch.rootLifetimeID
-            else { return false }
+            else { return .unavailable }
+            MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreCodemapRootFenceWait, transition: .completed)
         }
-        return true
+        return .ready
     }
 
-    private func cancelCodemapRootMutationFenceWaiter(
+    private func removeCodemapRootMutationFenceWaiter(
         rootEpoch: WorkspaceCodemapRootEpoch,
         waiterID: UUID
     ) {
-        guard let continuation = codemapRootMutationFenceWaitersByRootEpoch[rootEpoch]?
-            .removeValue(forKey: waiterID)
+        guard codemapRootMutationFenceWaitersByRootEpoch[rootEpoch]?.removeValue(forKey: waiterID) != nil
         else { return }
         if codemapRootMutationFenceWaitersByRootEpoch[rootEpoch]?.isEmpty == true {
             codemapRootMutationFenceWaitersByRootEpoch.removeValue(forKey: rootEpoch)
         }
-        continuation.resume()
     }
 
     private func finishCodemapRootMutationFence(
@@ -18036,8 +18079,8 @@ actor WorkspaceFileContextStore {
         }
         _ = didCommitMutation
         let waiters = codemapRootMutationFenceWaitersByRootEpoch.removeValue(forKey: token.rootEpoch) ?? [:]
-        for continuation in waiters.values {
-            continuation.resume()
+        for signal in waiters.values {
+            signal.resolve(.woken)
         }
         schedulePendingCodemapGraphIndexBuildIfFullyUnfenced(rootEpoch: token.rootEpoch)
     }
@@ -18164,6 +18207,7 @@ actor WorkspaceFileContextStore {
             )
             throw CancellationError()
         }
+        MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreEditPublication)
         let result = try await materializeCatalogFileAfterDiskWrite(
             rootID: rootID,
             relativePath: standardizedRelativePath,
@@ -18241,6 +18285,7 @@ actor WorkspaceFileContextStore {
             throw FileSystemError.fileNotFound
         }
 
+        MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreEditPublication)
         do {
             #if DEBUG
                 if let storeEditDeferredPublicationDidRegisterHandler {
@@ -19914,20 +19959,40 @@ actor WorkspaceFileContextStore {
                 rootToken: candidate.service.diagnosticRootToken.uuidString
             )
         )
-        let codemapFence = await beginCodemapRootMutationFence(
+        // An explicit request must not wait for another mutation of this root however long it
+        // runs; past the bound the caller gets the retryable freshness reply.
+        let fenceAcquisition = await acquireCodemapRootMutationFence(
             rootID: candidate.rootID,
-            command: .catalogAdvanced
+            command: .catalogAdvanced,
+            deadline: .now + codemapFenceWaitTimeout
         )
+        let codemapFence: CodemapRootMutationFenceToken?
+        let fenceOutcome: String
+        switch fenceAcquisition {
+        case let .acquired(token):
+            codemapFence = token
+            fenceOutcome = "acquired"
+        case .unavailable:
+            codemapFence = nil
+            fenceOutcome = "unavailable"
+        case .timedOut:
+            codemapFence = nil
+            fenceOutcome = "timedOut"
+        }
         EditFlowPerf.lifecycleEvent(
             EditFlowPerf.Lifecycle.WorkspaceExactResolution.checkpoint,
             correlation: lifecycleCorrelation,
             EditFlowPerf.Dimensions(
                 runPurpose: "explicitMaterialization",
                 status: "codemapRootFenceEnded",
-                outcome: codemapFence == nil ? "unavailable" : "acquired",
+                outcome: fenceOutcome,
                 rootToken: rootStatesByID[candidate.rootID]?.service.diagnosticRootToken.uuidString
             )
         )
+        if case .timedOut = fenceAcquisition {
+            setTerminalOutcome("codemapFenceTimedOut")
+            throw WorkspaceAppliedIngressWaitError.timedOut
+        }
         if Task.isCancelled {
             finishCodemapRootMutationFence(codemapFence, didCommitMutation: false)
             throw CancellationError()

@@ -426,6 +426,74 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), content)
         }
 
+        /// An explicit request for an uncatalogued file must not wait for another mutation's codemap
+        /// path fence however long it is held: past the bound it gets the retryable freshness
+        /// timeout, the fence stays with its owner, and a later request succeeds once it lifts.
+        func testCodemapPathQuiescenceWaitReturnsTypedPendingWhileFenceHeld() async throws {
+            let rootURL = try makeTemporaryDirectory(name: "CodemapFenceWaitBound")
+            let target = rootURL.appendingPathComponent("Target.swift")
+            let newcomer = rootURL.appendingPathComponent("Newcomer.swift")
+            try write("stale\n", to: target)
+            let store = WorkspaceFileContextStore()
+            let root = try await store.loadRoot(path: rootURL.path)
+            let roots = await store.rootRefs(scope: .visibleWorkspace)
+            let namespace = WorkspaceExactFileNamespace.identity(roots: roots)
+            let watcher = MCPPathContractReleaseGate(name: "fence bound watcher")
+            let heldPrune = MCPPathContractReleaseGate(name: "fence bound held prune")
+            let returned = MCPPathContractReleaseGate(name: "fence bound request returned")
+            returned.release()
+            await store.setWatcherSinkWillApplyHandler { rootID in
+                if rootID == root.id { await watcher.enterAndWait() }
+            }
+            await store.setExactFileSuspensionGateForTesting(point: .missingFilePruneFence, rootID: root.id) {
+                await heldPrune.enterAndWait()
+            }
+            await store.setCodemapFenceWaitTimeoutOverrideForTesting(.milliseconds(200))
+            try FileManager.default.removeItem(at: target)
+            let holder = Task {
+                try await store.resolveExactExistingWorkspaceFile(.absolute(target.path), namespace: namespace)
+            }
+            addTeardownBlock {
+                heldPrune.release()
+                watcher.release()
+                _ = await holder.result
+                await store.setWatcherSinkWillApplyHandler(nil)
+                await store.clearExactFileCandidateProbeGateForTesting()
+                await store.setCodemapFenceWaitTimeoutOverrideForTesting(nil)
+            }
+            guard await heldPrune.waitUntilEntered() else {
+                return XCTFail("The stale-file prune never took its path fence")
+            }
+            try write("new\n", to: newcomer)
+
+            let request = Task {
+                do {
+                    let result = try await store.materializeExplicitlyRequestedFile(newcomer.path, rootRefs: roots)
+                    await returned.enterAndWait()
+                    return result
+                } catch {
+                    await returned.enterAndWait()
+                    throw error
+                }
+            }
+            let returnedWhileFenceHeld = await returned.waitUntilEntered()
+            let heldFences = await store.codemapPathFenceCountForTesting(rootID: root.id, relativePath: "Target.swift")
+            heldPrune.release()
+            let result = await request.result
+            XCTAssertTrue(returnedWhileFenceHeld)
+            XCTAssertEqual(heldFences, 1)
+            guard case let .failure(error) = result,
+                  (error as? WorkspaceAppliedIngressWaitError) == .timedOut
+            else {
+                return XCTFail("Expected the retryable freshness timeout, got \(result)")
+            }
+
+            _ = await holder.result
+            guard case .materialized = try await store.materializeExplicitlyRequestedFile(newcomer.path, rootRefs: roots) else {
+                return XCTFail("The request must succeed once the fence lifts")
+            }
+        }
+
         func testCancelledStaleFilePruneReleasesFenceWithoutPruning() async throws {
             let rootURL = try makeTemporaryDirectory(name: "CancelledStaleDeletion")
             let target = rootURL.appendingPathComponent("Target.swift")

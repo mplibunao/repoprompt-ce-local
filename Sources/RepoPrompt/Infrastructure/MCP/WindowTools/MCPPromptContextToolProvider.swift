@@ -162,20 +162,28 @@ final class MCPPromptContextToolProvider {
             return try Value(simplePromptReply(tabContext.promptText, op: operation.rawValue))
         case .set:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for set") }
-            try await MCPDomainMutationCommitContext.willCommit()
-            try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText = text }
-            let context = try await dependencies.execution.requireCurrentTabContext(MCPWindowToolName.prompt)
-            return try Value(simplePromptReply(context.promptText, op: operation.rawValue))
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
+            let published = try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) {
+                $0.promptText = text
+            }
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationReplyConstruction)
+            // Echo what this call published. Resolving the tab again could throw after the commit or
+            // name another tab.
+            return try Value(simplePromptReply(published.promptText, op: operation.rawValue))
         case .append:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for append") }
-            try await MCPDomainMutationCommitContext.willCommit()
-            try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText += text }
-            let context = try await dependencies.execution.requireCurrentTabContext(MCPWindowToolName.prompt)
-            return try Value(simplePromptReply(context.promptText, op: operation.rawValue))
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
+            let published = try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) {
+                $0.promptText += text
+            }
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationReplyConstruction)
+            return try Value(simplePromptReply(published.promptText, op: operation.rawValue))
         case .clear:
-            try await MCPDomainMutationCommitContext.willCommit()
-            try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText = "" }
-            return try Value(simplePromptReply("", op: operation.rawValue))
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
+            let published = try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) {
+                $0.promptText = ""
+            }
+            return try Value(simplePromptReply(published.promptText, op: operation.rawValue))
         case .export:
             return try await exportPrompt(args: args, resolvedContext: resolvedContext, tabContext: tabContext)
         case .selectPreset:
@@ -183,12 +191,20 @@ final class MCPPromptContextToolProvider {
                 throw MCPError.invalidParams("select_preset requires an explicitly bound tab (bind_context or _tabID). It is disabled for run-based bindings; use copy_preset override in workspace_context or export instead.")
             }
             let preset = try await resolveRequiredPreset(args["preset"])
-            try await MCPDomainMutationCommitContext.willCommit()
-            await MainActor.run { dependencies.context.promptVM.selectCopyPreset(preset.id) }
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
+            try await publishAfterCommit { dependencies.context.promptVM.selectCopyPreset(preset.id) }
             return try Value(ToolResultDTOs.PromptToolEnvelope.forSelectPreset(dependencies.prompt.copyPresetDescriptorDTO(preset)))
         case .snapshot, .listPresets, .unknown:
             throw MCPError.invalidParams("Unsupported op '\(operation.rawValue)' for prompt when tab context is active")
         }
+    }
+
+    /// Commits the protected mutation in progress and then publishes on the main actor with no
+    /// suspension between them, so a deadline before the commit leaves nothing published.
+    @MainActor
+    private func publishAfterCommit(_ publish: @MainActor () -> Void) async throws {
+        try await MCPDomainMutationCommitContext.willCommit()
+        publish()
     }
 
     /// Refreshes only the exact canonical selection consumed after the legacy selection queue
@@ -384,14 +400,14 @@ final class MCPPromptContextToolProvider {
         operation: () async throws -> T
     ) async throws -> T {
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(phase)
+        MCPToolExecutionHandlerPhaseContext.report(phase)
         do {
             let value = try await operation()
             try Task.checkCancellation()
-            await MCPToolExecutionHandlerPhaseContext.report(phase, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(phase, transition: .completed)
             return value
         } catch {
-            await MCPToolExecutionHandlerPhaseContext.report(phase, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(phase, transition: .completed)
             throw error
         }
     }

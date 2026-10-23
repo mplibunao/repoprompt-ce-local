@@ -198,6 +198,9 @@ actor FileSystemService {
         /// Test-only barrier immediately before namespace-manifest authority fencing.
         var workspaceRootNamespaceEnumerationWillFinishHandler: (@Sendable () async -> Void)?
 
+        /// Test-only gate invoked after a mutation reserves its paths and before it commits.
+        var mutationWillCommitHandler: (@Sendable (FileSystemUncancellableMutation) async -> Void)?
+
         /// Test-only gate invoked before a mutation is submitted to the blocking-I/O queue.
         var mutationIOWillBeginHandler: (@Sendable (FileSystemUncancellableMutation) async -> Void)?
 
@@ -469,6 +472,12 @@ actor FileSystemService {
     }
 
     #if DEBUG
+        func setMutationWillCommitHandlerForTesting(
+            _ handler: (@Sendable (FileSystemUncancellableMutation) async -> Void)?
+        ) {
+            mutationWillCommitHandler = handler
+        }
+
         func setMutationIOWillBeginHandlerForTesting(
             _ handler: (@Sendable (FileSystemUncancellableMutation) async -> Void)?
         ) {

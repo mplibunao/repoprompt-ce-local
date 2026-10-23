@@ -77,7 +77,9 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 frozen: frozen,
                 dependencies: appContext.fileToolDependencies
             )
+            MCPToolExecutionHandlerPhaseContext.report(.fileToolAuthorityValidation)
             try await validate(authority)
+            MCPToolExecutionHandlerPhaseContext.report(.fileToolAuthorityValidation, transition: .completed)
             return authority
         }
         let metadata = await dependencies.context.captureRequestMetadata()
@@ -228,7 +230,7 @@ final class MCPFileToolProvider: MCPAppToolProviding {
             )
         ) { [self] _, args in
             try Task.checkCancellation()
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsPreMutationChecks)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsPreMutationChecks)
             guard let action = args["action"]?.stringValue,
                   let path = args["path"]?.stringValue
             else { throw MCPError.invalidParams("missing required fields") }
@@ -236,10 +238,10 @@ final class MCPFileToolProvider: MCPAppToolProviding {
             let content = args["content"]?.stringValue
             let newPath = args["new_path"]?.stringValue
             let ifExists = args["if_exists"]?.stringValue?.lowercased() ?? "error"
-            let suppliedOperationID = args["operation_id"]?.stringValue?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let operationID = suppliedOperationID.flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsPreMutationChecks, transition: .completed)
+            // One identity with the journal, the log, and a timeout reply. A direct call outside an MCP
+            // invocation gets a fresh one.
+            let operationID = MCPDomainMutationCommitContext.operationID(forArguments: args) ?? UUID().uuidString
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsPreMutationChecks, transition: .completed)
             try Task.checkCancellation()
 
             let reply: ToolResultDTOs.FileActionReply
@@ -263,9 +265,9 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                     failure: failure
                 )
             }
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsReplyConstruction)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsReplyConstruction)
             let value = try Value(reply)
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsReplyConstruction, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsReplyConstruction, transition: .completed)
             return value
         }
     }
@@ -346,17 +348,17 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                     budget: budget
                 )
 
-                await MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureSeedResolution)
+                MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureSeedResolution)
                 let metadata = authority.metadata
                 try Task.checkCancellation()
                 let lookupContext = authority.lookupContext
                 try Task.checkCancellation()
-                await MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureIngressWait)
+                MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureIngressWait)
                 _ = try await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(
                     rootScope: lookupContext.rootScope,
                     timeout: MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
                 )
-                await MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureIngressWait, transition: .completed)
+                MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureIngressWait, transition: .completed)
                 try Task.checkCancellation()
 
                 let files: [WorkspaceFileRecord]
@@ -418,22 +420,22 @@ final class MCPFileToolProvider: MCPAppToolProviding {
         authority: ReadAuthority
     ) async throws -> Value {
         let dependencies = authority.dependencies
-        await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeRequestResolution)
+        MCPToolExecutionHandlerPhaseContext.report(.getFileTreeRequestResolution)
         return try await withActiveWorktreeStartupBenchmarkTag(lookupContext: authority.lookupContext) {
             let type = args["type"]?.stringValue ?? "files"
             switch type {
             case "roots":
                 let filePathDisplay = await MainActor.run { dependencies.context.promptVM.filePathDisplayOption }
                 let lookupContext = authority.lookupContext
-                await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeRequestResolution, transition: .completed)
-                await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait)
+                MCPToolExecutionHandlerPhaseContext.report(.getFileTreeRequestResolution, transition: .completed)
+                MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait)
                 _ = try await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(
                     rootScope: lookupContext.rootScope,
                     timeout: MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
                 )
                 try Task.checkCancellation()
-                await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait, transition: .completed)
-                await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction)
+                MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait, transition: .completed)
+                MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction)
                 let worktreeScope = ToolResultDTOs.WorktreeScopeDTO.sessionBound(from: lookupContext.bindingProjection)
                 let snapshot = await dependencies.context.promptVM.workspaceFileContextStore.makeFileTreeSelectionSnapshot(
                     selection: StoredSelection(),
@@ -445,7 +447,7 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                     guard authority.frozen.rootCatalogSnapshot.isGenuinelyRootless else {
                         throw MCPServerViewModel.FileToolAuthorityFailure.mismatchedProjection
                     }
-                    await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction, transition: .completed)
+                    MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction, transition: .completed)
                     return try Value(ToolResultDTOs.FileTreeDTO(
                         rootsCount: 0,
                         usesLegend: false,
@@ -458,7 +460,7 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 let rootLines = snapshot.roots.map { root in
                     lookupContext.bindingProjection?.projectedLogicalDisplayPath(forPhysicalPath: root.fullPath, display: .full) ?? root.fullPath
                 }
-                await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction, transition: .completed)
+                MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction, transition: .completed)
                 try await validate(authority)
                 return try Value(ToolResultDTOs.FileTreeDTO(rootsCount: snapshot.roots.count, usesLegend: false, tree: rootLines.joined(separator: "\n"), note: nil, wasTruncated: false, worktreeScope: worktreeScope))
             case "files":
@@ -472,15 +474,15 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 }
                 let metadata = authority.metadata
                 let lookupContext = authority.lookupContext
-                await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeRequestResolution, transition: .completed)
-                await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait)
+                MCPToolExecutionHandlerPhaseContext.report(.getFileTreeRequestResolution, transition: .completed)
+                MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait)
                 _ = try await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(
                     rootScope: lookupContext.rootScope,
                     timeout: MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
                 )
                 try Task.checkCancellation()
-                await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait, transition: .completed)
-                await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction)
+                MCPToolExecutionHandlerPhaseContext.report(.getFileTreeIngressWait, transition: .completed)
+                MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction)
                 if mode.lowercased() == "selected" {
                     try await MCPServerViewModel.requireReadFileAutoSelectionPrerequisite {
                         try await dependencies.files.drainReadFileAutoSelection(metadata, .canonicalSelection)
@@ -488,7 +490,7 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 }
                 let worktreeScope = ToolResultDTOs.WorktreeScopeDTO.sessionBound(from: lookupContext.bindingProjection)
                 let resultAndRootCount = try await dependencies.files.buildStoreBackedFileTreeResult(mode, maxDepth, args["path"]?.stringValue, lookupContext)
-                await MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction, transition: .completed)
+                MCPToolExecutionHandlerPhaseContext.report(.getFileTreeConstruction, transition: .completed)
                 try await validate(authority)
                 if resultAndRootCount.emptyReason == .rootProjectionEmpty,
                    !authority.frozen.rootCatalogSnapshot.isGenuinelyRootless
@@ -524,7 +526,7 @@ final class MCPFileToolProvider: MCPAppToolProviding {
     ) async throws -> Value {
         let dependencies = authority.dependencies
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(.readFileRequestResolution)
+        MCPToolExecutionHandlerPhaseContext.report(.readFileRequestResolution)
         EditFlowPerf.lifecycleEvent(EditFlowPerf.Lifecycle.ReadFile.providerEntered)
         let providerTotalState = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.providerTotal)
         defer { EditFlowPerf.end(EditFlowPerf.Stage.ReadFile.providerTotal, providerTotalState) }
@@ -555,12 +557,13 @@ final class MCPFileToolProvider: MCPAppToolProviding {
         } catch let issue as PathResolutionIssue {
             throw MCPError.invalidParams(PathResolutionIssueRenderer.message(for: issue))
         }
-        await MCPToolExecutionHandlerPhaseContext.report(.readFileRequestResolution, transition: .completed)
+        MCPToolExecutionHandlerPhaseContext.report(.readFileRequestResolution, transition: .completed)
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(.readFileContentRead)
+        MCPToolExecutionHandlerPhaseContext.report(.readFileContentRead)
         let unprojectedReadResult: MCPAppFileReadResult
         do {
             unprojectedReadResult = try await EditFlowPerf.measure(EditFlowPerf.Stage.ReadFile.providerReadEnvelope) {
+                MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadGitArtifactPreflight)
                 if let artifactReply = try await dependencies.files.readSelectedAuthorizedGitArtifact(
                     path,
                     translatedArtifactPath,
@@ -579,17 +582,18 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 )
             }
         } catch WorkspaceAppliedIngressWaitError.timedOut {
-            await MCPToolExecutionHandlerPhaseContext.report(.readFileContentRead, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.readFileContentRead, transition: .completed)
             return try Value(Self.readFileFreshnessTimeoutDTO(
                 path: path,
                 worktreeScope: worktreeScope
             ))
         }
-        await MCPToolExecutionHandlerPhaseContext.report(.readFileContentRead, transition: .completed)
+        MCPToolExecutionHandlerPhaseContext.report(.readFileContentRead, transition: .completed)
         try Task.checkCancellation()
         let unprojectedReply = switch unprojectedReadResult {
         case let .workspace(reply, _), let .nonSelecting(reply): reply
         }
+        MCPToolExecutionHandlerPhaseContext.report(.readFileReplyProjection)
         let readResult: MCPAppFileReadResult = try await EditFlowPerf.measure(
             EditFlowPerf.Stage.ReadFile.providerReplyProjection
         ) {
@@ -610,8 +614,9 @@ final class MCPFileToolProvider: MCPAppToolProviding {
         case .workspace: "attempted"
         case .nonSelecting: "skipped"
         }
+        MCPToolExecutionHandlerPhaseContext.report(.readFileAuthorityValidation)
         try await validate(authority)
-        await MCPToolExecutionHandlerPhaseContext.report(.readFileAutoSelection)
+        MCPToolExecutionHandlerPhaseContext.report(.readFileAutoSelection)
         try await EditFlowPerf.measure(
             EditFlowPerf.Stage.ReadFile.providerAutoSelect,
             EditFlowPerf.Dimensions(outcome: autoSelectOutcome)
@@ -630,18 +635,21 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 }
             }
         }
-        await MCPToolExecutionHandlerPhaseContext.report(.readFileAutoSelection, transition: .completed)
+        MCPToolExecutionHandlerPhaseContext.report(.readFileAutoSelection, transition: .completed)
         try Task.checkCancellation()
         let projectedReply = switch readResult {
         case let .workspace(reply, _), let .nonSelecting(reply): reply
         }
+        MCPToolExecutionHandlerPhaseContext.report(.readFileAuthorityValidation)
         try await validate(authority)
+        MCPToolExecutionHandlerPhaseContext.report(.readFileValueEncoding)
         let value = try await EditFlowPerf.measure(EditFlowPerf.Stage.ReadFile.providerValueEncoding) {
             try await MCPProviderProjectionWorker.encode(
                 projectedReply,
                 toolName: MCPWindowToolName.readFile
             )
         }
+        MCPToolExecutionHandlerPhaseContext.report(.readFileValueEncoding, transition: .completed)
         EditFlowPerf.lifecycleEvent(EditFlowPerf.Lifecycle.ReadFile.providerResultReady)
         return value
     }
