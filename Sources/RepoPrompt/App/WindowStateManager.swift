@@ -455,6 +455,13 @@ class WindowStatesManager: ObservableObject {
         closingWindowReferences.compactMap(\.value)
     }
 
+    /// True from app launch until the saved window session has loaded. A window that registers
+    /// in this interval may still be handed a restore entry when the load finishes. After it,
+    /// each loaded entry has gone to a registered window or waits for the next window to register.
+    var isRestoreSessionLoadPending: Bool {
+        restorePersistenceGate.isRestoreSessionLoadPending
+    }
+
     func loadWindowRestoreSessionIfNeeded() {
         guard !hasLoadedRestoreSession else { return }
         hasLoadedRestoreSession = true
@@ -486,16 +493,7 @@ class WindowStatesManager: ObservableObject {
                 // Seed instance-number state from snapshot for deterministic restore
                 self.preseedInstanceNumberState(from: snapshot)
 
-                self.restoreQueue = entries
-                // Count every restore entry as in-progress before handing any out, so
-                // entries destined for windows that have not registered yet keep the
-                // persistence gate held (multi-window crash restore).
-                self.restorePersistenceGate.finishRestoreSessionLoad(pendingEntryCount: entries.count)
-                if !entries.isEmpty {
-                    self.applyRestoreEntriesIfPossible()
-                }
-                self.flushDeferredWindowSessionPersistIfRestoreIdle()
-                self.scheduleLeftoverRestoreEntryGraceReleaseIfNeeded()
+                self.installLoadedRestoreEntries(entries)
                 #if DEBUG
                     if let applyStartMS {
                         WorkspaceRestorePerfLog.log(
@@ -505,6 +503,19 @@ class WindowStatesManager: ObservableObject {
                 #endif
             }
         }
+    }
+
+    private func installLoadedRestoreEntries(_ entries: [WindowSessionEntry]) {
+        restoreQueue = entries
+        // Count every restore entry as in-progress before handing any out, so
+        // entries destined for windows that have not registered yet keep the
+        // persistence gate held (multi-window crash restore).
+        restorePersistenceGate.finishRestoreSessionLoad(pendingEntryCount: entries.count)
+        if !entries.isEmpty {
+            applyRestoreEntriesIfPossible()
+        }
+        flushDeferredWindowSessionPersistIfRestoreIdle()
+        scheduleLeftoverRestoreEntryGraceReleaseIfNeeded()
     }
 
     /// Pre-seeds instance number state from a loaded session snapshot.
@@ -1032,6 +1043,18 @@ class WindowStatesManager: ObservableObject {
     }
 
     #if DEBUG
+        /// Puts the manager in the launch state before the saved window session has loaded,
+        /// without reading a session file.
+        func beginRestoreSessionLoadForTesting() {
+            restorePersistenceGate.beginRestoreSessionLoad()
+        }
+
+        /// Finishes a load begun with `beginRestoreSessionLoadForTesting()` the way a loaded
+        /// session file does, handing `entries` to the registered windows.
+        func finishRestoreSessionLoadForTesting(entries: [WindowSessionEntry]) {
+            installLoadedRestoreEntries(entries)
+        }
+
         func setTerminatingForTesting(_ isTerminating: Bool) {
             self.isTerminating = isTerminating
             if !isTerminating {

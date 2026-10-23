@@ -337,6 +337,16 @@ class WindowState: ObservableObject {
     /// written back over a still-valid snapshot entry. Cleared as soon as a restore resolves.
     private(set) var unresolvedRestoreEntry: WindowSessionEntry?
     private var pendingRestoreCompletion: (() -> Void)?
+    private var restoreEntriesInFlight = 0
+
+    /// True while a launch restore can still switch this window's workspace: until the saved
+    /// window session has loaded, since the load may hand this window an entry, and from the
+    /// moment an entry is handed over until its restore attempt finishes. The second interval
+    /// includes the wait for workspace initialization before the restore's switch begins.
+    var isWorkspaceRestoreInFlight: Bool {
+        restoreEntriesInFlight > 0 || windowStatesManager?.isRestoreSessionLoadPending == true
+    }
+
     private(set) var claimedInitialRefreshDeferralID: UUID?
     private(set) var claimedInitialRefreshDeferralWaiterID: UUID?
 
@@ -1212,10 +1222,14 @@ class WindowState: ObservableObject {
             completion?()
             return
         }
+        restoreEntriesInFlight += 1
         // Never drop a previously pending completion if the entry is replaced.
         pendingRestoreCompletion?()
         pendingRestoreEntry = entry
-        pendingRestoreCompletion = completion
+        pendingRestoreCompletion = { [weak self] in
+            self?.restoreEntriesInFlight -= 1
+            completion?()
+        }
         applyPendingRestoreEntryIfPossible()
     }
 

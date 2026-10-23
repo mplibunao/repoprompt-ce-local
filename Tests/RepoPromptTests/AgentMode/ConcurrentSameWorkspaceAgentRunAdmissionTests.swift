@@ -766,6 +766,230 @@ import XCTest
             XCTAssertEqual(providerCount, 0)
         }
 
+        func testAgentRunStartDuringLaunchRestoreIsRefusedUntilTheRestoreSettles() async throws {
+            let fixture = try await DurableAgentAdmissionFixture.make()
+            let leaseHold = AdmissionSaveGate()
+            let restoreHold = AdmissionSaveGate()
+            let window = fixture.window
+            let manager = window.workspaceManager
+            let windowStates = WindowStatesManager.shared
+            trackCleanup {
+                await leaseHold.open()
+                await restoreHold.open()
+                manager.setWorkspaceActivationLeaseDidAcquireHandlerForTesting(nil)
+                manager.setWorkspaceRootHydrationWillSpawnHandlerForTesting(nil)
+                if windowStates.isRestoreSessionLoadPending {
+                    windowStates.finishRestoreSessionLoadForTesting(entries: [])
+                }
+                await fixture.cleanup()
+            }
+            let restoredWorkspace = try XCTUnwrap(manager.activeWorkspace)
+            let systemWorkspace = try XCTUnwrap(manager.workspaces.first(where: \.isSystemWorkspace))
+            // A relaunched window registers on the system workspace while the saved window
+            // session is still loading.
+            let resetResult = await manager.switchWorkspace(
+                to: systemWorkspace,
+                saveState: false,
+                reason: "launchRestoreAdmission.reset"
+            )
+            XCTAssertTrue(resetResult.didSwitch, resetResult.message ?? "")
+            try await waitUntil("Agent Mode to handle the reset") {
+                !window.agentModeViewModel.hasPendingWorkspaceSwitchDiscard
+            }
+            windowStates.beginRestoreSessionLoadForTesting()
+
+            let recorder = AdmissionProviderRecorder(expectedCount: 1, blockProviders: false)
+            let service = makeAgentRunStartService(window: window, recorder: recorder)
+            let startArgs: [String: Value] = [
+                "op": .string("start"),
+                "message": .string("start during launch restore"),
+                "detach": .bool(true),
+                "timeout": .int(0)
+            ]
+            func assertStartRefusedAsSwitchInFlight(_ phase: String) async {
+                do {
+                    let admitted = try await service.execute(args: startArgs)
+                    XCTFail("agent_run start was admitted \(phase): \(admitted)")
+                } catch let MCPError.invalidParams(message) {
+                    XCTAssertEqual(
+                        message,
+                        AgentRunMCPToolService.workspaceSwitchPendingStartRejectionMessage,
+                        phase
+                    )
+                } catch {
+                    XCTFail("Expected the retryable switch rejection \(phase), got \(error)")
+                }
+            }
+
+            await assertStartRefusedAsSwitchInFlight("before the saved window session loaded")
+
+            // Hold the restore twice: before its switch begins, where only the window's restore
+            // entry refuses a start, and after the restored workspace became active, which is
+            // where an admitted run would later be discarded by Agent Mode's switch teardown.
+            manager.setWorkspaceActivationLeaseDidAcquireHandlerForTesting { workspaceID in
+                guard workspaceID == restoredWorkspace.id else { return }
+                await leaseHold.enterFirstAndWait()
+            }
+            manager.setWorkspaceRootHydrationWillSpawnHandlerForTesting { workspaceID in
+                guard workspaceID == restoredWorkspace.id else { return }
+                await restoreHold.enterFirstAndWait()
+            }
+            guard windowStates.allWindows.map(\.windowID) == [window.windowID] else {
+                return XCTFail("The loaded session hands its entry to the first registered window, which must be this one.")
+            }
+            windowStates.finishRestoreSessionLoadForTesting(entries: [
+                makeRestoreEntry(workspaceID: restoredWorkspace.id, workspaceName: restoredWorkspace.name)
+            ])
+            try await waitUntil("the restore to hold before its switch begins") {
+                await leaseHold.hasEntered()
+            }
+            XCTAssertFalse(manager.isSwitchingWorkspace)
+            await assertStartRefusedAsSwitchInFlight("before the restore's switch began")
+            await leaseHold.open()
+            try await waitUntil("the restore to hold with its workspace active") {
+                await restoreHold.hasEntered()
+            }
+            XCTAssertEqual(manager.activeWorkspaceID, restoredWorkspace.id)
+
+            await assertStartRefusedAsSwitchInFlight("while the restore was switching the window")
+            let providerCountDuringRestore = await recorder.count()
+            XCTAssertEqual(providerCountDuringRestore, 0)
+
+            await restoreHold.open()
+
+            // A caller retries on the retryable rejection; once Agent Mode has handled the
+            // restored workspace, the start is admitted and the restore no longer discards it.
+            var unexpectedError: Error?
+            try await waitUntil("a start to be admitted after the restore settles") {
+                do {
+                    _ = try await service.execute(args: startArgs)
+                    return true
+                } catch let MCPError.invalidParams(message)
+                    where message == AgentRunMCPToolService.workspaceSwitchPendingStartRejectionMessage
+                {
+                    return false
+                } catch {
+                    unexpectedError = error
+                    return true
+                }
+            }
+            XCTAssertNil(unexpectedError)
+            XCTAssertEqual(manager.activeWorkspaceID, restoredWorkspace.id)
+            let admittedRuns = await recorder.observations()
+            XCTAssertEqual(admittedRuns.count, 1)
+            let admittedTabID = try XCTUnwrap(admittedRuns.first?.tabID)
+            XCTAssertNotNil(window.agentModeViewModel.session(for: admittedTabID, createIfNeeded: false))
+        }
+
+        func testStartGateRefusesWhileASwitchIsPendingOnASettledWindow() async throws {
+            let fixture = try await DurableAgentAdmissionFixture.make()
+            let window = fixture.window
+            let manager = window.workspaceManager
+            manager.registerSwitchSessionProvider(ConfirmationRequiringSwitchSessionProvider())
+            let systemWorkspace = manager.workspaces.first(where: \.isSystemWorkspace)
+            let manualSwitch = Task { () -> WorkspaceSwitchResult? in
+                guard let systemWorkspace else { return nil }
+                return await manager.requestWorkspaceSwitch(to: systemWorkspace, saveState: false)
+            }
+            trackCleanup {
+                manualSwitch.cancel()
+                if let confirmation = manager.pendingSwitchConfirmation {
+                    manager.resolveSwitchConfirmation(id: confirmation.id, allow: false)
+                }
+                _ = await manualSwitch.value
+                await fixture.cleanup()
+            }
+            // Agent Mode handles the fixture's own activation first, so below only the switch
+            // under test refuses starts.
+            try await waitUntil("Agent Mode to handle the fixture's activation") {
+                !window.agentModeViewModel.hasPendingWorkspaceSwitchDiscard
+            }
+
+            // A manual switch waiting at its confirmation dialog.
+            try await waitUntil("the manual switch to ask for confirmation") {
+                manager.pendingSwitchConfirmation != nil
+            }
+            XCTAssertThrowsError(try AgentRunMCPToolService.requireSettledWorkspaceForStart(in: window))
+            let confirmation = try XCTUnwrap(manager.pendingSwitchConfirmation)
+            manager.resolveSwitchConfirmation(id: confirmation.id, allow: false)
+            let declinedSwitch = await manualSwitch.value
+            XCTAssertEqual(declinedSwitch?.didSwitch, false)
+
+            // A switch notification Agent Mode hasn't handled. The window still has a workspace,
+            // so this handler returns without discarding.
+            let unhandled = window.agentModeViewModel.test_receiveWorkspaceSwitchNotification(nil)
+            XCTAssertThrowsError(try AgentRunMCPToolService.requireSettledWorkspaceForStart(in: window))
+            await window.agentModeViewModel.test_handleWorkspaceSwitch(nil, owner: unhandled)
+            XCTAssertNoThrow(try AgentRunMCPToolService.requireSettledWorkspaceForStart(in: window))
+        }
+
+        func testPendingSwitchDiscardLastsUntilTheLatestNotificationIsHandled() async {
+            let viewModel = AgentModeViewModel(
+                testWindowID: 10801,
+                codexControllerFactory: { _, _, _, _, _, _ in
+                    StartupTestCodexController(gatesStartup: false)
+                }
+            )
+            XCTAssertFalse(viewModel.hasPendingWorkspaceSwitchDiscard)
+
+            // Each notification's handler runs in its own task, so handlers can finish in any order.
+            let first = viewModel.test_receiveWorkspaceSwitchNotification(nil)
+            XCTAssertTrue(viewModel.hasPendingWorkspaceSwitchDiscard)
+            let second = viewModel.test_receiveWorkspaceSwitchNotification(nil)
+            let latest = viewModel.test_receiveWorkspaceSwitchNotification(nil)
+            await viewModel.test_handleWorkspaceSwitch(nil, owner: first)
+            XCTAssertTrue(
+                viewModel.hasPendingWorkspaceSwitchDiscard,
+                "a superseded handler settled a newer notification"
+            )
+            await viewModel.test_handleWorkspaceSwitch(nil, owner: latest)
+            XCTAssertFalse(
+                viewModel.hasPendingWorkspaceSwitchDiscard,
+                "the latest notification's handler finished without settling it"
+            )
+            await viewModel.test_handleWorkspaceSwitch(nil, owner: second)
+            XCTAssertFalse(
+                viewModel.hasPendingWorkspaceSwitchDiscard,
+                "a superseded handler that finished late reopened the pending discard"
+            )
+        }
+
+        func testRestoreEntryStaysInFlightUntilItsRestoreFinishes() async throws {
+            let (_, storageOverride, runtime) = try makeIsolatedRuntime(
+                container: makeTemporaryDirectory(named: "RestoreEntryInFlight"),
+                profileIdentifier: "restore-entry-in-flight"
+            )
+            try await runtime.start()
+            let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
+            GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
+            let window = WindowState(domainRuntime: runtime)
+            WindowStatesManager.shared.registerWindowState(window)
+            GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
+            trackCleanup {
+                window.beginClose()
+                await window.tearDown()
+                WindowStatesManager.shared.unregisterWindowState(window)
+                _ = await runtime.shutdown()
+                storageOverride.restore()
+            }
+            // A launch restore can hand a window its entry before the window's workspace manager
+            // has initialized, and a later entry replaces one that hasn't been applied yet.
+            guard !window.workspaceManager.isInitialized else {
+                return XCTFail("The workspace manager initialized before the restore entries were handed over.")
+            }
+            XCTAssertFalse(window.isWorkspaceRestoreInFlight)
+            var replacedEntryCompletions = 0
+            var restoreFinished = false
+            window.applyWindowRestoreEntry(makeRestoreEntry(workspaceID: UUID())) { replacedEntryCompletions += 1 }
+            window.applyWindowRestoreEntry(makeRestoreEntry(workspaceID: UUID())) { restoreFinished = true }
+            XCTAssertEqual(replacedEntryCompletions, 1)
+            XCTAssertTrue(window.isWorkspaceRestoreInFlight, "the replacing entry was not counted")
+
+            await window.workspaceManager.awaitInitialized()
+            try await waitUntil("the replacing entry's restore to finish") { restoreFinished }
+            XCTAssertFalse(window.isWorkspaceRestoreInFlight, "the finished restore was still counted")
+        }
+
         func testCanonicalAdmissionRefreshRejectsDuplicateTabIDWithoutMutationOrDispatch() async throws {
             let (_, storageOverride, runtime) = try makeIsolatedRuntime(
                 container: makeTemporaryDirectory(named: "MalformedCanonicalIdentity"),
@@ -2114,6 +2338,19 @@ import XCTest
             return url
         }
 
+        private func makeRestoreEntry(workspaceID: UUID, workspaceName: String? = nil) -> WindowSessionEntry {
+            WindowSessionEntry(
+                windowKind: .standard,
+                workspaceID: workspaceID,
+                workspaceName: workspaceName,
+                isSystemWorkspace: false,
+                isEphemeral: false,
+                primaryRepoPath: nil,
+                lastFocused: true,
+                workspaceInstanceNumber: nil
+            )
+        }
+
         private func waitUntil(
             _ description: String,
             timeout: Duration = .seconds(5),
@@ -2752,6 +2989,21 @@ import XCTest
             releaseWaiters.removeAll()
             waiters.forEach { $0.resume() }
         }
+    }
+
+    /// Reports one session that needs confirmation, so a manual switch waits at its dialog.
+    @MainActor
+    private final class ConfirmationRequiringSwitchSessionProvider: WorkspaceSwitchSessionProvider {
+        func switchSessionItems() -> [WorkspaceSwitchSessionItem] {
+            [WorkspaceSwitchSessionItem(
+                id: "admission-test",
+                count: 1,
+                singularLabel: "test session",
+                pluralLabel: "test sessions"
+            )]
+        }
+
+        func cancelSwitchSessions() async {}
     }
 
     private enum AdmissionTestError: Error {
