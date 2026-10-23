@@ -211,8 +211,9 @@ package struct MCPDomainReadToolProvider {
         try Task.checkCancellation()
 
         let resolvedContext = context
-        // The shared effect runs in the coordinator's lane task, so the reading call's fence is passed in
-        // explicitly; a selection the effect enqueues is dropped once that call is revoked.
+        // The shared effect runs in the side-effect coordinator's lane task. That task inherits task-locals
+        // today, but the fence belongs to this call, so it's set explicitly around the effect: a selection
+        // the effect enqueues stays tied to this call however the lane starts its tasks.
         let fence = MCPDomainInvocationFence.current
         let emitter = MCPDomainReadSideEffectEmitter { effectClass, operationID, fingerprint, waitForCommit, unfencedOperation in
             let operation: @Sendable () async throws -> Void = {
