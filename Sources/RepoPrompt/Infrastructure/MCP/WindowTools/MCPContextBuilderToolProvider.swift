@@ -728,6 +728,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                 let responseDisposition = Self.responseDisposition(
                     responseType: responseType,
                     terminalDisposition: snapshot.terminalDisposition,
+                    selection: sel,
                     usedAgentOutputAsPrompt: snapshot.usedAgentOutputAsPrompt,
                     effectivePrompt: effectivePrompt,
                     callerInstructions: instructions
@@ -979,6 +980,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
     nonisolated static func responseDisposition(
         responseType: ContextBuilderResponseType?,
         terminalDisposition: ContextBuilderRunTerminalOutcome,
+        selection: StoredSelection,
         usedAgentOutputAsPrompt: Bool,
         effectivePrompt: String,
         callerInstructions: String
@@ -1017,6 +1019,17 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                     responseType,
                     reason: "the caller instructions used unsupported or malformed discovery-guideline markup"
                 ))
+            }
+            // A plan or answer generated from an empty selection reads like one generated from the code,
+            // so the caller can't tell it apart. Review refuses an empty selection when it resolves its targets.
+            if selection.isEmptyForSelectedFileTree,
+               let responseType,
+               responseType == .plan || responseType == .question
+            {
+                return .failed(
+                    "context_builder_discovery_empty: Context Builder discovery finished with no files selected, "
+                        + "so the \(responseType.rawValue) request was not sent."
+                )
             }
             guard let mode = responseType?.headlessMode else {
                 return .failed("Context Builder requested response mode is unavailable")
