@@ -144,7 +144,7 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         if let windowID { fields.append("window_id=\(windowID)") }
         if let requestIdentity {
             if let requestID = requestIdentity.jsonRPCRequestID {
-                fields.append("request_id=\(requestID)")
+                fields.append("request_id=\(Self.quotedClientValue("\(requestID)"))")
             }
             if let requestConnectionID = requestIdentity.connectionID {
                 fields.append("request_connection_id=\(requestConnectionID)")
@@ -176,8 +176,33 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         if let blockingProviderCount { fields.append("blocking_count=\(blockingProviderCount)") }
         if let releasedProviderCount { fields.append("released_count=\(releasedProviderCount)") }
         if let mutationState { fields.append("mutation_state=\(mutationState.rawValue)") }
-        if let mutationOperationID { fields.append("operation_id=\(mutationOperationID)") }
+        if let mutationOperationID { fields.append("operation_id=\(Self.quotedClientValue(mutationOperationID))") }
         return fields.joined(separator: " ")
+    }
+
+    /// Quotes a client-supplied value, escaping quotes, backslashes, and control characters and keeping
+    /// at most 128 characters, so the value can't add fields to the line.
+    static func quotedClientValue(_ value: String) -> String {
+        let limit = 128
+        var escaped = ""
+        for scalar in value.unicodeScalars.prefix(limit) {
+            switch scalar {
+            case "\\": escaped += "\\\\"
+            case "\"": escaped += "\\\""
+            case "\n": escaped += "\\n"
+            case "\r": escaped += "\\r"
+            case "\t": escaped += "\\t"
+            case _ where scalar.value < 0x20 || (0x7F ... 0x9F).contains(scalar.value)
+                || scalar.value == 0x2028 || scalar.value == 0x2029:
+                escaped += String(format: "\\u%04X", scalar.value)
+            default:
+                escaped.unicodeScalars.append(scalar)
+            }
+        }
+        if value.unicodeScalars.count > limit {
+            escaped += "..."
+        }
+        return "\"\(escaped)\""
     }
 }
 
@@ -189,7 +214,8 @@ enum MCPToolExecutionTracer {
 
     private static let state = State()
     /// Release builds lose the stderr line when the app is launched normally, so escalations also
-    /// go to the unified log. Every field is a tool name, phase, identifier, count, or duration.
+    /// go to the unified log. Every field is a tool name, phase, identifier, count, or duration, and
+    /// the client-supplied request and operation IDs are quoted and escaped.
     private static let log = Logger(subsystem: "com.repoprompt.mcp", category: "ToolExecution")
 
     static var successTracingEnabled: Bool {
