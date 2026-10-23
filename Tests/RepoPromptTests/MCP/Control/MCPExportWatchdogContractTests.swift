@@ -132,7 +132,7 @@ import XCTest
             let rootURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("MutationCommitRevocation-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: rootURL) }
+            addTeardownBlock { try? FileManager.default.removeItem(at: rootURL) }
             let service = try await FileSystemService(path: rootURL.path)
 
             // Revocation first: the write is refused at its commit, after the path reservation and before
@@ -158,6 +158,23 @@ import XCTest
             try await service.createFile(atRelativePath: "Target.txt", content: "next\n")
             XCTAssertEqual(try String(contentsOfFile: targetPath, encoding: .utf8), "next\n")
 
+            // A cancelled caller is refused before preparing, so a later revocation still wins.
+            let cancelledCaller = DomainMutationCommitState()
+            let cancelledPreparations = MCPExecutionIgnoringCancellationGate()
+            await cancelledPreparations.release()
+            let cancelledAttempt = Task {
+                withUnsafeCurrentTask { $0?.cancel() }
+                try await cancelledCaller.beginIfNeeded { await cancelledPreparations.enterAndWait() }
+            }
+            do {
+                try await cancelledAttempt.value
+                XCTFail("Expected the cancelled caller to be refused")
+            } catch is CancellationError {}
+            let cancelledPreparationCount = await cancelledPreparations.enteredCount()
+            XCTAssertEqual(cancelledPreparationCount, 0)
+            XCTAssertEqual(cancelledCaller.currentPhase, .preCommit)
+            XCTAssertTrue(cancelledCaller.revoke(origin: .requestCancellation))
+
             // Commit first: once preparation has begun, revocation loses, the reply stays indeterminate,
             // and a competing caller shares the one preparation.
             let committing = DomainMutationCommitState()
@@ -165,11 +182,19 @@ import XCTest
             let owner = Task {
                 try await committing.beginIfNeeded { await preparation.enterAndWait() }
             }
+            addTeardownBlock {
+                await preparation.release()
+                _ = try? await owner.value
+            }
             try await preparation.waitUntilEntered(count: 1)
             XCTAssertFalse(committing.revoke(origin: .watchdogDeadline))
             XCTAssertEqual(committing.replyState, .indeterminateAfterCommit)
             let competitor = Task {
                 try await committing.beginIfNeeded { await preparation.enterAndWait() }
+            }
+            addTeardownBlock {
+                await preparation.release()
+                _ = try? await competitor.value
             }
             await preparation.release()
             try await owner.value
@@ -178,6 +203,27 @@ import XCTest
             XCTAssertEqual(preparationCount, 1)
             XCTAssertTrue(committing.hasBegunCommit())
             XCTAssertEqual(committing.beginFinalization(), .afterCommit)
+
+            // A failed preparation means the commit never began: the mutation finalizes before commit
+            // as not applied, and a later caller gets the same failure without preparing again.
+            struct PreparationFailed: Error {}
+            let failing = DomainMutationCommitState()
+            let failingPreparations = MCPExecutionIgnoringCancellationGate()
+            await failingPreparations.release()
+            for attempt in 1 ... 2 {
+                do {
+                    try await failing.beginIfNeeded {
+                        await failingPreparations.enterAndWait()
+                        throw PreparationFailed()
+                    }
+                    XCTFail("Expected attempt \(attempt) to fail")
+                } catch is PreparationFailed {}
+            }
+            let failingPreparationCount = await failingPreparations.enteredCount()
+            XCTAssertEqual(failingPreparationCount, 1)
+            XCTAssertFalse(failing.hasBegunCommit())
+            XCTAssertEqual(failing.replyState, .notApplied)
+            XCTAssertEqual(failing.beginFinalization(), .beforeCommit(revoked: false))
         }
 
         func testConnectionPermitReleasedWhenDeadlineExpiresImmediatelyAfterHandoff() async throws {

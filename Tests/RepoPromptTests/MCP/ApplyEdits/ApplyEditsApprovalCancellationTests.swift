@@ -14,10 +14,16 @@ import XCTest
             })
             let scope = ApplyEditsApprovalScope(windowID: 1, tabID: UUID())
             let subscription = await store.subscribe(scope: scope)
+            addTeardownBlock { await store.unsubscribe(scope: scope, id: subscription.id) }
             var snapshots = subscription.stream.makeAsyncIterator()
 
             let first = Task {
                 await store.requestReview(scope: scope, path: "Target.swift", unifiedDiff: "first", timeoutSeconds: 300)
+            }
+            addTeardownBlock {
+                await hopHeld.release()
+                first.cancel()
+                _ = await first.value
             }
             let firstReviewID = try await Self.nextPendingReviewID(from: &snapshots, excluding: nil)
 
@@ -27,6 +33,11 @@ import XCTest
 
             let second = Task {
                 await store.requestReview(scope: scope, path: "Target.swift", unifiedDiff: "second", timeoutSeconds: 300)
+            }
+            addTeardownBlock {
+                await hopHeld.release()
+                second.cancel()
+                _ = await second.value
             }
             let secondReviewID = try await Self.nextPendingReviewID(from: &snapshots, excluding: firstReviewID)
             let firstDecision = await first.value
@@ -38,7 +49,6 @@ import XCTest
             await store.resolveReview(scope: scope, reviewID: secondReviewID, decision: .accept)
             let secondDecision = await second.value
             XCTAssertEqual(secondDecision, .accept, "The late cancellation of the replaced request must not cancel the newer review")
-            await store.unsubscribe(scope: scope, id: subscription.id)
         }
 
         private static func nextPendingReviewID(
