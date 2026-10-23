@@ -1301,7 +1301,7 @@ actor ServerNetworkManager {
         let budget = "Tool '\(toolName)' didn't start within its \(MCPTimeoutPolicy.windowExclusiveAdmissionTimeoutSeconds)-second admission budget."
         let message = switch stage {
         case .connectionLane:
-            "\(budget) It was still queued behind an earlier call on this connection to a tool that takes a window's exclusive slot. Nothing was applied. Retry after that earlier call returns."
+            "\(budget) It was still queued behind another call on this connection. Nothing was applied. Retry after that call returns."
         case .windowExclusive:
             "\(budget) It was still waiting for \(windowID.map { "window \($0)'s" } ?? "its window's") exclusive slot, which \(holderToolName.map { "a '\($0)' call" } ?? "another call") holds. A call can hold the slot for minutes, such as an edit waiting for review or a worktree merge waiting for approval. Nothing was applied. Retry after that call finishes."
         case .preProvider:
@@ -13699,8 +13699,14 @@ actor ServerNetworkManager {
                                             MCPWindowToolName.applyEdits
                                         ].contains(toolName)
                                         code = "tool_execution_timeout"
+                                        // A file create or move makes the target's parent folders before its
+                                        // commit, so a revoked one can leave empty folders behind.
+                                        let revokedFolderNote = [MCPWindowToolName.fileActions, MCPWindowToolName.applyEdits]
+                                            .contains(toolName)
+                                            ? " A create or move may have left new, empty parent folders."
+                                            : ""
                                         message = if mutationWasRevoked {
-                                            "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract before its change was committed, so nothing was applied. Watchdog cancellation did not settle the provider during grace, so it was detached for eventual cleanup."
+                                            "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract before its change was committed, so the change wasn't applied.\(revokedFolderNote) Watchdog cancellation did not settle the provider during grace, so it was detached for eventual cleanup."
                                         } else if mutationOutcomeMayStillReconcile {
                                             "Tool '\(toolName)' exceeded its \(selectedDeadlineDescription)-second execution contract. Watchdog cancellation did not settle the mutation provider during grace, so it was detached for eventual reconciliation. Inspect affected state before issuing another mutation."
                                         } else {

@@ -417,9 +417,9 @@ package struct DomainMutationCommitRevokedError: Error, Equatable, LocalizedErro
 
     package var errorDescription: String? {
         if let origin {
-            return "The mutation was revoked by \(origin.rawValue) before its commit began; nothing was applied."
+            return "The mutation was revoked by \(origin.rawValue) before its commit began, so its change wasn't committed."
         }
-        return "The mutation was already finalizing, so its commit could not begin; nothing was applied."
+        return "The mutation was already finalizing, so its commit couldn't begin and its change wasn't committed."
     }
 }
 
