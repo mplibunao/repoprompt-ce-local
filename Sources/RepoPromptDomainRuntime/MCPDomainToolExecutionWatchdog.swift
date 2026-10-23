@@ -11,6 +11,10 @@ package enum MCPToolExecutionCancellationOrigin: String, Equatable, Sendable {
     case requestCancellation = "request_cancellation"
     case clientDeadline = "client_deadline"
     case serverExportEnvelope = "server_export_envelope"
+    /// A capped window quarantined the call so later calls could run.
+    case windowRecovery = "window_recovery"
+    case windowClosed = "window_closed"
+    case connectionClosed = "connection_closed"
 }
 
 package struct MCPToolExecutionCancelledError: Error, Equatable, LocalizedError, Sendable {

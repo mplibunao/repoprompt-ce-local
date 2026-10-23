@@ -211,7 +211,15 @@ package struct MCPDomainReadToolProvider {
         try Task.checkCancellation()
 
         let resolvedContext = context
-        let emitter = MCPDomainReadSideEffectEmitter { effectClass, operationID, fingerprint, waitForCommit, operation in
+        // The shared effect runs in the coordinator's lane task, so the reading call's fence is passed in
+        // explicitly; a selection the effect enqueues is dropped once that call is revoked.
+        let fence = MCPDomainInvocationFence.current
+        let emitter = MCPDomainReadSideEffectEmitter { effectClass, operationID, fingerprint, waitForCommit, unfencedOperation in
+            let operation: @Sendable () async throws -> Void = {
+                try await MCPDomainInvocationFence.$current.withValue(fence) {
+                    try await unfencedOperation()
+                }
+            }
             guard let handle = resolvedContext.handle else {
                 // Historical unscoped/test execution has no synthetic identity. Commit inline.
                 try Task.checkCancellation()

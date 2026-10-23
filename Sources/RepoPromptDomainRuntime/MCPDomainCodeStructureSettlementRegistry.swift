@@ -9,9 +9,17 @@ import Foundation
 /// cancellation transition that lease under this registry's single lock. A blocking lease fences
 /// later same-window detach-disposition calls for a bounded recovery horizon. After that horizon,
 /// one still-running provider may remain tracked without blocking; its exact lease still owns completion.
+///
+/// A call that reaches a capped window recovers it: every call in the window that outlived its caller is
+/// quarantined, its late publication is revoked, and the call runs. Quarantined leases stay tracked and
+/// leave the registry only on their exact completion, but they no longer fence the window. A window may
+/// have `outstandingRecoveryLimitPerWindow` recoveries whose calls have not all finished, and the app
+/// `quarantinedCallLimit` quarantined calls; past either limit the cap rejects calls as it did before.
 package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
     package static let recoveryHorizon = Duration.seconds(30)
     package static let releasedProviderLimit = 1
+    package static let outstandingRecoveryLimitPerWindow = 2
+    package static let quarantinedCallLimit = 8
 
     package init() {}
 
@@ -32,6 +40,39 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         package let handlerPhase: String?
         package let releasedProviderCount: Int
         package let blockingProviderCount: Int
+        package let quarantine: QuarantineUsage
+    }
+
+    /// How much quarantine capacity is in use, counted when it was read.
+    package struct QuarantineUsage: Equatable, Sendable {
+        package let windowQuarantinedCount: Int
+        /// Recoveries in the window with at least one quarantined call still running.
+        package let windowOutstandingRecoveryCount: Int
+        package let appQuarantinedCount: Int
+
+        package init(windowQuarantinedCount: Int, windowOutstandingRecoveryCount: Int, appQuarantinedCount: Int) {
+            self.windowQuarantinedCount = windowQuarantinedCount
+            self.windowOutstandingRecoveryCount = windowOutstandingRecoveryCount
+            self.appQuarantinedCount = appQuarantinedCount
+        }
+    }
+
+    /// One call a recovery quarantined.
+    package struct QuarantinedCall: Equatable, Sendable {
+        package let invocationID: UUID
+        package let connectionID: UUID
+        package let toolName: String
+        package let state: String
+        package let handlerPhase: String?
+        package let blockingAge: Duration?
+    }
+
+    /// A recovery the admitting call triggered, with the capacity in use after it.
+    package struct Recovery: Equatable, Sendable {
+        package let recoveryID: UUID
+        /// Ordered by when each call started blocking, oldest first.
+        package let quarantinedCalls: [QuarantinedCall]
+        package let quarantine: QuarantineUsage
     }
 
     package enum Admission: Sendable {
@@ -76,12 +117,15 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
     package struct Snapshot: Equatable, Sendable {
         package let activeCount: Int
         package let detachedCount: Int
+        /// Released by the recovery horizon and not quarantined, so counted against the released-provider limit.
         package let releasedCount: Int
+        package let quarantinedCount: Int
 
-        package init(activeCount: Int, detachedCount: Int, releasedCount: Int = 0) {
+        package init(activeCount: Int, detachedCount: Int, releasedCount: Int = 0, quarantinedCount: Int = 0) {
             self.activeCount = activeCount
             self.detachedCount = detachedCount
             self.releasedCount = releasedCount
+            self.quarantinedCount = quarantinedCount
         }
     }
 
@@ -102,11 +146,15 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         package let handlerPhaseAge: Duration?
         /// Set for a protected mutation: what it may claim was applied when the snapshot was taken.
         package let mutationState: DomainProtectedMutationState?
+        /// Set while the lease is quarantined: the recovery that quarantined it and how long ago.
+        package let recoveryID: UUID?
+        package let quarantineAge: Duration?
     }
 
     package struct Diagnostics: Equatable, Sendable {
         package let counts: Snapshot
         package let blockingCount: Int
+        package let quarantine: QuarantineUsage
         /// Ordered by admission, oldest first.
         package let leases: [LeaseDiagnostics]
     }
@@ -116,6 +164,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         package let leaseID: UUID
         package let connectionID: UUID
         package let invocationID: UUID
+        /// Set when this call's admission recovered a capped window.
+        package let recovery: Recovery?
 
         private weak var registry: MCPCodeStructureSettlementRegistry?
 
@@ -124,13 +174,15 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
             windowID: Int,
             leaseID: UUID,
             connectionID: UUID,
-            invocationID: UUID
+            invocationID: UUID,
+            recovery: Recovery?
         ) {
             self.registry = registry
             self.windowID = windowID
             self.leaseID = leaseID
             self.connectionID = connectionID
             self.invocationID = invocationID
+            self.recovery = recovery
         }
 
         package func recordCompletion(_ settlement: MCPToolExecutionSettlement) -> CompletionDirective {
@@ -196,6 +248,11 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         case forceDisconnecting
     }
 
+    private struct Quarantine {
+        let recoveryID: UUID
+        let since: Duration
+    }
+
     private struct Entry {
         let leaseID: UUID
         let connectionID: UUID
@@ -203,13 +260,30 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         let toolName: String
         let handlerPhaseRecorder: MCPToolExecutionHandlerPhaseRecorder?
         let commitState: DomainMutationCommitState?
+        let fence: MCPDomainInvocationFence?
         let admittedAt: Duration
         var state: State
         var blockingSince: Duration?
         var isReleased: Bool
+        var quarantine: Quarantine?
 
         var blocksAdmission: Bool {
-            state.blocksAdmission && !isReleased
+            state.blocksAdmission && !isReleased && quarantine == nil
+        }
+
+        var holdsReleasedSlot: Bool {
+            isReleased && quarantine == nil
+        }
+
+        /// The call outlived its caller: its deadline passed or its request was cancelled.
+        var isEscaped: Bool {
+            state.blocksAdmission && quarantine == nil
+        }
+
+        /// Neither revocation calls back into the registry, so the registry may call this under its lock.
+        func revoke(origin: MCPToolExecutionCancellationOrigin) {
+            fence?.revoke(origin: origin)
+            commitState?.revoke(origin: origin)
         }
     }
 
@@ -220,17 +294,29 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         let recoveryAfter: Duration?
         let releasedProviderCount: Int
         let blockingProviderCount: Int
+        let quarantine: QuarantineUsage
+    }
+
+    private struct RecoveryCandidate {
+        let recoveryID: UUID
+        let entries: [Entry]
+        let quarantine: QuarantineUsage
+        let now: Duration
     }
 
     private enum AdmissionDecision {
-        case admitted(Slot)
+        case admitted(leaseID: UUID, recovery: RecoveryCandidate?)
         case busy(BusyCandidate)
     }
 
     private let lock = NSLock()
     private var entriesByWindowID: [Int: [UUID: Entry]] = [:]
+    /// Per window, each outstanding recovery and the leases it quarantined that have not completed.
+    private var recoveriesByWindowID: [Int: [UUID: Set<UUID>]] = [:]
     private var drainWaitersByWindowID: [Int: [CheckedContinuation<Void, Never>]] = [:]
 
+    /// Admits a call into the window, or recovers the window when it is capped. `commitState` and `fence`
+    /// are the call's revocation handles; recovery and window close revoke whichever one it has.
     package func admit(
         windowID: Int,
         connectionID: UUID,
@@ -238,43 +324,63 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         toolName: String,
         now: Duration,
         handlerPhaseRecorder: MCPToolExecutionHandlerPhaseRecorder? = nil,
-        commitState: DomainMutationCommitState? = nil
+        commitState: DomainMutationCommitState? = nil,
+        fence: MCPDomainInvocationFence? = nil
     ) -> Admission {
         let decision: AdmissionDecision = lock.withLock {
             var entries = entriesByWindowID[windowID, default: [:]]
+            var recovery: RecoveryCandidate?
             let blockingEntries = entries.values.filter(\.blocksAdmission)
             if !blockingEntries.isEmpty {
-                let releasedProviderCount = entries.values.count(where: \.isReleased)
+                let releasedProviderCount = entries.values.count(where: \.holdsReleasedSlot)
                 let origin = Self.oldestEntry(in: blockingEntries)
                 let blockingSince = origin.blockingSince
                 precondition(blockingSince != nil, "Blocking settlement entry requires an origin timestamp")
                 let age = Self.elapsed(since: blockingSince!, now: now)
 
-                guard releasedProviderCount + blockingEntries.count <= Self.releasedProviderLimit else {
-                    return .busy(BusyCandidate(
-                        reason: .releasedProviderLimitReached,
-                        entry: origin,
-                        detachedAge: age,
-                        recoveryAfter: nil,
-                        releasedProviderCount: releasedProviderCount,
-                        blockingProviderCount: blockingEntries.count
-                    ))
-                }
+                if releasedProviderCount + blockingEntries.count > Self.releasedProviderLimit {
+                    let escaped = entries.values.filter(\.isEscaped)
+                    guard recoveryFits(windowID: windowID, quarantining: escaped.count) else {
+                        return .busy(BusyCandidate(
+                            reason: .releasedProviderLimitReached,
+                            entry: origin,
+                            detachedAge: age,
+                            recoveryAfter: nil,
+                            releasedProviderCount: releasedProviderCount,
+                            blockingProviderCount: blockingEntries.count,
+                            quarantine: quarantineUsage(windowID: windowID)
+                        ))
+                    }
+                    let recoveryID = UUID()
+                    for entry in escaped {
+                        entries[entry.leaseID]?.quarantine = Quarantine(recoveryID: recoveryID, since: now)
+                        // Revoked before the lock is released: admission and dispatch are separate steps, so a
+                        // call admitted after this recovery could otherwise publish before these calls are revoked.
+                        entry.revoke(origin: .windowRecovery)
+                    }
+                    recoveriesByWindowID[windowID, default: [:]][recoveryID] = Set(escaped.map(\.leaseID))
+                    recovery = RecoveryCandidate(
+                        recoveryID: recoveryID,
+                        entries: escaped,
+                        quarantine: quarantineUsage(windowID: windowID),
+                        now: now
+                    )
+                } else {
+                    let recoveryAfter = max(.zero, Self.recoveryHorizon - age)
+                    guard recoveryAfter == .zero else {
+                        return .busy(BusyCandidate(
+                            reason: Self.busyReason(for: blockingEntries),
+                            entry: origin,
+                            detachedAge: age,
+                            recoveryAfter: recoveryAfter,
+                            releasedProviderCount: releasedProviderCount,
+                            blockingProviderCount: blockingEntries.count,
+                            quarantine: quarantineUsage(windowID: windowID)
+                        ))
+                    }
 
-                let recoveryAfter = max(.zero, Self.recoveryHorizon - age)
-                guard recoveryAfter == .zero else {
-                    return .busy(BusyCandidate(
-                        reason: Self.busyReason(for: blockingEntries),
-                        entry: origin,
-                        detachedAge: age,
-                        recoveryAfter: recoveryAfter,
-                        releasedProviderCount: releasedProviderCount,
-                        blockingProviderCount: blockingEntries.count
-                    ))
+                    entries[origin.leaseID]?.isReleased = true
                 }
-
-                entries[origin.leaseID]?.isReleased = true
-                entriesByWindowID[windowID] = entries
             }
 
             let leaseID = UUID()
@@ -285,24 +391,28 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                 toolName: toolName,
                 handlerPhaseRecorder: handlerPhaseRecorder,
                 commitState: commitState,
+                fence: fence,
                 admittedAt: now,
                 state: .reserved,
                 blockingSince: nil,
-                isReleased: false
+                isReleased: false,
+                quarantine: nil
             )
             entriesByWindowID[windowID] = entries
+            return .admitted(leaseID: leaseID, recovery: recovery)
+        }
+
+        // Handler-phase recorders take their own lock, so they are read after the registry lock is released.
+        switch decision {
+        case let .admitted(leaseID, recovery):
             return .admitted(Slot(
                 registry: self,
                 windowID: windowID,
                 leaseID: leaseID,
                 connectionID: connectionID,
-                invocationID: invocationID
+                invocationID: invocationID,
+                recovery: recovery.map(Self.recovery(from:))
             ))
-        }
-
-        switch decision {
-        case let .admitted(slot):
-            return .admitted(slot)
         case let .busy(candidate):
             return .busy(BusyContext(
                 reason: candidate.reason,
@@ -313,27 +423,45 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                 recoveryAfter: candidate.recoveryAfter,
                 handlerPhase: candidate.entry.handlerPhaseRecorder?.snapshot()?.phase.rawValue,
                 releasedProviderCount: candidate.releasedProviderCount,
-                blockingProviderCount: candidate.blockingProviderCount
+                blockingProviderCount: candidate.blockingProviderCount,
+                quarantine: candidate.quarantine
             ))
         }
     }
 
     package func snapshot(windowID: Int) -> Snapshot {
         lock.withLock {
-            let entries = entriesByWindowID[windowID, default: [:]]
-            return Snapshot(
-                activeCount: entries.count,
-                detachedCount: entries.values.count { $0.state.isZombie },
-                releasedCount: entries.values.count(where: \.isReleased)
-            )
+            Self.counts(of: Array(entriesByWindowID[windowID, default: [:]].values))
+        }
+    }
+
+    /// Revokes the late publication of every call in a closing window. The leases stay until each call
+    /// completes, and the window's quarantined calls keep counting toward the app-wide limit.
+    package func revokeWindow(windowID: Int) {
+        lock.withLock {
+            for entry in entriesByWindowID[windowID, default: [:]].values {
+                entry.revoke(origin: .windowClosed)
+            }
+        }
+    }
+
+    /// Revokes the late publication of a closing connection's calls. Teardown cancels their providers
+    /// directly, which doesn't reach the watchdog's revocation, so this runs before that cancellation.
+    package func revokeConnection(_ connectionID: UUID) {
+        lock.withLock {
+            for entries in entriesByWindowID.values {
+                for entry in entries.values where entry.connectionID == connectionID {
+                    entry.revoke(origin: .connectionClosed)
+                }
+            }
         }
     }
 
     /// Reports every lease in the window for DEBUG diagnostics. Recorders are read after the
     /// registry lock is released; they take only their own lock.
     package func diagnostics(windowID: Int, now: Duration) -> Diagnostics {
-        let entries = lock.withLock {
-            Array(entriesByWindowID[windowID, default: [:]].values)
+        let (entries, quarantine) = lock.withLock {
+            (Array(entriesByWindowID[windowID, default: [:]].values), quarantineUsage(windowID: windowID))
         }
         let leases = entries
             .sorted { lhs, rhs in
@@ -360,16 +488,15 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                     providerCompleted: entry.state.providerCompleted,
                     handlerPhase: handlerPhase,
                     handlerPhaseAge: handlerPhaseAge,
-                    mutationState: entry.commitState?.replyState
+                    mutationState: entry.commitState?.replyState,
+                    recoveryID: entry.quarantine?.recoveryID,
+                    quarantineAge: entry.quarantine.map { Self.elapsed(since: $0.since, now: now) }
                 )
             }
         return Diagnostics(
-            counts: Snapshot(
-                activeCount: entries.count,
-                detachedCount: entries.count { $0.state.isZombie },
-                releasedCount: entries.count(where: \.isReleased)
-            ),
+            counts: Self.counts(of: entries),
             blockingCount: entries.count(where: \.blocksAdmission),
+            quarantine: quarantine,
             leases: leases
         )
     }
@@ -381,7 +508,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         lock.withLock {
             let entries = entriesByWindowID[windowID, default: [:]]
             let blockingCount = entries.values.count(where: \.blocksAdmission)
-            let releasedCount = entries.values.count(where: \.isReleased)
+            let releasedCount = entries.values.count(where: \.holdsReleasedSlot)
             return blockingCount > 0
                 && releasedCount + blockingCount > Self.releasedProviderLimit
         }
@@ -476,7 +603,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                 return (.notActivated, [])
             }
             if let settlement {
-                entries.removeValue(forKey: leaseID)
+                removeEntry(leaseID, windowID: windowID, from: &entries)
                 return (
                     .settled(settlement),
                     storeEntriesAndTakeWaiters(entries, windowID: windowID)
@@ -513,7 +640,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
 
             case let .detaching(settlement):
                 if let settlement {
-                    entries.removeValue(forKey: leaseID)
+                    removeEntry(leaseID, windowID: windowID, from: &entries)
                     let waiters = storeEntriesAndTakeWaiters(entries, windowID: windowID)
                     return (.abandoned(settlement), waiters)
                 }
@@ -550,7 +677,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
             guard case .reserved = entry.state else {
                 return (.retained, [])
             }
-            entries.removeValue(forKey: leaseID)
+            removeEntry(leaseID, windowID: windowID, from: &entries)
             return (
                 .released,
                 storeEntriesAndTakeWaiters(entries, windowID: windowID)
@@ -582,7 +709,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
             case let .retain(updated):
                 entries[leaseID] = updated
             case .remove:
-                entries.removeValue(forKey: leaseID)
+                removeEntry(leaseID, windowID: windowID, from: &entries)
             }
             return (
                 value,
@@ -591,6 +718,75 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         }
         result.1.forEach { $0.resume() }
         return result.0
+    }
+
+    /// Removes a lease on its exact completion. A quarantined lease refunds its recovery once every call
+    /// that recovery quarantined has completed. Callers hold the lock.
+    private func removeEntry(_ leaseID: UUID, windowID: Int, from entries: inout [UUID: Entry]) {
+        guard let quarantine = entries.removeValue(forKey: leaseID)?.quarantine else { return }
+        var recoveries = recoveriesByWindowID[windowID, default: [:]]
+        recoveries[quarantine.recoveryID]?.remove(leaseID)
+        if recoveries[quarantine.recoveryID]?.isEmpty == true {
+            recoveries.removeValue(forKey: quarantine.recoveryID)
+        }
+        recoveriesByWindowID[windowID] = recoveries.isEmpty ? nil : recoveries
+    }
+
+    /// A recovery quarantines every escaped call in the window or none of them, so a population over the
+    /// app-wide limit stays blocked rather than being split. Callers hold the lock.
+    private func recoveryFits(windowID: Int, quarantining count: Int) -> Bool {
+        recoveriesByWindowID[windowID, default: [:]].count < Self.outstandingRecoveryLimitPerWindow
+            && appQuarantinedCount() + count <= Self.quarantinedCallLimit
+    }
+
+    private func appQuarantinedCount() -> Int {
+        recoveriesByWindowID.values.reduce(0) { total, recoveries in
+            total + recoveries.values.reduce(0) { $0 + $1.count }
+        }
+    }
+
+    private func quarantineUsage(windowID: Int) -> QuarantineUsage {
+        let recoveries = recoveriesByWindowID[windowID, default: [:]]
+        return QuarantineUsage(
+            windowQuarantinedCount: recoveries.values.reduce(0) { $0 + $1.count },
+            windowOutstandingRecoveryCount: recoveries.count,
+            appQuarantinedCount: appQuarantinedCount()
+        )
+    }
+
+    private static func counts(of entries: [Entry]) -> Snapshot {
+        Snapshot(
+            activeCount: entries.count,
+            detachedCount: entries.count { $0.state.isZombie },
+            releasedCount: entries.count(where: \.holdsReleasedSlot),
+            quarantinedCount: entries.count { $0.quarantine != nil }
+        )
+    }
+
+    private static func recovery(from candidate: RecoveryCandidate) -> Recovery {
+        let calls = candidate.entries
+            .sorted { lhs, rhs in
+                let lhsSince = lhs.blockingSince ?? lhs.admittedAt
+                let rhsSince = rhs.blockingSince ?? rhs.admittedAt
+                return lhsSince == rhsSince
+                    ? lhs.invocationID.uuidString < rhs.invocationID.uuidString
+                    : lhsSince < rhsSince
+            }
+            .map { entry in
+                QuarantinedCall(
+                    invocationID: entry.invocationID,
+                    connectionID: entry.connectionID,
+                    toolName: entry.toolName,
+                    state: entry.state.diagnosticName,
+                    handlerPhase: entry.handlerPhaseRecorder?.snapshot()?.phase.rawValue,
+                    blockingAge: entry.blockingSince.map { elapsed(since: $0, now: candidate.now) }
+                )
+            }
+        return Recovery(
+            recoveryID: candidate.recoveryID,
+            quarantinedCalls: calls,
+            quarantine: candidate.quarantine
+        )
     }
 
     private func storeEntriesAndTakeWaiters(
