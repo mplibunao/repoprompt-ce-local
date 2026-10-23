@@ -1830,8 +1830,18 @@ actor ACPAgentSessionController {
             return try await openNewSession()
         case let .load(existingSessionID):
             guard loadSessionSupported else {
-                suppressSessionLoadReplayUpdates = false
-                throw ControllerError.requestFailed("ACP runtime does not support session/load for existing session \(existingSessionID).")
+                // The runtime can't reload the saved conversation, so open a new one as the
+                // missing-session fallback below does. The runner then sends RepoPrompt's
+                // transcript handoff with the next prompt and clears the stale ID.
+                fallbackResumeSessionIDForPromptClearing = existingSessionID
+                log("ACP runtime does not advertise session/load; opening ACP session/new instead of loading \(existingSessionID)")
+                diagnose(.info("\(provider.providerID.rawValue) does not support session/load; opening a fresh session instead of loading \(existingSessionID)."))
+                let fresh = try await openNewSession()
+                return OpenSessionResult(
+                    sessionID: fresh.sessionID,
+                    providerSessionIdentity: fresh.providerSessionIdentity,
+                    invalidatedResumeSessionID: existingSessionID
+                )
             }
             do {
                 suppressSessionLoadReplayUpdates = true

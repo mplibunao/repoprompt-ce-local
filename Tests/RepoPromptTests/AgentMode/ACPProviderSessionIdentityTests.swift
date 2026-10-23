@@ -86,6 +86,43 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
         XCTAssertEqual(recordedSessionLoadIDs(at: recordURL), ["stale-session-id"])
     }
 
+    /// A runtime that doesn't advertise `loadSession` opens a new conversation for a saved one
+    /// instead of failing the run, without sending a `session/load` it can't answer.
+    func testUnsupportedLoadFallsBackWithoutSendingSessionLoad() async throws {
+        let workspace = try makeTemporaryDirectory()
+        let scriptURL = try makeFakeACPServerScript()
+        let recordURL = try makeTemporaryDirectory().appendingPathComponent("record.jsonl")
+        let request = makeRunRequest(
+            agentKind: .openCode,
+            workspacePath: workspace.path,
+            resumeSessionID: "saved-session-id"
+        )
+        let provider = FakeACPProvider(
+            providerID: .openCode,
+            commandPath: scriptURL.path,
+            environment: [
+                "ACP_RECORD_PATH": recordURL.path,
+                "ACP_LOAD_SESSION": "0",
+                "ACP_RUNTIME_SESSION_ID": "fresh-runtime-id"
+            ]
+        )
+        let controller = try ACPAgentSessionController(provider: provider, runRequest: request)
+
+        let bootstrap = try await controller.bootstrap()
+        await controller.shutdown()
+
+        XCTAssertFalse(bootstrap.loadSessionSupported)
+        XCTAssertTrue(bootstrap.didFallbackToNewSessionAfterLoadFailure)
+        XCTAssertEqual(bootstrap.invalidatedResumeSessionID, "saved-session-id")
+        XCTAssertEqual(bootstrap.sessionID, "fresh-runtime-id")
+        XCTAssertEqual(bootstrap.providerSessionIdentity.loadSessionID, "fresh-runtime-id")
+        XCTAssertEqual(bootstrap.providerSessionIdentity.loadSessionIDConfidence, .verified)
+        // Shutdown's session/cancel may or may not reach the record before the agent exits.
+        let methods = recordedMethods(at: recordURL)
+        XCTAssertFalse(methods.contains("session/load"), "\(methods)")
+        XCTAssertEqual(methods.count(where: { $0 == "session/new" }), 1, "\(methods)")
+    }
+
     func testProviderSessionIdentityNormalizesEmptyIDs() {
         let identity = ACPProviderSessionIdentity(
             providerID: .cursor,
@@ -130,6 +167,7 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
         record_path = os.environ.get("ACP_RECORD_PATH")
         runtime_session_id = os.environ.get("ACP_RUNTIME_SESSION_ID", "runtime-session-id")
         fail_load = os.environ.get("ACP_FAIL_LOAD") == "1"
+        load_supported = os.environ.get("ACP_LOAD_SESSION", "1") == "1"
         load_error_code = int(os.environ.get("ACP_LOAD_ERROR_CODE", "-32602"))
         load_error_message = os.environ.get("ACP_LOAD_ERROR_MESSAGE")
 
@@ -156,7 +194,7 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
             params = request.get("params") or {}
             record(method, params)
             if method == "initialize":
-                respond(request.get("id"), {"agentCapabilities": {"loadSession": True}, "authMethods": []})
+                respond(request.get("id"), {"agentCapabilities": {"loadSession": load_supported}, "authMethods": []})
             elif method == "session/new":
                 respond(request.get("id"), {"sessionId": runtime_session_id})
             elif method == "session/load":
@@ -191,17 +229,26 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
     }
 
     private func recordedSessionLoadIDs(at url: URL) -> [String] {
-        guard let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) else { return [] }
-        return text.split(whereSeparator: { $0.isNewline }).compactMap { line in
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  object["method"] as? String == "session/load",
+        recordedRequests(at: url).compactMap { object in
+            guard object["method"] as? String == "session/load",
                   let params = object["params"] as? [String: Any]
             else {
                 return nil
             }
             return params["sessionId"] as? String
+        }
+    }
+
+    private func recordedMethods(at url: URL) -> [String] {
+        recordedRequests(at: url).compactMap { $0["method"] as? String }
+    }
+
+    private func recordedRequests(at url: URL) -> [[String: Any]] {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8) else { return [] }
+        return text.split(whereSeparator: { $0.isNewline }).compactMap { line in
+            guard let data = String(line).data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         }
     }
 }
