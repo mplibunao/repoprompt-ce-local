@@ -28,7 +28,7 @@ final class WindowSessionRestorePersistenceGateTests: XCTestCase {
         // Still loading: nothing may flush yet.
         XCTAssertNil(gate.takeFlushableDeferredReason())
 
-        gate.finishRestoreSessionLoad(pendingEntryCount: 0)
+        gate.finishRestoreSessionLoad()
 
         XCTAssertFalse(gate.isRestoreInProgress)
         XCTAssertEqual(gate.takeFlushableDeferredReason(), "focusChanged:true")
@@ -39,14 +39,11 @@ final class WindowSessionRestorePersistenceGateTests: XCTestCase {
     func testPersistRequestsDeferredWhileAnyWindowRestoreIsInFlight() {
         var gate = WindowSessionRestorePersistenceGate()
         gate.beginRestoreSessionLoad()
-        gate.finishRestoreSessionLoad(pendingEntryCount: 2)
+        gate.finishRestoreSessionLoad()
 
         // Both entries are handed to their registered windows.
-        gate.consumePendingRestoreEntry()
         gate.beginRestoringWindow(1)
-        gate.consumePendingRestoreEntry()
         gate.beginRestoringWindow(2)
-        XCTAssertEqual(gate.pendingRestoreEntryCount, 0)
 
         // Load finished but two windows are still applying their restore entries.
         XCTAssertTrue(gate.isRestoreInProgress)
@@ -60,56 +57,6 @@ final class WindowSessionRestorePersistenceGateTests: XCTestCase {
         gate.finishRestoringWindow(2)
         XCTAssertFalse(gate.isRestoreInProgress)
         XCTAssertEqual(gate.takeFlushableDeferredReason(), "workspaceSwitch")
-    }
-
-    func testLeftoverRestoreEntriesForUnregisteredWindowsKeepPersistsDeferred() {
-        var gate = WindowSessionRestorePersistenceGate()
-        gate.beginRestoreSessionLoad()
-
-        // Two-window crash snapshot, but only window 1 has registered so far.
-        gate.finishRestoreSessionLoad(pendingEntryCount: 2)
-        gate.consumePendingRestoreEntry()
-        gate.beginRestoringWindow(1)
-
-        // Window 1 finishes restoring; its focus/workspace-switch persists must NOT
-        // write a partial one-window snapshot while window 2's entry is unclaimed.
-        gate.finishRestoringWindow(1)
-        XCTAssertTrue(gate.isRestoreInProgress)
-        XCTAssertEqual(gate.pendingRestoreEntryCount, 1)
-        XCTAssertFalse(gate.shouldPersistNow(reason: "workspaceSwitch"))
-        XCTAssertNil(gate.takeFlushableDeferredReason())
-
-        // Window 2 registers late and consumes the leftover entry.
-        gate.consumePendingRestoreEntry()
-        gate.beginRestoringWindow(2)
-        XCTAssertTrue(gate.isRestoreInProgress)
-        XCTAssertNil(gate.takeFlushableDeferredReason())
-
-        gate.finishRestoringWindow(2)
-        XCTAssertFalse(gate.isRestoreInProgress)
-        XCTAssertEqual(gate.takeFlushableDeferredReason(), "workspaceSwitch")
-    }
-
-    func testAbandoningLeftoverRestoreEntriesReleasesGateAndConsumeClampsAtZero() {
-        var gate = WindowSessionRestorePersistenceGate()
-        gate.beginRestoreSessionLoad()
-        gate.finishRestoreSessionLoad(pendingEntryCount: 1)
-
-        // The entry's window never re-registers; persists stay deferred meanwhile.
-        XCTAssertFalse(gate.shouldPersistNow(reason: "focusChanged:true"))
-        XCTAssertNil(gate.takeFlushableDeferredReason())
-
-        // The grace valve abandons the leftover entry and reopens persistence.
-        gate.abandonPendingRestoreEntries()
-        XCTAssertFalse(gate.isRestoreInProgress)
-        XCTAssertEqual(gate.pendingRestoreEntryCount, 0)
-        XCTAssertEqual(gate.takeFlushableDeferredReason(), "focusChanged:true")
-
-        // A late hand-off after abandonment must not underflow the pending count.
-        gate.consumePendingRestoreEntry()
-        XCTAssertEqual(gate.pendingRestoreEntryCount, 0)
-        XCTAssertFalse(gate.isRestoreInProgress)
-        XCTAssertTrue(gate.shouldPersistNow(reason: "workspaceSwitch"))
     }
 
     func testWindowClosedMidRestoreReleasesGateAndUnknownWindowFinishIsHarmless() {
@@ -139,9 +86,8 @@ final class WindowSessionRestorePersistenceGateTests: XCTestCase {
         //    would capture the default/system workspace and clobber the crash snapshot.
         XCTAssertFalse(gate.shouldPersistNow(reason: "registerWindow"))
 
-        // 3. Load completes: the entry is counted, then handed to the window.
-        gate.finishRestoreSessionLoad(pendingEntryCount: 1)
-        gate.consumePendingRestoreEntry()
+        // 3. Load completes and the entry is handed to the window.
+        gate.finishRestoreSessionLoad()
         gate.beginRestoringWindow(1)
         XCTAssertTrue(gate.isRestoreInProgress)
 
