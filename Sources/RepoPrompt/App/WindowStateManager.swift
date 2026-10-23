@@ -410,6 +410,10 @@ class WindowStatesManager: ObservableObject {
     /// The window the user was in when the driver requested a window while the app was active.
     /// The driver's window hands key focus back to it.
     private weak var launchRestoreFocusReturnWindow: WindowState?
+    /// The saved workspace each restoring window is restoring. A window's own restore fields
+    /// can't answer this: its pending entry clears when the restore task starts, and its
+    /// unresolved entry clears when any real workspace becomes active.
+    private var restoringEntryWorkspaceIDByWindowID: [Int: UUID] = [:]
 
     func claimInitialRefreshDeferralForNewWindow() -> WindowInitialRefreshDeferral? {
         guard !pendingInitialRefreshDeferrals.isEmpty else { return nil }
@@ -462,6 +466,13 @@ class WindowStatesManager: ObservableObject {
     /// each loaded entry has gone to a registered window or waits for the next window to register.
     var isRestoreSessionLoadPending: Bool {
         restorePersistenceGate.isRestoreSessionLoadPending
+    }
+
+    /// True while a saved window for `workspaceID` is still to reopen: its entry waits in the
+    /// restore queue, or a window is restoring it. Matches by saved workspace UUID only.
+    func hasPendingLaunchRestore(workspaceID: UUID) -> Bool {
+        restoreQueue.contains { $0.workspaceID == workspaceID }
+            || restoringEntryWorkspaceIDByWindowID.values.contains(workspaceID)
     }
 
     func loadWindowRestoreSessionIfNeeded() {
@@ -730,10 +741,12 @@ class WindowStatesManager: ObservableObject {
         #endif
         let windowID = state.windowID
         restorePersistenceGate.beginRestoringWindow(windowID)
+        restoringEntryWorkspaceIDByWindowID[windowID] = entry.workspaceID
         state.applyWindowRestoreEntry(entry) { [weak self, weak state] in
             guard let self else { return }
             // A later click on the window must not send it behind again.
             state?.onFirstBecameKey = nil
+            restoringEntryWorkspaceIDByWindowID.removeValue(forKey: windowID)
             restorePersistenceGate.finishRestoringWindow(windowID)
             flushDeferredWindowSessionPersistIfRestoreIdle()
             advanceLaunchRestore()
@@ -953,6 +966,7 @@ class WindowStatesManager: ObservableObject {
         // A window that closes mid-restore must not leave the persistence gate held.
         let wasRestoring = restorePersistenceGate.restoringWindowIDs.contains(state.windowID)
         restorePersistenceGate.finishRestoringWindow(state.windowID)
+        restoringEntryWorkspaceIDByWindowID.removeValue(forKey: state.windowID)
 
         // Skip notifications and updates during termination to prevent observation crashes
         guard !isTerminating else { return }
@@ -1175,6 +1189,7 @@ class WindowStatesManager: ObservableObject {
             launchRestoreOpenInFlight = false
             launchRestoreDriverStopped = false
             launchRestoreFocusReturnWindow = nil
+            restoringEntryWorkspaceIDByWindowID.removeAll()
         }
 
         func setTerminatingForTesting(_ isTerminating: Bool) {

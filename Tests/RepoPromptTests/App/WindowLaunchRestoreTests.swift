@@ -8,7 +8,7 @@ import XCTest
         /// Every window a test registers, closed by the teardown that `beginLaunchRestore()` adds.
         private var registeredWindows: [WindowState] = []
         /// Every restore hold a test installs, opened by that teardown so no restore task hangs.
-        private var restoreHolds: [RestoreHold] = []
+        private var restoreHolds: [WindowRestoreHold] = []
 
         override func setUp() {
             super.setUp()
@@ -24,7 +24,7 @@ import XCTest
             let workspaces = try await makeSavedWorkspaces(count: 3)
             let savedIDs = Set(workspaces.map(\.id))
             let windowStates = try beginLaunchRestore()
-            var openedHolds: [RestoreHold] = []
+            var openedHolds: [WindowRestoreHold] = []
             let opener = installOpener {
                 let window = self.makeWindow()
                 openedHolds.append(self.holdRestore(of: window, onlyFor: savedIDs))
@@ -197,8 +197,8 @@ import XCTest
 
         /// Holds `window`'s restore once its switch to one of `workspaceIDs` holds the activation
         /// lease, before the switch begins.
-        private func holdRestore(of window: WindowState, onlyFor workspaceIDs: Set<UUID>) -> RestoreHold {
-            let hold = RestoreHold()
+        private func holdRestore(of window: WindowState, onlyFor workspaceIDs: Set<UUID>) -> WindowRestoreHold {
+            let hold = WindowRestoreHold()
             restoreHolds.append(hold)
             window.workspaceManager.setWorkspaceActivationLeaseDidAcquireHandlerForTesting { workspaceID in
                 guard workspaceIDs.contains(workspaceID) else { return }
@@ -207,7 +207,7 @@ import XCTest
             return hold
         }
 
-        private func waitForHold(_ hold: RestoreHold, _ description: String) async throws -> UUID? {
+        private func waitForHold(_ hold: WindowRestoreHold, _ description: String) async throws -> UUID? {
             try await waitUntil("\(description) to reach its hold") {
                 await hold.workspaceID != nil
             }
@@ -248,7 +248,7 @@ import XCTest
     }
 
     /// Holds one restore attempt at its first matching activation until opened.
-    private actor RestoreHold {
+    actor WindowRestoreHold {
         private(set) var workspaceID: UUID?
         private var isOpen = false
         private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
