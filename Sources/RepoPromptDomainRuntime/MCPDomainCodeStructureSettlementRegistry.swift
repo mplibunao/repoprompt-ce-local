@@ -285,13 +285,16 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
             state.blocksAdmission && quarantine == nil
         }
 
-        /// Revokes the call's fence or commit arbiter and reports whether the revocation won. It loses only
-        /// when a protected mutation's commit had already begun; a fence revocation always wins. Neither
-        /// revocation calls back into the registry, so the registry may call this under its lock.
+        /// Revokes the call's fence or commit arbiter and reports whether the call can no longer apply its
+        /// change. The arbiter refuses a revocation once preparation starts, so a mutation that failed
+        /// preparation or is finalizing as not applied also counts as revoked; only one whose commit began
+        /// doesn't. A fence revocation always takes. Neither revocation calls back into the registry, so the
+        /// registry may call this under its lock.
         @discardableResult
         func revoke(origin: MCPToolExecutionCancellationOrigin) -> Bool {
             fence?.revoke(origin: origin)
-            return commitState?.revoke(origin: origin) ?? true
+            guard let commitState else { return true }
+            return commitState.revoke(origin: origin) || commitState.replyState == .notApplied
         }
     }
 

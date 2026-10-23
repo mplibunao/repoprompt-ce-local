@@ -133,14 +133,17 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
     /// A call that reaches a capped window recovers it: the calls that outlived their callers are
     /// quarantined and revoked, a live sibling is untouched, and the quarantined leases stay tracked
     /// until their own completion refunds the recovery. A prompt change whose commit had already begun
-    /// loses its revocation, and the recovery reports that.
+    /// loses its revocation, and the recovery reports that; one whose preparation failed can't commit, so
+    /// its revocation counts as won.
     func testCappedWindowRecoveryQuarantinesOnlyEscapedCallsUntilEachCompletes() async throws {
+        struct PreparationFailure: Error {}
         let registry = MCPCodeStructureSettlementRegistry()
         let windowID = 81
         let detachedReadFence = MCPDomainInvocationFence()
         let liveReadFence = MCPDomainInvocationFence()
         let promptCommit = DomainMutationCommitState()
         let committingPromptCommit = DomainMutationCommitState()
+        let failedPromptCommit = DomainMutationCommitState()
 
         let detachedRead = try admittedSlot(registry, windowID: windowID, now: .zero, fence: detachedReadFence)
         let liveRead = try admittedSlot(registry, windowID: windowID, now: .seconds(1), fence: liveReadFence)
@@ -152,9 +155,12 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
             now: .seconds(66),
             commitState: committingPromptCommit
         )
+        let failedPrompt = try admittedSlot(registry, windowID: windowID, now: .seconds(67), commitState: failedPromptCommit)
         try await committingPromptCommit.beginIfNeeded {}
+        try? await failedPromptCommit.beginIfNeeded { throw PreparationFailure() }
         escape(stuckPrompt, at: .seconds(100))
         XCTAssertEqual(committingPrompt.resolveGraceExpiry(now: .seconds(100)), .forceDisconnect)
+        XCTAssertEqual(failedPrompt.resolveGraceExpiry(now: .seconds(100)), .forceDisconnect)
         XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
 
         let recovering = try admittedSlot(registry, windowID: windowID, now: .seconds(101))
@@ -162,23 +168,30 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         XCTAssertEqual(recovery.quarantinedCalls.first?.invocationID, detachedRead.invocationID)
         XCTAssertEqual(
             Dictionary(uniqueKeysWithValues: recovery.quarantinedCalls.map { ($0.invocationID, $0.revocationWon) }),
-            [detachedRead.invocationID: true, stuckPrompt.invocationID: true, committingPrompt.invocationID: false]
+            [
+                detachedRead.invocationID: true,
+                stuckPrompt.invocationID: true,
+                committingPrompt.invocationID: false,
+                failedPrompt.invocationID: true
+            ]
         )
-        XCTAssertEqual(recovery.quarantine, .init(windowQuarantinedCount: 3, windowOutstandingRecoveryCount: 1, appQuarantinedCount: 3))
+        XCTAssertEqual(recovery.quarantine, .init(windowQuarantinedCount: 4, windowOutstandingRecoveryCount: 1, appQuarantinedCount: 4))
         XCTAssertEqual(detachedReadFence.revocationOrigin, .windowRecovery)
         XCTAssertEqual(promptCommit.currentPhase, .revoked(.windowRecovery))
         XCTAssertEqual(committingPromptCommit.currentPhase, .commitStarted)
+        XCTAssertEqual(failedPromptCommit.currentPhase, .preparationFailed)
         XCTAssertFalse(liveReadFence.isRevoked)
         let leases = registry.diagnostics(windowID: windowID, now: .seconds(101)).leases
         XCTAssertEqual(leases.first { $0.invocationID == committingPrompt.invocationID }?.revocationWon, false)
         XCTAssertEqual(leases.first { $0.invocationID == stuckPrompt.invocationID }?.revocationWon, true)
+        XCTAssertEqual(leases.first { $0.invocationID == failedPrompt.invocationID }?.revocationWon, true)
         XCTAssertNil(leases.first { $0.invocationID == liveRead.invocationID }?.revocationWon)
 
         // Quarantined calls no longer fence the window but stay tracked.
         XCTAssertFalse(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
         XCTAssertEqual(
             registry.snapshot(windowID: windowID),
-            .init(activeCount: 5, detachedCount: 2, releasedCount: 0, quarantinedCount: 3)
+            .init(activeCount: 6, detachedCount: 2, releasedCount: 0, quarantinedCount: 4)
         )
         let next = try admittedSlot(registry, windowID: windowID, now: .seconds(102))
         XCTAssertNil(next.recovery)
@@ -188,6 +201,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         // The recovery stays outstanding until every call it quarantined has completed.
         XCTAssertEqual(detachedRead.recordCompletion(.success), .settleDetached)
         XCTAssertEqual(stuckPrompt.recordCompletion(.cancellation), .settleDetached)
+        XCTAssertEqual(failedPrompt.recordCompletion(.success), .settleForceDisconnected)
         XCTAssertEqual(registry.diagnostics(windowID: windowID, now: .seconds(103)).quarantine.windowOutstandingRecoveryCount, 1)
         XCTAssertEqual(committingPrompt.recordCompletion(.success), .settleForceDisconnected)
         XCTAssertEqual(
