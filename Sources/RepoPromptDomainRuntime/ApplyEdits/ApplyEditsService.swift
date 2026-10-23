@@ -59,7 +59,9 @@ package struct ApplyEditsService {
                         "File '\(request.path)' does not exist. Use `on_missing=\"create\"` with `rewrite`, or create the file first via `file_actions` action=\"create\"."
                     )
                 }
+                MCPToolExecutionHandlerPhaseContext.report(.applyEditsPreviewTransform)
                 let result = buildCreateResult(text: newText, path: request.path, verbose: request.verbose, options: options)
+                MCPToolExecutionHandlerPhaseContext.report(.applyEditsPreviewTransform, transition: .completed)
                 return (exists: false, originalText: nil, result: result)
             default:
                 throw ApplyEditsError.invalidParams(
