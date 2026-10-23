@@ -1303,7 +1303,7 @@ actor ServerNetworkManager {
         case .connectionLane:
             "\(budget) It was still queued behind another call on this connection. Nothing was applied. Retry after that call returns."
         case .windowExclusive:
-            "\(budget) It was still waiting for \(windowID.map { "window \($0)'s" } ?? "its window's") exclusive slot, which \(holderToolName.map { "a '\($0)' call" } ?? "another call") holds. A call can hold the slot for minutes, such as an edit waiting for review or a worktree merge waiting for approval. Nothing was applied. Retry after that call finishes."
+            "\(budget) It was still waiting for \(windowID.map { "window \($0)'s" } ?? "its window's") exclusive slot, which \(holderToolName.map { "a call to '\($0)'" } ?? "another call") holds. A call can hold the slot for minutes, such as an edit waiting for review or a worktree merge waiting for approval. Nothing was applied. Retry after that call finishes."
         case .preProvider:
             "\(budget) Routing the call and checking it before its provider started took that long, which usually means the app is busy. Nothing was applied. Retry in a few seconds."
         }
