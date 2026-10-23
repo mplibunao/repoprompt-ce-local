@@ -1,0 +1,92 @@
+# Run ledger: faster local promotion
+
+Request: none · Plan: a local Deep Plan, not committed; the decisions it carried are recorded below.
+
+Shorten a local production promotion so production is stopped only for the rollback-unit archive and the app swap: build and sign the release before the quit, compress the state tarball with multithreaded zstd, and run the two acceptance client arms together. One pull request on branch `chore/faster-local-promotion`.
+
+| Item | Outcome | Agent session | Commits |
+|------|---------|---------------|---------|
+| 1–2. Restore and seed read gzip and zstd; the archive writes zstd | done | engineer · Orchestrate 1/5: zstd readers and writer; pair · Review 1/5 | `feat(release): write the rollback archive state with multithreaded zstd` |
+| 3–4. Installer `prepare` and `install-prepared` modes; Make targets and `local-prepare` routing | done | pair · Orchestrate 2/5: installer split modes and routing; pair · Review 2/5 | `feat(release): build and sign the production app before the quit` |
+| 5. Release and testing docs, release skill | done | engineer · Orchestrate 3/5: release docs and skill; pair · Review 3/5 | `docs(release): prepare before the quit and accept with both clients at once` |
+| 6. Live evidence beside production | done | pair · Orchestrate 4/5: live evidence beside production, then live evidence rerun | none (evidence only) |
+| 7. Review, `pr-ready`, pull request | done | engineer · Branch review; engineer · Branch review fixes; pair · Branch cleanup | `test(release): pin each prepared-install refusal and the prepare dispatch`; `refactor(release): set the signing requirement where the team is resolved`; `docs(ledgers): record the faster local promotion run` |
+
+## Decisions carried in from planning
+
+- Decision: build, package, and sign the release while production still runs; production stops only for the archive and the swap. Source: user.
+- Decision: the state archive moves to multithreaded zstd (`tar -cf - | zstd -T0 -3`); existing `.tar.gz` archives still restore and seed; `Codex/Debug` stays in the archive. Source: user.
+- Decision: the acceptance matrix starts the Claude Code and Codex arms together, each in its own background tab; the quit arm stays last. Source: user.
+- Decision: preparation publishes one fixed private bundle at `.build/local-production/RepoPrompt.app`; the prepared install accepts it only when its signature-sealed provenance names the checkout's `HEAD` with `dirty: false` and `git_status: "ok"` and its version equals `version.env`. No new environment variables. Source: user.
+- Decision: the seed reads `.tar.zst` with Python's built-in `tarfile` mode `r|zst` and refuses clearly before Python 3.14; no `zstd` subprocess in the seed. Source: user.
+- Decision: only preparation goes through the developer daemon (`make dev-prepare-local-production`, heavy slot); the swap is plain `make install-prepared-local-production`. Source: user.
+- Decision: the manifest's `files` object names exactly one of `application-support.tar.zst` and `application-support.tar.gz`; `schemaVersion` stays 1; a missing `zstd` fails before anything changes, with no gzip fallback. Source: approved plan.
+- Decision: split modes accept only an existing Apple Development registry with plan action `use`; first use, adoption from self-signed signing, and rotation stay with the one-run install. Source: approved plan.
+- Decision: no ADR. Reversing the writer is a one-line change and both readers stay, so it fails the "hard to reverse" test; the reason is written in `docs/releasing.md` and the pull request description. Source: approved plan.
+- Decision: plan items 1 and 2 run as one work item, because the legacy-gzip restore test re-encodes the writer's zstd output; plan items 3 and 4 likewise, because the routing test needs the `prepare` mode. Source: orchestrator judgment.
+
+## 1–2. Restore and seed read gzip and zstd; the archive writes zstd
+
+- Decision: restore and seed take the state file from the manifest's `files` object and refuse a manifest that lists neither or both names, before anything changes. Source: approved plan.
+- Decision: the manifest test also checks that `application-support.tar.zst` starts with the zstd magic number, because `tar` and the `zstd` CLI both read gzip, so no other test catches gzip bytes written under the `.zst` name. Source: implementing agent's judgment, accepted.
+- Decision: the pipe-failure test asserts `app.zip` exists and resets the archive directory per case, so it proves the run reached the `tar | zstd` pipe. Source: review finding.
+- Decision: removed a restore guard that the manifest parser already enforces. Declined a shared manifest-edit helper in the seed test as cosmetic. Source: refactor pass; orchestrator judgment.
+- Evidence: `python3 Scripts/test_local_release_archive.py` 35 tests OK (31 before); `python3 Scripts/test_seed_debug_profile.py` 37 OK on 3.14.2; `/usr/bin/python3` 3.9.6 37 OK with the zstd subtest skipped; `make release-selftest` exit 0. Nine mutations (pipefail removed, restore choosing by directory, each missing-`zstd` check removed, gzip bytes under the `.zst` name, accept-both and accept-neither in restore and seed) each failed the test meant to catch them. Python 3.14 `r|zst` read a 360 MB `tar -cf - | zstd -T0 -3` stream, which was one frame.
+- Deferred: seeding from an archive the real script wrote runs in item 6.
+
+## 3–4. Installer `prepare` and `install-prepared` modes; Make targets and `local-prepare` routing
+
+- Decision: the installer's body became shared functions, so the one-run install and the prepared install use one staging and replacement transaction. The review compared the one-run path line by line with the version on `main` and found the same commands, order, three running-production checks, registry rules, and output. The one change: an argument other than the two modes is now a usage error; before, arguments were ignored and no caller passed any. Source: approved plan; review.
+- Decision: `verify_prepared_bundle` makes one `codesign --verify --deep --strict -R=<requirement>` call, because `man codesign` says a given requirement is checked as part of the verification (exit 3 when only the requirement fails). The one-run path keeps its two calls. The function reads the team and Keychain service from the same globals the requirement is built from, so a caller can't pass a disagreeing team. Source: approved plan; refactor pass.
+- Decision: the test `git` stub answers `rev-parse HEAD` only for the release source root, so the split-root test fails if `HEAD` is read from the control-plane checkout. Bad-provenance cases edit the prepared bundle after preparation, because `prepare` refuses to produce one. An extra test proves `prepare`'s own check refuses a build that doesn't match `HEAD` and keeps the previous prepared bundle. Source: implementing agent's judgment, accepted.
+- Decision: the prepared install trims and uppercases `LOCAL_SIGNING_TEAM_ID` before comparing it with the registry, matching the other two modes. The successful prepared-install test compares the registry's bytes and mode, which catches a value-preserving rewrite. Source: review findings.
+- Decision: declined two test-helper dedupes and a shared conductor subcommand set as cosmetic or wider than this change. Source: orchestrator judgment.
+- Evidence: `python3 Scripts/test_local_production_installer.py` 35 tests OK (30 before); `python3 Scripts/test_conductor_fair_heavy.py` 14 OK (13 before); `make conductor-selftest` exit 0; `make -n` expands the three targets as planned. Sixteen installer mutations (among them `prepare` keeping the stop check, `install-prepared` copying from `.build/release`, each provenance or version check removed, `HEAD` or `version.env` read from the control-plane checkout, publishing before verifying) and two conductor mutations (dropping `local-prepare` from the heavy-slot or the timeout set) each failed the test meant to catch them.
+- Deferred: `install-prepared`'s early `ROTATE_LOCAL_SIGNING_IDENTITY` refusal and its team-mismatch branch have no test of their own; both fail closed before staging. Live `codesign` sealing of the provenance is proven in item 6.
+
+## 5. Release and testing docs, release skill
+
+- Decision: `docs/releasing.md`, `docs/testing.md`, and the `rpce-release` skill's stop list take the planned wording, with the corrections below. Source: approved plan.
+- Decision: corrected three planned sentences that the code contradicts. Preparation also takes the registry lock and a temp directory, so the docs say it "installs nothing and doesn't write the signing registry" instead of "writes only inside `.build`". The prepared install's staging check is its first, not a repeat. Only the seed test's zstd seeding case skips on an old Python. Source: implementing agent's fact check; orchestrator judgment.
+- Decision: a move from self-signed signing or a rotation archives in step 2 and then runs the one-run install with production still quit. The planned text ran them "before the promotion" through the one-run install, which archives nothing, so the previous build would have reached no rollback unit. Source: review finding (must-fix).
+- Decision: step 2's `HEAD` check is its own block that prints a `MISMATCH` line, and the quit comes only after the match line. Step 3's recovery starts with fixing the cause the refusal names, because the one-run install checks neither `HEAD` nor a dirty tree. Source: review findings.
+- Decision: the acceptance matrix's row block now matches its prose: the operator's `$W2` set runs before the client arms, the `$W2` read-back runs after both finish, and `list_sessions` runs last. This overrides the plan's "row block stays", because the plan's own prose already scheduled those rows differently from the block. With the arms concurrent, the `$W2` read-back shows whether an arm's selection reached another window, which is the client routing the matrix proves. Source: review finding; orchestrator judgment.
+- Decision: the rehearsal precondition matches the durable rehearsal rule; the seed docs say Python 3.14 "built with zstd support"; a `testing.md` sentence that repeated the rollback-unit text was deleted; the install section's three running-app sentences became one statement of which mode checks when. Declined four optional shortenings of approved text. Source: review and refactor passes; orchestrator judgment.
+- Evidence: `make guardrails` exit 0 and `git diff --check` clean after each round. The step 2 check line printed the match line, then `MISMATCH` for a different commit and for a missing file, in a throwaway repository. Earlier restore versions refuse a zstd archive before creating the rescue directory. All anchors resolve.
+- Deferred: three acceptance-matrix gaps that predate this branch: the prose names a roots row the block lacks, nothing says who runs the `windows` row, and the refusal paragraph names only the operator's Codex wait. Not filed.
+
+## 6. Live evidence beside production
+
+- Decision: the first evidence run was stopped partway through the full-scale run when production was quit for the build 60 promotion. Its disposable tree was deleted; preparation and the swap had finished, and the full-scale run was repeated from the start on an otherwise idle machine. Source: user.
+- Decision: no rebase. The branch merges cleanly onto `main` at `0f5f03a9a`, whose changes touch none of this branch's files, and a rebase would void the prepared bundle's match with `HEAD`. Source: user; orchestrator check.
+- Evidence (2026-10-22 and 2026-10-23, macOS 26.6.2, Apple M5 with 10 cores, Python 3.14.2, `zstd` 1.5.7, bash 5.3.9, bsdtar 3.5.3):
+  - Preparation: `make dev-prepare-local-production` with production running, 967 s, exit 0, no heavy-slot wait. The prepared bundle's provenance names the branch `HEAD` with `dirty: false` and `git_status: ok`; its versions equal `version.env`; strict `codesign` verification passes.
+  - Swap: `make install-prepared-local-production` into a temporary install directory with a copy of the registry, 1.55 s (2.62 s on the first run). No compile, package, or sign step in its output; the installed `CDHash` and provenance equal the prepared bundle's. The production app's `CDHash`, the real registry's bytes, and production's process were unchanged.
+  - Full scale, on a disposable copy of build 58's state (19.0 GB, 521,713 entries): the archive took 477.6 s with gzip (`main`'s script) and 223.7 s with zstd (this branch); the state tarball is 4.22 GB against 2.29 GB. This branch's restore took 207.0 s for the gzip archive and 197.1 s for the zstd one, and each passed 13 checks against the snapshot: app and state bytes, modes, and mtimes; `Codex/Debug`; excluded entries kept; preferences; the identity record's bytes and mode; a sibling debug profile untouched. Python 3.14's `r|zst` read the real `zstd -T0` output in a full seed dry run (72.6 s), and seeds from the two archives produced identical profiles. Peak disk use 28.3 GiB; the tree was deleted afterwards.
+  - Where the archive time goes now: `zstd` used 26 s of CPU and never limited the pipe. `tar` itself spent 159.5 s in system time, the same as in the gzip run, and `tar -cf - | cat > /dev/null` alone took 202 s. Sampling put 48% of that in bsdtar's default `--mac-metadata` packing of each entry's extended attributes and ACLs. The plan's "a minute or two" came from a benchmark with few files and does not hold on the real state.
+  - Build 60 promotion (2026-10-23): with the release products already compiled from the promoted commit before the stop, the one-run installer reused them and took 45 s instead of about 8 min; the gzip archive took 7.9 min; the total outage was 9.7 min against 24 min for build 59.
+- Deferred: the after-landing in-place rehearsal (see Deferred below). The full seed comparison skipped all 113 workspaces, because their catalog URLs point into the real profile while the disposable archives record the disposable one as their source; it covers the full read of both tarballs and the copied index, catalog, presets, and settings.
+
+## 7. Review, `pr-ready`, pull request
+
+- Decision: a branch-wide review and a separate cleanup pass ran from the repository's review templates, quoting the pull request description draft. Accepted:
+  - a test that pins `local-prepare` to the installer's `prepare` argument, because a dropped argument would run the one-run installer;
+  - a refusal-message assertion on every row of the prepared-install mismatch table, with new rows for the marketing version, the provenance version, the signing-mode marker, and an Info.plist team that differs from the registry;
+  - the legacy gzip restore test running without `zstd` on `PATH`;
+  - step 1's warning against editing tracked files before the install;
+  - setting the signing requirement where the team is resolved.
+
+  Declined: renaming the per-arm `$T1`, because the prose already says each arm names its own. Dropped: the concern that hosted CI lacks `zstd`, because the `macos-26` arm64 runner image lists zstd 1.5.7, and CI's Style job does run `make conductor-selftest` and `make release-selftest`. Source: review findings; orchestrator judgment.
+- Evidence: each new refusal row fails when its check is removed from a scratch copy of the installer, and the dispatch test fails when the `prepare` argument is dropped. `make conductor-selftest` passes after the cleanup, and `make dev-release-preflight` passes. The live evidence in item 6 ran at the docs commit; the commits after it change tests, one doc sentence, and where the installer sets the signing requirement, without changing what it runs.
+
+## Deferred
+
+- The installer's `cleanup` reads exit status 0 on SIGTERM, SIGINT, or SIGHUP and so skips `rollback_transaction`, which can leave the prior app at its printed backup path. This predates the change. Drafted as an issue; not filed.
+- After landing and before the next promotion: one in-place archive-and-restore rehearsal in an approved idle window, timed, with the numbers in the next promotion's receipt.
+
+## Parked decisions
+
+- Should the rollback archive stop packing macOS metadata? bsdtar's default `--mac-metadata` packs each entry's extended attributes and ACLs into an AppleDouble member, which took about half of the zstd archive's 224 s on build 58's state and doubles the members the seed reads. `tar --no-mac-metadata` would cut that, but the rollback unit would no longer restore extended attributes or ACLs, and nothing yet shows which the profile relies on. Options: investigate which extended attributes and ACLs the state holds and whether restore needs them, then decide; or keep the default. Recommendation: investigate in a separate issue; leave this pull request's archive contents unchanged. Blocks: nothing.
+
+- Should the installer's intermittent hang be filed as a distribution issue? Under load, an installer subshell can block writing a heredoc into its own pipe before it runs `python3`. This was seen in `Scripts/load_release_metadata.sh` and in the installer's `json_field`, as 2–6 `TimeoutExpired` errors per full test run at load average about 14, and once before any edit. It fits macOS shrinking pipe buffers under pipe-memory pressure, but it wasn't reproduced on demand. It predates this change, which adds about six more such calls per split-mode run. Every such call comes before the replacement transaction, so a hang mutates nothing and an interrupt is safe. Options: file it now together with the signal-gap issue, both drafted with `rpce-issue-creator`; or fix it in this pull request by passing the Python with `python3 -c` and killing the test's process group on timeout. Recommendation: file it; the fix touches a shared release helper outside this plan, and its root cause needs a reproduction first. A later probe found the hung heredocs were 259 and 1,191 bytes and a fresh pipe held 65,536 bytes at load 13.8, which weakens the pipe-size explanation; about 46 `python3` heredoc call sites in 23 scripts under `Scripts/` share the pattern. Blocks: nothing.
+- Should the two installer follow-ups be filed now? Both are drafted locally with `rpce-issue-creator` and have no duplicates: the signal-time rollback gap (labels `bug`, `tooling`, `area:release`) and the heredoc hang (same labels). Options: file both, file one, or neither. Recommendation: file both. Blocks: nothing.

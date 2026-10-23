@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Seed the debug profile one way from a verified production release archive.
 
-The source is `application-support.tar.gz` in an archive written by
-`Scripts/local_release_archive.sh`. The seed keeps the selected workspaces with their chat
-and agent history, the workspace index, presets, and global settings; rewrites file paths
-that point into the archived production profile so they point into the debug profile; and
-publishes the result as `~/Library/Application Support/RepoPrompt CE Debug` with one
-rename. The live production profile is never read, written, or locked.
+The source is the state tarball in an archive written by `Scripts/local_release_archive.sh`:
+`application-support.tar.zst`, or `application-support.tar.gz` in older archives, whichever
+the manifest lists. The seed keeps the selected workspaces with their chat and agent
+history, the workspace index, presets, and global settings; rewrites file paths that point
+into the archived production profile so they point into the debug profile; and publishes
+the result as `~/Library/Application Support/RepoPrompt CE Debug` with one rename. The live
+production profile is never read, written, or locked.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import errno
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import signal
@@ -44,7 +46,14 @@ import debug_app_process  # noqa: E402
 PRODUCTION_PROFILE_NAME = "RepoPrompt CE"
 DEBUG_PROFILE_NAME = "RepoPrompt CE Debug"
 ARCHIVE_ROOT_RELATIVE = Path("Archives") / "repoprompt-ce"
-STATE_ARCHIVE_NAME = "application-support.tar.gz"
+# The state tarball names a manifest may list, with the tarfile stream mode that reads each.
+STATE_ARCHIVE_MODES = {"application-support.tar.gz": "r|gz", "application-support.tar.zst": "r|zst"}
+try:
+    import compression.zstd  # noqa: F401  # Python 3.14+, built with zstd
+
+    ZSTD_READABLE = True
+except ImportError:
+    ZSTD_READABLE = False
 MANIFEST_NAME = "manifest.json"
 MANIFEST_SCHEMA_VERSION = 1
 DEBUG_BUNDLE_NAME = "RepoPrompt.app"
@@ -136,10 +145,11 @@ class Archive:
     manifest: Mapping[str, object]
     archived_at_epoch: float
     source_root: str
+    state_name: str
 
     @property
     def state_path(self) -> Path:
-        return self.directory / STATE_ARCHIVE_NAME
+        return self.directory / self.state_name
 
 
 @dataclass
@@ -228,9 +238,12 @@ def load_archive(directory: Path, expected_tag: str | None) -> Archive:
     for name in files:
         if not isinstance(name, str) or not name or "/" in name or name in {".", ".."}:
             raise SeedError(f"Manifest {manifest_path} lists an unusable file name {name!r}.")
-    if STATE_ARCHIVE_NAME not in files:
-        raise SeedError(f"Manifest {manifest_path} does not list {STATE_ARCHIVE_NAME}.")
-    return Archive(directory, tag, manifest, float(epoch), source_root.rstrip("/"))
+    state_names = [name for name in STATE_ARCHIVE_MODES if name in files]
+    if len(state_names) != 1:
+        raise SeedError(
+            f"Manifest {manifest_path} must list exactly one state archive: {' or '.join(STATE_ARCHIVE_MODES)}."
+        )
+    return Archive(directory, tag, manifest, float(epoch), source_root.rstrip("/"), state_names[0])
 
 
 def complete_archives(archive_root: Path) -> list[Archive]:
@@ -691,7 +704,7 @@ def excluded_runtime_entry(parts: tuple[str, ...]) -> tuple[str, str] | None:
 
 def open_state_archive(archive: Archive) -> Iterator[tuple[tarfile.TarFile, tarfile.TarInfo, tuple[str, ...]]]:
     try:
-        with tarfile.open(archive.state_path, mode="r|gz") as state:
+        with tarfile.open(archive.state_path, mode=STATE_ARCHIVE_MODES[archive.state_name]) as state:
             for member in state:
                 parts = member_parts(member.name)
                 if parts is not None:
@@ -1393,6 +1406,12 @@ def seed(
     step("Resolving the release archive")
     archive = resolve_archive(args.archive, locations.archive_root)
     print(f"Archive {archive.tag} at {archive.directory}")
+    if archive.state_name.endswith(".tar.zst") and not ZSTD_READABLE:
+        raise SeedError(
+            f"Reading {archive.state_path} needs Python 3.14 or newer with zstd support; "
+            f"{sys.executable} is Python {platform.python_version()}. "
+            "Run the seed with a newer python3; nothing was copied."
+        )
 
     step("Checking the working-journal format")
     supported = supported_journal_schema_version(debug_bundle_path(locations, environ))

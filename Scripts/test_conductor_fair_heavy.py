@@ -515,5 +515,22 @@ class FairHeavyAdmissionTests(unittest.TestCase):
                         holder.close()
 
 
+class ReleaseRoutingTests(unittest.TestCase):
+    def test_release_builds_take_the_heavy_slot_and_release_timeout(self) -> None:
+        registry = conductor.OperationRegistry(SCRIPT_DIR.parent)
+        for subcommand in ("package", "local-install", "local-prepare"):
+            with self.subTest(subcommand=subcommand):
+                args = {"subcommand": subcommand}
+                self.assertTrue(conductor.operation_requires_global_heavy_slot("release", args))
+                self.assertEqual(registry._default_timeout("release", args), conductor.RELEASE_TIMEOUT_SECONDS)
+
+    # A dropped "prepare" argument would run the one-run installer, which forwards
+    # CONFIRM_LOCAL_PRODUCTION_INSTALL, under make dev-prepare-local-production.
+    def test_local_prepare_dispatches_the_installer_prepare_mode(self) -> None:
+        registry = conductor.OperationRegistry(SCRIPT_DIR.parent)
+        argv = registry.prepare({"operation": "release", "args": {"subcommand": "local-prepare"}})[0]
+        self.assertEqual(argv, [str(SCRIPT_DIR.parent / "Scripts" / "install_local_production.sh"), "prepare"])
+
+
 if __name__ == "__main__":
     unittest.main()

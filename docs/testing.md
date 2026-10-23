@@ -237,6 +237,8 @@ Isolation covers state files only. The URL scheme, document types, global shortc
 
 A fresh debug profile is empty, so it can't reproduce how the app behaves with many workspaces and long chat and agent histories. `Scripts/seed_debug_profile.py` copies that state one way from a production [release archive](releasing.md#rollback-unit) into the debug profile. It reads only the archive, never the live production profile, so production can keep running.
 
+Reading `application-support.tar.zst` needs Python 3.14 or newer built with zstd support. On an older Python the seed stops before reading and says which Python it needs. Gzip archives seed on any Python the script supports.
+
 ```bash
 python3 Scripts/seed_debug_profile.py --dry-run     # run every check and report what would be copied
 python3 Scripts/seed_debug_profile.py               # newest complete archive, every workspace
@@ -249,6 +251,7 @@ python3 Scripts/seed_debug_profile.py --replace     # move the current debug pro
 The seed refuses, before it writes anything, when:
 
 - The manifest is missing, or a listed file doesn't match its `.sha256` sidecar and the checksum in the manifest.
+- The manifest lists neither state file or both, or it lists `application-support.tar.zst` and the running Python can't read zstd.
 - The archive's working-journal schema version is unknown, or it or a journal in the archive is newer than the `RepoPromptWorkingJournalSchemaVersion` the debug bundle declares. Build the debug app with `make dev-build` first. An older archive is fine: the debug build reads it the way production will after its next upgrade, so seeding also exercises the upgrade path.
 - The debug app or a debug CLI is running. A running production app doesn't block it.
 - The debug profile or its staging directory resolves into the production profile, such as through a symlink in one of its parent folders.
@@ -271,7 +274,7 @@ HOME=/tmp/seed-home \
 
 To launch the debug app on that profile, also set `CFFIXED_USER_HOME`, as [Debug profile isolation](#debug-profile-isolation) describes.
 
-`python3 Scripts/test_seed_debug_profile.py` covers each refusal, rewrite, skip, and replacement with small fixture archives under a temporary home.
+`python3 Scripts/test_seed_debug_profile.py` covers each refusal, rewrite, skip, and replacement with small fixture archives under a temporary home. On a Python without zstd support it skips the case that seeds from a zstd archive.
 
 ## Live Codex Desktop direct-headless worktree routing
 

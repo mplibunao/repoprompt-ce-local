@@ -32,6 +32,6 @@ Stop before changing the installed app or repository state when:
 - the selected commit is not the clean, pushed `main` tip
 - the build number, tag, archive target, or receipt is unresolved
 - the rollback rehearsal prerequisite in `docs/releasing.md` is not satisfied
-- archive, install, acceptance, provenance, tag, push, or receipt verification fails
+- preparation, archive, install, acceptance, provenance, tag, push, or receipt verification fails
 
 On failure, preserve the evidence and follow the rollback path in `docs/releasing.md`; do not continue to later promotion steps.

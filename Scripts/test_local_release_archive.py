@@ -9,7 +9,10 @@ Support tree are never read or written.
 
 from __future__ import annotations
 
+import copy
 import filecmp
+import gzip
+import hashlib
 import json
 import os
 import plistlib
@@ -17,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -41,6 +45,18 @@ INFO_PLIST_TEMPLATE = ROOT_DIR / "AppBundle" / "Info.plist.template"
 DISPLAY_NAME = "RepoPrompt CE"
 TAG = "local/v1.4.0-b99"
 JOURNAL_SOURCE_PATH = Path("Sources/RepoPromptDomainRuntime/DomainPersistence.swift")
+STATE_ARCHIVE_NAME = "application-support.tar.zst"
+LEGACY_STATE_ARCHIVE_NAME = "application-support.tar.gz"
+
+
+def setUpModule() -> None:
+    # The archive script pipes tar through zstd and restore's tar runs zstd to read the
+    # result, so without a real zstd every case would fail for a reason that hides the cause.
+    if shutil.which("zstd") is None:
+        raise RuntimeError(
+            "These tests need the zstd command on PATH, because the rollback unit's state tarball is "
+            "zstd-compressed. Install it (brew install zstd) and rerun."
+        )
 
 
 class LocalReleaseRollbackUnitTests(unittest.TestCase):
@@ -237,6 +253,26 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
     def manifest(self) -> dict:
         return json.loads((self.archive_root / TAG / "manifest.json").read_text(encoding="utf-8"))
 
+    def state_listing(self) -> str:
+        """Entries of the archived state tarball; tar detects zstd and gzip from the stream."""
+        return subprocess.run(
+            ["tar", "-tf", str(self.archive_root / TAG / STATE_ARCHIVE_NAME)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    def path_without_zstd(self) -> str:
+        """PATH with every directory that holds a zstd executable removed."""
+        entries = [
+            entry
+            for entry in os.environ["PATH"].split(os.pathsep)
+            if entry and shutil.which("zstd", path=entry) is None
+        ]
+        filtered = os.pathsep.join(entries)
+        self.assertIsNone(shutil.which("zstd", path=filtered))
+        return filtered
+
     # -- tests ------------------------------------------------------------------
 
     def test_package_contract_embeds_working_journal_schema_version(self) -> None:
@@ -265,11 +301,47 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         )
 
     def test_round_trip_reproduces_app_state_defaults_and_identity(self) -> None:
+        self.assert_round_trip_reproduces_baseline()
+
+    def test_restore_reads_the_legacy_gzip_archive_its_manifest_names(self) -> None:
+        def reencode_state_as_gzip(archive_dir: Path) -> None:
+            zstd_path = archive_dir / STATE_ARCHIVE_NAME
+            tarball = subprocess.run(
+                ["zstd", "-d", "-c", "-q", str(zstd_path)], check=True, capture_output=True
+            ).stdout
+            gzip_path = archive_dir / LEGACY_STATE_ARCHIVE_NAME
+            gzip_path.write_bytes(gzip.compress(tarball))
+            digest = hashlib.sha256(gzip_path.read_bytes()).hexdigest()
+            (archive_dir / f"{LEGACY_STATE_ARCHIVE_NAME}.sha256").write_text(
+                f"{digest}  {LEGACY_STATE_ARCHIVE_NAME}\n", encoding="utf-8"
+            )
+            (archive_dir / f"{STATE_ARCHIVE_NAME}.sha256").unlink()
+            manifest_path = archive_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            del manifest["files"][STATE_ARCHIVE_NAME]
+            manifest["files"][LEGACY_STATE_ARCHIVE_NAME] = {"sha256": digest, "bytes": gzip_path.stat().st_size}
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            # An unlisted zstd file beside the listed gzip one: restore follows the manifest,
+            # not the directory, so this must play no part.
+            zstd_path.write_bytes(b"junk that is not a zstd stream")
+
+        # Restore runs without zstd on PATH: a gzip archive needs no zstd, and the re-encoding
+        # above runs with the normal PATH.
+        self.assert_round_trip_reproduces_baseline(
+            rewrite_archive=reencode_state_as_gzip, PATH=self.path_without_zstd()
+        )
+
+    def assert_round_trip_reproduces_baseline(
+        self, rewrite_archive: Callable[[Path], None] | None = None, **restore_overrides: str
+    ) -> None:
+        """Archives the baseline, optionally rewrites it, diverges live state, restores, and compares."""
         self.write_baseline_fixture(defaults={"UpdateChannel": "stable", "RemovedLater": "yes"})
         app_before = directory_snapshot(self.app)
         state_before = directory_snapshot(self.state)
 
         self.archive()
+        if rewrite_archive is not None:
+            rewrite_archive(self.archive_root / TAG)
 
         # Diverge every restored surface, including keys the newer build would have added.
         self.write_app(build="39", commit="f" * 40)
@@ -282,7 +354,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         (self.state / "DebugApps" / "marker.txt").write_text("debug-after\n", encoding="utf-8")
         (self.state / "Rollbacks" / "marker.txt").write_text("rollback-after\n", encoding="utf-8")
 
-        self.restore()
+        self.restore(**restore_overrides)
 
         self.assertEqual(directory_snapshot(self.app), app_before)
         restored_state = directory_snapshot(self.state)
@@ -312,8 +384,13 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.assertTrue(manifest["localSigningIdentity"]["archived"])
         self.assertIsInstance(manifest["archivedAtEpoch"], float)
         self.assertTrue(manifest["archivedAtISO"])
-        for name in ("app.zip", "application-support.tar.gz", "defaults.plist"):
+        for name in ("app.zip", STATE_ARCHIVE_NAME, "defaults.plist"):
             self.assertEqual(len(manifest["files"][name]["sha256"]), 64, name)
+        self.assertNotIn(LEGACY_STATE_ARCHIVE_NAME, manifest["files"])
+        # tar and the zstd command both read gzip too, so only the frame's magic number shows
+        # that the file named .tar.zst holds zstd.
+        with (self.archive_root / TAG / STATE_ARCHIVE_NAME).open("rb") as state_archive:
+            self.assertEqual(state_archive.read(4), b"\x28\xb5\x2f\xfd")
 
     def test_bundle_schema_takes_priority_over_observed_journal_versions(self) -> None:
         self.write_baseline_fixture(journal_schema_version=1)
@@ -357,12 +434,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
         self.archive(LOCAL_RELEASE_ARCHIVE_EXCLUDES="DebugApps:Rollbacks:Conductor:DomainRuntime")
         manifest = self.manifest()
-        listing = subprocess.run(
-            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
+        listing = self.state_listing().splitlines()
 
         top_level = {entry.removeprefix("./").split("/", 1)[0] for entry in listing}
         self.assertEqual(manifest["observed_working_journal_versions"], [2])
@@ -431,12 +503,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
 
         self.archive()
 
-        listing = subprocess.run(
-            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
+        listing = self.state_listing().splitlines()
         self.assertTrue(any(entry.endswith("Settings/globalSettings.json") for entry in listing))
         # Exclusion matching applies only to top-level entries.
         top_level = {entry.split("/")[1] for entry in listing if entry.startswith("./") and len(entry.split("/")) > 1}
@@ -456,12 +523,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         sibling_before = directory_snapshot(sibling)
 
         self.archive()
-        listing = subprocess.run(
-            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
+        listing = self.state_listing().splitlines()
 
         self.assertFalse(any(f"{DISPLAY_NAME} Debug" in entry for entry in listing), listing)
         self.assertIn("./Codex/Debug/home/history.jsonl", listing)
@@ -488,12 +550,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         marker.write_text("before-archive\n", encoding="utf-8")
 
         self.archive()
-        listing = subprocess.run(
-            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
+        listing = self.state_listing()
         self.assertNotIn("./DebugApps-foo-preserved/", listing)
 
         marker.write_text("after-archive\n", encoding="utf-8")
@@ -610,12 +667,7 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         nested = self.state / "Workspaces" / "inner" / "DebugApps" / "nested.json"
 
         self.archive()
-        listing = subprocess.run(
-            ["tar", "-tzf", str(self.archive_root / TAG / "application-support.tar.gz")],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
+        listing = self.state_listing()
         self.assertIn("Workspaces/inner/DebugApps/nested.json", listing)
         self.assertNotIn("./DebugApps/", listing)
         self.assertNotIn("./Rollbacks/", listing)
@@ -645,20 +697,88 @@ class LocalReleaseRollbackUnitTests(unittest.TestCase):
         self.write_baseline_fixture()
         self.archive()
         manifest_path = self.archive_root / TAG / "manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        del manifest["files"]
-        del manifest["applicationSupport"]["excludedNames"]
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        intact = json.loads(manifest_path.read_text(encoding="utf-8"))
+        # Verifying any checksum would fail with a different message than the manifest refusal.
         app_zip = self.archive_root / TAG / "app.zip"
         app_zip.write_bytes(app_zip.read_bytes() + b"corrupt")
         excluded_before = (self.state / "DebugApps" / "marker.txt").read_text(encoding="utf-8")
 
-        result = self.run_script(RESTORE_SCRIPT)
+        def drop_files_and_excluded_names(manifest: dict) -> None:
+            del manifest["files"]
+            del manifest["applicationSupport"]["excludedNames"]
+
+        def drop_the_state_archive(manifest: dict) -> None:
+            del manifest["files"][STATE_ARCHIVE_NAME]
+
+        def list_both_state_archives(manifest: dict) -> None:
+            manifest["files"][LEGACY_STATE_ARCHIVE_NAME] = dict(manifest["files"][STATE_ARCHIVE_NAME])
+
+        cases = {
+            "no files or excluded names": (drop_files_and_excluded_names, "lists no archive files"),
+            "neither state archive": (drop_the_state_archive, "must list exactly one state archive"),
+            "both state archives": (list_both_state_archives, "must list exactly one state archive"),
+        }
+        for label, (damage, expected) in cases.items():
+            with self.subTest(label=label):
+                manifest = copy.deepcopy(intact)
+                damage(manifest)
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                result = self.run_script(RESTORE_SCRIPT)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stdout + result.stderr)
+                self.assertTrue((self.state / "DebugApps").is_dir())
+                self.assertEqual(
+                    (self.state / "DebugApps" / "marker.txt").read_text(encoding="utf-8"), excluded_before
+                )
+                self.assertEqual(list(self.archive_root.glob("**/*.rescue-*")), [])
+
+    def test_missing_zstd_leaves_a_completed_archive_untouched(self) -> None:
+        self.write_baseline_fixture()
+        self.archive()
+        archive_before = directory_snapshot(self.archive_root / TAG)
+
+        result = self.run_script(ARCHIVE_SCRIPT, PATH=self.path_without_zstd(), LOCAL_RELEASE_ARCHIVE_OVERWRITE="1")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("lists no archive files", result.stdout + result.stderr)
-        self.assertTrue((self.state / "DebugApps").is_dir())
-        self.assertEqual((self.state / "DebugApps" / "marker.txt").read_text(encoding="utf-8"), excluded_before)
+        self.assertIn("brew install zstd", result.stdout + result.stderr)
+        self.assertEqual(directory_snapshot(self.archive_root / TAG), archive_before)
+
+    def test_missing_zstd_refuses_restore_before_moving_anything(self) -> None:
+        self.write_baseline_fixture()
+        self.archive()
+        # Diverge live state so a restore that got past the check would be visible.
+        (self.state / "Settings" / "globalSettings.json").write_text('{"marker":"live"}\n', encoding="utf-8")
+        before = self.rollback_surfaces()
+
+        result = self.run_script(RESTORE_SCRIPT, PATH=self.path_without_zstd())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("brew install zstd", result.stdout + result.stderr)
+        # The surfaces include the rescue-directory list, so a rescue directory would show here.
+        self.assertEqual(self.rollback_surfaces(), before)
+
+    def test_failed_state_compression_leaves_no_manifest(self) -> None:
+        self.write_baseline_fixture()
+        stubs = {
+            "zstd fails": ("zstd", "#!/bin/sh\ncat >/dev/null\nexit 1\n"),
+            "tar fails": ("tar", "#!/bin/sh\nexit 1\n"),
+        }
+        for label, (tool, body) in stubs.items():
+            with self.subTest(label=label):
+                archive_dir = self.archive_root / TAG
+                # Start each case from an empty directory so app.zip can only come from this run.
+                shutil.rmtree(archive_dir, ignore_errors=True)
+                stub_dir = self.tmp / f"failing-{tool}"
+                write_executable(stub_dir / tool, body)
+
+                result = self.run_script(ARCHIVE_SCRIPT, PATH=f"{stub_dir}{os.pathsep}{os.environ['PATH']}")
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                # ditto writes app.zip just before the pipe, so it shows the run reached the pipe.
+                self.assertTrue((archive_dir / "app.zip").is_file(), result.stdout + result.stderr)
+                self.assertFalse((archive_dir / "manifest.json").exists())
 
     def test_restore_keeps_a_rescue_directory_and_survives_an_interrupted_run(self) -> None:
         self.write_baseline_fixture()

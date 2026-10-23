@@ -13,7 +13,8 @@ LOCAL_RELEASE_ARCHIVE_OVERWRITE="${LOCAL_RELEASE_ARCHIVE_OVERWRITE:-0}"
 IFS=':' read -r -a EXCLUDED_STATE_NAMES <<<"${LOCAL_RELEASE_ARCHIVE_EXCLUDES:-DebugApps:Rollbacks:Conductor:DebugApps-*}"
 
 APP_ARCHIVE_NAME="app.zip"
-STATE_ARCHIVE_NAME="application-support.tar.gz"
+STATE_ARCHIVE_NAME="application-support.tar.zst"
+LEGACY_STATE_ARCHIVE_NAME="application-support.tar.gz"
 DEFAULTS_ARCHIVE_NAME="defaults.plist"
 IDENTITY_ARCHIVE_NAME="local-signing-identity-v1.json"
 
@@ -23,6 +24,10 @@ MANIFEST_PATH="$ARCHIVE_DIR/manifest.json"
 [[ -d "$LOCAL_PRODUCTION_APP" ]] || fail "No installed app bundle at $LOCAL_PRODUCTION_APP."
 [[ -d "$LOCAL_APP_SUPPORT_DIR" ]] || fail "No application support directory at $LOCAL_APP_SUPPORT_DIR."
 require_no_running_repoprompt_processes "archiving"
+# Checked before anything is created or removed, so a missing tool never invalidates a
+# completed archive under LOCAL_RELEASE_ARCHIVE_OVERWRITE=1.
+command -v zstd >/dev/null ||
+    fail "zstd is required to write $STATE_ARCHIVE_NAME. Install zstd (brew install zstd), ensure it is on PATH, and retry; nothing was archived."
 if [[ -e "$MANIFEST_PATH" && "$LOCAL_RELEASE_ARCHIVE_OVERWRITE" != "1" ]]; then
     fail "Archive $ARCHIVE_DIR already holds a manifest. Set LOCAL_RELEASE_ARCHIVE_OVERWRITE=1 to replace it."
 fi
@@ -50,8 +55,13 @@ rm -f "$ARCHIVE_DIR/$APP_ARCHIVE_NAME"
 ditto -c -k --keepParent "$LOCAL_PRODUCTION_APP" "$ARCHIVE_DIR/$APP_ARCHIVE_NAME"
 
 step "Archiving application support state (excluding top-level ${EXCLUDED_STATE_NAMES[*]})"
-rm -f "$ARCHIVE_DIR/$STATE_ARCHIVE_NAME"
-tar -czf "$ARCHIVE_DIR/$STATE_ARCHIVE_NAME" -C "$LOCAL_APP_SUPPORT_DIR" "${TAR_OPERANDS[@]}"
+# zstd -o refuses an existing file, and an earlier gzip archive of this tag must not leave
+# its tarball beside the new one.
+rm -f "$ARCHIVE_DIR/$STATE_ARCHIVE_NAME" "$ARCHIVE_DIR/$STATE_ARCHIVE_NAME.sha256" \
+    "$ARCHIVE_DIR/$LEGACY_STATE_ARCHIVE_NAME" "$ARCHIVE_DIR/$LEGACY_STATE_ARCHIVE_NAME.sha256"
+# pipefail fails the script when either side fails, before the manifest is written.
+tar -cf - -C "$LOCAL_APP_SUPPORT_DIR" "${TAR_OPERANDS[@]}" |
+    zstd -T0 -3 -q -o "$ARCHIVE_DIR/$STATE_ARCHIVE_NAME"
 
 step "Exporting preferences domain $LOCAL_DEFAULTS_DOMAIN"
 rm -f "$ARCHIVE_DIR/$DEFAULTS_ARCHIVE_NAME"
@@ -104,6 +114,7 @@ ARCHIVE_TAG="$TAG" \
     ARCHIVE_APP_PATH="$LOCAL_PRODUCTION_APP" \
     ARCHIVE_REPOSITORY_PATH="${LOCAL_RELEASE_SOURCE_REPOSITORY:-$LOCAL_RELEASE_ROOT_DIR}" \
     ARCHIVE_STATE_PATH="$LOCAL_APP_SUPPORT_DIR" \
+    ARCHIVE_STATE_FILE_NAME="$STATE_ARCHIVE_NAME" \
     ARCHIVE_DEFAULTS_DOMAIN="$LOCAL_DEFAULTS_DOMAIN" \
     ARCHIVE_IDENTITY_PATH="$LOCAL_SIGNING_IDENTITY_REGISTRY_PATH" \
     ARCHIVE_IDENTITY_PRESENT="$IDENTITY_ARCHIVED" \
@@ -232,7 +243,7 @@ def observed_working_journal_versions() -> tuple[list[int], list[str]]:
     return sorted(versions), sorted(unreadable)
 
 
-files = ["app.zip", "application-support.tar.gz", "defaults.plist"]
+files = ["app.zip", os.environ["ARCHIVE_STATE_FILE_NAME"], "defaults.plist"]
 if os.environ["ARCHIVE_IDENTITY_PRESENT"] == "1":
     files.append("local-signing-identity-v1.json")
 
