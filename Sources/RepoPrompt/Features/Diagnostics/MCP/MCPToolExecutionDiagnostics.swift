@@ -352,7 +352,8 @@ enum MCPSettlementRecoveryLog {
                 call.invocationID.uuidString,
                 call.state,
                 call.handlerPhase ?? "unreported",
-                call.blockingAge.map { String(format: "%.3f", $0.mcpMilliseconds) } ?? "unknown"
+                call.blockingAge.map { String(format: "%.3f", $0.mcpMilliseconds) } ?? "unknown",
+                call.revocationWon ? "won" : "lost"
             ].joined(separator: ":")
         }
         let quarantine = recovery.quarantine
@@ -363,7 +364,8 @@ enum MCPSettlementRecoveryLog {
             "invocation_id=\(invocationID.uuidString)",
             "connection_id=\(connectionID.uuidString)",
             "recovery_id=\(recovery.recoveryID.uuidString)",
-            // Each call is tool:invocation_id:state:handler_phase:blocking_age_ms.
+            // Each call is tool:invocation_id:state:handler_phase:blocking_age_ms:revocation. A lost revocation
+            // means a protected mutation's commit had already begun, so that call may still apply its change.
             "quarantined_calls=[\(calls.joined(separator: ","))]",
             "window_outstanding_recoveries=\(quarantine.windowOutstandingRecoveryCount)"
                 + "/\(MCPCodeStructureSettlementRegistry.outstandingRecoveryLimitPerWindow)",

@@ -65,6 +65,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         package let state: String
         package let handlerPhase: String?
         package let blockingAge: Duration?
+        /// False when a protected mutation's commit had already begun, so the call may still apply it.
+        package let revocationWon: Bool
     }
 
     /// A recovery the admitting call triggered, with the capacity in use after it.
@@ -146,9 +148,11 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         package let handlerPhaseAge: Duration?
         /// Set for a protected mutation: what it may claim was applied when the snapshot was taken.
         package let mutationState: DomainProtectedMutationState?
-        /// Set while the lease is quarantined: the recovery that quarantined it and how long ago.
+        /// Set while the lease is quarantined: the recovery that quarantined it, how long ago, and whether
+        /// its revocation won. A lost revocation means a protected mutation's commit had already begun.
         package let recoveryID: UUID?
         package let quarantineAge: Duration?
+        package let revocationWon: Bool?
     }
 
     package struct Diagnostics: Equatable, Sendable {
@@ -251,6 +255,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
     private struct Quarantine {
         let recoveryID: UUID
         let since: Duration
+        let revocationWon: Bool
     }
 
     private struct Entry {
@@ -280,10 +285,13 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
             state.blocksAdmission && quarantine == nil
         }
 
-        /// Neither revocation calls back into the registry, so the registry may call this under its lock.
-        func revoke(origin: MCPToolExecutionCancellationOrigin) {
+        /// Revokes the call's fence or commit arbiter and reports whether the revocation won. It loses only
+        /// when a protected mutation's commit had already begun; a fence revocation always wins. Neither
+        /// revocation calls back into the registry, so the registry may call this under its lock.
+        @discardableResult
+        func revoke(origin: MCPToolExecutionCancellationOrigin) -> Bool {
             fence?.revoke(origin: origin)
-            commitState?.revoke(origin: origin)
+            return commitState?.revoke(origin: origin) ?? true
         }
     }
 
@@ -352,16 +360,19 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                         ))
                     }
                     let recoveryID = UUID()
-                    for entry in escaped {
-                        entries[entry.leaseID]?.quarantine = Quarantine(recoveryID: recoveryID, since: now)
+                    var quarantined: [Entry] = []
+                    for var entry in escaped {
                         // Revoked before the lock is released: admission and dispatch are separate steps, so a
                         // call admitted after this recovery could otherwise publish before these calls are revoked.
-                        entry.revoke(origin: .windowRecovery)
+                        let revocationWon = entry.revoke(origin: .windowRecovery)
+                        entry.quarantine = Quarantine(recoveryID: recoveryID, since: now, revocationWon: revocationWon)
+                        entries[entry.leaseID] = entry
+                        quarantined.append(entry)
                     }
-                    recoveriesByWindowID[windowID, default: [:]][recoveryID] = Set(escaped.map(\.leaseID))
+                    recoveriesByWindowID[windowID, default: [:]][recoveryID] = Set(quarantined.map(\.leaseID))
                     recovery = RecoveryCandidate(
                         recoveryID: recoveryID,
-                        entries: escaped,
+                        entries: quarantined,
                         quarantine: quarantineUsage(windowID: windowID),
                         now: now
                     )
@@ -490,7 +501,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                     handlerPhaseAge: handlerPhaseAge,
                     mutationState: entry.commitState?.replyState,
                     recoveryID: entry.quarantine?.recoveryID,
-                    quarantineAge: entry.quarantine.map { Self.elapsed(since: $0.since, now: now) }
+                    quarantineAge: entry.quarantine.map { Self.elapsed(since: $0.since, now: now) },
+                    revocationWon: entry.quarantine?.revocationWon
                 )
             }
         return Diagnostics(
@@ -779,7 +791,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                     toolName: entry.toolName,
                     state: entry.state.diagnosticName,
                     handlerPhase: entry.handlerPhaseRecorder?.snapshot()?.phase.rawValue,
-                    blockingAge: entry.blockingSince.map { elapsed(since: $0, now: candidate.now) }
+                    blockingAge: entry.blockingSince.map { elapsed(since: $0, now: candidate.now) },
+                    revocationWon: entry.quarantine?.revocationWon ?? true
                 )
             }
         return Recovery(

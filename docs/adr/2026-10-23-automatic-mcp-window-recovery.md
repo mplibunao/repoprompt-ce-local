@@ -26,7 +26,7 @@ Releasing a stuck call's lease isn't safe on its own. The call is still running,
 
 ## Consequences
 
-- A capped window works again on its next call without a restart, and a recovered call's late work can't overwrite newer selection or prompt state.
+- A capped window works again on its next call without a restart. Once a recovered call's revocation wins, its late work can't overwrite newer selection or prompt state. A prompt change whose commit had already begun loses the revocation and may still apply. The recovery's log line and the DEBUG settlement snapshot record which calls lost.
 - Stuck calls stay tracked. A recurring fault fills the limits and brings back the "stop and report" error instead of hiding behind repeated recoveries.
 - The registry diverges from upstream's. A port that touches it must keep the quarantine path and the revocation checks.
 - Only publication sites with a fence or arbiter check refuse late work. A new publication site in work that a leased call starts needs its own check.

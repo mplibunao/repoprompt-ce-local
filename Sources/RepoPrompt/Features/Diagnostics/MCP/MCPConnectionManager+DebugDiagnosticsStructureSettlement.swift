@@ -81,6 +81,9 @@ import MCP
                 if let quarantineAge = lease.quarantineAge {
                     entry["quarantine_age_ms"] = quarantineAge.mcpMilliseconds
                 }
+                if let revocationWon = lease.revocationWon {
+                    entry["revocation_won"] = revocationWon
+                }
                 return entry
             }
             return debugDiagnosticsResult([
