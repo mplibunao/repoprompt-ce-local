@@ -98,6 +98,58 @@ import XCTest
             )
         }
 
+        func testDockWindowTakesNoEntryOnceTheDriverStarts() async throws {
+            let workspaces = try await makeSavedWorkspaces(count: 3)
+            let savedIDs = Set(workspaces.map(\.id))
+            let windowStates = try beginLaunchRestore()
+            // One hold per window the opener registers, in request order.
+            var openedHolds: [WindowRestoreHold] = []
+            let opener = installOpener {
+                let window = self.makeWindow()
+                openedHolds.append(self.holdRestore(of: window, onlyFor: savedIDs))
+                self.register(window)
+            }
+            let firstWindow = makeWindow()
+            let firstHold = holdRestore(of: firstWindow, onlyFor: savedIDs)
+            register(firstWindow)
+            windowStates.finishRestoreSessionLoadForTesting(entries: workspaces.map(entry(for:)))
+            _ = try await waitForHold(firstHold, "the first window's restore")
+            await firstHold.open()
+            try await waitUntil("the driver's first window to reach its restore hold") {
+                guard openedHolds.count == 1 else { return false }
+                return await openedHolds[0].workspaceID != nil
+            }
+
+            // Dock > New Window while the driver's window restores and the third entry is queued.
+            AppWindowOpener.shared.requestMainWindowFromDock()
+            let dockWindow = try XCTUnwrap(registeredWindows.last)
+            XCTAssertFalse(dockWindow.isWorkspaceRestoreInFlight, "the Dock window took a saved entry")
+
+            await openedHolds[0].open()
+            try await waitUntil("the driver to open a window for the third entry") {
+                guard openedHolds.count == 3 else { return false }
+                return await openedHolds[2].workspaceID != nil
+            }
+            let thirdTarget = await openedHolds[2].workspaceID
+            XCTAssertEqual(thirdTarget, workspaces[2].id)
+            await openedHolds[2].open()
+            try await waitUntil("every restore attempt to return") {
+                windowStates.allWindows.allSatisfy { !$0.isWorkspaceRestoreInFlight }
+            }
+
+            XCTAssertEqual(opener.requestCount, 3, "two windows for saved entries and one for the Dock")
+            XCTAssertEqual(windowStates.allWindows.count, workspaces.count + 1)
+            let restoredWindows = windowStates.allWindows.filter { $0 !== dockWindow }
+            XCTAssertEqual(
+                restoredWindows.map(\.workspaceManager.activeWorkspaceID),
+                workspaces.map { $0.id as UUID? }
+            )
+            XCTAssertFalse(
+                savedIDs.contains { $0 == dockWindow.workspaceManager.activeWorkspaceID },
+                "the Dock window restored a saved workspace"
+            )
+        }
+
         func testCaptureKeepsEverySavedEntryDuringRestore() async throws {
             let workspaces = try await makeSavedWorkspaces(count: 2)
             let order = [workspaces[0], workspaces[1], workspaces[0]]
