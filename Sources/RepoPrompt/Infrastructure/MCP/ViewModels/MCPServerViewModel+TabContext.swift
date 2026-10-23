@@ -4423,12 +4423,17 @@ extension MCPServerViewModel {
         if connectionStillOnResolvedTab, let latest {
             context = latest
         } else {
-            // The connection left the tab while the commit ran. Publish to the tab it resolved, starting
-            // from that tab's stored prompt, and leave the connection's new binding alone.
+            // The connection holds no snapshot of this tab: a one-shot context hint routed the call, or the
+            // connection moved to another tab while the commit ran. Publish to the resolved tab, starting
+            // from its current prompt, which is the editor's unsaved text when the tab is active, and leave
+            // the connection's binding alone.
             context = resolved
-            if let storedPrompt = workspaceManager?.composeTab(with: resolved.tabID)?.promptText {
-                context.promptText = storedPrompt
-            }
+            context.promptText = workspaceManager?.collectMCPTabContextComposeSnapshot(
+                tabID: resolved.tabID,
+                workspaceID: resolved.workspaceID,
+                captureActiveUIState: true,
+                flushPendingUISelection: false
+            )?.snapshot.promptText ?? resolved.promptText
         }
         let previousPrompt = context.promptText
         mutation(&context)

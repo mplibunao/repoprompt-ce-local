@@ -226,6 +226,56 @@ import XCTest
             }
         }
 
+        func testHintedPromptAppendKeepsUnsavedEditorText() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let editor = context.window.promptManager
+                do {
+                    // No binding: each call reaches the tab through a one-shot context hint, so the
+                    // connection holds no snapshot of the tab when the append commits.
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                    XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, context.tabID)
+                    let stored = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "stored", "context_id": context.tabID.uuidString]
+                    )
+                    XCTAssertFalse(stored.rawJSON.contains("\"isError\":true"), stored.rawJSON)
+                    XCTAssertNil(context.window.mcpServer.tabContextByConnectionID[endpoint.connectionID])
+                    // The editor holds text the stored tab doesn't have yet.
+                    manager.setSnapshotsSuspended(true, forTabID: context.tabID)
+                    editor.promptText = "unsaved"
+
+                    let appended = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: [
+                            "op": "append",
+                            "text": " then appended",
+                            "context_id": context.tabID.uuidString,
+                            "_rawJSON": true
+                        ]
+                    )
+                    XCTAssertFalse(appended.rawJSON.contains("\"isError\":true"), appended.rawJSON)
+                    XCTAssertTrue(appended.rawJSON.contains("unsaved then appended"), appended.rawJSON)
+                    XCTAssertEqual(manager.composeTab(with: context.tabID)?.promptText, "unsaved then appended")
+                    XCTAssertEqual(editor.promptText, "unsaved then appended")
+
+                    manager.setSnapshotsSuspended(false, forTabID: context.tabID)
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    manager.setSnapshotsSuspended(false, forTabID: context.tabID)
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
         func testPromptMutationTimedOutBeforeCommitIsNotAppliedAndDetaches() async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
@@ -3665,7 +3715,8 @@ import XCTest
 
         private static func prepareProtectedExportFixture(
             _ fixture: PersistentMCPTestFixture,
-            endpoint: PersistentMCPTestEndpoint
+            endpoint: PersistentMCPTestEndpoint,
+            bindTab: Bool = true
         ) async throws {
             let context = fixture.contextA
             let workspace = try XCTUnwrap(
@@ -3687,6 +3738,7 @@ import XCTest
                 )
             )
             try await activateWorkspace(for: context)
+            guard bindTab else { return }
             let bindResponse = try await endpoint.callTool(
                 name: "bind_context",
                 arguments: ["op": "bind", "context_id": context.tabID.uuidString]
