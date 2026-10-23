@@ -318,7 +318,8 @@ private extension Array {
     }
 }
 
-/// Why a request can't get a window for a workspace yet. Every reason is retryable.
+/// Why a request can't get a window for a workspace yet, with the text an agent reads for each.
+/// Every reason is retryable.
 enum WorkspaceWindowNotReadyReason {
     /// A window shows the workspace but is switching, closing, or still restoring.
     case windowNotReady
@@ -327,15 +328,27 @@ enum WorkspaceWindowNotReadyReason {
     /// A saved window for the workspace is still to reopen, or is restoring, at launch.
     case savedWindowReopening
 
+    /// No call reports when the launch restore finishes, so the text gives the agent a retry
+    /// interval and the longest wait to expect.
+    private static let launchRestoreRetryHint = "Retry in a few seconds. A large saved session can take a minute or more to reopen."
+
     func error(workspaceName: String) -> MCPError {
         switch self {
         case .windowNotReady:
-            MCPError.invalidRequest("Workspace '\(workspaceName)' has a window that is not ready or is closing. Wait for that operation to finish, then retry.")
+            MCPError.invalidRequest("Workspace '\(workspaceName)' has a window that is not ready or is closing. Retry in a few seconds.")
         case .savedWindowsLoading:
-            MCPError.invalidRequest("Saved windows are still loading after launch, so no window was opened for workspace '\(workspaceName)'. Wait a moment, then retry.")
+            MCPError.invalidRequest("Saved windows are still loading after launch, so no window was opened for workspace '\(workspaceName)'. \(Self.launchRestoreRetryHint)")
         case .savedWindowReopening:
-            MCPError.invalidRequest("Workspace '\(workspaceName)' has a saved window that is still reopening after launch, so no other window was opened. Wait for it to restore, then retry.")
+            MCPError.invalidRequest("Workspace '\(workspaceName)' has a saved window that is still reopening after launch, so no other window was opened. \(Self.launchRestoreRetryHint)")
         }
+    }
+
+    /// The refusal for a standard switch of a window whose launch restore hasn't returned.
+    static func restoringWindowError(windowID: Int, isSessionLoading: Bool) -> MCPError {
+        if isSessionLoading {
+            return MCPError.invalidRequest("Saved windows are still loading after launch, so window \(windowID) wasn't switched. \(launchRestoreRetryHint)")
+        }
+        return MCPError.invalidRequest("Window \(windowID) is still restoring its saved workspace. \(launchRestoreRetryHint)")
     }
 }
 
@@ -2711,16 +2724,15 @@ final class WindowRoutingService: Service {
                     // A window that took a saved entry switches itself to it once its workspace
                     // initializes. A caller's switch that ran first would be refused or overwritten.
                     // Until the saved session loads, any window may still be handed an entry.
-                    let restoreRefusal: String? = await MainActor.run {
+                    let restoreRefusal: MCPError? = await MainActor.run {
                         guard targetWindow.isWorkspaceRestoreInFlight else { return nil }
-                        let windowID = targetWindow.windowID
-                        if routingService.windowStates.isRestoreSessionLoadPending {
-                            return "Saved windows are still loading after launch, so window \(windowID) wasn't switched. Wait a moment, then retry."
-                        }
-                        return "Window \(windowID) is still restoring its saved workspace. Wait for the restore to finish, then retry."
+                        return WorkspaceWindowNotReadyReason.restoringWindowError(
+                            windowID: targetWindow.windowID,
+                            isSessionLoading: routingService.windowStates.isRestoreSessionLoadPending
+                        )
                     }
                     if let restoreRefusal {
-                        throw MCPError.invalidRequest(restoreRefusal)
+                        throw restoreRefusal
                     }
 
                     // Perform the switch on the target window
