@@ -1,3 +1,4 @@
+import Combine
 import Darwin
 import Foundation
 import JSONSchema
@@ -246,10 +247,15 @@ import XCTest
                         arguments: ["op": "set", "text": "stored", "context_id": context.tabID.uuidString]
                     )
                     XCTAssertFalse(stored.rawJSON.contains("\"isError\":true"), stored.rawJSON)
-                    XCTAssertNil(context.window.mcpServer.tabContextByConnectionID[endpoint.connectionID])
                     // The editor holds text the stored tab doesn't have yet.
                     manager.setSnapshotsSuspended(true, forTabID: context.tabID)
                     editor.promptText = "unsaved"
+                    let server = context.window.mcpServer
+                    let connectionID = endpoint.connectionID
+                    var snapshotPresentAtCommit: Bool?
+                    server.setBeforeTabContextMutationCommitForTesting { @MainActor in
+                        snapshotPresentAtCommit = server.tabContextByConnectionID[connectionID] != nil
+                    }
 
                     let appended = try await endpoint.callTool(
                         name: MCPWindowToolName.prompt,
@@ -260,6 +266,8 @@ import XCTest
                             "_rawJSON": true
                         ]
                     )
+                    server.setBeforeTabContextMutationCommitForTesting(nil)
+                    XCTAssertEqual(snapshotPresentAtCommit, false)
                     XCTAssertFalse(appended.rawJSON.contains("\"isError\":true"), appended.rawJSON)
                     XCTAssertTrue(appended.rawJSON.contains("unsaved then appended"), appended.rawJSON)
                     XCTAssertEqual(manager.composeTab(with: context.tabID)?.promptText, "unsaved then appended")
@@ -269,7 +277,160 @@ import XCTest
                     await fixture.cleanup()
                     try await fixture.assertCleanedUp()
                 } catch {
+                    context.window.mcpServer.setBeforeTabContextMutationCommitForTesting(nil)
                     manager.setSnapshotsSuspended(false, forTabID: context.tabID)
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testHintedPromptChangeDoesNotMirrorItsTabIntoALaterBinding() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let manager = context.window.workspaceManager
+                let otherTabID = UUID()
+                do {
+                    let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == context.workspaceID })
+                    manager.workspaces[workspaceIndex].composeTabs.append(ComposeTabState(id: otherTabID, name: "Other"))
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                    XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, context.tabID)
+
+                    // A hinted prompt change on tab A, then a binding to the other tab and a change there.
+                    let hinted = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "hinted text", "context_id": context.tabID.uuidString]
+                    )
+                    XCTAssertFalse(hinted.rawJSON.contains("\"isError\":true"), hinted.rawJSON)
+                    let bind = try await endpoint.callTool(
+                        name: "bind_context",
+                        arguments: ["op": "bind", "context_id": otherTabID.uuidString]
+                    )
+                    let bindText = try Self.toolResultText(bind)
+                    XCTAssertFalse(bindText.contains("Error:"), bindText)
+                    let bound = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "other tab text"]
+                    )
+                    XCTAssertFalse(bound.rawJSON.contains("\"isError\":true"), bound.rawJSON)
+                    XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.tabID, otherTabID)
+
+                    let watched = await Self.editActiveTabAndWaitForItsMirrors(
+                        manager: manager,
+                        editor: context.window.promptManager,
+                        tabID: context.tabID,
+                        text: "edited in tab A"
+                    )
+                    XCTAssertTrue(watched)
+                    let binding = server.tabContextByConnectionID[endpoint.connectionID]
+                    XCTAssertEqual(binding?.tabID, otherTabID)
+                    XCTAssertEqual(binding?.promptText, "other tab text")
+                    XCTAssertEqual(binding?.tabName, "Other")
+
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        func testHintedPromptChangeRevokedBeforeCommitDoesNotMirrorIntoABindingMadeWhileItWaited() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let manager = context.window.workspaceManager
+                let networkManager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let gate = MCPExecutionIgnoringCancellationGate()
+                let operationID = "hinted-prompt-revoked-\(UUID().uuidString)"
+                let otherTabID = UUID()
+                var responseTask: Task<PersistentMCPTestRPCResponse, Error>?
+                do {
+                    let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == context.workspaceID })
+                    manager.workspaces[workspaceIndex].composeTabs.append(
+                        ComposeTabState(id: otherTabID, name: "Other", promptText: "other tab text")
+                    )
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                    await networkManager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+
+                    // A hinted prompt change on tab A, held before its commit, ignoring cancellation, until its
+                    // deadline revokes it and the reply detaches.
+                    server.setBeforeTabContextMutationCommitForTesting {
+                        await gate.enterAndWait()
+                    }
+                    let activeResponseTask = Task {
+                        try await endpoint.callTool(
+                            name: MCPWindowToolName.prompt,
+                            arguments: [
+                                "op": "set",
+                                "text": "hinted text",
+                                "context_id": context.tabID.uuidString,
+                                "operation_id": operationID,
+                                "_rawJSON": true
+                            ]
+                        )
+                    }
+                    responseTask = activeResponseTask
+                    try await gate.waitUntilEntered(count: 1)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolExecutionDeadline)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolCancellationCleanupGrace)
+                    let response = try await activeResponseTask.value
+                    responseTask = nil
+                    XCTAssertEqual(try Self.toolResultObject(response)["mutation_state"] as? String, "not_applied")
+                    server.setBeforeTabContextMutationCommitForTesting(nil)
+
+                    // While the revoked call still waits, the connection binds the other tab.
+                    let bind = try await endpoint.callTool(
+                        name: "bind_context",
+                        arguments: ["op": "bind", "context_id": otherTabID.uuidString]
+                    )
+                    let bindText = try Self.toolResultText(bind)
+                    XCTAssertFalse(bindText.contains("Error:"), bindText)
+                    XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.promptText, "other tab text")
+
+                    await gate.release()
+                    let settled = await Self.waitUntil {
+                        guard let record = try? await Self.journalRecord(operationID: operationID) else { return false }
+                        return record.status.rawValue == DomainMutationJournalStatus.cancelledBeforeCommit.rawValue
+                    }
+                    XCTAssertTrue(settled)
+
+                    let watched = await Self.editActiveTabAndWaitForItsMirrors(
+                        manager: manager,
+                        editor: context.window.promptManager,
+                        tabID: context.tabID,
+                        text: "edited in tab A"
+                    )
+                    XCTAssertTrue(watched)
+                    let binding = server.tabContextByConnectionID[endpoint.connectionID]
+                    XCTAssertEqual(binding?.tabID, otherTabID)
+                    XCTAssertEqual(binding?.promptText, "other tab text")
+                    XCTAssertEqual(binding?.tabName, "Other")
+
+                    await networkManager.debugResetToolExecutionWatchdogEnvironment()
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    responseTask?.cancel()
+                    await gate.release()
+                    if let responseTask { _ = try? await responseTask.value }
+                    server.setBeforeTabContextMutationCommitForTesting(nil)
+                    await networkManager.debugResetToolExecutionWatchdogEnvironment()
                     await fixture.cleanup()
                     throw error
                 }
@@ -4123,6 +4284,33 @@ import XCTest
                 throw error
             }
             return held
+        }
+
+        @MainActor
+        final class WatchedPrompts {
+            var values: [String] = []
+        }
+
+        /// Edits the active tab and returns whether a watcher saw the edit. The watcher subscribes after the
+        /// connection's own subscriptions, so by the time it sees the edit, any mirror still attached to the
+        /// tab has handled it too.
+        @MainActor
+        private static func editActiveTabAndWaitForItsMirrors(
+            manager: WorkspaceManagerViewModel,
+            editor: PromptViewModel,
+            tabID: UUID,
+            text: String
+        ) async -> Bool {
+            let watchedPrompts = WatchedPrompts()
+            let watch = manager.composeTabSnapshotPublisher(for: tabID)
+                .receive(on: RunLoop.main)
+                .sink { snapshot in
+                    Task { @MainActor in watchedPrompts.values.append(snapshot.promptText) }
+                }
+            defer { watch.cancel() }
+            editor.promptText = text
+            manager.publishActiveComposeTabSnapshot(commitToMemory: true, touchModified: false)
+            return await waitUntil { watchedPrompts.values.contains(text) }
         }
 
         /// A second connection bound to window A's tab, as an Agent Mode run's connection is.

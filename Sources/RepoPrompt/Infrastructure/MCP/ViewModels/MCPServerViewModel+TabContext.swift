@@ -4408,12 +4408,22 @@ extension MCPServerViewModel {
         mutation: (inout TabContextSnapshot) -> Void
     ) async throws -> TabContextSnapshot {
         let (connectionID, resolved) = try await contextForCurrentRequest(toolName: toolName)
+        // A call routed by a one-shot context hint resolves without a snapshot on the connection, and
+        // resolving it started a compose-tab mirror.
+        let routedByHint = tabContextByConnectionID[connectionID] == nil
         #if DEBUG
             if let debugBeforeTabContextMutationCommitForTesting {
                 await debugBeforeTabContextMutationCommitForTesting()
             }
         #endif
-        try await MCPDomainMutationCommitContext.willCommit()
+        do {
+            try await MCPDomainMutationCommitContext.willCommit()
+        } catch {
+            if routedByHint {
+                endHintedMirror(connectionID: connectionID)
+            }
+            throw error
+        }
         // The commit suspends, and meanwhile the compose-tab mirror, read-file auto-selection, and
         // file-tool authority can update this connection's snapshot of the tab. Nothing from here to the
         // snapshot write suspends or throws, and the mutation applies to the resolved tab's latest snapshot.
@@ -4425,8 +4435,8 @@ extension MCPServerViewModel {
         } else {
             // The connection holds no snapshot of this tab: a one-shot context hint routed the call, or the
             // connection moved to another tab while the commit ran. Publish to the resolved tab, starting
-            // from its current prompt, which is the editor's unsaved text when the tab is active, and leave
-            // the connection's binding alone.
+            // from its current prompt, which is the editor's unsaved text when the tab is active. A newer
+            // binding stays as it is.
             context = resolved
             context.promptText = workspaceManager?.collectMCPTabContextComposeSnapshot(
                 tabID: resolved.tabID,
@@ -4451,6 +4461,17 @@ extension MCPServerViewModel {
         }
         if connectionStillOnResolvedTab {
             tabContextByConnectionID[connectionID] = context
+        } else if routedByHint {
+            if latest == nil, !Task.isCancelled {
+                // Record the hinted snapshot, as before the commit could suspend. The connection's next
+                // resolution releases it and ends the hint's mirror.
+                tabContextByConnectionID[connectionID] = context
+            } else {
+                // A cancelled call may belong to a connection torn down during the commit. A binding
+                // installed meanwhile already holds the connection's snapshot. Either way the call doesn't
+                // record one.
+                endHintedMirror(connectionID: connectionID)
+            }
         }
         if toolName == MCPWindowToolName.prompt {
             commitPromptContextToUI(context)
@@ -4462,6 +4483,18 @@ extension MCPServerViewModel {
 
     private static func isSameTab(_ lhs: TabContextSnapshot, _ rhs: TabContextSnapshot) -> Bool {
         lhs.tabID == rhs.tabID && lhs.windowID == rhs.windowID && lhs.workspaceID == rhs.workspaceID
+    }
+
+    /// Ends the compose-tab mirror that resolving a one-shot context hint started, for a hinted call that
+    /// doesn't record a snapshot on the connection. A release or a new binding ends the connection's mirror
+    /// only when it replaces a snapshot, so nothing else ends this one. A binding installed while the call
+    /// ran kept the hint's mirror instead of starting its own. The mirror restarts on that binding's tab.
+    @MainActor
+    private func endHintedMirror(connectionID: UUID) {
+        endMirroringForConnection(connectionID)
+        if let binding = tabContextByConnectionID[connectionID] {
+            beginMirroringForConnection(connectionID, context: binding)
+        }
     }
 
     @MainActor
