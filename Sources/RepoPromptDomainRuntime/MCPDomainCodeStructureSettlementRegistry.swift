@@ -516,15 +516,6 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         )
     }
 
-    /// Reports whether an already-released provider plus current blockers still
-    /// exhaust the bounded zombie capacity. This is observational only; leases
-    /// remain owned and transitioned by the existing admission/completion paths.
-    package func hasReleasedProviderLimitBlockage(windowID: Int) -> Bool {
-        lock.withLock {
-            Self.isCapped(entriesByWindowID[windowID, default: [:]])
-        }
-    }
-
     /// Whether the window is capped and recovering it wouldn't fit the limits, so its next call would be
     /// refused. Completions that refund a recovery end this even while the window stays capped.
     package func isRecoveryExhausted(windowID: Int) -> Bool {

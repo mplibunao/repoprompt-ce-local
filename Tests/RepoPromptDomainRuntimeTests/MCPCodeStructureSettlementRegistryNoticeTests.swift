@@ -17,7 +17,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         )
         XCTAssertEqual(firstSlot.resolveGraceExpiry(now: .zero), .detach)
         XCTAssertEqual(firstSlot.activateDetach(), .activated)
-        XCTAssertFalse(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
+        XCTAssertEqual(blockingAndReleasedCounts(registry, windowID: windowID), [1, 0])
 
         // The recovery horizon releases the first cancellation-ignoring provider
         // so one new call may run, but preserves that provider's exact lease.
@@ -27,19 +27,19 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
             invocationID: secondInvocationID,
             now: MCPCodeStructureSettlementRegistry.recoveryHorizon
         )
-        XCTAssertFalse(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
+        XCTAssertEqual(blockingAndReleasedCounts(registry, windowID: windowID), [0, 1])
 
         XCTAssertEqual(
             secondSlot.resolveGraceExpiry(now: MCPCodeStructureSettlementRegistry.recoveryHorizon),
             .detach
         )
         XCTAssertEqual(secondSlot.activateDetach(), .activated)
-        XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
+        XCTAssertEqual(blockingAndReleasedCounts(registry, windowID: windowID), [1, 1])
 
         // Completing the sibling frees the cap even though the released first
-        // provider remains tracked. The UI may clear its released-limit notice.
+        // provider remains tracked.
         XCTAssertEqual(secondSlot.recordCompletion(.success), .settleDetached)
-        XCTAssertFalse(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
+        XCTAssertEqual(blockingAndReleasedCounts(registry, windowID: windowID), [0, 1])
 
         // The original lease still owns and records its own eventual completion.
         XCTAssertEqual(firstSlot.recordCompletion(.success), .settleDetached)
@@ -161,7 +161,6 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         escape(stuckPrompt, at: .seconds(100))
         XCTAssertEqual(committingPrompt.resolveGraceExpiry(now: .seconds(100)), .forceDisconnect)
         XCTAssertEqual(failedPrompt.resolveGraceExpiry(now: .seconds(100)), .forceDisconnect)
-        XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
 
         let recovering = try admittedSlot(registry, windowID: windowID, now: .seconds(101))
         let recovery = try XCTUnwrap(recovering.recovery)
@@ -188,7 +187,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         XCTAssertNil(leases.first { $0.invocationID == liveRead.invocationID }?.revocationWon)
 
         // Quarantined calls no longer fence the window but stay tracked.
-        XCTAssertFalse(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
+        XCTAssertEqual(blockingAndReleasedCounts(registry, windowID: windowID), [0, 0])
         XCTAssertEqual(
             registry.snapshot(windowID: windowID),
             .init(activeCount: 6, detachedCount: 2, releasedCount: 0, quarantinedCount: 4)
@@ -239,7 +238,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         for slot in together {
             _ = slot.recordCompletion(.success)
         }
-        XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
+        XCTAssertEqual(blockingAndReleasedCounts(registry, windowID: windowID), [1, 1])
         XCTAssertFalse(registry.isRecoveryExhausted(windowID: windowID))
         XCTAssertEqual(
             try recover(registry, windowID: windowID, at: .seconds(402)).quarantine,
@@ -282,7 +281,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         for slot in closing {
             _ = slot.recordCompletion(.success)
         }
-        XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
+        XCTAssertEqual(blockingAndReleasedCounts(registry, windowID: windowID), [1, 1])
         XCTAssertFalse(registry.isRecoveryExhausted(windowID: windowID))
         XCTAssertEqual(
             try recover(registry, windowID: windowID, at: .seconds(103)).quarantine,
@@ -348,6 +347,12 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         }
     }
 
+    /// The window's blocking and released lease counts, which decide whether it's capped.
+    private func blockingAndReleasedCounts(_ registry: MCPCodeStructureSettlementRegistry, windowID: Int) -> [Int] {
+        let diagnostics = registry.diagnostics(windowID: windowID, now: .zero)
+        return [diagnostics.blockingCount, diagnostics.counts.releasedCount]
+    }
+
     /// Lets the call's deadline and grace pass while it ignores cancellation, so it detaches.
     private func escape(
         _ slot: MCPCodeStructureSettlementRegistry.Slot,
@@ -370,7 +375,6 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         escape(released, at: start + .seconds(35))
         let blocking = try admittedSlot(registry, windowID: windowID, now: start + .seconds(65))
         escape(blocking, at: start + .seconds(100))
-        XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
         return [released, blocking]
     }
 
@@ -388,7 +392,6 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         for slot in slots.dropFirst() {
             XCTAssertEqual(slot.resolveGraceExpiry(now: start + .seconds(35)), .forceDisconnect)
         }
-        XCTAssertTrue(registry.hasReleasedProviderLimitBlockage(windowID: windowID))
         return slots
     }
 
