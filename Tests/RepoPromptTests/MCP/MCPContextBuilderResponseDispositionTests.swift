@@ -5,14 +5,14 @@ final class MCPContextBuilderResponseDispositionTests: XCTestCase {
     func testPlanOrQuestionIsNotSentWhenDiscoveryLeftTheSelectionEmpty() {
         for responseType in [ContextBuilderResponseType.plan, .question] {
             let empty = disposition(responseType, selection: StoredSelection())
-            if case let .failed(message) = empty {
+            if case let .contextOnlyFailed(message) = empty {
                 XCTAssertEqual(
                     message,
                     "context_builder_discovery_empty: Context Builder discovery finished with no files selected, "
                         + "so the \(responseType.rawValue) request was not sent."
                 )
             } else {
-                XCTFail("\(responseType) with an empty selection: expected failed, got \(empty)")
+                XCTFail("\(responseType) with an empty selection: expected contextOnlyFailed, got \(empty)")
             }
 
             let slicesOnly = disposition(
