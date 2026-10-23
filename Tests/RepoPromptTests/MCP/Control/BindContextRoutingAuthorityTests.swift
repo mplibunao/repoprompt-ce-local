@@ -596,6 +596,12 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
             let reopening = "has a saved window that is still reopening after launch"
 
             await assertNotReady(queued, inNewWindow: true, expecting: loading, "a new window while the saved session is loading")
+            await assertNotReady(
+                queued,
+                inNewWindow: false,
+                expecting: "\(loading), so window \(window.windowID) wasn't switched",
+                "switching a window while the saved session is loading"
+            )
 
             windowStates.finishRestoreSessionLoadForTesting(entries: [restoring, queued].map { workspace in
                 WindowSessionEntry(

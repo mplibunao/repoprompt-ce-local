@@ -2710,11 +2710,17 @@ final class WindowRoutingService: Service {
 
                     // A window that took a saved entry switches itself to it once its workspace
                     // initializes. A caller's switch that ran first would be refused or overwritten.
-                    let restoringWindowID = await MainActor.run {
-                        targetWindow.isWorkspaceRestoreInFlight ? targetWindow.windowID : nil
+                    // Until the saved session loads, any window may still be handed an entry.
+                    let restoreRefusal: String? = await MainActor.run {
+                        guard targetWindow.isWorkspaceRestoreInFlight else { return nil }
+                        let windowID = targetWindow.windowID
+                        if routingService.windowStates.isRestoreSessionLoadPending {
+                            return "Saved windows are still loading after launch, so window \(windowID) wasn't switched. Wait a moment, then retry."
+                        }
+                        return "Window \(windowID) is still restoring its saved workspace. Wait for the restore to finish, then retry."
                     }
-                    if let restoringWindowID {
-                        throw MCPError.invalidRequest("Window \(restoringWindowID) is still restoring its saved workspace. Wait for the restore to finish, then retry.")
+                    if let restoreRefusal {
+                        throw MCPError.invalidRequest(restoreRefusal)
                     }
 
                     // Perform the switch on the target window
