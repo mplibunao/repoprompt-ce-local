@@ -93,6 +93,12 @@ public enum MCPTimeoutPolicy {
         boundedToolFreshnessWaitTimeoutSeconds
     )
 
+    /// An explicit path request that has to wait for another mutation of the same root to finish
+    /// its codemap fence gives up after this bound and returns the retryable freshness reply. The
+    /// fence it waited on stays in place.
+    public static let codemapFenceWaitTimeoutSeconds = 20
+    public static let codemapFenceWaitTimeout: Duration = .seconds(codemapFenceWaitTimeoutSeconds)
+
     public static let workspaceReadinessWaitTimeoutSeconds = 30
     public static let workspaceReadinessWaitTimeout: Duration = .seconds(workspaceReadinessWaitTimeoutSeconds)
 
