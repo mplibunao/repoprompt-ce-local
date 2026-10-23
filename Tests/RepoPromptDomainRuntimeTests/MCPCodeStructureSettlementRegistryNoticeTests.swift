@@ -84,14 +84,21 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         XCTAssertEqual(blocking.resolveGraceExpiry(now: .seconds(100)), .detach)
         XCTAssertEqual(blocking.activateDetach(), .activated)
 
-        guard case let .busy(busy) = registry.admit(
+        let busy: MCPCodeStructureSettlementRegistry.BusyContext
+        switch registry.admit(
             windowID: windowID,
             connectionID: UUID(),
             invocationID: UUID(),
             toolName: "read_file",
             now: .seconds(101)
-        ) else {
-            return XCTFail("expected the capped window to reject admission")
+        ) {
+        case let .busy(context):
+            busy = context
+        case let .admitted(slot):
+            XCTFail("expected the capped window to reject admission")
+            // An unclosed slot trips the registry's leak assertion, which would hide this failure.
+            _ = slot.closeBeforeExecutionExit()
+            return
         }
         XCTAssertEqual(busy.reason, .releasedProviderLimitReached)
         XCTAssertEqual(busy.originInvocationID, blocking.invocationID)
@@ -317,17 +324,21 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        guard case let .busy(busy) = registry.admit(
+        switch registry.admit(
             windowID: windowID,
             connectionID: UUID(),
             invocationID: UUID(),
             toolName: "read_file",
             now: now
-        ) else {
-            return XCTFail("expected the cap to reject the call", file: file, line: line)
+        ) {
+        case let .busy(busy):
+            XCTAssertEqual(busy.reason, .releasedProviderLimitReached, file: file, line: line)
+            XCTAssertEqual(busy.quarantine, quarantine, file: file, line: line)
+        case let .admitted(slot):
+            XCTFail("expected the cap to reject the call", file: file, line: line)
+            // An unclosed slot trips the registry's leak assertion, which would hide this failure.
+            _ = slot.closeBeforeExecutionExit()
         }
-        XCTAssertEqual(busy.reason, .releasedProviderLimitReached, file: file, line: line)
-        XCTAssertEqual(busy.quarantine, quarantine, file: file, line: line)
     }
 
     private func admittedSlot(
