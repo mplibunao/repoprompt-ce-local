@@ -623,6 +623,15 @@ package enum MCPDomainMutationCommitContext {
         controller?.operationID
     }
 
+    /// The operation identity a provider reports: the protected wrapper's when one runs, else the same
+    /// rule applied to the arguments and the invocation.
+    package static func operationID(forArguments arguments: [String: Value]) -> String? {
+        if let operationID { return operationID }
+        let supplied = arguments["operation_id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let supplied, !supplied.isEmpty { return supplied }
+        return MCPDomainInvocationSecurityContext.current?.invocationID.uuidString
+    }
+
     package static func admitPhysicalTargets(
         _ paths: [String],
         rootMappings: [DomainMutationPhysicalRootMapping]

@@ -130,13 +130,7 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
     }
 
     private func executeApplyEdits(args: [String: Value]) async throws -> EditSummary {
-        // The protected-mutation wrapper owns the identity: the supplied operation_id, else the server
-        // invocation ID. The fallbacks serve direct calls that bypass the wrapper.
-        let suppliedOperationID = args["operation_id"]?.stringValue?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let operationID = MCPDomainMutationCommitContext.operationID
-            ?? suppliedOperationID.flatMap { $0.isEmpty ? nil : $0 }
-            ?? MCPDomainInvocationSecurityContext.current?.invocationID.uuidString
+        let operationID = MCPDomainMutationCommitContext.operationID(forArguments: args)
         var requestPath: String? = nil
         var requestForRetryableFailure: ApplyEditsRequest?
         do {

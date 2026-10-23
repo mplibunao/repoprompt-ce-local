@@ -238,9 +238,9 @@ final class MCPFileToolProvider: MCPAppToolProviding {
             let content = args["content"]?.stringValue
             let newPath = args["new_path"]?.stringValue
             let ifExists = args["if_exists"]?.stringValue?.lowercased() ?? "error"
-            let suppliedOperationID = args["operation_id"]?.stringValue?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let operationID = suppliedOperationID.flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
+            // One identity with the journal, the log, and a timeout reply. A direct call outside an MCP
+            // invocation gets a fresh one.
+            let operationID = MCPDomainMutationCommitContext.operationID(forArguments: args) ?? UUID().uuidString
             MCPToolExecutionHandlerPhaseContext.report(.fileActionsPreMutationChecks, transition: .completed)
             try Task.checkCancellation()
 
