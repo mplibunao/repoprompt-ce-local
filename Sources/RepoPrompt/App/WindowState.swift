@@ -152,6 +152,11 @@ class WindowState: ObservableObject {
     /// Called whenever `isCurrentlyFocused` changes.
     var onFocusChanged: ((Bool) -> Void)?
 
+    /// One-shot hook the launch restore sets on a window it opened, to hand key focus back to the
+    /// window in use. It runs when this window attaches if opening made it key, and is cleared
+    /// either way, so a later click on this window is never undone.
+    var onAttachedAsKey: (() -> Void)?
+
     // MARK: - Per-Window View Models
 
     let workspaceFileContextStore: WorkspaceFileContextStore
@@ -310,6 +315,7 @@ class WindowState: ObservableObject {
         }
         closeCoordinator.beginClose()
         onFocusChanged = nil
+        onAttachedAsKey = nil
         removeFocusObservers()
         pendingWindowTitleUpdateTask?.cancel()
         pendingWindowTitleUpdateTask = nil
@@ -614,6 +620,19 @@ class WindowState: ObservableObject {
         requestWindowTitleUpdate(reason: .windowAttached)
         // Install Agent mode titlebar accessory if requested before window was attached
         applyAgentTitlebarAccessoryIfPossible()
+        // Opening the window makes it key before it attaches, so attachment is where that key
+        // change can be told apart from a later click.
+        resolveAttachedAsKeyHook()
+    }
+
+    /// Runs `onAttachedAsKey` if this window is attached and key, then clears it. Does nothing
+    /// before the window attaches.
+    func resolveAttachedAsKeyHook() {
+        guard let window = nsWindow, let hook = onAttachedAsKey else { return }
+        onAttachedAsKey = nil
+        if window.isKeyWindow {
+            hook()
+        }
     }
 
     private func configureWindowChrome(for window: NSWindow) {

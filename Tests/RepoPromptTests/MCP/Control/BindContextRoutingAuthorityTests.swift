@@ -510,6 +510,135 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
                 )
             }
         }
+
+        @MainActor
+        func testSwitchDuringLaunchRestoreReturnsNotReady() async throws {
+            // The handler resolves its target from the disk snapshot, so both workspaces go through
+            // a workspace manager's persistence.
+            let persister = makeWindowInstance()
+            await persister.workspaceManager.awaitInitialized()
+            let announcements = WorkspaceListChangeCounter()
+            let restoring = persister.workspaceManager.createWorkspace(name: "Restoring \(UUID().uuidString)", repoPaths: [])
+            let queued = persister.workspaceManager.createWorkspace(name: "Queued \(UUID().uuidString)", repoPaths: [])
+            // Teardown blocks run in reverse order, so this runs after the window leaves the restored
+            // workspace below.
+            addTeardownBlock { @MainActor in
+                for workspace in [restoring, queued] {
+                    let outcome = await persister.workspaceManager.deleteWorkspaceAsync(workspace)
+                    XCTAssertEqual(outcome, .deleted)
+                }
+            }
+            // Created after both creations are announced, so its catalog can resolve the restore entry
+            // and no late catalog reload undoes the restore's switch.
+            let announced = await MCPWindowTestSupport.waitUntil(timeout: .seconds(10)) { announcements.count >= 2 }
+            guard announced else { throw BindContextRoutingFixtureError.workspacePersistenceTimedOut }
+            let window = makeWindowInstance()
+            await window.workspaceManager.awaitInitialized()
+            _ = installWindows([window])
+            try await AppGlobalMCPServiceComposition.shared.ensureRegistered()
+            let toolsEnabled = await window.mcpServer.setWindowToolsEnabled(true)
+            XCTAssertTrue(toolsEnabled)
+            addTeardownBlock { @MainActor in
+                _ = await window.mcpServer.setWindowToolsEnabled(false)
+            }
+            let connection = try await makeProductionMCPConnection()
+            addTeardownBlock { await connection.cleanup() }
+
+            // With no opener, neither the launch restore nor a routed request can open a window, so
+            // an unguarded request fails with "Failed to open new window" instead.
+            AppWindowOpener.shared.resetForTesting()
+            let windowStates = WindowStatesManager.shared
+            let restoreHold = WindowRestoreHold()
+            window.workspaceManager.setWorkspaceActivationLeaseDidAcquireHandlerForTesting { workspaceID in
+                guard workspaceID == restoring.id else { return }
+                await restoreHold.enterAndWait(workspaceID: workspaceID)
+            }
+            windowStates.beginRestoreSessionLoadForTesting()
+            addTeardownBlock { @MainActor in
+                windowStates.resetLaunchRestoreForTesting()
+                window.workspaceManager.setWorkspaceActivationLeaseDidAcquireHandlerForTesting(nil)
+                await restoreHold.open()
+                _ = await MCPWindowTestSupport.waitUntil { !window.isWorkspaceRestoreInFlight }
+                // Deletion is refused while a window shows the workspace.
+                if let systemWorkspace = window.workspaceManager.workspaces.first(where: \.isSystemWorkspace) {
+                    _ = await window.workspaceManager.switchWorkspace(
+                        to: systemWorkspace,
+                        saveState: false,
+                        reason: "bindContextRoutingAuthorityTest.teardown"
+                    )
+                }
+            }
+
+            let shownWorkspaceID = window.workspaceManager.activeWorkspaceID
+            func assertNotReady(
+                _ workspace: WorkspaceModel,
+                inNewWindow: Bool,
+                expecting expectedMessage: String,
+                _ label: String
+            ) async {
+                var arguments: [String: Value] = [
+                    "action": .string("switch"),
+                    "workspace": .string(workspace.id.uuidString),
+                    "_rawJSON": .bool(true)
+                ]
+                if inNewWindow {
+                    arguments["open_in_new_window"] = .bool(true)
+                } else {
+                    arguments["window_id"] = .int(window.windowID)
+                }
+                let result = await callTool(connection, name: "manage_workspaces", arguments: arguments)
+                XCTAssertTrue(result.isError, "\(label): \(result.text)")
+                XCTAssertTrue(result.text.contains(expectedMessage), "\(label): \(result.text)")
+                XCTAssertEqual(windowStates.allWindows.map(\.windowID), [window.windowID], label)
+                XCTAssertEqual(window.workspaceManager.activeWorkspaceID, shownWorkspaceID, label)
+            }
+            let loading = "Saved windows are still loading after launch"
+            let reopening = "has a saved window that is still reopening after launch"
+
+            await assertNotReady(queued, inNewWindow: true, expecting: loading, "a new window while the saved session is loading")
+            await assertNotReady(
+                queued,
+                inNewWindow: false,
+                expecting: "\(loading), so window \(window.windowID) wasn't switched",
+                "switching a window while the saved session is loading"
+            )
+
+            windowStates.finishRestoreSessionLoadForTesting(entries: [restoring, queued].map { workspace in
+                WindowSessionEntry(
+                    windowKind: .standard,
+                    workspaceID: workspace.id,
+                    workspaceName: workspace.name,
+                    isSystemWorkspace: false,
+                    isEphemeral: false,
+                    primaryRepoPath: nil,
+                    lastFocused: false,
+                    workspaceInstanceNumber: nil
+                )
+            })
+            let restoreHeld = await MCPWindowTestSupport.waitUntil(timeout: .seconds(10)) {
+                await restoreHold.workspaceID != nil
+            }
+            XCTAssertTrue(restoreHeld, "the window's restore did not reach its hold")
+
+            await assertNotReady(
+                queued,
+                inNewWindow: true,
+                expecting: reopening,
+                "a new window with the workspace's saved entry queued"
+            )
+            await assertNotReady(
+                restoring,
+                inNewWindow: true,
+                expecting: reopening,
+                "a new window with a window restoring the workspace"
+            )
+            await assertNotReady(
+                queued,
+                inNewWindow: false,
+                expecting: "Window \(window.windowID) is still restoring its saved workspace",
+                "switching the window that is restoring"
+            )
+        }
     #endif
 
     #if DEBUG
