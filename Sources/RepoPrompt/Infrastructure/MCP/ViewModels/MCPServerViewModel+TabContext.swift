@@ -4415,8 +4415,8 @@ extension MCPServerViewModel {
         #endif
         try await MCPDomainMutationCommitContext.willCommit()
         // The commit suspends, and meanwhile the compose-tab mirror, read-file auto-selection, and
-        // file-tool authority can update this connection's snapshot of the tab. From here to the end
-        // nothing suspends or throws, and the mutation applies to the resolved tab's latest snapshot.
+        // file-tool authority can update this connection's snapshot of the tab. Nothing from here to the
+        // snapshot write suspends or throws, and the mutation applies to the resolved tab's latest snapshot.
         let latest = tabContextByConnectionID[connectionID]
         let connectionStillOnResolvedTab = latest.map { Self.isSameTab($0, resolved) } ?? false
         var context: TabContextSnapshot
