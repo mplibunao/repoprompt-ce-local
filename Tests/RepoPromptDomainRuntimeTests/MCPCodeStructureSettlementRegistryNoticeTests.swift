@@ -387,8 +387,7 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         at start: Duration
     ) throws -> [MCPCodeStructureSettlementRegistry.Slot] {
         let slots = try (0 ..< count).map { _ in try admittedSlot(registry, windowID: windowID, now: start) }
-        XCTAssertEqual(slots[0].resolveGraceExpiry(now: start + .seconds(35)), .detach)
-        XCTAssertEqual(slots[0].activateDetach(), .activated)
+        escape(slots[0], at: start + .seconds(35))
         for slot in slots.dropFirst() {
             XCTAssertEqual(slot.resolveGraceExpiry(now: start + .seconds(35)), .forceDisconnect)
         }

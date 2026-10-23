@@ -1581,7 +1581,7 @@ actor ServerNetworkManager {
 
     /// Whether the registry still shows what a notice reports: a recovery notice lasts while the window
     /// has quarantined calls, and an exhaustion notice while the window is capped and a recovery wouldn't fit.
-    private nonisolated static func isCodeStructureSettlementNoticeCurrent(
+    private nonisolated static func isCodeStructureSettlementLimitNoticeCurrent(
         _ kind: MCPServerViewModel.CodeStructureSettlementLimitNotice.Kind,
         windowID: Int,
         registry: MCPCodeStructureSettlementRegistry
@@ -1596,7 +1596,7 @@ actor ServerNetworkManager {
 
     /// The notice the registry's state calls for: the exhaustion warning while the window is capped and a
     /// recovery wouldn't fit, the window's latest recovery while it has quarantined calls, and otherwise none.
-    private func codeStructureSettlementNoticeKind(
+    private func codeStructureSettlementLimitNoticeKind(
         windowID: Int
     ) -> MCPServerViewModel.CodeStructureSettlementLimitNotice.Kind? {
         let registry = codeStructureSettlementRegistry
@@ -1616,7 +1616,7 @@ actor ServerNetworkManager {
     private func reconcileCodeStructureSettlementLimitNotice(windowID: Int) async {
         let current = codeStructureSettlementLimitNoticeByWindowID[windowID]
         guard current != nil || latestCodeStructureRecoveryNoticeByWindowID[windowID] != nil else { return }
-        let wanted = codeStructureSettlementNoticeKind(windowID: windowID)
+        let wanted = codeStructureSettlementLimitNoticeKind(windowID: windowID)
         guard wanted != current?.kind else { return }
         if let wanted {
             let projection = recordCodeStructureSettlementLimitNotice(windowID: windowID, kind: wanted)
@@ -1635,7 +1635,7 @@ actor ServerNetworkManager {
     ) async {
         let registry = codeStructureSettlementRegistry
         let didPresent = await MainActor.run {
-            guard Self.isCodeStructureSettlementNoticeCurrent(
+            guard Self.isCodeStructureSettlementLimitNoticeCurrent(
                 projection.kind,
                 windowID: windowID,
                 registry: registry
