@@ -1661,6 +1661,14 @@ actor ServerNetworkManager {
         codeStructureSettlementLimitNoticeByWindowID.removeValue(forKey: windowID)
     }
 
+    /// A settlement can refund app-wide quarantine room, which ends another window's exhaustion warning, so
+    /// every window showing a notice is re-derived along with the settled call's own window.
+    private func reconcileCodeStructureSettlementLimitNoticesAfterSettlement(windowID: Int) async {
+        for noticeWindowID in Set(codeStructureSettlementLimitNoticeByWindowID.keys).union([windowID]) {
+            await reconcileCodeStructureSettlementLimitNotice(windowID: noticeWindowID)
+        }
+    }
+
     private func clearCodeStructureSettlementLimitNotice(
         windowID: Int,
         projection: CodeStructureSettlementLimitNoticeProjection
@@ -13189,7 +13197,9 @@ actor ServerNetworkManager {
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
                                         if let slot = settlementAdmission.slot {
-                                            await self.reconcileCodeStructureSettlementLimitNotice(windowID: slot.windowID)
+                                            await self.reconcileCodeStructureSettlementLimitNoticesAfterSettlement(
+                                                windowID: slot.windowID
+                                            )
                                         }
                                         let outcome = providerSettlement.rawValue
                                         await emitExecutionTrace(.handlerCompleted, cancellationOutcome: outcome)
@@ -13219,7 +13229,9 @@ actor ServerNetworkManager {
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
                                         if let slot = settlementAdmission.slot {
-                                            await self.reconcileCodeStructureSettlementLimitNotice(windowID: slot.windowID)
+                                            await self.reconcileCodeStructureSettlementLimitNoticesAfterSettlement(
+                                                windowID: slot.windowID
+                                            )
                                         }
                                         await emitExecutionTrace(
                                             .detachedSettled,
@@ -13258,7 +13270,9 @@ actor ServerNetworkManager {
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
                                         if let slot = settlementAdmission.slot {
-                                            await self.reconcileCodeStructureSettlementLimitNotice(windowID: slot.windowID)
+                                            await self.reconcileCodeStructureSettlementLimitNoticesAfterSettlement(
+                                                windowID: slot.windowID
+                                            )
                                         }
                                         await emitExecutionTrace(
                                             .handlerCompleted,
@@ -13287,7 +13301,9 @@ actor ServerNetworkManager {
                                         _ providerSettlement: MCPToolExecutionSettlement
                                     ) async {
                                         if let slot = settlementAdmission.slot {
-                                            await self.reconcileCodeStructureSettlementLimitNotice(windowID: slot.windowID)
+                                            await self.reconcileCodeStructureSettlementLimitNoticesAfterSettlement(
+                                                windowID: slot.windowID
+                                            )
                                         }
                                         await emitExecutionTrace(
                                             .lateSettled,
