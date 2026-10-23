@@ -217,7 +217,7 @@ enum MCPToolExecutionTracer {
     /// Release builds lose the stderr line when the app is launched normally, so escalations also
     /// go to the unified log. Every field is a tool name, phase, identifier, count, or duration, and
     /// the client-supplied request and operation IDs are quoted and escaped.
-    private static let log = Logger(subsystem: "com.repoprompt.mcp", category: "ToolExecution")
+    fileprivate static let log = Logger(subsystem: "com.repoprompt.mcp", category: "ToolExecution")
 
     static var successTracingEnabled: Bool {
         #if DEBUG
@@ -281,7 +281,6 @@ final class MCPSettlementCapRejectionLog: @unchecked Sendable {
         var suppressed: Int
     }
 
-    private static let log = Logger(subsystem: "com.repoprompt.mcp", category: "ToolExecution")
     private let repeatInterval: Duration
     private let clock = ContinuousClock()
     private let lock = NSLock()
@@ -322,7 +321,7 @@ final class MCPSettlementCapRejectionLog: @unchecked Sendable {
             "released_count=\(context.releasedProviderCount)",
             "suppressed_since_last=\(suppressed)"
         ].joined(separator: " ")
-        Self.log.error("[MCPToolExecution] \(line, privacy: .public)")
+        MCPToolExecutionTracer.log.error("[MCPToolExecution] \(line, privacy: .public)")
     }
 }
 

@@ -1326,31 +1326,6 @@ actor ServerNetworkManager {
         return (message, metadata)
     }
 
-    static func windowExclusiveAdmissionTimeoutResult(
-        rawJSON: Bool,
-        toolName: String,
-        stage: CallAdmissionStage,
-        invocationID: UUID,
-        operationID: String,
-        windowID: Int? = nil,
-        holderToolName: String? = nil
-    ) -> CallTool.Result {
-        let timeout = windowExclusiveAdmissionTimeout(
-            toolName: toolName,
-            stage: stage,
-            invocationID: invocationID,
-            operationID: operationID,
-            windowID: windowID,
-            holderToolName: holderToolName
-        )
-        return executionContractToolErrorResult(
-            rawJSON: rawJSON,
-            code: "tool_execution_admission_timeout",
-            message: timeout.message,
-            metadata: timeout.metadata
-        )
-    }
-
     static func executionContractToolErrorResult(
         rawJSON: Bool,
         code: String,
@@ -11885,14 +11860,19 @@ actor ServerNetworkManager {
                         try windowExclusiveAdmissionDeadline.check()
                         return nil
                     } catch {
-                        return Self.windowExclusiveAdmissionTimeoutResult(
-                            rawJSON: capturedRawJSON,
+                        let timeout = Self.windowExclusiveAdmissionTimeout(
                             toolName: toolName,
                             stage: stage,
                             invocationID: invocationID,
                             operationID: resolvedOperationID,
                             windowID: windowID,
                             holderToolName: windowID.flatMap { self.windowExclusiveHolders.toolName(windowID: $0) }
+                        )
+                        return Self.executionContractToolErrorResult(
+                            rawJSON: capturedRawJSON,
+                            code: "tool_execution_admission_timeout",
+                            message: timeout.message,
+                            metadata: timeout.metadata
                         )
                     }
                 }
@@ -13037,6 +13017,7 @@ actor ServerNetworkManager {
                                                 self.codeStructureSettlementRegistry.diagnostics(windowID: $0, now: now)
                                             }
                                             : nil
+                                        let tracedMutation = phase.isAlwaysEmitted ? windowMutationObservation : nil
                                         MCPToolExecutionTracer.emit(MCPToolExecutionTraceEvent(
                                             toolName: toolName,
                                             operationIdentity: evidenceOperationIdentity,
@@ -13061,10 +13042,8 @@ actor ServerNetworkManager {
                                             windowID: traceWindowID,
                                             blockingProviderCount: settlementPopulation?.blockingCount,
                                             releasedProviderCount: settlementPopulation?.counts.releasedCount,
-                                            mutationState: phase.isAlwaysEmitted ? windowMutationObservation?.state : nil,
-                                            mutationOperationID: phase.isAlwaysEmitted
-                                                ? windowMutationObservation?.reportedOrResolvedOperationID
-                                                : nil
+                                            mutationState: tracedMutation?.state,
+                                            mutationOperationID: tracedMutation?.reportedOrResolvedOperationID
                                         ))
                                     }
 

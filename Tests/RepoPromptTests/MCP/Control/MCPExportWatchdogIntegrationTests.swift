@@ -404,10 +404,7 @@ import XCTest
                     XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.promptText, "other tab text")
 
                     await gate.release()
-                    let settled = await Self.waitUntil {
-                        guard let record = try? await Self.journalRecord(operationID: operationID) else { return false }
-                        return record.status.rawValue == DomainMutationJournalStatus.cancelledBeforeCommit.rawValue
-                    }
+                    let settled = await Self.waitForJournalStatus(.cancelledBeforeCommit, operationID: operationID)
                     XCTAssertTrue(settled)
 
                     let watched = await Self.editActiveTabAndWaitForItsMirrors(
@@ -511,10 +508,7 @@ import XCTest
                     // Released, the escaped provider finds its commit revoked: the journal records a
                     // before-commit cancellation and the prompt keeps its earlier text.
                     await gate.release()
-                    let settled = await Self.waitUntil {
-                        guard let record = try? await Self.journalRecord(operationID: operationID) else { return false }
-                        return record.status.rawValue == DomainMutationJournalStatus.cancelledBeforeCommit.rawValue
-                    }
+                    let settled = await Self.waitForJournalStatus(.cancelledBeforeCommit, operationID: operationID)
                     XCTAssertTrue(settled)
                     XCTAssertEqual(
                         context.window.workspaceManager.composeTab(with: context.tabID)?.promptText,
@@ -635,12 +629,7 @@ import XCTest
 
                     // Released, the escaped edit finds its commit revoked and writes nothing.
                     await held.commitGate.release()
-                    let settled = await Self.waitUntil {
-                        guard let record = try? await Self.journalRecord(operationID: held.operationID) else {
-                            return false
-                        }
-                        return record.status.rawValue == DomainMutationJournalStatus.cancelledBeforeCommit.rawValue
-                    }
+                    let settled = await Self.waitForJournalStatus(.cancelledBeforeCommit, operationID: held.operationID)
                     XCTAssertTrue(settled)
                     XCTAssertEqual(try String(contentsOf: fixture.contextA.fileURL, encoding: .utf8), held.originalText)
 
@@ -740,12 +729,7 @@ import XCTest
                     XCTAssertTrue(cancellationTraced)
 
                     await commitGate.release()
-                    let settled = await Self.waitUntil {
-                        guard let record = try? await Self.journalRecord(operationID: inFlightOperationID) else {
-                            return false
-                        }
-                        return record.status.rawValue == DomainMutationJournalStatus.cancelledBeforeCommit.rawValue
-                    }
+                    let settled = await Self.waitForJournalStatus(.cancelledBeforeCommit, operationID: inFlightOperationID)
                     XCTAssertTrue(settled)
                     let journal = try await AppDomainRuntimeComposition.shared.runtime.mutationJournal.snapshot()
                     XCTAssertFalse(journal.recordSnapshots.contains { $0.operationID == queuedOperationID })
@@ -4192,6 +4176,16 @@ import XCTest
                 snapshot.recordSnapshots.last { $0.operationID == operationID },
                 "Missing mutation journal record for \(operationID)"
             )
+        }
+
+        private static func waitForJournalStatus(
+            _ status: DomainMutationJournalStatus,
+            operationID: String
+        ) async -> Bool {
+            await waitUntil {
+                guard let record = try? await journalRecord(operationID: operationID) else { return false }
+                return record.status.rawValue == status.rawValue
+            }
         }
 
         private static func activateWorkspace(for context: PersistentMCPTestContext) async throws {
