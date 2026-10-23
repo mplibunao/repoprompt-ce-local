@@ -940,6 +940,10 @@ final class MCPReadFileAutoSelectionCoordinator {
                     if let canonicalApplyGateForTesting {
                         await canonicalApplyGateForTesting()
                     }
+                    await MCPStuckToolScenarioRegistry.shared.holdIfArmed(
+                        windowID: key.windowID,
+                        hook: .readFileAutoSelection
+                    )
                 #endif
                 // The debug gate models any suspension before mutation. Revalidate identity
                 // afterward so an invalidated or replaced route can never apply stale work, and

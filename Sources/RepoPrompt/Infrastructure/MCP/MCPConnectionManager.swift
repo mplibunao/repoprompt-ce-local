@@ -2716,6 +2716,9 @@ actor ServerNetworkManager {
         // The window's calls keep their settlement leases until they finish, but none may publish.
         codeStructureSettlementRegistry.revokeWindow(windowID: windowID)
         codeStructureSettlementLimitNoticeByWindowID.removeValue(forKey: windowID)
+        #if DEBUG
+            MCPStuckToolScenarioRegistry.shared.releaseWindow(windowID)
+        #endif
 
         // Remove stale run→window cache entries for the closed window.
         let staleRunIDs = presentationWindowByRun.compactMap { runID, mappedWindowID in

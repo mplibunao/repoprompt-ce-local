@@ -650,6 +650,11 @@ final class MCPFileToolProvider: MCPAppToolProviding {
             )
         }
         MCPToolExecutionHandlerPhaseContext.report(.readFileValueEncoding, transition: .completed)
+        #if DEBUG
+            if let windowID = metadata.windowID {
+                await MCPStuckToolScenarioRegistry.shared.holdIfArmed(windowID: windowID, hook: .readFile)
+            }
+        #endif
         EditFlowPerf.lifecycleEvent(EditFlowPerf.Lifecycle.ReadFile.providerResultReady)
         return value
     }

@@ -173,6 +173,8 @@ import MCP
                 #endif
             case "mcp_structure_settlement_snapshot":
                 return await debugMCPStructureSettlementSnapshotPayload(op: op, arguments: arguments)
+            case "mcp_stuck_call_scenario":
+                return await debugMCPStuckCallScenarioPayload(op: op, arguments: arguments)
             case "mcp_read_file_auto_selection_probe_begin":
                 #if DEBUG
                     return await debugMCPReadFileAutoSelectionProbeBeginPayload(op: op, arguments: arguments)

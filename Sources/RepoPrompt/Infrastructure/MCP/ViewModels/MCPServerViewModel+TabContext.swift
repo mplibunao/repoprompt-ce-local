@@ -4425,6 +4425,7 @@ extension MCPServerViewModel {
             if let debugBeforeTabContextMutationCommitForTesting {
                 await debugBeforeTabContextMutationCommitForTesting()
             }
+            await MCPStuckToolScenarioRegistry.shared.holdIfArmed(windowID: resolved.windowID, hook: .prompt)
         #endif
         do {
             try await MCPDomainMutationCommitContext.willCommit()

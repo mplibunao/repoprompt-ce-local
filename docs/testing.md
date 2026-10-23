@@ -203,6 +203,24 @@ Run a stuck-call reproduction only against the debug app, never production. Conf
 
 `swift-inspect` can't attach to the debug app. The debug bundle lacks the `get-task-allow` entitlement, so the task port request fails with `(os/kern) failure 0x5`. Use `sample` for stacks.
 
+### Injecting stuck calls
+
+The `mcp_stuck_call_scenario` op holds real calls in the debug app so a capped window and its recovery can be driven on demand. To arm a scenario, give a window and one hook:
+
+- `read_file` holds a read after its reply is built and its selection is queued.
+- `read_file_auto_selection` holds the window's selection worker before it applies a read's selection.
+- `prompt` holds `prompt` set, append, or clear after the tab resolves and before the change commits.
+
+A scenario captures at most two calls. Each captured call ignores cancellation, so it keeps running past its deadline and cleanup grace the way a stuck call does. Held calls continue when the scenario is released or cleared, when its window closes, or after `auto_release_seconds`, which defaults to 300 and can be at most 600. Only one scenario per window and hook can capture calls at a time. Arm another once the first has captured two.
+
+```bash
+rpce-cli-debug -w <window> -c __repoprompt_debug_diagnostics -j '{"op":"mcp_stuck_call_scenario","action":"arm","window_id":<window>,"hook":"read_file"}'
+rpce-cli-debug -w <window> -c __repoprompt_debug_diagnostics -j '{"op":"mcp_stuck_call_scenario","action":"status"}'
+rpce-cli-debug -w <window> -c __repoprompt_debug_diagnostics -j '{"op":"mcp_stuck_call_scenario","action":"release","scenario_id":"<scenario_id>"}'
+```
+
+`clear` releases a scenario and forgets it. Evidence from injected stalls shows that recovery restores a window and that recovered calls don't publish late. It says nothing about what a real stuck call was waiting on. Finding that out needs the reproduction above.
+
 ### Catalog shard patch measurement
 
 A root's catalog shard is the store's sorted file, folder, and search-entry arrays for that root, with its path index. `mcp_read_search_runtime_snapshot` takes these arguments for measuring how a window's store applies a published batch of file changes to the shard:
