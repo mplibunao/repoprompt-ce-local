@@ -33,7 +33,7 @@ final class ClaudeCodeAgentProviderResultOutcomeTests: XCTestCase {
         XCTAssertEqual(outcome.finalContent, "hi")
     }
 
-    func testErrorSubtypeOrErrorsFailTheRunAndAnInterruptedTurnCancelsIt() {
+    func testErrorSubtypeErrorsOrAnAbortTheCallerDidNotRequestFailTheRun() {
         let provider = ClaudeCodeAgentProvider(
             runner: CLIProcessRunner(config: CLIProcessConfiguration(
                 command: "/usr/bin/false",
@@ -57,10 +57,10 @@ final class ClaudeCodeAgentProviderResultOutcomeTests: XCTestCase {
                 "failed: Upstream timeout"
             ),
             (
-                // An interrupted turn also reports `is_error` and an error subtype.
-                "interrupted",
-                #"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Request was aborted by user"],"session_id":"s3"}"#,
-                "cancelled"
+                // Reads as cancelled, but nothing cancelled the run.
+                "abort",
+                #"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["The operation was aborted due to timeout"],"session_id":"s3"}"#,
+                "failed: The operation was aborted due to timeout"
             )
         ]
         for testCase in cases {

@@ -283,9 +283,12 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
             switch ClaudeResultOutcome(resultPayload: json, stopReasonHint: stopReason) {
             case .completed:
                 break
-            case .cancelled:
+            case .cancelled where Task.isCancelled:
                 throw CancellationError()
-            case .failed:
+            case .cancelled, .failed:
+                // This provider never interrupts the CLI, and a caller's stop cancels this task. A result
+                // that reads as cancelled without that is an abort inside the CLI, such as a request
+                // timeout, and the caller needs its message.
                 throw Self.cliFailureError(detail: Self.failedResultDetail(json, resultText: finalText))
             }
 
