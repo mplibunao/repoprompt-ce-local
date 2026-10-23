@@ -156,7 +156,7 @@ enum MCPAppPhysicalCapabilityAdapters {
     typealias UpdateCurrentTabContext = @MainActor @Sendable (
         _ toolName: String,
         _ mutation: (inout MCPServerViewModel.TabContextSnapshot) -> Void
-    ) async throws -> Void
+    ) async throws -> MCPServerViewModel.TabContextSnapshot
     typealias SelectedRecordsForCurrentTabContext = @MainActor @Sendable (
         _ metadata: MCPServerViewModel.RequestMetadata,
         _ lookupContextOverride: WorkspaceLookupContext?

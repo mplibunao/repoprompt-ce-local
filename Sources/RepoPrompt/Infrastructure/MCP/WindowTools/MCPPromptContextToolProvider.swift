@@ -163,21 +163,27 @@ final class MCPPromptContextToolProvider {
         case .set:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for set") }
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
-            try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText = text }
+            let published = try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) {
+                $0.promptText = text
+            }
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationReplyConstruction)
-            let context = try await dependencies.execution.requireCurrentTabContext(MCPWindowToolName.prompt)
-            return try Value(simplePromptReply(context.promptText, op: operation.rawValue))
+            // Echo what this call published. Resolving the tab again could throw after the commit or
+            // name another tab.
+            return try Value(simplePromptReply(published.promptText, op: operation.rawValue))
         case .append:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for append") }
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
-            try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText += text }
+            let published = try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) {
+                $0.promptText += text
+            }
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationReplyConstruction)
-            let context = try await dependencies.execution.requireCurrentTabContext(MCPWindowToolName.prompt)
-            return try Value(simplePromptReply(context.promptText, op: operation.rawValue))
+            return try Value(simplePromptReply(published.promptText, op: operation.rawValue))
         case .clear:
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
-            try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText = "" }
-            return try Value(simplePromptReply("", op: operation.rawValue))
+            let published = try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) {
+                $0.promptText = ""
+            }
+            return try Value(simplePromptReply(published.promptText, op: operation.rawValue))
         case .export:
             return try await exportPrompt(args: args, resolvedContext: resolvedContext, tabContext: tabContext)
         case .selectPreset:

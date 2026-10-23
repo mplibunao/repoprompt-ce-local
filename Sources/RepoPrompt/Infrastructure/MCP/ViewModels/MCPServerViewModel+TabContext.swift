@@ -4400,19 +4400,36 @@ extension MCPServerViewModel {
 
     /// Commits the protected mutation in progress, if any, after the context resolves and right before
     /// the change publishes, so a deadline that lands while the context is still resolving revokes the
-    /// mutation and nothing publishes.
+    /// mutation and nothing publishes. Returns the snapshot it published.
     @MainActor
+    @discardableResult
     func updateCurrentTabContext(
         toolName: String,
         mutation: (inout TabContextSnapshot) -> Void
-    ) async throws {
-        var (connectionID, context) = try await contextForCurrentRequest(toolName: toolName)
+    ) async throws -> TabContextSnapshot {
+        let (connectionID, resolved) = try await contextForCurrentRequest(toolName: toolName)
         #if DEBUG
             if let debugBeforeTabContextMutationCommitForTesting {
                 await debugBeforeTabContextMutationCommitForTesting()
             }
         #endif
         try await MCPDomainMutationCommitContext.willCommit()
+        // The commit suspends, and meanwhile the compose-tab mirror, read-file auto-selection, and
+        // file-tool authority can update this connection's snapshot of the tab. From here to the end
+        // nothing suspends or throws, and the mutation applies to the resolved tab's latest snapshot.
+        let latest = tabContextByConnectionID[connectionID]
+        let connectionStillOnResolvedTab = latest.map { Self.isSameTab($0, resolved) } ?? false
+        var context: TabContextSnapshot
+        if connectionStillOnResolvedTab, let latest {
+            context = latest
+        } else {
+            // The connection left the tab while the commit ran. Publish to the tab it resolved, starting
+            // from that tab's stored prompt, and leave the connection's new binding alone.
+            context = resolved
+            if let storedPrompt = workspaceManager?.composeTab(with: resolved.tabID)?.promptText {
+                context.promptText = storedPrompt
+            }
+        }
         let previousPrompt = context.promptText
         mutation(&context)
         if context.promptText != previousPrompt {
@@ -4427,12 +4444,19 @@ extension MCPServerViewModel {
                 }
             }
         }
-        tabContextByConnectionID[connectionID] = context
+        if connectionStillOnResolvedTab {
+            tabContextByConnectionID[connectionID] = context
+        }
         if toolName == MCPWindowToolName.prompt {
             commitPromptContextToUI(context)
         } else {
             await pushVirtualContextToUI(context)
         }
+        return context
+    }
+
+    private static func isSameTab(_ lhs: TabContextSnapshot, _ rhs: TabContextSnapshot) -> Bool {
+        lhs.tabID == rhs.tabID && lhs.windowID == rhs.windowID && lhs.workspaceID == rhs.workspaceID
     }
 
     @MainActor
