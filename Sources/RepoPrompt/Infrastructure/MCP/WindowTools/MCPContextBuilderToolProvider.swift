@@ -142,6 +142,9 @@ enum ContextBuilderResponseDisposition {
     case contextOnly
     case generate(HeadlessMode, prompt: String)
     case failed(String)
+    /// Discovery completed, but its result can't support the follow-up. The reply reports the run as
+    /// failed with this reason and keeps the tab, prompt and selection a failed discovery returns.
+    case contextOnlyFailed(String)
 }
 
 /// Typed-prompt resolution outcome for a completed Context Builder run. `resolved` carries the prompt
@@ -714,7 +717,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                 }
                 let resultTab = renderedSelection.resultTab
                 let effectivePrompt = renderedSelection.effectivePrompt
-                let status = renderedSelection.status
+                var status = renderedSelection.status
                 let sel = renderedSelection.selection
                 let fileCount = renderedSelection.fileCount
                 let selectionReply = renderedSelection.reply
@@ -728,6 +731,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                 let responseDisposition = Self.responseDisposition(
                     responseType: responseType,
                     terminalDisposition: snapshot.terminalDisposition,
+                    selection: sel,
                     usedAgentOutputAsPrompt: snapshot.usedAgentOutputAsPrompt,
                     effectivePrompt: effectivePrompt,
                     callerInstructions: instructions
@@ -737,6 +741,8 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                 switch responseDisposition {
                 case .contextOnly:
                     break
+                case let .contextOnlyFailed(reason):
+                    status = "failed: \(reason)"
                 case let .failed(message):
                     throw MCPError.internalError(message)
                 case let .generate(mode, prompt):
@@ -979,6 +985,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
     nonisolated static func responseDisposition(
         responseType: ContextBuilderResponseType?,
         terminalDisposition: ContextBuilderRunTerminalOutcome,
+        selection: StoredSelection,
         usedAgentOutputAsPrompt: Bool,
         effectivePrompt: String,
         callerInstructions: String
@@ -1017,6 +1024,17 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                     responseType,
                     reason: "the caller instructions used unsupported or malformed discovery-guideline markup"
                 ))
+            }
+            // A plan or answer generated from an empty selection reads like one generated from the code,
+            // so the caller can't tell it apart. Review refuses an empty selection when it resolves its targets.
+            if selection.isEmptyForSelectedFileTree,
+               let responseType,
+               responseType == .plan || responseType == .question
+            {
+                return .contextOnlyFailed(
+                    "context_builder_discovery_empty: Context Builder discovery finished with no files selected, "
+                        + "so the \(responseType.rawValue) request was not sent."
+                )
             }
             guard let mode = responseType?.headlessMode else {
                 return .failed("Context Builder requested response mode is unavailable")

@@ -4619,6 +4619,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         // (e.g., 404 errors already explain about settings/account access)
         let hasSpecificGuidance = lowerMessage.contains("login") ||
             lowerMessage.contains("authenticate") ||
+            lowerMessage.contains("authentication") ||
+            lowerMessage.contains("api key") ||
             lowerMessage.contains("404") ||
             lowerMessage.contains("not found") ||
             lowerMessage.contains("settings")
