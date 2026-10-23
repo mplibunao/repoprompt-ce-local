@@ -50,6 +50,24 @@ actor ACPAgentSessionController {
         let invalidatedResumeSessionID: String?
     }
 
+    /// What idle retirement needs to know about the controller, read in one actor turn.
+    struct IdleRetirementSnapshot: Equatable {
+        let state: State
+        let hasActivePrompt: Bool
+        let pendingRequestCount: Int
+        let pendingPermissionCount: Int
+        let loadSessionSupported: Bool
+
+        /// Nothing is in flight. A controller whose process exited while idle is `failed`, and
+        /// retiring it only reaps what is left.
+        var isIdle: Bool {
+            (state == .sessionOpen || state == .failed)
+                && !hasActivePrompt
+                && pendingRequestCount == 0
+                && pendingPermissionCount == 0
+        }
+    }
+
     private enum ControllerError: LocalizedError {
         case invalidState(expected: String, actual: State)
         case processNotRunning
@@ -379,6 +397,16 @@ actor ACPAgentSessionController {
 
     var hasReusableSession: Bool {
         state == .sessionOpen && process != nil && sessionID != nil
+    }
+
+    func idleRetirementSnapshot() -> IdleRetirementSnapshot {
+        IdleRetirementSnapshot(
+            state: state,
+            hasActivePrompt: activePromptTurnID != nil,
+            pendingRequestCount: pendingRequests.count,
+            pendingPermissionCount: pendingPermissionRequests.count,
+            loadSessionSupported: loadSessionSupported
+        )
     }
 
     func isCompatibleWith(request: ACPRunRequest) -> Bool {

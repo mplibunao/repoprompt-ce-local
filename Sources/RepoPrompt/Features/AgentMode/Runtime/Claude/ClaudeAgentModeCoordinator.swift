@@ -112,19 +112,9 @@ final class ClaudeAgentModeCoordinator {
         let mcpStrictMode: Bool?
     }
 
-    /// The clock the idle timer reads and sleeps on. Production uses `ContinuousClock`, which keeps
-    /// counting while the Mac sleeps. A deadline that passes during sleep fires on wake.
-    struct IdleClock {
-        let now: @MainActor () -> ContinuousClock.Instant
-        let sleepUntil: @MainActor (_ deadline: ContinuousClock.Instant) async throws -> Void
-
-        static var continuous: IdleClock {
-            IdleClock(
-                now: { ContinuousClock.now },
-                sleepUntil: { deadline in try await Task.sleep(until: deadline, clock: .continuous) }
-            )
-        }
-    }
+    /// The clock the idle timer reads and sleeps on. A deadline that passes while the Mac sleeps
+    /// fires on wake.
+    typealias IdleClock = AgentProviderIdleClock
 
     /// One armed idle timer. `anchor` is the attach or terminal commit that armed it. Re-arms keep
     /// the anchor and the controller and take a new token.
@@ -143,19 +133,6 @@ final class ClaudeAgentModeCoordinator {
                 loggedMissingProviderSessionID: loggedMissingProviderSessionID
             )
         }
-    }
-
-    /// Work that keeps an idle controller's process alive.
-    private enum IdleRetirementBlocker: String {
-        case terminalCommit
-        case activeRun
-        case pendingStart
-        case interaction
-        case queuedInstructions
-        case bindingTransition
-        case mcpWork
-        case resumeTransfer
-        case missingProviderSessionID
     }
 
     /// What an idle-timer deadline decided.
@@ -814,38 +791,13 @@ final class ClaudeAgentModeCoordinator {
         return (controller, interval)
     }
 
-    private func claudeIdleRetirementBlocker(for session: AgentTabSession) -> IdleRetirementBlocker? {
-        if session.terminalCommitInProgress {
-            return .terminalCommit
-        }
-        if session.activeRunOwnership != nil || session.runState.isActive || session.agentTask != nil {
-            return .activeRun
-        }
-        if session.unresolvedStartupTicket != nil
-            || session.mcpPendingStartOwner != nil
-            || session.mcpFollowUpRunPending
-        {
-            return .pendingStart
-        }
-        if session.hasBindingBlockingInteraction {
-            return .interaction
-        }
-        if !session.pendingInstructions.isEmpty
-            || !session.pendingClaudeSteeringInstructions.isEmpty
-            || session.claudeSteeringFlushTask != nil
-        {
-            return .queuedInstructions
-        }
-        if session.bindingTransitionInProgress
-            || session.worktreeBindingTransitionInProgress
-            || session.isChangingExecutionLocation
-        {
-            return .bindingTransition
-        }
-        if let runID = session.runID,
-           hasActiveMCPTools(runID) || hasActiveChildAgentRunWaits(runID)
-        {
-            return .mcpWork
+    private func claudeIdleRetirementBlocker(for session: AgentTabSession) -> AgentProviderRetirementBlocker? {
+        if let blocker = AgentProviderRetirement.sharedBlocker(
+            for: session,
+            hasActiveMCPTools: hasActiveMCPTools,
+            hasActiveChildAgentRunWaits: hasActiveChildAgentRunWaits
+        ) {
+            return blocker
         }
         if hasPendingResumeTransfer(for: session) {
             return .resumeTransfer

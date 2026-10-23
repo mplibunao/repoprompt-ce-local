@@ -647,23 +647,37 @@ import XCTest
         }
     }
 
-    /// A clock for the Claude idle timer that moves only when the test advances it. A sleeper
-    /// wakes when time reaches its deadline, not when its task is cancelled, so a replaced timer
-    /// can wake after its successor is installed.
+    /// A clock that moves only when the test advances it. Through `idleClock`, a sleeper wakes when
+    /// time reaches its deadline, not when its task is cancelled, so a replaced idle timer can wake
+    /// after its successor is installed. Through `cancellableClock`, a sleep ends as soon as its
+    /// task is cancelled, as `Task.sleep` does.
     @MainActor
     final class StartupTestManualClock {
+        private struct Sleeper {
+            let id: UUID
+            let deadline: ContinuousClock.Instant
+            let continuation: CheckedContinuation<Void, Error>
+        }
+
         private(set) var now = ContinuousClock.now
-        private var sleepers: [(deadline: ContinuousClock.Instant, continuation: CheckedContinuation<Void, Error>)] = []
+        private var sleepers: [Sleeper] = []
 
         /// The deadline of every sleeper, in the order they began sleeping.
         var pendingDeadlines: [ContinuousClock.Instant] {
             sleepers.map(\.deadline)
         }
 
-        var idleClock: ClaudeAgentModeCoordinator.IdleClock {
-            ClaudeAgentModeCoordinator.IdleClock(
+        var idleClock: AgentProviderIdleClock {
+            AgentProviderIdleClock(
                 now: { self.now },
                 sleepUntil: { deadline in try await self.sleep(until: deadline) }
+            )
+        }
+
+        var cancellableClock: AgentProviderIdleClock {
+            AgentProviderIdleClock(
+                now: { self.now },
+                sleepUntil: { deadline in try await self.cancellableSleep(until: deadline) }
             )
         }
 
@@ -682,11 +696,25 @@ import XCTest
             pending.forEach { $0.continuation.resume(throwing: CancellationError()) }
         }
 
-        private func sleep(until deadline: ContinuousClock.Instant) async throws {
+        private func sleep(until deadline: ContinuousClock.Instant, id: UUID = UUID()) async throws {
             guard deadline > now else { return }
             try await withCheckedThrowingContinuation { continuation in
-                sleepers.append((deadline, continuation))
+                sleepers.append(Sleeper(id: id, deadline: deadline, continuation: continuation))
             }
+        }
+
+        private func cancellableSleep(until deadline: ContinuousClock.Instant) async throws {
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try await sleep(until: deadline, id: id)
+            } onCancel: {
+                Task { @MainActor in self.cancelSleeper(id) }
+            }
+        }
+
+        private func cancelSleeper(_ id: UUID) {
+            guard let index = sleepers.firstIndex(where: { $0.id == id }) else { return }
+            sleepers.remove(at: index).continuation.resume(throwing: CancellationError())
         }
     }
 
