@@ -81,6 +81,22 @@ actor ApplyEditsApprovalStore: Sendable {
     private var pendingByScope: [ApplyEditsApprovalScope: PendingRecord] = [:]
     private var subscriptions: [ApplyEditsApprovalScope: [UUID: SnapshotContinuation]] = [:]
 
+    #if DEBUG
+        /// Receives a cancelled request's resolution and decides when to run it, so a test can land an
+        /// old request's cancellation after a newer review has replaced it.
+        private nonisolated let requestCancellationHopForTesting: (
+            @Sendable (_ resolve: @Sendable () async -> Void) async -> Void
+        )?
+
+        init(
+            requestCancellationHopForTesting: (
+                @Sendable (_ resolve: @Sendable () async -> Void) async -> Void
+            )? = nil
+        ) {
+            self.requestCancellationHopForTesting = requestCancellationHopForTesting
+        }
+    #endif
+
     func autoEditEnabled(for scope: ApplyEditsApprovalScope) -> Bool {
         autoEditOverridesByScope[scope] ?? Self.globalDefaultAutoEditEnabled()
     }
@@ -140,9 +156,24 @@ actor ApplyEditsApprovalStore: Sendable {
                 )
                 publishSnapshot(for: scope)
             }
-        }, onCancel: {
+        }, onCancel: { [reviewID = review.id] in
+            // Cancel only this request's review. By the time this runs, a newer request may have
+            // replaced it in the same scope, and that review must stay pending.
             Task {
-                await self.cancelPendingReview(scope: scope, reason: cancellationReason)
+                let resolve: @Sendable () async -> Void = {
+                    await self.resolvePendingReviewIfMatching(
+                        scope: scope,
+                        reviewID: reviewID,
+                        decision: .cancelled(reason: cancellationReason)
+                    )
+                }
+                #if DEBUG
+                    if let hop = self.requestCancellationHopForTesting {
+                        await hop(resolve)
+                        return
+                    }
+                #endif
+                await resolve()
             }
         })
         EditFlowPerf.end(
