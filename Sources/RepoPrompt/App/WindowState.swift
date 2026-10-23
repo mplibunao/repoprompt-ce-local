@@ -152,6 +152,10 @@ class WindowState: ObservableObject {
     /// Called whenever `isCurrentlyFocused` changes.
     var onFocusChanged: ((Bool) -> Void)?
 
+    /// One-shot hook that runs the first time this window is key, then clears itself. The launch
+    /// restore sets it on a window it opened, to hand key focus back to the window in use.
+    var onFirstBecameKey: (() -> Void)?
+
     // MARK: - Per-Window View Models
 
     let workspaceFileContextStore: WorkspaceFileContextStore
@@ -310,6 +314,7 @@ class WindowState: ObservableObject {
         }
         closeCoordinator.beginClose()
         onFocusChanged = nil
+        onFirstBecameKey = nil
         removeFocusObservers()
         pendingWindowTitleUpdateTask?.cancel()
         pendingWindowTitleUpdateTask = nil
@@ -614,6 +619,15 @@ class WindowState: ObservableObject {
         requestWindowTitleUpdate(reason: .windowAttached)
         // Install Agent mode titlebar accessory if requested before window was attached
         applyAgentTitlebarAccessoryIfPossible()
+        // A new window can become key before this attachment subscribes to key changes.
+        runFirstBecameKeyHookIfKey()
+    }
+
+    /// Runs `onFirstBecameKey` if this window is key now.
+    func runFirstBecameKeyHookIfKey() {
+        guard nsWindow?.isKeyWindow == true, let hook = onFirstBecameKey else { return }
+        onFirstBecameKey = nil
+        hook()
     }
 
     private func configureWindowChrome(for window: NSWindow) {
@@ -662,6 +676,7 @@ class WindowState: ObservableObject {
                 guard let self else { return }
                 let appIsActive = NSApplication.shared.isActive
                 scheduleFocusUpdate(appIsActive)
+                runFirstBecameKeyHookIfKey()
             }
             .store(in: &focusCancellables)
 

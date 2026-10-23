@@ -5,10 +5,14 @@
 //  Created by Eric Provencher on 2025-03-24.
 //
 
+import AppKit
 import Combine
 import Foundation
 import KeyboardShortcuts
+import Logging
 import SwiftUI
+
+private let windowRestoreLog = Logger(label: "com.repoprompt.app.window-restore")
 
 struct WindowSessionSnapshot: Codable {
     var version: Int
@@ -366,6 +370,9 @@ class WindowStatesManager: ObservableObject {
         let id: UUID
         let excludeWindowIDs: Set<Int>
         let expectedInitialRefreshDeferralID: UUID?
+        /// True only for the launch restore driver's request: the window that satisfies it takes
+        /// the next saved entry. Windows opened for any other caller serve that caller.
+        let takesLaunchRestoreEntry: Bool
         let continuation: CheckedContinuation<WindowState, Error>
 
         var defersInitialAgentSystemWorkspaceRefresh: Bool {
@@ -390,6 +397,19 @@ class WindowStatesManager: ObservableObject {
     private var restoreQueue: [WindowSessionEntry] = []
     private var hasLoadedRestoreSession = false
     private var restorePersistenceGate = WindowSessionRestorePersistenceGate()
+    /// Windows opened for an `openNewMainWindow` caller other than the launch restore driver.
+    /// The session load doesn't hand them saved entries, because they serve that caller.
+    private var windowIDsOpenedForCallers: Set<Int> = []
+    /// Set when the launch restore driver requests its first window. From then on, a window that
+    /// registers without the driver's request takes no saved entry.
+    private var launchRestoreDriverStarted = false
+    /// True from the driver's window request until a window satisfies it.
+    private var launchRestoreOpenInFlight = false
+    /// Set when a driver window request fails. The remaining entries stay queued and saved.
+    private var launchRestoreDriverStopped = false
+    /// The window the user was in when the driver requested a window while the app was active.
+    /// The driver's window hands key focus back to it.
+    private weak var launchRestoreFocusReturnWindow: WindowState?
 
     func claimInitialRefreshDeferralForNewWindow() -> WindowInitialRefreshDeferral? {
         guard !pendingInitialRefreshDeferrals.isEmpty else { return nil }
@@ -494,6 +514,7 @@ class WindowStatesManager: ObservableObject {
             applyRestoreEntriesIfPossible()
         }
         flushDeferredWindowSessionPersistIfRestoreIdle()
+        advanceLaunchRestore()
     }
 
     /// Pre-seeds instance number state from a loaded session snapshot.
@@ -546,7 +567,10 @@ class WindowStatesManager: ObservableObject {
     ///
     /// - Returns: The newly created `WindowState`
     /// - Throws: `WindowOpenError.openerUnavailable` if no opener is installed
-    func openNewMainWindow(deferringInitialAgentSystemWorkspaceRefresh: Bool = false) async throws -> WindowState {
+    func openNewMainWindow(
+        deferringInitialAgentSystemWorkspaceRefresh: Bool = false,
+        takingLaunchRestoreEntry: Bool = false
+    ) async throws -> WindowState {
         // Capture existing window IDs to identify the new one
         let excludeWindowIDs = Set(allWindows.map(\.windowID))
         let waiterID = UUID()
@@ -565,6 +589,7 @@ class WindowStatesManager: ObservableObject {
                     id: waiterID,
                     excludeWindowIDs: excludeWindowIDs,
                     expectedInitialRefreshDeferralID: refreshDeferral?.id,
+                    takesLaunchRestoreEntry: takingLaunchRestoreEntry,
                     continuation: continuation
                 ))
 
@@ -623,15 +648,16 @@ class WindowStatesManager: ObservableObject {
         state.requestClose(authorization: authorization)
     }
 
-    /// Notifies waiters when a new window is registered.
-    private func notifyWindowOpenWaiters(newState: WindowState) {
-        guard let index = windowOpenWaiterIndex(for: newState) else { return }
+    /// Removes and returns the waiter a newly registered window satisfies. The caller resumes it
+    /// once the window's restore entry is decided.
+    private func takeWindowOpenWaiter(for newState: WindowState) -> WindowOpenWaiter? {
+        guard let index = windowOpenWaiterIndex(for: newState) else { return nil }
 
         let waiter = windowOpenWaiters.remove(at: index)
         if waiter.defersInitialAgentSystemWorkspaceRefresh {
             verifyInitialRefreshDeferralClaim(waiter: waiter, newState: newState)
         }
-        waiter.continuation.resume(returning: newState)
+        return waiter
     }
 
     private func windowOpenWaiterIndex(for newState: WindowState) -> Int? {
@@ -704,19 +730,139 @@ class WindowStatesManager: ObservableObject {
         #endif
         let windowID = state.windowID
         restorePersistenceGate.beginRestoringWindow(windowID)
-        state.applyWindowRestoreEntry(entry) { [weak self] in
+        state.applyWindowRestoreEntry(entry) { [weak self, weak state] in
             guard let self else { return }
+            // A later click on the window must not send it behind again.
+            state?.onFirstBecameKey = nil
             restorePersistenceGate.finishRestoringWindow(windowID)
             flushDeferredWindowSessionPersistIfRestoreIdle()
+            advanceLaunchRestore()
         }
     }
 
     /// Attempt to apply restore entries to any already-registered windows.
     private func applyRestoreEntriesIfPossible() {
         guard !restoreQueue.isEmpty else { return }
-        for state in allWindows where !restoreQueue.isEmpty {
+        for state in allWindows where !restoreQueue.isEmpty && !windowIDsOpenedForCallers.contains(state.windowID) {
             applyNextRestoreEntryIfAvailable(to: state)
         }
+    }
+
+    /// Decides whether a window takes a saved entry. This runs in the turn that adds the window to
+    /// `allWindows`, before MCP can see the window, so a window that takes an entry already reports
+    /// its restore in flight to the first MCP request that reaches it.
+    private func assignLaunchRestoreEntry(to state: WindowState, openWaiter: WindowOpenWaiter?) {
+        if let openWaiter {
+            guard openWaiter.takesLaunchRestoreEntry else {
+                windowIDsOpenedForCallers.insert(state.windowID)
+                logRegisteredWithoutEntry(state, reason: "openedForCaller")
+                return
+            }
+            launchRestoreOpenInFlight = false
+            #if DEBUG
+                WorkspaceRestorePerfLog.log("restore.driver openRegistered windowID=\(state.windowID)")
+            #endif
+            applyNextRestoreEntryIfAvailable(to: state)
+            installLaunchRestoreFocusReturn(on: state)
+            return
+        }
+        // Windows macOS reopens, the first scene, and any window opened before the driver starts
+        // take entries in saved order. After the driver starts, an unrequested window (a Dock or
+        // File > New Window) stays a plain window so it can't take the entry the driver opened a
+        // window for.
+        guard !launchRestoreDriverStarted else {
+            logRegisteredWithoutEntry(state, reason: "registeredAfterDriverStarted")
+            return
+        }
+        applyNextRestoreEntryIfAvailable(to: state)
+    }
+
+    private func logRegisteredWithoutEntry(_ state: WindowState, reason: String) {
+        #if DEBUG
+            guard !restoreQueue.isEmpty || isRestoreSessionLoadPending else { return }
+            WorkspaceRestorePerfLog.log(
+                "restore.window registeredWithoutEntry windowID=\(state.windowID) reason=\(reason)"
+            )
+        #endif
+    }
+
+    // MARK: - Launch Restore Driver
+
+    /// Opens a window for the next saved entry that no window took. It opens one window at a time,
+    /// and only after every restore attempt that started earlier has returned, so the first
+    /// window's restore runs without competition and driver-opened windows never restore
+    /// concurrently. Called when the session file finishes loading, when a restore attempt
+    /// returns, and when a restoring window closes.
+    private func advanceLaunchRestore() {
+        guard !isTerminating, !launchRestoreDriverStopped, !launchRestoreOpenInFlight else { return }
+        guard restorePersistenceGate.restoringWindowIDs.isEmpty else { return }
+        guard !restoreQueue.isEmpty else {
+            #if DEBUG
+                if launchRestoreDriverStarted {
+                    WorkspaceRestorePerfLog.log("restore.driver done")
+                }
+            #endif
+            return
+        }
+        // With no window registered yet, the first window takes the next entry when it registers.
+        guard !allWindows.isEmpty, AppWindowOpener.shared.isAvailable else { return }
+
+        launchRestoreDriverStarted = true
+        launchRestoreOpenInFlight = true
+        launchRestoreFocusReturnWindow = NSApplication.shared.isActive ? windowInUse() : nil
+        #if DEBUG
+            WorkspaceRestorePerfLog.log("restore.driver openRequested remaining=\(restoreQueue.count)")
+        #endif
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard !isTerminating else {
+                launchRestoreOpenInFlight = false
+                return
+            }
+            do {
+                let window = try await openNewMainWindow(takingLaunchRestoreEntry: true)
+                window.runFirstBecameKeyHookIfKey()
+            } catch {
+                // The opener is checked above in the same turn, so this is reachable only when it
+                // is uninstalled in between. Stop rather than retry: the entries stay saved.
+                launchRestoreOpenInFlight = false
+                launchRestoreDriverStopped = true
+                launchRestoreFocusReturnWindow = nil
+                windowRestoreLog.warning(
+                    "Launch restore stopped: a window for a saved entry could not be opened (\(error.localizedDescription)). \(restoreQueue.count) saved windows stay in the session file and reopen on the next launch."
+                )
+                #if DEBUG
+                    WorkspaceRestorePerfLog.log("restore.driver openFailed error=\(String(describing: error))")
+                #endif
+            }
+        }
+    }
+
+    /// The registered window that is key, or else main, at the moment of the call.
+    private func windowInUse() -> WindowState? {
+        if let keyWindow = NSApplication.shared.keyWindow,
+           let state = allWindows.first(where: { $0.nsWindow === keyWindow })
+        {
+            return state
+        }
+        if let mainWindow = NSApplication.shared.mainWindow {
+            return allWindows.first { $0.nsWindow === mainWindow }
+        }
+        return nil
+    }
+
+    /// Makes the window the user was in key again once the driver's window becomes key, so a
+    /// restored window opens behind it.
+    private func installLaunchRestoreFocusReturn(on state: WindowState) {
+        guard let target = launchRestoreFocusReturnWindow else { return }
+        launchRestoreFocusReturnWindow = nil
+        state.onFirstBecameKey = { [weak self, weak target] in
+            guard let self, let target, !target.isClosing,
+                  allWindows.contains(where: { $0 === target })
+            else { return }
+            target.nsWindow?.makeKeyAndOrderFront(nil)
+        }
+        state.runFirstBecameKeyHookIfKey()
     }
 
     func registerWindowState(_ state: WindowState) {
@@ -741,8 +887,8 @@ class WindowStatesManager: ObservableObject {
         // Notify that window count changed
         NotificationCenter.default.post(name: .windowCountDidChange, object: nil)
 
-        // Notify any waiters for programmatic window creation
-        notifyWindowOpenWaiters(newState: state)
+        // The waiter for programmatic window creation, if this window satisfies one
+        let openWaiter = takeWindowOpenWaiter(for: state)
 
         // Listen for focus changes in the window state:
         state.onFocusChanged = { [weak self] isFocused in
@@ -761,7 +907,8 @@ class WindowStatesManager: ObservableObject {
             persistWindowSession(reason: "workspaceSwitch")
         }
 
-        applyNextRestoreEntryIfAvailable(to: state)
+        assignLaunchRestoreEntry(to: state, openWaiter: openWaiter)
+        openWaiter?.continuation.resume(returning: state)
 
         // Assign an initial instance number if the workspace is already set
         if let ws = state.workspaceManager.activeWorkspace {
@@ -802,7 +949,9 @@ class WindowStatesManager: ObservableObject {
             closingWindowReferences.append(WeakWindowState(state))
         }
         explicitlyClosingWindowIDs.remove(state.windowID)
+        windowIDsOpenedForCallers.remove(state.windowID)
         // A window that closes mid-restore must not leave the persistence gate held.
+        let wasRestoring = restorePersistenceGate.restoringWindowIDs.contains(state.windowID)
         restorePersistenceGate.finishRestoringWindow(state.windowID)
 
         // Skip notifications and updates during termination to prevent observation crashes
@@ -819,6 +968,12 @@ class WindowStatesManager: ObservableObject {
 
         // Clear instance assignment for this window without reusing numbers
         clearInstanceAssignment(forWindowID: state.windowID)
+
+        // The closed window's restore task may still finish in the background; the next saved
+        // window doesn't wait for it.
+        if wasRestoring {
+            advanceLaunchRestore()
+        }
 
         Task { @MainActor in
             await self.persistWindowSessionImmediately(reason: "unregisterWindow:\(state.windowID)")
@@ -975,6 +1130,11 @@ class WindowStatesManager: ObservableObject {
         // Use MainActor.assumeIsolated since this is called from applicationWillTerminate
         // which runs on the main thread, but Swift doesn't know that statically.
         MainActor.assumeIsolated {
+            if !self.isTerminating, self.launchRestoreOpenInFlight {
+                windowRestoreLog.warning(
+                    "Quitting while a window opened for launch restore has not appeared. The \(self.restoreQueue.count) saved windows that haven't reopened stay in the session file."
+                )
+            }
             self.closingWindowReferences.removeAll { $0.value == nil }
             self.terminationWindowSnapshot = self.deduplicatedWindows(
                 self.terminationWindowSnapshot +
@@ -1010,6 +1170,11 @@ class WindowStatesManager: ObservableObject {
         func resetLaunchRestoreForTesting() {
             restoreQueue.removeAll()
             restorePersistenceGate = WindowSessionRestorePersistenceGate()
+            windowIDsOpenedForCallers.removeAll()
+            launchRestoreDriverStarted = false
+            launchRestoreOpenInFlight = false
+            launchRestoreDriverStopped = false
+            launchRestoreFocusReturnWindow = nil
         }
 
         func setTerminatingForTesting(_ isTerminating: Bool) {

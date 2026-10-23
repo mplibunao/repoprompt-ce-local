@@ -7,6 +7,8 @@ import XCTest
     final class WindowLaunchRestoreTests: XCTestCase {
         /// Every window a test registers, closed by the teardown that `beginLaunchRestore()` adds.
         private var registeredWindows: [WindowState] = []
+        /// Every restore hold a test installs, opened by that teardown so no restore task hangs.
+        private var restoreHolds: [RestoreHold] = []
 
         override func setUp() {
             super.setUp()
@@ -18,18 +20,107 @@ import XCTest
             super.tearDown()
         }
 
-        func testCaptureKeepsEverySavedEntryDuringRestore() async throws {
-            let (first, second) = try await makeSavedWorkspaces()
-            let saved = [entry(for: first), entry(for: second), entry(for: first)]
-            let savedIDs = saved.map(\.workspaceID)
+        func testLaunchRestoreOpensEveryRemainingEntryOneAtATime() async throws {
+            let workspaces = try await makeSavedWorkspaces(count: 3)
+            let savedIDs = Set(workspaces.map(\.id))
             let windowStates = try beginLaunchRestore()
+            var openedHolds: [RestoreHold] = []
+            let opener = installOpener {
+                let window = self.makeWindow()
+                openedHolds.append(self.holdRestore(of: window, onlyFor: savedIDs))
+                self.register(window)
+            }
+            let firstWindow = makeWindow()
+            let firstHold = holdRestore(of: firstWindow, onlyFor: savedIDs)
+            register(firstWindow)
 
-            windowStates.finishRestoreSessionLoadForTesting(entries: saved)
-            XCTAssertEqual(captureIDs(), savedIDs, "entries queued before any window registered")
+            windowStates.finishRestoreSessionLoadForTesting(entries: workspaces.map(entry(for:)))
+            let firstTarget = try await waitForHold(firstHold, "the first window's restore")
+            XCTAssertEqual(firstTarget, workspaces[0].id)
 
-            for (index, workspace) in [first, second, first].enumerated() {
-                let window = makeRegisteredWindow()
-                try await waitForRestoreToReturn(window)
+            var restoringHold = firstHold
+            for index in 1 ..< workspaces.count {
+                XCTAssertEqual(opener.requestCount, index - 1, "windows requested while window \(index) was restoring")
+                await restoringHold.open()
+                try await waitUntil("the driver's window \(index + 1) to reach its restore hold") {
+                    guard openedHolds.count == index else { return false }
+                    return await openedHolds[index - 1].workspaceID != nil
+                }
+                restoringHold = openedHolds[index - 1]
+                let target = await restoringHold.workspaceID
+                XCTAssertEqual(target, workspaces[index].id, "window \(index + 1)'s restore target")
+            }
+            await restoringHold.open()
+            try await waitUntil("every restore attempt to return") {
+                windowStates.allWindows.allSatisfy { !$0.isWorkspaceRestoreInFlight }
+            }
+
+            XCTAssertEqual(opener.requestCount, workspaces.count - 1)
+            XCTAssertEqual(
+                windowStates.allWindows.map(\.workspaceManager.activeWorkspaceID),
+                workspaces.map { $0.id as UUID? }
+            )
+        }
+
+        func testWindowOpenedForAnotherCallerTakesNoEntry() async throws {
+            let workspaces = try await makeSavedWorkspaces(count: 2)
+            let windowStates = try beginLaunchRestore()
+            let opener = installOpener {
+                self.register(self.makeWindow())
+            }
+            let firstWindow = makeWindow()
+            let firstHold = holdRestore(of: firstWindow, onlyFor: Set(workspaces.map(\.id)))
+            register(firstWindow)
+            windowStates.finishRestoreSessionLoadForTesting(entries: workspaces.map(entry(for:)))
+            _ = try await waitForHold(firstHold, "the first window's restore")
+
+            // A routed MCP request opens a window while the second saved entry is still queued.
+            let callerWindow = try await windowStates.openNewMainWindow()
+            XCTAssertFalse(callerWindow.isWorkspaceRestoreInFlight, "the caller's window took a saved entry")
+
+            await firstHold.open()
+            try await waitUntil("the driver to open and restore a window for the second entry") {
+                windowStates.allWindows.count == 3
+                    && windowStates.allWindows.allSatisfy { !$0.isWorkspaceRestoreInFlight }
+            }
+
+            XCTAssertEqual(opener.requestCount, 2, "one window for the caller and one for the second entry")
+            let restoredWindows = windowStates.allWindows.filter { $0 !== callerWindow }
+            XCTAssertEqual(
+                restoredWindows.map(\.workspaceManager.activeWorkspaceID),
+                workspaces.map { $0.id as UUID? }
+            )
+            let callerWorkspaceID = callerWindow.workspaceManager.activeWorkspaceID
+            XCTAssertFalse(
+                workspaces.contains { $0.id == callerWorkspaceID },
+                "the caller's window restored a saved workspace"
+            )
+        }
+
+        func testCaptureKeepsEverySavedEntryDuringRestore() async throws {
+            let workspaces = try await makeSavedWorkspaces(count: 2)
+            let order = [workspaces[0], workspaces[1], workspaces[0]]
+            let savedIDs = order.map { $0.id as UUID? }
+            let windowStates = try beginLaunchRestore()
+            // Records the driver's requests without opening a window, so a capture can see a
+            // request outstanding; the test then registers the window that satisfies it.
+            let opener = installOpener()
+
+            windowStates.finishRestoreSessionLoadForTesting(entries: order.map(entry(for:)))
+            XCTAssertEqual(captureIDs(), savedIDs, "with entries queued before any window registered")
+
+            for (index, workspace) in order.enumerated() {
+                if index > 0 {
+                    try await waitUntil("the driver to request window \(index + 1)") {
+                        opener.requestCount == index
+                    }
+                    XCTAssertEqual(captureIDs(), savedIDs, "with the driver's request for window \(index + 1) outstanding")
+                }
+                let window = makeWindow()
+                register(window)
+                try await waitUntil("window \(index + 1)'s restore attempt to return") {
+                    !window.isWorkspaceRestoreInFlight
+                }
                 XCTAssertEqual(window.workspaceManager.activeWorkspaceID, workspace.id)
                 XCTAssertEqual(captureIDs(), savedIDs, "after \(index + 1) restores returned")
             }
@@ -37,11 +128,11 @@ import XCTest
 
         // MARK: - Fixture
 
-        /// Creates two saved workspaces on disk, so a new window's catalog contains them.
-        private func makeSavedWorkspaces() async throws -> (WorkspaceModel, WorkspaceModel) {
+        /// Creates saved workspaces on disk, so a new window's catalog contains them.
+        private func makeSavedWorkspaces(count: Int) async throws -> [WorkspaceModel] {
             let persister = makeWindow()
             await persister.workspaceManager.awaitInitialized()
-            let workspaces = ["First", "Second"].map {
+            let workspaces = (1 ... count).map {
                 persister.workspaceManager.createWorkspace(name: "Launch Restore \($0) \(UUID().uuidString)", repoPaths: [])
             }
             // Teardown blocks run in reverse order, so this runs after every window has closed.
@@ -58,7 +149,7 @@ import XCTest
                 let onDisk = await persister.workspaceManager.loadWorkspaceSnapshotFromDisk().map(\.id)
                 return workspaces.allSatisfy { onDisk.contains($0.id) }
             }
-            return (workspaces[0], workspaces[1])
+            return workspaces
         }
 
         /// Puts the shared manager in the launch state, before the saved session has loaded.
@@ -71,6 +162,10 @@ import XCTest
             addTeardownBlock { @MainActor in
                 // Reset before closing: closing a restoring window wakes the launch restore.
                 windowStates.resetLaunchRestoreForTesting()
+                AppWindowOpener.shared.resetForTesting()
+                for hold in self.restoreHolds {
+                    await hold.open()
+                }
                 for window in self.registeredWindows {
                     window.beginClose()
                     await window.tearDown()
@@ -80,25 +175,47 @@ import XCTest
             return windowStates
         }
 
+        /// Stands in for SwiftUI's `openWindow` and counts requests. `body` runs synchronously for
+        /// each request and may register a window in the same call.
+        private func installOpener(_ body: @escaping () -> Void = {}) -> OpenRequestCounter {
+            let counter = OpenRequestCounter()
+            AppWindowOpener.shared.installForTesting {
+                counter.requestCount += 1
+                body()
+            }
+            return counter
+        }
+
         private func makeWindow() -> WindowState {
             MCPWindowTestSupport.makeWindowWithoutAutoStart()
         }
 
-        private func makeRegisteredWindow() -> WindowState {
-            let window = makeWindow()
+        private func register(_ window: WindowState) {
             registeredWindows.append(window)
             WindowStatesManager.shared.registerWindowState(window)
-            return window
+        }
+
+        /// Holds `window`'s restore once its switch to one of `workspaceIDs` holds the activation
+        /// lease, before the switch begins.
+        private func holdRestore(of window: WindowState, onlyFor workspaceIDs: Set<UUID>) -> RestoreHold {
+            let hold = RestoreHold()
+            restoreHolds.append(hold)
+            window.workspaceManager.setWorkspaceActivationLeaseDidAcquireHandlerForTesting { workspaceID in
+                guard workspaceIDs.contains(workspaceID) else { return }
+                await hold.enterAndWait(workspaceID: workspaceID)
+            }
+            return hold
+        }
+
+        private func waitForHold(_ hold: RestoreHold, _ description: String) async throws -> UUID? {
+            try await waitUntil("\(description) to reach its hold") {
+                await hold.workspaceID != nil
+            }
+            return await hold.workspaceID
         }
 
         private func captureIDs() -> [UUID?] {
             WindowStatesManager.shared.captureCurrentSessionForTesting().windows.map(\.workspaceID)
-        }
-
-        private func waitForRestoreToReturn(_ window: WindowState) async throws {
-            try await waitUntil("window \(window.windowID)'s restore attempt to return") {
-                !window.isWorkspaceRestoreInFlight
-            }
         }
 
         private func entry(for workspace: WorkspaceModel) -> WindowSessionEntry {
@@ -122,6 +239,32 @@ import XCTest
             guard await MCPWindowTestSupport.waitUntil(timeout: timeout, condition) else {
                 throw LaunchRestoreFixtureError.timedOut(description)
             }
+        }
+    }
+
+    @MainActor
+    private final class OpenRequestCounter {
+        var requestCount = 0
+    }
+
+    /// Holds one restore attempt at its first matching activation until opened.
+    private actor RestoreHold {
+        private(set) var workspaceID: UUID?
+        private var isOpen = false
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func enterAndWait(workspaceID: UUID) async {
+            guard self.workspaceID == nil else { return }
+            self.workspaceID = workspaceID
+            guard !isOpen else { return }
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+
+        func open() {
+            isOpen = true
+            let waiters = releaseWaiters
+            releaseWaiters.removeAll()
+            waiters.forEach { $0.resume() }
         }
     }
 
