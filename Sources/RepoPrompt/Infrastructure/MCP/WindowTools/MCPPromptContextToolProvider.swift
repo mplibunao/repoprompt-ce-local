@@ -163,17 +163,22 @@ final class MCPPromptContextToolProvider {
         case .set:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for set") }
             try await MCPDomainMutationCommitContext.willCommit()
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
             try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText = text }
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationReplyConstruction)
             let context = try await dependencies.execution.requireCurrentTabContext(MCPWindowToolName.prompt)
             return try Value(simplePromptReply(context.promptText, op: operation.rawValue))
         case .append:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for append") }
             try await MCPDomainMutationCommitContext.willCommit()
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
             try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText += text }
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationReplyConstruction)
             let context = try await dependencies.execution.requireCurrentTabContext(MCPWindowToolName.prompt)
             return try Value(simplePromptReply(context.promptText, op: operation.rawValue))
         case .clear:
             try await MCPDomainMutationCommitContext.willCommit()
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
             try await dependencies.context.updateCurrentTabContext(MCPWindowToolName.prompt) { $0.promptText = "" }
             return try Value(simplePromptReply("", op: operation.rawValue))
         case .export:
@@ -184,6 +189,7 @@ final class MCPPromptContextToolProvider {
             }
             let preset = try await resolveRequiredPreset(args["preset"])
             try await MCPDomainMutationCommitContext.willCommit()
+            MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
             await MainActor.run { dependencies.context.promptVM.selectCopyPreset(preset.id) }
             return try Value(ToolResultDTOs.PromptToolEnvelope.forSelectPreset(dependencies.prompt.copyPresetDescriptorDTO(preset)))
         case .snapshot, .listPresets, .unknown:
@@ -384,14 +390,14 @@ final class MCPPromptContextToolProvider {
         operation: () async throws -> T
     ) async throws -> T {
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(phase)
+        MCPToolExecutionHandlerPhaseContext.report(phase)
         do {
             let value = try await operation()
             try Task.checkCancellation()
-            await MCPToolExecutionHandlerPhaseContext.report(phase, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(phase, transition: .completed)
             return value
         } catch {
-            await MCPToolExecutionHandlerPhaseContext.report(phase, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(phase, transition: .completed)
             throw error
         }
     }

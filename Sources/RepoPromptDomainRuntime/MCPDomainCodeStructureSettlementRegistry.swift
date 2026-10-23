@@ -2,7 +2,9 @@ import Foundation
 
 /// Owns same-window settlement state for detach-disposition tools outside ordinary lane accounting.
 ///
-/// The fenced tools are `get_code_structure`, `read_file`, and `get_file_tree`. Every admitted
+/// The fenced tools are `get_code_structure`, `read_file`, `get_file_tree`, and the prompt
+/// mutations (`prompt` set, append, clear, and select_preset, and `workspace_context`
+/// select_preset); `file_actions` detaches without a lease. Every admitted
 /// provider receives an invocation-scoped lease. Completion, cleanup-grace expiry, and external
 /// cancellation transition that lease under this registry's single lock. A blocking lease fences
 /// later same-window detach-disposition calls for a bounded recovery horizon. After that horizon,
@@ -29,6 +31,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         package let recoveryAfter: Duration?
         package let handlerPhase: String?
         package let releasedProviderCount: Int
+        package let blockingProviderCount: Int
     }
 
     package enum Admission: Sendable {
@@ -80,6 +83,30 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
             self.detachedCount = detachedCount
             self.releasedCount = releasedCount
         }
+    }
+
+    /// One lease as the DEBUG settlement snapshot reports it.
+    package struct LeaseDiagnostics: Equatable, Sendable {
+        package let leaseID: UUID
+        package let invocationID: UUID
+        package let connectionID: UUID
+        package let toolName: String
+        /// `reserved`, `detaching`, `detached`, `abandoned`, or `force_disconnecting`.
+        package let state: String
+        package let admissionAge: Duration
+        package let blockingAge: Duration?
+        package let isReleased: Bool
+        /// Whether the provider returned while its lease was still detaching.
+        package let providerCompleted: Bool
+        package let handlerPhase: MCPToolExecutionHandlerPhaseSnapshot?
+        package let handlerPhaseAge: Duration?
+    }
+
+    package struct Diagnostics: Equatable, Sendable {
+        package let counts: Snapshot
+        package let blockingCount: Int
+        /// Ordered by admission, oldest first.
+        package let leases: [LeaseDiagnostics]
     }
 
     package final class Slot: @unchecked Sendable {
@@ -172,7 +199,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         let connectionID: UUID
         let invocationID: UUID
         let toolName: String
-        let handlerPhase: @Sendable () -> String?
+        let handlerPhaseRecorder: MCPToolExecutionHandlerPhaseRecorder?
+        let admittedAt: Duration
         var state: State
         var blockingSince: Duration?
         var isReleased: Bool
@@ -188,6 +216,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         let detachedAge: Duration
         let recoveryAfter: Duration?
         let releasedProviderCount: Int
+        let blockingProviderCount: Int
     }
 
     private enum AdmissionDecision {
@@ -205,7 +234,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         invocationID: UUID,
         toolName: String,
         now: Duration,
-        handlerPhase: @escaping @Sendable () -> String?
+        handlerPhaseRecorder: MCPToolExecutionHandlerPhaseRecorder? = nil
     ) -> Admission {
         let decision: AdmissionDecision = lock.withLock {
             var entries = entriesByWindowID[windowID, default: [:]]
@@ -223,7 +252,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                         entry: origin,
                         detachedAge: age,
                         recoveryAfter: nil,
-                        releasedProviderCount: releasedProviderCount
+                        releasedProviderCount: releasedProviderCount,
+                        blockingProviderCount: blockingEntries.count
                     ))
                 }
 
@@ -234,7 +264,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                         entry: origin,
                         detachedAge: age,
                         recoveryAfter: recoveryAfter,
-                        releasedProviderCount: releasedProviderCount
+                        releasedProviderCount: releasedProviderCount,
+                        blockingProviderCount: blockingEntries.count
                     ))
                 }
 
@@ -248,7 +279,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                 connectionID: connectionID,
                 invocationID: invocationID,
                 toolName: toolName,
-                handlerPhase: handlerPhase,
+                handlerPhaseRecorder: handlerPhaseRecorder,
+                admittedAt: now,
                 state: .reserved,
                 blockingSince: nil,
                 isReleased: false
@@ -274,8 +306,9 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                 originConnectionID: candidate.entry.connectionID,
                 detachedAge: candidate.detachedAge,
                 recoveryAfter: candidate.recoveryAfter,
-                handlerPhase: candidate.entry.handlerPhase(),
-                releasedProviderCount: candidate.releasedProviderCount
+                handlerPhase: candidate.entry.handlerPhaseRecorder?.snapshot()?.phase.rawValue,
+                releasedProviderCount: candidate.releasedProviderCount,
+                blockingProviderCount: candidate.blockingProviderCount
             ))
         }
     }
@@ -289,6 +322,50 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                 releasedCount: entries.values.count(where: \.isReleased)
             )
         }
+    }
+
+    /// Reports every lease in the window for DEBUG diagnostics. Recorders are read after the
+    /// registry lock is released; they take only their own lock.
+    package func diagnostics(windowID: Int, now: Duration) -> Diagnostics {
+        let entries = lock.withLock {
+            Array(entriesByWindowID[windowID, default: [:]].values)
+        }
+        let leases = entries
+            .sorted { lhs, rhs in
+                lhs.admittedAt == rhs.admittedAt
+                    ? lhs.invocationID.uuidString < rhs.invocationID.uuidString
+                    : lhs.admittedAt < rhs.admittedAt
+            }
+            .map { entry in
+                let handlerPhase = entry.handlerPhaseRecorder?.snapshot()
+                let handlerPhaseAge = handlerPhase.flatMap { phase in
+                    entry.handlerPhaseRecorder.map { recorder in
+                        max(.zero, now - recorder.origin - .milliseconds(phase.elapsedMilliseconds))
+                    }
+                }
+                return LeaseDiagnostics(
+                    leaseID: entry.leaseID,
+                    invocationID: entry.invocationID,
+                    connectionID: entry.connectionID,
+                    toolName: entry.toolName,
+                    state: entry.state.diagnosticName,
+                    admissionAge: Self.elapsed(since: entry.admittedAt, now: now),
+                    blockingAge: entry.blockingSince.map { Self.elapsed(since: $0, now: now) },
+                    isReleased: entry.isReleased,
+                    providerCompleted: entry.state.providerCompleted,
+                    handlerPhase: handlerPhase,
+                    handlerPhaseAge: handlerPhaseAge
+                )
+            }
+        return Diagnostics(
+            counts: Snapshot(
+                activeCount: entries.count,
+                detachedCount: entries.count { $0.state.isZombie },
+                releasedCount: entries.count(where: \.isReleased)
+            ),
+            blockingCount: entries.count(where: \.blocksAdmission),
+            leases: leases
+        )
     }
 
     /// Reports whether an already-released provider plus current blockers still
@@ -586,5 +663,20 @@ private extension MCPCodeStructureSettlementRegistry.State {
         case .detaching, .detached, .abandoned, .forceDisconnecting:
             true
         }
+    }
+
+    var diagnosticName: String {
+        switch self {
+        case .reserved: "reserved"
+        case .detaching: "detaching"
+        case .detached: "detached"
+        case .abandoned: "abandoned"
+        case .forceDisconnecting: "force_disconnecting"
+        }
+    }
+
+    var providerCompleted: Bool {
+        if case .detaching(.some) = self { return true }
+        return false
     }
 }

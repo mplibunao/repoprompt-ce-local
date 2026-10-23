@@ -9851,10 +9851,13 @@ actor ServerNetworkManager {
                 executionWatchdogTerminalConnections.contains(connectionID)
             }
 
-            func debugCodeStructureSettlementSnapshot(
+            func debugCodeStructureSettlementDiagnostics(
                 windowID: Int
-            ) -> MCPCodeStructureSettlementRegistry.Snapshot {
-                codeStructureSettlementRegistry.snapshot(windowID: windowID)
+            ) -> MCPCodeStructureSettlementRegistry.Diagnostics {
+                codeStructureSettlementRegistry.diagnostics(
+                    windowID: windowID,
+                    now: toolExecutionWatchdogEnvironment.now()
+                )
             }
 
             func debugAwaitCodeStructureSettlementDrain(windowID: Int) async {
@@ -12705,7 +12708,7 @@ actor ServerNetworkManager {
                                     transition: MCPToolExecutionHandlerPhaseTransition = .started
                                 ) async {
                                     guard isPromptExport, let contract = selectedExecutionContract else { return }
-                                    let snapshot = await MCPToolExecutionHandlerPhaseContext.report(
+                                    let snapshot = MCPToolExecutionHandlerPhaseContext.report(
                                         phase,
                                         transition: transition,
                                         using: handlerPhaseRecorder
@@ -12785,9 +12788,7 @@ actor ServerNetworkManager {
                                             invocationID: invocationID,
                                             toolName: toolName,
                                             now: executionWatchdogEnvironment.now(),
-                                            handlerPhase: {
-                                                handlerPhaseRecorder.snapshot()?.phase.rawValue
-                                            }
+                                            handlerPhaseRecorder: handlerPhaseRecorder
                                         ) {
                                         case let .admitted(slot):
                                             if let noticeProjection = await self.takeCodeStructureSettlementLimitNoticeAfterSuccessfulAdmission(
@@ -12813,6 +12814,9 @@ actor ServerNetworkManager {
                                         _ = settlementAdmission.slot?.closeBeforeExecutionExit()
                                     }
 
+                                    let traceWindowID = settlementAdmission.slot?.windowID
+                                        ?? Self.currentToolDispatchAuthorization?.windowIdentity?.windowID
+
                                     @Sendable func emitExecutionTrace(
                                         _ phase: MCPToolExecutionTraceEvent.Phase,
                                         resolvedCleanupDisposition: MCPToolExecutionCleanupDisposition? = nil,
@@ -12828,6 +12832,11 @@ actor ServerNetworkManager {
                                         let handlerPhaseAgeMilliseconds = handlerPhase.map {
                                             max(0, now.mcpMilliseconds - executionTraceOrigin.mcpMilliseconds - $0.elapsedMilliseconds)
                                         }
+                                        let settlementPopulation = phase.isAlwaysEmitted
+                                            ? traceWindowID.map {
+                                                self.codeStructureSettlementRegistry.diagnostics(windowID: $0, now: now)
+                                            }
+                                            : nil
                                         MCPToolExecutionTracer.emit(MCPToolExecutionTraceEvent(
                                             toolName: toolName,
                                             operationIdentity: evidenceOperationIdentity,
@@ -12848,7 +12857,10 @@ actor ServerNetworkManager {
                                             graceOutcome: graceOutcome,
                                             escalationReason: escalationReason,
                                             handlerPhase: handlerPhase,
-                                            handlerPhaseAgeMilliseconds: handlerPhaseAgeMilliseconds
+                                            handlerPhaseAgeMilliseconds: handlerPhaseAgeMilliseconds,
+                                            windowID: traceWindowID,
+                                            blockingProviderCount: settlementPopulation?.blockingCount,
+                                            releasedProviderCount: settlementPopulation?.counts.releasedCount
                                         ))
                                     }
 
@@ -13018,6 +13030,13 @@ actor ServerNetworkManager {
                                             cancellationOutcome: providerSettlement.rawValue,
                                             cancellationOrigin: .requestCancellation
                                         )
+                                        await emitExecutionTrace(
+                                            .lateSettled,
+                                            cancellationRequested: true,
+                                            cancellationOutcome: providerSettlement.rawValue,
+                                            cancellationOrigin: .requestCancellation,
+                                            settlement: "abandoned"
+                                        )
                                         EditFlowPerf.lifecycleEvent(
                                             EditFlowPerf.Lifecycle.MCPToolCall.resolvedProviderEnded,
                                             correlation: lifecycleCorrelation,
@@ -13041,6 +13060,13 @@ actor ServerNetworkManager {
                                                 projection: noticeProjection
                                             )
                                         }
+                                        await emitExecutionTrace(
+                                            .lateSettled,
+                                            cancellationRequested: true,
+                                            cancellationOutcome: providerSettlement.rawValue,
+                                            cancellationOrigin: .watchdogDeadline,
+                                            settlement: "force_disconnected"
+                                        )
                                         EditFlowPerf.lifecycleEvent(
                                             EditFlowPerf.Lifecycle.MCPToolCall.resolvedProviderEnded,
                                             correlation: lifecycleCorrelation,
@@ -13350,6 +13376,13 @@ actor ServerNetworkManager {
                                         let limitReached = busyContext.reason == .releasedProviderLimitReached
                                         let abandoned = busyContext.reason == .abandoned
                                         if limitReached {
+                                            MCPSettlementCapRejectionLog.shared.record(.init(
+                                                windowID: windowID,
+                                                toolName: toolName,
+                                                invocationID: invocationID,
+                                                connectionID: connectionID,
+                                                busyContext: busyContext
+                                            ))
                                             let noticeProjection = await self.recordCodeStructureSettlementLimitNotice(
                                                 windowID: windowID
                                             )

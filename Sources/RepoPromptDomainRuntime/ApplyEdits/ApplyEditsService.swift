@@ -23,6 +23,7 @@ package struct ApplyEditsService {
         let result = previewResult.result
 
         if result.editsApplied > 0 {
+            MCPToolExecutionHandlerPhaseContext.report(.applyEditsWrite)
             try await EditFlowPerf.measure(
                 EditFlowPerf.Stage.ApplyEdits.hostWrite,
                 EditFlowPerf.Dimensions(fileBytes: result.updatedText.utf8.count, appliedCount: result.editsApplied)
@@ -67,6 +68,7 @@ package struct ApplyEditsService {
             }
         }
 
+        MCPToolExecutionHandlerPhaseContext.report(.applyEditsPreviewRead)
         let originalText = try await EditFlowPerf.measure(EditFlowPerf.Stage.ApplyEdits.hostRead) {
             try await host.readText(path: request.path)
         }
@@ -74,7 +76,9 @@ package struct ApplyEditsService {
             EditFlowPerf.Stage.ApplyEdits.hostRead,
             EditFlowPerf.Dimensions(fileBytes: originalText.utf8.count)
         )
+        MCPToolExecutionHandlerPhaseContext.report(.applyEditsPreviewTransform)
         let result = try await engine.apply(request: request, to: originalText, options: options)
+        MCPToolExecutionHandlerPhaseContext.report(.applyEditsPreviewTransform, transition: .completed)
         return (exists: true, originalText: originalText, result: result)
     }
 

@@ -29,11 +29,11 @@ enum MCPSelectionConstruction {
         _ phase: MCPToolExecutionHandlerPhase,
         _ operation: () async -> T
     ) async throws -> T {
-        await MCPToolExecutionHandlerPhaseContext.report(phase)
+        MCPToolExecutionHandlerPhaseContext.report(phase)
         let value = await operation()
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(phase, transition: .completed)
-        await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionConstruction)
+        MCPToolExecutionHandlerPhaseContext.report(phase, transition: .completed)
+        MCPToolExecutionHandlerPhaseContext.report(.manageSelectionConstruction)
         return value
     }
 
@@ -49,7 +49,7 @@ enum MCPSelectionConstruction {
             .ResolveManageSelectionArtifactInputs
     ) async throws -> MCPSelectionConstructionOutcome {
         var snapshot = snapshot
-        await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionConstruction)
+        MCPToolExecutionHandlerPhaseContext.report(.manageSelectionConstruction)
 
         snapshot.selection = try await attributed(
             .manageSelectionConstructionVirtualSelectionStabilization
@@ -115,7 +115,7 @@ enum MCPSelectionConstruction {
         // Operation-specific construction runs in the caller and is attributed from the moment
         // control returns, so the span opens here rather than at the callsite. The caller closes
         // it through `completeOperationSpecificConstruction()`.
-        await MCPToolExecutionHandlerPhaseContext.report(
+        MCPToolExecutionHandlerPhaseContext.report(
             .manageSelectionConstructionOperationSpecificConstruction
         )
 
@@ -138,11 +138,11 @@ enum MCPSelectionConstruction {
     /// after cancellation cannot overwrite the attribution that names it.
     static func completeOperationSpecificConstruction() async throws {
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(
+        MCPToolExecutionHandlerPhaseContext.report(
             .manageSelectionConstructionOperationSpecificConstruction,
             transition: .completed
         )
-        await MCPToolExecutionHandlerPhaseContext.report(
+        MCPToolExecutionHandlerPhaseContext.report(
             .manageSelectionConstruction,
             transition: .completed
         )

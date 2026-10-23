@@ -172,10 +172,16 @@ rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.perf_diagn
 
 If a key is unavailable, confirm that `rpce-cli-debug --version` resolves to the current CE debug build before falling back to lower-level defaults.
 
-The `mcp_structure_settlement_snapshot` op reports one window's settlement registry counts of active, detached, and released entries:
+The `mcp_structure_settlement_snapshot` op reports one window's settlement registry: the counts of active, detached, released, and blocking entries, and a `leases` array, oldest admission first. Each lease gives its lease, invocation, and connection IDs, its tool, state, admission age, and blocking age, its `released` and `provider_completed` flags, and the handler phase its invocation last reported, with that report's transition and age. A handler phase is the await the call most recently reached. A `started` phase with a large age is the await that hasn't returned.
 
 ```bash
 rpce-cli-debug -w 1 -c __repoprompt_debug_diagnostics -j '{"op":"mcp_structure_settlement_snapshot","window_id":1}'
+```
+
+Debug and release builds also write each watchdog escalation (deadline expiry, cleanup-grace expiry, detach, force-disconnect), each late settlement of a timed-out or cancelled provider, and each rejection at a window's released-provider limit to the unified log, with the tool, the invocation and connection IDs, the window, the handler phase and its age, and the window's blocking and released counts. The log records the first rejection for one blockage and then at most one more every 30 seconds. Read them from the debug or production app with:
+
+```bash
+log show --last 1h --style compact --predicate 'subsystem == "com.repoprompt.mcp" AND category == "ToolExecution"'
 ```
 
 ### Catalog shard patch measurement

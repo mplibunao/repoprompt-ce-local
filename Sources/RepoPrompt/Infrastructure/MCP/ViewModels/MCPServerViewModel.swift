@@ -6284,7 +6284,7 @@ final class MCPServerViewModel: ObservableObject {
             return lhs.id.uuidString < rhs.id.uuidString
         }
 
-        await MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureGraphSnapshot)
+        MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureGraphSnapshot)
         let aggregate = try await store.queryCodemapStructureGraphs(
             seedFileIDs: orderedFiles.map(\.id),
             direction: request.direction,
@@ -6294,8 +6294,8 @@ final class MCPServerViewModel: ObservableObject {
             logicalRootDisplayNamesByRootID: logicalRootNames
         )
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureGraphTraversal)
-        await MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureGraphRevalidation)
+        MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureGraphTraversal)
+        MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureGraphRevalidation)
         let initialRevalidation = await store.revalidateCodemapStructureGraphs(aggregate)
         let renderableFileIDs = aggregate.roots.flatMap { root -> [UUID] in
             if case .invalid? = initialRevalidation[root.rootEpoch] { return [] }
@@ -6317,7 +6317,7 @@ final class MCPServerViewModel: ObservableObject {
                     maximumCandidateDemandCount: request.budget.maximumNodeCount
                 ),
                 structurePhaseDidChange: { phase in
-                    await MCPToolExecutionHandlerPhaseContext.report(phase.mcpToolExecutionHandlerPhase)
+                    MCPToolExecutionHandlerPhaseContext.report(phase.mcpToolExecutionHandlerPhase)
                 }
             ).structureSignaturePresentation(
                 fileIDs: renderableFileIDs,
@@ -6336,7 +6336,7 @@ final class MCPServerViewModel: ObservableObject {
             revalidation[rootEpoch] = result
         }
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureAssembly)
+        MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureAssembly)
         return Self.codeStructureReplyDTO(
             aggregate: aggregate,
             presentation: presentation,
@@ -6892,12 +6892,14 @@ final class MCPServerViewModel: ObservableObject {
         namespace: WorkspaceExactFileNamespace,
         timeout: Duration = MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
     ) async throws -> WorkspaceReadableFileResolution {
+        MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadFreshness)
         try await readableService.awaitFreshnessForExplicitRequest(
             input,
             namespace: namespace,
             timeout: timeout
         )
         try Task.checkCancellation()
+        MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadExactResolution)
         let resolution = try await EditFlowPerf.measure(EditFlowPerf.Stage.ReadFile.resolveReadableFile) {
             try await readableService.resolveReadFileRequest(
                 input,
@@ -6919,6 +6921,7 @@ final class MCPServerViewModel: ObservableObject {
         try Task.checkCancellation()
         let store = promptVM.workspaceFileContextStore
         let readableService = WorkspaceReadableFileService(store: store)
+        MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadRootCapture)
         let roots = await store.rootRefs(scope: lookupContext.rootScope)
         let namespace = lookupContext.exactFileNamespace(storeRoots: roots)
         let requestedPath = input.renderedPath
@@ -6968,6 +6971,7 @@ final class MCPServerViewModel: ObservableObject {
         }
         try Task.checkCancellation()
 
+        MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadReplyPreparation)
         let preparedReply: MCPReadFileToolProjection.PreparedReply
         do {
             preparedReply = try await MCPReadFileToolProjection.makeBaseReply(
@@ -7064,7 +7068,7 @@ final class MCPServerViewModel: ObservableObject {
         operationID: String
     ) async throws -> MCPFileActionMutationAcknowledgement {
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(.fileActionsPreMutationChecks)
+        MCPToolExecutionHandlerPhaseContext.report(.fileActionsPreMutationChecks)
         // Enforce workspace presence in multi-window mode
         try await requireWorkspaceForTool(MCPWindowToolName.fileActions)
         try Task.checkCancellation()
@@ -7090,9 +7094,9 @@ final class MCPServerViewModel: ObservableObject {
         let shouldSelectCreatedFileInActiveUI = false
         let store = promptVM.workspaceFileContextStore
         let mutationRootMappings = await lookupContext.domainMutationPhysicalRootMappings(store: store)
-        await MCPToolExecutionHandlerPhaseContext.report(.fileActionsPreMutationChecks, transition: .completed)
+        MCPToolExecutionHandlerPhaseContext.report(.fileActionsPreMutationChecks, transition: .completed)
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(.fileActionsCatalogEligibility)
+        MCPToolExecutionHandlerPhaseContext.report(.fileActionsCatalogEligibility)
         do {
             let mutationPaths = [effectivePath] + (effectiveNewPath.map { [$0] } ?? [])
             _ = try await store.awaitAppliedIngressForExplicitRequests(
@@ -7103,11 +7107,11 @@ final class MCPServerViewModel: ObservableObject {
         } catch is WorkspaceAppliedIngressWaitError {
             throw MCPMutationRetryableFailure.workspaceFreshnessUnavailable()
         }
-        await MCPToolExecutionHandlerPhaseContext.report(.fileActionsCatalogEligibility, transition: .completed)
+        MCPToolExecutionHandlerPhaseContext.report(.fileActionsCatalogEligibility, transition: .completed)
         try Task.checkCancellation()
 
         do {
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO)
             switch action.lowercased() {
             case "create":
                 guard let content else {
@@ -7149,33 +7153,33 @@ final class MCPServerViewModel: ObservableObject {
             default:
                 throw MCPError.invalidParams("invalid action: \(action). Must be 'create', 'delete', or 'move'")
             }
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO, transition: .completed)
         } catch is CancellationError {
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO, transition: .completed)
             throw CancellationError()
         } catch let fmErr as FileManagerError {
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO, transition: .completed)
             // Convert internal file-manager errors to friendly, contextual MCP errors
             throw await mapFileManagerErrorToMCP(fmErr, action: action, path: path)
         } catch let mcpErr as MCPError {
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO, transition: .completed)
             throw mcpErr
         } catch {
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsMutationIO, transition: .completed)
             // Generic fallback
             throw MCPError.invalidParams("File action '\(action)' failed: \(error.localizedDescription)")
         }
 
         // The filesystem mutation is durable. From this point cancellation must not be
         // misreported as a safe-to-retry pre-mutation failure.
-        await MCPToolExecutionHandlerPhaseContext.report(.fileActionsPostMutationCatalog)
+        MCPToolExecutionHandlerPhaseContext.report(.fileActionsPostMutationCatalog)
         // Workspace-backed mutations publish their catalog delta before returning.
         // Re-entering the store here to await watcher ingress is both redundant and
         // unsafe for request settlement: a concurrent Context Builder rebuild can hold
         // the store actor after the durable mutation and strand this acknowledgement.
         // External watcher reconciliation remains asynchronous by design.
         let freshness = "fresh"
-        await MCPToolExecutionHandlerPhaseContext.report(.fileActionsPostMutationCatalog, transition: .completed)
+        MCPToolExecutionHandlerPhaseContext.report(.fileActionsPostMutationCatalog, transition: .completed)
         var acknowledgementWarnings: [String] = []
         if Task.isCancelled {
             acknowledgementWarnings.append(
@@ -7183,7 +7187,7 @@ final class MCPServerViewModel: ObservableObject {
             )
         }
         if action.lowercased() == "create" {
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsPostMutationSelection)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsPostMutationSelection)
             let baseSelection = resolvedContext.snapshot.selection
             let addResult = await addStoredSelectionPaths(
                 existing: baseSelection,
@@ -7214,7 +7218,7 @@ final class MCPServerViewModel: ObservableObject {
                     )
                 }
             }
-            await MCPToolExecutionHandlerPhaseContext.report(.fileActionsPostMutationSelection, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.fileActionsPostMutationSelection, transition: .completed)
         }
         return MCPFileActionMutationAcknowledgement(
             warning: acknowledgementWarnings.isEmpty ? nil : acknowledgementWarnings.joined(separator: " "),

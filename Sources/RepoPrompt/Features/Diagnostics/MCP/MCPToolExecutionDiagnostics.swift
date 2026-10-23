@@ -1,157 +1,6 @@
 import Foundation
+import OSLog
 import RepoPromptShared
-
-enum MCPToolExecutionHandlerPhase: String, Equatable {
-    case manageSelectionAutoSelectionDrain = "manage_selection.auto_selection_drain"
-    case manageSelectionIngressWait = "manage_selection.ingress_wait"
-    case manageSelectionConstruction = "manage_selection.selection_construction"
-    /// Child intervals of the aggregate construction phase. The aggregate raw value stays their
-    /// prefix so existing log grouping keeps working, while the watchdog packet can name the
-    /// specific stalled interval instead of the combined one. The first three each cover a single
-    /// awaited dependency; the fourth covers operation-specific construction, which spans the
-    /// caller's per-operation work.
-    case manageSelectionConstructionVirtualSelectionStabilization =
-        "manage_selection.selection_construction.virtual_selection_stabilization"
-    case manageSelectionConstructionGitReviewContextFreeze =
-        "manage_selection.selection_construction.git_review_context_freeze"
-    case manageSelectionConstructionArtifactInputResolution =
-        "manage_selection.selection_construction.artifact_input_resolution"
-    case manageSelectionConstructionOperationSpecificConstruction =
-        "manage_selection.selection_construction.operation_specific_construction"
-    case manageSelectionPersistence = "manage_selection.persistence"
-    case manageSelectionReplyConstruction = "manage_selection.reply_construction"
-    case fileActionsPreMutationChecks = "file_actions.pre_mutation_checks"
-    case fileActionsCatalogEligibility = "file_actions.catalog_eligibility"
-    case fileActionsMutationIO = "file_actions.mutation_io"
-    case fileActionsPostMutationCatalog = "file_actions.post_mutation_catalog"
-    case fileActionsPostMutationSelection = "file_actions.post_mutation_selection"
-    case fileActionsReplyConstruction = "file_actions.reply_construction"
-    case readFileRequestResolution = "read_file.request_resolution"
-    case readFileContentRead = "read_file.content_read"
-    case readFileAutoSelection = "read_file.auto_selection"
-    case getFileTreeRequestResolution = "get_file_tree.request_resolution"
-    case getFileTreeIngressWait = "get_file_tree.ingress_wait"
-    case getFileTreeConstruction = "get_file_tree.construction"
-    case promptExportSelectionDrain = "prompt_export.selection_drain"
-    case promptExportPresetResolution = "prompt_export.preset_resolution"
-    case promptExportContentAssembly = "prompt_export.content_assembly"
-    case promptExportMetadataAssembly = "prompt_export.metadata_assembly"
-    case promptExportDestinationAuthorization = "prompt_export.destination_authorization"
-    case promptExportDurableWrite = "prompt_export.durable_write"
-    case promptExportIngressWait = "prompt_export.ingress_wait"
-    case promptExportReplyAssembly = "prompt_export.reply_assembly"
-    case promptExportFormatting = "prompt_export.formatting"
-    case promptExportPublication = "prompt_export.publication"
-    // Graph-first get_code_structure execution stages.
-    case getCodeStructureSeedResolution = "get_code_structure.seed_resolution"
-    case getCodeStructureIngressWait = "get_code_structure.ingress_wait"
-    case getCodeStructureGraphSnapshot = "get_code_structure.graph_snapshot"
-    case getCodeStructureGraphTraversal = "get_code_structure.graph_traversal"
-    case getCodeStructureGraphRevalidation = "get_code_structure.graph_revalidation"
-    case getCodeStructureRenderDemand = "get_code_structure.render_demand"
-    case getCodeStructureFreeze = "get_code_structure.freeze"
-    case getCodeStructureRender = "get_code_structure.render"
-    case getCodeStructureAssembly = "get_code_structure.assembly"
-}
-
-enum MCPToolExecutionHandlerPhaseTransition: String, Equatable {
-    case started
-    case completed
-}
-
-struct MCPToolExecutionHandlerPhaseSnapshot: Equatable {
-    let phase: MCPToolExecutionHandlerPhase
-    let transition: MCPToolExecutionHandlerPhaseTransition
-    let elapsedMilliseconds: Double
-}
-
-/// Per-invocation progress state. Providers use the task-local accessor while the
-/// connection manager retains this recorder explicitly for watchdog escalation.
-final class MCPToolExecutionHandlerPhaseRecorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private let origin: Duration
-    private let now: @Sendable () async -> Duration
-    private var latest: MCPToolExecutionHandlerPhaseSnapshot?
-
-    init(
-        origin: Duration,
-        now: @escaping @Sendable () async -> Duration
-    ) {
-        self.origin = origin
-        self.now = now
-    }
-
-    @discardableResult
-    func report(
-        _ phase: MCPToolExecutionHandlerPhase,
-        transition: MCPToolExecutionHandlerPhaseTransition
-    ) async -> MCPToolExecutionHandlerPhaseSnapshot {
-        let current = await now()
-        let snapshot = MCPToolExecutionHandlerPhaseSnapshot(
-            phase: phase,
-            transition: transition,
-            elapsedMilliseconds: max(0, current.mcpMilliseconds - origin.mcpMilliseconds)
-        )
-        store(snapshot)
-        return snapshot
-    }
-
-    func snapshot() -> MCPToolExecutionHandlerPhaseSnapshot? {
-        lock.lock()
-        defer { lock.unlock() }
-        return latest
-    }
-
-    private func store(_ snapshot: MCPToolExecutionHandlerPhaseSnapshot) {
-        lock.lock()
-        latest = snapshot
-        lock.unlock()
-    }
-}
-
-enum MCPToolExecutionHandlerPhaseContext {
-    @TaskLocal
-    static var recorder: MCPToolExecutionHandlerPhaseRecorder?
-
-    #if DEBUG
-        private final class DebugState: @unchecked Sendable {
-            let lock = NSLock()
-            var sink: (@Sendable (MCPToolExecutionHandlerPhaseSnapshot) -> Void)?
-        }
-
-        private static let debugState = DebugState()
-    #endif
-
-    static func report(
-        _ phase: MCPToolExecutionHandlerPhase,
-        transition: MCPToolExecutionHandlerPhaseTransition = .started
-    ) async {
-        guard let recorder else { return }
-        await report(phase, transition: transition, using: recorder)
-    }
-
-    @discardableResult
-    static func report(
-        _ phase: MCPToolExecutionHandlerPhase,
-        transition: MCPToolExecutionHandlerPhaseTransition = .started,
-        using recorder: MCPToolExecutionHandlerPhaseRecorder
-    ) async -> MCPToolExecutionHandlerPhaseSnapshot {
-        let snapshot = await recorder.report(phase, transition: transition)
-        #if DEBUG
-            let sink = debugState.lock.withLock { debugState.sink }
-            sink?(snapshot)
-        #endif
-        return snapshot
-    }
-
-    #if DEBUG
-        static func setTestSink(_ sink: (@Sendable (MCPToolExecutionHandlerPhaseSnapshot) -> Void)?) {
-            debugState.lock.lock()
-            debugState.sink = sink
-            debugState.lock.unlock()
-        }
-    #endif
-}
 
 struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
     enum Phase: String {
@@ -165,15 +14,30 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         case cleanupGraceExpired = "execution_cleanup_grace_expired"
         case detachedForSettlement = "execution_detached_for_settlement"
         case detachedSettled = "execution_detached_settled"
+        /// A provider whose caller cancelled it, or whose connection was force-disconnected,
+        /// finally returned. `settlement` says which.
+        case lateSettled = "execution_late_settled"
         case connectionForceDisconnectRequested = "connection_force_disconnect_requested"
 
         var isAlwaysEmitted: Bool {
             switch self {
             case .deadlineExpired, .cancellationRequested, .settledDuringGrace,
                  .cleanupGraceExpired, .detachedForSettlement, .detachedSettled,
-                 .connectionForceDisconnectRequested:
+                 .lateSettled, .connectionForceDisconnectRequested:
                 true
             case .contractSelected, .started, .handlerCompleted, .handlerPhaseTransition:
+                false
+            }
+        }
+
+        /// Escalations a person reading the unified log should notice first.
+        var isEscalation: Bool {
+            switch self {
+            case .cleanupGraceExpired, .detachedForSettlement, .connectionForceDisconnectRequested:
+                true
+            case .contractSelected, .started, .handlerCompleted, .handlerPhaseTransition,
+                 .deadlineExpired, .cancellationRequested, .settledDuringGrace,
+                 .detachedSettled, .lateSettled:
                 false
             }
         }
@@ -199,6 +63,11 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
     let escalationReason: String?
     let handlerPhase: MCPToolExecutionHandlerPhaseSnapshot?
     let handlerPhaseAgeMilliseconds: Double?
+    let windowID: Int?
+    /// The window's settlement-registry population when the event was built; set only for
+    /// always-emitted events of window-scoped calls.
+    let blockingProviderCount: Int?
+    let releasedProviderCount: Int?
 
     init(
         toolName: String,
@@ -220,7 +89,10 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         graceOutcome: String?,
         escalationReason: String?,
         handlerPhase: MCPToolExecutionHandlerPhaseSnapshot?,
-        handlerPhaseAgeMilliseconds: Double?
+        handlerPhaseAgeMilliseconds: Double?,
+        windowID: Int? = nil,
+        blockingProviderCount: Int? = nil,
+        releasedProviderCount: Int? = nil
     ) {
         self.toolName = toolName
         self.operationIdentity = operationIdentity
@@ -242,6 +114,9 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         self.escalationReason = escalationReason
         self.handlerPhase = handlerPhase
         self.handlerPhaseAgeMilliseconds = handlerPhaseAgeMilliseconds
+        self.windowID = windowID
+        self.blockingProviderCount = blockingProviderCount
+        self.releasedProviderCount = releasedProviderCount
     }
 
     var isAlwaysEmitted: Bool {
@@ -259,6 +134,7 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
             "elapsed_ms=\(String(format: "%.3f", elapsedMilliseconds))"
         ]
         if let runID { fields.append("run_id=\(runID.uuidString)") }
+        if let windowID { fields.append("window_id=\(windowID)") }
         if let requestIdentity {
             if let requestID = requestIdentity.jsonRPCRequestID {
                 fields.append("request_id=\(requestID)")
@@ -290,6 +166,8 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         if let handlerPhaseAgeMilliseconds {
             fields.append("handler_phase_age_ms=\(String(format: "%.3f", handlerPhaseAgeMilliseconds))")
         }
+        if let blockingProviderCount { fields.append("blocking_count=\(blockingProviderCount)") }
+        if let releasedProviderCount { fields.append("released_count=\(releasedProviderCount)") }
         return fields.joined(separator: " ")
     }
 }
@@ -301,6 +179,9 @@ enum MCPToolExecutionTracer {
     }
 
     private static let state = State()
+    /// Release builds lose the stderr line when the app is launched normally, so escalations also
+    /// go to the unified log. Every field is a tool name, phase, identifier, count, or duration.
+    private static let log = Logger(subsystem: "com.repoprompt.mcp", category: "ToolExecution")
 
     static var successTracingEnabled: Bool {
         #if DEBUG
@@ -321,6 +202,12 @@ enum MCPToolExecutionTracer {
         state.lock.unlock()
         sink?(event)
 
+        if event.isAlwaysEmitted {
+            log.log(
+                level: event.phase.isEscalation ? .error : .default,
+                "\(event.description, privacy: .public)"
+            )
+        }
         guard event.isAlwaysEmitted || successTracingEnabled else { return }
         guard let data = "[MCPToolExecution] \(event)\n".data(using: .utf8) else { return }
         state.lock.lock()
@@ -337,6 +224,70 @@ enum MCPToolExecutionTracer {
             state.lock.unlock()
         }
     #endif
+}
+
+/// Logs settlement-cap rejections to the unified log. Every rejection in one blockage carries the
+/// same oldest blocker and released count, so the first is logged and repeats at most once per
+/// `repeatInterval`, with the number suppressed since the last line.
+final class MCPSettlementCapRejectionLog: @unchecked Sendable {
+    struct Rejection {
+        let windowID: Int
+        let toolName: String
+        let invocationID: UUID
+        let connectionID: UUID
+        let busyContext: MCPCodeStructureSettlementRegistry.BusyContext
+    }
+
+    static let shared = MCPSettlementCapRejectionLog()
+
+    private struct Entry {
+        var lastLogged: ContinuousClock.Instant
+        var suppressed: Int
+    }
+
+    private static let log = Logger(subsystem: "com.repoprompt.mcp", category: "ToolExecution")
+    private let repeatInterval: Duration
+    private let clock = ContinuousClock()
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+
+    init(repeatInterval: Duration = .seconds(30)) {
+        self.repeatInterval = repeatInterval
+    }
+
+    func record(_ rejection: Rejection) {
+        let context = rejection.busyContext
+        let key = "\(rejection.windowID)|\(context.originInvocationID.uuidString)|\(context.releasedProviderCount)"
+        let now = clock.now
+        let suppressed: Int? = lock.withLock {
+            entries = entries.filter { now - $0.value.lastLogged < repeatInterval * 2 }
+            if var entry = entries[key], now - entry.lastLogged < repeatInterval {
+                entry.suppressed += 1
+                entries[key] = entry
+                return nil
+            }
+            let suppressed = entries[key]?.suppressed ?? 0
+            entries[key] = Entry(lastLogged: now, suppressed: 0)
+            return suppressed
+        }
+        guard let suppressed else { return }
+        let line = [
+            "phase=settlement_cap_rejected",
+            "window_id=\(rejection.windowID)",
+            "tool=\(rejection.toolName)",
+            "invocation_id=\(rejection.invocationID.uuidString)",
+            "connection_id=\(rejection.connectionID.uuidString)",
+            "origin_tool=\(context.originToolName)",
+            "origin_invocation_id=\(context.originInvocationID.uuidString)",
+            "origin_connection_id=\(context.originConnectionID.uuidString)",
+            "origin_handler_phase=\(context.handlerPhase ?? "unreported")",
+            "origin_blocking_age_ms=\(String(format: "%.3f", context.detachedAge.mcpMilliseconds))",
+            "blocking_count=\(context.blockingProviderCount)",
+            "released_count=\(context.releasedProviderCount)",
+            "suppressed_since_last=\(suppressed)"
+        ].joined(separator: " ")
+        Self.log.error("[MCPToolExecution] \(line, privacy: .public)")
+    }
 }
 
 extension Duration {

@@ -3182,6 +3182,8 @@ import XCTest
         }
 
         private static let expectedExportPhaseTrace = [
+            "protected_mutation.authorization:started",
+            "protected_mutation.journal_begin:started",
             "prompt_export.selection_drain:started",
             "prompt_export.selection_drain:completed",
             "prompt_export.preset_resolution:started",
@@ -3193,11 +3195,17 @@ import XCTest
             "prompt_export.destination_authorization:started",
             "prompt_export.destination_authorization:completed",
             "prompt_export.durable_write:started",
+            "protected_mutation.physical_admission:started",
+            "protected_mutation.commit_preparation:started",
+            "protected_mutation.physical_guard:started",
+            "filesystem_mutation.io_wait:started",
+            "workspace_store.edit_publication:started",
             "prompt_export.durable_write:completed",
             "prompt_export.ingress_wait:started",
             "prompt_export.ingress_wait:completed",
             "prompt_export.reply_assembly:started",
             "prompt_export.reply_assembly:completed",
+            "protected_mutation.journal_finalization:started",
             "prompt_export.formatting:started",
             "prompt_export.formatting:completed",
             "prompt_export.publication:started",

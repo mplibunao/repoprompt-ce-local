@@ -2247,6 +2247,7 @@ extension MCPServerViewModel {
                 }
                 throw FileToolAuthorityFailure.superseded
             }
+            MCPToolExecutionHandlerPhaseContext.report(.fileToolAuthorityValidation)
             try await frozenAuthority.validate(
                 workspaceManager: workspaceManager,
                 store: promptVM.workspaceFileContextStore
@@ -2276,6 +2277,7 @@ extension MCPServerViewModel {
         )
 
         let rootCatalogSnapshot: WorkspaceRootCatalogSnapshot
+        MCPToolExecutionHandlerPhaseContext.report(.fileToolAuthorityRootCatalogWait)
         do {
             rootCatalogSnapshot = try await workspaceManager.awaitWorkspaceRootCatalogSnapshot(
                 workspaceID: workspaceID,
@@ -2296,6 +2298,7 @@ extension MCPServerViewModel {
         }
 
         do {
+            MCPToolExecutionHandlerPhaseContext.report(.fileToolAuthorityLookupResolution)
             let lookupContext = try await resolveFileToolLookupContext(
                 from: metadata,
                 rootCatalogSnapshot: rootCatalogSnapshot,
@@ -2306,6 +2309,7 @@ extension MCPServerViewModel {
             else {
                 throw FileToolAuthorityFailure.superseded
             }
+            MCPToolExecutionHandlerPhaseContext.report(.fileToolAuthorityCapture)
             let frozenAuthority = try await FrozenFileToolAuthority.capture(
                 lookupContext: lookupContext,
                 rootCatalogSnapshot: rootCatalogSnapshot,
@@ -2320,10 +2324,12 @@ extension MCPServerViewModel {
             else {
                 throw FileToolAuthorityFailure.superseded
             }
+            MCPToolExecutionHandlerPhaseContext.report(.fileToolAuthorityValidation)
             try await frozenAuthority.validate(
                 workspaceManager: workspaceManager,
                 store: promptVM.workspaceFileContextStore
             )
+            MCPToolExecutionHandlerPhaseContext.report(.fileToolAuthorityValidation, transition: .completed)
             return frozenAuthority
         } catch is CancellationError {
             throw CancellationError()

@@ -12960,6 +12960,7 @@ actor WorkspaceFileContextStore {
     private func interactiveReadSnapshotWithinForegroundActivity(
         for expectedRecord: WorkspaceFileRecord
     ) async throws -> WorkspaceInteractiveReadSnapshot? {
+        MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadSeededAuthority)
         try await requirePublishedSeededAuthorityFresh(rootID: expectedRecord.rootID)
         for attempt in 0 ..< 2 {
             try Task.checkCancellation()
@@ -12983,6 +12984,7 @@ actor WorkspaceFileContextStore {
             )
             let schedulerOwnerID = interactiveReadSchedulerOwnerID
             let fingerprint: FileContentFingerprint
+            MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadFingerprint)
             do {
                 fingerprint = try await service.contentFingerprint(
                     ofRelativePath: current.standardizedRelativePath,
@@ -13011,6 +13013,7 @@ actor WorkspaceFileContextStore {
                 return nil
             }
 
+            MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadCachedContent)
             do {
                 let cached = try await interactiveReadCache.snapshot(
                     for: cacheKey,
@@ -13040,6 +13043,7 @@ actor WorkspaceFileContextStore {
                     file: current,
                     rootLifetimeID: identity.lifetimeID
                 )
+                MCPToolExecutionHandlerPhaseContext.report(.readFileContentReadSeededAuthority)
                 try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return WorkspaceInteractiveReadSnapshot(
                     preparedContent: preparedContent,
@@ -17939,6 +17943,7 @@ actor WorkspaceFileContextStore {
         rootEpoch: WorkspaceCodemapRootEpoch
     ) async -> Bool {
         while !codemapPathWorkIsQuiescent(rootEpoch: rootEpoch) {
+            MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreCodemapPathQuiescenceWait)
             let waiterID = UUID()
             await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
@@ -17957,6 +17962,7 @@ actor WorkspaceFileContextStore {
             guard !Task.isCancelled,
                   rootStatesByID[rootEpoch.rootID]?.lifetimeID == rootEpoch.rootLifetimeID
             else { return false }
+            MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreCodemapPathQuiescenceWait, transition: .completed)
         }
         return true
     }
@@ -17988,6 +17994,7 @@ actor WorkspaceFileContextStore {
         rootEpoch: WorkspaceCodemapRootEpoch
     ) async -> Bool {
         while codemapRootMutationFenceTokensByRootEpoch[rootEpoch] != nil {
+            MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreCodemapRootFenceWait)
             let waiterID = UUID()
             await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
@@ -18003,6 +18010,7 @@ actor WorkspaceFileContextStore {
             guard !Task.isCancelled,
                   rootStatesByID[rootEpoch.rootID]?.lifetimeID == rootEpoch.rootLifetimeID
             else { return false }
+            MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreCodemapRootFenceWait, transition: .completed)
         }
         return true
     }
@@ -18164,6 +18172,7 @@ actor WorkspaceFileContextStore {
             )
             throw CancellationError()
         }
+        MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreEditPublication)
         let result = try await materializeCatalogFileAfterDiskWrite(
             rootID: rootID,
             relativePath: standardizedRelativePath,
@@ -18241,6 +18250,7 @@ actor WorkspaceFileContextStore {
             throw FileSystemError.fileNotFound
         }
 
+        MCPToolExecutionHandlerPhaseContext.report(.workspaceStoreEditPublication)
         do {
             #if DEBUG
                 if let storeEditDeferredPublicationDidRegisterHandler {

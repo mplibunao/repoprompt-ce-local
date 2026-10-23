@@ -87,14 +87,14 @@ final class ContentReadCancellationTests: XCTestCase {
                         }
                     ) {
                         try await MCPToolExecutionHandlerPhaseContext.$recorder.withValue(phaseRecorder) {
-                            await MCPToolExecutionHandlerPhaseContext.report(.readFileContentRead)
+                            MCPToolExecutionHandlerPhaseContext.report(.readFileContentRead)
                             let fingerprint = try await service.contentFingerprint(ofRelativePath: "Target.swift")
                             _ = try await service.loadValidatedContent(
                                 ofRelativePath: "Target.swift",
                                 expectedFingerprint: fingerprint,
                                 workloadClass: .interactiveRead
                             )
-                            await MCPToolExecutionHandlerPhaseContext.report(
+                            MCPToolExecutionHandlerPhaseContext.report(
                                 .readFileContentRead,
                                 transition: .completed
                             )
@@ -179,8 +179,7 @@ final class ContentReadCancellationTests: XCTestCase {
             connectionID: connectionID,
             invocationID: invocationID,
             toolName: MCPWindowToolName.readFile,
-            now: .zero,
-            handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+            now: .zero
         )
         guard case let .admitted(settlementSlot) = admission else {
             return XCTFail("Expected settlement-registry admission")
@@ -269,8 +268,7 @@ final class ContentReadCancellationTests: XCTestCase {
             connectionID: UUID(),
             invocationID: UUID(),
             toolName: MCPWindowToolName.readFile,
-            now: .zero,
-            handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+            now: .zero
         )
         guard case let .admitted(settlementSlot) = admission else {
             return XCTFail("Expected settlement-registry admission")
@@ -459,8 +457,7 @@ final class ContentReadCancellationTests: XCTestCase {
             connectionID: connectionID,
             invocationID: invocationID,
             toolName: MCPWindowToolName.readFile,
-            now: .zero,
-            handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+            now: .zero
         )
         guard case let .admitted(settlementSlot) = admission else {
             return XCTFail("Expected settlement-registry admission")
@@ -615,8 +612,7 @@ final class ContentReadCancellationTests: XCTestCase {
                     connectionID: UUID(),
                     invocationID: UUID(),
                     toolName: MCPWindowToolName.readFile,
-                    now: clock.now(),
-                    handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+                    now: clock.now()
                 )
                 guard case let .admitted(settlementSlot) = admission else {
                     return XCTFail("Explicit-materialization attempt \(attemptNumber) was blocked before execution")
@@ -683,8 +679,7 @@ final class ContentReadCancellationTests: XCTestCase {
                 connectionID: UUID(),
                 invocationID: UUID(),
                 toolName: MCPWindowToolName.readFile,
-                now: clock.now(),
-                handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+                now: clock.now()
             )
             let thirdAdmissionSucceeded: Bool
             switch thirdAdmission {
@@ -1045,8 +1040,7 @@ final class ContentReadCancellationTests: XCTestCase {
                     connectionID: UUID(),
                     invocationID: invocationID,
                     toolName: MCPWindowToolName.readFile,
-                    now: clock.now(),
-                    handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+                    now: clock.now()
                 )
                 guard case let .admitted(settlementSlot) = admission else {
                     return XCTFail("Timeout attempt \(attempt) was blocked by prior provider settlement debt")
@@ -2013,8 +2007,7 @@ final class ContentReadCancellationTests: XCTestCase {
                 connectionID: UUID(),
                 invocationID: UUID(),
                 toolName: MCPWindowToolName.readFile,
-                now: clock.now(),
-                handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+                now: clock.now()
             )
             guard case let .admitted(settlementSlot) = admission else {
                 XCTFail("Exact-resolution attempt \(attempt) was blocked before execution", file: file, line: line)
@@ -2097,8 +2090,7 @@ final class ContentReadCancellationTests: XCTestCase {
                 connectionID: UUID(),
                 invocationID: UUID(),
                 toolName: MCPWindowToolName.readFile,
-                now: clock.now(),
-                handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+                now: clock.now()
             )
             let thirdAdmissionSucceeded: Bool
             switch thirdAdmission {
@@ -2311,8 +2303,7 @@ final class ApplyEditsBoundedPreviewReadTests: XCTestCase {
                 connectionID: UUID(),
                 invocationID: UUID(),
                 toolName: MCPWindowToolName.readFile,
-                now: clock.now(),
-                handlerPhase: { MCPToolExecutionHandlerPhase.readFileContentRead.rawValue }
+                now: clock.now()
             )
             guard case let .admitted(slot) = admission else {
                 return XCTFail("Structure provider was not admitted")
@@ -2368,8 +2359,7 @@ final class ApplyEditsBoundedPreviewReadTests: XCTestCase {
                 connectionID: UUID(),
                 invocationID: UUID(),
                 toolName: MCPWindowToolName.getCodeStructure,
-                now: clock.now(),
-                handlerPhase: { nil }
+                now: clock.now()
             ) else {
                 return XCTFail("Detached structure provider should fence the next structure call")
             }

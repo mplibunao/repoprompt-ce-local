@@ -208,6 +208,7 @@ package struct MCPDomainProtectedMutationToolProvider: Sendable {
         let fingerprint: String
         do {
             try Task.checkCancellation()
+            MCPToolExecutionHandlerPhaseContext.report(.protectedMutationAuthorization)
             initialAuthorization = try await policyStore.authorize(
                 context: securityContext,
                 toolName: operation.toolName,
@@ -232,6 +233,7 @@ package struct MCPDomainProtectedMutationToolProvider: Sendable {
             throw error
         }
         let key = "\(operation.toolName).\(operation.action):request:\(securityContext.mutationRequestKey)"
+        MCPToolExecutionHandlerPhaseContext.report(.protectedMutationJournalBegin)
         let begin = try await journal.begin(
             key: key,
             operationID: operationID,
@@ -260,13 +262,16 @@ package struct MCPDomainProtectedMutationToolProvider: Sendable {
             )
             let controller = DomainMutationCommitController(
                 admitPhysicalTargets: { paths, mappings in
+                    MCPToolExecutionHandlerPhaseContext.report(.protectedMutationPhysicalAdmission)
                     try await admissionState.admit(paths: paths, rootMappings: mappings)
                 },
                 physicalMutationGuard: {
                     guard await commitState.hasBegunCommit() else { return nil }
+                    MCPToolExecutionHandlerPhaseContext.report(.protectedMutationPhysicalGuard)
                     return try await admissionState.physicalMutationGuard()
                 },
                 willCommit: {
+                    MCPToolExecutionHandlerPhaseContext.report(.protectedMutationCommitPreparation)
                     try await commitState.beginIfNeeded {
                         try await admissionState.prepareCommit()
                     }
@@ -276,6 +281,7 @@ package struct MCPDomainProtectedMutationToolProvider: Sendable {
                 let result = try await MCPDomainMutationCommitContext.$controller.withValue(controller) {
                     try await binding(effectiveArguments)
                 }
+                MCPToolExecutionHandlerPhaseContext.report(.protectedMutationJournalFinalization)
                 let didBeginCommit = await commitState.hasBegunCommit()
                 if Task.isCancelled, didBeginCommit {
                     try await finishIndeterminateAfterCommitAndThrow(
@@ -290,6 +296,7 @@ package struct MCPDomainProtectedMutationToolProvider: Sendable {
             } catch let error as DomainProtectedMutationError {
                 throw error
             } catch {
+                MCPToolExecutionHandlerPhaseContext.report(.protectedMutationJournalFinalization)
                 let didBeginCommit = await commitState.hasBegunCommit()
                 if didBeginCommit {
                     try await finishIndeterminateAfterCommitAndThrow(

@@ -163,6 +163,7 @@ extension FileSystemService {
             try completion.get()
             return
         }
+        MCPToolExecutionHandlerPhaseContext.report(.filesystemMutationIOWait)
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
                 if Task.isCancelled {

@@ -181,26 +181,26 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         let includeBlocks = view == "content"
         let metadata = await dependencies.context.captureRequestMetadata()
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionAutoSelectionDrain)
+        MCPToolExecutionHandlerPhaseContext.report(.manageSelectionAutoSelectionDrain)
         let drainRequirement: MCPReadFileAutoSelectionCoordinator.DrainRequirement = op == "get"
             ? .canonicalSelection
             : .mirroredSelectionAndMetrics
         try await MCPServerViewModel.requireReadFileAutoSelectionPrerequisite {
             try await dependencies.files.drainReadFileAutoSelection(metadata, drainRequirement)
         }
-        await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionAutoSelectionDrain, transition: .completed)
+        MCPToolExecutionHandlerPhaseContext.report(.manageSelectionAutoSelectionDrain, transition: .completed)
         try Task.checkCancellation()
         var resolvedContext = try dependencies.context.resolveTabContextSnapshot(metadata, MCPWindowToolName.manageSelection)
         let lookupContext = await dependencies.selection.resolveFileToolLookupContext(metadata)
         try Task.checkCancellation()
         let lookupRootScope = lookupContext.rootScope
         if op != "get" {
-            await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionIngressWait)
+            MCPToolExecutionHandlerPhaseContext.report(.manageSelectionIngressWait)
             _ = try await dependencies.context.promptVM.workspaceFileContextStore.awaitAppliedIngress(
                 rootScope: lookupRootScope,
                 timeout: MCPTimeoutPolicy.boundedToolFreshnessWaitTimeout
             )
-            await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionIngressWait, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.manageSelectionIngressWait, transition: .completed)
         }
         try Task.checkCancellation()
         let construction = try await MCPSelectionConstruction.run(
@@ -233,9 +233,9 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
             selectionLog("[Virtual] manage_selection op=get tab=\(ctx.tabID) selected=\(ctx.selection.selectedPaths.count) manualCodemaps=\(ctx.selection.manualCodemapPaths.count) slices=\(ctx.selection.slices.count)")
             try await MCPSelectionConstruction.completeOperationSpecificConstruction()
             try Task.checkCancellation()
-            await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction)
+            MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction)
             let reply = try await dependencies.selection.buildCurrentSelectionReply(includeBlocks, display, extraInvalid, view, resolvedContext, lookupContext)
-            await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction, transition: .completed)
             try Task.checkCancellation()
             return reply
         case "preview":
@@ -269,7 +269,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
             let previewCodeMapOverride: CodeMapUsage? = context.runID != nil ? .auto : nil
             try await MCPSelectionConstruction.completeOperationSpecificConstruction()
             try Task.checkCancellation()
-            await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction)
+            MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction)
             let previewReply = try await dependencies.selection.buildSelectionPreviewReply(
                 previewSelectionFinal,
                 includeBlocks,
@@ -287,7 +287,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
                     throw ArtifactCommitConflict(reason: "Git artifact advertisement changed during preview")
                 }
             }
-            await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction, transition: .completed)
+            MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction, transition: .completed)
             try Task.checkCancellation()
             if strict {
                 let resolvedPreviewArtifactCount = artifactResolution.artifacts.count { artifact in
@@ -590,7 +590,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         resolvedContext.snapshot.selection = selection
         try await MCPSelectionConstruction.completeOperationSpecificConstruction()
         try Task.checkCancellation()
-        await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionPersistence)
+        MCPToolExecutionHandlerPhaseContext.report(.manageSelectionPersistence)
         let canonicalSelection: StoredSelection
         if let artifactFence {
             let result = await dependencies.selection.commitManageSelectionArtifactMutation(
@@ -627,12 +627,12 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         } else {
             canonicalSelection = baseContext.selection
         }
-        await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionPersistence, transition: .completed)
+        MCPToolExecutionHandlerPhaseContext.report(.manageSelectionPersistence, transition: .completed)
         try Task.checkCancellation()
         let codeMapOverride: CodeMapUsage? = baseContext.runID != nil ? .auto : nil
         var replyContext = baseContext
         replyContext.selection = canonicalSelection
-        await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction)
+        MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction)
         let reply = try await dependencies.selection.buildSelectionMutationReply(
             canonicalSelection,
             includeBlocks,
@@ -644,7 +644,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
             lookupContext,
             reviewGitContext
         )
-        await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction, transition: .completed)
+        MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction, transition: .completed)
         try Task.checkCancellation()
         return reply
     }
