@@ -1115,7 +1115,7 @@ package enum MCPDomainCanonicalToolDefinitions {
                 name: definition.name,
                 description: definition.description.replacingOccurrences(
                     of: "- `stop_session`: Stop a live session.",
-                    with: "- `stop_session`: Cancel a live session's run. With no run in flight, release the session's agent process instead, ending that process's background commands. The transcript stays, and the next message starts a new process that resumes the conversation if the agent can load it. The reply's `provider_process` says whether the stop released the process."
+                    with: "- `stop_session`: Cancel a live session's run. With no run in flight, end its agent process and that process's background commands. The session stays, and a later message resumes it."
                 ),
                 inputSchema: definition.inputSchema,
                 annotations: definition.annotations,

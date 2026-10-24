@@ -27,12 +27,12 @@ import XCTest
         }
 
         /// A stop on a session whose run completed releases its process and keeps the transcript,
-        /// the stored conversation and the terminal result. The reply warns when the Codex
-        /// app-server may still be exiting, and when the next message can't resume the conversation.
+        /// the stored conversation and the terminal result. The reply warns only when the next
+        /// message can't resume the conversation.
         func testCompletedSessionReleasesProviderAndKeepsConversation() async throws {
             let rows: [(label: String, agent: AgentProviderKind, acpLoadSession: Bool, message: String?)] = [
                 ("claude", .claudeCode, true, nil),
-                ("codex", .codexExec, true, AgentManageMCPToolService.stopReleasedCodexMessage),
+                ("codex", .codexExec, true, nil),
                 ("cursor", .cursor, true, nil),
                 ("cursor without loadSession", .cursor, false, AgentManageMCPToolService.stopNewConversationMessage)
             ]

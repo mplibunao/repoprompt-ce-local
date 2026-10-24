@@ -79,15 +79,10 @@ struct AgentManageMCPToolService {
     #endif
 
     static let stopSessionChangedMessage = "Retryable session_changed: The session's agent process changed while stopping, so no process was released. Retry agent_manage op=stop_session."
-    static let stopReleasedCodexMessage = "The Codex app-server can take a few more seconds to exit."
     static let stopNewConversationMessage = "This agent can't load saved conversations. The next message opens a new one with a summary of this transcript."
-    static var stopShuttingDownMessage: String {
-        let seconds = AgentModeViewModel.providerRetirementReplyWait.components.seconds
-        return "The process is still shutting down after \(seconds) seconds and finishes on its own. The next message waits for it."
-    }
-
+    static let stopShuttingDownMessage = "The process is still shutting down. The next message waits for it."
     static let stopBlockedMessage = "The stop didn't release the process. Retry it once the blocker clears."
-    static let stopAlreadyGoneMessage = "The session had no agent process attached. A process left by a cancelled or failed run can still be exiting."
+    static let stopAlreadyGoneMessage = "The session had no agent process attached."
 
     init(
         toolName: String,
@@ -934,9 +929,8 @@ struct AgentManageMCPToolService {
 
         agentModeVM.clearStaleMCPRunningMasksBeforeStop(session, sessionID: sessionID)
         // Captured in the same main-actor slice as the runtime `retireProviderIfIdle` retires, so
-        // the reply describes that runtime. Codex's app-server exits after its retirement
-        // finishes, and an ACP agent that can't load a saved conversation starts a new one.
-        let heldCodexRuntime = session.codexController != nil
+        // the reply describes that runtime: an ACP agent that can't load a saved conversation
+        // starts a new one.
         let heldACPController = session.acpController
         let status: String
         var messages: [String] = []
@@ -945,9 +939,6 @@ struct AgentManageMCPToolService {
         case let .retiring(retirement):
             if await agentModeVM.waitForProviderRetirementReply(retirement) {
                 status = "released"
-                if heldCodexRuntime {
-                    messages.append(Self.stopReleasedCodexMessage)
-                }
             } else {
                 status = "shutting_down"
                 messages.append(Self.stopShuttingDownMessage)
