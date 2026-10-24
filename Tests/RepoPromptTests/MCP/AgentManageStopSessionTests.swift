@@ -43,7 +43,7 @@ import XCTest
                 let reply = try await fixture.stop()
 
                 XCTAssertEqual(reply["stop_requested"], .bool(false), label)
-                XCTAssertEqual(reply["provider_process"], .object(["status": .string("released")]), label)
+                XCTAssertEqual(reply["provider_process"]?.objectValue?["status"], .string("released"), label)
                 XCTAssertEqual(reply["is_live"], .bool(true), label)
                 XCTAssertEqual(reply["runtime_attached"], .bool(false), label)
                 XCTAssertEqual(fixture.shutdownsFinished, 1, label)
@@ -155,7 +155,7 @@ import XCTest
             try await startupTestEventually { shutdownHold.isWaiting && fixture.clock.pendingDeadlines.count == 1 }
             fixture.clock.advance(by: AgentModeViewModel.providerRetirementReplyWait)
             let reply = try await stopping.reply()
-            XCTAssertEqual(reply["provider_process"], .object(["status": .string("shutting_down")]))
+            XCTAssertEqual(reply["provider_process"]?.objectValue?["status"], .string("shutting_down"))
             XCTAssertEqual(reply["runtime_attached"], .bool(false))
 
             let preparationsWaiting = StartupTestCounter()

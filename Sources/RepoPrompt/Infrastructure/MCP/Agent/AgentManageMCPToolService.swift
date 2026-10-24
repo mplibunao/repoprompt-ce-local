@@ -79,6 +79,9 @@ struct AgentManageMCPToolService {
     #endif
 
     static let stopSessionChangedMessage = "Retryable session_changed: The session's agent process changed while stopping, so no process was released. Retry agent_manage op=stop_session."
+    static let stopReleasedCodexMessage = "The Codex app-server can take a few more seconds to exit."
+    static let stopShuttingDownMessage = "The process is still shutting down after 5 seconds and finishes on its own. The next message waits for it."
+    static let stopAlreadyGoneMessage = "The session had no agent process attached. A process left by a cancelled or failed run can still be exiting."
 
     init(
         toolName: String,
@@ -923,13 +926,27 @@ struct AgentManageMCPToolService {
             return .object(reply)
         }
 
-        let providerProcess: [String: Value]
+        // Codex's app-server exits after its retirement finishes, so its `released` says so.
+        let heldCodexRuntime = session.codexController != nil
+        var providerProcess: [String: Value]
         switch await agentModeVM.retireProviderIfIdle(session, reason: .explicitStop) {
         case let .retiring(retirement):
-            let finished = await agentModeVM.waitForProviderRetirementReply(retirement)
-            providerProcess = ["status": .string(finished ? "released" : "shutting_down")]
+            if await agentModeVM.waitForProviderRetirementReply(retirement) {
+                providerProcess = ["status": .string("released")]
+                if heldCodexRuntime {
+                    providerProcess["message"] = .string(Self.stopReleasedCodexMessage)
+                }
+            } else {
+                providerProcess = [
+                    "status": .string("shutting_down"),
+                    "message": .string(Self.stopShuttingDownMessage)
+                ]
+            }
         case .alreadyGone:
-            providerProcess = ["status": .string("already_gone")]
+            providerProcess = [
+                "status": .string("already_gone"),
+                "message": .string(Self.stopAlreadyGoneMessage)
+            ]
         case let .blocked(blocker):
             providerProcess = ["status": .string("blocked"), "blocker": .string(blocker.rawValue)]
         case .superseded:
