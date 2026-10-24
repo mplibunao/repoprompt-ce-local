@@ -50,6 +50,24 @@ actor ACPAgentSessionController {
         let invalidatedResumeSessionID: String?
     }
 
+    /// What idle retirement needs to know about the controller, read in one actor turn.
+    struct IdleRetirementSnapshot: Equatable {
+        let state: State
+        let hasActivePrompt: Bool
+        let pendingRequestCount: Int
+        let pendingPermissionCount: Int
+        let loadSessionSupported: Bool
+
+        /// Nothing is in flight. A controller whose process exited while idle is `failed`, and
+        /// retiring it only reaps what is left.
+        var isIdle: Bool {
+            (state == .sessionOpen || state == .failed)
+                && !hasActivePrompt
+                && pendingRequestCount == 0
+                && pendingPermissionCount == 0
+        }
+    }
+
     private enum ControllerError: LocalizedError {
         case invalidState(expected: String, actual: State)
         case processNotRunning
@@ -379,6 +397,16 @@ actor ACPAgentSessionController {
 
     var hasReusableSession: Bool {
         state == .sessionOpen && process != nil && sessionID != nil
+    }
+
+    func idleRetirementSnapshot() -> IdleRetirementSnapshot {
+        IdleRetirementSnapshot(
+            state: state,
+            hasActivePrompt: activePromptTurnID != nil,
+            pendingRequestCount: pendingRequests.count,
+            pendingPermissionCount: pendingPermissionRequests.count,
+            loadSessionSupported: loadSessionSupported
+        )
     }
 
     func isCompatibleWith(request: ACPRunRequest) -> Bool {
@@ -1830,8 +1858,18 @@ actor ACPAgentSessionController {
             return try await openNewSession()
         case let .load(existingSessionID):
             guard loadSessionSupported else {
-                suppressSessionLoadReplayUpdates = false
-                throw ControllerError.requestFailed("ACP runtime does not support session/load for existing session \(existingSessionID).")
+                // The runtime can't reload the saved conversation, so open a new one as the
+                // missing-session fallback below does. The runner then sends RepoPrompt's
+                // transcript handoff with the next prompt and clears the stale ID.
+                fallbackResumeSessionIDForPromptClearing = existingSessionID
+                log("ACP runtime does not advertise session/load; opening ACP session/new instead of loading \(existingSessionID)")
+                diagnose(.info("\(provider.providerID.rawValue) does not support session/load; opening a fresh session instead of loading \(existingSessionID)."))
+                let fresh = try await openNewSession()
+                return OpenSessionResult(
+                    sessionID: fresh.sessionID,
+                    providerSessionIdentity: fresh.providerSessionIdentity,
+                    invalidatedResumeSessionID: existingSessionID
+                )
             }
             do {
                 suppressSessionLoadReplayUpdates = true

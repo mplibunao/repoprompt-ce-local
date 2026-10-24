@@ -1163,3 +1163,192 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
         }
     #endif
 }
+
+#if DEBUG
+
+    // MARK: - Retirement and resume
+
+    /// These runs go through the view model's submission into the runner's fresh-start branch, on
+    /// real ACP controllers whose agent is `StartupTestACPPeer`.
+    extension ACPIntegratedAgentModeRunnerExecutionTests {
+        /// A released session's next turn waits for the old process to exit, then loads the stored
+        /// conversation in a new process.
+        func testRetiredSessionLoadsConversationAfterShutdown() async throws {
+            let fixture = try makeACPRetirementFixture()
+            let session = fixture.session
+            let fact = "fact-\(UUID().uuidString)"
+            try await fixture.runTurn("Remember \(fact).")
+            let firstPID = try XCTUnwrap(fixture.peer.startedPIDs.first)
+            let storedID = try XCTUnwrap(session.providerSessionID)
+            let firstRunID = try XCTUnwrap(session.runID)
+
+            let shutdownHold = StartupTestHeldGate()
+            fixture.cleanup.heldGates.append(shutdownHold)
+            let startsWaiting = StartupTestCounter()
+            fixture.viewModel.test_setACPRetirementHooks(
+                retirementWillShutDown: { _ in await shutdownHold.wait() },
+                startWillAwaitRetirement: { _ in startsWaiting.value += 1 }
+            )
+            guard case .retiring = await fixture.viewModel.retireProviderIfIdle(session, reason: .explicitStop) else {
+                return XCTFail("the idle session's process was not released")
+            }
+            XCTAssertNil(session.acpController)
+            XCTAssertNil(session.runID)
+            XCTAssertEqual(session.providerSessionID, storedID)
+
+            let ticket = try fixture.submit("What did I ask you to remember?")
+            // A start that skipped the wait shows up as a second process.
+            try await startupTestEventually { startsWaiting.value == 1 || fixture.peer.startedPIDs.count > 1 }
+            XCTAssertEqual(fixture.peer.startedPIDs, [firstPID], "a new process started while the old one was running")
+
+            shutdownHold.release()
+            try await startupTestJoin(ticket.task)
+            try await fixture.awaitCompletedTurn()
+
+            let records = fixture.peer.records
+            let secondPID = try XCTUnwrap(fixture.peer.startedPIDs.last)
+            XCTAssertNotEqual(secondPID, firstPID)
+            let firstExit = try XCTUnwrap(records.firstIndex { $0.event == "exit" && $0.pid == firstPID })
+            let secondStart = try XCTUnwrap(records.firstIndex { $0.event == "start" && $0.pid == secondPID })
+            XCTAssertLessThan(firstExit, secondStart, "the new process started before the old one exited")
+            let load = try XCTUnwrap(records.first { $0.event == "session/load" && $0.pid == secondPID })
+            XCTAssertEqual(load.sessionID, storedID)
+            XCTAssertEqual(load.history?.contains { $0.contains(fact) }, true, "\(String(describing: load.history))")
+            XCTAssertFalse(records.contains { $0.event == "session/new" && $0.pid == secondPID })
+            let secondPrompt = try XCTUnwrap(records.last { $0.event == "session/prompt" })
+            XCTAssertEqual(secondPrompt.pid, secondPID)
+            XCTAssertEqual(secondPrompt.sessionID, storedID)
+            XCTAssertEqual(session.providerSessionID, storedID)
+            XCTAssertNotNil(session.runID)
+            XCTAssertNotEqual(session.runID, firstRunID)
+            XCTAssertNotNil(session.acpController)
+            XCTAssertFalse(fixture.viewModel.test_hasPendingACPRetirement(for: session))
+        }
+
+        /// When the agent can't load the stored conversation, the turn opens a new one, sends the
+        /// transcript handoff with the message, and says so once in the transcript.
+        func testResumeFallbackAddsOneNoticeAndHandoff() async throws {
+            let savedID = "saved-acp-session"
+            let notice = ACPIntegratedAgentModeRunner.resumeFallbackNotice(for: .cursor)
+            for (label, loadSession, failLoad) in [
+                ("stored conversation missing", true, true),
+                ("agent can't load conversations", false, false)
+            ] {
+                let fixture = try makeACPRetirementFixture(loadSession: loadSession, failLoad: failLoad)
+                Self.installEarlierConversation(on: fixture.session, providerSessionID: savedID)
+                let earlierItems = fixture.session.items
+
+                try await fixture.runTurn("after the fallback")
+
+                let records = fixture.peer.records
+                XCTAssertEqual(records.contains { $0.event == "session/load" }, loadSession, label)
+                XCTAssertEqual(records.count { $0.event == "session/new" }, 1, label)
+                let prompt = try XCTUnwrap(records.last { $0.event == "session/prompt" }?.text, label)
+                let handoffEnd = try XCTUnwrap(prompt.range(of: "</forked_session>"), "\(label): \(prompt)")
+                XCTAssertTrue(prompt[..<handoffEnd.lowerBound].contains("the earlier fact is 42"), "\(label): \(prompt)")
+                XCTAssertTrue(prompt[handoffEnd.upperBound...].contains("after the fallback"), "\(label): \(prompt)")
+                XCTAssertEqual(Self.systemTexts(in: fixture.session), [notice], label)
+                XCTAssertEqual(Array(fixture.session.items.prefix(earlierItems.count)), earlierItems, label)
+                let newID = try XCTUnwrap(fixture.session.providerSessionID, label)
+                XCTAssertNotEqual(newID, savedID, label)
+                XCTAssertEqual(records.last { $0.event == "session/prompt" }?.sessionID, newID, label)
+            }
+        }
+
+        /// A fallback whose `session/new` fails too ends the run failed, without the notice that a
+        /// new conversation started.
+        func testFailedNewConversationAddsNoNotice() async throws {
+            let savedID = "saved-acp-session"
+            let fixture = try makeACPRetirementFixture(loadSession: false, failNew: true)
+            Self.installEarlierConversation(on: fixture.session, providerSessionID: savedID)
+            let ticket = try fixture.submit("after the fallback")
+            try await startupTestJoin(ticket.task)
+            try await startupTestEventually(seconds: 15) {
+                !fixture.session.runState.isActive && fixture.session.activeRunOwnership == nil
+            }
+            XCTAssertEqual(fixture.session.runState, .failed)
+            XCTAssertEqual(Self.systemTexts(in: fixture.session), [])
+            XCTAssertFalse(fixture.peer.records.contains { $0.event == "session/prompt" })
+        }
+
+        private static func installEarlierConversation(
+            on session: AgentModeViewModel.TabSession,
+            providerSessionID: String
+        ) {
+            session.setItemsSilently(
+                [
+                    .user("what is the earlier fact?", sequenceIndex: 0),
+                    .assistant("the earlier fact is 42", sequenceIndex: 1)
+                ],
+                reason: .persistedSessionHydration
+            )
+            session.nextSequenceIndex = 2
+            session.providerSessionID = providerSessionID
+        }
+
+        private static func systemTexts(in session: AgentModeViewModel.TabSession) -> [String] {
+            session.items.filter { $0.kind == .system }.map(\.text)
+        }
+
+        // MARK: Retirement fixture
+
+        /// A Cursor session in a view model whose ACP starts use `peer`.
+        @MainActor
+        final class ACPRetirementFixture: StartupTestSessionFixture {
+            let peer: StartupTestACPPeer
+
+            init(
+                viewModel: AgentModeViewModel,
+                session: AgentModeViewModel.TabSession,
+                readiness: StartupTestGatedReadiness,
+                controller: StartupTestCodexController,
+                peer: StartupTestACPPeer
+            ) {
+                self.peer = peer
+                super.init(viewModel: viewModel, session: session, readiness: readiness, controller: controller)
+            }
+
+            /// Sends `text` as a manual turn and waits until its run has completed.
+            func runTurn(_ text: String) async throws {
+                let ticket = try submit(text)
+                try await startupTestJoin(ticket.task)
+                try await awaitCompletedTurn()
+            }
+        }
+
+        /// Builds the fixture and registers its teardown, which also ends every agent process the
+        /// test started, before any test step can throw.
+        func makeACPRetirementFixture(
+            loadSession: Bool = true,
+            failLoad: Bool = false,
+            failNew: Bool = false
+        ) throws -> ACPRetirementFixture {
+            let directory = try makeTestDirectory()
+            let peer = try StartupTestACPPeer(directory: directory)
+            let readiness = StartupTestGatedReadiness(gatedCalls: [])
+            let controller = StartupTestCodexController(gatesStartup: false)
+            let viewModel = startupTestMakeViewModel(
+                storageRoot: directory,
+                readiness: readiness,
+                controller: controller,
+                acpProvider: peer.provider(loadSession: loadSession, failLoad: failLoad, failNew: failNew)
+            )
+            let session = AgentModeViewModel.TabSession(tabID: UUID())
+            session.hasLoadedPersistedState = true
+            session.selectedAgent = .cursor
+            let fixture = ACPRetirementFixture(
+                viewModel: viewModel,
+                session: session,
+                readiness: readiness,
+                controller: controller,
+                peer: peer
+            )
+            addTeardownBlock { @MainActor in
+                await fixture.tearDown()
+                await session.acpController?.shutdown()
+                peer.killUnexitedProcesses()
+            }
+            return fixture
+        }
+    }
+#endif

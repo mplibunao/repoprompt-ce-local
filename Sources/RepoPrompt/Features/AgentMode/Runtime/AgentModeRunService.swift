@@ -209,6 +209,17 @@ final class AgentModeRunService {
         return nil
     }
 
+    func pendingACPRetirementTask(for session: AgentTabSession) -> Task<Void, Never>? {
+        acpRunner.pendingRetirementTask(for: session.tabID)
+    }
+
+    func beginACPRetirement(
+        for session: AgentTabSession,
+        expectedController: ACPAgentSessionController
+    ) -> Task<Void, Never>? {
+        acpRunner.beginRetirement(for: session, expectedController: expectedController)
+    }
+
     /// Attempts to submit a prompt into an already-active ACP session.
     @discardableResult
     func submitActiveACPPromptIfSupported(
@@ -566,6 +577,14 @@ final class AgentModeRunService {
     }
 
     #if DEBUG
+        func test_setACPRetirementHooks(
+            retirementWillShutDown: (@MainActor (_ tabID: UUID) async -> Void)?,
+            startWillAwaitRetirement: (@MainActor (_ tabID: UUID) -> Void)?
+        ) {
+            acpRunner.test_retirementWillShutDown = retirementWillShutDown
+            acpRunner.test_startWillAwaitRetirement = startWillAwaitRetirement
+        }
+
         func test_requeueAllQueuedACPSteeringAsFollowUp(session: AgentTabSession) {
             requeueAllQueuedACPSteeringAsFollowUp(tabID: session.tabID, session: session, reason: "test")
         }

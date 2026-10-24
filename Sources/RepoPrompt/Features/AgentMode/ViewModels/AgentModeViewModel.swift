@@ -625,6 +625,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     let applyEditsApprovalStore: ApplyEditsApprovalStore
     private lazy var runService: AgentModeRunService = makeRunService()
     private let sessionLifecycleAuthority = AgentSessionLifecycleAuthority()
+    /// The clock `agent_manage stop_session` waits on for a released process.
+    private(set) var providerRetirementClock: AgentProviderIdleClock = .continuous
 
     private var isRestoringState = false
     private var activeUISyncSuppressionDepth = 0
@@ -969,6 +971,20 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             runService.test_requeueAllQueuedACPSteeringAsFollowUp(session: session)
         }
 
+        func test_setACPRetirementHooks(
+            retirementWillShutDown: (@MainActor (_ tabID: UUID) async -> Void)?,
+            startWillAwaitRetirement: (@MainActor (_ tabID: UUID) -> Void)?
+        ) {
+            runService.test_setACPRetirementHooks(
+                retirementWillShutDown: retirementWillShutDown,
+                startWillAwaitRetirement: startWillAwaitRetirement
+            )
+        }
+
+        func test_hasPendingACPRetirement(for session: TabSession) -> Bool {
+            runService.pendingACPRetirementTask(for: session) != nil
+        }
+
         /// Stops the run the way a confirmed execution-location change stops it.
         func test_cancelAgentRunForExecutionLocationChange(tabID: UUID) async {
             guard let session = sessions[tabID] else { return }
@@ -1092,6 +1108,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         func test_installLiveSession(_ session: TabSession) {
             sessions[session.tabID] = session
+        }
+
+        func test_setProviderRetirementClock(_ clock: AgentProviderIdleClock) {
+            providerRetirementClock = clock
         }
 
         func test_installPersistentSessionBinding(
@@ -6827,15 +6847,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 evidence: session.runState.isActive ? .recorded : .queuedStartup
             )
         }
-        let settled: MCPStatusResolution? = switch session.runState {
-        case .completed, .failed, .cancelled:
-            session.runState.mcpTerminalSnapshotStatus.map { MCPStatusResolution(status: $0) }
-        case .idle:
-            mcpLatestSubmissionTerminalStatus(for: session).map { MCPStatusResolution(status: $0) }
-                ?? MCPStatusResolution(status: .failed, evidence: .unrecordedTerminal)
-        case .running, .waitingForUser, .waitingForQuestion, .waitingForApproval:
-            nil
-        }
+        let settled = mcpSettledStatusResolution(for: session)
         // A startup that owns a ticket returned above, so its masks never expire here.
         if let settled {
             clearStaleMCPRunningMasks(for: session, settled: settled, sessionID: sessionID)
@@ -6855,6 +6867,29 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         case .running, .idle, .completed, .failed, .cancelled:
             return MCPStatusResolution(status: .running)
         }
+    }
+
+    /// The status a session's recorded run state settles to, or nil while its run is still going.
+    private func mcpSettledStatusResolution(for session: TabSession) -> MCPStatusResolution? {
+        switch session.runState {
+        case .completed, .failed, .cancelled:
+            session.runState.mcpTerminalSnapshotStatus.map { MCPStatusResolution(status: $0) }
+        case .idle:
+            mcpLatestSubmissionTerminalStatus(for: session).map { MCPStatusResolution(status: $0) }
+                ?? MCPStatusResolution(status: .failed, evidence: .unrecordedTerminal)
+        case .running, .waitingForUser, .waitingForQuestion, .waitingForApproval:
+            nil
+        }
+    }
+
+    /// Drops the running masks an MCP snapshot would drop as stale. Only a snapshot clears them,
+    /// and a stop takes none, so without this a stale mask would block every stop of a settled
+    /// session until its next run.
+    func clearStaleMCPRunningMasksBeforeStop(_ session: TabSession, sessionID: UUID) {
+        guard session.unresolvedStartupTicket == nil,
+              let settled = mcpSettledStatusResolution(for: session)
+        else { return }
+        clearStaleMCPRunningMasks(for: session, settled: settled, sessionID: sessionID)
     }
 
     /// The masks are legacy bookkeeping for the gap before a run starts. Clearing a stale one only
@@ -10025,6 +10060,219 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 && target.recoveryClaim?.state != .complete
         }) else { return nil }
         return try authoritativeLiveSession(for: sessionID)
+    }
+
+    // MARK: - Provider retirement
+
+    /// How long `agent_manage stop_session` waits for a released process before it replies.
+    static let providerRetirementReplyWait: Duration = .seconds(5)
+
+    /// The native runtime RepoPrompt holds for a session. A headless CLI provider is attached only
+    /// during a run, so it never needs retiring.
+    private enum AttachedProviderRuntime {
+        case claude(any NativeAgentRuntimeControlling)
+        case codex(any CodexSessionControlling)
+        case acp(ACPAgentSessionController)
+
+        var controllerID: ObjectIdentifier {
+            switch self {
+            case let .claude(controller): ObjectIdentifier(controller as AnyObject)
+            case let .codex(controller): ObjectIdentifier(controller)
+            case let .acp(controller): ObjectIdentifier(controller)
+            }
+        }
+
+        var providerName: String {
+            switch self {
+            case .claude: "claude"
+            case .codex: "codex"
+            case .acp: "acp"
+            }
+        }
+    }
+
+    private func attachedProviderRuntime(of session: TabSession) -> AttachedProviderRuntime? {
+        if let controller = session.claudeController { return .claude(controller) }
+        if let controller = session.codexController { return .codex(controller) }
+        if let controller = session.acpController { return .acp(controller) }
+        return nil
+    }
+
+    /// Retires the provider runtime attached to a live session that has no work in flight. The
+    /// transcript and the stored provider conversation stay, so the next message starts a new
+    /// process that resumes the conversation. Every check runs again after the provider probe's
+    /// await, and the runtime is detached and handed to its provider's retirement in one main-actor
+    /// slice, so a submission admitted meanwhile always wins and is never cancelled. Once begun, a
+    /// retirement runs to completion even if the caller is cancelled.
+    ///
+    /// `expectedControllerID` and `isRequestCurrent` let an idle timer give up when its timer or
+    /// controller was replaced, or its setting turned off, during the probe.
+    func retireProviderIfIdle(
+        _ session: TabSession,
+        reason: AgentProviderRetirementReason,
+        expectedControllerID: ObjectIdentifier? = nil,
+        isRequestCurrent: @MainActor () -> Bool = { true }
+    ) async -> AgentProviderRetirementResult {
+        let tabID = session.tabID
+        let runtime = attachedProviderRuntime(of: session)
+        let bindingGeneration = session.bindingTransitionGeneration
+        let runID = session.runID
+        func isStillCurrent() -> Bool {
+            sessions[tabID] === session && isRequestCurrent() && !Task.isCancelled
+        }
+        func settle(_ result: AgentProviderRetirementResult) -> AgentProviderRetirementResult {
+            let event = switch result {
+            case .retiring: "retiring"
+            case .alreadyGone: "already_gone"
+            case let .blocked(blocker): "blocked blocker=\(blocker.rawValue)"
+            case .superseded: "superseded"
+            }
+            AgentProviderRetirement.log(
+                event,
+                provider: runtime?.providerName ?? "none",
+                tabID: tabID,
+                runID: runID,
+                controllerID: runtime?.controllerID,
+                reason: reason
+            )
+            return result
+        }
+
+        guard isStillCurrent() else { return settle(.superseded) }
+        if let expectedControllerID, runtime?.controllerID != expectedControllerID {
+            return settle(.superseded)
+        }
+        if let blocker = sharedProviderRetirementBlocker(for: session) {
+            return settle(.blocked(blocker))
+        }
+        guard let runtime else {
+            return settle(pendingProviderRetirement(for: session).map { .retiring($0) } ?? .alreadyGone)
+        }
+        if let blocker = providerRetirementBlocker(runtime, session: session) {
+            return settle(.blocked(blocker))
+        }
+
+        let probeBlocker = await providerProbeBlocker(runtime, reason: reason)
+
+        guard isStillCurrent() else { return settle(.superseded) }
+        if let blocker = sharedProviderRetirementBlocker(for: session) {
+            return settle(.blocked(blocker))
+        }
+        guard let current = attachedProviderRuntime(of: session) else {
+            return settle(pendingProviderRetirement(for: session).map { .retiring($0) } ?? .alreadyGone)
+        }
+        guard current.controllerID == runtime.controllerID,
+              session.bindingTransitionGeneration == bindingGeneration,
+              session.runID == runID
+        else {
+            return settle(.superseded)
+        }
+        if let blocker = providerRetirementBlocker(current, session: session) ?? probeBlocker {
+            return settle(.blocked(blocker))
+        }
+
+        let retirement: Task<Void, Never>? = switch current {
+        case let .claude(controller):
+            claudeCoordinator.beginClaudeRetirement(session, expectedController: controller)
+                .map { transfer in Task { _ = await transfer.value } }
+        case let .codex(controller):
+            codexCoordinator.beginCodexRetirement(session, expectedController: controller)
+        case let .acp(controller):
+            runService.beginACPRetirement(for: session, expectedController: controller)
+        }
+        guard let retirement else { return settle(.superseded) }
+        Task {
+            await retirement.value
+            AgentProviderRetirement.log(
+                "finished",
+                provider: current.providerName,
+                tabID: tabID,
+                runID: runID,
+                controllerID: current.controllerID,
+                reason: reason
+            )
+        }
+        return settle(.retiring(retirement))
+    }
+
+    /// Waits up to `providerRetirementReplyWait` for a retirement and reports whether it finished.
+    func waitForProviderRetirementReply(_ retirement: Task<Void, Never>) async -> Bool {
+        await AgentProviderRetirement.wait(
+            for: retirement,
+            timeout: Self.providerRetirementReplyWait,
+            clock: providerRetirementClock
+        )
+    }
+
+    private func sharedProviderRetirementBlocker(for session: TabSession) -> AgentProviderRetirementBlocker? {
+        AgentProviderRetirement.sharedBlocker(
+            for: session,
+            hasActiveMCPTools: { self.mcpServer?.hasActiveToolExecutions(runID: $0) ?? false },
+            hasActiveChildAgentRunWaits: { self.mcpServer?.hasActiveChildAgentRunWaits(runID: $0) ?? false }
+        )
+    }
+
+    /// Provider checks that need no await.
+    private func providerRetirementBlocker(
+        _ runtime: AttachedProviderRuntime,
+        session: TabSession
+    ) -> AgentProviderRetirementBlocker? {
+        let storedConversationID: String? = switch runtime {
+        case .claude, .acp: session.providerSessionID
+        case .codex: session.codexConversationID
+        }
+        if case .codex = runtime, codexCoordinator.hasCodexWorkInFlight(for: session) {
+            return .providerBusy
+        }
+        if storedConversationID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+            return .missingProviderSessionID
+        }
+        return nil
+    }
+
+    /// Asks the provider whether its runtime is idle. Codex has no probe; its state lives on the
+    /// session. Claude's background tasks never block here: an explicit stop ends them, and Claude's
+    /// idle timer, which keeps them up to its cap, retires through `ClaudeAgentModeCoordinator`.
+    /// Automatic retirement keeps an ACP agent that can't reload a conversation.
+    private func providerProbeBlocker(
+        _ runtime: AttachedProviderRuntime,
+        reason: AgentProviderRetirementReason
+    ) async -> AgentProviderRetirementBlocker? {
+        switch runtime {
+        case let .claude(controller):
+            return await controller.idleProbe().turnInFlight ? .providerBusy : nil
+        case let .acp(controller):
+            let snapshot = await controller.idleRetirementSnapshot()
+            if !snapshot.isIdle {
+                return .providerBusy
+            }
+            if reason.isAutomatic, !snapshot.loadSessionSupported {
+                return .resumeUnsupported
+            }
+            return nil
+        case .codex:
+            return nil
+        }
+    }
+
+    /// A retirement of this tab's runtime that is still running, joined across providers.
+    private func pendingProviderRetirement(for session: TabSession) -> Task<Void, Never>? {
+        var retirements: [Task<Void, Never>] = []
+        if let transfer = claudeCoordinator.pendingClaudeRetirementTask(for: session.tabID) {
+            retirements.append(Task { _ = await transfer.value })
+        }
+        if let retirement = codexCoordinator.pendingCodexRetirementTask(for: session.tabID) {
+            retirements.append(retirement)
+        }
+        if let retirement = runService.pendingACPRetirementTask(for: session) {
+            retirements.append(retirement)
+        }
+        guard retirements.count > 1 else { return retirements.first }
+        return Task {
+            for retirement in retirements {
+                await retirement.value
+            }
+        }
     }
 
     private func releaseOutstandingProvisionalMCPSessionTarget(_ target: MCPSessionTarget) {

@@ -744,6 +744,15 @@ final class AgentTabSession: ObservableObject {
 
     var claudeController: (any NativeAgentRuntimeControlling)?
     var acpController: ACPAgentSessionController?
+
+    /// Whether RepoPrompt holds a Claude, Codex or ACP native runtime for this session. It turns
+    /// false as soon as a runtime is detached, while its process may still be exiting, and it stays
+    /// true for a runtime whose process crashed until the next run detaches it. A headless CLI
+    /// provider is attached only during a run, so it isn't counted.
+    var hasAttachedProviderRuntime: Bool {
+        claudeController != nil || codexController != nil || acpController != nil
+    }
+
     var codexEventTask: Task<Void, Never>?
     var codexEventTaskRunID: UUID?
     var codexLastEventAt: Date?

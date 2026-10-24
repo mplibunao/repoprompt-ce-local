@@ -1110,6 +1110,18 @@ package enum MCPDomainCanonicalToolDefinitions {
                 isEnabledByDefault: definition.isEnabledByDefault
             )
         }
+        if definition.name == MCPWindowToolName.agentManage {
+            return MCPDomainToolDefinition(
+                name: definition.name,
+                description: definition.description.replacingOccurrences(
+                    of: "- `stop_session`: Stop a live session.",
+                    with: "- `stop_session`: Cancel any run and end the session's agent process, including its background commands. The session stays, and a later message resumes it."
+                ),
+                inputSchema: definition.inputSchema,
+                annotations: definition.annotations,
+                isEnabledByDefault: definition.isEnabledByDefault
+            )
+        }
         if [MCPWindowToolName.prompt, MCPWindowToolName.workspaceContext].contains(definition.name) {
             guard case var .object(schema) = definition.inputSchema,
                   case var .object(properties)? = schema["properties"],

@@ -1037,7 +1037,7 @@ actor InteractiveREPL {
           \u{001B}[32magent_manage\u{001B}[0m op=resume_session session_id="..."
                                           Resume existing session
           \u{001B}[32magent_manage\u{001B}[0m op=stop_session session_id="..."
-                                          Stop/cancel a live session
+                                          Cancel any run and end the session's agent process
           \u{001B}[32magent_manage\u{001B}[0m op=list_workflows     List workflows
           Use \u{001B}[32mdescribe agent_run\u{001B}[0m / \u{001B}[32mdescribe agent_manage\u{001B}[0m for full schemas.
 

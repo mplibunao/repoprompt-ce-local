@@ -76,6 +76,12 @@ import XCTest
         fileprivate(set) var cancel: () -> Void = {}
     }
 
+    /// A count a test hook increments, read by the test as it waits.
+    @MainActor
+    final class StartupTestCounter {
+        var value = 0
+    }
+
     /// One owner's tracked operations that have not finished yet, by how to cancel them. Each
     /// fixture owns its own, so one teardown never cancels work another owner registered.
     @MainActor
@@ -174,21 +180,32 @@ import XCTest
     /// A view model whose provider startup goes through `readiness` and `controller`, and, when
     /// `claude` is given, whose Claude-compatible runs use that recorder's runtimes and count as
     /// available without an installed CLI. `claudeIdle`, when given, supplies the idle timer's
-    /// clock, setting, and MCP queries.
+    /// clock, setting, and MCP queries. `codexControllers`, when given, makes a new Codex controller
+    /// for each start in place of `controller`. `acpProvider`, when given, serves every ACP start, and
+    /// ACP agents count as available.
     @MainActor
     func startupTestMakeViewModel(
         storageRoot: URL,
         readiness: StartupTestGatedReadiness,
         controller: StartupTestCodexController,
+        codexControllers: StartupTestCodexControllerRecorder? = nil,
         claude: StartupTestClaudeRecorder? = nil,
-        claudeIdle: StartupTestClaudeIdleEnvironment? = nil
+        claudeIdle: StartupTestClaudeIdleEnvironment? = nil,
+        acpProvider: (any ACPAgentProvider)? = nil
     ) -> AgentModeViewModel {
         let viewModel = AgentModeViewModel(
             testWorkspacePath: storageRoot.path,
             testWorkspaceDirectory: storageRoot,
-            codexControllerFactory: { _, _, _, _, _, _ in controller },
+            codexControllerFactory: { runID, _, _, _, _, _ in
+                codexControllers.map { recorder in MainActor.assumeIsolated { recorder.makeController(runID: runID) } }
+                    ?? controller
+            },
             claudeControllerFactory: claude.map { recorder in
                 { runID, _, _, _ in MainActor.assumeIsolated { recorder.makeRuntime(runID: runID) } }
+            },
+            acpProviderFactory: { agent, modelString in
+                if let acpProvider { return acpProvider }
+                return try await ACPAgentProviderFactory.makeProvider(for: agent, modelString: modelString)
             },
             mcpServerEnabler: { await readiness.enter() },
             testIdleProviderShutdownMinutes: claudeIdle.map { idle in
@@ -202,10 +219,40 @@ import XCTest
                 { runID in MainActor.assumeIsolated { idle.runIDsWithActiveChildWaits.contains(runID) } }
             }
         )
-        if claude != nil {
+        if claude != nil || acpProvider != nil {
             viewModel.test_agentAvailabilityForRunOverride = { _ in true }
         }
         return viewModel
+    }
+
+    /// Makes a new Codex controller for each start and records, in order, when each was created and
+    /// when each finished shutting down.
+    @MainActor
+    final class StartupTestCodexControllerRecorder {
+        enum Event: Equatable {
+            case created(controller: Int)
+            case shutdownFinished(controller: Int)
+        }
+
+        private(set) var controllers: [StartupTestCodexController] = []
+        /// The process run ID each controller was created for, in creation order.
+        private(set) var runIDs: [UUID] = []
+        private(set) var events: [Event] = []
+        /// When set, every controller's `shutdown()` waits for it.
+        var shutdownHold: StartupTestHeldGate?
+
+        func makeController(runID: UUID) -> StartupTestCodexController {
+            let index = controllers.count
+            let controller = StartupTestCodexController(gatesStartup: false)
+            controller.shutdownHold = { [weak self] in self?.shutdownHold }
+            controller.onShutdownFinished = { [weak self] in
+                self?.events.append(.shutdownFinished(controller: index))
+            }
+            controllers.append(controller)
+            runIDs.append(runID)
+            events.append(.created(controller: index))
+            return controller
+        }
     }
 
     /// Submits `text` to `session` the way `mcpDispatchInstruction` submits an instruction that
@@ -346,6 +393,17 @@ import XCTest
                 session: session,
                 sourceController: controller
             )
+        }
+
+        /// Waits until the session's run has ended and its terminal has committed, and fails unless
+        /// it completed.
+        func awaitCompletedTurn() async throws {
+            try await startupTestEventually(seconds: 15) {
+                !self.session.runState.isActive
+                    && self.session.activeRunOwnership == nil
+                    && !self.session.terminalCommitInProgress
+            }
+            XCTAssertEqual(session.runState, .completed, "errors: \(errorTexts)")
         }
 
         /// Every gate is released before anything is awaited, and every await is bounded, so a
@@ -647,23 +705,37 @@ import XCTest
         }
     }
 
-    /// A clock for the Claude idle timer that moves only when the test advances it. A sleeper
-    /// wakes when time reaches its deadline, not when its task is cancelled, so a replaced timer
-    /// can wake after its successor is installed.
+    /// A clock that moves only when the test advances it. Through `idleClock`, a sleeper wakes when
+    /// time reaches its deadline, not when its task is cancelled, so a replaced idle timer can wake
+    /// after its successor is installed. Through `cancellableClock`, a sleep ends as soon as its
+    /// task is cancelled, as `Task.sleep` does.
     @MainActor
     final class StartupTestManualClock {
+        private struct Sleeper {
+            let id: UUID
+            let deadline: ContinuousClock.Instant
+            let continuation: CheckedContinuation<Void, Error>
+        }
+
         private(set) var now = ContinuousClock.now
-        private var sleepers: [(deadline: ContinuousClock.Instant, continuation: CheckedContinuation<Void, Error>)] = []
+        private var sleepers: [Sleeper] = []
 
         /// The deadline of every sleeper, in the order they began sleeping.
         var pendingDeadlines: [ContinuousClock.Instant] {
             sleepers.map(\.deadline)
         }
 
-        var idleClock: ClaudeAgentModeCoordinator.IdleClock {
-            ClaudeAgentModeCoordinator.IdleClock(
+        var idleClock: AgentProviderIdleClock {
+            AgentProviderIdleClock(
                 now: { self.now },
                 sleepUntil: { deadline in try await self.sleep(until: deadline) }
+            )
+        }
+
+        var cancellableClock: AgentProviderIdleClock {
+            AgentProviderIdleClock(
+                now: { self.now },
+                sleepUntil: { deadline in try await self.cancellableSleep(until: deadline) }
             )
         }
 
@@ -682,11 +754,25 @@ import XCTest
             pending.forEach { $0.continuation.resume(throwing: CancellationError()) }
         }
 
-        private func sleep(until deadline: ContinuousClock.Instant) async throws {
+        private func sleep(until deadline: ContinuousClock.Instant, id: UUID = UUID()) async throws {
             guard deadline > now else { return }
             try await withCheckedThrowingContinuation { continuation in
-                sleepers.append((deadline, continuation))
+                sleepers.append(Sleeper(id: id, deadline: deadline, continuation: continuation))
             }
+        }
+
+        private func cancellableSleep(until deadline: ContinuousClock.Instant) async throws {
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try await sleep(until: deadline, id: id)
+            } onCancel: {
+                Task { @MainActor in self.cancelSleeper(id) }
+            }
+        }
+
+        private func cancelSleeper(_ id: UUID) {
+            guard let index = sleepers.firstIndex(where: { $0.id == id }) else { return }
+            sleepers.remove(at: index).continuation.resume(throwing: CancellationError())
         }
     }
 
@@ -808,6 +894,9 @@ import XCTest
         var startupError: Error?
         var compactError: Error?
         var compactHold: StartupTestHeldGate?
+        /// Returns the gate `shutdown()` waits for after it begins, if any.
+        var shutdownHold: () -> StartupTestHeldGate? = { nil }
+        var onShutdownFinished: () -> Void = {}
         private var gatesStartup: Bool
         private var startupWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -984,7 +1073,13 @@ import XCTest
         ) async {}
 
         func cancelCurrentTurn() async {}
-        func shutdown() async {}
+
+        func shutdown() async {
+            if let hold = shutdownHold() {
+                await hold.wait()
+            }
+            onShutdownFinished()
+        }
 
         func respondToServerRequest(id: CodexAppServerRequestID, result: [String: Any]) async {
             serverRequestResponses.append((id, result))

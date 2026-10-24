@@ -104,6 +104,26 @@ import XCTest
                     fixture.session.mcpPendingStartOwner = UUID()
                     return { fixture.session.mcpPendingStartOwner = nil }
                 },
+                Protection("composer submission in flight") { fixture in
+                    fixture.session.activeComposerSubmitAttempt = Self.composerSubmitAttempt(for: fixture.session)
+                    return { fixture.session.activeComposerSubmitAttempt = nil }
+                },
+                Protection("MCP epoch preparation") { fixture in
+                    fixture.session.mcpEpochPreparation = Task {}
+                    return { fixture.session.mcpEpochPreparation = nil }
+                },
+                Protection("pending superseding completion") { fixture in
+                    fixture.session.pendingSupersedingTurnCompletions = 1
+                    return { fixture.session.pendingSupersedingTurnCompletions = 0 }
+                },
+                Protection("queued ACP steering") { fixture in
+                    fixture.session.pendingACPSteeringInstructions = [Self.acpSteeringInstruction(for: fixture.session)]
+                    return { fixture.session.pendingACPSteeringInstructions = [] }
+                },
+                Protection("initial worktree preparation") { fixture in
+                    fixture.session.isPreparingInitialWorktree = true
+                    return { fixture.session.isPreparingInitialWorktree = false }
+                },
                 Protection("binding transition") { fixture in
                     let generation = fixture.session.beginPersistentBindingTransition()
                     return { fixture.session.finishPersistentBindingTransition(generation: generation) }
@@ -584,6 +604,45 @@ import XCTest
                 grantRoot: nil,
                 proposedExecpolicyAmendmentJSON: nil,
                 details: []
+            )
+        }
+
+        private static func composerSubmitAttempt(for session: AgentModeViewModel.TabSession) -> AgentComposerSubmitAttempt {
+            AgentComposerSubmitAttempt(
+                id: UUID(),
+                target: AgentComposerSubmitTarget(
+                    tabID: session.tabID,
+                    route: .existingAgentSession,
+                    expectedSourceTabSessionIdentity: ObjectIdentifier(session),
+                    expectedSourceAgentSessionID: nil,
+                    expectedPersistentBindingIdentity: nil,
+                    expectedBindingTransitionGeneration: session.bindingTransitionGeneration,
+                    expectedRunState: session.runState,
+                    expectedRunID: session.runID,
+                    expectedRunAttemptID: session.activeRunAttemptID,
+                    expectedSubmissionToken: session.composerSubmissionToken,
+                    expectedInitialStartLocation: nil
+                ),
+                inputRevision: 0,
+                noticeRevision: 0,
+                rawDraftSnapshot: "submitting"
+            )
+        }
+
+        private static func acpSteeringInstruction(
+            for session: AgentModeViewModel.TabSession
+        ) -> AgentModeViewModel.TabSession.ACPSteeringInstruction {
+            AgentModeViewModel.TabSession.ACPSteeringInstruction(
+                id: UUID(),
+                targetRunID: session.runID,
+                targetRunAttemptID: session.activeRunAttemptID,
+                providerText: "steer",
+                interruptedPromptProviderText: nil,
+                attachments: [],
+                taggedFileAttachments: [],
+                draftText: "steer",
+                optimisticUserItemID: nil,
+                createdAt: Date()
             )
         }
     }
