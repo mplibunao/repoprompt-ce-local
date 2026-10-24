@@ -433,6 +433,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     #if DEBUG
         private var testWorkspaceResolutionFailurePublicationGate: (@Sendable () async -> Void)?
         private var testReadySessionToolTrackingGate: (@Sendable () async -> Void)?
+        /// Called when a controller preparation finds the tab's retirement still running, before it
+        /// waits for it.
+        var test_controllerPreparationWillAwaitRetirement: (@MainActor (_ tabID: UUID) -> Void)?
     #endif
     private var toolTrackingByTabID: [UUID: AgentToolTrackingController] = [:]
     private let windowID: Int
@@ -5649,19 +5652,24 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         clearCodexControllerInstanceState(for: session)
     }
 
+    /// Queues `controller`'s shutdown behind the tab's earlier retirements and returns the task
+    /// that finishes once it and `afterShutdown` have run. A controller already claimed by another
+    /// retirement is not shut down twice; the tab's latest retirement task is returned instead.
+    @discardableResult
     private func retireCodexController(
         _ controller: any CodexSessionControlling,
         tabID: UUID,
         source: String,
-        beforeShutdown: (@MainActor () async -> Void)? = nil
-    ) {
+        beforeShutdown: (@MainActor () async -> Void)? = nil,
+        afterShutdown: (@MainActor () async -> Void)? = nil
+    ) -> Task<Void, Never>? {
         codexControllerRetirementClaims = codexControllerRetirementClaims.filter { $0.value.controller != nil }
         let controllerID = ObjectIdentifier(controller)
         if let claimedController = codexControllerRetirementClaims[controllerID]?.controller,
            Self.sameCodexControllerInstance(claimedController, controller)
         {
             logCodex("[AgentModeVM][CodexRetirement] joined existing controller retirement tab=\(tabID) source=\(source)")
-            return
+            return codexControllerRetirementTaskByTabID[tabID]?.task
         }
         codexControllerRetirementClaims[controllerID] = CodexControllerRetirementClaim(controller: controller)
 
@@ -5671,6 +5679,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             await previousTask?.value
             await beforeShutdown?()
             await controller.shutdown()
+            await afterShutdown?()
             guard let self,
                   codexControllerRetirementTaskByTabID[tabID]?.generation == generation
             else {
@@ -5681,12 +5690,70 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         }
         codexControllerRetirementTaskByTabID[tabID] = (generation: generation, task: task)
         logCodex("[AgentModeVM][CodexRetirement] scheduled tab=\(tabID) source=\(source)")
+        return task
     }
 
     private func awaitCodexControllerRetirement(for tabID: UUID) async {
         while let retirement = codexControllerRetirementTaskByTabID[tabID] {
             await retirement.task.value
         }
+    }
+
+    /// The tab's latest controller retirement still running. It waits for the tab's earlier ones.
+    func pendingCodexRetirementTask(for tabID: UUID) -> Task<Void, Never>? {
+        codexControllerRetirementTaskByTabID[tabID]?.task
+    }
+
+    /// Codex work that needs the attached app-server even with no run active: a turn starting,
+    /// running or retrying authentication, a steer being reconciled, or queued follow-up dispatch.
+    func hasCodexWorkInFlight(for session: AgentTabSession) -> Bool {
+        session.codexPendingTurnKind != nil
+            || session.codexPendingAuthRetryTurn != nil
+            || session.codexAuthoritativeActiveTurn != nil
+            || session.codexAnonymousActiveTurn != nil
+            || session.codexPendingSteerLifecycleReconciliation != nil
+            || !session.codexFallbackQueue.isEmpty
+            || session.codexFallbackDispatchInFlight != nil
+            || session.codexFallbackPumpTask != nil
+            || session.codexFallbackSuccessorRetryTask != nil
+    }
+
+    /// Detaches an idle controller and queues its shutdown in one main-actor slice, keeping the
+    /// conversation and rollout so the next start resumes the thread in a new app-server. The
+    /// retirement task holds everything it cleans up and touches no session state, so a start
+    /// admitted once the controller is detached waits for it and is never cleaned up by it. Returns
+    /// nil when `expectedController` is no longer the session's controller.
+    func beginIdleProviderRetirement(
+        _ session: AgentTabSession,
+        expectedController: any CodexSessionControlling
+    ) -> Task<Void, Never>? {
+        guard let controller = session.codexController,
+              Self.sameCodexControllerInstance(controller, expectedController)
+        else {
+            return nil
+        }
+        let tabID = session.tabID
+        let runID = session.runID
+        markCodexReconnectNeeded(for: session, source: "idle-provider-retirement")
+        cancelCodexThreadNameSync(for: tabID)
+        cancelCodexTabScopedControllerTasks(for: tabID)
+        clearCodexControllerRuntimeState(for: session)
+        let toolTracking = toolTrackingByTabID.removeValue(forKey: tabID)
+        if let runID {
+            clearCodexRecoveryAttempt(for: runID)
+            session.clearRunID(ifCurrent: runID)
+        }
+        return retireCodexController(
+            controller,
+            tabID: tabID,
+            source: "idle-provider-retirement",
+            afterShutdown: {
+                await toolTracking?.stopTracking()
+                if let runID {
+                    await ServerNetworkManager.shared.unregisterToolObservers(for: runID)
+                }
+            }
+        )
     }
 
     @discardableResult
@@ -6076,6 +6143,11 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         }()
 
         func prepareCodexController() async -> CodexControllerPreparation {
+            #if DEBUG
+                if codexControllerRetirementTaskByTabID[session.tabID] != nil {
+                    test_controllerPreparationWillAwaitRetirement?(session.tabID)
+                }
+            #endif
             await awaitCodexControllerRetirement(for: session.tabID)
             guard session.selectedAgent == .codexExec,
                   session.runID == runID,

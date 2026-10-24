@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Why a live session's provider runtime is being retired.
 enum AgentProviderRetirementReason {
@@ -11,6 +12,10 @@ enum AgentProviderRetirementReason {
     var isAutomatic: Bool {
         if case .automaticIdle = self { return true }
         return false
+    }
+
+    var logValue: String {
+        isAutomatic ? "automatic_idle" : "explicit_stop"
     }
 }
 
@@ -62,6 +67,23 @@ struct AgentProviderIdleClock {
 }
 
 enum AgentProviderRetirement {
+    private static let logger = Logger(subsystem: "com.repoprompt.agents", category: "ProviderRetirement")
+
+    /// One retirement decision or completion. Carries identifiers only, never conversation content.
+    static func log(
+        _ event: String,
+        provider: String,
+        tabID: UUID,
+        runID: UUID?,
+        controllerID: ObjectIdentifier?,
+        reason: AgentProviderRetirementReason
+    ) {
+        let controller = controllerID.map { String(describing: $0) } ?? "none"
+        logger.notice(
+            "Provider retirement \(event, privacy: .public) provider=\(provider, privacy: .public) tab=\(tabID.uuidString, privacy: .public) run=\(runID?.uuidString ?? "none", privacy: .public) controller=\(controller, privacy: .public) reason=\(reason.logValue, privacy: .public)"
+        )
+    }
+
     /// The busy checks every provider shares. Provider probes and queues are checked by each
     /// provider. Both steering queues are read: only the selected provider fills its own.
     @MainActor

@@ -32,6 +32,13 @@ final class ACPIntegratedAgentModeRunner {
         let errorText: String?
     }
 
+    /// A detached controller's shutdown. Only the task holding the controller shuts it down, so a
+    /// waiter never mistakes a controller that is already closing for one that has exited.
+    private struct ControllerRetirement {
+        let generation: UUID
+        let task: Task<Void, Never>
+    }
+
     private let hooks: AgentModeRunService.Hooks
     private let terminalCommitBarrier: AgentRunTerminalCommitBarrier
     private let toolTrackingHooks: AgentToolTrackingHooks
@@ -42,6 +49,13 @@ final class ACPIntegratedAgentModeRunner {
     private var toolTrackingRunIDByTabID: [UUID: UUID] = [:]
     private var acpProviderInvocationByTrackerInvocationIDByTabID: [UUID: [UUID: UUID]] = [:]
     private var acpProviderPlaceholderInvocationIDsByTabID: [UUID: Set<UUID>] = [:]
+    private var retirementByTabID: [UUID: ControllerRetirement] = [:]
+    #if DEBUG
+        /// Awaited by a retirement task before it shuts its controller down.
+        var test_retirementWillShutDown: (@MainActor (_ tabID: UUID) async -> Void)?
+        /// Called when a start finds the tab's retirement still running, before it waits for it.
+        var test_startWillAwaitRetirement: (@MainActor (_ tabID: UUID) -> Void)?
+    #endif
 
     private func log(_ message: String, runID: UUID) {
         guard AgentRuntimeProviderService.enableDebugLogging else { return }
@@ -173,6 +187,16 @@ final class ACPIntegratedAgentModeRunner {
         setRunningStatus(initialTransportStatusText(for: runRequest.agentKind), source: .transport, session: session, urgent: true)
 
         let freshRunRequest = runRequest
+        // A retired process exits before the next one starts. The run state set above blocks any new
+        // retirement, and the request built before this call stays valid because retirement never
+        // changes the stored conversation ID.
+        while let retirement = retirementByTabID[tabID] {
+            #if DEBUG
+                test_startWillAwaitRetirement?(tabID)
+            #endif
+            await retirement.task.value
+        }
+        guard isStartupStillCurrent(session: session, runAttemptID: runAttemptID) else { return }
         if let existingController = session.acpController {
             let isCompatible = await existingController.isCompatibleWith(request: runRequest)
             guard isStartupStillCurrent(session: session, runAttemptID: runAttemptID) else { return }
@@ -360,6 +384,45 @@ final class ACPIntegratedAgentModeRunner {
                 )
             } onCancel: {}
         }
+    }
+
+    /// Detaches `expectedController` and registers its shutdown in one main-actor slice. The next
+    /// start on the tab waits for that shutdown and opens a new controller that loads the stored
+    /// conversation. Returns nil when `expectedController` is no longer the session's controller.
+    func beginRetirement(
+        for session: AgentTabSession,
+        expectedController: ACPAgentSessionController
+    ) -> Task<Void, Never>? {
+        guard let controller = session.acpController, controller === expectedController else { return nil }
+        let tabID = session.tabID
+        let runID = session.runID
+        let trackerTeardown = prepareToolTrackingTeardown(for: session, matchingRunID: runID)
+        session.acpController = nil
+        if let runID {
+            session.clearRunID(ifCurrent: runID)
+        }
+        let previous = retirementByTabID[tabID]?.task
+        let generation = UUID()
+        #if DEBUG
+            let willShutDown = test_retirementWillShutDown
+        #endif
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            #if DEBUG
+                await willShutDown?(tabID)
+            #endif
+            await controller.shutdown()
+            await trackerTeardown?()
+            guard let self, retirementByTabID[tabID]?.generation == generation else { return }
+            retirementByTabID.removeValue(forKey: tabID)
+        }
+        retirementByTabID[tabID] = ControllerRetirement(generation: generation, task: task)
+        return task
+    }
+
+    /// The tab's latest controller retirement still running. It waits for the tab's earlier ones.
+    func pendingRetirementTask(for tabID: UUID) -> Task<Void, Never>? {
+        retirementByTabID[tabID]?.task
     }
 
     func submitActivePrompt(

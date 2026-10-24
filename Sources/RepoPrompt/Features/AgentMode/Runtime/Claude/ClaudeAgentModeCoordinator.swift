@@ -818,9 +818,8 @@ final class ClaudeAgentModeCoordinator {
         scheduleClaudeIdleTimer(arm.rearmed(at: deadline), for: session)
     }
 
-    /// Retires an idle controller through the resume transfer in one main-actor slice. The next run
-    /// attempt waits for the transfer and starts its new process, with `--resume`, only after this
-    /// one has exited.
+    /// Retires an idle controller through `beginClaudeRetirement`, keeping the timer's anchor and
+    /// outcome reporting.
     private func retireIdleClaudeController(
         _ controller: any NativeAgentRuntimeControlling,
         arm: IdleTimerArm,
@@ -828,36 +827,63 @@ final class ClaudeAgentModeCoordinator {
         liveBackgroundTasksAtCap: Bool,
         session: AgentTabSession
     ) {
-        invalidateControllerRetirement(for: session)
-        let runID = session.runID
-        guard let detached = detachClaudeController(
-            controller,
-            from: session,
-            removeToolTracking: true
-        ) else {
+        guard beginClaudeRetirement(session, expectedController: controller) != nil else {
             idleTimers.remove(session.tabID, ifToken: arm.token)
             reportIdleTimerOutcome(.ended, tabID: session.tabID)
             return
-        }
-        if let runID {
-            session.clearRunID(ifCurrent: runID)
-        }
-        let transfer = beginClaudeResumeTransferIfNeeded(for: session, oldController: detached)
-        idleTimers.remove(session.tabID, ifToken: arm.token)
-        if let transfer {
-            // Installs the captured provider session ID even if no message follows. It waits on
-            // this transfer only and never drains the retired list, because a reset or provider
-            // switch moves the transfer there, and the next run attempt must find it there and
-            // wait for this process to exit.
-            Task { @MainActor [self, session] in
-                await finishPendingClaudeResumeTransfer(transfer.task, generation: transfer.generation, for: session)
-            }
         }
         let idleSeconds = arm.anchor.duration(to: idleClock.now()).components.seconds
         Self.idleLogger.notice(
             "Retiring idle Claude process for tab=\(session.tabID.uuidString, privacy: .public) idleSeconds=\(idleSeconds) intervalSeconds=\(interval.components.seconds) liveBackgroundTasksAtCap=\(liveBackgroundTasksAtCap)"
         )
         reportIdleTimerOutcome(.retired, tabID: session.tabID)
+    }
+
+    /// Detaches `expectedController` and hands it to a resume transfer in one main-actor slice, and
+    /// ends the tab's idle timer. The returned transfer finishes once the old process has shut down.
+    /// The next run attempt waits for it and starts its new process, with `--resume`, only after
+    /// this one has exited. Returns nil when `expectedController` is no longer the session's.
+    func beginClaudeRetirement(
+        _ session: AgentTabSession,
+        expectedController: any NativeAgentRuntimeControlling
+    ) -> Task<NativeAgentRuntimeSessionRef, Never>? {
+        invalidateControllerRetirement(for: session)
+        let runID = session.runID
+        guard let detached = detachClaudeController(
+            expectedController,
+            from: session,
+            removeToolTracking: true
+        ),
+            let transfer = beginClaudeResumeTransferIfNeeded(for: session, oldController: detached)
+        else {
+            return nil
+        }
+        if let runID {
+            session.clearRunID(ifCurrent: runID)
+        }
+        idleTimers.cancel(session.tabID)
+        if let generation = transfer.generation {
+            // Installs the captured provider session ID even if no message follows. It waits on
+            // this transfer only and never drains the retired list, because a reset or provider
+            // switch moves the transfer there, and the next run attempt must find it there and
+            // wait for this process to exit.
+            Task { @MainActor [self, session] in
+                await finishPendingClaudeResumeTransfer(transfer.task, generation: generation, for: session)
+            }
+        }
+        return transfer.task
+    }
+
+    /// The tab's pending resume transfer. The retired list is left out: a transfer moved there by a
+    /// reset or provider switch belongs to a conversation the session no longer resumes.
+    func pendingClaudeRetirementTask(for tabID: UUID) -> Task<NativeAgentRuntimeSessionRef, Never>? {
+        pendingResumeTransferTasksByTabID[tabID]
+    }
+
+    /// How long a live background task can keep an idle process, counted from the idle timer's
+    /// anchor.
+    static var idleBackgroundTaskKeepAliveCap: Duration {
+        backgroundTaskKeepAliveCap
     }
 
     private func reportIdleTimerOutcome(_ outcome: IdleTimerOutcome, tabID: UUID) {
@@ -1497,21 +1523,21 @@ final class ClaudeAgentModeCoordinator {
         Task { await cancelClaudeRun(session, oldController: detached) }
     }
 
-    /// Returns the transfer it installed as the tab's pending one, with its generation. Returns nil
-    /// when there is no controller to retire, or when a transfer is already pending and the new one
-    /// goes to the retired list.
+    /// Returns the transfer that shuts `oldController` down, with its generation when it was
+    /// installed as the tab's pending transfer. When a transfer is already pending, the new one goes
+    /// to the retired list and has no generation. Returns nil when there is no controller to retire.
     @discardableResult
     func beginClaudeResumeTransferIfNeeded(
         for session: AgentTabSession,
         oldController: DetachedClaudeController?
-    ) -> (task: Task<NativeAgentRuntimeSessionRef, Never>, generation: UUID)? {
+    ) -> (task: Task<NativeAgentRuntimeSessionRef, Never>, generation: UUID?)? {
         guard let oldController else { return nil }
         guard pendingResumeTransferTasksByTabID[session.tabID] == nil else {
             let task = Task { @MainActor [self, session] in
                 await cancelClaudeRunAndCaptureSessionRef(session, oldController: oldController)
             }
             retiredResumeTransferTasksByTabID[session.tabID, default: []].append(task)
-            return nil
+            return (task, nil)
         }
         let generation = UUID()
         pendingResumeTransferGenerationByTabID[session.tabID] = generation
