@@ -133,6 +133,44 @@ final class DomainReadSideEffectRecoveryTests: XCTestCase {
         XCTAssertEqual(events.snapshot(), ["drained"])
     }
 
+    /// A retired effect that never started finishes at its retirement, releasing whatever its submitter
+    /// claimed, instead of waiting for an earlier effect that has no fence and may never end.
+    func testARetiredEffectThatNeverStartedFinishesWithoutWaitingForItsPredecessor() async throws {
+        let identity = makeIdentity()
+        let handle = makeHandle(identity: identity)
+        let coordinator = DomainReadSideEffectCoordinator(identity: identity)
+        let stuck = HeldEffect()
+        let events = EventLog()
+        let fence = MCPDomainInvocationFence()
+
+        _ = try await coordinator.submit(
+            handle: handle,
+            effectClass: .selection,
+            operationID: UUID(),
+            fingerprint: "unfenced"
+        ) {
+            await stuck.enterAndWait()
+        }
+        await stuck.waitUntilEntered()
+        let retired = try await coordinator.submit(
+            handle: handle,
+            effectClass: .selection,
+            operationID: UUID(),
+            fingerprint: "retired",
+            fence: fence,
+            onFinished: { events.append("retired finished") }
+        ) {
+            events.append("retired ran")
+        }
+        let retiredWait = Task { try await coordinator.wait(handle: handle, receipt: retired) }
+        fence.revoke(origin: .watchdogDeadline)
+        retiredWait.cancel()
+        await assertCancelled(retiredWait)
+
+        XCTAssertEqual(events.snapshot(), ["retired finished"])
+        await stuck.release()
+    }
+
     private func assertCancelled(
         _ task: Task<Void, Error>,
         file: StaticString = #filePath,

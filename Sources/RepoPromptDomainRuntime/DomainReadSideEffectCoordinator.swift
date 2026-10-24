@@ -69,6 +69,10 @@ package actor DomainReadSideEffectCoordinator {
         var runningRevisions: Set<UInt64> = []
         var retiredRevisions: Set<UInt64> = []
         var fences: [UInt64: MCPDomainInvocationFence] = [:]
+        /// The finish of each revision whose operation hasn't started. Retiring such a revision runs its
+        /// finish at once: its task may wait on an earlier operation that never ends, and nothing will run
+        /// under the finish's claim.
+        var unstartedFinishes: [UInt64: FinishOnce] = [:]
         var operations: [UUID: RecordedOperation] = [:]
         var expiredOperationIDs: [UUID] = []
         var terminalWaiters: [UUID: TerminalWaiter] = [:]
@@ -92,7 +96,8 @@ package actor DomainReadSideEffectCoordinator {
 
     /// `fence` belongs to the read that submits the operation; once it's revoked, the read's cancelled
     /// wait retires the operation. `onFinished` runs once: when the operation's task ends, before any
-    /// waiter sees the result, or right away when this call doesn't start a task.
+    /// waiter sees the result; at retirement, when the operation hasn't started; or right away when this
+    /// call doesn't start a task.
     package func submit(
         handle: DomainReadContextHandle,
         effectClass: DomainReadSideEffectClass,
@@ -102,9 +107,10 @@ package actor DomainReadSideEffectCoordinator {
         onFinished: (@Sendable () -> Void)? = nil,
         operation: @Sendable @escaping () async throws -> Void
     ) throws -> DomainReadSideEffectReceipt {
+        let finish = FinishOnce(onFinished)
         var startedTask = false
         defer {
-            if !startedTask { onFinished?() }
+            if !startedTask { finish.run() }
         }
         try validate(handle)
         guard !stopped else { throw DomainReadSideEffectError.stopped }
@@ -122,12 +128,12 @@ package actor DomainReadSideEffectCoordinator {
 
         let revision = state.acceptedRevision &+ 1
         let task = Task { [weak self] in
-            defer { onFinished?() }
+            defer { finish.run() }
             // Waiting for terminal revisions, not results: a previous terminal error belongs to its
             // submitter and must never poison this lane.
             await self?.awaitTerminal(key: key, through: revision - 1)
             try Task.checkCancellation()
-            guard await self?.isRetired(key: key, revision: revision) == false else { return }
+            guard await self?.beginOperation(key: key, revision: revision) == true else { return }
             try await operation()
         }
         let receipt = DomainReadSideEffectReceipt(
@@ -140,6 +146,7 @@ package actor DomainReadSideEffectCoordinator {
         state.tasks[revision] = task
         state.runningRevisions.insert(revision)
         state.fences[revision] = fence
+        state.unstartedFinishes[revision] = finish
         state.operations[operationID] = RecordedOperation(
             fingerprint: fingerprint,
             receipt: receipt
@@ -262,8 +269,12 @@ package actor DomainReadSideEffectCoordinator {
         states[key]?.terminalWaiters.removeValue(forKey: waiterID)?.continuation.resume()
     }
 
-    private func isRetired(key: LaneKey, revision: UInt64) -> Bool {
-        states[key]?.retiredRevisions.contains(revision) ?? true
+    /// Starts a revision's operation unless it was retired first. Retirement also runs on the actor, so a
+    /// revision's finish runs at its retirement exactly when its operation never starts.
+    private func beginOperation(key: LaneKey, revision: UInt64) -> Bool {
+        guard states[key]?.retiredRevisions.contains(revision) == false else { return false }
+        states[key]?.unstartedFinishes.removeValue(forKey: revision)
+        return true
     }
 
     private func retireIfRevoked(key: LaneKey, revision: UInt64) {
@@ -273,13 +284,16 @@ package actor DomainReadSideEffectCoordinator {
               !state.retiredRevisions.contains(revision)
         else { return }
         state.retiredRevisions.insert(revision)
+        let unstartedFinish = state.unstartedFinishes.removeValue(forKey: revision)
         states[key] = state
         markTerminal(key: key, revision: revision)
+        unstartedFinish?.run()
     }
 
     private func taskEnded(key: LaneKey, revision: UInt64) {
         guard var state = states[key] else { return }
         state.runningRevisions.remove(revision)
+        state.unstartedFinishes.removeValue(forKey: revision)
         let wasRetired = state.retiredRevisions.remove(revision) != nil
         states[key] = state
         if wasRetired {
@@ -324,5 +338,24 @@ package actor DomainReadSideEffectCoordinator {
             state.expiredOperationIDs.removeFirst(state.expiredOperationIDs.count - 32)
         }
         states[key] = state
+    }
+}
+
+/// An operation's finish callback, run at most once by whichever of its task's end or its retirement
+/// comes first. The task runs it synchronously, so it has run before any waiter sees the task's result.
+private final class FinishOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var action: (@Sendable () -> Void)?
+
+    init(_ action: (@Sendable () -> Void)?) {
+        self.action = action
+    }
+
+    func run() {
+        let action = lock.withLock {
+            defer { self.action = nil }
+            return self.action
+        }
+        action?()
     }
 }
