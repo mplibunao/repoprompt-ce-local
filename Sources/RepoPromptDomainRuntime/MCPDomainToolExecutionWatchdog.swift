@@ -363,6 +363,9 @@ package enum MCPToolExecutionWatchdog {
                     }
                     if !deadlineDidExpire {
                         deadlineDidExpire = true
+                        // The caller gets a timeout, so work the operation queued before it completed must
+                        // not publish afterwards. A commit that already began loses this revocation.
+                        revokeBeforeCancellation?(.watchdogDeadline)
                         await onEvent(.deadlineExpired)
                         await onSynchronousSettlement(operationSettlement)
                         await onEvent(.settledDuringGrace(
@@ -392,6 +395,8 @@ package enum MCPToolExecutionWatchdog {
                             return try completed.result.get()
                         }
                         deadlineDidExpire = true
+                        // The caller gets a timeout here as well, so the operation's queued work is revoked.
+                        revokeBeforeCancellation?(.watchdogDeadline)
                         await onEvent(.deadlineExpired)
                         await onSynchronousSettlement(operationSettlement)
                         await onEvent(.settledDuringGrace(

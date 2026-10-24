@@ -210,6 +210,14 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         assertFullyReclaimed(coordinator)
     }
 
+    /// A read whose provider completes at its deadline gets the timeout reply, and its queued selection never
+    /// applies afterwards, whichever of the completion and the deadline the watchdog handles first.
+    func testAReadThatCompletesAtItsDeadlineTimesOutWithoutSelectingItsFileLater() async throws {
+        for order in LateCompletionOrder.allCases {
+            try await assertReadCompletingAtItsDeadlineNeverSelectsItsFile(order)
+        }
+    }
+
     func testCancellingCanonicalDrainReleasesWaiterWhilePhysicalWorkerContinues() async {
         let gate = RecoveryCancellationIgnoringGate()
         let recorder = RecoveryInvocationRecorder()
@@ -530,6 +538,94 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         }
     }
 
+    private enum LateCompletionOrder: CaseIterable {
+        /// The watchdog handles the completion before its deadline event.
+        case completionFirst
+        /// The watchdog handles its deadline event after the completion was delivered but before handling it.
+        case deadlineFirst
+    }
+
+    private func assertReadCompletingAtItsDeadlineNeverSelectsItsFile(
+        _ order: LateCompletionOrder,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let gate = RecoveryCancellationIgnoringGate()
+        let recorder = RecoveryBatchRecorder()
+        let probe = RecoveryDiagnosticEventProbe()
+        let completionDelivered = RecoveryEventSignal()
+        let deadlineHandled = RecoveryEventSignal()
+        let key = contextKey()
+        let coordinator = MCPReadFileAutoSelectionCoordinator(
+            isContextCurrent: { $0 == key },
+            applyCanonical: { _, batch in
+                await recorder.record(.init(fullPaths: batch.fullPaths, slicePaths: batch.sliceEntries.map(\.path)))
+                return .unchanged
+            },
+            applyMirror: { _ in .converged },
+            diagnosticObserver: { probe.record($0) }
+        )
+        coordinator.setCanonicalApplyGateForTesting { await gate.enter() }
+        let fence = MCPDomainInvocationFence()
+        let deadline = Duration.seconds(30)
+        let environment = MCPToolExecutionWatchdogEnvironment(
+            now: { .zero },
+            sleep: { _ in
+                switch order {
+                case .completionFirst:
+                    // Handling the completion cancels this sleep, so the deadline event never comes.
+                    try await Task.sleep(for: .seconds(3600))
+                case .deadlineFirst:
+                    await completionDelivered.wait()
+                }
+            },
+            eventDidProduce: { point in
+                guard order == .deadlineFirst, point == .operationCompleted else { return }
+                completionDelivered.signal()
+                await deadlineHandled.wait()
+            },
+            beforeEventConsumption: { point in
+                if point == .deadlineExpired { deadlineHandled.signal() }
+            }
+        )
+
+        var watchdogError: Error?
+        do {
+            _ = try await MCPToolExecutionWatchdog.execute(
+                deadline: deadline,
+                cancellationGrace: .seconds(5),
+                environment: environment,
+                operationCompletionInstant: { deadline },
+                revokeBeforeCancellation: { origin in fence.revoke(origin: origin) },
+                operation: {
+                    // An eligible Agent Mode read queues its selection and returns without waiting for it.
+                    await MainActor.run {
+                        _ = coordinator.enqueue(intent: .full(paths: ["/tmp/Late.swift"]), fence: fence, for: key)
+                    }
+                    return "read reply"
+                }
+            )
+        } catch {
+            watchdogError = error
+        }
+        XCTAssertEqual(
+            watchdogError as? MCPToolExecutionWatchdogError,
+            .executionTimedOut(settlement: .success),
+            "\(order)",
+            file: file,
+            line: line
+        )
+
+        await gate.release()
+        let drained = await coordinator.drain(.canonicalSelection, for: key)
+        _ = await probe.waitFor(kind: .workerStopped, lane: .canonical)
+        let applied = await recorder.batches()
+        XCTAssertEqual(drained, .completed, "\(order)", file: file, line: line)
+        XCTAssertEqual(applied, [], "\(order): the timed-out read's selection applied after its timeout", file: file, line: line)
+        coordinator.invalidate(context: key)
+        assertFullyReclaimed(coordinator, file: file, line: line)
+    }
+
     private func contextKey(
         tabID: UUID = UUID(),
         workspaceID: UUID = UUID(),
@@ -629,6 +725,33 @@ private actor RecoveryCancellationIgnoringGate {
         released = true
         releaseWaiters.forEach { $0.resume() }
         releaseWaiters.removeAll()
+    }
+}
+
+/// A one-shot signal that closures running off the main actor can raise and await.
+private final class RecoveryEventSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var signalled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        let resumed: [CheckedContinuation<Void, Never>] = lock.withLock {
+            signalled = true
+            defer { waiters.removeAll() }
+            return waiters
+        }
+        resumed.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let ready = lock.withLock {
+                if signalled { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if ready { continuation.resume() }
+        }
     }
 }
 
