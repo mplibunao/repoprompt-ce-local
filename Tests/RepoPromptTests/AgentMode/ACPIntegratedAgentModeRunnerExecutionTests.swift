@@ -1314,16 +1314,6 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
                 try await startupTestJoin(ticket.task)
                 try await awaitCompletedTurn()
             }
-
-            /// Waits until the session's run has ended, and fails unless it completed.
-            func awaitCompletedTurn() async throws {
-                try await startupTestEventually(seconds: 15) {
-                    !self.session.runState.isActive
-                        && self.session.activeRunOwnership == nil
-                        && !self.session.terminalCommitInProgress
-                }
-                XCTAssertEqual(session.runState, .completed, "errors: \(errorTexts)")
-            }
         }
 
         /// Builds the fixture and registers its teardown, which also ends every agent process the

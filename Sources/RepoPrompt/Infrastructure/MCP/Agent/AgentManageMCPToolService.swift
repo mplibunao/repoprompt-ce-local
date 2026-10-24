@@ -940,7 +940,7 @@ struct AgentManageMCPToolService {
         let heldACPController = session.acpController
         let status: String
         var messages: [String] = []
-        var blockerName: String?
+        var providerProcess: [String: Value] = [:]
         switch await agentModeVM.retireProviderIfIdle(session, reason: .explicitStop) {
         case let .retiring(retirement):
             if await agentModeVM.waitForProviderRetirementReply(retirement) {
@@ -960,7 +960,7 @@ struct AgentManageMCPToolService {
             messages.append(Self.stopAlreadyGoneMessage)
         case let .blocked(blocker):
             status = "blocked"
-            blockerName = blocker.rawValue
+            providerProcess["blocker"] = .string(blocker.rawValue)
             messages.append(Self.stopBlockedMessage)
         case .superseded:
             guard agentModeVM.sessions[session.tabID] === session else { throw notLiveError }
@@ -968,10 +968,7 @@ struct AgentManageMCPToolService {
         }
         // The status describes the captured runtime only; a run started since may have attached a
         // new one, which the summary reports.
-        var providerProcess: [String: Value] = ["status": .string(status)]
-        if let blockerName {
-            providerProcess["blocker"] = .string(blockerName)
-        }
+        providerProcess["status"] = .string(status)
         if !messages.isEmpty {
             providerProcess["message"] = .string(messages.joined(separator: " "))
         }

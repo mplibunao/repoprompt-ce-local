@@ -5723,7 +5723,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     /// retirement task holds everything it cleans up and touches no session state, so a start
     /// admitted once the controller is detached waits for it and is never cleaned up by it. Returns
     /// nil when `expectedController` is no longer the session's controller.
-    func beginIdleProviderRetirement(
+    func beginCodexRetirement(
         _ session: AgentTabSession,
         expectedController: any CodexSessionControlling
     ) -> Task<Void, Never>? {

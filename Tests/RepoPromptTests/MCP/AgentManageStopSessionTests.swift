@@ -374,12 +374,7 @@ import XCTest
                     let turnID = try XCTUnwrap(claude.sentTurnIDs.last)
                     await runtime.emit(.turnCompleted(turnID: turnID, status: .completed))
                 }
-                try await startupTestEventually(seconds: 15) {
-                    !self.session.runState.isActive
-                        && self.session.activeRunOwnership == nil
-                        && !self.session.terminalCommitInProgress
-                }
-                XCTAssertEqual(session.runState, .completed, "errors: \(errorTexts)")
+                try await awaitCompletedTurn()
             }
         }
 

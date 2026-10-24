@@ -10176,7 +10176,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             claudeCoordinator.beginClaudeRetirement(session, expectedController: controller)
                 .map { transfer in Task { _ = await transfer.value } }
         case let .codex(controller):
-            codexCoordinator.beginIdleProviderRetirement(session, expectedController: controller)
+            codexCoordinator.beginCodexRetirement(session, expectedController: controller)
         case let .acp(controller):
             runService.beginACPRetirement(for: session, expectedController: controller)
         }

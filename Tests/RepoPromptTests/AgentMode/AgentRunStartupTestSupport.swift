@@ -395,6 +395,17 @@ import XCTest
             )
         }
 
+        /// Waits until the session's run has ended and its terminal has committed, and fails unless
+        /// it completed.
+        func awaitCompletedTurn() async throws {
+            try await startupTestEventually(seconds: 15) {
+                !self.session.runState.isActive
+                    && self.session.activeRunOwnership == nil
+                    && !self.session.terminalCommitInProgress
+            }
+            XCTAssertEqual(session.runState, .completed, "errors: \(errorTexts)")
+        }
+
         /// Every gate is released before anything is awaited, and every await is bounded, so a
         /// test that fails while a start is held reports it instead of hanging teardown.
         func tearDown() async {
@@ -886,7 +897,6 @@ import XCTest
         /// Returns the gate `shutdown()` waits for after it begins, if any.
         var shutdownHold: () -> StartupTestHeldGate? = { nil }
         var onShutdownFinished: () -> Void = {}
-        private(set) var shutdownsFinished = 0
         private var gatesStartup: Bool
         private var startupWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -1068,7 +1078,6 @@ import XCTest
             if let hold = shutdownHold() {
                 await hold.wait()
             }
-            shutdownsFinished += 1
             onShutdownFinished()
         }
 
