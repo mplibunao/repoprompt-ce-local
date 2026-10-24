@@ -27,11 +27,17 @@ import XCTest
         }
 
         /// A stop on a session whose run completed releases its process and keeps the transcript,
-        /// the stored conversation and the terminal result.
+        /// the stored conversation and the terminal result. The reply warns when the Codex
+        /// app-server may still be exiting, and when the next message can't resume the conversation.
         func testCompletedSessionReleasesProviderAndKeepsConversation() async throws {
-            for agent in [AgentProviderKind.claudeCode, .codexExec, .cursor] {
-                let label = agent.rawValue
-                let fixture = try makeFixture(agent: agent)
+            let rows: [(label: String, agent: AgentProviderKind, acpLoadSession: Bool, message: String?)] = [
+                ("claude", .claudeCode, true, nil),
+                ("codex", .codexExec, true, AgentManageMCPToolService.stopReleasedCodexMessage),
+                ("cursor", .cursor, true, nil),
+                ("cursor without loadSession", .cursor, false, AgentManageMCPToolService.stopNewConversationMessage)
+            ]
+            for (label, agent, acpLoadSession, message) in rows {
+                let fixture = try makeFixture(agent: agent, acpLoadSession: acpLoadSession)
                 try await fixture.runCompletedTurn("first message")
                 let listedBefore = try await fixture.listedSession()
                 XCTAssertEqual(listedBefore["runtime_attached"], .bool(true), label)
@@ -44,6 +50,7 @@ import XCTest
 
                 XCTAssertEqual(reply["stop_requested"], .bool(false), label)
                 XCTAssertEqual(reply["provider_process"]?.objectValue?["status"], .string("released"), label)
+                XCTAssertEqual(reply["provider_process"]?.objectValue?["message"], message.map(Value.string), label)
                 XCTAssertEqual(reply["is_live"], .bool(true), label)
                 XCTAssertEqual(reply["runtime_attached"], .bool(false), label)
                 XCTAssertEqual(fixture.shutdownsFinished, 1, label)
@@ -82,11 +89,7 @@ import XCTest
 
                 let reply = try await fixture.stop()
 
-                XCTAssertEqual(
-                    reply["provider_process"],
-                    .object(["status": .string("blocked"), "blocker": .string("interaction")]),
-                    label
-                )
+                XCTAssertEqual(Self.blockedReason(reply), "interaction", label)
                 XCTAssertEqual(reply["runtime_attached"], .bool(true), label)
                 XCTAssertEqual(fixture.claude.shutdownsStarted, 0, label)
                 XCTAssertTrue(fixture.session.claudeController === controller, label)
@@ -101,11 +104,7 @@ import XCTest
 
                 let reply = try await fixture.stop()
 
-                XCTAssertEqual(
-                    reply["provider_process"],
-                    .object(["status": .string("blocked"), "blocker": .string("provider_busy")]),
-                    label
-                )
+                XCTAssertEqual(Self.blockedReason(reply), "provider_busy", label)
                 XCTAssertEqual(fixture.shutdownsFinished, 0, label)
                 XCTAssertTrue(fixture.session.codexController === controller, label)
                 XCTAssertEqual(fixture.session.codexPendingTurnKind, .user, label)
@@ -130,10 +129,7 @@ import XCTest
             let reply = try await stopping.reply()
 
             XCTAssertEqual(reply["stop_requested"], .bool(false))
-            XCTAssertEqual(
-                reply["provider_process"],
-                .object(["status": .string("blocked"), "blocker": .string("active_run")])
-            )
+            XCTAssertEqual(Self.blockedReason(reply), "active_run")
             XCTAssertEqual(fixture.claude.shutdownsStarted, 0)
             XCTAssertEqual(fixture.claude.runtimesCreated, 1, "the admitted message started a new process")
             XCTAssertNotNil(fixture.session.claudeController)
@@ -386,7 +382,7 @@ import XCTest
         /// Builds a fixture for `agent` with the idle setting at 0, so no idle timer retires anything,
         /// and registers its teardown, which also ends every ACP agent process the test started,
         /// before any test step can throw.
-        private func makeFixture(agent: AgentProviderKind) throws -> Fixture {
+        private func makeFixture(agent: AgentProviderKind, acpLoadSession: Bool = true) throws -> Fixture {
             let directory = try makeTestDirectory()
             let readiness = StartupTestGatedReadiness(gatedCalls: [])
             let controller = StartupTestCodexController(gatesStartup: false)
@@ -402,7 +398,7 @@ import XCTest
                 codexControllers: codex,
                 claude: claude,
                 claudeIdle: idle,
-                acpProvider: peer.provider()
+                acpProvider: peer.provider(loadSession: acpLoadSession)
             )
             viewModel.test_setProviderRetirementClock(idle.clock.cancellableClock)
             let session = AgentModeViewModel.TabSession(tabID: UUID())

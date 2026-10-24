@@ -80,7 +80,13 @@ struct AgentManageMCPToolService {
 
     static let stopSessionChangedMessage = "Retryable session_changed: The session's agent process changed while stopping, so no process was released. Retry agent_manage op=stop_session."
     static let stopReleasedCodexMessage = "The Codex app-server can take a few more seconds to exit."
-    static let stopShuttingDownMessage = "The process is still shutting down after 5 seconds and finishes on its own. The next message waits for it."
+    static let stopNewConversationMessage = "This agent can't load saved conversations. The next message opens a new one with a summary of this transcript."
+    static var stopShuttingDownMessage: String {
+        let seconds = AgentModeViewModel.providerRetirementReplyWait.components.seconds
+        return "The process is still shutting down after \(seconds) seconds and finishes on its own. The next message waits for it."
+    }
+
+    static let stopBlockedMessage = "The stop didn't release the process. Retry it once the blocker clears."
     static let stopAlreadyGoneMessage = "The session had no agent process attached. A process left by a cancelled or failed run can still be exiting."
 
     init(
@@ -927,35 +933,48 @@ struct AgentManageMCPToolService {
         }
 
         agentModeVM.clearStaleMCPRunningMasksBeforeStop(session, sessionID: sessionID)
-        // Codex's app-server exits after its retirement finishes, so its `released` says so.
+        // Captured in the same main-actor slice as the runtime `retireProviderIfIdle` retires, so
+        // the reply describes that runtime. Codex's app-server exits after its retirement
+        // finishes, and an ACP agent that can't load a saved conversation starts a new one.
         let heldCodexRuntime = session.codexController != nil
-        var providerProcess: [String: Value]
+        let heldACPController = session.acpController
+        let status: String
+        var messages: [String] = []
+        var blockerName: String?
         switch await agentModeVM.retireProviderIfIdle(session, reason: .explicitStop) {
         case let .retiring(retirement):
             if await agentModeVM.waitForProviderRetirementReply(retirement) {
-                providerProcess = ["status": .string("released")]
+                status = "released"
                 if heldCodexRuntime {
-                    providerProcess["message"] = .string(Self.stopReleasedCodexMessage)
+                    messages.append(Self.stopReleasedCodexMessage)
                 }
             } else {
-                providerProcess = [
-                    "status": .string("shutting_down"),
-                    "message": .string(Self.stopShuttingDownMessage)
-                ]
+                status = "shutting_down"
+                messages.append(Self.stopShuttingDownMessage)
+            }
+            if let heldACPController, await !heldACPController.idleRetirementSnapshot().loadSessionSupported {
+                messages.append(Self.stopNewConversationMessage)
             }
         case .alreadyGone:
-            providerProcess = [
-                "status": .string("already_gone"),
-                "message": .string(Self.stopAlreadyGoneMessage)
-            ]
+            status = "already_gone"
+            messages.append(Self.stopAlreadyGoneMessage)
         case let .blocked(blocker):
-            providerProcess = ["status": .string("blocked"), "blocker": .string(blocker.rawValue)]
+            status = "blocked"
+            blockerName = blocker.rawValue
+            messages.append(Self.stopBlockedMessage)
         case .superseded:
             guard agentModeVM.sessions[session.tabID] === session else { throw notLiveError }
             throw MCPError.invalidParams(Self.stopSessionChangedMessage)
         }
         // The status describes the captured runtime only; a run started since may have attached a
         // new one, which the summary reports.
+        var providerProcess: [String: Value] = ["status": .string(status)]
+        if let blockerName {
+            providerProcess["blocker"] = .string(blockerName)
+        }
+        if !messages.isEmpty {
+            providerProcess["message"] = .string(messages.joined(separator: " "))
+        }
         var reply = summary(isLive: agentModeVM.sessions[session.tabID] === session)
         reply["stop_requested"] = .bool(false)
         reply["provider_process"] = .object(providerProcess)
