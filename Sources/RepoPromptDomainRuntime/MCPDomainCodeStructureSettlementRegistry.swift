@@ -650,14 +650,10 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
     }
 
     private func claimEffect(windowID: Int, leaseID: UUID, invocationID: UUID) -> UUID? {
-        lock.withLock {
-            guard var entry = entriesByWindowID[windowID]?[leaseID],
-                  entry.invocationID == invocationID
-            else { return nil }
+        transition(windowID: windowID, leaseID: leaseID, invocationID: invocationID) { entry in
             let claimID = UUID()
             entry.effectClaimIDs.insert(claimID)
-            entriesByWindowID[windowID]?[leaseID] = entry
-            return claimID
+            return (.retain(entry), claimID)
         }
     }
 
