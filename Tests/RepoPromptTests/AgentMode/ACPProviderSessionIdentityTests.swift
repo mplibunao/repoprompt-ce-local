@@ -90,7 +90,6 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
         XCTAssertEqual(bootstrap.sessionID, "fresh-runtime-id")
         XCTAssertEqual(bootstrap.providerSessionIdentity.loadSessionID, "fresh-runtime-id")
         XCTAssertEqual(bootstrap.providerSessionIdentity.loadSessionIDConfidence, .verified)
-        // Shutdown's session/cancel may or may not reach the record before the agent exits.
         let methods = peer.requestMethods
         XCTAssertFalse(methods.contains("session/load"), "\(methods)")
         XCTAssertEqual(methods.count(where: { $0 == "session/new" }), 1, "\(methods)")

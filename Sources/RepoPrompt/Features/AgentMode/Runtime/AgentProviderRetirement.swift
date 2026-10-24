@@ -6,7 +6,7 @@ enum AgentProviderRetirementReason {
     /// `agent_manage stop_session` on a session with no active run. It ignores the idle setting and
     /// ends the process's background work.
     case explicitStop
-    /// An idle timer whose deadline passed. `anchor` is the terminal or attach that armed it.
+    /// An idle timer whose deadline passed.
     case automaticIdle(anchor: ContinuousClock.Instant)
 
     var isAutomatic: Bool {
@@ -33,7 +33,8 @@ enum AgentProviderRetirementBlocker: String {
     case resumeTransfer = "resume_transfer"
     case missingProviderSessionID = "missing_provider_session_id"
     case providerBusy = "provider_busy"
-    /// Automatic retirement only: a live Claude background task, under the keep-alive cap.
+    /// Claude's idle timer only: a live Claude background task, under the keep-alive cap. The timer
+    /// logs it when it keeps the process; `retireProviderIfIdle` never returns it.
     case backgroundTasks = "background_tasks"
     /// Automatic retirement only: the ACP runtime can't reload a saved conversation.
     case resumeUnsupported = "resume_unsupported"

@@ -90,6 +90,11 @@ import XCTest
                 let reply = try await fixture.stop()
 
                 XCTAssertEqual(Self.blockedReason(reply), "interaction", label)
+                XCTAssertEqual(
+                    reply["provider_process"]?.objectValue?["message"],
+                    .string(AgentManageMCPToolService.stopBlockedMessage),
+                    label
+                )
                 XCTAssertEqual(reply["runtime_attached"], .bool(true), label)
                 XCTAssertEqual(fixture.claude.shutdownsStarted, 0, label)
                 XCTAssertTrue(fixture.session.claudeController === controller, label)
@@ -137,17 +142,27 @@ import XCTest
         }
 
         /// A running mask that MCP snapshots treat as stale, unchanged for over 15 s with no owner
-        /// or run work behind it, doesn't block a stop. A fresh one does.
+        /// or run work behind it, doesn't block a stop. A fresh one does, and a start that holds
+        /// its ticket keeps even a stale mask and blocks the stop.
         func testStaleRunningMaskDoesNotBlockStop() async throws {
-            let rows: [(label: String, ageSeconds: TimeInterval, raise: @MainActor (AgentModeViewModel.TabSession) -> Void, blocker: String?)] = [
-                ("fresh follow-up mask", 0, { $0.mcpFollowUpRunPending = true }, "pending_start"),
-                ("stale follow-up mask", 20, { $0.mcpFollowUpRunPending = true }, nil),
-                ("stale superseding mask", 20, { $0.pendingSupersedingTurnCompletions = 1 }, nil)
+            typealias Raise = @MainActor (AgentModeViewModel.TabSession) -> AgentRunStartupTicket?
+            let rows: [(label: String, ageSeconds: TimeInterval, raise: Raise, blocker: String?)] = [
+                ("fresh follow-up mask", 0, { $0.mcpFollowUpRunPending = true
+                    return nil }, "pending_start"),
+                ("stale follow-up mask", 20, { $0.mcpFollowUpRunPending = true
+                    return nil }, nil),
+                ("stale superseding mask", 20, { $0.pendingSupersedingTurnCompletions = 1
+                    return nil }, nil),
+                ("stale follow-up mask behind a startup ticket", 20, { session in
+                    session.mcpFollowUpRunPending = true
+                    return session.installStartupTicketIfAbsent()
+                }, "pending_start")
             ]
             for (label, ageSeconds, raise, blocker) in rows {
                 let fixture = try makeFixture(agent: .claudeCode)
                 try await fixture.runCompletedTurn("turn")
-                raise(fixture.session)
+                let ticket = raise(fixture.session)
+                defer { ticket?.resolve(.cancelled) }
                 let changedAt = Date().addingTimeInterval(-ageSeconds)
                 fixture.session.mcpFollowUpRunPendingUpdatedAt = changedAt
                 fixture.session.pendingSupersedingTurnCompletionsUpdatedAt = changedAt
@@ -157,6 +172,7 @@ import XCTest
                 if let blocker {
                     XCTAssertEqual(Self.blockedReason(reply), blocker, label)
                     XCTAssertEqual(fixture.claude.shutdownsStarted, 0, label)
+                    XCTAssertTrue(fixture.session.mcpFollowUpRunPending, label)
                 } else {
                     XCTAssertEqual(reply["provider_process"]?.objectValue?["status"], .string("released"), label)
                     XCTAssertFalse(fixture.session.mcpFollowUpRunPending, label)
