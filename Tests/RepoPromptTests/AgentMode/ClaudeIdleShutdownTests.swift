@@ -451,7 +451,7 @@ import XCTest
         @MainActor
         private final class Fixture: StartupTestSessionFixture {
             let claude: StartupTestClaudeRecorder
-            let idle: StartupTestClaudeIdleEnvironment
+            let idle: StartupTestIdleEnvironment
             /// What each of this tab's idle-timer deadlines decided, in order.
             private(set) var idleOutcomes: [Outcome] = []
             /// Called with each decision as the coordinator reports it, in the same main-actor slice.
@@ -469,7 +469,7 @@ import XCTest
                 readiness: StartupTestGatedReadiness,
                 controller: StartupTestCodexController,
                 claude: StartupTestClaudeRecorder,
-                idle: StartupTestClaudeIdleEnvironment
+                idle: StartupTestIdleEnvironment
             ) {
                 self.claude = claude
                 self.idle = idle
@@ -528,13 +528,13 @@ import XCTest
             let readiness = StartupTestGatedReadiness(gatedCalls: [])
             let controller = StartupTestCodexController(gatesStartup: false)
             let claude = StartupTestClaudeRecorder()
-            let idle = StartupTestClaudeIdleEnvironment()
+            let idle = StartupTestIdleEnvironment()
             let viewModel = startupTestMakeViewModel(
                 storageRoot: storageRoot,
                 readiness: readiness,
                 controller: controller,
                 claude: claude,
-                claudeIdle: idle
+                idle: idle
             )
             let session = startupTestCodexSession()
             session.selectedAgent = .claudeCode
@@ -583,11 +583,14 @@ import XCTest
             file: StaticString = #filePath,
             line: UInt = #line
         ) async throws {
-            func outcomes() -> [Outcome] {
-                countingStale ? fixture.idleOutcomes : fixture.idleOutcomes.filter { $0 != .stale }
-            }
-            try await startupTestEventually(file: file, line: line) { outcomes().count >= expected.count }
-            XCTAssertEqual(outcomes(), expected, label, file: file, line: line)
+            try await startupTestExpectIdleOutcomes(
+                expected,
+                in: { fixture.idleOutcomes },
+                countingStale: countingStale,
+                label,
+                file: file,
+                line: line
+            )
         }
 
         private static func claudeApprovalRequest(id: String) -> AgentApprovalRequest {

@@ -30,6 +30,8 @@ final class AgentModeRunService {
         let activeAgentRunWaitQuery: (_ runID: UUID) -> Bool
         /// Bounded wait for child `agent_run.wait` scopes to drain before Claude native interrupt.
         let childAgentRunWaitDrainTimeoutSeconds: TimeInterval
+        /// The setting, clock and view-model calls the ACP idle timer uses.
+        let acpIdleRetirement: ACPIntegratedAgentModeRunner.IdleRetirementHost
     }
 
     /// Neutral command/cancellation contracts shared with the direct/headless
@@ -101,7 +103,8 @@ final class AgentModeRunService {
             terminalCommitBarrier: terminalCommitBarrier,
             toolTrackingHooks: toolTrackingHooks,
             providerFactory: dependencies.acpProviderFactory,
-            controllerFactory: dependencies.acpControllerFactory
+            controllerFactory: dependencies.acpControllerFactory,
+            idleRetirement: dependencies.acpIdleRetirement
         )
     }
 
@@ -583,6 +586,12 @@ final class AgentModeRunService {
         ) {
             acpRunner.test_retirementWillShutDown = retirementWillShutDown
             acpRunner.test_startWillAwaitRetirement = startWillAwaitRetirement
+        }
+
+        func test_setACPIdleTimerOutcomeObserver(
+            _ observer: (@MainActor (_ tabID: UUID, _ outcome: ACPIntegratedAgentModeRunner.IdleTimerOutcome) -> Void)?
+        ) {
+            acpRunner.test_idleTimerOutcomeObserver = observer
         }
 
         func test_requeueAllQueuedACPSteeringAsFollowUp(session: AgentTabSession) {
