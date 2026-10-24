@@ -1324,6 +1324,10 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
                 get throws { try XCTUnwrap(peer.startedPIDs.last) }
             }
 
+            var promptCount: Int {
+                peer.records.count { $0.event == "session/prompt" }
+            }
+
             /// Waits until this tab's deadlines have made `expected.count` decisions and checks them.
             func expectIdleOutcomes(
                 _ expected: [AgentProviderIdleTimerOutcome],
@@ -1381,6 +1385,7 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
                 idle: idle
             )
             addTeardownBlock { @MainActor in
+                try? peer.releaseHold(Self.heldPrompt)
                 await fixture.tearDown()
                 idle.clock.cancelSleepers()
                 await session.acpController?.shutdown()
@@ -1397,6 +1402,8 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
     extension ACPIntegratedAgentModeRunnerExecutionTests {
         /// The default setting of 5 minutes, which every fixture starts with.
         private static let idleInterval: Duration = .seconds(GlobalSettingsStore.defaultIdleProviderShutdownMinutes * 60)
+        /// The hold name the scripted agent waits on before it answers a prompt containing it.
+        static let heldPrompt = "held"
 
         /// A completed turn arms the timer. The process lives until the deadline, exits at it, and the
         /// next turn loads the same conversation in a new process.
@@ -1438,6 +1445,139 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             XCTAssertFalse(records.contains { $0.event == "session/new" && $0.pid == secondPID })
             XCTAssertEqual(records.last { $0.event == "session/prompt" }?.sessionID, storedID)
             XCTAssertNotEqual(session.runID, firstRunID)
+        }
+
+        /// A run waiting for approval, a follow-up queued behind it and that follow-up in flight each
+        /// keep the process past the deadline armed before them; the deadline armed by the last
+        /// completed turn retires it. Work that holds an idle session, such as a binding transition,
+        /// keeps the process until a deadline after the work ends.
+        func testIdleDeadlineKeepsBusyACPWork() async throws {
+            do {
+                let fixture = try makeACPRetirementFixture()
+                let session = fixture.session
+                let clock = fixture.idle.clock
+                try await fixture.runTurn("first turn")
+                let pid = try fixture.lastPID
+
+                clock.advance(by: .seconds(60))
+                let approvalTurn = try fixture.submit("[permission] run the build")
+                try await startupTestJoin(approvalTurn.task)
+                try await startupTestEventually { session.pendingApproval != nil }
+                clock.advance(by: Self.idleInterval)
+                try await fixture.expectIdleOutcomes([.stale], countingStale: true, "pending approval")
+                XCTAssertFalse(fixture.peer.hasExited(pid), "pending approval")
+
+                XCTAssertEqual(
+                    fixture.viewModel.submitUserTurn(text: "[hold:\(Self.heldPrompt)] queued follow-up", tabID: fixture.tabID),
+                    .submitted
+                )
+                XCTAssertEqual(session.pendingInstructions.count, 1, "the follow-up was not queued")
+                let approval = try XCTUnwrap(session.pendingApproval)
+                XCTAssertTrue(fixture.viewModel.submitApprovalDecision(
+                    tabID: fixture.tabID,
+                    requestID: approval.id,
+                    decision: .accept
+                ))
+                // The approved turn completes, arms a timer, and starts the queued follow-up.
+                try await startupTestEventually(seconds: 15) {
+                    fixture.promptCount == 3 && session.pendingInstructions.isEmpty && session.runState == .running
+                }
+                let followUpArmedDeadline = clock.now + Self.idleInterval
+                try await startupTestEventually { clock.pendingDeadlines == [followUpArmedDeadline] }
+                clock.advance(by: Self.idleInterval)
+                try await fixture.expectIdleOutcomes([.stale, .stale], countingStale: true, "follow-up in flight")
+                XCTAssertFalse(fixture.peer.hasExited(pid), "follow-up in flight")
+
+                try fixture.peer.releaseHold(Self.heldPrompt)
+                try await fixture.awaitCompletedTurn()
+                clock.advance(by: Self.idleInterval)
+                try await fixture.expectIdleOutcomes([.stale, .stale, .retired], countingStale: true)
+                try await startupTestEventually { fixture.peer.hasExited(pid) }
+                XCTAssertEqual(fixture.peer.startedPIDs, [pid])
+            }
+
+            do {
+                let label = "binding transition"
+                let fixture = try makeACPRetirementFixture()
+                let clock = fixture.idle.clock
+                try await fixture.runTurn("turn")
+                let pid = try fixture.lastPID
+                let generation = fixture.session.beginPersistentBindingTransition()
+                clock.advance(by: Self.idleInterval)
+                try await fixture.expectIdleOutcomes([.rearmed], label)
+                XCTAssertFalse(fixture.peer.hasExited(pid), label)
+                XCTAssertNotNil(fixture.session.acpController, label)
+
+                fixture.session.finishPersistentBindingTransition(generation: generation)
+                clock.advance(by: Self.idleInterval)
+                try await fixture.expectIdleOutcomes([.rearmed, .retired], label)
+                try await startupTestEventually { fixture.peer.hasExited(pid) }
+            }
+        }
+
+        /// The idle timer leaves an agent that can't reload a saved conversation running, since a
+        /// new process could not resume it. An explicit stop still releases it.
+        func testACPIdleTimerSkipsUnsupportedLoadCapability() async throws {
+            let fixture = try makeACPRetirementFixture(loadSession: false)
+            let session = fixture.session
+            let clock = fixture.idle.clock
+            try await fixture.runTurn("turn")
+            let pid = try fixture.lastPID
+
+            clock.advance(by: Self.idleInterval)
+            try await fixture.expectIdleOutcomes([.ended])
+            XCTAssertEqual(clock.pendingDeadlines, [], "the timer kept polling")
+            XCTAssertFalse(fixture.peer.hasExited(pid))
+            XCTAssertNotNil(session.acpController)
+
+            guard case let .retiring(retirement) = await fixture.viewModel.retireProviderIfIdle(
+                session,
+                reason: .explicitStop
+            ) else {
+                return XCTFail("an explicit stop did not release the process")
+            }
+            try await startupTestJoin(retirement)
+            XCTAssertTrue(fixture.peer.hasExited(pid))
+        }
+
+        /// A deadline whose timer a later arm replaced wakes without acting, whether the later arm
+        /// is for the same controller or for a new one. The later arm's deadline still retires.
+        func testStaleACPDeadlineCannotRetireReplacementController() async throws {
+            for newProcess in [false, true] {
+                let label = newProcess ? "a new process replaced the controller" : "a later turn re-armed the timer"
+                let fixture = try makeACPRetirementFixture()
+                let session = fixture.session
+                let clock = fixture.idle.clock
+                try await fixture.runTurn("first turn")
+                let firstPID = try fixture.lastPID
+
+                clock.advance(by: .seconds(60))
+                if newProcess {
+                    guard case let .retiring(retirement) = await fixture.viewModel.retireProviderIfIdle(
+                        session,
+                        reason: .explicitStop
+                    ) else {
+                        return XCTFail("\(label): the explicit stop did not release the process")
+                    }
+                    try await startupTestJoin(retirement)
+                }
+                try await fixture.runTurn("second turn")
+                let secondPID = try fixture.lastPID
+                XCTAssertEqual(secondPID != firstPID, newProcess, label)
+                let controller = try XCTUnwrap(session.acpController, label)
+                let secondDeadline = clock.now + Self.idleInterval
+                try await startupTestEventually { clock.pendingDeadlines.contains(secondDeadline) }
+
+                clock.advance(by: Self.idleInterval - .seconds(60))
+                try await fixture.expectIdleOutcomes([.stale], countingStale: true, label)
+                XCTAssertTrue(session.acpController === controller, label)
+                XCTAssertFalse(fixture.peer.hasExited(secondPID), label)
+                XCTAssertEqual(clock.pendingDeadlines, [secondDeadline], label)
+
+                clock.advance(by: .seconds(60))
+                try await fixture.expectIdleOutcomes([.stale, .retired], countingStale: true, label)
+                try await startupTestEventually { fixture.peer.hasExited(secondPID) }
+            }
         }
     }
 #endif
