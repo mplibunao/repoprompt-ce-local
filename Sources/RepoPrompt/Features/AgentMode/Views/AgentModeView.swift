@@ -100,7 +100,8 @@ struct AgentModeView: View {
                         stressHarness: windowState.agentChatStressHarness,
                         windowID: windowState.windowID,
                         currentTabID: currentTabID,
-                        codexManagedLoginAction: codexManagedLoginAction
+                        codexManagedLoginAction: codexManagedLoginAction,
+                        settlementNoticeServer: windowState.mcpServer
                     )
                     .environment(\.agentWindowIsFocused, windowState.isCurrentlyFocused)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -116,7 +117,8 @@ struct AgentModeView: View {
                         selectionCoordinator: windowState.selectionCoordinator,
                         windowID: windowState.windowID,
                         currentTabID: currentTabID,
-                        codexManagedLoginAction: codexManagedLoginAction
+                        codexManagedLoginAction: codexManagedLoginAction,
+                        settlementNoticeServer: windowState.mcpServer
                     )
                     .environment(\.agentWindowIsFocused, windowState.isCurrentlyFocused)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
