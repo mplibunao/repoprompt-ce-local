@@ -10216,25 +10216,16 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     }
 
     /// Asks the provider whether its runtime is idle. Codex has no probe; its state lives on the
-    /// session. An explicit stop releases a Claude process with live background tasks and an ACP
-    /// agent that can't reload a conversation; automatic retirement keeps both.
+    /// session. Claude's background tasks never block here: an explicit stop ends them, and Claude's
+    /// idle timer, which keeps them up to its cap, retires through `ClaudeAgentModeCoordinator`.
+    /// Automatic retirement keeps an ACP agent that can't reload a conversation.
     private func providerProbeBlocker(
         _ runtime: AttachedProviderRuntime,
         reason: AgentProviderRetirementReason
     ) async -> AgentProviderRetirementBlocker? {
         switch runtime {
         case let .claude(controller):
-            let probe = await controller.idleProbe()
-            if probe.turnInFlight {
-                return .providerBusy
-            }
-            if case let .automaticIdle(anchor) = reason,
-               probe.hasLiveBackgroundTasks,
-               anchor + ClaudeAgentModeCoordinator.idleBackgroundTaskKeepAliveCap > providerRetirementClock.now()
-            {
-                return .backgroundTasks
-            }
-            return nil
+            return await controller.idleProbe().turnInFlight ? .providerBusy : nil
         case let .acp(controller):
             let snapshot = await controller.idleRetirementSnapshot()
             if !snapshot.isIdle {

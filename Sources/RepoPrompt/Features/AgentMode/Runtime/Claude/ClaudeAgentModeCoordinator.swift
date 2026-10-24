@@ -736,6 +736,9 @@ final class ClaudeAgentModeCoordinator {
         // A live background task keeps the process until the task ends or the cap passes. The
         // re-arm never runs past the cap.
         if probe.hasLiveBackgroundTasks, capDeadline > now {
+            Self.idleLogger.debug(
+                "Keeping idle Claude process for tab=\(session.tabID.uuidString, privacy: .public) blocker=\(AgentProviderRetirementBlocker.backgroundTasks.rawValue, privacy: .public)"
+            )
             rearmClaudeIdleTimer(arm, at: min(now + interval, capDeadline), for: session)
             return
         }
@@ -878,12 +881,6 @@ final class ClaudeAgentModeCoordinator {
     /// reset or provider switch belongs to a conversation the session no longer resumes.
     func pendingClaudeRetirementTask(for tabID: UUID) -> Task<NativeAgentRuntimeSessionRef, Never>? {
         pendingResumeTransferTasksByTabID[tabID]
-    }
-
-    /// How long a live background task can keep an idle process, counted from the idle timer's
-    /// anchor.
-    static var idleBackgroundTaskKeepAliveCap: Duration {
-        backgroundTaskKeepAliveCap
     }
 
     private func reportIdleTimerOutcome(_ outcome: IdleTimerOutcome, tabID: UUID) {
