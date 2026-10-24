@@ -54,15 +54,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         let recorder = RecoveryBatchRecorder()
         let probe = RecoveryDiagnosticEventProbe()
         let key = contextKey()
-        let coordinator = MCPReadFileAutoSelectionCoordinator(
-            isContextCurrent: { $0 == key },
-            applyCanonical: { _, batch in
-                await recorder.record(.init(fullPaths: batch.fullPaths, slicePaths: batch.sliceEntries.map(\.path)))
-                return .unchanged
-            },
-            applyMirror: { _ in .converged },
-            diagnosticObserver: { probe.record($0) }
-        )
+        let coordinator = batchRecordingCoordinator(for: key, recorder: recorder, probe: probe)
         let revokedRead = MCPDomainInvocationFence()
         let liveSliceRead = MCPDomainInvocationFence()
         let liveFullRead = MCPDomainInvocationFence()
@@ -96,15 +88,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         let probe = RecoveryDiagnosticEventProbe()
         let revokedReadWaiterRegistered = RecoveryMainActorSignal()
         let key = contextKey()
-        let coordinator = MCPReadFileAutoSelectionCoordinator(
-            isContextCurrent: { $0 == key },
-            applyCanonical: { _, batch in
-                await recorder.record(.init(fullPaths: batch.fullPaths, slicePaths: batch.sliceEntries.map(\.path)))
-                return .unchanged
-            },
-            applyMirror: { _ in .converged },
-            diagnosticObserver: { probe.record($0) }
-        )
+        let coordinator = batchRecordingCoordinator(for: key, recorder: recorder, probe: probe)
         var applyCount = 0
         var stuckWorkerSawCancellation = false
         coordinator.setCanonicalApplyGateForTesting {
@@ -166,15 +150,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         let recorder = RecoveryBatchRecorder()
         let probe = RecoveryDiagnosticEventProbe()
         let key = contextKey()
-        let coordinator = MCPReadFileAutoSelectionCoordinator(
-            isContextCurrent: { $0 == key },
-            applyCanonical: { _, batch in
-                await recorder.record(.init(fullPaths: batch.fullPaths, slicePaths: batch.sliceEntries.map(\.path)))
-                return .unchanged
-            },
-            applyMirror: { _ in .converged },
-            diagnosticObserver: { probe.record($0) }
-        )
+        let coordinator = batchRecordingCoordinator(for: key, recorder: recorder, probe: probe)
         var applyCount = 0
         coordinator.setCanonicalApplyGateForTesting {
             applyCount += 1
@@ -207,6 +183,109 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
             RecoveryBatchRecorder.Batch(fullPaths: ["/tmp/Next.swift"], slicePaths: [])
         ])
         coordinator.invalidate(context: key)
+        assertFullyReclaimed(coordinator)
+    }
+
+    /// Closing a connection drains its queue, and that drain passes over a stuck batch whose reads were all
+    /// revoked even when no later read arrives: the reads queued behind the batch apply, and the drain returns.
+    func testClosingAConnectionPassesOverItsRevokedStuckBatchAndAppliesTheReadsBehindIt() async {
+        let gate = RecoveryCancellationIgnoringGate()
+        let recorder = RecoveryBatchRecorder()
+        let probe = RecoveryDiagnosticEventProbe()
+        let key = contextKey()
+        let coordinator = batchRecordingCoordinator(for: key, recorder: recorder, probe: probe)
+        var applyCount = 0
+        coordinator.setCanonicalApplyGateForTesting {
+            applyCount += 1
+            guard applyCount == 1 else { return }
+            await gate.enter()
+        }
+
+        let revokedRead = MCPDomainInvocationFence()
+        XCTAssertTrue(coordinator.enqueue(intent: .full(paths: ["/tmp/Stuck.swift"]), fence: revokedRead, for: key))
+        await gate.waitUntilEntered()
+        XCTAssertTrue(coordinator.enqueue(
+            intent: .full(paths: ["/tmp/Queued.swift"]),
+            fence: MCPDomainInvocationFence(),
+            for: key
+        ))
+        revokedRead.revoke(origin: .watchdogDeadline)
+
+        let closingDrainReturned = expectation(description: "the closing drain returned")
+        let closingDrain = Task { @MainActor in
+            defer { closingDrainReturned.fulfill() }
+            return await coordinator.finish(context: key)
+        }
+        await fulfillment(of: [closingDrainReturned], timeout: 5)
+        let appliedWhileStuck = await recorder.batches()
+
+        // Invalidating ends a drain that still waits for the stuck batch, so a lane that never passes over it fails
+        // this test instead of hanging it.
+        coordinator.invalidate(context: key)
+        await gate.release()
+        let closingDrainResult = await closingDrain.value
+        let workerStarts = probe.snapshot().count(where: { $0.kind == .workerStarted && $0.lane == .canonical })
+        _ = await probe.waitFor(kind: .workerStopped, lane: .canonical, occurrence: workerStarts)
+        XCTAssertEqual(closingDrainResult, .completed)
+        XCTAssertEqual(appliedWhileStuck, [RecoveryBatchRecorder.Batch(fullPaths: ["/tmp/Queued.swift"], slicePaths: [])])
+        assertFullyReclaimed(coordinator)
+    }
+
+    /// A passed-over worker that resumes leaves the worker that replaced it alone: a later read still waits behind
+    /// the replacement's batch, and once that batch's reads are revoked too, it can be passed over in turn.
+    func testAPassedOverWorkerThatResumesDoesNotDisturbTheWorkerThatReplacedIt() async {
+        let firstGate = RecoveryCancellationIgnoringGate()
+        let secondGate = RecoveryCancellationIgnoringGate()
+        let recorder = RecoveryBatchRecorder()
+        let probe = RecoveryDiagnosticEventProbe()
+        let key = contextKey()
+        let coordinator = batchRecordingCoordinator(for: key, recorder: recorder, probe: probe)
+        var applyCount = 0
+        coordinator.setCanonicalApplyGateForTesting {
+            applyCount += 1
+            switch applyCount {
+            case 1: await firstGate.enter()
+            case 2: await secondGate.enter()
+            default: break
+            }
+        }
+
+        let firstRead = MCPDomainInvocationFence()
+        XCTAssertTrue(coordinator.enqueue(intent: .full(paths: ["/tmp/First.swift"]), fence: firstRead, for: key))
+        await firstGate.waitUntilEntered()
+        firstRead.revoke(origin: .watchdogDeadline)
+        let secondRead = MCPDomainInvocationFence()
+        XCTAssertTrue(coordinator.enqueue(intent: .full(paths: ["/tmp/Second.swift"]), fence: secondRead, for: key))
+        await secondGate.waitUntilEntered()
+
+        // The passed-over worker resumes, finds every read in its batch revoked, and stops.
+        await firstGate.release()
+        _ = await probe.waitFor(kind: .workerStopped, lane: .canonical)
+        XCTAssertTrue(coordinator.enqueue(
+            intent: .full(paths: ["/tmp/Third.swift"]),
+            fence: MCPDomainInvocationFence(),
+            for: key
+        ))
+        let workerStartsBehindLiveBatch = probe.snapshot().count(where: { $0.kind == .workerStarted && $0.lane == .canonical })
+        XCTAssertEqual(workerStartsBehindLiveBatch, 2, "the third read got a worker of its own beside the second read's")
+
+        secondRead.revoke(origin: .watchdogDeadline)
+        let thirdReadReturned = expectation(description: "the third read's wait returned")
+        let thirdReadDrain = Task { @MainActor in
+            defer { thirdReadReturned.fulfill() }
+            return await coordinator.drain(.canonicalSelection, for: key)
+        }
+        await fulfillment(of: [thirdReadReturned], timeout: 5)
+        let appliedWhileSecondIsStuck = await recorder.batches()
+
+        // Invalidating ends a drain that still waits for the second batch, so a regression fails instead of hanging.
+        coordinator.invalidate(context: key)
+        await secondGate.release()
+        let thirdReadResult = await thirdReadDrain.value
+        let workerStarts = probe.snapshot().count(where: { $0.kind == .workerStarted && $0.lane == .canonical })
+        _ = await probe.waitFor(kind: .workerStopped, lane: .canonical, occurrence: workerStarts)
+        XCTAssertEqual(thirdReadResult, .completed)
+        XCTAssertEqual(appliedWhileSecondIsStuck, [RecoveryBatchRecorder.Batch(fullPaths: ["/tmp/Third.swift"], slicePaths: [])])
         assertFullyReclaimed(coordinator)
     }
 
@@ -556,15 +635,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         let completionDelivered = RecoveryEventSignal()
         let deadlineHandled = RecoveryEventSignal()
         let key = contextKey()
-        let coordinator = MCPReadFileAutoSelectionCoordinator(
-            isContextCurrent: { $0 == key },
-            applyCanonical: { _, batch in
-                await recorder.record(.init(fullPaths: batch.fullPaths, slicePaths: batch.sliceEntries.map(\.path)))
-                return .unchanged
-            },
-            applyMirror: { _ in .converged },
-            diagnosticObserver: { probe.record($0) }
-        )
+        let coordinator = batchRecordingCoordinator(for: key, recorder: recorder, probe: probe)
         coordinator.setCanonicalApplyGateForTesting { await gate.enter() }
         let fence = MCPDomainInvocationFence()
         let deadline = Duration.seconds(30)
@@ -624,6 +695,23 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         XCTAssertEqual(applied, [], "\(order): the timed-out read's selection applied after its timeout", file: file, line: line)
         coordinator.invalidate(context: key)
         assertFullyReclaimed(coordinator, file: file, line: line)
+    }
+
+    /// A coordinator for `key` that records each batch it applies and reports its diagnostics to `probe`.
+    private func batchRecordingCoordinator(
+        for key: MCPReadFileAutoSelectionCoordinator.ContextKey,
+        recorder: RecoveryBatchRecorder,
+        probe: RecoveryDiagnosticEventProbe
+    ) -> MCPReadFileAutoSelectionCoordinator {
+        MCPReadFileAutoSelectionCoordinator(
+            isContextCurrent: { $0 == key },
+            applyCanonical: { _, batch in
+                await recorder.record(.init(fullPaths: batch.fullPaths, slicePaths: batch.sliceEntries.map(\.path)))
+                return .unchanged
+            },
+            applyMirror: { _ in .converged },
+            diagnosticObserver: { probe.record($0) }
+        )
     }
 
     private func contextKey(
