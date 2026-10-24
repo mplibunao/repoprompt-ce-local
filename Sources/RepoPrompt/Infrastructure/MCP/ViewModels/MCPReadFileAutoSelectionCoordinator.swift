@@ -277,6 +277,7 @@ final class MCPReadFileAutoSelectionCoordinator {
             let intent: Intent
             let coverageIdentity: CoverageIdentity?
             let fence: MCPDomainInvocationFence?
+            let settlementClaims: MCPCodeStructureSettlementRegistry.EffectClaims?
         }
 
         let authority: MCPServerViewModel.FrozenFileToolAuthority
@@ -296,12 +297,13 @@ final class MCPReadFileAutoSelectionCoordinator {
             intent: Intent,
             authority: MCPServerViewModel.FrozenFileToolAuthority,
             coverageIdentity: CoverageIdentity? = nil,
-            fence: MCPDomainInvocationFence? = nil
+            fence: MCPDomainInvocationFence? = nil,
+            settlementClaims: MCPCodeStructureSettlementRegistry.EffectClaims? = nil
         ) {
             self.authority = authority
             self.coverageIdentity = nil
             coveragePermitted = coverageIdentity != nil
-            merge(intent, coverageIdentity: coverageIdentity, fence: fence)
+            merge(intent, coverageIdentity: coverageIdentity, fence: fence, settlementClaims: settlementClaims)
         }
 
         /// Whether a read that contributed to this batch has been revoked since.
@@ -315,6 +317,12 @@ final class MCPReadFileAutoSelectionCoordinator {
             !contributions.isEmpty && contributions.allSatisfy { $0.fence?.isRevoked == true }
         }
 
+        /// Claims the settlement lease of each read that contributed to this batch and is still in the registry,
+        /// and returns the releases.
+        func claimContributorLeases() -> [@Sendable () -> Void] {
+            contributions.compactMap { $0.settlementClaims?.claim() }
+        }
+
         /// The batch rebuilt from the contributions whose reads are not revoked, or nil when every one is.
         /// Rebuilding replays the merges, so a slice that a revoked full-file read had replaced comes back.
         func withoutRevokedContributions() -> CanonicalBatch? {
@@ -325,13 +333,15 @@ final class MCPReadFileAutoSelectionCoordinator {
                 intent: first.intent,
                 authority: authority,
                 coverageIdentity: first.coverageIdentity,
-                fence: first.fence
+                fence: first.fence,
+                settlementClaims: first.settlementClaims
             )
             for contribution in live.dropFirst() {
                 rebuilt.merge(
                     contribution.intent,
                     coverageIdentity: contribution.coverageIdentity,
-                    fence: contribution.fence
+                    fence: contribution.fence,
+                    settlementClaims: contribution.settlementClaims
                 )
             }
             return rebuilt
@@ -340,12 +350,14 @@ final class MCPReadFileAutoSelectionCoordinator {
         mutating func merge(
             _ intent: Intent,
             coverageIdentity incomingCoverageIdentity: CoverageIdentity? = nil,
-            fence: MCPDomainInvocationFence? = nil
+            fence: MCPDomainInvocationFence? = nil,
+            settlementClaims: MCPCodeStructureSettlementRegistry.EffectClaims? = nil
         ) {
             contributions.append(Contribution(
                 intent: intent,
                 coverageIdentity: incomingCoverageIdentity,
-                fence: fence
+                fence: fence,
+                settlementClaims: settlementClaims
             ))
             automaticCodemapDisposition = automaticCodemapDisposition.merging(intent.automaticCodemapDisposition)
             if coveragePermitted {
@@ -585,6 +597,8 @@ final class MCPReadFileAutoSelectionCoordinator {
     private var canonicalLanes: [ContextKey: CanonicalLane] = [:]
     private var canonicalWorkers = Set<ContextKey>()
     private var canonicalWorkerIDs: [ContextKey: UUID] = [:]
+    /// The settlement lease claims each passed-over worker holds for its reads, released when its apply ends.
+    private var passedOverWorkerLeaseClaims: [UUID: [@Sendable () -> Void]] = [:]
     private var mirrorLanes: [TabMirrorKey: MirrorLane] = [:]
     private var mirrorWorkers: [TabMirrorKey: MirrorWorker] = [:]
     private var retiredMirrorWorkers: [UUID: RetiredMirrorWorker] = [:]
@@ -634,13 +648,15 @@ final class MCPReadFileAutoSelectionCoordinator {
     }
 
     /// `fence` belongs to the read that produced the intent: once it is revoked, the intent is dropped,
-    /// here or when its batch applies.
+    /// here or when its batch applies. `settlementClaims` claims on that read's settlement lease when its
+    /// batch is passed over while stuck.
     @discardableResult
     func enqueue(
         intent: Intent,
         authority: MCPServerViewModel.FrozenFileToolAuthority,
         coverageIdentity: CoverageIdentity? = nil,
         fence: MCPDomainInvocationFence? = nil,
+        settlementClaims: MCPCodeStructureSettlementRegistry.EffectClaims? = nil,
         for key: ContextKey,
         lifecycleCorrelation: EditFlowPerf.LifecycleCorrelation? = EditFlowPerf.currentLifecycleCorrelation
     ) -> Bool {
@@ -679,7 +695,7 @@ final class MCPReadFileAutoSelectionCoordinator {
         let previousAcceptedSequence = lane.acceptedSequence
         lane.acceptedSequence = sequence
         if var pending = lane.pending {
-            pending.batch.merge(intent, coverageIdentity: coverageIdentity, fence: fence)
+            pending.batch.merge(intent, coverageIdentity: coverageIdentity, fence: fence, settlementClaims: settlementClaims)
             pending.highestSequence = sequence
             pending.acceptedIntentCount &+= 1
             pending.lifecycleCorrelation = lifecycleCorrelation ?? pending.lifecycleCorrelation
@@ -696,7 +712,8 @@ final class MCPReadFileAutoSelectionCoordinator {
                     intent: intent,
                     authority: authority,
                     coverageIdentity: coverageIdentity,
-                    fence: fence
+                    fence: fence,
+                    settlementClaims: settlementClaims
                 ),
                 lowestSequence: sequence,
                 highestSequence: sequence,
@@ -926,6 +943,7 @@ final class MCPReadFileAutoSelectionCoordinator {
                 canonicalWorkers.remove(key)
                 canonicalWorkerIDs.removeValue(forKey: key)
             }
+            passedOverWorkerLeaseClaims.removeValue(forKey: workerID)?.forEach { $0() }
             emitCanonicalDiagnostic(
                 .workerStopped,
                 for: key,
@@ -1103,7 +1121,9 @@ final class MCPReadFileAutoSelectionCoordinator {
     /// A batch whose every read was revoked can never publish, so a worker stuck applying it must not hold up
     /// the reads queued behind it on the same connection. The lane completes the batch's range, which also
     /// returns the revoked reads' own waits, and a new worker takes the queued reads. The stuck worker keeps
-    /// running: it no longer owns the lane, and its batch fails every publication check if it resumes.
+    /// running: it no longer owns the lane, and its batch fails every publication check if it resumes. It
+    /// claims its reads' settlement leases until its apply ends. The window's recovery limits keep counting it
+    /// after those reads stop waiting.
     /// Callers check at each enqueue and drain, because a fence revocation notifies nobody.
     private func retireFullyRevokedInFlightBatch(for key: ContextKey) {
         guard let inFlight = canonicalLanes[key]?.inFlight,
@@ -1112,6 +1132,11 @@ final class MCPReadFileAutoSelectionCoordinator {
         else { return }
         canonicalWorkers.remove(key)
         canonicalWorkerIDs.removeValue(forKey: key)
+        // Claimed before the range completes, while each revoked read still waits on it and so keeps its lease.
+        let leaseClaims = inFlight.queued.batch.claimContributorLeases()
+        if !leaseClaims.isEmpty {
+            passedOverWorkerLeaseClaims[inFlight.workerID] = leaseClaims
+        }
         emitCanonicalDiagnostic(
             .workerRetired,
             for: key,
@@ -1125,6 +1150,7 @@ final class MCPReadFileAutoSelectionCoordinator {
                 return nil
             }(),
             revokedReadCount: inFlight.queued.acceptedIntentCount,
+            countedReadCount: leaseClaims.count,
             inFlightDuration: inFlight.startedAt.duration(to: clock.now)
         )
         completeCanonicalBatch(

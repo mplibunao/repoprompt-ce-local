@@ -5068,6 +5068,7 @@ final class MCPServerViewModel: ObservableObject {
             authority: authority,
             coverageIdentity: coverageIdentity,
             fence: MCPDomainInvocationFence.current,
+            settlementClaims: MCPCodeStructureSettlementRegistry.EffectClaims.current,
             for: key
         ) else {
             throw FileToolAuthorityFailure.superseded

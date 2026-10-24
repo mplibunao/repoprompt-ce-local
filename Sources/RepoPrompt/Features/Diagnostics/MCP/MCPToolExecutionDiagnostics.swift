@@ -377,13 +377,16 @@ enum MCPSettlementRecoveryLog {
 }
 
 /// Logs each auto-selection batch that a connection's selection lane passes over because every read in it was
-/// revoked while a worker was still applying it. The line names the stuck selection apply.
+/// revoked while a worker was still applying it. The line names the stuck selection apply. `counted_reads` is
+/// how many of those reads' settlement leases the stuck worker keeps until its apply ends; a read whose lease
+/// had already left the registry isn't counted.
 enum MCPAutoSelectionBatchRetirementLog {
     static func record(
         windowID: Int,
         tabID: UUID,
         connectionID: UUID?,
         revokedReadCount: UInt64,
+        countedReadCount: Int,
         inFlightDuration: Duration
     ) {
         let line = [
@@ -392,6 +395,7 @@ enum MCPAutoSelectionBatchRetirementLog {
             "tab_id=\(tabID.uuidString)",
             "connection_id=\(connectionID?.uuidString ?? "none")",
             "revoked_reads=\(revokedReadCount)",
+            "counted_reads=\(countedReadCount)",
             "in_flight_ms=\(String(format: "%.3f", inFlightDuration.mcpMilliseconds))"
         ].joined(separator: " ")
         MCPToolExecutionTracer.log.error("[MCPToolExecution] \(line, privacy: .public)")

@@ -212,16 +212,19 @@ package struct MCPDomainReadToolProvider {
 
         let resolvedContext = context
         // The shared effect runs in the side-effect coordinator's lane task. That task inherits task-locals
-        // today, but the fence belongs to this call, so it's set explicitly around the effect: a selection
-        // the effect enqueues stays tied to this call however the lane starts its tasks. The lane also uses
-        // the fence to retire the effect once this call is revoked, and each effect is claimed on the call's
-        // settlement lease until it ends.
+        // today, but the fence and the settlement claims belong to this call, so they're set explicitly around
+        // the effect: a selection the effect enqueues stays tied to this call however the lane starts its tasks,
+        // and a stuck apply of that selection can keep this call's lease after the effect ends. The lane also
+        // uses the fence to retire the effect once this call is revoked, and each effect is claimed on the
+        // call's settlement lease until it ends.
         let fence = MCPDomainInvocationFence.current
         let effectClaims = MCPCodeStructureSettlementRegistry.EffectClaims.current
         let emitter = MCPDomainReadSideEffectEmitter { effectClass, operationID, fingerprint, waitForCommit, unfencedOperation in
             let operation: @Sendable () async throws -> Void = {
                 try await MCPDomainInvocationFence.$current.withValue(fence) {
-                    try await unfencedOperation()
+                    try await MCPCodeStructureSettlementRegistry.EffectClaims.$current.withValue(effectClaims) {
+                        try await unfencedOperation()
+                    }
                 }
             }
             guard let handle = resolvedContext.handle else {
