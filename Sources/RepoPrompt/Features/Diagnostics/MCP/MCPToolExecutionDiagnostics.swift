@@ -376,6 +376,28 @@ enum MCPSettlementRecoveryLog {
     }
 }
 
+/// Logs each auto-selection batch that a connection's selection lane passes over because every read in it was
+/// revoked while a worker was still applying it. The line names the stuck selection apply.
+enum MCPAutoSelectionBatchRetirementLog {
+    static func record(
+        windowID: Int,
+        tabID: UUID,
+        connectionID: UUID?,
+        revokedReadCount: UInt64,
+        inFlightDuration: Duration
+    ) {
+        let line = [
+            "phase=auto_selection_batch_retired",
+            "window_id=\(windowID)",
+            "tab_id=\(tabID.uuidString)",
+            "connection_id=\(connectionID?.uuidString ?? "none")",
+            "revoked_reads=\(revokedReadCount)",
+            "in_flight_ms=\(String(format: "%.3f", inFlightDuration.mcpMilliseconds))"
+        ].joined(separator: " ")
+        MCPToolExecutionTracer.log.error("[MCPToolExecution] \(line, privacy: .public)")
+    }
+}
+
 extension Duration {
     var mcpSeconds: Double {
         let components = components

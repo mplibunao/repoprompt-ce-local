@@ -6,7 +6,7 @@ import MCP
 #if DEBUG
     /// Holds MCP tool calls for the `mcp_stuck_call_scenario` diagnostics op, so a capped window and its
     /// automatic recovery can be driven on the debug app. A scenario targets one window and one hook and
-    /// holds at most `captureLimit` calls there. A held call doesn't observe cancellation, so it outlives
+    /// holds at most its capture limit of calls there, two unless it is armed with one. A held call doesn't observe cancellation, so it outlives
     /// its deadline and grace the way a stuck call does. Held calls continue when the scenario is released
     /// or cleared, when its window closes, or after its auto-release delay.
     final class MCPStuckToolScenarioRegistry: @unchecked Sendable {
@@ -23,6 +23,7 @@ import MCP
             let scenarioID: UUID
             let windowID: Int
             let hook: Hook
+            let captureLimit: Int
             let capturedCount: Int
             let heldCount: Int
             let isReleased: Bool
@@ -36,7 +37,7 @@ import MCP
         }
 
         static let shared = MCPStuckToolScenarioRegistry()
-        static let captureLimit = 2
+        static let maximumCaptureLimit = 2
         static let defaultAutoReleaseAfter = Duration.seconds(300)
         static let maximumAutoReleaseAfter = Duration.seconds(600)
 
@@ -45,13 +46,14 @@ import MCP
             let hook: Hook
             let armedAt: ContinuousClock.Instant
             let autoReleaseAfter: Duration
+            let captureLimit: Int
             var capturedCount = 0
             var held: [CheckedContinuation<Void, Never>] = []
             var isReleased = false
             var autoRelease: Task<Void, Never>?
 
             var isCapturing: Bool {
-                !isReleased && capturedCount < MCPStuckToolScenarioRegistry.captureLimit
+                !isReleased && capturedCount < captureLimit
             }
         }
 
@@ -59,7 +61,12 @@ import MCP
         private let clock = ContinuousClock()
         private var scenarios: [UUID: Scenario] = [:]
 
-        func arm(windowID: Int, hook: Hook, autoReleaseAfter: Duration) throws -> UUID {
+        func arm(
+            windowID: Int,
+            hook: Hook,
+            autoReleaseAfter: Duration,
+            captureLimit: Int = maximumCaptureLimit
+        ) throws -> UUID {
             let scenarioID = UUID()
             try lock.withLock {
                 if let existing = capturingScenarioID(windowID: windowID, hook: hook) {
@@ -69,7 +76,8 @@ import MCP
                     windowID: windowID,
                     hook: hook,
                     armedAt: clock.now,
-                    autoReleaseAfter: autoReleaseAfter
+                    autoReleaseAfter: autoReleaseAfter,
+                    captureLimit: captureLimit
                 )
             }
             let autoRelease = Task { [weak self] in
@@ -116,6 +124,7 @@ import MCP
                         scenarioID: scenarioID,
                         windowID: scenario.windowID,
                         hook: scenario.hook,
+                        captureLimit: scenario.captureLimit,
                         capturedCount: scenario.capturedCount,
                         heldCount: scenario.held.count,
                         isReleased: scenario.isReleased,
@@ -207,6 +216,22 @@ import MCP
                         message: "`auto_release_seconds` must be an integer from 1 to \(maximumSeconds)."
                     )
                 }
+                let captureLimit: Int
+                switch debugBoundedInt(
+                    arguments,
+                    "capture_limit",
+                    defaultValue: MCPStuckToolScenarioRegistry.maximumCaptureLimit,
+                    range: 1 ... MCPStuckToolScenarioRegistry.maximumCaptureLimit
+                ) {
+                case let .value(parsed), let .defaulted(parsed):
+                    captureLimit = parsed
+                case .invalid:
+                    return debugDiagnosticsError(
+                        op: op,
+                        code: "invalid_params",
+                        message: "`capture_limit` must be an integer from 1 to \(MCPStuckToolScenarioRegistry.maximumCaptureLimit)."
+                    )
+                }
                 let windowExists = await MainActor.run { WindowStatesManager.shared.hasWindow(id: windowID) }
                 guard windowExists else {
                     return debugDiagnosticsError(op: op, code: "no_window", message: "No RepoPrompt window matched window_id \(windowID).")
@@ -215,7 +240,8 @@ import MCP
                     let scenarioID = try registry.arm(
                         windowID: windowID,
                         hook: hook,
-                        autoReleaseAfter: .seconds(autoReleaseSeconds)
+                        autoReleaseAfter: .seconds(autoReleaseSeconds),
+                        captureLimit: captureLimit
                     )
                     return debugDiagnosticsResult([
                         "ok": true,
@@ -224,7 +250,7 @@ import MCP
                         "scenario_id": scenarioID.uuidString,
                         "window_id": windowID,
                         "hook": hook.rawValue,
-                        "capture_limit": MCPStuckToolScenarioRegistry.captureLimit,
+                        "capture_limit": captureLimit,
                         "auto_release_seconds": autoReleaseSeconds
                     ])
                 } catch let MCPStuckToolScenarioRegistry.ArmError.alreadyArmed(existing) {
@@ -242,6 +268,7 @@ import MCP
                         "scenario_id": status.scenarioID.uuidString,
                         "window_id": status.windowID,
                         "hook": status.hook.rawValue,
+                        "capture_limit": status.captureLimit,
                         "captured_count": status.capturedCount,
                         "held_count": status.heldCount,
                         "released": status.isReleased,

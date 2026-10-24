@@ -13,7 +13,7 @@ Releasing a stuck call's lease isn't safe on its own. The call is still running,
 
 - When a file or code call reaches a window at its cap, the settlement registry quarantines the window's escaped calls, the ones still holding a lease after their deadline passed or their request was cancelled, and runs the new call.
 - Quarantine revokes, under the registry lock, whatever a call could still publish. A read's invocation fence stops its queued auto-selection at enqueue, in the selection worker, and at the selection write. A prompt change's commit arbiter refuses its commit. Closing a window or a connection revokes its calls the same way.
-- A read's selection effect runs in its tab's side-effect lane and can keep running after the read returns. It keeps the read's lease until it finishes, so a stuck effect blocks and gets quarantined like a stuck call. Once the read is revoked and stops waiting, its effect no longer holds up later effects on the tab.
+- A read's selection effect runs in its tab's side-effect lane and can keep running after the read returns. It keeps the read's lease until it finishes, so a stuck effect blocks and gets quarantined like a stuck call. Once the read is revoked and stops waiting, its effect no longer holds up later effects on the tab. Each connection's selection worker applies that connection's selections one batch at a time. Once every read in the batch a worker is stuck on has been revoked, the connection's next read or drain passes over the batch, which can't publish, and leaves the stuck worker to end on its own.
 - Quarantined calls keep their leases and count against two limits until they finish: 2 outstanding recoveries per window, each quarantining the calls stuck at that moment, and 8 quarantined calls app-wide. A recovery quarantines all the window's escaped calls or none. Past either limit, the cap error returns and tells the agent to stop retrying and report the problem.
 - The window's banner reports each recovery, and the unified log lists every quarantined call. Agents don't get a recovery tool.
 - `apply_edits` doesn't take a settlement lease. Its own server-side limit and the commit arbiter bound it, and closing its connection revokes the arbiter.
@@ -28,6 +28,7 @@ Releasing a stuck call's lease isn't safe on its own. The call is still running,
 ## Consequences
 
 - A capped window works again on its next call without a restart. Once a recovered call's revocation wins, its late work can't overwrite newer selection or prompt state. A prompt change whose commit had already begun loses the revocation and may still apply. The recovery's log line and the DEBUG settlement snapshot record which calls lost.
+- A selection batch passed over this way is logged as `phase=auto_selection_batch_retired`, so a stuck selection apply shows in the unified log.
 - Stuck calls stay tracked. A recurring fault fills the limits and brings back the "stop and report" error instead of hiding behind repeated recoveries.
 - The registry diverges from upstream's. A port that touches it must keep the quarantine path and the revocation checks.
 - Only publication sites with a fence or arbiter check refuse late work. A new publication site in work that a leased call starts needs its own check.

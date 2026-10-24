@@ -309,6 +309,12 @@ final class MCPReadFileAutoSelectionCoordinator {
             contributions.contains { $0.fence?.isRevoked == true }
         }
 
+        /// Whether every read that contributed to this batch has been revoked, so none of it can publish. A
+        /// contribution without a fence counts as live.
+        var isFullyRevoked: Bool {
+            !contributions.isEmpty && contributions.allSatisfy { $0.fence?.isRevoked == true }
+        }
+
         /// The batch rebuilt from the contributions whose reads are not revoked, or nil when every one is.
         /// Rebuilding replays the merges, so a slice that a revoked full-file read had replaced comes back.
         func withoutRevokedContributions() -> CanonicalBatch? {
@@ -521,10 +527,18 @@ final class MCPReadFileAutoSelectionCoordinator {
         let continuation: CheckedContinuation<SequenceWaitResult, Never>
     }
 
+    /// The batch a worker is applying, kept so the lane can pass over it once none of it can publish.
+    private struct InFlightCanonicalBatch {
+        let queued: QueuedCanonicalBatch
+        let workerID: UUID
+        let startedAt: ContinuousClock.Instant
+    }
+
     private struct CanonicalLane {
         var acceptedSequence: UInt64 = 0
         var completedSequence: UInt64 = 0
         var pending: QueuedCanonicalBatch?
+        var inFlight: InFlightCanonicalBatch?
         var latestRequiredMirrorTicket: UInt64?
         var waiters: [UUID: CanonicalSequenceWaiter] = [:]
     }
@@ -566,6 +580,7 @@ final class MCPReadFileAutoSelectionCoordinator {
     private let applyCanonical: ApplyCanonical
     private let applyMirror: ApplyMirror
     private let diagnosticObserver: DiagnosticObserver?
+    private let clock = ContinuousClock()
     private var nextSequence: UInt64 = 0
     private var canonicalLanes: [ContextKey: CanonicalLane] = [:]
     private var canonicalWorkers = Set<ContextKey>()
@@ -650,6 +665,7 @@ final class MCPReadFileAutoSelectionCoordinator {
             outcome = "revoked"
             return false
         }
+        retireFullyRevokedInFlightBatch(for: key)
 
         var lane = canonicalLanes[key] ?? CanonicalLane()
         if let pending = lane.pending,
@@ -720,6 +736,7 @@ final class MCPReadFileAutoSelectionCoordinator {
         onCanonicalWaiterRegistered: (() -> Void)? = nil
     ) async -> DrainResult {
         guard !Task.isCancelled else { return .cancelled }
+        retireFullyRevokedInFlightBatch(for: key)
         let target = canonicalLanes[key]?.acceptedSequence ?? 0
         guard target > 0 else { return .completed }
         emitCanonicalDiagnostic(
@@ -905,8 +922,10 @@ final class MCPReadFileAutoSelectionCoordinator {
 
     private func runCanonicalWorker(for key: ContextKey, workerID: UUID) async {
         defer {
-            canonicalWorkers.remove(key)
-            canonicalWorkerIDs.removeValue(forKey: key)
+            if ownsCanonicalLane(key, workerID: workerID) {
+                canonicalWorkers.remove(key)
+                canonicalWorkerIDs.removeValue(forKey: key)
+            }
             emitCanonicalDiagnostic(
                 .workerStopped,
                 for: key,
@@ -914,8 +933,9 @@ final class MCPReadFileAutoSelectionCoordinator {
             )
             cleanupRetiredContextIfSettled(key)
         }
-        while var lane = canonicalLanes[key], let queued = lane.pending {
+        while ownsCanonicalLane(key, workerID: workerID), var lane = canonicalLanes[key], let queued = lane.pending {
             lane.pending = nil
+            lane.inFlight = InFlightCanonicalBatch(queued: queued, workerID: workerID, startedAt: clock.now)
             canonicalLanes[key] = lane
             EditFlowPerf.end(
                 EditFlowPerf.Stage.ReadFile.AutoSelect.canonicalQueueWait,
@@ -1006,6 +1026,15 @@ final class MCPReadFileAutoSelectionCoordinator {
                     }
                 }
             }
+            guard ownsCanonicalLane(key, workerID: workerID) else {
+                // The lane passed over this batch while it was stuck and already completed its range. A change
+                // it published before its reads were revoked still needs its mirror.
+                if let mirrorTicket, var lane = canonicalLanes[key] {
+                    lane.latestRequiredMirrorTicket = max(lane.latestRequiredMirrorTicket ?? 0, mirrorTicket)
+                    canonicalLanes[key] = lane
+                }
+                return
+            }
             #if DEBUG
                 if let debugApplyOutcome, let debugMutationDurationMilliseconds {
                     recordDebugCanonicalApply(
@@ -1042,6 +1071,7 @@ final class MCPReadFileAutoSelectionCoordinator {
         mirrorTicket: UInt64?
     ) {
         guard var lane = canonicalLanes[key] else { return }
+        lane.inFlight = nil
         lane.completedSequence = max(lane.completedSequence, throughSequence)
         #if DEBUG
             debugAccountingByContext[key, default: DebugContextAccounting()].completedIntentCount &+= acceptedIntentCount
@@ -1063,6 +1093,48 @@ final class MCPReadFileAutoSelectionCoordinator {
                 waiterID: id
             )
             waiter.continuation.resume(returning: .completed(requiredMirrorTicket: lane.latestRequiredMirrorTicket))
+        }
+    }
+
+    private func ownsCanonicalLane(_ key: ContextKey, workerID: UUID) -> Bool {
+        canonicalWorkerIDs[key] == workerID
+    }
+
+    /// A batch whose every read was revoked can never publish, so a worker stuck applying it must not hold up
+    /// the reads queued behind it on the same connection. The lane completes the batch's range, which also
+    /// returns the revoked reads' own waits, and a new worker takes the queued reads. The stuck worker keeps
+    /// running: it no longer owns the lane, and its batch fails every publication check if it resumes.
+    /// Callers check at each enqueue and drain, because a fence revocation notifies nobody.
+    private func retireFullyRevokedInFlightBatch(for key: ContextKey) {
+        guard let inFlight = canonicalLanes[key]?.inFlight,
+              inFlight.queued.batch.isFullyRevoked,
+              ownsCanonicalLane(key, workerID: inFlight.workerID)
+        else { return }
+        canonicalWorkers.remove(key)
+        canonicalWorkerIDs.removeValue(forKey: key)
+        emitCanonicalDiagnostic(
+            .workerRetired,
+            for: key,
+            workerID: inFlight.workerID
+        )
+        MCPAutoSelectionBatchRetirementLog.record(
+            windowID: key.windowID,
+            tabID: key.tabID,
+            connectionID: {
+                if case let .bound(connectionID, _) = key.route { return connectionID }
+                return nil
+            }(),
+            revokedReadCount: inFlight.queued.acceptedIntentCount,
+            inFlightDuration: inFlight.startedAt.duration(to: clock.now)
+        )
+        completeCanonicalBatch(
+            for: key,
+            throughSequence: inFlight.queued.highestSequence,
+            acceptedIntentCount: inFlight.queued.acceptedIntentCount,
+            mirrorTicket: nil
+        )
+        if canonicalLanes[key]?.pending != nil {
+            scheduleCanonicalWorkerIfNeeded(for: key)
         }
     }
 

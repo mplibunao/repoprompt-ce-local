@@ -9,6 +9,7 @@ struct MCPReadFileAutoSelectionDiagnosticEvent: Equatable, CustomStringConvertib
         case waiterResumed = "waiter_resumed"
         case workerStarted = "worker_started"
         case workerStopped = "worker_stopped"
+        case workerRetired = "worker_retired"
     }
 
     enum Lane: String {
