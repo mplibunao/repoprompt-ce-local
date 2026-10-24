@@ -66,6 +66,13 @@ final class ACPIntegratedAgentModeRunner {
         Self.displayText(for: error)
     }
 
+    /// Shown when the agent couldn't load the session's stored conversation and a new one was
+    /// opened. It doesn't say the transcript handoff arrived: the handoff goes with the message being
+    /// sent and stays staged if that send fails.
+    static func resumeFallbackNotice(for agentKind: AgentProviderKind) -> String {
+        "\(agentKind.displayName) couldn't resume the previous conversation and started a new one. The new conversation doesn't have this transcript's full history or tool output."
+    }
+
     private static func displayText(for error: Error) -> String {
         if let providerError = error as? AIProviderError {
             switch providerError {
@@ -645,6 +652,14 @@ final class ACPIntegratedAgentModeRunner {
                 if bootstrap.didFallbackToNewSessionAfterLoadFailure {
                     await hooks.providerInput.stageResumeRecoveryHandoffIfNeeded(session)
                     initialMessageForPromptTurn = hooks.providerInput.prependPendingHandoffIfNeeded(initialMessageForRun, session)
+                    if isStartupStillCurrent(session: session, runID: runID, runAttemptID: runAttemptID) {
+                        session.appendItem(
+                            AgentChatItem.system(
+                                Self.resumeFallbackNotice(for: runRequest.agentKind),
+                                sequenceIndex: session.nextSequenceIndex
+                            )
+                        )
+                    }
                 }
                 applyProviderSessionIdentity(
                     bootstrap.providerSessionIdentity,

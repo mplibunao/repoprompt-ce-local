@@ -716,7 +716,8 @@ actor MCPCommandRunner {
             op=resume_session session_id="..." [model_id=<id>]
                                           Resume an existing session
             op=stop_session session_id="..."
-                                          Stop a live running session
+                                          Cancel a live session's run, or release
+                                          its agent process when no run is active
             op=cleanup_sessions session_ids=["<uuid>",...]
                                           Delete specific MCP-originated sessions
                                           Only sessions started via MCP are eligible

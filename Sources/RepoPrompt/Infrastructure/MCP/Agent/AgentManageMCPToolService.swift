@@ -73,7 +73,12 @@ struct AgentManageMCPToolService {
     #if DEBUG
         var test_resumeSetupBoundary: (@MainActor (_ afterActivation: Bool) async -> Void)?
         var testAfterTargetResolution: ((AgentModeViewModel.MCPSessionTarget) async -> Void)?
+        /// Serves `list_sessions` and `stop_session` in place of the window's Agent Mode, so a test
+        /// can stop sessions whose providers are fakes.
+        var test_agentModeViewModel: AgentModeViewModel?
     #endif
+
+    static let stopSessionChangedMessage = "Retryable session_changed: The session's agent process changed while stopping, so no process was released. Retry agent_manage op=stop_session."
 
     init(
         toolName: String,
@@ -299,7 +304,7 @@ struct AgentManageMCPToolService {
         guard let workspace = targetWindow.workspaceManager.activeWorkspace else {
             throw MCPError.invalidParams("No active workspace available for agent_manage.list_sessions.")
         }
-        let agentModeVM = targetWindow.agentModeViewModel
+        let agentModeVM = agentModeViewModel(of: targetWindow)
         let scopedParentSessionID = await resolveSpawnParentSessionID(metadata, targetWindow)
         let agentFilter = normalizedString(args["agent"])?.lowercased()
         let stateFilter = normalizedString(args["state"])
@@ -317,6 +322,7 @@ struct AgentManageMCPToolService {
                 modelRaw: meta.agentModel,
                 stateRaw: meta.lastRunState,
                 isLive: false,
+                runtimeAttached: false,
                 parentSessionID: meta.parentSessionID,
                 isMCPOriginated: meta.isMCPOriginated,
                 modelParameterSelections: meta.acpModelParameterSelections
@@ -333,6 +339,7 @@ struct AgentManageMCPToolService {
                 modelRaw: entry.agentModelRaw,
                 stateRaw: entry.lastRunStateRaw,
                 isLive: agentModeVM.sessions[entry.tabID] != nil,
+                runtimeAttached: agentModeVM.sessions[entry.tabID]?.hasAttachedProviderRuntime ?? false,
                 parentSessionID: entry.parentSessionID,
                 isMCPOriginated: entry.isMCPOriginated,
                 modelParameterSelections: entry.acpModelParameterSelections
@@ -351,6 +358,7 @@ struct AgentManageMCPToolService {
                 modelRaw: session.selectedModelRaw,
                 stateRaw: session.runState.rawValue,
                 isLive: true,
+                runtimeAttached: session.hasAttachedProviderRuntime,
                 parentSessionID: session.parentSessionID,
                 isMCPOriginated: session.isMCPOriginated,
                 modelParameterSelections: session.acpModelParameterSelections
@@ -682,6 +690,7 @@ struct AgentManageMCPToolService {
             modelRaw: session.selectedModelRaw,
             stateRaw: session.runState.rawValue,
             isLive: true,
+            runtimeAttached: session.hasAttachedProviderRuntime,
             parentSessionID: session.parentSessionID,
             isMCPOriginated: session.isMCPOriginated,
             modelParameterSelections: session.acpModelParameterSelections
@@ -866,6 +875,7 @@ struct AgentManageMCPToolService {
             modelRaw: session.selectedModelRaw,
             stateRaw: session.runState.rawValue,
             isLive: true,
+            runtimeAttached: session.hasAttachedProviderRuntime,
             parentSessionID: session.parentSessionID,
             isMCPOriginated: session.isMCPOriginated,
             modelParameterSelections: session.acpModelParameterSelections
@@ -878,34 +888,67 @@ struct AgentManageMCPToolService {
             throw MCPError.invalidParams("No active workspace available for agent_manage.stop_session.")
         }
         let sessionReference = try requireNonEmptyString(args["session_id"], name: "session_id")
-        let agentModeVM = targetWindow.agentModeViewModel
+        let agentModeVM = agentModeViewModel(of: targetWindow)
         guard let sessionID = try await agentModeVM.mcpResolveSessionID(reference: sessionReference, workspace: workspace) else {
             throw MCPError.invalidParams("Session '\(sessionReference)' was not found in the active workspace.")
         }
 
+        let notLiveError = MCPError.invalidParams("Session '\(sessionReference)' is not currently live and cannot be stopped.")
         guard let session = try agentModeVM.mcpSettledLiveSessionForStop(sessionID: sessionID) else {
-            throw MCPError.invalidParams("Session '\(sessionReference)' is not currently live and cannot be stopped.")
+            throw notLiveError
         }
-        let wasActive = session.runState.isActive
-        if wasActive {
-            await agentModeVM.cancelAgentRun(tabID: session.tabID, completion: .terminalPublished)
-            await Task.yield()
+        let tabName = targetWindow.workspaceManager.composeTab(with: session.tabID)?.name ?? "Agent Session"
+        func summary(isLive: Bool) -> [String: Value] {
+            sessionSummaryObject(
+                sessionID: sessionID,
+                name: tabName,
+                lastModified: session.lastActivityAt,
+                itemCount: session.transcriptProjectionCounts.canonicalVisibleRowCount,
+                agentRaw: session.selectedAgent.rawValue,
+                modelRaw: session.selectedModelRaw,
+                stateRaw: session.runState.rawValue,
+                isLive: isLive,
+                runtimeAttached: isLive && session.hasAttachedProviderRuntime,
+                modelParameterSelections: session.acpModelParameterSelections
+            )
         }
 
-        let tabName = targetWindow.workspaceManager.composeTab(with: session.tabID)?.name ?? "Agent Session"
-        var summary = sessionSummaryObject(
-            sessionID: sessionID,
-            name: tabName,
-            lastModified: session.lastActivityAt,
-            itemCount: session.transcriptProjectionCounts.canonicalVisibleRowCount,
-            agentRaw: session.selectedAgent.rawValue,
-            modelRaw: session.selectedModelRaw,
-            stateRaw: session.runState.rawValue,
-            isLive: true,
-            modelParameterSelections: session.acpModelParameterSelections
-        )
-        summary["stop_requested"] = .bool(wasActive)
-        return .object(summary)
+        // A running session's stop cancels the run and nothing more: retiring afterwards could
+        // reach a run admitted while the cancellation settled.
+        if session.runState.isActive {
+            await agentModeVM.cancelAgentRun(tabID: session.tabID, completion: .terminalPublished)
+            await Task.yield()
+            var reply = summary(isLive: true)
+            reply["stop_requested"] = .bool(true)
+            return .object(reply)
+        }
+
+        let providerProcess: [String: Value]
+        switch await agentModeVM.retireProviderIfIdle(session, reason: .explicitStop) {
+        case let .retiring(retirement):
+            let finished = await agentModeVM.waitForProviderRetirementReply(retirement)
+            providerProcess = ["status": .string(finished ? "released" : "shutting_down")]
+        case .alreadyGone:
+            providerProcess = ["status": .string("already_gone")]
+        case let .blocked(blocker):
+            providerProcess = ["status": .string("blocked"), "blocker": .string(blocker.rawValue)]
+        case .superseded:
+            guard agentModeVM.sessions[session.tabID] === session else { throw notLiveError }
+            throw MCPError.invalidParams(Self.stopSessionChangedMessage)
+        }
+        // The status describes the captured runtime only; a run started since may have attached a
+        // new one, which the summary reports.
+        var reply = summary(isLive: agentModeVM.sessions[session.tabID] === session)
+        reply["stop_requested"] = .bool(false)
+        reply["provider_process"] = .object(providerProcess)
+        return .object(reply)
+    }
+
+    private func agentModeViewModel(of window: WindowState) -> AgentModeViewModel {
+        #if DEBUG
+            if let test_agentModeViewModel { return test_agentModeViewModel }
+        #endif
+        return window.agentModeViewModel
     }
 
     private func executeCleanupSessions(args: [String: Value]) async throws -> Value {
@@ -1435,6 +1478,7 @@ struct AgentManageMCPToolService {
         modelRaw: String?,
         stateRaw: String?,
         isLive: Bool,
+        runtimeAttached: Bool,
         parentSessionID: UUID? = nil,
         isMCPOriginated: Bool = false,
         modelParameterSelections: [ACPModelParameterSelection] = []
@@ -1446,7 +1490,8 @@ struct AgentManageMCPToolService {
             "last_modified": .string(timestamp(lastModified)),
             "item_count": .int(itemCount),
             "state": publicState.map(Value.string) ?? .null,
-            "is_live": .bool(isLive)
+            "is_live": .bool(isLive),
+            "runtime_attached": .bool(runtimeAttached)
         ]
         if let stateRaw, let publicState,
            normalizedStateToken(stateRaw) != normalizedStateToken(publicState)

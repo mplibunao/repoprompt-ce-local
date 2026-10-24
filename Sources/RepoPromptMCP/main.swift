@@ -3152,7 +3152,7 @@ func printUsage() {
           agent_manage op=handoff session_id="<id>" inline=true  Alias for extract_handoff
           agent_manage op=create_session session_name="Auth work"
           agent_manage op=resume_session session_id="<id>"
-          agent_manage op=stop_session session_id="<id>"   Stop a live session
+          agent_manage op=stop_session session_id="<id>"   Cancel the run, or release an idle agent process
           agent_manage op=list_workflows                List workflows
           Operations: list_agents, list_sessions, get_log, extract_handoff/handoff,
                       create_session, resume_session, stop_session, list_workflows

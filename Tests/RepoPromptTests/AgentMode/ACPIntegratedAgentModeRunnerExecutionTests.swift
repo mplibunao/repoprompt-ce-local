@@ -1225,6 +1225,68 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             XCTAssertFalse(fixture.viewModel.test_hasPendingACPRetirement(for: session))
         }
 
+        /// When the agent can't load the stored conversation, the turn opens a new one, sends the
+        /// transcript handoff with the message, and says so once in the transcript. A failed
+        /// `session/new` adds no such notice.
+        func testResumeFallbackAddsOneNoticeAndHandoff() async throws {
+            let savedID = "saved-acp-session"
+            let notice = ACPIntegratedAgentModeRunner.resumeFallbackNotice(for: .cursor)
+            for (label, loadSession, failLoad) in [
+                ("stored conversation missing", true, true),
+                ("agent can't load conversations", false, false)
+            ] {
+                let fixture = try makeACPRetirementFixture(loadSession: loadSession, failLoad: failLoad)
+                Self.installEarlierConversation(on: fixture.session, providerSessionID: savedID)
+                let earlierItems = fixture.session.items
+
+                try await fixture.runTurn("after the fallback")
+
+                let records = fixture.peer.records
+                XCTAssertEqual(records.contains { $0.event == "session/load" }, loadSession, label)
+                XCTAssertEqual(records.count { $0.event == "session/new" }, 1, label)
+                let prompt = try XCTUnwrap(records.last { $0.event == "session/prompt" }?.text, label)
+                let handoffEnd = try XCTUnwrap(prompt.range(of: "</forked_session>"), "\(label): \(prompt)")
+                XCTAssertTrue(prompt[..<handoffEnd.lowerBound].contains("the earlier fact is 42"), "\(label): \(prompt)")
+                XCTAssertTrue(prompt[handoffEnd.upperBound...].contains("after the fallback"), "\(label): \(prompt)")
+                XCTAssertEqual(Self.systemTexts(in: fixture.session), [notice], label)
+                XCTAssertEqual(Array(fixture.session.items.prefix(earlierItems.count)), earlierItems, label)
+                let newID = try XCTUnwrap(fixture.session.providerSessionID, label)
+                XCTAssertNotEqual(newID, savedID, label)
+                XCTAssertEqual(records.last { $0.event == "session/prompt" }?.sessionID, newID, label)
+            }
+
+            let label = "session/new fails too"
+            let fixture = try makeACPRetirementFixture(loadSession: false, failNew: true)
+            Self.installEarlierConversation(on: fixture.session, providerSessionID: savedID)
+            let ticket = try fixture.submit("after the fallback")
+            try await startupTestJoin(ticket.task)
+            try await startupTestEventually(seconds: 15) {
+                !fixture.session.runState.isActive && fixture.session.activeRunOwnership == nil
+            }
+            XCTAssertEqual(fixture.session.runState, .failed, label)
+            XCTAssertEqual(Self.systemTexts(in: fixture.session), [], label)
+            XCTAssertFalse(fixture.peer.records.contains { $0.event == "session/prompt" }, label)
+        }
+
+        private static func installEarlierConversation(
+            on session: AgentModeViewModel.TabSession,
+            providerSessionID: String
+        ) {
+            session.setItemsSilently(
+                [
+                    .user("what is the earlier fact?", sequenceIndex: 0),
+                    .assistant("the earlier fact is 42", sequenceIndex: 1)
+                ],
+                reason: .persistedSessionHydration
+            )
+            session.nextSequenceIndex = 2
+            session.providerSessionID = providerSessionID
+        }
+
+        private static func systemTexts(in session: AgentModeViewModel.TabSession) -> [String] {
+            session.items.filter { $0.kind == .system }.map(\.text)
+        }
+
         // MARK: Retirement fixture
 
         /// A Cursor session in a view model whose ACP starts use `peer`.
