@@ -1514,8 +1514,7 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             try await startupTestEventually { fixture.peer.hasExited(pid) }
         }
 
-        /// A switch to Never before the deadline keeps the process: the deadline ends the timer
-        /// without asking the session to retire.
+        /// A switch to Never before the deadline keeps the process: the deadline ends the timer.
         func testNeverSettingAtACPIdleDeadlineKeepsProcess() async throws {
             let fixture = try makeACPRetirementFixture()
             let clock = fixture.idle.clock
