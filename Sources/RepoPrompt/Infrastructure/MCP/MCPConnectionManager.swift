@@ -1828,6 +1828,9 @@ actor ServerNetworkManager {
 
     private var activeToolScopesByWindow: [Int: [UUID: ActiveToolScopeRecord]] = [:]
     private var activeToolScopeSequence: UInt64 = 0
+    /// Each running protected mutation's commit arbiter, by connection, so the connection's teardown can
+    /// revoke it. Agent Mode calls record no active-tool scope, so the arbiters are kept here instead.
+    private var protectedMutationCommitStatesByConnectionID: [UUID: [UUID: DomainMutationCommitState]] = [:]
     private var dashboardDidChangeHook: (@Sendable () -> Void)?
 
     /// ─────────────  Connection value/stats (for admission fairness)  ─────────────
@@ -2421,8 +2424,13 @@ actor ServerNetworkManager {
         _ connectionID: UUID,
         reason: String
     ) async -> Int {
-        // Revoke before cancelling, as the watchdog does, so a cancelled call can't publish afterward.
+        // Revoke before cancelling, as the watchdog does, so a cancelled call can't publish afterward. The
+        // cancellation reaches only providers the view model has registered, and `apply_edits` takes no
+        // settlement lease, so each protected mutation's arbiter is revoked directly too.
         codeStructureSettlementRegistry.revokeConnection(connectionID)
+        for commitState in protectedMutationCommitStatesByConnectionID[connectionID, default: [:]].values {
+            commitState.revoke(origin: .connectionClosed)
+        }
         // Capture exact scope identities before the MainActor hop. Actor reentrancy may admit
         // newer same-connection scopes while the identity-bound VM cancellation scan runs.
         let capturedScopeIDsByWindow = activeToolScopeIDs(ownedBy: connectionID)
@@ -2517,7 +2525,8 @@ actor ServerNetworkManager {
     }
 
     /// Run `op` while recording this exact active-tool scope for `windowID`.
-    /// The exact scope ID is always removed, even if `op` throws or broader cleanup ran first.
+    /// The exact scope ID is always removed, even if `op` throws or broader cleanup ran first. A protected
+    /// mutation's `commitState` is kept for the same span, so the connection's teardown revokes it.
     func withWindowToolOwnership<T>(
         windowID: Int,
         connectionID: UUID,
@@ -2525,6 +2534,7 @@ actor ServerNetworkManager {
         connectionAuthorization: ToolDispatchAuthorization? = nil,
         windowIdentity: WindowToolDispatchIdentity? = nil,
         recordScope: Bool = true,
+        commitState: DomainMutationCommitState? = nil,
         _ op: @Sendable () async throws -> T
     ) async throws -> T {
         guard !connectionsBeingRemoved.contains(connectionID),
@@ -2545,6 +2555,10 @@ actor ServerNetworkManager {
             else {
                 throw ToolDispatchAdmissionError.connectionTerminal
             }
+            let commitStateID = registerProtectedMutationCommitState(commitState, connectionID: connectionID)
+            defer {
+                unregisterProtectedMutationCommitState(commitStateID, connectionID: connectionID)
+            }
             return try await op()
         }
         guard !connectionsBeingRemoved.contains(connectionID),
@@ -2557,10 +2571,30 @@ actor ServerNetworkManager {
         else {
             throw ToolDispatchAdmissionError.connectionTerminal
         }
+        let commitStateID = registerProtectedMutationCommitState(commitState, connectionID: connectionID)
         defer {
             endActiveToolScope(scope)
+            unregisterProtectedMutationCommitState(commitStateID, connectionID: connectionID)
         }
         return try await op()
+    }
+
+    private func registerProtectedMutationCommitState(
+        _ commitState: DomainMutationCommitState?,
+        connectionID: UUID
+    ) -> UUID? {
+        guard let commitState else { return nil }
+        let id = UUID()
+        protectedMutationCommitStatesByConnectionID[connectionID, default: [:]][id] = commitState
+        return id
+    }
+
+    private func unregisterProtectedMutationCommitState(_ id: UUID?, connectionID: UUID) {
+        guard let id else { return }
+        protectedMutationCommitStatesByConnectionID[connectionID]?.removeValue(forKey: id)
+        if protectedMutationCommitStatesByConnectionID[connectionID]?.isEmpty == true {
+            protectedMutationCommitStatesByConnectionID.removeValue(forKey: connectionID)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -14005,7 +14039,8 @@ actor ServerNetworkManager {
                                                 toolName: toolName,
                                                 connectionAuthorization: dispatchAuthorization,
                                                 windowIdentity: windowDispatchIdentity,
-                                                recordScope: shouldTrackToolOwnership
+                                                recordScope: shouldTrackToolOwnership,
+                                                commitState: mutationCommitState
                                             ) {
                                                 try await Self.$currentToolDispatchAuthorization.withValue(dispatchAuthorization) {
                                                     let value = try await Self.$currentExplicitWindowRoutingHint.withValue(explicitWindowRoutingHint) {
