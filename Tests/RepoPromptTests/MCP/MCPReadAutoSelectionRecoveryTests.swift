@@ -256,6 +256,15 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         firstRead.revoke(origin: .watchdogDeadline)
         let secondRead = MCPDomainInvocationFence()
         XCTAssertTrue(coordinator.enqueue(intent: .full(paths: ["/tmp/Second.swift"]), fence: secondRead, for: key))
+        // The enqueue passes over the stuck batch and starts the replacement before it returns. Without that, nothing
+        // ever enters the second gate, and the test stops here instead of waiting for it.
+        let workerStartsAfterPassOver = probe.snapshot().count(where: { $0.kind == .workerStarted && $0.lane == .canonical })
+        XCTAssertEqual(workerStartsAfterPassOver, 2, "the second read's enqueue didn't pass over the stuck batch")
+        guard workerStartsAfterPassOver == 2 else {
+            await firstGate.release()
+            await secondGate.release()
+            return
+        }
         await secondGate.waitUntilEntered()
 
         // The passed-over worker resumes, finds every read in its batch revoked, and stops.
