@@ -72,6 +72,9 @@ final class ACPIntegratedAgentModeRunner {
     private var retirementByTabID: [UUID: ControllerRetirement] = [:]
     private let idleRetirement: IdleRetirementHost
     private let idleTimers = PerKeyTaskStore<UUID>()
+    /// The process run, per tab, whose agent the idle timer last kept because it can't reload a
+    /// saved conversation, so that decision is logged once per agent process.
+    private var resumeUnsupportedLoggedRunIDByTabID: [UUID: UUID] = [:]
     #if DEBUG
         /// Awaited by a retirement task before it shuts its controller down.
         var test_retirementWillShutDown: (@MainActor (_ tabID: UUID) async -> Void)?
@@ -1329,9 +1332,15 @@ final class ACPIntegratedAgentModeRunner {
         case .retiring:
             idleTimers.remove(tabID, ifToken: token)
             reportIdleTimerOutcome(.retired, tabID: tabID)
-        case .alreadyGone, .superseded, .blocked(.resumeUnsupported):
-            // A runtime that can't reload its conversation keeps its process until the next
-            // completed turn arms a new timer.
+        case .blocked(.resumeUnsupported):
+            // The agent keeps its process until a later completed turn arms a new timer, and no
+            // deadline before then asks again.
+            if session.runID == nil || resumeUnsupportedLoggedRunIDByTabID[tabID] != session.runID {
+                resumeUnsupportedLoggedRunIDByTabID[tabID] = session.runID
+                logKeptIdleProcess(.resumeUnsupported, arm: arm, session: session)
+            }
+            endIdleTimer(arm, tabID: tabID)
+        case .alreadyGone, .superseded:
             endIdleTimer(arm, tabID: tabID)
         case let .blocked(blocker):
             guard idleTimers.hasTask(for: tabID, token: token), let interval = idleShutdownInterval() else {
@@ -1340,17 +1349,28 @@ final class ACPIntegratedAgentModeRunner {
             }
             if blocker == .missingProviderSessionID, !arm.loggedMissingProviderSessionID {
                 arm.loggedMissingProviderSessionID = true
-                AgentProviderRetirement.log(
-                    "kept blocker=\(blocker.rawValue)",
-                    provider: "acp",
-                    tabID: tabID,
-                    runID: session.runID,
-                    controllerID: arm.controllerID,
-                    reason: .automaticIdle(anchor: arm.anchor)
-                )
+                logKeptIdleProcess(blocker, arm: arm, session: session)
             }
             rearmIdleTimer(arm, at: idleRetirement.clock.now() + interval, for: session)
         }
+    }
+
+    /// Logs at notice level why the timer keeps a process for longer than one interval: the agent
+    /// can't reload a saved conversation, or the session has no stored conversation ID.
+    /// `retireProviderIfIdle` logs every blocked automatic check at debug level.
+    private func logKeptIdleProcess(
+        _ blocker: AgentProviderRetirementBlocker,
+        arm: IdleTimerArm,
+        session: AgentTabSession
+    ) {
+        AgentProviderRetirement.log(
+            "kept blocker=\(blocker.rawValue)",
+            provider: "acp",
+            tabID: session.tabID,
+            runID: session.runID,
+            controllerID: arm.controllerID,
+            reason: .automaticIdle(anchor: arm.anchor)
+        )
     }
 
     private func endIdleTimer(_ arm: IdleTimerArm, tabID: UUID) {
