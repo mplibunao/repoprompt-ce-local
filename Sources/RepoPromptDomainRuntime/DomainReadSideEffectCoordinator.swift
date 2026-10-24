@@ -205,6 +205,18 @@ package actor DomainReadSideEffectCoordinator {
         try Task.checkCancellation()
     }
 
+    #if DEBUG
+        /// The revisions that a lane's parked operations and drains wait to see become terminal, so a test
+        /// can tell a waiter that is parked from one that hasn't run yet.
+        package func debugTerminalWaitTargets(
+            handle: DomainReadContextHandle,
+            effectClass: DomainReadSideEffectClass
+        ) -> [UInt64] {
+            let key = LaneKey(context: handle.context, effectClass: effectClass)
+            return states[key]?.terminalWaiters.values.map(\.target).sorted() ?? []
+        }
+    #endif
+
     package func shutdown() {
         stopped = true
         for state in states.values {
