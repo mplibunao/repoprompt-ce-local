@@ -16,7 +16,7 @@ Releasing a stuck call's lease isn't safe on its own. The call is still running,
 - A read's selection effect runs in its tab's side-effect lane and can keep running after the read returns. It keeps the read's lease until it finishes, so a stuck effect blocks and gets quarantined like a stuck call. Once the read is revoked and stops waiting, its effect no longer holds up later effects on the tab.
 - Quarantined calls keep their leases and count against two limits until they finish: 2 outstanding recoveries per window, each quarantining the calls stuck at that moment, and 8 quarantined calls app-wide. A recovery quarantines all the window's escaped calls or none. Past either limit, the cap error returns and tells the agent to stop retrying and report the problem.
 - The window's banner reports each recovery, and the unified log lists every quarantined call. Agents don't get a recovery tool.
-- `apply_edits` doesn't take a settlement lease. Its own server-side limit and the commit arbiter bound it.
+- `apply_edits` doesn't take a settlement lease. Its own server-side limit and the commit arbiter bound it, and closing its connection revokes the arbiter.
 
 ## Alternatives considered
 
