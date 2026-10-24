@@ -1226,8 +1226,7 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
         }
 
         /// When the agent can't load the stored conversation, the turn opens a new one, sends the
-        /// transcript handoff with the message, and says so once in the transcript. A failed
-        /// `session/new` adds no such notice.
+        /// transcript handoff with the message, and says so once in the transcript.
         func testResumeFallbackAddsOneNoticeAndHandoff() async throws {
             let savedID = "saved-acp-session"
             let notice = ACPIntegratedAgentModeRunner.resumeFallbackNotice(for: .cursor)
@@ -1254,8 +1253,12 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
                 XCTAssertNotEqual(newID, savedID, label)
                 XCTAssertEqual(records.last { $0.event == "session/prompt" }?.sessionID, newID, label)
             }
+        }
 
-            let label = "session/new fails too"
+        /// A fallback whose `session/new` fails too ends the run failed, without the notice that a
+        /// new conversation started.
+        func testFailedNewConversationAddsNoNotice() async throws {
+            let savedID = "saved-acp-session"
             let fixture = try makeACPRetirementFixture(loadSession: false, failNew: true)
             Self.installEarlierConversation(on: fixture.session, providerSessionID: savedID)
             let ticket = try fixture.submit("after the fallback")
@@ -1263,9 +1266,9 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             try await startupTestEventually(seconds: 15) {
                 !fixture.session.runState.isActive && fixture.session.activeRunOwnership == nil
             }
-            XCTAssertEqual(fixture.session.runState, .failed, label)
-            XCTAssertEqual(Self.systemTexts(in: fixture.session), [], label)
-            XCTAssertFalse(fixture.peer.records.contains { $0.event == "session/prompt" }, label)
+            XCTAssertEqual(fixture.session.runState, .failed)
+            XCTAssertEqual(Self.systemTexts(in: fixture.session), [])
+            XCTAssertFalse(fixture.peer.records.contains { $0.event == "session/prompt" })
         }
 
         private static func installEarlierConversation(
