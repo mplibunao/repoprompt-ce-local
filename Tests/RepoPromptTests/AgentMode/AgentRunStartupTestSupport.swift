@@ -179,8 +179,8 @@ import XCTest
 
     /// A view model whose provider startup goes through `readiness` and `controller`, and, when
     /// `claude` is given, whose Claude-compatible runs use that recorder's runtimes and count as
-    /// available without an installed CLI. `claudeIdle`, when given, supplies the idle timer's
-    /// clock, setting, and MCP queries. `codexControllers`, when given, makes a new Codex controller
+    /// available without an installed CLI. `idle`, when given, supplies the idle timers' clock and
+    /// setting, and Claude's MCP queries. `codexControllers`, when given, makes a new Codex controller
     /// for each start in place of `controller`. `acpProvider`, when given, serves every ACP start, and
     /// ACP agents count as available.
     @MainActor
@@ -190,7 +190,7 @@ import XCTest
         controller: StartupTestCodexController,
         codexControllers: StartupTestCodexControllerRecorder? = nil,
         claude: StartupTestClaudeRecorder? = nil,
-        claudeIdle: StartupTestClaudeIdleEnvironment? = nil,
+        idle: StartupTestIdleEnvironment? = nil,
         acpProvider: (any ACPAgentProvider)? = nil
     ) -> AgentModeViewModel {
         let viewModel = AgentModeViewModel(
@@ -208,14 +208,14 @@ import XCTest
                 return try await ACPAgentProviderFactory.makeProvider(for: agent, modelString: modelString)
             },
             mcpServerEnabler: { await readiness.enter() },
-            testIdleProviderShutdownMinutes: claudeIdle.map { idle in
+            testIdleProviderShutdownMinutes: idle.map { idle in
                 { MainActor.assumeIsolated { idle.idleMinutes } }
             },
-            testClaudeIdleClock: claudeIdle?.clock.idleClock,
-            testClaudeActiveMCPToolQuery: claudeIdle.map { idle in
+            testIdleClock: idle?.clock.idleClock,
+            testClaudeActiveMCPToolQuery: idle.map { idle in
                 { runID in MainActor.assumeIsolated { idle.runIDsWithActiveMCPTools.contains(runID) } }
             },
-            testClaudeActiveAgentRunWaitQuery: claudeIdle.map { idle in
+            testClaudeActiveAgentRunWaitQuery: idle.map { idle in
                 { runID in MainActor.assumeIsolated { idle.runIDsWithActiveChildWaits.contains(runID) } }
             }
         )
@@ -776,14 +776,32 @@ import XCTest
         }
     }
 
-    /// The Claude idle timer's inputs in a startup test. The gate treats a run ID in
+    /// The idle timers' inputs in a startup test. Claude's timer treats a run ID in
     /// `runIDsWithActiveMCPTools` or `runIDsWithActiveChildWaits` as having that MCP work in flight.
     @MainActor
-    final class StartupTestClaudeIdleEnvironment {
+    final class StartupTestIdleEnvironment {
         let clock = StartupTestManualClock()
         var idleMinutes = GlobalSettingsStore.defaultIdleProviderShutdownMinutes
         var runIDsWithActiveMCPTools: Set<UUID> = []
         var runIDsWithActiveChildWaits: Set<UUID> = []
+    }
+
+    /// Waits until `outcomes()` holds `expected.count` idle-timer decisions and checks them.
+    /// Decisions of replaced timers are left out unless `countingStale` is set.
+    @MainActor
+    func startupTestExpectIdleOutcomes(
+        _ expected: [AgentProviderIdleTimerOutcome],
+        in outcomes: @escaping @MainActor () -> [AgentProviderIdleTimerOutcome],
+        countingStale: Bool = false,
+        _ label: String = "",
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        func observed() -> [AgentProviderIdleTimerOutcome] {
+            countingStale ? outcomes() : outcomes().filter { $0 != .stale }
+        }
+        try await startupTestEventually(file: file, line: line) { observed().count >= expected.count }
+        XCTAssertEqual(observed(), expected, label, file: file, line: line)
     }
 
     /// Holds every caller of `wait()` until `release()`; later callers pass straight through.

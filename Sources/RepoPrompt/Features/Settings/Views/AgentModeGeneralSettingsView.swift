@@ -270,7 +270,7 @@ struct AgentModeGeneralSettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .font(fontPreset.swiftUIFont(sizeAtNormal: 13, weight: .semibold))
-                Text("When an Agent Mode session has been idle this long, RepoPrompt stops its agent process and the MCP servers and commands that process started. The next message resumes the conversation. A Claude agent running a background command keeps its process for up to 2 hours. A change applies to sessions that finish a turn after it.")
+                Text("When an Agent Mode session has been idle this long, RepoPrompt stops its agent process and the MCP servers and commands that process started. The next message resumes the conversation. Cursor, OpenCode and Grok Build agents are stopped only when they can reload a saved conversation. A Claude agent running a background command keeps its process for up to 2 hours. A change applies to sessions that finish a turn after it. Choosing Never also cancels shutdowns that haven't started yet, but not one already under way.")
                     .font(fontPreset.swiftUIFont(sizeAtNormal: 12))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

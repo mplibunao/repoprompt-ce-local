@@ -39,6 +39,26 @@ final class ACPIntegratedAgentModeRunner {
         let task: Task<Void, Never>
     }
 
+    /// What the idle timer needs from the view model, which owns the session map and the shared
+    /// retirement operation.
+    struct IdleRetirementHost {
+        /// The idle-shutdown setting in whole minutes, read when the timer is armed and at each
+        /// deadline.
+        let shutdownMinutes: () -> Int
+        let clock: AgentProviderIdleClock
+        let isSessionCurrent: @MainActor (_ session: AgentTabSession) -> Bool
+        /// `AgentModeViewModel.retireProviderIfIdle`.
+        let retireIfIdle: @MainActor (
+            _ session: AgentTabSession,
+            _ reason: AgentProviderRetirementReason,
+            _ expectedControllerID: ObjectIdentifier,
+            _ isRequestCurrent: @MainActor () -> Bool
+        ) async -> AgentProviderRetirementResult
+    }
+
+    private typealias IdleTimerArm = AgentProviderIdleTimerArm
+    typealias IdleTimerOutcome = AgentProviderIdleTimerOutcome
+
     private let hooks: AgentModeRunService.Hooks
     private let terminalCommitBarrier: AgentRunTerminalCommitBarrier
     private let toolTrackingHooks: AgentToolTrackingHooks
@@ -50,11 +70,18 @@ final class ACPIntegratedAgentModeRunner {
     private var acpProviderInvocationByTrackerInvocationIDByTabID: [UUID: [UUID: UUID]] = [:]
     private var acpProviderPlaceholderInvocationIDsByTabID: [UUID: Set<UUID>] = [:]
     private var retirementByTabID: [UUID: ControllerRetirement] = [:]
+    private let idleRetirement: IdleRetirementHost
+    private let idleTimers = PerKeyTaskStore<UUID>()
+    /// The process run, per tab, whose agent the idle timer last kept because it can't reload a
+    /// saved conversation, so that decision is logged once per agent process.
+    private var resumeUnsupportedLoggedRunIDByTabID: [UUID: UUID] = [:]
     #if DEBUG
         /// Awaited by a retirement task before it shuts its controller down.
         var test_retirementWillShutDown: (@MainActor (_ tabID: UUID) async -> Void)?
         /// Called when a start finds the tab's retirement still running, before it waits for it.
         var test_startWillAwaitRetirement: (@MainActor (_ tabID: UUID) -> Void)?
+        /// Called with each idle-timer deadline's decision. Tests wait on it instead of on time.
+        var test_idleTimerOutcomeObserver: (@MainActor (_ tabID: UUID, _ outcome: IdleTimerOutcome) -> Void)?
     #endif
 
     private func log(_ message: String, runID: UUID) {
@@ -154,13 +181,15 @@ final class ACPIntegratedAgentModeRunner {
         terminalCommitBarrier: AgentRunTerminalCommitBarrier,
         toolTrackingHooks: AgentToolTrackingHooks,
         providerFactory: @escaping AgentModeViewModel.ACPProviderFactory,
-        controllerFactory: @escaping AgentModeViewModel.ACPControllerFactory
+        controllerFactory: @escaping AgentModeViewModel.ACPControllerFactory,
+        idleRetirement: IdleRetirementHost
     ) {
         self.hooks = hooks
         self.terminalCommitBarrier = terminalCommitBarrier
         self.toolTrackingHooks = toolTrackingHooks
         self.providerFactory = providerFactory
         self.controllerFactory = controllerFactory
+        self.idleRetirement = idleRetirement
     }
 
     func startRun(
@@ -194,6 +223,10 @@ final class ACPIntegratedAgentModeRunner {
         setRunningStatus(initialTransportStatusText(for: runRequest.agentKind), source: .transport, session: session, urgent: true)
 
         let freshRunRequest = runRequest
+        // No idle deadline falls inside a run. Its terminal arms a new timer if it keeps the controller.
+        if idleRetirement.isSessionCurrent(session) {
+            idleTimers.cancel(tabID)
+        }
         // A retired process exits before the next one starts. The run state set above blocks any new
         // retirement, and the request built before this call stays valid because retirement never
         // changes the stored conversation ID.
@@ -1219,8 +1252,146 @@ final class ACPIntegratedAgentModeRunner {
                         await controller.shutdown()
                     }
                 }
+            },
+            postCommit: { [weak self] in
+                guard terminalState == .completed, let controller else { return }
+                self?.armIdleTimer(for: session, controller: controller)
             }
         ))
+    }
+
+    // MARK: - Idle provider shutdown
+
+    /// Arms the tab's idle timer after a completed run that kept `controller`, replacing the timer
+    /// an earlier terminal armed. At a setting of 0 it only cancels that timer.
+    private func armIdleTimer(for session: AgentTabSession, controller: ACPAgentSessionController) {
+        // A terminal from a session object the tab has replaced must not cancel or replace the
+        // current session's timer.
+        guard idleRetirement.isSessionCurrent(session) else { return }
+        idleTimers.cancel(session.tabID)
+        guard session.acpController === controller, let interval = idleShutdownInterval() else { return }
+        let anchor = idleRetirement.clock.now()
+        scheduleIdleTimer(
+            IdleTimerArm(controllerID: ObjectIdentifier(controller), anchor: anchor, deadline: anchor + interval),
+            for: session
+        )
+    }
+
+    private func idleShutdownInterval() -> Duration? {
+        GlobalSettingsStore.idleProviderShutdownInterval(minutes: idleRetirement.shutdownMinutes())
+    }
+
+    /// Stores the timer task, cancelling the one it replaces. The task only decides and hands an
+    /// idle controller to the shared retirement. It never awaits a shutdown, so cancelling or
+    /// replacing it cannot cut a retirement short.
+    private func scheduleIdleTimer(_ arm: IdleTimerArm, for session: AgentTabSession) {
+        let tabID = session.tabID
+        let clock = idleRetirement.clock
+        idleTimers.set(tabID, token: arm.token, task: Task { @MainActor [weak self, weak session] in
+            do {
+                try await clock.sleepUntil(arm.deadline)
+            } catch {
+                self?.idleTimers.remove(tabID, ifToken: arm.token)
+                return
+            }
+            await self?.handleIdleDeadline(arm, tabID: tabID, session: session)
+        })
+    }
+
+    private func handleIdleDeadline(_ firedArm: IdleTimerArm, tabID: UUID, session: AgentTabSession?) async {
+        guard idleTimers.hasTask(for: tabID, token: firedArm.token) else {
+            reportIdleTimerOutcome(.stale, tabID: tabID)
+            return
+        }
+        guard let session,
+              idleRetirement.isSessionCurrent(session),
+              let controller = session.acpController,
+              ObjectIdentifier(controller) == firedArm.controllerID,
+              let interval = idleShutdownInterval()
+        else {
+            endIdleTimer(firedArm, tabID: tabID)
+            return
+        }
+        var arm = firedArm
+        let settingDeadline = arm.anchor + interval
+        if settingDeadline > idleRetirement.clock.now() {
+            // The setting grew after the timer was armed: wait out the rest, counted from the anchor.
+            rearmIdleTimer(arm, at: settingDeadline, for: session)
+            return
+        }
+        let token = arm.token
+        let result = await idleRetirement.retireIfIdle(
+            session,
+            .automaticIdle(anchor: arm.anchor),
+            arm.controllerID
+        ) {
+            // A replacement timer or a switch to 0 during the controller probe stops the retirement.
+            self.idleTimers.hasTask(for: tabID, token: token) && self.idleShutdownInterval() != nil
+        }
+        switch result {
+        case .retiring:
+            idleTimers.remove(tabID, ifToken: token)
+            reportIdleTimerOutcome(.retired, tabID: tabID)
+        case .blocked(.resumeUnsupported):
+            // The agent keeps its process until a later completed turn arms a new timer, and no
+            // deadline before then asks again.
+            if session.runID == nil || resumeUnsupportedLoggedRunIDByTabID[tabID] != session.runID {
+                resumeUnsupportedLoggedRunIDByTabID[tabID] = session.runID
+                logKeptIdleProcess(.resumeUnsupported, arm: arm, session: session)
+            }
+            endIdleTimer(arm, tabID: tabID)
+        case .alreadyGone, .superseded:
+            endIdleTimer(arm, tabID: tabID)
+        case let .blocked(blocker):
+            guard idleTimers.hasTask(for: tabID, token: token), let interval = idleShutdownInterval() else {
+                endIdleTimer(arm, tabID: tabID)
+                return
+            }
+            if blocker == .missingProviderSessionID, !arm.loggedMissingProviderSessionID {
+                arm.loggedMissingProviderSessionID = true
+                logKeptIdleProcess(blocker, arm: arm, session: session)
+            }
+            rearmIdleTimer(arm, at: idleRetirement.clock.now() + interval, for: session)
+        }
+    }
+
+    /// Logs at notice level why the timer keeps a process for longer than one interval: the agent
+    /// can't reload a saved conversation, or the session has no stored conversation ID.
+    /// `retireProviderIfIdle` logs every blocked automatic check at debug level.
+    private func logKeptIdleProcess(
+        _ blocker: AgentProviderRetirementBlocker,
+        arm: IdleTimerArm,
+        session: AgentTabSession
+    ) {
+        AgentProviderRetirement.log(
+            "kept blocker=\(blocker.rawValue)",
+            provider: "acp",
+            tabID: session.tabID,
+            runID: session.runID,
+            controllerID: arm.controllerID,
+            reason: .automaticIdle(anchor: arm.anchor)
+        )
+    }
+
+    private func endIdleTimer(_ arm: IdleTimerArm, tabID: UUID) {
+        idleTimers.remove(tabID, ifToken: arm.token)
+        reportIdleTimerOutcome(.ended, tabID: tabID)
+    }
+
+    /// Re-arming is the timer task's last step: storing the new task cancels the running one.
+    private func rearmIdleTimer(
+        _ arm: IdleTimerArm,
+        at deadline: ContinuousClock.Instant,
+        for session: AgentTabSession
+    ) {
+        reportIdleTimerOutcome(.rearmed, tabID: session.tabID)
+        scheduleIdleTimer(arm.rearmed(at: deadline), for: session)
+    }
+
+    private func reportIdleTimerOutcome(_ outcome: IdleTimerOutcome, tabID: UUID) {
+        #if DEBUG
+            test_idleTimerOutcomeObserver?(tabID, outcome)
+        #endif
     }
 
     // MARK: - Tool Tracking (per-tab, using shared AgentToolTrackingController)

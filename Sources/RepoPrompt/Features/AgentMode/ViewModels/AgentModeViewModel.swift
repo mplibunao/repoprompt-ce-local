@@ -2,6 +2,7 @@ import Combine
 import CryptoKit
 import Foundation
 import MCP
+import os
 import SwiftUI
 
 struct AgentContextUsage: Codable, Equatable {
@@ -627,6 +628,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private let sessionLifecycleAuthority = AgentSessionLifecycleAuthority()
     /// The clock `agent_manage stop_session` waits on for a released process.
     private(set) var providerRetirementClock: AgentProviderIdleClock = .continuous
+    /// The idle-shutdown setting every provider's idle timer reads, and the ACP timer's clock.
+    private let idleProviderShutdownMinutes: () -> Int
+    private let acpIdleClock: AgentProviderIdleClock
 
     private var isRestoringState = false
     private var activeUISyncSuppressionDepth = 0
@@ -983,6 +987,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         func test_hasPendingACPRetirement(for session: TabSession) -> Bool {
             runService.pendingACPRetirementTask(for: session) != nil
+        }
+
+        func test_setACPIdleTimerOutcomeObserver(
+            _ observer: (@MainActor (_ tabID: UUID, _ outcome: ACPIntegratedAgentModeRunner.IdleTimerOutcome) -> Void)?
+        ) {
+            runService.test_setACPIdleTimerOutcomeObserver(observer)
         }
 
         /// Stops the run the way a confirmed execution-location change stops it.
@@ -2326,6 +2336,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         providerConversationCleanupRegistry = ProviderConversationCleanupRegistry()
         shouldManageCodexTooling = true
         usesProductionAgentDefaultsAndModelPolling = true
+        let idleProviderShutdownMinutes = { GlobalSettingsStore.shared.idleProviderShutdownMinutes() }
+        self.idleProviderShutdownMinutes = idleProviderShutdownMinutes
+        acpIdleClock = .continuous
         codexCoordinator = CodexAgentModeCoordinator(
             windowID: windowID,
             runtimeWorkspacePathsProvider: codexRuntimeWorkspacePathsProvider,
@@ -2336,7 +2349,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 providerBindingService.codexCapabilitiesForLaunch(isMCPRelated: isMCPRelated)
             },
             codexHookApprovalSettings: GlobalSettingsStore.shared,
-            idleProviderShutdownMinutes: { GlobalSettingsStore.shared.idleProviderShutdownMinutes() },
+            idleProviderShutdownMinutes: idleProviderShutdownMinutes,
             activeToolQuery: { [weak mcpServer] runID in
                 mcpServer?.hasActiveToolExecutions(runID: runID) ?? false
             },
@@ -2351,7 +2364,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         claudeCoordinator = ClaudeAgentModeCoordinator(
             windowID: windowID,
             workspacePathProvider: sessionWorkspacePathProvider,
-            idleProviderShutdownMinutes: { GlobalSettingsStore.shared.idleProviderShutdownMinutes() },
+            idleProviderShutdownMinutes: idleProviderShutdownMinutes,
             awaitNoActiveMCPTools: { [weak mcpServer] runID in
                 guard let mcpServer else { return }
                 try await mcpServer.awaitNoActiveToolExecutions(runID: runID)
@@ -2487,7 +2500,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             testCodexStallWatchdogInactivityThreshold: TimeInterval? = nil,
             testCodexTransportClosedRecoveryGraceInterval: TimeInterval? = nil,
             testIdleProviderShutdownMinutes: (() -> Int)? = nil,
-            testClaudeIdleClock: ClaudeAgentModeCoordinator.IdleClock? = nil,
+            testIdleClock: AgentProviderIdleClock? = nil,
             testClaudeActiveMCPToolQuery: ClaudeAgentModeCoordinator.MCPActiveToolQuery? = nil,
             testClaudeActiveAgentRunWaitQuery: ClaudeAgentModeCoordinator.ActiveAgentRunWaitQuery? = nil,
             testUsesProductionAgentDefaultsAndModelPolling: Bool = false,
@@ -2539,6 +2552,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             let testWatchdogProbeThreshold = testCodexStallWatchdogProbeThreshold ?? legacyWatchdogThreshold ?? 0
             let idleProviderShutdownMinutes = testIdleProviderShutdownMinutes
                 ?? { GlobalSettingsStore.defaultIdleProviderShutdownMinutes }
+            self.idleProviderShutdownMinutes = idleProviderShutdownMinutes
+            acpIdleClock = testIdleClock ?? .continuous
             let testWatchdogRecoveryThreshold: TimeInterval = if let explicitRecoveryThreshold = testCodexStallWatchdogRecoveryThreshold {
                 explicitRecoveryThreshold
             } else if testCodexStallWatchdogProbeThreshold == nil, let legacyWatchdogThreshold {
@@ -2588,7 +2603,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 windowID: testWindowID,
                 workspacePathProvider: sessionWorkspacePathProvider,
                 idleProviderShutdownMinutes: idleProviderShutdownMinutes,
-                idleClock: testClaudeIdleClock ?? .continuous,
+                idleClock: testIdleClock ?? .continuous,
                 claudeControllerFactory: claudeControllerFactory,
                 toolEndedCount: { [weak testMCPServer] runID in
                     testMCPServer?.toolEndedCount(runID: runID) ?? 0
@@ -2951,7 +2966,23 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             activeAgentRunWaitQuery: { [weak self] runID in
                 self?.mcpServer?.hasActiveChildAgentRunWaits(runID: runID) ?? false
             },
-            childAgentRunWaitDrainTimeoutSeconds: Self.childAgentRunWaitDrainTimeoutSeconds
+            childAgentRunWaitDrainTimeoutSeconds: Self.childAgentRunWaitDrainTimeoutSeconds,
+            acpIdleRetirement: .init(
+                shutdownMinutes: idleProviderShutdownMinutes,
+                clock: acpIdleClock,
+                isSessionCurrent: { [weak self] session in
+                    self?.sessions[session.tabID] === session
+                },
+                retireIfIdle: { [weak self] session, reason, controllerID, isRequestCurrent in
+                    guard let self else { return .superseded }
+                    return await retireProviderIfIdle(
+                        session,
+                        reason: reason,
+                        expectedControllerID: controllerID,
+                        isRequestCurrent: isRequestCurrent
+                    )
+                }
+            )
         )
         let hooks = AgentModeRunService.Hooks(
             usage: .init(
@@ -10127,8 +10158,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             case let .blocked(blocker): "blocked blocker=\(blocker.rawValue)"
             case .superseded: "superseded"
             }
+            // An idle timer asks again every interval while the session stays busy.
+            let level: OSLogType = if case .blocked = result, reason.isAutomatic { .debug } else { .default }
             AgentProviderRetirement.log(
                 event,
+                level: level,
                 provider: runtime?.providerName ?? "none",
                 tabID: tabID,
                 runID: runID,

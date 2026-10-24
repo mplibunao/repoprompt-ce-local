@@ -116,33 +116,8 @@ final class ClaudeAgentModeCoordinator {
     /// fires on wake.
     typealias IdleClock = AgentProviderIdleClock
 
-    /// One armed idle timer. `anchor` is the attach or terminal commit that armed it. Re-arms keep
-    /// the anchor and the controller and take a new token.
-    private struct IdleTimerArm {
-        let controllerID: ObjectIdentifier
-        let anchor: ContinuousClock.Instant
-        let deadline: ContinuousClock.Instant
-        let token = UUID()
-        var loggedMissingProviderSessionID = false
-
-        func rearmed(at deadline: ContinuousClock.Instant) -> IdleTimerArm {
-            IdleTimerArm(
-                controllerID: controllerID,
-                anchor: anchor,
-                deadline: deadline,
-                loggedMissingProviderSessionID: loggedMissingProviderSessionID
-            )
-        }
-    }
-
-    /// What an idle-timer deadline decided.
-    enum IdleTimerOutcome: Equatable {
-        /// The timer was replaced or cancelled before its deadline was handled.
-        case stale
-        case ended
-        case rearmed
-        case retired
-    }
+    private typealias IdleTimerArm = AgentProviderIdleTimerArm
+    typealias IdleTimerOutcome = AgentProviderIdleTimerOutcome
 
     private static let logger = Logger(subsystem: "com.repoprompt.agents", category: "ClaudeSteering")
     private static let flagSettingsLogger = Logger(subsystem: "com.repoprompt.agents", category: "ClaudeFlagSettings")

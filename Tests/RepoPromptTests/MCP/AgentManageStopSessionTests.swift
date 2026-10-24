@@ -399,7 +399,7 @@ import XCTest
             let controller = StartupTestCodexController(gatesStartup: false)
             let claude = StartupTestClaudeRecorder()
             let codex = StartupTestCodexControllerRecorder()
-            let idle = StartupTestClaudeIdleEnvironment()
+            let idle = StartupTestIdleEnvironment()
             idle.idleMinutes = 0
             let peer = try StartupTestACPPeer(directory: directory)
             let viewModel = startupTestMakeViewModel(
@@ -408,7 +408,7 @@ import XCTest
                 controller: controller,
                 codexControllers: codex,
                 claude: claude,
-                claudeIdle: idle,
+                idle: idle,
                 acpProvider: peer.provider(loadSession: acpLoadSession)
             )
             viewModel.test_setProviderRetirementClock(idle.clock.cancellableClock)

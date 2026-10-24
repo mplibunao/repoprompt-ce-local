@@ -864,7 +864,7 @@ private enum AppSettingsMCPRegistry {
             key: "agent_mode.idle_provider_shutdown_minutes",
             group: "agent_mode",
             label: "Idle Provider Shutdown",
-            description: "Minutes an idle Agent Mode session keeps its provider process (Claude Code, Claude-compatible backends, and Codex) before RepoPrompt stops it. The next message resumes the conversation. Whole number from 0 to 120, default 5, where 0 never stops it. A change applies to sessions that finish a turn after it, and 0 also stops shutdowns already scheduled.",
+            description: "Minutes an idle Agent Mode session keeps its provider process before RepoPrompt stops it. This covers Claude Code, Claude-compatible backends, Codex, and ACP agents (Cursor, OpenCode, Grok Build) that can reload a saved conversation; an ACP agent that can't is never stopped this way. The next message resumes the conversation. A Claude background command can keep an idle process for up to 2 hours. Whole number from 0 to 120, default 5, where 0 never stops it. A change applies to sessions that finish a turn after it, and 0 also cancels shutdowns that haven't started yet, but not one already under way.",
             range: GlobalSettingsStore.idleProviderShutdownMinutesRange,
             read: { .int($0.idleProviderShutdownMinutes()) },
             write: { try $0.setIdleProviderShutdownMinutes(requiredInt(from: $1)) }

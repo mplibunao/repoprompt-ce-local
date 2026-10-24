@@ -67,12 +67,41 @@ struct AgentProviderIdleClock {
     }
 }
 
+/// One armed idle timer. `anchor` is the attach or terminal commit that armed it. Re-arms keep the
+/// anchor and the controller and take a new token.
+struct AgentProviderIdleTimerArm {
+    let controllerID: ObjectIdentifier
+    let anchor: ContinuousClock.Instant
+    let deadline: ContinuousClock.Instant
+    let token = UUID()
+    var loggedMissingProviderSessionID = false
+
+    func rearmed(at deadline: ContinuousClock.Instant) -> AgentProviderIdleTimerArm {
+        AgentProviderIdleTimerArm(
+            controllerID: controllerID,
+            anchor: anchor,
+            deadline: deadline,
+            loggedMissingProviderSessionID: loggedMissingProviderSessionID
+        )
+    }
+}
+
+/// What an idle-timer deadline decided.
+enum AgentProviderIdleTimerOutcome: Equatable {
+    /// The timer was replaced or cancelled before its deadline was handled.
+    case stale
+    case ended
+    case rearmed
+    case retired
+}
+
 enum AgentProviderRetirement {
     private static let logger = Logger(subsystem: "com.repoprompt.agents", category: "ProviderRetirement")
 
     /// One retirement decision or completion. Carries identifiers only, never conversation content.
     static func log(
         _ event: String,
+        level: OSLogType = .default,
         provider: String,
         tabID: UUID,
         runID: UUID?,
@@ -80,7 +109,8 @@ enum AgentProviderRetirement {
         reason: AgentProviderRetirementReason
     ) {
         let controller = controllerID.map { String(describing: $0) } ?? "none"
-        logger.notice(
+        logger.log(
+            level: level,
             "Provider retirement \(event, privacy: .public) provider=\(provider, privacy: .public) tab=\(tabID.uuidString, privacy: .public) run=\(runID?.uuidString ?? "none", privacy: .public) controller=\(controller, privacy: .public) reason=\(reason.logValue, privacy: .public)"
         )
     }

@@ -7,6 +7,10 @@ import XCTest
 /// it receives to one record file, so a test can follow requests across process replacement. Each
 /// conversation's prompts are kept in a store that outlives the process, and `session/load` of a
 /// stored conversation records what it recovered.
+///
+/// A prompt containing `[hold:<name>]` is answered only after `releaseHold(<name>)`. A prompt
+/// containing `[permission]` asks the client for permission first and is answered once the client
+/// responds.
 final class StartupTestACPPeer: @unchecked Sendable {
     /// One line of the record file.
     struct Record: Equatable {
@@ -54,6 +58,11 @@ final class StartupTestACPPeer: @unchecked Sendable {
         if failNew { environment["ACP_FAIL_NEW"] = "1" }
         if let runtimeSessionID { environment["ACP_RUNTIME_SESSION_ID"] = runtimeSessionID }
         return StartupTestACPProvider(providerID: providerID, commandPath: scriptURL.path, environment: environment)
+    }
+
+    /// Lets every prompt held on `[hold:<name>]` finish, now and later.
+    func releaseHold(_ name: String) throws {
+        try Data().write(to: storeURL.appendingPathComponent(name + ".release"))
     }
 
     /// Stores a conversation the agent can load, as one an earlier process saved.
@@ -112,8 +121,10 @@ final class StartupTestACPPeer: @unchecked Sendable {
     #!/usr/bin/env python3
     import json
     import os
+    import re
     import signal
     import sys
+    import time
 
     record_path = os.environ["ACP_RECORD_PATH"]
     store_dir = os.environ["ACP_STORE_DIR"]
@@ -123,6 +134,8 @@ final class StartupTestACPPeer: @unchecked Sendable {
     runtime_session_id = os.environ.get("ACP_RUNTIME_SESSION_ID")
     pid = os.getpid()
     new_sessions = 0
+    # The prompt waiting for the client's answer to a permission request, as (prompt id, request id).
+    awaiting_permission = None
 
     def record(entry):
         entry["pid"] = pid
@@ -160,7 +173,12 @@ final class StartupTestACPPeer: @unchecked Sendable {
             request = json.loads(line)
         except Exception:
             continue
-        if "id" not in request or "method" not in request:
+        if "method" not in request:
+            if awaiting_permission is not None and request.get("id") == awaiting_permission[1]:
+                respond(awaiting_permission[0], {"stopReason": "end_turn"})
+                awaiting_permission = None
+            continue
+        if "id" not in request:
             continue
         method = request["method"]
         params = request.get("params") or {}
@@ -191,6 +209,28 @@ final class StartupTestACPPeer: @unchecked Sendable {
             history = stored(session_id) or []
             history.append(text)
             store(session_id, history)
+            hold = re.search(r"\[hold:([A-Za-z0-9_-]+)\]", text)
+            if hold:
+                release_path = os.path.join(store_dir, hold.group(1) + ".release")
+                while not os.path.exists(release_path):
+                    time.sleep(0.01)
+            if "[permission]" in text:
+                permission_id = "permission-%d" % pid
+                awaiting_permission = (request["id"], permission_id)
+                print(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": permission_id,
+                    "method": "session/request_permission",
+                    "params": {
+                        "sessionId": session_id,
+                        "toolCall": {"toolCallId": "tool-1", "title": "Run the build", "kind": "execute"},
+                        "options": [
+                            {"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+                            {"optionId": "reject", "kind": "reject_once", "name": "Reject"}
+                        ]
+                    }
+                }), flush=True)
+                continue
             respond(request["id"], {"stopReason": "end_turn"})
         else:
             record({"event": method})
