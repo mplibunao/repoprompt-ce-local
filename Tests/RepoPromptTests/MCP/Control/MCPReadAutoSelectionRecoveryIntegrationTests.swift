@@ -1030,9 +1030,6 @@ import XCTest
         }
     }
 
-    /// Read auto-selection lane events for one tab, so a test can wait for a drain to start waiting or
-    /// for a held worker to stop without polling. An expectation is fulfilled by the first matching
-    /// event after it is requested.
     /// Holds each of the first `heldCount` selection applies at its own gate until that apply is released, so a
     /// test can end stuck applies one at a time.
     private actor SelectionApplyHolds {
@@ -1083,6 +1080,9 @@ import XCTest
         case didNotEnter(expected: Int, actual: Int)
     }
 
+    /// Read auto-selection lane events for one tab, so a test can wait for a drain to start waiting or
+    /// for a held worker to stop without polling. An expectation is fulfilled by the first matching
+    /// event after it is requested.
     private final class SelectionLaneProbe: @unchecked Sendable {
         private struct Trigger: Hashable {
             let kind: MCPReadFileAutoSelectionDiagnosticEvent.Kind
