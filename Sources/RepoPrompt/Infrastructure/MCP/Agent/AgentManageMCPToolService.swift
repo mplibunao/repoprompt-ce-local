@@ -926,6 +926,7 @@ struct AgentManageMCPToolService {
             return .object(reply)
         }
 
+        agentModeVM.clearStaleMCPRunningMasksBeforeStop(session, sessionID: sessionID)
         // Codex's app-server exits after its retirement finishes, so its `released` says so.
         let heldCodexRuntime = session.codexController != nil
         var providerProcess: [String: Value]

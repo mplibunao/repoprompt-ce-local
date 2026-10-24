@@ -6847,15 +6847,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 evidence: session.runState.isActive ? .recorded : .queuedStartup
             )
         }
-        let settled: MCPStatusResolution? = switch session.runState {
-        case .completed, .failed, .cancelled:
-            session.runState.mcpTerminalSnapshotStatus.map { MCPStatusResolution(status: $0) }
-        case .idle:
-            mcpLatestSubmissionTerminalStatus(for: session).map { MCPStatusResolution(status: $0) }
-                ?? MCPStatusResolution(status: .failed, evidence: .unrecordedTerminal)
-        case .running, .waitingForUser, .waitingForQuestion, .waitingForApproval:
-            nil
-        }
+        let settled = mcpSettledStatusResolution(for: session)
         // A startup that owns a ticket returned above, so its masks never expire here.
         if let settled {
             clearStaleMCPRunningMasks(for: session, settled: settled, sessionID: sessionID)
@@ -6875,6 +6867,29 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         case .running, .idle, .completed, .failed, .cancelled:
             return MCPStatusResolution(status: .running)
         }
+    }
+
+    /// The status a session's recorded run state settles to, or nil while its run is still going.
+    private func mcpSettledStatusResolution(for session: TabSession) -> MCPStatusResolution? {
+        switch session.runState {
+        case .completed, .failed, .cancelled:
+            session.runState.mcpTerminalSnapshotStatus.map { MCPStatusResolution(status: $0) }
+        case .idle:
+            mcpLatestSubmissionTerminalStatus(for: session).map { MCPStatusResolution(status: $0) }
+                ?? MCPStatusResolution(status: .failed, evidence: .unrecordedTerminal)
+        case .running, .waitingForUser, .waitingForQuestion, .waitingForApproval:
+            nil
+        }
+    }
+
+    /// Drops the running masks an MCP snapshot would drop as stale. Only a snapshot clears them,
+    /// and a stop takes none, so without this a stale mask would block every stop of a settled
+    /// session until its next run.
+    func clearStaleMCPRunningMasksBeforeStop(_ session: TabSession, sessionID: UUID) {
+        guard session.unresolvedStartupTicket == nil,
+              let settled = mcpSettledStatusResolution(for: session)
+        else { return }
+        clearStaleMCPRunningMasks(for: session, settled: settled, sessionID: sessionID)
     }
 
     /// The masks are legacy bookkeeping for the gap before a run starts. Clearing a stale one only

@@ -140,6 +140,35 @@ import XCTest
             XCTAssertTrue(fixture.session.runState.isActive)
         }
 
+        /// A running mask that MCP snapshots treat as stale, unchanged for over 15 s with no owner
+        /// or run work behind it, doesn't block a stop. A fresh one does.
+        func testStaleRunningMaskDoesNotBlockStop() async throws {
+            let rows: [(label: String, ageSeconds: TimeInterval, raise: @MainActor (AgentModeViewModel.TabSession) -> Void, blocker: String?)] = [
+                ("fresh follow-up mask", 0, { $0.mcpFollowUpRunPending = true }, "pending_start"),
+                ("stale follow-up mask", 20, { $0.mcpFollowUpRunPending = true }, nil),
+                ("stale superseding mask", 20, { $0.pendingSupersedingTurnCompletions = 1 }, nil)
+            ]
+            for (label, ageSeconds, raise, blocker) in rows {
+                let fixture = try makeFixture(agent: .claudeCode)
+                try await fixture.runCompletedTurn("turn")
+                raise(fixture.session)
+                let changedAt = Date().addingTimeInterval(-ageSeconds)
+                fixture.session.mcpFollowUpRunPendingUpdatedAt = changedAt
+                fixture.session.pendingSupersedingTurnCompletionsUpdatedAt = changedAt
+
+                let reply = try await fixture.stop()
+
+                if let blocker {
+                    XCTAssertEqual(Self.blockedReason(reply), blocker, label)
+                    XCTAssertEqual(fixture.claude.shutdownsStarted, 0, label)
+                } else {
+                    XCTAssertEqual(reply["provider_process"]?.objectValue?["status"], .string("released"), label)
+                    XCTAssertFalse(fixture.session.mcpFollowUpRunPending, label)
+                    XCTAssertEqual(fixture.session.pendingSupersedingTurnCompletions, 0, label)
+                }
+            }
+        }
+
         /// A released Codex app-server still exiting when the reply is due reports `shutting_down`.
         /// The next message waits for it, then resumes the same thread in a new app-server that the
         /// old retirement leaves alone.
@@ -397,6 +426,14 @@ import XCTest
                 peer.killUnexitedProcesses()
             }
             return fixture
+        }
+
+        /// The `blocker` of a reply whose `provider_process.status` is `blocked`, or nil otherwise.
+        private static func blockedReason(_ reply: [String: Value]) -> String? {
+            guard let process = reply["provider_process"]?.objectValue,
+                  process["status"] == .string("blocked")
+            else { return nil }
+            return process["blocker"]?.stringValue
         }
 
         private static func approvalRequest() -> AgentApprovalRequest {
