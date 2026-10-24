@@ -59,7 +59,8 @@ import MCP
                     "state": lease.state,
                     "admission_age_ms": lease.admissionAge.mcpMilliseconds,
                     "released": lease.isReleased,
-                    "provider_completed": lease.providerCompleted
+                    "provider_completed": lease.providerCompleted,
+                    "pending_effect_count": lease.pendingEffectCount
                 ]
                 if let blockingAge = lease.blockingAge {
                     entry["blocking_age_ms"] = blockingAge.mcpMilliseconds

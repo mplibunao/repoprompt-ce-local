@@ -144,6 +144,93 @@ import XCTest
             }
         }
 
+        /// A read that times out while its selection is stuck keeps its lease until the selection ends, so it
+        /// blocks the window like a stuck provider. Once the recovery horizon releases it, a read routed to the
+        /// same tab by a window hint, which selects nothing, returns while the first read's selection is still
+        /// stuck.
+        func testATimedOutReadWithAStuckSelectionStopsHoldingUpItsTab() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let context = fixture.contextA
+                let windowID = context.window.windowID
+                let server = context.window.mcpServer
+                let manager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let gate = MCPExecutionIgnoringCancellationGate()
+                var endpoint: PersistentMCPTestEndpoint?
+                var hintedRead: Task<PersistentMCPTestRPCResponse, Error>?
+
+                do {
+                    try await fixture.registerDomainWorkspace(context)
+                    try await Self.activateWorkspace(context)
+                    let caller = try await Self.makeBoundEndpoint(label: "stuck-selection-reader", fixture: fixture)
+                    endpoint = caller
+                    _ = try await caller.callTool(name: MCPWindowToolName.manageSelection, arguments: ["op": "clear"])
+                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting {
+                        await gate.enterAndWait()
+                    }
+
+                    let stuckRead = Task {
+                        try await caller.callTool(
+                            name: MCPWindowToolName.readFile,
+                            arguments: ["path": context.fileURL.path, "_rawJSON": true]
+                        )
+                    }
+                    try await gate.waitUntilEntered(count: 1)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolExecutionDeadline)
+                    let timedOut = try await stuckRead.value
+                    XCTAssertTrue(timedOut.rawJSON.contains("tool_execution_timeout"), timedOut.rawJSON)
+                    let kept = await manager.debugCodeStructureSettlementDiagnostics(windowID: windowID)
+                    XCTAssertEqual(kept.leases.map(\.state), ["awaiting_effects"])
+                    XCTAssertEqual(kept.blockingCount, 1)
+
+                    try await clock.advanceWithoutWakingSleepers(by: MCPCodeStructureSettlementRegistry.recoveryHorizon)
+                    let toolsEnabled = await server.setWindowToolsEnabled(true)
+                    XCTAssertTrue(toolsEnabled)
+                    let hinted = try fixture.endpointA()
+                    let hintedReturned = expectation(description: "the hinted read on the same tab returned")
+                    hintedRead = Task {
+                        defer { hintedReturned.fulfill() }
+                        return try await hinted.callTool(
+                            name: MCPWindowToolName.readFile,
+                            arguments: ["path": context.fileURL.path, "_windowID": windowID]
+                        )
+                    }
+                    await fulfillment(of: [hintedReturned], timeout: 10)
+                    let hintedResponse = try await XCTUnwrap(hintedRead).value
+                    hintedRead = nil
+                    XCTAssertFalse(hintedResponse.rawJSON.contains("\"isError\":true"), hintedResponse.rawJSON)
+
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    await gate.release()
+                    await manager.debugAwaitCodeStructureSettlementDrain(windowID: windowID)
+                    XCTAssertFalse(try XCTUnwrap(Self.storedSelection(context)).selectedPaths.contains(context.fileURL.path))
+
+                    _ = await server.setWindowToolsEnabled(false)
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await Self.cleanupEndpoint(caller, manager: manager)
+                    endpoint = nil
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    await gate.release()
+                    hintedRead?.cancel()
+                    if let hintedRead { _ = try? await hintedRead.value }
+                    _ = await server.setWindowToolsEnabled(false)
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: manager) }
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
         /// A read revoked after the selection worker checked its batch, while the write is about to land, is
         /// left out of the stored selection, and the read it shares the batch with still applies.
         func testReadRevokedJustBeforeTheSelectionWriteIsLeftOutWhileTheRestOfItsBatchApplies() async throws {

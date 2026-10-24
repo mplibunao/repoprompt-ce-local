@@ -337,6 +337,59 @@ final class MCPCodeStructureSettlementRegistryNoticeTests: XCTestCase {
         XCTAssertEqual(registry.snapshot(windowID: secondWindowID).activeCount, 0)
     }
 
+    /// A call whose provider returns while an effect it handed off still runs keeps its lease, blocking the
+    /// window from the provider's return like a provider that ignored cancellation. Releasing the claim, once,
+    /// removes the lease.
+    func testALeaseStaysBlockingWhileAnEffectItHandedOffRuns() throws {
+        let registry = MCPCodeStructureSettlementRegistry()
+        let windowID = 121
+        let slot = try admittedSlot(registry, windowID: windowID, now: .zero)
+        let claim = try XCTUnwrap(slot.claimEffect())
+
+        XCTAssertEqual(slot.recordCompletion(.cancellation, now: .seconds(31)), .deliver)
+        XCTAssertEqual(blockingAndReleasedCounts(registry, windowID: windowID), [1, 0])
+        switch registry.admit(
+            windowID: windowID,
+            connectionID: UUID(),
+            invocationID: UUID(),
+            toolName: "read_file",
+            now: .seconds(40)
+        ) {
+        case let .busy(busy):
+            XCTAssertEqual(busy.recoveryAfter, .seconds(21))
+        case let .admitted(admitted):
+            XCTFail("expected the lease kept by its effect to block the window")
+            _ = admitted.closeBeforeExecutionExit()
+        }
+
+        XCTAssertTrue(claim.release())
+        XCTAssertFalse(claim.release())
+        XCTAssertEqual(registry.snapshot(windowID: windowID).activeCount, 0)
+    }
+
+    /// A lease kept by its effect is quarantined by a recovery like any escaped call, and the recovery is
+    /// refunded only when that effect ends.
+    func testARecoveryQuarantinesALeaseKeptByItsEffectUntilTheEffectEnds() throws {
+        let registry = MCPCodeStructureSettlementRegistry()
+        let windowID = 122
+        let kept = try admittedSlot(registry, windowID: windowID, now: .zero)
+        let claim = try XCTUnwrap(kept.claimEffect())
+        _ = kept.recordCompletion(.cancellation, now: .seconds(31))
+        let stuck = try admittedSlot(registry, windowID: windowID, now: .seconds(61))
+        escape(stuck, at: .seconds(96))
+        XCTAssertEqual(blockingAndReleasedCounts(registry, windowID: windowID), [1, 1])
+
+        let recovery = try recover(registry, windowID: windowID, at: .seconds(100))
+        XCTAssertEqual(recovery.quarantinedCalls.map(\.state), ["awaiting_effects", "detached"])
+        XCTAssertEqual(stuck.recordCompletion(.success), .settleDetached)
+        XCTAssertEqual(registry.diagnostics(windowID: windowID, now: .seconds(110)).quarantine.appQuarantinedCount, 1)
+
+        XCTAssertTrue(claim.release())
+        let drained = registry.diagnostics(windowID: windowID, now: .seconds(120))
+        XCTAssertEqual(drained.counts.activeCount, 0)
+        XCTAssertEqual(drained.quarantine.windowOutstandingRecoveryCount, 0)
+    }
+
     private final class ManualClock: @unchecked Sendable {
         private let lock = NSLock()
         private var value: Duration = .zero

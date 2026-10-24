@@ -13102,6 +13102,21 @@ actor ServerNetworkManager {
                                     defer {
                                         _ = settlementAdmission.slot?.closeBeforeExecutionExit()
                                     }
+                                    // A read's effects keep its lease until they end. The last release can remove a
+                                    // lease after the call settled, so it re-derives the notices as a settlement does.
+                                    let effectClaims = settlementAdmission.slot.map { slot in
+                                        MCPCodeStructureSettlementRegistry.EffectClaims {
+                                            guard let claim = slot.claimEffect() else { return nil }
+                                            return {
+                                                guard claim.release() else { return }
+                                                Task {
+                                                    await self.reconcileCodeStructureSettlementLimitNoticesAfterSettlement(
+                                                        windowID: slot.windowID
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
 
                                     let traceWindowID = settlementAdmission.slot?.windowID
                                         ?? Self.currentToolDispatchAuthorization?.windowIdentity?.windowID
@@ -13212,7 +13227,11 @@ actor ServerNetworkManager {
                                             }
                                             guard let mutationObservation else {
                                                 return try await MCPDomainInvocationFence.$current.withValue(invocationFence) {
-                                                    try await executeOperation()
+                                                    try await MCPCodeStructureSettlementRegistry.EffectClaims.$current.withValue(
+                                                        effectClaims
+                                                    ) {
+                                                        try await executeOperation()
+                                                    }
                                                 }
                                             }
                                             return try await MCPDomainProtectedMutationSettlementContext.$observer.withValue(

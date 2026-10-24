@@ -285,7 +285,7 @@ package enum MCPToolExecutionWatchdog {
             let box = ResultBox(result: result, completionTime: completionTime)
             if let settlementSlot {
                 let operationSettlement = settlement(for: box)
-                switch settlementSlot.recordCompletion(operationSettlement) {
+                switch settlementSlot.recordCompletion(operationSettlement, now: completionTime) {
                 case .deliver:
                     deliveredCompletionMailbox?.store(box)
                     await environment.eventDidProduce(.operationCompleted)

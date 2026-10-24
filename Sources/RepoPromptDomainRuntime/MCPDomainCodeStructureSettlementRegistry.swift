@@ -10,6 +10,10 @@ import Foundation
 /// later same-window detach-disposition calls for a bounded recovery horizon. After that horizon,
 /// one still-running provider may remain tracked without blocking; its exact lease still owns completion.
 ///
+/// A call's lease also covers the effects it hands off, such as the selection a read submits: when the
+/// provider returns while an effect it claimed still runs, the lease stays and blocks like a provider that
+/// ignored cancellation, until the last claim is released.
+///
 /// A call that reaches a capped window recovers it: every call in the window that outlived its caller is
 /// quarantined, its late publication is revoked, and the call runs. Quarantined leases stay tracked and
 /// leave the registry only on their exact completion, but they no longer fence the window. A window may
@@ -137,13 +141,15 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         package let invocationID: UUID
         package let connectionID: UUID
         package let toolName: String
-        /// `reserved`, `detaching`, `detached`, `abandoned`, or `force_disconnecting`.
+        /// `reserved`, `detaching`, `detached`, `abandoned`, `force_disconnecting`, or `awaiting_effects`.
         package let state: String
         package let admissionAge: Duration
         package let blockingAge: Duration?
         package let isReleased: Bool
-        /// Whether the provider returned while its lease was still detaching.
+        /// Whether the provider returned while its lease was still detaching or its effects still ran.
         package let providerCompleted: Bool
+        /// Effects the call handed off that haven't finished.
+        package let pendingEffectCount: Int
         package let handlerPhase: MCPToolExecutionHandlerPhaseSnapshot?
         package let handlerPhaseAge: Duration?
         /// Set for a protected mutation: what it may claim was applied when the snapshot was taken.
@@ -189,12 +195,18 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
             self.recovery = recovery
         }
 
-        package func recordCompletion(_ settlement: MCPToolExecutionSettlement) -> CompletionDirective {
+        /// `now` dates the blocking of a lease that its unfinished effects keep. Without it, such a lease
+        /// counts as blocking from its admission.
+        package func recordCompletion(
+            _ settlement: MCPToolExecutionSettlement,
+            now: Duration? = nil
+        ) -> CompletionDirective {
             registry?.recordCompletion(
                 windowID: windowID,
                 leaseID: leaseID,
                 invocationID: invocationID,
-                settlement: settlement
+                settlement: settlement,
+                now: now
             ) ?? .ignored
         }
 
@@ -233,6 +245,26 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
             ) ?? .alreadySettled
         }
 
+        /// Claims an effect this call hands off that may outlive its provider. Nil once the lease has left
+        /// the registry.
+        package func claimEffect() -> EffectClaim? {
+            guard let claimID = registry?.claimEffect(
+                windowID: windowID,
+                leaseID: leaseID,
+                invocationID: invocationID
+            ) else { return nil }
+            return EffectClaim(slot: self, claimID: claimID)
+        }
+
+        fileprivate func releaseEffect(_ claimID: UUID) -> Bool {
+            registry?.releaseEffect(
+                windowID: windowID,
+                leaseID: leaseID,
+                invocationID: invocationID,
+                claimID: claimID
+            ) ?? false
+        }
+
         deinit {
             #if DEBUG
                 registry?.assertLeaseReleased(
@@ -244,12 +276,55 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         }
     }
 
+    /// One effect a call handed off. It keeps the call's slot, and so its lease, until it's released.
+    package final class EffectClaim: @unchecked Sendable {
+        private let slot: Slot
+        private let claimID: UUID
+        private let lock = NSLock()
+        private var isReleased = false
+
+        fileprivate init(slot: Slot, claimID: UUID) {
+            self.slot = slot
+            self.claimID = claimID
+        }
+
+        /// Releases the claim; later calls do nothing. Returns whether this removed the lease, which happens
+        /// when the provider has returned and this was its last claim.
+        @discardableResult
+        package func release() -> Bool {
+            let firstRelease = lock.withLock {
+                defer { isReleased = true }
+                return !isReleased
+            }
+            return firstRelease && slot.releaseEffect(claimID)
+        }
+    }
+
+    /// How a leased call claims the effects it hands off. The MCP host sets it around the provider, and the
+    /// read side-effect emitter claims each effect it submits and releases the claim when the effect ends.
+    package struct EffectClaims: Sendable {
+        @TaskLocal package static var current: EffectClaims?
+
+        private let claimEffect: @Sendable () -> (@Sendable () -> Void)?
+
+        /// `claimEffect` returns the release for one claimed effect, or nil when the call's lease is gone.
+        package init(claimEffect: @escaping @Sendable () -> (@Sendable () -> Void)?) {
+            self.claimEffect = claimEffect
+        }
+
+        package func claim() -> (@Sendable () -> Void)? {
+            claimEffect()
+        }
+    }
+
     fileprivate enum State: Equatable {
         case reserved
         case detaching(MCPToolExecutionSettlement?)
         case detached
         case abandoned
         case forceDisconnecting
+        /// The provider returned, and effects it handed off still run.
+        case awaitingEffects
     }
 
     private struct Quarantine {
@@ -271,6 +346,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         var blockingSince: Duration?
         var isReleased: Bool
         var quarantine: Quarantine?
+        var effectClaimIDs: Set<UUID> = []
 
         var blocksAdmission: Bool {
             state.blocksAdmission && !isReleased && quarantine == nil
@@ -500,6 +576,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                     blockingAge: entry.blockingSince.map { Self.elapsed(since: $0, now: now) },
                     isReleased: entry.isReleased,
                     providerCompleted: entry.state.providerCompleted,
+                    pendingEffectCount: entry.effectClaimIDs.count,
                     handlerPhase: handlerPhase,
                     handlerPhaseAge: handlerPhaseAge,
                     mutationState: entry.commitState?.replyState,
@@ -550,23 +627,48 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         windowID: Int,
         leaseID: UUID,
         invocationID: UUID,
-        settlement: MCPToolExecutionSettlement
+        settlement: MCPToolExecutionSettlement,
+        now: Duration?
     ) -> CompletionDirective {
         transition(windowID: windowID, leaseID: leaseID, invocationID: invocationID) { entry in
             switch entry.state {
             case .reserved:
-                return (.remove, .deliver)
+                return (.settle(now: now), .deliver)
             case .detaching:
                 entry.state = .detaching(settlement)
                 return (.retain(entry), .deferred)
             case .detached:
-                return (.remove, .settleDetached)
+                return (.settle(now: now), .settleDetached)
             case .abandoned:
-                return (.remove, .settleAbandoned)
+                return (.settle(now: now), .settleAbandoned)
             case .forceDisconnecting:
-                return (.remove, .settleForceDisconnected)
+                return (.settle(now: now), .settleForceDisconnected)
+            case .awaitingEffects:
+                return (.retain(entry), .ignored)
             }
         } ?? .ignored
+    }
+
+    private func claimEffect(windowID: Int, leaseID: UUID, invocationID: UUID) -> UUID? {
+        lock.withLock {
+            guard var entry = entriesByWindowID[windowID]?[leaseID],
+                  entry.invocationID == invocationID
+            else { return nil }
+            let claimID = UUID()
+            entry.effectClaimIDs.insert(claimID)
+            entriesByWindowID[windowID]?[leaseID] = entry
+            return claimID
+        }
+    }
+
+    private func releaseEffect(windowID: Int, leaseID: UUID, invocationID: UUID, claimID: UUID) -> Bool {
+        transition(windowID: windowID, leaseID: leaseID, invocationID: invocationID) { entry in
+            entry.effectClaimIDs.remove(claimID)
+            guard case .awaitingEffects = entry.state, entry.effectClaimIDs.isEmpty else {
+                return (.retain(entry), false)
+            }
+            return (.remove, true)
+        } ?? false
     }
 
     private func resolveGraceExpiry(
@@ -599,7 +701,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                 return .detach
             case .detaching, .detached:
                 return .detach
-            case .abandoned:
+            case .abandoned, .awaitingEffects:
                 return .settled
             case .forceDisconnecting:
                 return .forceDisconnect
@@ -622,7 +724,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                 return (.notActivated, [])
             }
             if let settlement {
-                removeEntry(leaseID, windowID: windowID, from: &entries)
+                settleEntry(leaseID, windowID: windowID, now: nil, in: &entries)
                 return (
                     .settled(settlement),
                     storeEntriesAndTakeWaiters(entries, windowID: windowID)
@@ -659,7 +761,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
 
             case let .detaching(settlement):
                 if let settlement {
-                    removeEntry(leaseID, windowID: windowID, from: &entries)
+                    settleEntry(leaseID, windowID: windowID, now: now, in: &entries)
                     let waiters = storeEntriesAndTakeWaiters(entries, windowID: windowID)
                     return (.abandoned(settlement), waiters)
                 }
@@ -676,6 +778,9 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
 
             case .forceDisconnecting:
                 return (.forceDisconnect(nil), [])
+
+            case .awaitingEffects:
+                return (.settled, [])
             }
         }
         result.1.forEach { $0.resume() }
@@ -696,9 +801,9 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
             guard case .reserved = entry.state else {
                 return (.retained, [])
             }
-            removeEntry(leaseID, windowID: windowID, from: &entries)
+            settleEntry(leaseID, windowID: windowID, now: nil, in: &entries)
             return (
-                .released,
+                entries[leaseID] == nil ? .released : .retained,
                 storeEntriesAndTakeWaiters(entries, windowID: windowID)
             )
         }
@@ -709,6 +814,8 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
     private enum Mutation {
         case retain(Entry)
         case remove
+        /// The provider returned: remove the lease, or keep it while its effects run.
+        case settle(now: Duration?)
     }
 
     private func transition<Result>(
@@ -729,6 +836,9 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
                 entries[leaseID] = updated
             case .remove:
                 removeEntry(leaseID, windowID: windowID, from: &entries)
+            case let .settle(now):
+                entries[leaseID] = entry
+                settleEntry(leaseID, windowID: windowID, now: now, in: &entries)
             }
             return (
                 value,
@@ -737,6 +847,19 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
         }
         result.1.forEach { $0.resume() }
         return result.0
+    }
+
+    /// Ends a lease whose provider has returned. While effects it claimed still run, the lease stays and
+    /// blocks admission, dated from `now`, from when it first blocked, or else from its admission. Callers
+    /// hold the lock.
+    private func settleEntry(_ leaseID: UUID, windowID: Int, now: Duration?, in entries: inout [UUID: Entry]) {
+        guard var entry = entries[leaseID], !entry.effectClaimIDs.isEmpty else {
+            removeEntry(leaseID, windowID: windowID, from: &entries)
+            return
+        }
+        entry.state = .awaitingEffects
+        entry.blockingSince = entry.blockingSince ?? now ?? entry.admittedAt
+        entries[leaseID] = entry
     }
 
     /// Removes a lease on its exact completion. A quarantined lease refunds its recovery once every call
@@ -871,7 +994,7 @@ package final class MCPCodeStructureSettlementRegistry: @unchecked Sendable {
 private extension MCPCodeStructureSettlementRegistry.State {
     var isZombie: Bool {
         switch self {
-        case .detaching, .detached, .abandoned:
+        case .detaching, .detached, .abandoned, .awaitingEffects:
             true
         case .reserved, .forceDisconnecting:
             false
@@ -882,7 +1005,7 @@ private extension MCPCodeStructureSettlementRegistry.State {
         switch self {
         case .reserved:
             false
-        case .detaching, .detached, .abandoned, .forceDisconnecting:
+        case .detaching, .detached, .abandoned, .forceDisconnecting, .awaitingEffects:
             true
         }
     }
@@ -894,11 +1017,16 @@ private extension MCPCodeStructureSettlementRegistry.State {
         case .detached: "detached"
         case .abandoned: "abandoned"
         case .forceDisconnecting: "force_disconnecting"
+        case .awaitingEffects: "awaiting_effects"
         }
     }
 
     var providerCompleted: Bool {
-        if case .detaching(.some) = self { return true }
-        return false
+        switch self {
+        case .detaching(.some), .awaitingEffects:
+            true
+        case .reserved, .detaching(.none), .detached, .abandoned, .forceDisconnecting:
+            false
+        }
     }
 }
