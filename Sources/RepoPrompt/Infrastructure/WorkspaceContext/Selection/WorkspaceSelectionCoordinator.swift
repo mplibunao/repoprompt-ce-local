@@ -408,6 +408,8 @@ final class WorkspaceSelectionCoordinator {
         )
     }
 
+    /// `publicationRevoked` is checked with `expectedCurrentSelection`, in the same synchronous step as the
+    /// write, and a revoked publication is reported as a conflict.
     @discardableResult
     func persistSelection(
         _ selection: StoredSelection,
@@ -416,7 +418,8 @@ final class WorkspaceSelectionCoordinator {
         mirrorToUIIfActive: Bool = true,
         expectedCurrentSelection: StoredSelection? = nil,
         peerSourceRevision: UInt64? = nil,
-        peerMutationFence: MCPSelectionPeerMutationFence? = nil
+        peerMutationFence: MCPSelectionPeerMutationFence? = nil,
+        publicationRevoked: () -> Bool = { false }
     ) async -> StoredSelection {
         switch await persistSelectionResult(
             selection,
@@ -425,7 +428,8 @@ final class WorkspaceSelectionCoordinator {
             mirrorToUIIfActive: mirrorToUIIfActive,
             expectedCurrentSelection: expectedCurrentSelection,
             peerSourceRevision: peerSourceRevision,
-            peerMutationFence: peerMutationFence
+            peerMutationFence: peerMutationFence,
+            publicationRevoked: publicationRevoked
         ) {
         case let .committed(committed):
             committed
@@ -443,7 +447,8 @@ final class WorkspaceSelectionCoordinator {
         mirrorToUIIfActive: Bool = true,
         expectedCurrentSelection: StoredSelection? = nil,
         peerSourceRevision: UInt64? = nil,
-        peerMutationFence: MCPSelectionPeerMutationFence? = nil
+        peerMutationFence: MCPSelectionPeerMutationFence? = nil,
+        publicationRevoked: () -> Bool = { false }
     ) async -> SelectionPersistenceResult {
         guard let workspaceManager,
               let currentSelection = workspaceManager.composeTab(for: identity)?.selection
@@ -451,6 +456,9 @@ final class WorkspaceSelectionCoordinator {
         if let expectedCurrentSelection,
            currentSelection != expectedCurrentSelection
         {
+            return .conflict(current: currentSelection)
+        }
+        if publicationRevoked() {
             return .conflict(current: currentSelection)
         }
         if source == .mcpPeerContext {

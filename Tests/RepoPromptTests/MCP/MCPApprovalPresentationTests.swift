@@ -91,10 +91,10 @@ import XCTest
                 let server = fixture.server
 
                 server.clearCodeStructureSettlementLimitNotice(generation: 41)
-                server.presentCodeStructureSettlementLimitNotice(generation: 41)
+                server.presentCodeStructureSettlementLimitNotice(generation: 41, kind: .recoveryExhausted)
                 XCTAssertNil(server.codeStructureSettlementLimitNotice)
 
-                server.presentCodeStructureSettlementLimitNotice(generation: 42)
+                server.presentCodeStructureSettlementLimitNotice(generation: 42, kind: .recoveryExhausted)
                 XCTAssertEqual(server.codeStructureSettlementLimitNotice?.generation, 42)
                 server.clearCodeStructureSettlementLimitNotice(generation: 41)
                 XCTAssertEqual(server.codeStructureSettlementLimitNotice?.generation, 42)
@@ -102,7 +102,7 @@ import XCTest
                 server.clearCodeStructureSettlementLimitNotice(generation: 42)
                 XCTAssertNil(server.codeStructureSettlementLimitNotice)
 
-                server.presentCodeStructureSettlementLimitNotice(generation: 41)
+                server.presentCodeStructureSettlementLimitNotice(generation: 41, kind: .recoveryExhausted)
                 XCTAssertNil(server.codeStructureSettlementLimitNotice)
             }
         }

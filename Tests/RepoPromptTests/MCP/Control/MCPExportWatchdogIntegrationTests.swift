@@ -532,6 +532,111 @@ import XCTest
             }
         }
 
+        /// A capped window recovers on the next call while its two stuck prompt changes are still held. The
+        /// window shows the recovery until they finish, and once released they publish nothing, so the change
+        /// made after the recovery stays.
+        func testCappedWindowRecoversWhileStuckPromptChangesStayHeldAndNeverPublish() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let context = fixture.contextA
+                let windowID = context.window.windowID
+                let manager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let gate = MCPExecutionIgnoringCancellationGate()
+                let operationIDs = (0 ..< 2).map { "prompt-capped-\($0)-\(UUID().uuidString)" }
+                var stuckCalls: [Task<PersistentMCPTestRPCResponse, Error>] = []
+
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+                    context.window.mcpServer.setBeforeTabContextMutationCommitForTesting {
+                        await gate.enterAndWait()
+                    }
+
+                    // The first stuck change detaches. Once the recovery horizon releases it, the second one
+                    // runs and detaches too, which caps the window.
+                    for (index, operationID) in operationIDs.enumerated() {
+                        if index > 0 {
+                            try await clock.advanceWithoutWakingSleepers(by: MCPCodeStructureSettlementRegistry.recoveryHorizon)
+                        }
+                        stuckCalls.append(Task {
+                            try await endpoint.callTool(
+                                name: MCPWindowToolName.prompt,
+                                arguments: [
+                                    "op": "set",
+                                    "text": "stuck \(index)",
+                                    "operation_id": operationID,
+                                    "_rawJSON": true
+                                ]
+                            )
+                        })
+                        try await gate.waitUntilEntered(count: index + 1)
+                        try await clock.waitForSleeperCount(1)
+                        try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolExecutionDeadline)
+                        try await clock.waitForSleeperCount(1)
+                        try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolCancellationCleanupGrace)
+                        let payload = try await Self.toolResultObject(stuckCalls[index].value)
+                        XCTAssertEqual(payload["settlement"] as? String, "detached")
+                    }
+                    let capped = await manager.debugCodeStructureSettlementDiagnostics(windowID: windowID)
+                    XCTAssertEqual(capped.counts, .init(activeCount: 2, detachedCount: 2, releasedCount: 1))
+                    XCTAssertEqual(capped.blockingCount, 1)
+
+                    context.window.mcpServer.setBeforeTabContextMutationCommitForTesting(nil)
+                    let recovering = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "after recovery"]
+                    )
+                    XCTAssertFalse(recovering.rawJSON.contains("\"isError\":true"), recovering.rawJSON)
+                    let recovered = await manager.debugCodeStructureSettlementDiagnostics(windowID: windowID)
+                    XCTAssertEqual(
+                        recovered.counts,
+                        .init(activeCount: 2, detachedCount: 2, releasedCount: 0, quarantinedCount: 2)
+                    )
+                    XCTAssertEqual(recovered.blockingCount, 0)
+                    let notice = context.window.mcpServer.codeStructureSettlementLimitNotice
+                    if case let .recovered(callCount, _) = notice?.kind {
+                        XCTAssertEqual(callCount, 2)
+                    } else {
+                        XCTFail("Expected the recovery notice, got \(String(describing: notice))")
+                    }
+
+                    await gate.release()
+                    for operationID in operationIDs {
+                        let settled = await Self.waitForJournalStatus(.cancelledBeforeCommit, operationID: operationID)
+                        XCTAssertTrue(settled, operationID)
+                    }
+                    await manager.debugAwaitCodeStructureSettlementDrain(windowID: windowID)
+                    XCTAssertEqual(
+                        context.window.workspaceManager.composeTab(with: context.tabID)?.promptText,
+                        "after recovery"
+                    )
+                    let noticeCleared = await Self.waitUntil {
+                        context.window.mcpServer.codeStructureSettlementLimitNotice == nil
+                    }
+                    XCTAssertTrue(noticeCleared)
+
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await gate.release()
+                    for call in stuckCalls {
+                        call.cancel()
+                        _ = try? await call.value
+                    }
+                    context.window.mcpServer.setBeforeTabContextMutationCommitForTesting(nil)
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
         func testWindowExclusiveCallsShareOneAdmissionDeadline() async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
@@ -641,6 +746,71 @@ import XCTest
                 } catch {
                     await heldEdit?.finish(manager: manager)
                     if let queuedEndpoint { await Self.cleanupEndpoint(queuedEndpoint, manager: manager) }
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        /// Closing a connection revokes its running edit even when the teardown's cancellation misses the
+        /// provider, as it does for an edit the view model hasn't registered yet. The stand-in provider ignores
+        /// cancellation and has no settlement lease, so only that revocation stops it from beginning its commit.
+        func testClosingAConnectionRevokesItsEditWhenTheCancellationMissesIt() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let endpoint = try fixture.endpointA()
+                let manager = fixture.networkManager
+                let gate = MCPExecutionIgnoringCancellationGate()
+                let probe = CommitBeginProbe()
+                var editTask: Task<PersistentMCPTestRPCResponse, Error>?
+
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    await manager.debugSetResolvedToolOperationOverride(toolName: MCPWindowToolName.applyEdits) {
+                        await gate.enterAndWait()
+                        guard let arbiter = MCPDomainMutationCommitContext.invocationCommitState else {
+                            probe.record(.noArbiter)
+                            return .string("no arbiter")
+                        }
+                        do {
+                            try await arbiter.beginIfNeeded {}
+                            probe.record(.began)
+                        } catch is DomainMutationCommitRevokedError {
+                            probe.record(.revoked)
+                        }
+                        return .string("done")
+                    }
+                    editTask = Task {
+                        try await endpoint.callTool(
+                            name: MCPWindowToolName.applyEdits,
+                            arguments: [
+                                "path": fixture.contextA.fileURL.path,
+                                "rewrite": "late content\n",
+                                "_rawJSON": true
+                            ]
+                        )
+                    }
+                    try await gate.waitUntilEntered(count: 1)
+
+                    _ = await manager.debugCancelActiveToolsOwnedByConnection(
+                        endpoint.connectionID,
+                        reason: "connection_closed"
+                    )
+                    await gate.release()
+                    _ = try await editTask?.value
+                    XCTAssertEqual(probe.outcome, .revoked)
+
+                    await manager.debugSetResolvedToolOperationOverride(toolName: MCPWindowToolName.applyEdits, operation: nil)
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await gate.release()
+                    editTask?.cancel()
+                    if let editTask { _ = try? await editTask.value }
+                    await manager.debugSetResolvedToolOperationOverride(toolName: MCPWindowToolName.applyEdits, operation: nil)
                     await fixture.cleanup()
                     throw error
                 }
@@ -4723,6 +4893,26 @@ import XCTest
             lock.lock()
             defer { lock.unlock() }
             return settlements
+        }
+    }
+
+    /// What a stand-in provider saw when it tried to begin its commit through the call's arbiter.
+    private final class CommitBeginProbe: @unchecked Sendable {
+        enum Outcome: Equatable {
+            case began
+            case revoked
+            case noArbiter
+        }
+
+        private let lock = NSLock()
+        private var recorded: Outcome?
+
+        var outcome: Outcome? {
+            lock.withLock { recorded }
+        }
+
+        func record(_ outcome: Outcome) {
+            lock.withLock { recorded = outcome }
         }
     }
 

@@ -172,13 +172,15 @@ rpce-cli-debug -w 1 -c app_settings -j '{"op":"set","key":"agent_mode.perf_diagn
 
 If a key is unavailable, confirm that `rpce-cli-debug --version` resolves to the current CE debug build before falling back to lower-level defaults.
 
-The `mcp_structure_settlement_snapshot` op reports one window's settlement registry: the counts of active, detached, released, and blocking entries, and a `leases` array, oldest admission first. Each lease gives its lease, invocation, and connection IDs, its tool, state, admission age, and blocking age, its `released` and `provider_completed` flags, and the handler phase its invocation last reported, with that report's transition and age. A handler phase is the await the call most recently reached. A `started` phase with a large age is the await that hasn't returned. A lease held by a protected mutation, such as `prompt set`, also gives its `mutation_state`. The state is `not_applied` once a deadline or cancellation has revoked the mutation before its commit, and `indeterminate_after_commit` once its commit has begun.
+The `mcp_structure_settlement_snapshot` op reports one window's settlement registry: the counts of active, detached, released, and blocking entries, and a `leases` array, oldest admission first. Each lease gives its lease, invocation, and connection IDs, its tool, state, admission age, and blocking age, its `released` and `provider_completed` flags, its `pending_effect_count`, and the handler phase its invocation last reported, with that report's transition and age. A handler phase is the await the call most recently reached. A `started` phase with a large age is the await that hasn't returned. A read's selection effect keeps the read's lease until it finishes, so a read whose provider returned while its selection still runs shows the `awaiting_effects` state and blocks the window like a stuck provider. Each connection has its own selection worker. Once every read in the batch that worker is stuck applying has been revoked, the connection's next read or drain passes over the batch, which ends those reads' selection effects. The stuck worker keeps their leases in `awaiting_effects` until its apply ends, and each one counts like a stuck call. It blocks the window for 30 seconds, then the next call marks it released and runs. A released lease doesn't block, but it uses up the window's released-provider limit of one. One more blocking lease then caps the window, and the recovery that follows quarantines it. The pass-over logs `phase=auto_selection_batch_retired` with the window, tab, connection, revoked read count, the number of those reads whose leases the worker keeps (`counted_reads`), and time in flight. A lease held by a protected mutation, such as `prompt set`, also gives its `mutation_state`. The state is `not_applied` once a deadline or cancellation has revoked the mutation before its commit, and `indeterminate_after_commit` once its commit has begun.
+
+When a call reaches a window at its released-provider limit, the registry quarantines the window's stuck calls and runs the call. A quarantined call stays tracked until it finishes, but it no longer blocks the window, and once its revocation wins it can't publish a selection or prompt change. The snapshot gives the window's `quarantined_count`, its `window_outstanding_recoveries` against `window_recovery_limit`, and the `app_quarantined_count` against `app_quarantine_limit`. A quarantined lease gives `quarantined: true`, the `recovery_id` that quarantined it, its `quarantine_age_ms`, and `revocation_won`. A `false` there means a prompt change had already begun its commit when the window recovered, so it may still apply.
 
 ```bash
 rpce-cli-debug -w 1 -c __repoprompt_debug_diagnostics -j '{"op":"mcp_structure_settlement_snapshot","window_id":1}'
 ```
 
-Debug and release builds also write each watchdog escalation (deadline expiry, request cancellation, cleanup-grace expiry, detach, force-disconnect), each late settlement of a timed-out or cancelled provider, and each rejection at a window's released-provider limit to the unified log, with the tool, the invocation and connection IDs, the window, the handler phase and its age, and the window's blocking and released counts. Entries for a protected mutation, such as `apply_edits`, add its `mutation_state` and `operation_id`. The log records the first rejection for one blockage and then at most one more every 30 seconds. Read them from the debug or production app with:
+Debug and release builds also write each watchdog escalation (deadline expiry, request cancellation, cleanup-grace expiry, detach, force-disconnect), each late settlement of a timed-out or cancelled provider, each automatic recovery of a capped window with the calls it quarantined, and each rejection at a window's released-provider limit to the unified log, with the tool, the invocation and connection IDs, the window, the handler phase and its age, and the window's blocking and released counts. Entries for a protected mutation, such as `apply_edits`, add its `mutation_state` and `operation_id`. The log records the first rejection for one blockage and then at most one more every 30 seconds. Read them from the debug or production app with:
 
 ```bash
 log show --last 1h --style compact --predicate 'subsystem == "com.repoprompt.mcp" AND category == "ToolExecution"'
@@ -200,6 +202,24 @@ Run a stuck-call reproduction only against the debug app, never production. Conf
 5. Delete the scratch workspace, list the windows, and close any window the delete left open.
 
 `swift-inspect` can't attach to the debug app. The debug bundle lacks the `get-task-allow` entitlement, so the task port request fails with `(os/kern) failure 0x5`. Use `sample` for stacks.
+
+### Injecting stuck calls
+
+The `mcp_stuck_call_scenario` op holds real calls in the debug app so a capped window and its recovery can be driven on demand. To arm a scenario, give a window and one hook:
+
+- `read_file` holds a read after its reply is built and its selection is queued.
+- `read_file_auto_selection` holds a selection worker in the window before it applies a batch of reads' selections. Each connection has its own worker.
+- `prompt` holds `prompt` set, append, or clear after the tab resolves and before the change commits.
+
+A scenario captures at most two calls, or one when it is armed with `"capture_limit":1`. Capturing one selection batch lets the same connection's next batch run, which shows its lane passing over a stuck batch. Each captured call ignores cancellation, so it keeps running past its deadline and cleanup grace the way a stuck call does. Held calls continue when the scenario is released or cleared, when its window closes, or after `auto_release_seconds`, which defaults to 300 and can be at most 600. Only one scenario per window and hook can capture calls at a time. Arm another once the first has reached its limit.
+
+```bash
+rpce-cli-debug -w <window> -c __repoprompt_debug_diagnostics -j '{"op":"mcp_stuck_call_scenario","action":"arm","window_id":<window>,"hook":"read_file"}'
+rpce-cli-debug -w <window> -c __repoprompt_debug_diagnostics -j '{"op":"mcp_stuck_call_scenario","action":"status"}'
+rpce-cli-debug -w <window> -c __repoprompt_debug_diagnostics -j '{"op":"mcp_stuck_call_scenario","action":"release","scenario_id":"<scenario_id>"}'
+```
+
+`clear` releases a scenario and forgets it. Evidence from injected stalls shows that recovery restores a window and that recovered calls don't publish late. It says nothing about what a real stuck call was waiting on. Finding that out needs the reproduction above.
 
 ### Catalog shard patch measurement
 

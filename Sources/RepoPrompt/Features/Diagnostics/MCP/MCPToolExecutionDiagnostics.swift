@@ -263,8 +263,8 @@ enum MCPToolExecutionTracer {
 }
 
 /// Logs settlement-cap rejections to the unified log. Every rejection in one blockage carries the
-/// same oldest blocker and released count, so the first is logged and repeats at most once per
-/// `repeatInterval`, with the number suppressed since the last line.
+/// same oldest blocker, released count, and quarantine usage, so the first is logged and repeats at
+/// most once per `repeatInterval`, with the number suppressed since the last line.
 final class MCPSettlementCapRejectionLog: @unchecked Sendable {
     struct Rejection {
         let windowID: Int
@@ -292,7 +292,14 @@ final class MCPSettlementCapRejectionLog: @unchecked Sendable {
 
     func record(_ rejection: Rejection) {
         let context = rejection.busyContext
-        let key = "\(rejection.windowID)|\(context.originInvocationID.uuidString)|\(context.releasedProviderCount)"
+        let quarantine = context.quarantine
+        let key = [
+            "\(rejection.windowID)",
+            context.originInvocationID.uuidString,
+            "\(context.releasedProviderCount)",
+            "\(quarantine.windowOutstandingRecoveryCount)",
+            "\(quarantine.appQuarantinedCount)"
+        ].joined(separator: "|")
         let now = clock.now
         let suppressed: Int? = lock.withLock {
             entries = entries.filter { now - $0.value.lastLogged < repeatInterval * 2 }
@@ -319,7 +326,77 @@ final class MCPSettlementCapRejectionLog: @unchecked Sendable {
             "origin_blocking_age_ms=\(String(format: "%.3f", context.detachedAge.mcpMilliseconds))",
             "blocking_count=\(context.blockingProviderCount)",
             "released_count=\(context.releasedProviderCount)",
+            "window_quarantined_count=\(quarantine.windowQuarantinedCount)",
+            "window_outstanding_recoveries=\(quarantine.windowOutstandingRecoveryCount)"
+                + "/\(MCPCodeStructureSettlementRegistry.outstandingRecoveryLimitPerWindow)",
+            "app_quarantined_count=\(quarantine.appQuarantinedCount)"
+                + "/\(MCPCodeStructureSettlementRegistry.quarantinedCallLimit)",
             "suppressed_since_last=\(suppressed)"
+        ].joined(separator: " ")
+        MCPToolExecutionTracer.log.error("[MCPToolExecution] \(line, privacy: .public)")
+    }
+}
+
+/// Logs each automatic recovery of a capped window to the unified log, naming every call it quarantined.
+enum MCPSettlementRecoveryLog {
+    static func record(
+        windowID: Int,
+        toolName: String,
+        invocationID: UUID,
+        connectionID: UUID,
+        recovery: MCPCodeStructureSettlementRegistry.Recovery
+    ) {
+        let calls = recovery.quarantinedCalls.map { call in
+            [
+                call.toolName,
+                call.invocationID.uuidString,
+                call.state,
+                call.handlerPhase ?? "unreported",
+                call.blockingAge.map { String(format: "%.3f", $0.mcpMilliseconds) } ?? "unknown",
+                call.revocationWon ? "won" : "lost"
+            ].joined(separator: ":")
+        }
+        let quarantine = recovery.quarantine
+        let line = [
+            "phase=settlement_window_recovered",
+            "window_id=\(windowID)",
+            "tool=\(toolName)",
+            "invocation_id=\(invocationID.uuidString)",
+            "connection_id=\(connectionID.uuidString)",
+            "recovery_id=\(recovery.recoveryID.uuidString)",
+            // Each call is tool:invocation_id:state:handler_phase:blocking_age_ms:revocation. A lost revocation
+            // means a protected mutation's commit had already begun, so that call may still apply its change.
+            "quarantined_calls=[\(calls.joined(separator: ","))]",
+            "window_outstanding_recoveries=\(quarantine.windowOutstandingRecoveryCount)"
+                + "/\(MCPCodeStructureSettlementRegistry.outstandingRecoveryLimitPerWindow)",
+            "app_quarantined_count=\(quarantine.appQuarantinedCount)"
+                + "/\(MCPCodeStructureSettlementRegistry.quarantinedCallLimit)"
+        ].joined(separator: " ")
+        MCPToolExecutionTracer.log.error("[MCPToolExecution] \(line, privacy: .public)")
+    }
+}
+
+/// Logs each auto-selection batch that a connection's selection lane passes over because every read in it was
+/// revoked while a worker was still applying it. The line names the stuck selection apply. `counted_reads` is
+/// how many of those reads' settlement leases the stuck worker keeps until its apply ends; a read whose lease
+/// had already left the registry isn't counted.
+enum MCPAutoSelectionBatchRetirementLog {
+    static func record(
+        windowID: Int,
+        tabID: UUID,
+        connectionID: UUID?,
+        revokedReadCount: UInt64,
+        countedReadCount: Int,
+        inFlightDuration: Duration
+    ) {
+        let line = [
+            "phase=auto_selection_batch_retired",
+            "window_id=\(windowID)",
+            "tab_id=\(tabID.uuidString)",
+            "connection_id=\(connectionID?.uuidString ?? "none")",
+            "revoked_reads=\(revokedReadCount)",
+            "counted_reads=\(countedReadCount)",
+            "in_flight_ms=\(String(format: "%.3f", inFlightDuration.mcpMilliseconds))"
         ].joined(separator: " ")
         MCPToolExecutionTracer.log.error("[MCPToolExecution] \(line, privacy: .public)")
     }

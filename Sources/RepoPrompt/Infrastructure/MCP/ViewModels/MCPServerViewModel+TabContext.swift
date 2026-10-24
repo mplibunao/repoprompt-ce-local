@@ -1780,7 +1780,8 @@ extension MCPServerViewModel {
         workspaceID: UUID?,
         selectionCoordinator: WorkspaceSelectionCoordinator?,
         mirrorToUIIfActive: Bool = true,
-        expectedCurrentSelection: StoredSelection? = nil
+        expectedCurrentSelection: StoredSelection? = nil,
+        publicationRevoked: () -> Bool = { false }
     ) async -> MCPSelectionCoordinatorPersistenceResult {
         guard let workspaceID, let selectionCoordinator else { return .unavailable }
         let identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
@@ -1794,7 +1795,8 @@ extension MCPServerViewModel {
             for: identity,
             source: .mcpTabContext,
             mirrorToUIIfActive: mirrorToUIIfActive,
-            expectedCurrentSelection: expectedCurrentSelection
+            expectedCurrentSelection: expectedCurrentSelection,
+            publicationRevoked: publicationRevoked
         )
         return outcome
     }
@@ -1806,7 +1808,8 @@ extension MCPServerViewModel {
         workspaceID: UUID?,
         selectionCoordinator: WorkspaceSelectionCoordinator?,
         mirrorToUIIfActive: Bool = true,
-        expectedCurrentSelection: StoredSelection? = nil
+        expectedCurrentSelection: StoredSelection? = nil,
+        publicationRevoked: () -> Bool = { false }
     ) async -> MCPSelectionPersistenceVerification {
         let outcome = await persistMCPSelectionThroughCoordinator(
             selection,
@@ -1814,7 +1817,8 @@ extension MCPServerViewModel {
             workspaceID: workspaceID,
             selectionCoordinator: selectionCoordinator,
             mirrorToUIIfActive: mirrorToUIIfActive,
-            expectedCurrentSelection: expectedCurrentSelection
+            expectedCurrentSelection: expectedCurrentSelection,
+            publicationRevoked: publicationRevoked
         )
         let canonicalSelection = workspaceID.flatMap { workspaceID in
             selectionCoordinator?
@@ -1982,7 +1986,8 @@ extension MCPServerViewModel {
         lookupContext: WorkspaceLookupContext,
         contextKey: MCPReadFileAutoSelectionCoordinator.ContextKey,
         expectedBaseSelection: StoredSelection,
-        automaticCodemapDisposition: MCPReadFileAutoSelectionCoordinator.AutomaticCodemapDisposition
+        automaticCodemapDisposition: MCPReadFileAutoSelectionCoordinator.AutomaticCodemapDisposition,
+        publicationRevoked: () -> Bool
     ) async -> ReadFileAutoSelectionAuthoritativeResult? {
         guard isReadFileAutoSelectionContextCurrent(contextKey) else { return nil }
 
@@ -2036,7 +2041,8 @@ extension MCPServerViewModel {
                     workspaceID: contextKey.workspaceID,
                     selectionCoordinator: selectionCoordinator,
                     mirrorToUIIfActive: false,
-                    expectedCurrentSelection: expectedBaseSelection
+                    expectedCurrentSelection: expectedBaseSelection,
+                    publicationRevoked: publicationRevoked
                 )
             }
             guard let refreshedTarget = currentReadFileAutoSelectionTab(for: contextKey) else { return nil }
@@ -2045,12 +2051,16 @@ extension MCPServerViewModel {
                 var updatedTab = refreshedTarget.tab
                 updatedTab.selection = persistedSelection
                 updatedTab.lastModified = Date()
-                await EditFlowPerf.measure(EditFlowPerf.Stage.ReadFile.AutoSelect.canonicalStoredCommit) {
+                let stored = await EditFlowPerf.measure(EditFlowPerf.Stage.ReadFile.AutoSelect.canonicalStoredCommit) {
+                    // Checked beside the write: the measurement may suspend before running this closure.
+                    guard !publicationRevoked() else { return false }
                     _ = refreshedTarget.manager.updateComposeTabStoredOnly(
                         updatedTab,
                         inWorkspaceID: refreshedTarget.identity.workspaceID
                     )
+                    return true
                 }
+                guard stored else { return nil }
                 verification = MCPSelectionPersistenceVerification(
                     outcome: .unavailable,
                     expectedSelection: persistedSelection,
@@ -4415,6 +4425,7 @@ extension MCPServerViewModel {
             if let debugBeforeTabContextMutationCommitForTesting {
                 await debugBeforeTabContextMutationCommitForTesting()
             }
+            await MCPStuckToolScenarioRegistry.shared.holdIfArmed(windowID: resolved.windowID, hook: .prompt)
         #endif
         do {
             try await MCPDomainMutationCommitContext.willCommit()

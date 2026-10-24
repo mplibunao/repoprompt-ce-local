@@ -15,6 +15,8 @@ struct AgentModeDetailWithSidebarView: View {
     let windowID: Int
     let currentTabID: UUID?
     let codexManagedLoginAction: CodexManagedLoginAction
+    /// The window's MCP model, whose stuck-call notice shows above the chat column.
+    let settlementNoticeServer: MCPServerViewModel?
 
     @State private var isContextBuilderQuestionPresented = false
 
@@ -31,7 +33,8 @@ struct AgentModeDetailWithSidebarView: View {
             stressHarness: AgentChatStressHarness?,
             windowID: Int,
             currentTabID: UUID?,
-            codexManagedLoginAction: CodexManagedLoginAction
+            codexManagedLoginAction: CodexManagedLoginAction,
+            settlementNoticeServer: MCPServerViewModel? = nil
         ) {
             self.agentModeVM = agentModeVM
             self.runtimeVM = runtimeVM
@@ -45,6 +48,7 @@ struct AgentModeDetailWithSidebarView: View {
             self.windowID = windowID
             self.currentTabID = currentTabID
             self.codexManagedLoginAction = codexManagedLoginAction
+            self.settlementNoticeServer = settlementNoticeServer
         }
 
         init(
@@ -88,7 +92,8 @@ struct AgentModeDetailWithSidebarView: View {
             selectionCoordinator: WorkspaceSelectionCoordinator,
             windowID: Int,
             currentTabID: UUID?,
-            codexManagedLoginAction: CodexManagedLoginAction
+            codexManagedLoginAction: CodexManagedLoginAction,
+            settlementNoticeServer: MCPServerViewModel? = nil
         ) {
             self.agentModeVM = agentModeVM
             self.runtimeVM = runtimeVM
@@ -101,6 +106,7 @@ struct AgentModeDetailWithSidebarView: View {
             self.windowID = windowID
             self.currentTabID = currentTabID
             self.codexManagedLoginAction = codexManagedLoginAction
+            self.settlementNoticeServer = settlementNoticeServer
         }
 
         init(
@@ -131,6 +137,15 @@ struct AgentModeDetailWithSidebarView: View {
             )
         }
     #endif
+
+    /// Overlaid on the chat column only, so it never covers the sessions sidebar or the context drawer.
+    @ViewBuilder
+    private var settlementNotice: some View {
+        if let settlementNoticeServer {
+            CodeStructureSettlementLimitNoticeBanner(server: settlementNoticeServer)
+                .padding(16)
+        }
+    }
 
     var body: some View {
         #if DEBUG
@@ -166,6 +181,7 @@ struct AgentModeDetailWithSidebarView: View {
                     codexManagedLoginAction: codexManagedLoginAction
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .top) { settlementNotice }
                 .overlay(alignment: .topTrailing) {
                     if let stressHarness, stressHarness.configuration.showOverlay {
                         AgentChatStressHarnessPanel(harness: stressHarness, currentTabID: currentTabID)
@@ -234,6 +250,7 @@ struct AgentModeDetailWithSidebarView: View {
                     codexManagedLoginAction: codexManagedLoginAction
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .top) { settlementNotice }
             }
             .onAppear {
                 syncContextBuilderQuestionPresentation()

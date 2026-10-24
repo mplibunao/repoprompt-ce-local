@@ -59,7 +59,8 @@ import MCP
                     "state": lease.state,
                     "admission_age_ms": lease.admissionAge.mcpMilliseconds,
                     "released": lease.isReleased,
-                    "provider_completed": lease.providerCompleted
+                    "provider_completed": lease.providerCompleted,
+                    "pending_effect_count": lease.pendingEffectCount
                 ]
                 if let blockingAge = lease.blockingAge {
                     entry["blocking_age_ms"] = blockingAge.mcpMilliseconds
@@ -74,6 +75,16 @@ import MCP
                 if let mutationState = lease.mutationState {
                     entry["mutation_state"] = mutationState.rawValue
                 }
+                entry["quarantined"] = lease.recoveryID != nil
+                if let recoveryID = lease.recoveryID {
+                    entry["recovery_id"] = recoveryID.uuidString
+                }
+                if let quarantineAge = lease.quarantineAge {
+                    entry["quarantine_age_ms"] = quarantineAge.mcpMilliseconds
+                }
+                if let revocationWon = lease.revocationWon {
+                    entry["revocation_won"] = revocationWon
+                }
                 return entry
             }
             return debugDiagnosticsResult([
@@ -84,6 +95,11 @@ import MCP
                 "detached_count": diagnostics.counts.detachedCount,
                 "released_count": diagnostics.counts.releasedCount,
                 "blocking_count": diagnostics.blockingCount,
+                "quarantined_count": diagnostics.counts.quarantinedCount,
+                "window_outstanding_recoveries": diagnostics.quarantine.windowOutstandingRecoveryCount,
+                "window_recovery_limit": MCPCodeStructureSettlementRegistry.outstandingRecoveryLimitPerWindow,
+                "app_quarantined_count": diagnostics.quarantine.appQuarantinedCount,
+                "app_quarantine_limit": MCPCodeStructureSettlementRegistry.quarantinedCallLimit,
                 "leases": leases
             ])
         }

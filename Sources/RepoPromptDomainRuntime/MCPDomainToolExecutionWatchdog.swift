@@ -11,6 +11,10 @@ package enum MCPToolExecutionCancellationOrigin: String, Equatable, Sendable {
     case requestCancellation = "request_cancellation"
     case clientDeadline = "client_deadline"
     case serverExportEnvelope = "server_export_envelope"
+    /// A capped window quarantined the call so later calls could run.
+    case windowRecovery = "window_recovery"
+    case windowClosed = "window_closed"
+    case connectionClosed = "connection_closed"
 }
 
 package struct MCPToolExecutionCancelledError: Error, Equatable, LocalizedError, Sendable {
@@ -281,7 +285,7 @@ package enum MCPToolExecutionWatchdog {
             let box = ResultBox(result: result, completionTime: completionTime)
             if let settlementSlot {
                 let operationSettlement = settlement(for: box)
-                switch settlementSlot.recordCompletion(operationSettlement) {
+                switch settlementSlot.recordCompletion(operationSettlement, now: completionTime) {
                 case .deliver:
                     deliveredCompletionMailbox?.store(box)
                     await environment.eventDidProduce(.operationCompleted)
@@ -359,6 +363,9 @@ package enum MCPToolExecutionWatchdog {
                     }
                     if !deadlineDidExpire {
                         deadlineDidExpire = true
+                        // The caller gets a timeout, so work the operation queued before it completed must
+                        // not publish afterwards. A commit that already began loses this revocation.
+                        revokeBeforeCancellation?(.watchdogDeadline)
                         await onEvent(.deadlineExpired)
                         await onSynchronousSettlement(operationSettlement)
                         await onEvent(.settledDuringGrace(
@@ -388,6 +395,8 @@ package enum MCPToolExecutionWatchdog {
                             return try completed.result.get()
                         }
                         deadlineDidExpire = true
+                        // The caller gets a timeout here as well, so the operation's queued work is revoked.
+                        revokeBeforeCancellation?(.watchdogDeadline)
                         await onEvent(.deadlineExpired)
                         await onSynchronousSettlement(operationSettlement)
                         await onEvent(.settledDuringGrace(

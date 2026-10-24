@@ -557,7 +557,7 @@ PY
   if ! grep -q 'case selection' "$m3_side_effects" || ! grep -q 'case gitArtifacts' "$m3_side_effects"; then
     fail "M3 independent selection/Git effect classes missing"
   fi
-  if ! grep -q 'await previous.result' "$m3_side_effects"; then
+  if ! grep -q 'awaitTerminal(key: key, through: revision - 1)' "$m3_side_effects"; then
     fail "M3 side-effect chain no longer recovers after an earlier failure"
   fi
   if ! grep -q 'expiredOperationIDs' "$m3_side_effects" \

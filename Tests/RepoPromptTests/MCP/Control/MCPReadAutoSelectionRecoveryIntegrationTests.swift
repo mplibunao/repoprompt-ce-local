@@ -2,6 +2,7 @@ import Foundation
 import MCP
 @testable import RepoPromptApp
 import RepoPromptDomainRuntime
+import RepoPromptShared
 import XCTest
 
 #if DEBUG
@@ -58,6 +59,378 @@ import XCTest
                     await fixture.cleanup()
                     try await fixture.assertCleanedUp()
                 } catch {
+                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager) }
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        /// A read that times out while its automatic selection waits to apply doesn't add its file to the
+        /// selection afterwards, and the next read of the file still does.
+        func testTimedOutReadDoesNotAddItsFileToSelectionLater() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let manager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let gate = MCPExecutionIgnoringCancellationGate()
+                var endpoint: PersistentMCPTestEndpoint?
+                var read: Task<PersistentMCPTestRPCResponse, Error>?
+                do {
+                    try await fixture.registerDomainWorkspace(context)
+                    try await Self.activateWorkspace(context)
+                    let caller = try await Self.makeBoundEndpoint(label: "timed-out-reader", fixture: fixture)
+                    endpoint = caller
+                    _ = try await caller.callTool(name: MCPWindowToolName.manageSelection, arguments: ["op": "clear"])
+                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting {
+                        await gate.enterAndWait()
+                    }
+
+                    // The read waits for its selection to apply, so the deadline lands while its intent is queued.
+                    let activeRead = Task {
+                        try await caller.callTool(
+                            name: MCPWindowToolName.readFile,
+                            arguments: ["path": context.fileURL.path, "_rawJSON": true]
+                        )
+                    }
+                    read = activeRead
+                    try await gate.waitUntilEntered(count: 1)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolExecutionDeadline)
+                    let timedOut = try await activeRead.value
+                    read = nil
+                    XCTAssertTrue(timedOut.rawJSON.contains("tool_execution_timeout"), timedOut.rawJSON)
+
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    await gate.release()
+                    let metadata = MCPServerViewModel.RequestMetadata(
+                        connectionID: caller.connectionID, clientName: nil, windowID: context.window.windowID
+                    )
+                    let drained = try await server.drainReadFileAutoSelection(
+                        metadata: metadata,
+                        requirement: .canonicalSelection
+                    )
+                    XCTAssertEqual(drained, .completed)
+                    XCTAssertFalse(try XCTUnwrap(Self.storedSelection(context)).selectedPaths.contains(context.fileURL.path))
+
+                    let reread = try await caller.callTool(
+                        name: MCPWindowToolName.readFile,
+                        arguments: ["path": context.fileURL.path]
+                    )
+                    XCTAssertFalse(reread.rawJSON.contains("\"isError\":true"), reread.rawJSON)
+                    XCTAssertTrue(try XCTUnwrap(Self.storedSelection(context)).selectedPaths.contains(context.fileURL.path))
+
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await Self.cleanupEndpoint(caller, manager: manager)
+                    endpoint = nil
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    read?.cancel()
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    await gate.release()
+                    if let read { _ = try? await read.value }
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: manager) }
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        /// A read that times out while its selection is stuck keeps its lease until the selection ends, so it
+        /// blocks the window like a stuck provider. Once the recovery horizon releases it, a read routed to the
+        /// same tab by a window hint, which selects nothing, returns while the first read's selection is still
+        /// stuck.
+        func testATimedOutReadWithAStuckSelectionStopsHoldingUpItsTab() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let context = fixture.contextA
+                let windowID = context.window.windowID
+                let server = context.window.mcpServer
+                let manager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let gate = MCPExecutionIgnoringCancellationGate()
+                var endpoint: PersistentMCPTestEndpoint?
+                var hintedRead: Task<PersistentMCPTestRPCResponse, Error>?
+
+                do {
+                    try await fixture.registerDomainWorkspace(context)
+                    try await Self.activateWorkspace(context)
+                    let caller = try await Self.makeBoundEndpoint(label: "stuck-selection-reader", fixture: fixture)
+                    endpoint = caller
+                    _ = try await caller.callTool(name: MCPWindowToolName.manageSelection, arguments: ["op": "clear"])
+                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting {
+                        await gate.enterAndWait()
+                    }
+
+                    let stuckRead = Task {
+                        try await caller.callTool(
+                            name: MCPWindowToolName.readFile,
+                            arguments: ["path": context.fileURL.path, "_rawJSON": true]
+                        )
+                    }
+                    try await gate.waitUntilEntered(count: 1)
+                    try await clock.waitForSleeperCount(1)
+                    try await clock.advanceNext(expected: MCPTimeoutPolicy.boundedToolExecutionDeadline)
+                    let timedOut = try await stuckRead.value
+                    XCTAssertTrue(timedOut.rawJSON.contains("tool_execution_timeout"), timedOut.rawJSON)
+                    let kept = await manager.debugCodeStructureSettlementDiagnostics(windowID: windowID)
+                    XCTAssertEqual(kept.leases.map(\.state), ["awaiting_effects"])
+                    XCTAssertEqual(kept.blockingCount, 1)
+
+                    try await clock.advanceWithoutWakingSleepers(by: MCPCodeStructureSettlementRegistry.recoveryHorizon)
+                    let toolsEnabled = await server.setWindowToolsEnabled(true)
+                    XCTAssertTrue(toolsEnabled)
+                    let hinted = try fixture.endpointA()
+                    let hintedReturned = expectation(description: "the hinted read on the same tab returned")
+                    hintedRead = Task {
+                        defer { hintedReturned.fulfill() }
+                        return try await hinted.callTool(
+                            name: MCPWindowToolName.readFile,
+                            arguments: ["path": context.fileURL.path, "_windowID": windowID]
+                        )
+                    }
+                    await fulfillment(of: [hintedReturned], timeout: 10)
+                    let hintedResponse = try await XCTUnwrap(hintedRead).value
+                    hintedRead = nil
+                    XCTAssertFalse(hintedResponse.rawJSON.contains("\"isError\":true"), hintedResponse.rawJSON)
+
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    await gate.release()
+                    await manager.debugAwaitCodeStructureSettlementDrain(windowID: windowID)
+                    XCTAssertFalse(try XCTUnwrap(Self.storedSelection(context)).selectedPaths.contains(context.fileURL.path))
+
+                    _ = await server.setWindowToolsEnabled(false)
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await Self.cleanupEndpoint(caller, manager: manager)
+                    endpoint = nil
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    await gate.release()
+                    hintedRead?.cancel()
+                    if let hintedRead { _ = try? await hintedRead.value }
+                    _ = await server.setWindowToolsEnabled(false)
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: manager) }
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        /// A read whose selection apply is stuck stays counted until that apply ends, even after the connection's
+        /// next read passes the apply over. Stuck applies fill the window's recovery limit until the next call is
+        /// refused, and ending held applies refunds the capacity they used.
+        func testPassedOverSelectionAppliesStayCountedUntilTheyEnd() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let context = fixture.contextA
+                let windowID = context.window.windowID
+                let server = context.window.mcpServer
+                let manager = fixture.networkManager
+                let clock = MCPExportWatchdogManualClock()
+                let deadline = MCPTimeoutPolicy.boundedToolExecutionDeadline
+                // Six reads' applies stick. The seventh runs.
+                let holds = SelectionApplyHolds(heldCount: 6)
+                var endpoint: PersistentMCPTestEndpoint?
+
+                do {
+                    try await fixture.registerDomainWorkspace(context)
+                    try await Self.activateWorkspace(context)
+                    let caller = try await Self.makeBoundEndpoint(label: "stuck-apply-reader", fixture: fixture)
+                    endpoint = caller
+                    _ = try await caller.callTool(name: MCPWindowToolName.manageSelection, arguments: ["op": "clear"])
+                    await manager.debugSetToolExecutionWatchdogEnvironment(clock.environment)
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting {
+                        await holds.enter()
+                    }
+
+                    func read() async throws -> PersistentMCPTestRPCResponse {
+                        try await caller.callTool(
+                            name: MCPWindowToolName.readFile,
+                            arguments: ["path": context.fileURL.path, "_rawJSON": true]
+                        )
+                    }
+                    /// The read's apply sticks at hold `index`, and the read times out at its deadline.
+                    func stuckRead(_ index: Int) async throws {
+                        let pending = Task { try await read() }
+                        do {
+                            try await holds.waitUntilEntered(count: index)
+                        } catch {
+                            let reply = try await pending.value
+                            XCTFail("read \(index) never reached its selection apply (\(error)): \(reply.rawJSON)")
+                            throw error
+                        }
+                        try await clock.waitForSleeper(expected: deadline)
+                        try await clock.advanceSleeper(expected: deadline)
+                        let reply = try await pending.value
+                        XCTAssertTrue(reply.rawJSON.contains("tool_execution_timeout"), "read \(index): \(reply.rawJSON)")
+                    }
+                    func diagnostics() async -> MCPCodeStructureSettlementRegistry.Diagnostics {
+                        await manager.debugCodeStructureSettlementDiagnostics(windowID: windowID)
+                    }
+
+                    // Each read passes over the previous read's stuck apply. A released stuck read and a newer one cap
+                    // the window, and the read after them recovers it, quarantining both.
+                    try await stuckRead(1)
+                    try await clock.advanceWithoutWakingSleepers(by: MCPCodeStructureSettlementRegistry.recoveryHorizon)
+                    try await stuckRead(2)
+                    let afterFirstPassOver = await diagnostics()
+                    XCTAssertEqual(afterFirstPassOver.leases.count, 2, "the passed-over read stopped counting while its apply was stuck")
+                    try await stuckRead(3)
+                    try await clock.advanceWithoutWakingSleepers(by: MCPCodeStructureSettlementRegistry.recoveryHorizon)
+                    try await stuckRead(4)
+                    try await stuckRead(5)
+                    try await clock.advanceWithoutWakingSleepers(by: MCPCodeStructureSettlementRegistry.recoveryHorizon)
+                    try await stuckRead(6)
+
+                    let atLimit = await diagnostics()
+                    XCTAssertEqual(atLimit.leases.map(\.state), Array(repeating: "awaiting_effects", count: 6))
+                    XCTAssertEqual(atLimit.leases.count(where: { $0.recoveryID != nil }), 4)
+                    XCTAssertEqual(
+                        atLimit.quarantine.windowOutstandingRecoveryCount,
+                        MCPCodeStructureSettlementRegistry.outstandingRecoveryLimitPerWindow
+                    )
+                    let refused = try await read()
+                    XCTAssertTrue(refused.rawJSON.contains("quarantine_exhausted"), refused.rawJSON)
+                    let appliesAfterRefusal = await holds.enteredCount()
+                    XCTAssertEqual(appliesAfterRefusal, 6)
+
+                    // Ending the first recovery's two stuck applies refunds that recovery. The next read then recovers
+                    // the window and returns.
+                    await holds.release(1)
+                    await holds.release(2)
+                    let refunded = await MCPWindowTestSupport.waitUntil(timeout: .seconds(10)) {
+                        await diagnostics().quarantine.windowOutstandingRecoveryCount == 1
+                    }
+                    XCTAssertTrue(refunded, "ending the held applies didn't refund their recovery")
+                    let recovered = try await read()
+                    XCTAssertFalse(recovered.rawJSON.contains("\"isError\":true"), recovered.rawJSON)
+
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    await holds.releaseAll()
+                    // Bounded, so stuck applies that never give up their leases fail the test instead of hanging it.
+                    let drained = await MCPWindowTestSupport.waitUntil(timeout: .seconds(10)) {
+                        await diagnostics().leases.isEmpty
+                    }
+                    XCTAssertTrue(drained, "leases remained after every held apply ended")
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    await Self.cleanupEndpoint(caller, manager: manager)
+                    endpoint = nil
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
+                    await holds.releaseAll()
+                    await manager.debugResetToolExecutionWatchdogEnvironment()
+                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: manager) }
+                    await fixture.cleanup()
+                    throw error
+                }
+            }
+        }
+
+        /// A read revoked after the selection worker checked its batch, while the write is about to land, is
+        /// left out of the stored selection, and the read it shares the batch with still applies.
+        func testReadRevokedJustBeforeTheSelectionWriteIsLeftOutWhileTheRestOfItsBatchApplies() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let coordinator = server.readFileAutoSelectionCoordinator
+                let gate = MCPExecutionIgnoringCancellationGate()
+                let liveRelativePath = "Sources/RevocationSurvivor.swift"
+                let liveURL = context.rootURL.appendingPathComponent(liveRelativePath)
+                var endpoint: PersistentMCPTestEndpoint?
+
+                _ = try await context.window.workspaceFileContextStore.createFile(
+                    rootID: context.rootID,
+                    relativePath: liveRelativePath,
+                    content: SwiftFixtureSource.emptyStruct("RevocationSurvivor")
+                )
+                do {
+                    try await fixture.registerDomainWorkspace(context)
+                    try await Self.activateWorkspace(context)
+                    let caller = try await Self.makeBoundEndpoint(label: "revoked-at-write", fixture: fixture)
+                    endpoint = caller
+                    _ = try await caller.callTool(name: MCPWindowToolName.manageSelection, arguments: ["op": "clear"])
+                    let binding = try XCTUnwrap(server.tabContextByConnectionID[caller.connectionID])
+                    let key = MCPReadFileAutoSelectionCoordinator.ContextKey(
+                        windowID: binding.windowID,
+                        workspaceID: binding.workspaceID,
+                        tabID: binding.tabID,
+                        route: .bound(connectionID: caller.connectionID, runID: binding.runID),
+                        bindingGeneration: binding.readFileAutoSelectionGeneration
+                    )
+                    let workspaceID = try XCTUnwrap(binding.workspaceID)
+                    // The apply resolves its own lookup context; a batch's authority only has to match its batch.
+                    let authority = MCPServerViewModel.FrozenFileToolAuthority(
+                        lookupContext: .visibleWorkspace,
+                        rootCatalogSnapshot: WorkspaceRootCatalogSnapshot(
+                            ticket: WorkspaceSearchReadinessTicket(workspaceID: workspaceID, generation: 1),
+                            workspaceID: workspaceID,
+                            configuredRootPaths: [],
+                            primaryRoots: []
+                        ),
+                        sessionRootLifetimeSnapshot: nil,
+                        sourceIdentity: nil
+                    )
+                    let revokedRead = MCPDomainInvocationFence()
+                    let liveRead = MCPDomainInvocationFence()
+                    server.setReadFileAutoSelectionPersistenceGateForTesting {
+                        await gate.enterAndWait()
+                    }
+
+                    // The worker can't start until this test suspends, so both intents share one batch.
+                    XCTAssertTrue(coordinator.enqueue(
+                        intent: .full(paths: [context.fileURL.path]),
+                        authority: authority,
+                        fence: revokedRead,
+                        for: key
+                    ))
+                    XCTAssertTrue(coordinator.enqueue(
+                        intent: .full(paths: [liveURL.path]),
+                        authority: authority,
+                        fence: liveRead,
+                        for: key
+                    ))
+                    try await gate.waitUntilEntered(count: 1)
+                    revokedRead.revoke(origin: .watchdogDeadline)
+                    server.setReadFileAutoSelectionPersistenceGateForTesting(nil)
+                    await gate.release()
+
+                    let drained = await coordinator.drain(.canonicalSelection, for: key)
+                    XCTAssertEqual(drained, .completed)
+                    let stored = try XCTUnwrap(Self.storedSelection(context))
+                    XCTAssertFalse(stored.selectedPaths.contains(context.fileURL.path), "\(stored.selectedPaths)")
+                    XCTAssertTrue(stored.selectedPaths.contains(liveURL.path), "\(stored.selectedPaths)")
+
+                    await Self.cleanupEndpoint(caller, manager: fixture.networkManager)
+                    endpoint = nil
+                    await fixture.cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    server.setReadFileAutoSelectionPersistenceGateForTesting(nil)
+                    await gate.release()
                     if let endpoint { await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager) }
                     await fixture.cleanup()
                     throw error
@@ -655,6 +1028,56 @@ import XCTest
             let content = try XCTUnwrap(result["content"] as? [[String: Any]])
             return try XCTUnwrap(content.first?["text"] as? String)
         }
+    }
+
+    /// Holds each of the first `heldCount` selection applies at its own gate until that apply is released, so a
+    /// test can end stuck applies one at a time.
+    private actor SelectionApplyHolds {
+        private let heldCount: Int
+        private var entered = 0
+        private var released: Set<Int> = []
+        private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+
+        init(heldCount: Int) {
+            self.heldCount = heldCount
+        }
+
+        func enter() async {
+            entered += 1
+            let index = entered
+            guard index <= heldCount, !released.contains(index) else { return }
+            await withCheckedContinuation { waiters[index] = $0 }
+        }
+
+        func enteredCount() -> Int {
+            entered
+        }
+
+        func waitUntilEntered(count expected: Int, timeout: Duration = .seconds(10)) async throws {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: timeout)
+            while entered < expected {
+                guard clock.now < deadline else {
+                    throw SelectionApplyHoldError.didNotEnter(expected: expected, actual: entered)
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+
+        func release(_ index: Int) {
+            released.insert(index)
+            waiters.removeValue(forKey: index)?.resume()
+        }
+
+        func releaseAll() {
+            for index in 1 ... max(heldCount, 1) {
+                release(index)
+            }
+        }
+    }
+
+    private enum SelectionApplyHoldError: Error {
+        case didNotEnter(expected: Int, actual: Int)
     }
 
     /// Read auto-selection lane events for one tab, so a test can wait for a drain to start waiting or
