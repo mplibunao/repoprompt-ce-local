@@ -38,6 +38,10 @@ package struct DomainReadSideEffectReceipt: Equatable, Sendable {
 ///
 /// Accepted operations are strictly ordered within a lane. A terminal failure is observable by
 /// the submitting caller but is not inherited by later operations or future high-water drains.
+///
+/// An operation whose read was revoked and stopped waiting is retired: it counts as terminal, so later
+/// operations and drains stop waiting for it, but its task keeps running and stays tracked until it ends.
+/// The revoked read's fence keeps a retired effect from publishing, so running it out of order is safe.
 package actor DomainReadSideEffectCoordinator {
     private struct LaneKey: Hashable, Sendable {
         let context: DomainContextIdentity
@@ -49,12 +53,25 @@ package actor DomainReadSideEffectCoordinator {
         let receipt: DomainReadSideEffectReceipt
     }
 
+    private struct TerminalWaiter: Sendable {
+        let target: UInt64
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
     private struct LaneState: Sendable {
         var acceptedRevision: UInt64 = 0
+        /// Every revision at or below this one is terminal: its task ended or it was retired.
         var terminalRevision: UInt64 = 0
+        /// Terminal revisions above `terminalRevision`, which wait for an earlier revision to become terminal.
+        var terminalRevisionsAboveContiguous: Set<UInt64> = []
         var tasks: [UInt64: Task<Void, Error>] = [:]
+        /// Revisions whose task hasn't ended, retired ones included.
+        var runningRevisions: Set<UInt64> = []
+        var retiredRevisions: Set<UInt64> = []
+        var fences: [UInt64: MCPDomainInvocationFence] = [:]
         var operations: [UUID: RecordedOperation] = [:]
         var expiredOperationIDs: [UUID] = []
+        var terminalWaiters: [UUID: TerminalWaiter] = [:]
     }
 
     private let identity: DomainRuntimeIdentity
@@ -73,13 +90,22 @@ package actor DomainReadSideEffectCoordinator {
         return states[LaneKey(context: handle.context, effectClass: effectClass)]?.acceptedRevision ?? 0
     }
 
+    /// `fence` belongs to the read that submits the operation; once it's revoked, the read's cancelled
+    /// wait retires the operation. `onFinished` runs once: when the operation's task ends, before any
+    /// waiter sees the result, or right away when this call doesn't start a task.
     package func submit(
         handle: DomainReadContextHandle,
         effectClass: DomainReadSideEffectClass,
         operationID: UUID,
         fingerprint: String,
+        fence: MCPDomainInvocationFence? = nil,
+        onFinished: (@Sendable () -> Void)? = nil,
         operation: @Sendable @escaping () async throws -> Void
     ) throws -> DomainReadSideEffectReceipt {
+        var startedTask = false
+        defer {
+            if !startedTask { onFinished?() }
+        }
         try validate(handle)
         guard !stopped else { throw DomainReadSideEffectError.stopped }
         let key = LaneKey(context: handle.context, effectClass: effectClass)
@@ -95,11 +121,13 @@ package actor DomainReadSideEffectCoordinator {
         }
 
         let revision = state.acceptedRevision &+ 1
-        let previous = state.tasks[state.acceptedRevision]
-        let task = Task {
-            // A previous terminal error belongs to its submitter. It must never poison this lane.
-            if let previous { _ = await previous.result }
+        let task = Task { [weak self] in
+            defer { onFinished?() }
+            // Waiting for terminal revisions, not results: a previous terminal error belongs to its
+            // submitter and must never poison this lane.
+            await self?.awaitTerminal(key: key, through: revision - 1)
             try Task.checkCancellation()
+            guard await self?.isRetired(key: key, revision: revision) == false else { return }
             try await operation()
         }
         let receipt = DomainReadSideEffectReceipt(
@@ -110,21 +138,25 @@ package actor DomainReadSideEffectCoordinator {
         )
         state.acceptedRevision = revision
         state.tasks[revision] = task
+        state.runningRevisions.insert(revision)
+        state.fences[revision] = fence
         state.operations[operationID] = RecordedOperation(
             fingerprint: fingerprint,
             receipt: receipt
         )
         states[key] = state
+        startedTask = true
 
         Task { [weak self] in
             _ = await task.result
-            await self?.markTerminal(key: key, revision: revision)
+            await self?.taskEnded(key: key, revision: revision)
         }
         return receipt
     }
 
     /// Waits for the exact submitted operation and preserves its success/failure/cancellation.
-    /// Cancellation of the waiter does not cancel the coordinator-owned shared effect.
+    /// Cancellation of the waiter does not cancel the coordinator-owned shared effect. When the
+    /// operation's read has been revoked, the cancelled wait retires the operation.
     package func wait(
         handle: DomainReadContextHandle,
         receipt: DomainReadSideEffectReceipt
@@ -136,7 +168,12 @@ package actor DomainReadSideEffectCoordinator {
               state.operations[receipt.operationID]?.receipt == receipt,
               let task = state.tasks[receipt.revision]
         else { throw DomainReadSideEffectError.receiptUnavailable }
-        try await awaitCompletion(of: task, cancelUnderlyingOnCancellation: false)
+        do {
+            try await awaitCompletion(of: task, cancelUnderlyingOnCancellation: false)
+        } catch where Task.isCancelled {
+            retireIfRevoked(key: key, revision: receipt.revision)
+            throw error
+        }
     }
 
     /// Waits until the lane has reached a revision. Historical effect failures are terminal and
@@ -152,18 +189,12 @@ package actor DomainReadSideEffectCoordinator {
         let key = LaneKey(context: handle.context, effectClass: effectClass)
         guard let state = states[key] else { return }
         if state.terminalRevision >= revision { return }
-        guard let task = state.tasks[revision] else {
+        guard revision <= state.acceptedRevision else {
             throw DomainReadSideEffectError.receiptUnavailable
         }
-        // A drain observes ordering, not the earlier submitter's failure. It must still be promptly
-        // cancellable without canceling shared work owned by another request.
-        do {
-            try await awaitCompletion(of: task, cancelUnderlyingOnCancellation: false)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            // Earlier terminal failures belong only to their exact submitters.
-        }
+        // A drain observes ordering, not the earlier submitters' failures, which belong only to them.
+        // It must still be promptly cancellable without canceling shared work owned by another request.
+        await awaitTerminal(key: key, through: revision)
         try Task.checkCancellation()
     }
 
@@ -208,18 +239,89 @@ package actor DomainReadSideEffectCoordinator {
         }
     }
 
-    private func markTerminal(key: LaneKey, revision: UInt64) {
-        guard var state = states[key] else { return }
-        state.terminalRevision = max(state.terminalRevision, revision)
-        if state.terminalRevision > 32 {
-            let floor = state.terminalRevision - 32
-            state.tasks = state.tasks.filter { $0.key >= floor }
-            let expired = state.operations.filter { $0.value.receipt.revision < floor }.map(\.key)
-            state.operations = state.operations.filter { $0.value.receipt.revision >= floor }
-            state.expiredOperationIDs.append(contentsOf: expired)
-            if state.expiredOperationIDs.count > 32 {
-                state.expiredOperationIDs.removeFirst(state.expiredOperationIDs.count - 32)
+    /// Returns once every revision through `target` is terminal, or when the calling task is cancelled.
+    private func awaitTerminal(key: LaneKey, through target: UInt64) async {
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled,
+                      let terminalRevision = states[key]?.terminalRevision,
+                      terminalRevision < target
+                else {
+                    continuation.resume()
+                    return
+                }
+                states[key]?.terminalWaiters[waiterID] = TerminalWaiter(target: target, continuation: continuation)
             }
+        } onCancel: {
+            Task { await self.resumeTerminalWaiter(key: key, waiterID: waiterID) }
+        }
+    }
+
+    private func resumeTerminalWaiter(key: LaneKey, waiterID: UUID) {
+        states[key]?.terminalWaiters.removeValue(forKey: waiterID)?.continuation.resume()
+    }
+
+    private func isRetired(key: LaneKey, revision: UInt64) -> Bool {
+        states[key]?.retiredRevisions.contains(revision) ?? true
+    }
+
+    private func retireIfRevoked(key: LaneKey, revision: UInt64) {
+        guard var state = states[key],
+              state.fences[revision]?.isRevoked == true,
+              state.runningRevisions.contains(revision),
+              !state.retiredRevisions.contains(revision)
+        else { return }
+        state.retiredRevisions.insert(revision)
+        states[key] = state
+        markTerminal(key: key, revision: revision)
+    }
+
+    private func taskEnded(key: LaneKey, revision: UInt64) {
+        guard var state = states[key] else { return }
+        state.runningRevisions.remove(revision)
+        let wasRetired = state.retiredRevisions.remove(revision) != nil
+        states[key] = state
+        if wasRetired {
+            pruneExpiredRevisions(key: key)
+        } else {
+            markTerminal(key: key, revision: revision)
+        }
+    }
+
+    /// Revisions become terminal out of order once one is retired, so the terminal revision advances only
+    /// over a contiguous run. A drain or a later operation never passes an earlier revision still running.
+    private func markTerminal(key: LaneKey, revision: UInt64) {
+        guard var state = states[key], revision > state.terminalRevision else { return }
+        state.terminalRevisionsAboveContiguous.insert(revision)
+        while state.terminalRevisionsAboveContiguous.remove(state.terminalRevision &+ 1) != nil {
+            state.terminalRevision &+= 1
+        }
+        let terminalRevision = state.terminalRevision
+        let resumed = state.terminalWaiters.filter { $0.value.target <= terminalRevision }
+        for waiterID in resumed.keys {
+            state.terminalWaiters.removeValue(forKey: waiterID)
+        }
+        states[key] = state
+        pruneExpiredRevisions(key: key)
+        for waiter in resumed.values {
+            waiter.continuation.resume()
+        }
+    }
+
+    /// Forgets receipts more than 32 revisions behind the terminal revision. A retired operation's task
+    /// is kept while it runs, so shutdown still cancels it.
+    private func pruneExpiredRevisions(key: LaneKey) {
+        guard var state = states[key], state.terminalRevision > 32 else { return }
+        let floor = state.terminalRevision - 32
+        let running = state.runningRevisions
+        state.tasks = state.tasks.filter { $0.key >= floor || running.contains($0.key) }
+        state.fences = state.fences.filter { $0.key >= floor || running.contains($0.key) }
+        let expired = state.operations.filter { $0.value.receipt.revision < floor }.map(\.key)
+        state.operations = state.operations.filter { $0.value.receipt.revision >= floor }
+        state.expiredOperationIDs.append(contentsOf: expired)
+        if state.expiredOperationIDs.count > 32 {
+            state.expiredOperationIDs.removeFirst(state.expiredOperationIDs.count - 32)
         }
         states[key] = state
     }
