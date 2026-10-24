@@ -130,8 +130,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         await gate.release()
         let revokedReadResult = await revokedReadDrain.value
         let nextReadResult = await nextReadDrain.value
-        let workerStarts = probe.snapshot().count(where: { $0.kind == .workerStarted && $0.lane == .canonical })
-        _ = await probe.waitFor(kind: .workerStopped, lane: .canonical, occurrence: workerStarts)
+        await probe.waitUntilStartedWorkersStop(lane: .canonical)
         let appliedAfterRelease = await recorder.batches()
         XCTAssertEqual(revokedReadResult, .completed)
         XCTAssertEqual(nextReadResult, .completed)
@@ -170,8 +169,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
             for: key
         ))
         // Passing over the stuck batch would start a second worker inside that enqueue.
-        let workerStarts = probe.snapshot().count(where: { $0.kind == .workerStarted && $0.lane == .canonical })
-        XCTAssertEqual(workerStarts, 1)
+        XCTAssertEqual(probe.eventCount(kind: .workerStarted, lane: .canonical), 1)
 
         await gate.release()
         let drained = await coordinator.drain(.canonicalSelection, for: key)
@@ -224,8 +222,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         coordinator.invalidate(context: key)
         await gate.release()
         let closingDrainResult = await closingDrain.value
-        let workerStarts = probe.snapshot().count(where: { $0.kind == .workerStarted && $0.lane == .canonical })
-        _ = await probe.waitFor(kind: .workerStopped, lane: .canonical, occurrence: workerStarts)
+        await probe.waitUntilStartedWorkersStop(lane: .canonical)
         XCTAssertEqual(closingDrainResult, .completed)
         XCTAssertEqual(appliedWhileStuck, [RecoveryBatchRecorder.Batch(fullPaths: ["/tmp/Queued.swift"], slicePaths: [])])
         assertFullyReclaimed(coordinator)
@@ -258,7 +255,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         XCTAssertTrue(coordinator.enqueue(intent: .full(paths: ["/tmp/Second.swift"]), fence: secondRead, for: key))
         // The enqueue passes over the stuck batch and starts the replacement before it returns. Without that, nothing
         // ever enters the second gate, and the test stops here instead of waiting for it.
-        let workerStartsAfterPassOver = probe.snapshot().count(where: { $0.kind == .workerStarted && $0.lane == .canonical })
+        let workerStartsAfterPassOver = probe.eventCount(kind: .workerStarted, lane: .canonical)
         XCTAssertEqual(workerStartsAfterPassOver, 2, "the second read's enqueue didn't pass over the stuck batch")
         guard workerStartsAfterPassOver == 2 else {
             await firstGate.release()
@@ -275,7 +272,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
             fence: MCPDomainInvocationFence(),
             for: key
         ))
-        let workerStartsBehindLiveBatch = probe.snapshot().count(where: { $0.kind == .workerStarted && $0.lane == .canonical })
+        let workerStartsBehindLiveBatch = probe.eventCount(kind: .workerStarted, lane: .canonical)
         XCTAssertEqual(workerStartsBehindLiveBatch, 2, "the third read got a worker of its own beside the second read's")
 
         secondRead.revoke(origin: .watchdogDeadline)
@@ -291,8 +288,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         coordinator.invalidate(context: key)
         await secondGate.release()
         let thirdReadResult = await thirdReadDrain.value
-        let workerStarts = probe.snapshot().count(where: { $0.kind == .workerStarted && $0.lane == .canonical })
-        _ = await probe.waitFor(kind: .workerStopped, lane: .canonical, occurrence: workerStarts)
+        await probe.waitUntilStartedWorkersStop(lane: .canonical)
         XCTAssertEqual(thirdReadResult, .completed)
         XCTAssertEqual(appliedWhileSecondIsStuck, [RecoveryBatchRecorder.Batch(fullPaths: ["/tmp/Third.swift"], slicePaths: [])])
         assertFullyReclaimed(coordinator)
@@ -300,9 +296,9 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
 
     /// A read whose provider completes at its deadline gets the timeout reply, and its queued selection never
     /// applies afterwards, whichever of the completion and the deadline the watchdog handles first.
-    func testAReadThatCompletesAtItsDeadlineTimesOutWithoutSelectingItsFileLater() async throws {
+    func testAReadThatCompletesAtItsDeadlineTimesOutWithoutSelectingItsFileLater() async {
         for order in LateCompletionOrder.allCases {
-            try await assertReadCompletingAtItsDeadlineNeverSelectsItsFile(order)
+            await assertReadCompletingAtItsDeadlineNeverSelectsItsFile(order)
         }
     }
 
@@ -637,7 +633,7 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
         _ order: LateCompletionOrder,
         file: StaticString = #filePath,
         line: UInt = #line
-    ) async throws {
+    ) async {
         let gate = RecoveryCancellationIgnoringGate()
         let recorder = RecoveryBatchRecorder()
         let probe = RecoveryDiagnosticEventProbe()
@@ -934,6 +930,18 @@ private final class RecoveryDiagnosticEventProbe: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return events
+    }
+
+    func eventCount(
+        kind: MCPReadFileAutoSelectionDiagnosticEvent.Kind,
+        lane: MCPReadFileAutoSelectionDiagnosticEvent.Lane
+    ) -> Int {
+        snapshot().count(where: { $0.kind == kind && $0.lane == lane })
+    }
+
+    /// Waits until every worker started on `lane` so far has stopped.
+    func waitUntilStartedWorkersStop(lane: MCPReadFileAutoSelectionDiagnosticEvent.Lane) async {
+        _ = await waitFor(kind: .workerStopped, lane: lane, occurrence: eventCount(kind: .workerStarted, lane: lane))
     }
 
     func waitFor(

@@ -6,14 +6,14 @@ import MCP
 #if DEBUG
     /// Holds MCP tool calls for the `mcp_stuck_call_scenario` diagnostics op, so a capped window and its
     /// automatic recovery can be driven on the debug app. A scenario targets one window and one hook and
-    /// holds at most its capture limit of calls there, two unless it is armed with one. A held call doesn't observe cancellation, so it outlives
-    /// its deadline and grace the way a stuck call does. Held calls continue when the scenario is released
-    /// or cleared, when its window closes, or after its auto-release delay.
+    /// holds at most `captureLimit` calls there, two by default. A held call doesn't observe cancellation,
+    /// so it outlives its deadline and grace the way a stuck call does. Held calls continue when the
+    /// scenario is released or cleared, when its window closes, or after its auto-release delay.
     final class MCPStuckToolScenarioRegistry: @unchecked Sendable {
         enum Hook: String, CaseIterable {
             /// `read_file`, after its reply is built and its selection intent is enqueued.
             case readFile = "read_file"
-            /// A read's automatic selection, before the window's selection worker applies it.
+            /// A read's automatic selection, before the selection worker for the read's connection applies it.
             case readFileAutoSelection = "read_file_auto_selection"
             /// `prompt` set, append, and clear, after the tab resolves and before the change commits.
             case prompt
