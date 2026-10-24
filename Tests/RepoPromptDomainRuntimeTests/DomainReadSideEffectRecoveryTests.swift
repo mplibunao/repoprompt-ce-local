@@ -178,20 +178,31 @@ final class DomainReadSideEffectRecoveryTests: XCTestCase {
 
         XCTAssertEqual(events.snapshot(), ["retired finished"])
         await stuck.release()
+        try await coordinator.wait(handle: handle, receipt: retired)
+        XCTAssertEqual(events.snapshot(), ["retired finished"])
     }
 
     #if DEBUG
         /// Yields until a waiter for `target` is parked in the lane or `events` records something, so the test
-        /// knows which of the two happened without timing it.
+        /// knows which of the two happened without timing it. The deadline only turns a hang into a failure.
+        /// `target` follows the lane's internal convention: an operation waits on the revision before its own,
+        /// and a drain on the revision it drains through.
         private func waitUntilParkedOrRecorded(
             _ coordinator: DomainReadSideEffectCoordinator,
             handle: DomainReadContextHandle,
             target: UInt64,
-            events: EventLog
+            events: EventLog,
+            file: StaticString = #filePath,
+            line: UInt = #line
         ) async {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
             while events.snapshot().isEmpty,
                   await !coordinator.debugTerminalWaitTargets(handle: handle, effectClass: .selection).contains(target)
             {
+                guard ContinuousClock.now < deadline else {
+                    XCTFail("no waiter parked on revision \(target) and nothing ran", file: file, line: line)
+                    return
+                }
                 await Task.yield()
             }
         }
