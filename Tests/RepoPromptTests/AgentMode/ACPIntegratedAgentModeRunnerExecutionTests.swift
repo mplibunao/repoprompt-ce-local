@@ -1584,7 +1584,7 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             try await fixture.expectIdleOutcomes([.stale, .rearmed], countingStale: true)
             try await startupTestEventually { clock.pendingDeadlines == [grownDeadline] }
 
-            clock.advance(by: .seconds(10 * 60 - Self.idleInterval.components.seconds - 1))
+            clock.advance(by: .seconds(10 * 60) - Self.idleInterval - .seconds(1))
             XCTAssertEqual(clock.pendingDeadlines, [grownDeadline], "a deadline before the grown one came due")
             XCTAssertTrue(session.acpController === controller)
             XCTAssertFalse(fixture.peer.hasExited(pid))

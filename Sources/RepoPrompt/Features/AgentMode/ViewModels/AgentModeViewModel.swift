@@ -10152,22 +10152,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             sessions[tabID] === session && isRequestCurrent() && !Task.isCancelled
         }
         func settle(_ result: AgentProviderRetirementResult) -> AgentProviderRetirementResult {
-            var level = OSLogType.default
-            let event: String
-            switch result {
-            case .retiring:
-                event = "retiring"
-            case .alreadyGone:
-                event = "already_gone"
-            case let .blocked(blocker):
-                event = "blocked blocker=\(blocker.rawValue)"
-                // An idle timer asks again every interval while the session stays busy.
-                if reason.isAutomatic {
-                    level = .debug
-                }
-            case .superseded:
-                event = "superseded"
+            let event = switch result {
+            case .retiring: "retiring"
+            case .alreadyGone: "already_gone"
+            case let .blocked(blocker): "blocked blocker=\(blocker.rawValue)"
+            case .superseded: "superseded"
             }
+            // An idle timer asks again every interval while the session stays busy.
+            let level: OSLogType = if case .blocked = result, reason.isAutomatic { .debug } else { .default }
             AgentProviderRetirement.log(
                 event,
                 level: level,
