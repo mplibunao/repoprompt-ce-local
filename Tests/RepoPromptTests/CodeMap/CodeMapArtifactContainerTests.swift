@@ -649,6 +649,120 @@ private func makeSecureRoot() throws -> URL {
             XCTAssertEqual(accounting.manifestCount, 0)
         }
 
+        func testScanSummariesSurviveDecodedSnapshotBudgetPressure() async throws {
+            let fixture = try await makeFixture()
+            _ = try await fixture.publish()
+
+            let refusing = try CodeMapRootManifestStore(rootURL: fixture.root, policy: policy(cacheBytes: 1))
+            try await assertScansDecodeEachManifestOnce(
+                "one-byte budget retains no snapshot",
+                fixture: fixture,
+                store: refusing,
+                manifestCount: 1,
+                cacheBytes: 1,
+                maximumRetainedSnapshots: 0
+            )
+
+            let secondNamespace = try CodeMapRootManifestNamespace(
+                repositoryNamespace: fixture.namespace.repositoryNamespace,
+                worktreeIdentity: "wt_" + String(repeating: "b", count: 64),
+                repositoryRelativeLoadedRootPrefix: "",
+                objectFormat: .sha1,
+                pipelineIdentity: fixture.namespace.pipelineIdentity,
+                repositoryBindingEpoch: "repository",
+                worktreeBindingEpoch: "worktree"
+            )
+            _ = try await fixture.store.updateCurrentManifest(
+                namespace: secondNamespace, authority: fixture.authority, records: [], lastAccessEpochSeconds: 100
+            )
+            let oneManifestByteCount = try UInt64(Data(contentsOf: fixture.manifestURL).count)
+            let secondByteCount = try UInt64(Data(contentsOf: fixture.store.manifestURL(for: secondNamespace)).count)
+            XCTAssertEqual(secondByteCount, oneManifestByteCount)
+            let evicting = try CodeMapRootManifestStore(
+                rootURL: fixture.root,
+                policy: policy(cacheBytes: oneManifestByteCount)
+            )
+            try await assertScansDecodeEachManifestOnce(
+                "one-manifest budget evicts on every decode",
+                fixture: fixture,
+                store: evicting,
+                manifestCount: 2,
+                cacheBytes: oneManifestByteCount,
+                maximumRetainedSnapshots: 1
+            )
+        }
+
+        func testScanSummaryRejectsChangedAndCorruptBytes() async throws {
+            let fixture = try await makeFixture()
+            _ = try await fixture.publish()
+            let limited = try CodeMapRootManifestStore(rootURL: fixture.root, policy: policy(cacheBytes: 1))
+            _ = try await limited.accounting()
+            let decodesBeforeRewrite = await limited.scanDecodeCountForTesting()
+            XCTAssertEqual(decodesBeforeRewrite, 1)
+
+            let replacement = try CodeMapRootManifestCodec.encode(snapshot: CodeMapRootManifestSnapshot(
+                namespace: fixture.namespace,
+                authority: fixture.authority,
+                manifestGeneration: 9,
+                lastAccessEpochSeconds: 100,
+                records: []
+            ))
+            try overwriteInPlacePreservingModificationDate(fixture.manifestURL, with: replacement)
+            let afterRewrite = try await limited.accounting()
+            XCTAssertEqual(afterRewrite.manifestCount, 1)
+            let decodesAfterRewrite = await limited.scanDecodeCountForTesting()
+            XCTAssertEqual(decodesAfterRewrite, 2)
+
+            var corrupt = replacement
+            corrupt[corrupt.count - 1] ^= 1
+            try overwriteInPlacePreservingModificationDate(fixture.manifestURL, with: corrupt)
+            let afterCorruption = try await limited.accounting()
+            XCTAssertEqual(afterCorruption.manifestCount, 0)
+            let decodesAfterCorruption = await limited.scanDecodeCountForTesting()
+            XCTAssertEqual(decodesAfterCorruption, 2)
+        }
+
+        func testLowercaseHexMatchesFormattedEncoding() {
+            let allBytes = Data((0 ... 255).map { UInt8($0) })
+            XCTAssertEqual(allBytes.lowercaseHex, allBytes.map { String(format: "%02x", $0) }.joined())
+            XCTAssertEqual(Data().lowercaseHex, "")
+            let slice = allBytes[250 ..< 256]
+            XCTAssertNotEqual(slice.startIndex, 0)
+            XCTAssertEqual(slice.lowercaseHex, "fafbfcfdfeff")
+        }
+
+        /// Runs complete scans on a cold store whose decoded-snapshot budget is too small for its
+        /// manifests: only scan summaries can keep later scans from decoding again.
+        private func assertScansDecodeEachManifestOnce(
+            _ scenario: String,
+            fixture: Fixture,
+            store: CodeMapRootManifestStore,
+            manifestCount: Int,
+            cacheBytes: UInt64,
+            maximumRetainedSnapshots: Int
+        ) async throws {
+            let initial = try await store.accounting()
+            XCTAssertEqual(initial.manifestCount, manifestCount, scenario)
+            let decodesAfterFirstScan = await store.scanDecodeCountForTesting()
+            XCTAssertEqual(decodesAfterFirstScan, manifestCount, scenario)
+            for _ in 0 ..< 3 {
+                let accounting = try await store.accounting()
+                XCTAssertEqual(accounting, initial, scenario)
+            }
+            let decodesAfterRescans = await store.scanDecodeCountForTesting()
+            XCTAssertEqual(decodesAfterRescans, manifestCount, scenario)
+            let entries = await store.decodedManifestCacheEntryCountForTesting()
+            let bytes = await store.decodedManifestCacheByteCountForTesting()
+            XCTAssertLessThanOrEqual(entries, maximumRetainedSnapshots, scenario)
+            XCTAssertLessThanOrEqual(bytes, cacheBytes, scenario)
+
+            let republished = try await fixture.publish(using: store)
+            XCTAssertEqual(republished, .unchanged(manifestGeneration: 1), scenario)
+            _ = try await store.accounting()
+            let decodesAfterRepublish = await store.scanDecodeCountForTesting()
+            XCTAssertEqual(decodesAfterRepublish, manifestCount, scenario)
+        }
+
         private func policy(records: Int = 100_000, cacheBytes: UInt64 = 64 * 1024 * 1024) -> CodeMapRootManifestStorePolicy {
             let defaults = CodeMapRootManifestStorePolicy.default
             return CodeMapRootManifestStorePolicy(

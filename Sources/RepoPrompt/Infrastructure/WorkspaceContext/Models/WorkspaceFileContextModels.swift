@@ -468,7 +468,7 @@ struct WorkspaceRootRecord: Identifiable, Equatable, Hashable {
         self.id = id
         self.name = name
         self.fullPath = fullPath
-        standardizedFullPath = (fullPath as NSString).standardizingPath
+        standardizedFullPath = StandardizedPath.absolute(fullPath)
         self.isSystemRoot = isSystemRoot
         self.kind = kind
     }

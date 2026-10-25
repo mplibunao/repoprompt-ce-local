@@ -10,12 +10,15 @@ private let standardizingPathMaximumUTF8Count = 1024
 private let standardizingPathRemovablePrefixes = ["/private", "/var/automount"]
 
 package enum StandardizedPath {
-    /// Returns the same bytes as `NSString.standardizingPath`. It returns `path` itself when the
-    /// text alone shows standardizing would change nothing, so a caller that stores both the input
-    /// and the result keeps one string instead of two.
+    /// Returns the same bytes as `NSString.standardizingPath` as a native contiguous UTF-8 string,
+    /// because every later comparison or hash of a lazily bridged `NSString` takes the slow path.
+    /// Native input that the text alone shows standardizing would not change is returned as-is, so
+    /// a caller that stores both the input and the result keeps one string instead of two.
     @inline(__always)
     package static func absolute(_ path: String) -> String {
-        isUnchangedByStandardizing(path) ? path : (path as NSString).standardizingPath
+        var standardized = isUnchangedByStandardizing(path) ? path : (path as NSString).standardizingPath
+        standardized.makeContiguousUTF8()
+        return standardized
     }
 
     @inline(__always)
