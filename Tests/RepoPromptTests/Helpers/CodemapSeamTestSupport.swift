@@ -59,6 +59,8 @@ final class CodemapStoreFixture: @unchecked Sendable {
     init(
         name: String,
         capabilityHooks: WorkspaceCodemapGitCapabilityServiceHooks = .none,
+        enginePolicy: WorkspaceCodemapBindingEnginePolicy = .default,
+        graphPullPause: WorkspaceCodemapGraphPullPause = .production,
         beforeCatalogPageRead: (@Sendable (WorkspaceCodemapGraphIndexCatalogPageRequest) async -> Void)? = nil
     ) throws {
         let registry = WorkspaceCodemapBindingIntegrationRegistry()
@@ -108,7 +110,9 @@ final class CodemapStoreFixture: @unchecked Sendable {
                         sourceReader: registry.makeValidatedSourceReaderClient(),
                         catalogClient: beforeCatalogPageRead.map {
                             registry.makeBindingCatalogClient().interceptingCatalogPageRead($0)
-                        } ?? registry.makeBindingCatalogClient()
+                        } ?? registry.makeBindingCatalogClient(),
+                        policy: enginePolicy,
+                        graphPullPause: graphPullPause
                     )
                 }
             ))
