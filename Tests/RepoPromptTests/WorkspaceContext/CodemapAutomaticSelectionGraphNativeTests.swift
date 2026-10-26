@@ -105,17 +105,7 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
 
         let accounting = await engine.accounting()
         XCTAssertEqual(accounting.counters.graphIndexRetries, 0)
-        let maybeGraph = await engine.selectionGraph(rootEpoch: rootAccounting.rootEpoch)
-        let graph = try XCTUnwrap(maybeGraph)
-        let pinned: WorkspaceCodemapGraphPinnedSnapshot
-        switch await graph.latestSnapshot() {
-        case let .ready(snapshot):
-            pinned = snapshot
-        case .pending:
-            return XCTFail("Completed graph index should publish a graph snapshot")
-        case let .revoked(reason):
-            return XCTFail("Completed graph index should not be revoked: \(reason)")
-        }
+        let pinned = try await requireReadySnapshot(engine: engine, rootEpoch: rootAccounting.rootEpoch)
 
         XCTAssertTrue(pinned.snapshot.coverage.isComplete)
         XCTAssertEqual(pinned.snapshot.coverage.pendingCount, 0)
@@ -134,16 +124,120 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
         XCTAssertFalse(fixture.builtSourceTexts.values.contains { $0.contains("OuterBlobOnly") })
     }
 
+    /// Runs on the main actor because XCTest can drop an off-main assertion failure that it hasn't
+    /// recorded by the time an async test returns.
+    @MainActor
+    func testUncommittedEditRefreshesGraphWithoutArtifactDemand() async throws {
+        let repository = try ReviewGitRepositoryFixture(name: #function)
+        let editedPath = "Sources/Shared.swift"
+        let referencingPath = "Sources/Client.swift"
+        let rootURL = try repository.makeRepository(
+            named: "root",
+            files: [
+                editedPath: "struct SharedModel { let id: Int }\nstruct OldMarker { let flag: Bool }\n",
+                referencingPath: "struct Client { let model: SharedModel }\n"
+            ]
+        )
+        let fixture = try CodemapStoreFixture(name: #function)
+        let store = fixture.makeStore()
+        let loaded = try await store.loadRoot(path: rootURL.path)
+        addTeardownBlock {
+            await store.unloadRoot(id: loaded.id)
+            await fixture.shutdown()
+            repository.cleanup()
+        }
+
+        let files = await store.files(inRoot: loaded.id)
+        let editedFile = try XCTUnwrap(files.first { $0.standardizedRelativePath == editedPath })
+        let referencingFile = try XCTUnwrap(files.first { $0.standardizedRelativePath == referencingPath })
+        let engine = try fixture.runtime().bindingEngine()
+        let initialAccounting = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+        let initial = try await requireReadySnapshot(engine: engine, rootEpoch: initialAccounting.rootEpoch)
+        let initialSlot = try XCTUnwrap(initial.snapshot.slotsByFileID[editedFile.id])
+        XCTAssertTrue(definitions(in: initial, fileID: editedFile.id).contains("OldMarker"))
+        XCTAssertTrue(hasEdge(in: initial, from: referencingFile.id, to: editedFile.id, named: "SharedModel"))
+        let completedRunCount = await engine.accounting().counters.graphIndexCoveragesCompleted
+
+        // Edit without committing, then replay the watcher event. The test reads the graph directly:
+        // an artifact demand would clear the path's shadow by itself and mask a missing refresh.
+        try repository.write(
+            "struct SharedModel { let id: Int }\nstruct NewMarker { let flag: Bool }\n",
+            to: editedPath,
+            at: rootURL
+        )
+        await store.replayObservedFileSystemDeltas(
+            rootID: loaded.id,
+            deltas: [.fileModified(editedPath, Date())]
+        )
+
+        let refreshedAccounting = try await waitForGraphCompletion(
+            engine: engine,
+            rootID: loaded.id,
+            afterCompletedRunCount: completedRunCount
+        )
+        let refreshed = try await requireReadySnapshot(engine: engine, rootEpoch: refreshedAccounting.rootEpoch)
+        let refreshedSlot = refreshed.snapshot.slotsByFileID[editedFile.id]
+        XCTAssertGreaterThan(
+            refreshed.snapshot.appliedGeneration.rawValue,
+            initial.snapshot.appliedGeneration.rawValue
+        )
+        XCTAssertTrue(refreshed.snapshot.coverage.isComplete)
+        XCTAssertEqual(refreshed.snapshot.coverage.pendingCount, 0)
+        XCTAssertGreaterThan(refreshedSlot?.pathGeneration ?? 0, initialSlot.pathGeneration)
+        guard case .contributed = refreshedSlot?.state else {
+            return XCTFail(
+                "The edited file should contribute after a later completed run; observed \(String(describing: refreshedSlot?.state)) at path generation \(String(describing: refreshedSlot?.pathGeneration))"
+            )
+        }
+        let refreshedDefinitions = definitions(in: refreshed, fileID: editedFile.id)
+        XCTAssertTrue(refreshedDefinitions.contains("NewMarker"))
+        XCTAssertFalse(refreshedDefinitions.contains("OldMarker"))
+        XCTAssertTrue(hasEdge(in: refreshed, from: referencingFile.id, to: editedFile.id, named: "SharedModel"))
+    }
+
+    private func requireReadySnapshot(
+        engine: WorkspaceCodemapBindingEngine,
+        rootEpoch: WorkspaceCodemapRootEpoch
+    ) async throws -> WorkspaceCodemapGraphPinnedSnapshot {
+        let maybeGraph = await engine.selectionGraph(rootEpoch: rootEpoch)
+        let graph = try XCTUnwrap(maybeGraph)
+        switch await graph.latestSnapshot() {
+        case let .ready(snapshot):
+            return snapshot
+        case .pending:
+            throw GraphWaitError.snapshotNotReady
+        case let .revoked(reason):
+            throw GraphWaitError.snapshotRevoked(String(describing: reason))
+        }
+    }
+
+    private func definitions(in pinned: WorkspaceCodemapGraphPinnedSnapshot, fileID: UUID) -> [String] {
+        pinned.snapshot.nodesByFileID[fileID]?.contribution.sortedUniqueDefinitions ?? []
+    }
+
+    private func hasEdge(
+        in pinned: WorkspaceCodemapGraphPinnedSnapshot,
+        from sourceFileID: UUID,
+        to targetFileID: UUID,
+        named name: String
+    ) -> Bool {
+        (pinned.snapshot.outgoingEdgesBySource[sourceFileID] ?? []).contains {
+            $0.targetFileID == targetFileID && $0.matchedNames.contains(name)
+        }
+    }
+
     private func waitForGraphCompletion(
         engine: WorkspaceCodemapBindingEngine,
-        rootID: UUID
+        rootID: UUID,
+        afterCompletedRunCount: UInt64? = nil
     ) async throws -> WorkspaceCodemapBindingEngineGraphIndexRootAccounting {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(20))
         while clock.now < deadline {
             let accounting = await engine.accounting()
             if let root = accounting.graphIndexRoots.first(where: { $0.rootEpoch.rootID == rootID }),
-               root.phase == .complete
+               root.phase == .complete,
+               afterCompletedRunCount.map({ accounting.counters.graphIndexCoveragesCompleted > $0 }) ?? true
             {
                 return root
             }
@@ -155,4 +249,6 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
 
 private enum GraphWaitError: Error {
     case timedOut
+    case snapshotNotReady
+    case snapshotRevoked(String)
 }

@@ -9645,10 +9645,13 @@ actor WorkspaceCodemapBindingEngine {
         _ = cancelGraphIndexJob(rootEpoch: rootEpoch, terminalPhase: .cancelled)
 
         session.invalidationGeneration += 1
+        var pathGenerationsByRelativePath: [String: UInt64] = [:]
         for path in safePaths {
-            session.pathGenerations[path] = (
+            let pathGeneration = (
                 session.pathGenerations[path] ?? session.registration.ingressGeneration
             ) + 1
+            session.pathGenerations[path] = pathGeneration
+            pathGenerationsByRelativePath[path] = pathGeneration
         }
         var manifestRemovals: [CodeMapPipelineIdentity: [ManifestMutation]] = [:]
         for identity in session.pipelines.keys {
@@ -9675,7 +9678,7 @@ actor WorkspaceCodemapBindingEngine {
 
         let revoked = await overlay.invalidatePaths(
             rootEpoch: rootEpoch,
-            standardizedRelativePaths: safePaths,
+            pathGenerationsByRelativePath: pathGenerationsByRelativePath,
             reason: reason
         )
         releaseRetainedAdoptionPaths(safePaths, rootEpoch: rootEpoch)

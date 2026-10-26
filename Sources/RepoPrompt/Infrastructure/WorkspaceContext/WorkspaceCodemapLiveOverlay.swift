@@ -79,6 +79,10 @@ actor WorkspaceCodemapLiveOverlay {
 
     private struct Shadow {
         let reason: WorkspaceCodemapLiveOverlayInvalidationReason
+        /// The oldest path generation whose graph-index content can resolve this shadow. Invalidation
+        /// supplies the generation it advanced the path to. When a demand's last owner cancels, the
+        /// shadow records that demand's own generation, because a cancellation doesn't change the file.
+        let pathGeneration: UInt64
         var accessOrdinal: UInt64
     }
 
@@ -1036,7 +1040,11 @@ actor WorkspaceCodemapLiveOverlay {
             root.shadows[ShadowKey(
                 pipelineIdentity: pending.ticket.token.pipelineIdentity,
                 relativePath: path
-            )] = Shadow(reason: .modified, accessOrdinal: takeAccessOrdinal())
+            )] = Shadow(
+                reason: .modified,
+                pathGeneration: pending.ticket.token.sourceExpectation.sourceAuthority.pathGeneration,
+                accessOrdinal: takeAccessOrdinal()
+            )
             advanceAllManifestInvalidationGenerations(&root, rootEpoch: rootEpoch)
             advanceContributionGeneration(&root, rootEpoch: rootEpoch)
         } else {
@@ -1078,7 +1086,11 @@ actor WorkspaceCodemapLiveOverlay {
                     root.shadows[ShadowKey(
                         pipelineIdentity: pending.ticket.token.pipelineIdentity,
                         relativePath: path
-                    )] = Shadow(reason: .modified, accessOrdinal: takeAccessOrdinal())
+                    )] = Shadow(
+                        reason: .modified,
+                        pathGeneration: pending.ticket.token.sourceExpectation.sourceAuthority.pathGeneration,
+                        accessOrdinal: takeAccessOrdinal()
+                    )
                     advanceAllManifestInvalidationGenerations(&root, rootEpoch: rootEpoch)
                 } else {
                     root.liveByFileID[fileID] = .pending(pending)
@@ -1294,18 +1306,20 @@ actor WorkspaceCodemapLiveOverlay {
         return .accepted
     }
 
+    /// `pathGenerationsByRelativePath` maps each invalidated path to the generation this
+    /// invalidation advanced it to. The path's shadow records that generation.
     @discardableResult
     func invalidatePaths(
         rootEpoch: WorkspaceCodemapRootEpoch,
-        standardizedRelativePaths: Set<String>,
+        pathGenerationsByRelativePath: [String: UInt64],
         reason: WorkspaceCodemapLiveOverlayInvalidationReason
     ) -> Int {
-        ensureAccessOrdinalCapacity(requiredCount: standardizedRelativePaths.count)
+        ensureAccessOrdinalCapacity(requiredCount: pathGenerationsByRelativePath.count)
         guard var root = roots[rootEpoch], root.authorityIsCurrent else { return 0 }
         var invalidated = 0
         var observedValidPath = false
-        for path in standardizedRelativePaths {
-            guard let relativePath = validatedRelativePath(path) else { continue }
+        for (path, pathGeneration) in pathGenerationsByRelativePath {
+            guard pathGeneration > 0, let relativePath = validatedRelativePath(path) else { continue }
             observedValidPath = true
             var affectedPipelines: Set<CodeMapPipelineIdentity> = []
             var removedGraphSlots: [WorkspaceCodemapGraphSlot] = []
@@ -1367,7 +1381,11 @@ actor WorkspaceCodemapLiveOverlay {
                     root.shadows[ShadowKey(
                         pipelineIdentity: pipelineIdentity,
                         relativePath: relativePath
-                    )] = Shadow(reason: reason, accessOrdinal: takeAccessOrdinal())
+                    )] = Shadow(
+                        reason: reason,
+                        pathGeneration: pathGeneration,
+                        accessOrdinal: takeAccessOrdinal()
+                    )
                 }
             }
         }
@@ -1778,6 +1796,13 @@ actor WorkspaceCodemapLiveOverlay {
                 dirtyRelativePaths.insert(oldIndexSlot.standardizedRelativePath)
             }
             root.graphIndexSlotsByFileID[slot.fileID] = slot
+            let shadowKey = ShadowKey(
+                pipelineIdentity: slot.pipelineIdentity,
+                relativePath: slot.standardizedRelativePath
+            )
+            if let shadow = root.shadows[shadowKey], Self.graphSlot(slot, resolves: shadow) {
+                root.shadows.removeValue(forKey: shadowKey)
+            }
         }
         if enumerationFinished, let priorSlots = root.graphReconciliationPriorIndexSlotsByFileID {
             for fileID in Set(priorSlots.keys).subtracting(root.graphReconciliationSeenIndexFileIDs) {
@@ -2613,7 +2638,7 @@ actor WorkspaceCodemapLiveOverlay {
             guard let slot = slotsByPath[key.relativePath],
                   slot.pipelineIdentity == key.pipelineIdentity
             else { continue }
-            slotsByPath[key.relativePath] = shadowedGraphSlot(slot, reason: shadow.reason, rootEpoch: rootEpoch)
+            slotsByPath[key.relativePath] = shadowedGraphSlot(slot, shadow: shadow, rootEpoch: rootEpoch)
         }
 
         var slots: [UUID: WorkspaceCodemapGraphSlot] = [:]
@@ -2694,7 +2719,7 @@ actor WorkspaceCodemapLiveOverlay {
                 pipelineIdentity: resolved.pipelineIdentity,
                 relativePath: path
             )] {
-                guard let shadowed = shadowedGraphSlot(resolved, reason: shadow.reason, rootEpoch: rootEpoch) else {
+                guard let shadowed = shadowedGraphSlot(resolved, shadow: shadow, rootEpoch: rootEpoch) else {
                     continue
                 }
                 resolved = shadowed
@@ -2811,12 +2836,22 @@ actor WorkspaceCodemapLiveOverlay {
         }
     }
 
+    private static func graphSlot(_ slot: WorkspaceCodemapGraphSlot, resolves shadow: Shadow) -> Bool {
+        shadow.reason == .modified &&
+            slot.state != .pending &&
+            slot.diagnostics?.source == .graphIndex &&
+            slot.pathGeneration >= shadow.pathGeneration
+    }
+
     private func shadowedGraphSlot(
         _ slot: WorkspaceCodemapGraphSlot,
-        reason: WorkspaceCodemapLiveOverlayInvalidationReason,
+        shadow: Shadow,
         rootEpoch: WorkspaceCodemapRootEpoch
     ) -> WorkspaceCodemapGraphSlot? {
-        switch reason {
+        if Self.graphSlot(slot, resolves: shadow) {
+            return slot
+        }
+        return switch shadow.reason {
         case .modified, .watcherGap, .evicted:
             graphSlot(
                 rootEpoch: rootEpoch,
