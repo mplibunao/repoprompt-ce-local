@@ -661,15 +661,7 @@ private func makeSecureRoot() throws -> URL {
                 maximumRetainedSnapshots: 0
             )
 
-            let secondNamespace = try CodeMapRootManifestNamespace(
-                repositoryNamespace: fixture.namespace.repositoryNamespace,
-                worktreeIdentity: "wt_" + String(repeating: "b", count: 64),
-                repositoryRelativeLoadedRootPrefix: "",
-                objectFormat: .sha1,
-                pipelineIdentity: fixture.namespace.pipelineIdentity,
-                repositoryBindingEpoch: "repository",
-                worktreeBindingEpoch: "worktree"
-            )
+            let secondNamespace = try fixture.sibling(0xB)
             _ = try await fixture.store.updateCurrentManifest(
                 namespace: secondNamespace, authority: fixture.authority, records: [], lastAccessEpochSeconds: 100
             )
@@ -716,6 +708,7 @@ private func makeSecureRoot() throws -> URL {
             try overwriteInPlacePreservingModificationDate(fixture.manifestURL, with: corrupt)
             let afterCorruption = try await limited.accounting()
             XCTAssertEqual(afterCorruption.manifestCount, 0)
+            XCTAssertEqual(afterCorruption.corruptManifestCount, 1)
             let decodesAfterCorruption = await limited.scanDecodeCountForTesting()
             XCTAssertEqual(decodesAfterCorruption, 2)
         }
@@ -822,6 +815,63 @@ private func makeSecureRoot() throws -> URL {
             XCTAssertFalse(attempt.succeeded)
         }
 
+        func testFirstPublicationCleansCorruptManifestsAboveCap() async throws {
+            let fixture = try await makeFixture()
+            _ = try await fixture.publish()
+            let validBytes = try Data(contentsOf: fixture.manifestURL)
+            for index in 1 ... 3 {
+                let namespace = try fixture.sibling(index)
+                _ = try await fixture.store.updateCurrentManifest(
+                    namespace: namespace, authority: fixture.authority, records: [], lastAccessEpochSeconds: 100
+                )
+                let url = fixture.store.manifestURL(for: namespace)
+                // Like the production backlog, the checksum is valid and only decode rejects the file.
+                let corrupt = try resealedManifest(Data(contentsOf: url)) { $0[0] ^= 1 }
+                try overwriteInPlacePreservingModificationDate(url, with: corrupt)
+            }
+            let storeVersion = fixture.root.appendingPathComponent("CodeMapRootManifests/v1", isDirectory: true)
+            let manifests = storeVersion.appendingPathComponent("manifests", isDirectory: true)
+            let quarantine = storeVersion.appendingPathComponent("quarantine", isDirectory: true)
+            for index in 0 ..< 4 {
+                XCTAssertTrue(FileManager.default.createFile(
+                    atPath: quarantine.appendingPathComponent("seeded.corrupt.\(index)").path,
+                    contents: Data([UInt8(index)]),
+                    attributes: [.posixPermissions: 0o600]
+                ))
+            }
+            XCTAssertEqual(try regularFilePaths(under: manifests).count, 4)
+            XCTAssertEqual(try regularFilePaths(under: quarantine).count, 4)
+
+            let maintained = expectation(description: "maintenance after the first publication")
+            let store = try CodeMapRootManifestStore(
+                rootURL: fixture.root,
+                policy: policy(manifests: 2, quarantine: 2, entries: 16),
+                hooks: CodeMapRootManifestStoreHooks(beforeTerminalAuthorityCheck: { operation in
+                    if operation == .maintenance {
+                        maintained.fulfill()
+                    }
+                }),
+                runsMaintenanceAfterFirstPublication: true
+            )
+            let published = try fixture.sibling(4)
+            let result = try await store.updateCurrentManifest(
+                namespace: published, authority: fixture.authority, records: [], lastAccessEpochSeconds: 100
+            )
+            XCTAssertEqual(result, .inserted(manifestGeneration: 1))
+            await fulfillment(of: [maintained], timeout: 5)
+            // The pass doesn't suspend after its terminal hook, so this call runs after the pass ends.
+            let accounting = try await store.accounting()
+
+            XCTAssertEqual(accounting.manifestCount, 2)
+            XCTAssertEqual(accounting.corruptManifestCount, 0)
+            XCTAssertEqual(accounting.quarantineCount, 2)
+            XCTAssertEqual(try regularFilePaths(under: manifests), Set([fixture.manifestURL, store.manifestURL(for: published)].map {
+                $0.pathComponents.suffix(2).joined(separator: "/")
+            }))
+            XCTAssertEqual(try Data(contentsOf: fixture.manifestURL), validBytes)
+            XCTAssertEqual(try regularFilePaths(under: quarantine).count, 2)
+        }
+
         func testLowercaseHexMatchesFormattedEncoding() {
             let allBytes = Data((0 ... 255).map { UInt8($0) })
             XCTAssertEqual(allBytes.lowercaseHex, allBytes.map { String(format: "%02x", $0) }.joined())
@@ -863,15 +913,21 @@ private func makeSecureRoot() throws -> URL {
             XCTAssertEqual(decodesAfterRepublish, manifestCount, scenario)
         }
 
-        private func policy(records: Int = 100_000, cacheBytes: UInt64 = 64 * 1024 * 1024) -> CodeMapRootManifestStorePolicy {
+        private func policy(
+            records: Int = 100_000,
+            cacheBytes: UInt64 = 64 * 1024 * 1024,
+            manifests: Int = CodeMapRootManifestStorePolicy.default.maximumManifestCount,
+            quarantine: Int = CodeMapRootManifestStorePolicy.default.maximumQuarantineCount,
+            entries: Int = CodeMapRootManifestStorePolicy.default.maintenanceEntryLimit
+        ) -> CodeMapRootManifestStorePolicy {
             let defaults = CodeMapRootManifestStorePolicy.default
             return CodeMapRootManifestStorePolicy(
                 maximumRecordCountPerManifest: records,
                 maximumManifestByteCount: defaults.maximumManifestByteCount,
-                maximumManifestCount: defaults.maximumManifestCount,
+                maximumManifestCount: manifests,
                 maximumStoreByteCount: defaults.maximumStoreByteCount,
-                maximumQuarantineCount: defaults.maximumQuarantineCount,
-                maintenanceEntryLimit: defaults.maintenanceEntryLimit,
+                maximumQuarantineCount: quarantine,
+                maintenanceEntryLimit: entries,
                 maximumDecodedManifestCacheByteCount: cacheBytes
             )
         }
@@ -885,6 +941,20 @@ private func makeSecureRoot() throws -> URL {
 
             var manifestURL: URL {
                 store.manifestURL(for: namespace)
+            }
+
+            /// The fixture's namespace with the worktree identity `wt_` followed by 64 copies of
+            /// `index` in hex, so each index from 0 to 15 except 10 names another namespace.
+            func sibling(_ index: Int) throws -> CodeMapRootManifestNamespace {
+                try CodeMapRootManifestNamespace(
+                    repositoryNamespace: namespace.repositoryNamespace,
+                    worktreeIdentity: "wt_" + String(repeating: String(index, radix: 16), count: 64),
+                    repositoryRelativeLoadedRootPrefix: "",
+                    objectFormat: .sha1,
+                    pipelineIdentity: namespace.pipelineIdentity,
+                    repositoryBindingEpoch: "repository",
+                    worktreeBindingEpoch: "worktree"
+                )
             }
 
             func publish(
@@ -988,6 +1058,13 @@ private func makeSecureRoot() throws -> URL {
         change(&payload)
         payload.append(contentsOf: SHA256.hash(data: payload))
         return payload
+    }
+
+    /// Paths of the regular files below `directory`, relative to it.
+    private func regularFilePaths(under directory: URL) throws -> Set<String> {
+        try Set(FileManager.default.subpathsOfDirectory(atPath: directory.path).filter { path in
+            try directory.appendingPathComponent(path).resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
+        })
     }
 
     private func temporaryManifestNames(in shard: URL) throws -> [String] {
