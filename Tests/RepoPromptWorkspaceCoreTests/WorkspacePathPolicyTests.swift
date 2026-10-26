@@ -36,7 +36,9 @@ final class WorkspacePathPolicyTests: XCTestCase {
     }
 
     /// Foundation's `standardizingPath` is the reference, so rows that depend on the file system
-    /// (`/private/tmp` and `/var/automount/tmp` shorten to `/tmp`) hold on any machine.
+    /// (`/private/tmp` and `/var/automount/tmp` shorten to `/tmp`) hold on any machine. Every result
+    /// must also be native contiguous UTF-8, including one returned unchanged from an
+    /// already-standard input that is still a lazily bridged `NSString`.
     func testAbsolutePathReturnsFoundationStandardizedBytes() {
         let inputs: [(label: String, path: String)] = [
             ("clean", "/Users/test/Project/Sources/App.swift"),
@@ -56,13 +58,16 @@ final class WorkspacePathPolicyTests: XCTestCase {
             ("1,025 bytes, which standardizing truncates", absolutePath(utf8Count: 1025)),
             ("relative", "Sources/App.swift"),
             ("root", "/"),
+            ("dot and dot-dot components", "/repo/./Sources/../App.swift"),
+            ("short trailing slash", "/repo/Sources/"),
+            ("non-ASCII dot component", "/tmp/Ünïcödé/./ファイル.swift"),
+            ("bridged and already standard", ("/repo/./App.swift" as NSString).standardizingPath),
+            ("URL path", URL(fileURLWithPath: "/Users/test/Project/Sources/App.swift").path),
         ]
         for (label, path) in inputs {
-            XCTAssertEqual(
-                Array(StandardizedPath.absolute(path).utf8),
-                Array((path as NSString).standardizingPath.utf8),
-                label
-            )
+            let standardized = StandardizedPath.absolute(path)
+            XCTAssertEqual(Array(standardized.utf8), Array((path as NSString).standardizingPath.utf8), label)
+            XCTAssertTrue(standardized.isContiguousUTF8, label)
         }
     }
 
