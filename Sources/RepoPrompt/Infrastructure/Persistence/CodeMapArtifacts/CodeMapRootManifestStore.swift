@@ -1034,6 +1034,9 @@ actor CodeMapRootManifestStore {
                   current.records == expectedSnapshot.records,
                   current.lastAccessEpochSeconds >= expectedSnapshot.lastAccessEpochSeconds
             else {
+                #if DEBUG
+                    debugAttempt.succeeded = true
+                #endif
                 return .unchanged(manifestGeneration: expectedSnapshot.manifestGeneration)
             }
         }
@@ -1241,6 +1244,36 @@ actor CodeMapRootManifestStore {
         guard initial.sameObject(as: completed), completed.size == off_t(encoded.count) else {
             throw CodeMapRootManifestStoreError.insecureLeaf
         }
+        // Decode the synced temporary file before the rename, so bytes that fail decode never
+        // replace the published manifest. The scope ends the DEBUG timer on failure too.
+        let readBack: Data
+        do {
+            #if DEBUG
+                let debugReadbackStartedUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                defer {
+                    debugAttempt.readbackDecodeDurationNanoseconds = debugElapsedNanoseconds(
+                        from: debugReadbackStartedUptimeNanoseconds,
+                        to: DispatchTime.now().uptimeNanoseconds
+                    )
+                }
+            #endif
+            readBack = try Self.readExactly(descriptor, byteCount: encoded.count)
+            guard try CodeMapRootManifestCodec.decode(
+                readBack,
+                expectedNamespace: namespace,
+                filenameDigest: name
+            ) == snapshot else {
+                throw CodeMapRootManifestStoreError.insecureLeaf
+            }
+        }
+        let readBackChecksum = try CodeMapRootManifestCodec.validatedContentChecksum(readBack)
+        let validated = try Self.validatedFileIdentity(
+            descriptor,
+            parent: shard,
+            name: temporaryName,
+            expectedMode: Self.fileMode
+        )
+        guard validated == completed else { throw CodeMapRootManifestStoreError.insecureLeaf }
 
         hooks.beforePublish()
         guard Self.rootParentIsCurrent(lockAnchor, rootURL: rootURL),
@@ -1256,6 +1289,14 @@ actor CodeMapRootManifestStore {
         } else if try Self.fileIdentityAt(parent: shard, name: name) != nil {
             throw CodeMapRootManifestStoreError.insecureLeaf
         }
+        guard try Self.validatedFileIdentity(
+            descriptor,
+            parent: shard,
+            name: temporaryName,
+            expectedMode: Self.fileMode
+        ) == validated else {
+            throw CodeMapRootManifestStoreError.insecureLeaf
+        }
         #if DEBUG
             let debugAtomicReplaceStartedUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         #endif
@@ -1267,8 +1308,19 @@ actor CodeMapRootManifestStore {
                 from: debugAtomicReplaceStartedUptimeNanoseconds,
                 to: DispatchTime.now().uptimeNanoseconds
             )
+            debugAttempt.published = true
         #endif
         temporaryExists = false
+        // The bytes were decoded before the rename, so only the file's identity can reveal a later change.
+        let renamed = try Self.validatedFileIdentity(
+            descriptor,
+            parent: shard,
+            name: name,
+            expectedMode: Self.fileMode
+        )
+        guard renamed.matchesIgnoringStatusChange(validated) else {
+            throw CodeMapRootManifestStoreError.insecureLeaf
+        }
         if hooks.faultAction(.afterManifestRename) == .simulateProcessTermination {
             throw CodeMapRootManifestStoreError.simulatedProcessTermination(.afterManifestRename)
         }
@@ -1285,7 +1337,7 @@ actor CodeMapRootManifestStore {
             name: name,
             expectedMode: Self.fileMode
         )
-        guard completed.sameObject(as: published), published.size == completed.size else {
+        guard published == renamed else {
             throw CodeMapRootManifestStoreError.insecureLeaf
         }
         #if DEBUG
@@ -1314,29 +1366,11 @@ actor CodeMapRootManifestStore {
         else {
             throw CodeMapRootManifestStoreError.insecureDirectory
         }
-        #if DEBUG
-            let debugReadbackStartedUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
-        #endif
-        let readBack = try Self.readExactly(descriptor, byteCount: encoded.count)
-        guard try CodeMapRootManifestCodec.decode(
-            readBack,
-            expectedNamespace: namespace,
-            filenameDigest: name
-        ) == snapshot else {
-            throw CodeMapRootManifestStoreError.insecureLeaf
-        }
-        #if DEBUG
-            debugAttempt.readbackDecodeDurationNanoseconds = debugElapsedNanoseconds(
-                from: debugReadbackStartedUptimeNanoseconds,
-                to: DispatchTime.now().uptimeNanoseconds
-            )
-            debugAttempt.published = true
-        #endif
-        try cacheDecodedManifest(
+        cacheDecodedManifest(
             at: ManifestCacheLocation(shard: namespace.shard, digest: name),
             identity: committed,
             snapshot: snapshot,
-            validatedContentChecksum: CodeMapRootManifestCodec.validatedContentChecksum(readBack)
+            validatedContentChecksum: readBackChecksum
         )
         if !canSkipGlobalReconciliation {
             try reconcileAfterCommittedPublication(
@@ -3042,6 +3076,19 @@ private struct ManifestFileIdentity: Equatable {
 
     func sameObject(as other: ManifestFileIdentity) -> Bool {
         device == other.device && inode == other.inode
+    }
+
+    /// Compares every field except the status-change time, which a rename updates.
+    func matchesIgnoringStatusChange(_ other: ManifestFileIdentity) -> Bool {
+        device == other.device &&
+            inode == other.inode &&
+            owner == other.owner &&
+            type == other.type &&
+            permissions == other.permissions &&
+            linkCount == other.linkCount &&
+            size == other.size &&
+            modificationSeconds == other.modificationSeconds &&
+            modificationNanoseconds == other.modificationNanoseconds
     }
 
     func isSecureRegularFile(in expectedDevice: dev_t, expectedMode: mode_t) -> Bool {

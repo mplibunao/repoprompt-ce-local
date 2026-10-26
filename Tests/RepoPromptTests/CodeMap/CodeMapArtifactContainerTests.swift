@@ -620,9 +620,7 @@ private func makeSecureRoot() throws -> URL {
             XCTAssertEqual(try fixture.decodeManifestOnDisk(), intended)
 
             // A valid checksum does not prove canonical serialization, so this still needs a decode.
-            var malformed = try Data(Data(contentsOf: fixture.manifestURL).dropLast(32))
-            malformed.append(0)
-            malformed.append(contentsOf: SHA256.hash(data: malformed))
+            let malformed = try resealedManifest(Data(contentsOf: fixture.manifestURL)) { $0.append(0) }
             XCTAssertNoThrow(try CodeMapRootManifestCodec.validatedContentChecksum(malformed))
             try malformed.write(to: fixture.manifestURL)
             let cold = try CodeMapRootManifestStore(rootURL: fixture.root)
@@ -756,6 +754,74 @@ private func makeSecureRoot() throws -> URL {
             XCTAssertEqual(envelope.sortedUniqueReferences, ["Foo"])
         }
 
+        func testTemporaryDecodeFailurePreservesPublishedManifest() async throws {
+            let fixture = try await makeFixture(recordCount: 1)
+            _ = try await fixture.publish()
+            let publishedBytes = try Data(contentsOf: fixture.manifestURL)
+            let shard = fixture.manifestURL.deletingLastPathComponent()
+            let store = try CodeMapRootManifestStore(
+                rootURL: fixture.root,
+                hooks: CodeMapRootManifestStoreHooks(faultAction: { point in
+                    if point == .afterTemporaryFileSync {
+                        corruptOnlyTemporaryManifest(in: shard)
+                    }
+                    return .proceed
+                })
+            )
+            do {
+                // The same records are written again only when the access time moves by 60 seconds or more.
+                _ = try await fixture.publish(using: store, lastAccessEpochSeconds: 200)
+                XCTFail("Expected the corrupted temporary manifest to fail decode")
+            } catch {
+                XCTAssertEqual(error as? CodeMapRootManifestDecodeFailure, .invalidMagic)
+            }
+
+            XCTAssertEqual(try Data(contentsOf: fixture.manifestURL), publishedBytes)
+            let onDisk = try fixture.decodeManifestOnDisk()
+            XCTAssertEqual(onDisk.manifestGeneration, 1)
+            XCTAssertEqual(onDisk.lastAccessEpochSeconds, 100)
+            XCTAssertEqual(try temporaryManifestNames(in: shard), [])
+            let metrics = await store.debugPublicationMetrics(namespace: fixture.namespace)
+            let attempt = try XCTUnwrap(metrics.lastAttempt)
+            XCTAssertFalse(attempt.published)
+            XCTAssertFalse(attempt.succeeded)
+        }
+
+        func testPostRenameMutationIsRejectedBeforeCaching() async throws {
+            let fixture = try await makeFixture(recordCount: 1)
+            let manifestURL = fixture.manifestURL
+            let replacement = try CodeMapRootManifestCodec.encode(snapshot: CodeMapRootManifestSnapshot(
+                namespace: fixture.namespace,
+                authority: fixture.authority,
+                manifestGeneration: 9,
+                lastAccessEpochSeconds: 100,
+                records: fixture.records
+            ))
+            let store = try CodeMapRootManifestStore(
+                rootURL: fixture.root,
+                hooks: CodeMapRootManifestStoreHooks(afterPublishRename: {
+                    do {
+                        try overwriteInPlacePreservingModificationDate(manifestURL, with: replacement)
+                    } catch {
+                        XCTFail("Couldn't rewrite the published manifest: \(error)")
+                    }
+                })
+            )
+            do {
+                _ = try await fixture.publish(using: store)
+                XCTFail("Expected the rewritten manifest to be rejected")
+            } catch {
+                XCTAssertEqual(error as? CodeMapRootManifestStoreError, .insecureLeaf)
+            }
+
+            let cachedSnapshotCount = await store.decodedManifestCacheEntryCountForTesting()
+            XCTAssertEqual(cachedSnapshotCount, 0)
+            let metrics = await store.debugPublicationMetrics(namespace: fixture.namespace)
+            let attempt = try XCTUnwrap(metrics.lastAttempt)
+            XCTAssertTrue(attempt.published)
+            XCTAssertFalse(attempt.succeeded)
+        }
+
         func testLowercaseHexMatchesFormattedEncoding() {
             let allBytes = Data((0 ... 255).map { UInt8($0) })
             XCTAssertEqual(allBytes.lowercaseHex, allBytes.map { String(format: "%02x", $0) }.joined())
@@ -810,16 +876,6 @@ private func makeSecureRoot() throws -> URL {
             )
         }
 
-        private func overwriteInPlacePreservingModificationDate(_ url: URL, with data: Data) throws {
-            let oldData = try Data(contentsOf: url)
-            XCTAssertEqual(data.count, oldData.count)
-            let oldDate = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate])
-            let handle = try FileHandle(forWritingTo: url)
-            try handle.write(contentsOf: data)
-            try handle.close()
-            try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: url.path)
-        }
-
         private struct Fixture {
             let root: URL
             let store: CodeMapRootManifestStore
@@ -831,9 +887,15 @@ private func makeSecureRoot() throws -> URL {
                 store.manifestURL(for: namespace)
             }
 
-            func publish(using other: CodeMapRootManifestStore? = nil) async throws -> CodeMapRootManifestWriteResult {
+            func publish(
+                using other: CodeMapRootManifestStore? = nil,
+                lastAccessEpochSeconds: UInt64 = 100
+            ) async throws -> CodeMapRootManifestWriteResult {
                 try await (other ?? store).updateCurrentManifest(
-                    namespace: namespace, authority: authority, records: records, lastAccessEpochSeconds: 100
+                    namespace: namespace,
+                    authority: authority,
+                    records: records,
+                    lastAccessEpochSeconds: lastAccessEpochSeconds
                 )
             }
 
@@ -902,6 +964,49 @@ private func makeSecureRoot() throws -> URL {
                 authority: authority,
                 records: records
             )
+        }
+    }
+
+    /// Rewrites a file of the same size in place and restores its access and modification times to
+    /// the nanosecond, so the status-change time is the only identity field the write changes.
+    /// Foundation's `setAttributes` would round the modification time to microseconds.
+    private func overwriteInPlacePreservingModificationDate(_ url: URL, with data: Data) throws {
+        var original = stat()
+        XCTAssertEqual(lstat(url.path, &original), 0)
+        XCTAssertEqual(Int(original.st_size), data.count)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.write(contentsOf: data)
+        try handle.close()
+        var times = [original.st_atimespec, original.st_mtimespec]
+        XCTAssertEqual(utimensat(AT_FDCWD, url.path, &times, AT_SYMLINK_NOFOLLOW), 0)
+    }
+
+    /// Applies `change` to a manifest's payload and replaces the SHA-256 trailer with the payload's
+    /// new digest, so the result passes the checksum check.
+    private func resealedManifest(_ manifest: Data, changingPayload change: (inout Data) -> Void) -> Data {
+        var payload = Data(manifest.dropLast(SHA256.byteCount))
+        change(&payload)
+        payload.append(contentsOf: SHA256.hash(data: payload))
+        return payload
+    }
+
+    private func temporaryManifestNames(in shard: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: shard.path).filter { $0.hasPrefix(".tmp.") }
+    }
+
+    /// Changes the magic of the shard's one temporary manifest and recomputes its checksum in place,
+    /// keeping its inode and size, so only canonical decode can reject the file.
+    private func corruptOnlyTemporaryManifest(in shard: URL) {
+        do {
+            let names = try temporaryManifestNames(in: shard)
+            XCTAssertEqual(names.count, 1)
+            guard let name = names.first else { return }
+            let url = shard.appendingPathComponent(name)
+            // The payload starts with the codec's magic.
+            let corrupt = try resealedManifest(Data(contentsOf: url)) { $0[0] ^= 1 }
+            try overwriteInPlacePreservingModificationDate(url, with: corrupt)
+        } catch {
+            XCTFail("Couldn't corrupt the temporary manifest: \(error)")
         }
     }
 #endif
