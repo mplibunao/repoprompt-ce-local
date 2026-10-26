@@ -722,6 +722,40 @@ private func makeSecureRoot() throws -> URL {
             XCTAssertEqual(decodesAfterCorruption, 2)
         }
 
+        func testAnonymousEnumContributionRoundTripsWithoutEmptyGraphNames() async throws {
+            let artifact = CodeMapSyntaxArtifact(
+                imports: [],
+                classes: [],
+                functions: [],
+                enums: [
+                    EnumInfo(name: "", cases: ["REPTYPE_MIN", "REPTYPE_MAX"]),
+                    EnumInfo(name: "Mode", cases: ["fast", "slow"])
+                ],
+                globalVars: [],
+                macros: [],
+                referencedTypes: ["", "Foo"]
+            )
+            // The artifact keeps the anonymous enum; only the graph contribution drops its empty name.
+            XCTAssertTrue(artifact.definedTypeNames.contains(""))
+
+            let fixture = try await makeFixture(recordCount: 1, outcome: .ready(artifact))
+            let result = try await fixture.publish()
+            XCTAssertEqual(result, .inserted(manifestGeneration: 1))
+
+            let published = try CodeMapRootManifestSnapshot(
+                namespace: fixture.namespace,
+                authority: fixture.authority,
+                manifestGeneration: 1,
+                lastAccessEpochSeconds: 100,
+                records: fixture.records
+            )
+            let decoded = try fixture.decodeManifestOnDisk()
+            XCTAssertEqual(decoded, published)
+            let envelope = try XCTUnwrap(decoded.records.first?.contributionEnvelope)
+            XCTAssertEqual(envelope.sortedUniqueDefinitions, ["Mode"])
+            XCTAssertEqual(envelope.sortedUniqueReferences, ["Foo"])
+        }
+
         func testLowercaseHexMatchesFormattedEncoding() {
             let allBytes = Data((0 ... 255).map { UInt8($0) })
             XCTAssertEqual(allBytes.lowercaseHex, allBytes.map { String(format: "%02x", $0) }.joined())
@@ -812,7 +846,10 @@ private func makeSecureRoot() throws -> URL {
             }
         }
 
-        private func makeFixture(recordCount: Int = 0) async throws -> Fixture {
+        private func makeFixture(
+            recordCount: Int = 0,
+            outcome: CodeMapSyntaxArtifactOutcome = .readyNoSymbols
+        ) async throws -> Fixture {
             let root = try makeSecureRoot()
             addTeardownBlock { try? FileManager.default.removeItem(at: root) }
             let pipeline = try SyntaxManager().pipelineIdentity(for: .swift, decoderPolicy: .workspaceAutomaticV1)
@@ -835,7 +872,7 @@ private func makeSecureRoot() throws -> URL {
                 rawByteCount: 1, pipelineIdentity: pipeline
             )
             let artifacts = try CodeMapArtifactStore(rootURL: root)
-            _ = try await artifacts.insert(key: key, deterministicOutcome: .readyNoSymbols)
+            _ = try await artifacts.insert(key: key, deterministicOutcome: outcome)
             guard case let .hit(_, handle) = try await artifacts.lookup(key: key) else {
                 throw CodeMapArtifactFileStoreError.integrityCollision
             }
@@ -846,7 +883,11 @@ private func makeSecureRoot() throws -> URL {
                 ),
                 artifactKey: key, casHandle: handle
             )
-            let contribution = CodeMapSelectionGraphContribution(artifactKey: key, definitions: [], references: [])
+            let contribution = if case let .ready(artifact) = outcome {
+                CodeMapSelectionGraphContribution(artifactKey: key, artifact: artifact)
+            } else {
+                CodeMapSelectionGraphContribution(artifactKey: key, definitions: [], references: [])
+            }
             let records = try (0 ..< recordCount).map { index in
                 try CodeMapRootManifestRecord.verifiedClean(
                     namespace: namespace, repositoryRelativePath: String(format: "File%06d.swift", index),
