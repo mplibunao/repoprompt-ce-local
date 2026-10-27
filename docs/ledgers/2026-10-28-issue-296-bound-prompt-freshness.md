@@ -54,4 +54,4 @@ Make an MCP connection bound to a compose tab read and change that tab's current
 
 ## Parked decisions
 
-- File a follow-up issue so run-owned prompts stop taking editor publications (today the snapshot mirror overwrites a run's prompt when the user edits the active tab)? Options: file it, or drop it. Recommendation: file it. Blocks: nothing.
+- File a follow-up issue so run-owned prompts stop taking editor publications (today the snapshot mirror overwrites a run's prompt when the user edits the active tab)? Options: file it, or drop it. Recommendation: file it. Blocks: nothing. Answer: drop it; only agents write that tab's prompt, and a run that follows another agent's change matches what this change gives every other connection.
