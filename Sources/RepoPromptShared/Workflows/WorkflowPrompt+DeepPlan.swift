@@ -156,7 +156,7 @@ The answer drives the rest of the run:
 
 - **Answered** (one of the three options, or a freeform reply) → set the involvement mode and continue. If they picked **Up front** or **Mid-flow**, treat that as a promise: a timeout at the chosen checkpoint later means **halt**, not "default and keep going".
 - **\(skippedLabel)** (user explicitly skipped) → fall back to **Hands-off** and continue. The user has signaled they don't want to be involved.
-- **\(timedOutLabel)** (no reply) → fall back to **Hands-off** and continue. A timeout here means no signal yet — don't stall the workflow before any direction has been given. (Phase 1's own questions are the **only** ones in this workflow where a timeout is treated as a default-fallback. Once the user has picked Up front or Mid-flow, downstream timeouts halt instead.)
+- **\(timedOutLabel)** → keep any answer the result carries, and use the documented default only for each question left blank: **Hands-off** for involvement, nothing added for sources. Then continue without waiting for the rest. (Phase 1's own questions are the **only** ones in this workflow where a timeout is treated as a default-fallback. Once the user has picked Up front or Mid-flow, downstream timeouts halt instead.)
 
 When you do involve the user, ask **2–4 thoughtful, plan-shaping questions** — questions that surface a real ambiguity in the work. If you couldn't have asked the question without first looking at the code or current draft, it's probably a good question. Generic workflow meta-questions ("what's the priority?") and unfocused asks ("what do you want?") don't count.
 
