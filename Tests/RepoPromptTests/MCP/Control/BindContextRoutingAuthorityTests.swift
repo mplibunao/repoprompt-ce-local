@@ -435,6 +435,31 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
             XCTAssertFalse(stickyRead.text.contains(visiblePrompt), stickyRead.text)
             let status = try await bindContextResponse(connection, ["op": .string("status")])
             XCTAssertEqual(status.binding.contextID, boundTabID)
+
+            // A second connection binds the same background tab. A stored-only write then changes the
+            // tab's prompt without publishing a snapshot, as a background Context Builder commit does.
+            let secondConnection = try await makeProductionMCPConnection()
+            addTeardownBlock { await secondConnection.cleanup() }
+            let secondBinding = try await bindContextResponse(secondConnection, [
+                "op": .string("bind"),
+                "context_id": .string(boundTabID.uuidString)
+            ])
+            XCTAssertEqual(secondBinding.binding.contextID, boundTabID)
+            let updatedPrompt = "updated-bound-tab-prompt-\(UUID().uuidString)"
+            var boundTab = try XCTUnwrap(target.workspaceManager.composeTab(with: boundTabID))
+            boundTab.promptText = updatedPrompt
+            XCTAssertTrue(target.workspaceManager.updateComposeTabStoredOnly(boundTab, inWorkspaceID: tabs.id))
+
+            for (label, reader) in [("first", connection), ("second", secondConnection)] {
+                let read = await readPromptThroughBinding(reader)
+                XCTAssertFalse(read.isError, "\(label): \(read.text)")
+                XCTAssertTrue(read.text.contains(updatedPrompt), "\(label): \(read.text)")
+                XCTAssertFalse(read.text.contains(visiblePrompt), "\(label): \(read.text)")
+                let readerStatus = try await bindContextResponse(reader, ["op": .string("status")])
+                XCTAssertEqual(readerStatus.binding.contextID, boundTabID, label)
+            }
+            XCTAssertEqual(target.workspaceManager.activeWorkspace?.activeComposeTabID, visibleTabID)
+            XCTAssertEqual(target.promptManager.promptText, visiblePrompt)
         }
 
         @MainActor

@@ -86,8 +86,13 @@ final class MCPPromptContextToolProvider {
                 MCPWindowToolName.workspaceContext
             )
         }
-        let dto = try await dependencies.prompt.buildTabWorkspaceContext(
+        // The prompt field and its token count use this one capture.
+        let tabContext = try dependencies.context.refreshingPromptText(
             resolvedTabContext.snapshot,
+            MCPWindowToolName.workspaceContext
+        )
+        let dto = try await dependencies.prompt.buildTabWorkspaceContext(
+            tabContext,
             Set(includeArr),
             display,
             overridePreset,
@@ -159,7 +164,8 @@ final class MCPPromptContextToolProvider {
         let tabContext = resolvedContext.snapshot
         switch operation {
         case .get:
-            return try Value(simplePromptReply(tabContext.promptText, op: operation.rawValue))
+            let current = try dependencies.context.refreshingPromptText(tabContext, MCPWindowToolName.prompt)
+            return try Value(simplePromptReply(current.promptText, op: operation.rawValue))
         case .set:
             guard let text = args["text"]?.stringValue else { throw MCPError.invalidParams("text required for set") }
             MCPToolExecutionHandlerPhaseContext.report(.promptMutationPublication)
@@ -185,7 +191,7 @@ final class MCPPromptContextToolProvider {
             }
             return try Value(simplePromptReply(published.promptText, op: operation.rawValue))
         case .export:
-            return try await exportPrompt(args: args, resolvedContext: resolvedContext, tabContext: tabContext)
+            return try await exportPrompt(args: args, tabContext: tabContext)
         case .selectPreset:
             guard tabContext.explicitlyBound, tabContext.runID == nil else {
                 throw MCPError.invalidParams("select_preset requires an explicitly bound tab (bind_context or _tabID). It is disabled for run-based bindings; use copy_preset override in workspace_context or export instead.")
@@ -289,8 +295,7 @@ final class MCPPromptContextToolProvider {
 
     private func exportPrompt(
         args: [String: Value],
-        resolvedContext: MCPServerViewModel.ResolvedTabContextSnapshot,
-        tabContext: MCPServerViewModel.TabContextSnapshot?
+        tabContext: MCPServerViewModel.TabContextSnapshot
     ) async throws -> Value {
         guard let rawPath = args["path"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !rawPath.isEmpty else {
             throw MCPError.invalidParams("path required for export")
@@ -307,12 +312,10 @@ final class MCPPromptContextToolProvider {
             return (effectivePreset: effectivePreset, cfg: cfg)
         }
 
+        // The content and its file metadata use this one capture.
+        let current = try dependencies.context.refreshingPromptText(tabContext, MCPWindowToolName.prompt)
         let text = try await withPromptExportPhase(.promptExportContentAssembly) {
-            if let tabContext {
-                await dependencies.prompt.buildTabClipboardContent(preset.cfg, tabContext)
-            } else {
-                await dependencies.context.promptVM.buildClipboard(for: preset.cfg)
-            }
+            await dependencies.prompt.buildTabClipboardContent(preset.cfg, current)
             // Clipboard assembly is nonthrowing and app-adapter loss can yield an empty
             // compatibility result, so cancellation is revalidated before authorization.
         }
@@ -320,11 +323,10 @@ final class MCPPromptContextToolProvider {
         let exportMetadata = try await withPromptExportPhase(.promptExportMetadataAssembly) {
             let pathDisplay = dependencies.context.promptVM.filePathDisplayOption
             let rootRefs = await dependencies.context.promptVM.workspaceFileContextStore.rootRefs(scope: .allLoaded)
-            let effectiveContext = tabContext.map { MCPServerViewModel.ResolvedTabContextSnapshot(snapshot: $0) } ?? resolvedContext
             let files = try await dependencies.prompt.buildExportSelectedFileInfos(
-                effectiveContext,
+                MCPServerViewModel.ResolvedTabContextSnapshot(snapshot: current),
                 preset.cfg,
-                tabContext?.selection,
+                current.selection,
                 pathDisplay
             )
             return (

@@ -120,12 +120,17 @@ import XCTest
             let workspace = try XCTUnwrap(
                 context.window.workspaceManager.workspaces.first { $0.id == context.workspaceID }
             )
-            await context.window.workspaceManager.switchWorkspace(
+            await activateWorkspace(workspace, in: context.window, reason: reason)
+        }
+
+        /// Makes `workspace` current in `window` and loads its compose tabs.
+        static func activateWorkspace(_ workspace: WorkspaceModel, in window: WindowState, reason: String) async {
+            await window.workspaceManager.switchWorkspace(
                 to: workspace,
                 saveState: false,
                 reason: reason
             )
-            context.window.promptManager.loadComposeTabsFromWorkspace(workspace, syncPromptText: true)
+            window.promptManager.loadComposeTabsFromWorkspace(workspace, syncPromptText: true)
         }
 
         /// The tool result's text blocks, joined by newlines.
