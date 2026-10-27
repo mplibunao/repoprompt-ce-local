@@ -10,6 +10,8 @@ Apply the wording approved on 2026-10-27 in the 2026-10-26 skills audit: `rp-dee
 | 2. Toolkit wording (`unslop`, `skills-audit`, `rp-orchestrate-loop`) | done | engineer · Orchestrate 2/4: toolkit wording | claude-toolkit, branch `chore/skills-audit-2026-10-26-wording`: `docs(skills): apply the skills-audit wording edits`, mplibunao/claude-tooling#84 |
 | 3. Cleanup pass on the prompt change | done | engineer · Orchestrate 3/4: cleanup pass | none (no changes) |
 | 4. Debug-app validation | done | engineer · Debug-app validation: deep-plan/investigate walkthroughs | none (no changes) |
+| 5. Timed-out opening wizard keeps picked answers | done | engineer · Debug-app run: deep-plan wording check A | `fix(workflows): keep the answers picked before Deep Plan's opening wizard times out` |
+| 6. Shared walkthrough list with a named over-engineering check | pending | | `fix(workflows): name the over-engineering check in Deep Plan's walkthroughs` |
 
 ## 1. Built-in prompt wording, version 65
 
@@ -37,3 +39,16 @@ Apply the wording approved on 2026-10-27 in the 2026-10-26 skills audit: `rp-dee
 - Evidence, Investigate (RepoPrompt chat route): the plain-language walkthrough followed the finished report, and nothing was written under `prompt-exports/`.
 - Evidence: the installed `rp-*` files, links, and linked paths match the pre-run snapshot. The production app was not stopped or relaunched. The scratch workspaces and folder are deleted, and the debug app is running on this head.
 - Deferred: Deep Plan in Up front mode and the T3 Code path weren't run. The T3 path is checked at promotion.
+
+## 5. Timed-out opening wizard keeps picked answers
+
+- Decision: when `rp-deep-plan`'s opening wizard times out, keep any answer the result carries and use the documented default only for each question left blank. `ask_user` returns the picks made before the timeout along with `timed_out: true` (`buildTimedOutResponse` in `UserInteractionModels.swift`), and the prompt used to fall back to Hands-off on any timeout. Source: user, approving the exact line on 2026-10-27.
+- Decision: no separate `context_builder` review. The change is one approved line, which a review can't reword, and the render check shows where it lands. Source: orchestrator judgment.
+- Evidence: all 54 renders before and after the commit; the 6 Deep Plan renders each changed exactly once, in that line, and the other 48 are unchanged; a one-word negative control failed. `make dev-format` changed no other file; `make dev-lint`, `make dev-swift-build PRODUCT=repoprompt-mcp`, `WorkflowPromptRunRecordTests`, and `DirectHeadlessCompositionTests` pass.
+- Evidence, install: a debug app built from this commit rewrote all 18 seeded version 64 copies to version 65. The MCP copies are byte-identical to the renders, and the CLI copies differ only in their `-cli` name line. Both Deep Plan copies contain the new line once and the old one zero times. The bundle was built with this ledger edit uncommitted, and no file under `Sources/` differed from the commit. The installed `rp-*` files and the production app were untouched.
+- Deferred: the live timeout case wasn't run, because the wizard's partial picks come from clicks in the app that `rpce-cli-debug` can't make.
+
+## 6. Shared walkthrough list with a named over-engineering check
+
+- Decision: move Phase 4.5's items 1 to 3 into a shared section, "Walking the User Through a Draft", with no route label, and name item 3 the over-engineering check. Phase 4.5 and Phase 5 point to it, and Phase 5 names the check. The item 4 debug-app run showed a route 4A walkthrough without per-piece keep, simplify, or defer verdicts, when Phase 5 pointed at a list in a section headed for route 4B. One shared list keeps one copy. Source: user, approving the exact text on 2026-10-27.
+- Evidence: all 54 renders before and after the commit; the 6 Deep Plan renders each changed in exactly the two approved places, and the other 48 are unchanged; a one-word negative control failed. `make dev-format` changed no other file; `make dev-lint`, `make dev-swift-build PRODUCT=repoprompt-mcp`, `WorkflowPromptRunRecordTests`, and `DirectHeadlessCompositionTests` pass.
