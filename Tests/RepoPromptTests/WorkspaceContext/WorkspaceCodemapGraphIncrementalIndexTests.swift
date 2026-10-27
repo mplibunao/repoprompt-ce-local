@@ -627,6 +627,187 @@ final class WorkspaceCodemapGraphIncrementalIndexTests: XCTestCase {
         XCTAssertEqual(checkpoints.first, checkpoints.last)
     }
 
+    /// Runs on the main actor because XCTest can drop an off-main assertion failure that it hasn't
+    /// recorded by the time an async test returns.
+    @MainActor
+    func testModifiedShadowYieldsOnlyToCurrentGraphIndexSlots() async throws {
+        let editedPath = "Sources/Edited.swift"
+        let cancelledPath = "Sources/Cancelled.swift"
+        let repository = try ReviewGitRepositoryFixture(name: #function)
+        let rootURL = try repository.makeRepository(
+            named: "root",
+            files: [
+                editedPath: "struct EditedOld { let id: Int }\n",
+                cancelledPath: "struct Cancelled { let id: Int }\n"
+            ]
+        )
+        addTeardownBlock { repository.cleanup() }
+        let service = WorkspaceCodemapGitCapabilityService(
+            namespaceSalt: Data(repeating: 0x6C, count: GitBlobRepositoryNamespace.saltByteCount),
+            hooks: .none
+        )
+        let request = WorkspaceCodemapGitCapabilityRequest(
+            rootID: UUID(),
+            rootLifetimeID: UUID(),
+            loadedRootURL: rootURL
+        )
+        guard case let .eligible(capability) = await service.resolve(root: request) else {
+            return XCTFail("The fixture repository must be codemap eligible")
+        }
+
+        for mode in [WorkspaceCodemapGraphReconcileMode.incremental, .alwaysFull] {
+            // Edit: the shadow hides a delayed pre-edit result and a pending enumeration. Any classified
+            // state at the current generation resolves it.
+            for resolvesAsEmpty in [false, true] {
+                let label = "\(mode) \(resolvesAsEmpty ? "empty" : "contributed")"
+                let harness = try await CodemapGraphIndexHarness(seed: 0xA1, mode: mode, capability: capability)
+                let fileID = harness.fileID(0, lane: 0x60)
+                let preEdit = try harness.makeSlot(
+                    fileID: fileID,
+                    path: editedPath,
+                    definitions: ["EditedOld"],
+                    references: []
+                )
+                let initialPublished = await harness.publish([preEdit], projectedTotal: 1, enumerationFinished: true)
+                XCTAssertTrue(initialPublished, label)
+                let invalidated = await harness.overlay.invalidatePaths(
+                    rootEpoch: harness.rootEpoch,
+                    pathGenerationsByRelativePath: [editedPath: 2],
+                    reason: .modified
+                )
+                XCTAssertEqual(invalidated, 1, label)
+
+                let pendingEnumeration = try harness.makeSlot(
+                    fileID: fileID,
+                    path: editedPath,
+                    state: .pending,
+                    requestGeneration: 2,
+                    pathGeneration: 2
+                )
+                for (step, slot) in [("pre-edit", preEdit), ("pending", pendingEnumeration)] {
+                    let published = await harness.publish([slot])
+                    XCTAssertTrue(published, "\(label) \(step)")
+                    await harness.pull()
+                    let snapshot = try await harness.latestSnapshot()
+                    XCTAssertEqual(snapshot.slotsByFileID[fileID]?.state, .pending, "\(label) \(step)")
+                    XCTAssertNil(snapshot.definitionPostings["EditedOld"], "\(label) \(step)")
+                    let shadowCount = await harness.overlay.accounting().shadowEntryCount
+                    XCTAssertEqual(shadowCount, 1, "\(label) \(step)")
+                }
+
+                let contributed = try harness.makeSlot(
+                    fileID: fileID,
+                    path: editedPath,
+                    definitions: ["EditedNew"],
+                    references: [],
+                    requestGeneration: 2,
+                    pathGeneration: 2
+                )
+                guard case let .contributed(contribution) = contributed.state else {
+                    return XCTFail("\(label): expected a contributed slot")
+                }
+                let current = if resolvesAsEmpty {
+                    try harness.makeSlot(
+                        fileID: fileID,
+                        path: editedPath,
+                        state: .empty(CodeMapSelectionGraphContribution(
+                            artifactKey: contribution.artifactKey,
+                            definitions: [String](),
+                            references: [String]()
+                        )),
+                        requestGeneration: 2,
+                        pathGeneration: 2
+                    )
+                } else {
+                    contributed
+                }
+                let ledgerBefore = try await harness.ledger()
+                let published = await harness.publish([current])
+                XCTAssertTrue(published, label)
+                if mode == .incremental {
+                    let ledger = try await harness.ledger()
+                    XCTAssertGreaterThan(ledger.incrementalReconcileCount, ledgerBefore.incrementalReconcileCount, label)
+                    XCTAssertEqual(ledger.incrementalFallbackCount, 0, label)
+                }
+                await harness.pull()
+                let resolved = try await harness.latestSnapshot()
+                XCTAssertEqual(resolved.slotsByFileID[fileID]?.state, current.state, label)
+                XCTAssertEqual(
+                    resolved.nodesByFileID[fileID]?.contribution.sortedUniqueDefinitions ?? [],
+                    resolvesAsEmpty ? [] : ["EditedNew"],
+                    label
+                )
+                XCTAssertNil(resolved.definitionPostings["EditedOld"], label)
+                let shadowCount = await harness.overlay.accounting().shadowEntryCount
+                XCTAssertEqual(shadowCount, 0, label)
+
+                let sealed = await harness.publish([], enumerationFinished: true)
+                XCTAssertTrue(sealed, label)
+                await harness.pull()
+                let sealedSnapshot = try await harness.latestSnapshot()
+                XCTAssertTrue(sealedSnapshot.coverage.isComplete, label)
+            }
+
+            // Cancellation: when the last owner of a demand at the file's current generation cancels,
+            // the graph shows the current graph-index slot without another publication.
+            let harness = try await CodemapGraphIndexHarness(seed: 0xA2, mode: mode, capability: capability)
+            let fileID = harness.fileID(1, lane: 0x60)
+            let current = try harness.makeSlot(
+                fileID: fileID,
+                path: cancelledPath,
+                definitions: ["Cancelled"],
+                references: []
+            )
+            let published = await harness.publish([current], projectedTotal: 1, enumerationFinished: true)
+            XCTAssertTrue(published, "\(mode)")
+            // The service withholds a token when its evidence changes during issuance, including any
+            // parent directory, such as the shared temp directory. Ask again when it does.
+            var authority: WorkspaceCodemapSourceAuthorityToken?
+            for _ in 0 ..< 5 where authority == nil {
+                authority = await service.makeSourceAuthority(
+                    capability: capability,
+                    observedRootEpoch: capability.rootEpoch,
+                    observedRepositoryAuthority: capability.repositoryAuthority,
+                    candidateRepositoryRelativePath: cancelledPath,
+                    observedPathGeneration: current.pathGeneration,
+                    currentPathGeneration: current.pathGeneration,
+                    observedIngressGeneration: 1,
+                    currentIngressGeneration: 1
+                )
+            }
+            let identity = try harness.makeIdentity(fileID: fileID, path: cancelledPath)
+            let locator = try GitBlobCodeMapLocatorIdentity(
+                repositoryNamespace: capability.repositoryNamespace,
+                objectFormat: capability.objectFormat,
+                blobOID: String(repeating: "a", count: 40),
+                pipelineIdentity: harness.pipeline
+            )
+            let sourceAuthority = try XCTUnwrap(authority)
+            let expectation = try XCTUnwrap(WorkspaceCodemapSourceExpectation.cleanGitBlob(
+                bindingIdentity: identity,
+                locatorIdentity: locator,
+                sourceAuthority: sourceAuthority
+            ))
+            let token = try XCTUnwrap(WorkspaceCodemapArtifactRequestToken.issue(
+                identity: identity,
+                requestGeneration: current.requestGeneration,
+                catalogGeneration: 3,
+                sourceExpectation: expectation
+            ))
+            let owner = WorkspaceCodemapLiveDemandOwner()
+            guard case let .started(ticket) = await harness.overlay.beginDemand(owner: owner, token: token) else {
+                return XCTFail("\(mode): the demand did not start")
+            }
+            let cancelled = await harness.overlay.cancelDemand(owner: owner, ticket: ticket)
+            XCTAssertTrue(cancelled, "\(mode)")
+            await harness.pull()
+            let snapshot = try await harness.latestSnapshot()
+            XCTAssertEqual(snapshot.slotsByFileID[fileID]?.state, current.state, "\(mode)")
+            XCTAssertEqual(snapshot.slotsByFileID[fileID]?.diagnostics?.source, .graphIndex, "\(mode)")
+            XCTAssertEqual(snapshot.nodesByFileID[fileID]?.contribution.sortedUniqueDefinitions, ["Cancelled"], "\(mode)")
+        }
+    }
+
     // MARK: - Engine diagnostics and warm relaunch
 
     func testGraphIndexReportsBatchTimingAndWarmRelaunchReusesArtifacts() async throws {
