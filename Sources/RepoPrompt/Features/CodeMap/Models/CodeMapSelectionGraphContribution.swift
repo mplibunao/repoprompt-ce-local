@@ -43,12 +43,15 @@ struct CodeMapSelectionGraphContribution: Hashable {
         )
     }
 
-    /// Graph names preserve case, normalize to NFC, deduplicate after normalization, and
-    /// sort by the normalized UTF-8 bytes. This policy is independent of locale and input order.
+    /// Graph names preserve case, normalize to NFC, drop names that are empty after
+    /// normalization, deduplicate, and sort by the normalized UTF-8 bytes. This policy is
+    /// independent of locale and input order. Empty names come from anonymous C enums and
+    /// the manifest decoder rejects them.
     private static func canonicalNames(_ names: some Sequence<String>) -> [String] {
-        Set(names.lazy.map(\.precomposedStringWithCanonicalMapping)).sorted { lhs, rhs in
-            lhs.utf8.lexicographicallyPrecedes(rhs.utf8)
-        }
+        Set(names.lazy.map(\.precomposedStringWithCanonicalMapping).filter { !$0.isEmpty })
+            .sorted { lhs, rhs in
+                lhs.utf8.lexicographicallyPrecedes(rhs.utf8)
+            }
     }
 
     private static func digest(

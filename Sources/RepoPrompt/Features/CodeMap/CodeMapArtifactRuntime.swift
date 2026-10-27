@@ -27,6 +27,7 @@ final class CodeMapArtifactRuntime: @unchecked Sendable {
         locatorStoreHooks: GitBlobCodeMapLocatorStoreHooks = .none,
         manifestStorePolicy: CodeMapRootManifestStorePolicy = .default,
         manifestStoreHooks: CodeMapRootManifestStoreHooks = .none,
+        manifestStoreRunsMaintenanceAfterFirstPublication: Bool = false,
         builder: CodeMapArtifactBuilderClient = CodeMapArtifactBuilderClient(),
         coordinatorPolicy: CodeMapArtifactBuildCoordinatorPolicy = .default,
         coordinatorClock: CodeMapArtifactBuildCoordinatorClock = .continuous,
@@ -51,7 +52,8 @@ final class CodeMapArtifactRuntime: @unchecked Sendable {
         let manifestStore = try CodeMapRootManifestStore(
             rootURL: rootURL,
             policy: manifestStorePolicy,
-            hooks: manifestStoreHooks
+            hooks: manifestStoreHooks,
+            runsMaintenanceAfterFirstPublication: manifestStoreRunsMaintenanceAfterFirstPublication
         )
         let coordinator = CodeMapArtifactBuildCoordinator(
             artifactStore: CodeMapArtifactStoreClient(store: artifactStore),
@@ -117,6 +119,7 @@ final class CodeMapArtifactRuntime: @unchecked Sendable {
             let runtime = try CodeMapArtifactRuntime(
                 rootURL: rootURL,
                 artifactStoreLeaseAdmission: .processWide,
+                manifestStoreRunsMaintenanceAfterFirstPublication: true,
                 bindingIntegrationRegistry: registry,
                 bindingEngineFactory: { runtime in
                     let namespaceSalt = try namespaceSaltProvider(rootURL, identity)

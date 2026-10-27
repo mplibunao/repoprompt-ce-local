@@ -214,9 +214,14 @@ enum CodeMapRootManifestWriteResult: Equatable {
 #endif
 
 struct CodeMapRootManifestAccounting: Equatable {
+    /// Valid manifests only; `manifestByteCount` and `recordCount` total the same manifests.
     let manifestCount: Int
     let manifestByteCount: UInt64
     let recordCount: Int
+    /// Manifests with canonical names that fail validation or decode.
+    let corruptManifestCount: Int
+    /// Manifests with canonical names that the scan could not inspect safely and leaves in place.
+    let insecureManifestCount: Int
     let temporaryCount: Int
     let quarantineCount: Int
     let hasMore: Bool
@@ -339,6 +344,8 @@ actor CodeMapRootManifestStore {
     private let hooks: CodeMapRootManifestStoreHooks
     private let lockAnchor: ManifestDirectoryDescriptor
     private let accessEpochSeconds: @Sendable () -> UInt64
+    private let runsMaintenanceAfterFirstPublication: Bool
+    private var maintenanceAfterFirstPublicationScheduled = false
     private let writerAuthorityStoreID = UUID()
     private var nextWriterSessionSequence: UInt64? = 1
     private var activeWriterSessions: Set<CodeMapRootManifestWriterSessionToken> = []
@@ -372,10 +379,14 @@ actor CodeMapRootManifestStore {
         private var debugPublicationAttemptOperationOrder: [UUID] = []
     #endif
 
+    /// - Parameter runsMaintenanceAfterFirstPublication: Runs `maintain()` once, after the first
+    ///   publication that runs its quota scan. The process-wide store sets it so a backlog of corrupt
+    ///   manifests and quarantine files leaves without a manual step.
     init(
         rootURL: URL,
         policy: CodeMapRootManifestStorePolicy = .default,
         hooks: CodeMapRootManifestStoreHooks = .none,
+        runsMaintenanceAfterFirstPublication: Bool = false,
         accessEpochSeconds: @escaping @Sendable () -> UInt64 = {
             UInt64(max(0, Date().timeIntervalSince1970))
         }
@@ -391,6 +402,7 @@ actor CodeMapRootManifestStore {
         self.rootURL = rootURL
         self.policy = policy
         self.hooks = hooks
+        self.runsMaintenanceAfterFirstPublication = runsMaintenanceAfterFirstPublication
         self.accessEpochSeconds = accessEpochSeconds
         let lockAnchor = try Self.openRootParent(rootURL)
         try Self.lock(lockAnchor.rawValue, operation: "manifest-anchor-lock")
@@ -1034,6 +1046,9 @@ actor CodeMapRootManifestStore {
                   current.records == expectedSnapshot.records,
                   current.lastAccessEpochSeconds >= expectedSnapshot.lastAccessEpochSeconds
             else {
+                #if DEBUG
+                    debugAttempt.succeeded = true
+                #endif
                 return .unchanged(manifestGeneration: expectedSnapshot.manifestGeneration)
             }
         }
@@ -1241,6 +1256,36 @@ actor CodeMapRootManifestStore {
         guard initial.sameObject(as: completed), completed.size == off_t(encoded.count) else {
             throw CodeMapRootManifestStoreError.insecureLeaf
         }
+        // Decode the synced temporary file before the rename, so bytes that fail decode never
+        // replace the published manifest. The scope ends the DEBUG timer on failure too.
+        let readBack: Data
+        do {
+            #if DEBUG
+                let debugReadbackStartedUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                defer {
+                    debugAttempt.readbackDecodeDurationNanoseconds = debugElapsedNanoseconds(
+                        from: debugReadbackStartedUptimeNanoseconds,
+                        to: DispatchTime.now().uptimeNanoseconds
+                    )
+                }
+            #endif
+            readBack = try Self.readExactly(descriptor, byteCount: encoded.count)
+            guard try CodeMapRootManifestCodec.decode(
+                readBack,
+                expectedNamespace: namespace,
+                filenameDigest: name
+            ) == snapshot else {
+                throw CodeMapRootManifestStoreError.insecureLeaf
+            }
+        }
+        let readBackChecksum = try CodeMapRootManifestCodec.validatedContentChecksum(readBack)
+        let validated = try Self.validatedFileIdentity(
+            descriptor,
+            parent: shard,
+            name: temporaryName,
+            expectedMode: Self.fileMode
+        )
+        guard validated == completed else { throw CodeMapRootManifestStoreError.insecureLeaf }
 
         hooks.beforePublish()
         guard Self.rootParentIsCurrent(lockAnchor, rootURL: rootURL),
@@ -1256,6 +1301,14 @@ actor CodeMapRootManifestStore {
         } else if try Self.fileIdentityAt(parent: shard, name: name) != nil {
             throw CodeMapRootManifestStoreError.insecureLeaf
         }
+        guard try Self.validatedFileIdentity(
+            descriptor,
+            parent: shard,
+            name: temporaryName,
+            expectedMode: Self.fileMode
+        ) == validated else {
+            throw CodeMapRootManifestStoreError.insecureLeaf
+        }
         #if DEBUG
             let debugAtomicReplaceStartedUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         #endif
@@ -1267,8 +1320,19 @@ actor CodeMapRootManifestStore {
                 from: debugAtomicReplaceStartedUptimeNanoseconds,
                 to: DispatchTime.now().uptimeNanoseconds
             )
+            debugAttempt.published = true
         #endif
         temporaryExists = false
+        // The bytes were decoded before the rename, so only the file's identity can reveal a later change.
+        let renamed = try Self.validatedFileIdentity(
+            descriptor,
+            parent: shard,
+            name: name,
+            expectedMode: Self.fileMode
+        )
+        guard renamed.matchesIgnoringStatusChange(validated) else {
+            throw CodeMapRootManifestStoreError.insecureLeaf
+        }
         if hooks.faultAction(.afterManifestRename) == .simulateProcessTermination {
             throw CodeMapRootManifestStoreError.simulatedProcessTermination(.afterManifestRename)
         }
@@ -1285,7 +1349,7 @@ actor CodeMapRootManifestStore {
             name: name,
             expectedMode: Self.fileMode
         )
-        guard completed.sameObject(as: published), published.size == completed.size else {
+        guard published == renamed else {
             throw CodeMapRootManifestStoreError.insecureLeaf
         }
         #if DEBUG
@@ -1314,29 +1378,11 @@ actor CodeMapRootManifestStore {
         else {
             throw CodeMapRootManifestStoreError.insecureDirectory
         }
-        #if DEBUG
-            let debugReadbackStartedUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
-        #endif
-        let readBack = try Self.readExactly(descriptor, byteCount: encoded.count)
-        guard try CodeMapRootManifestCodec.decode(
-            readBack,
-            expectedNamespace: namespace,
-            filenameDigest: name
-        ) == snapshot else {
-            throw CodeMapRootManifestStoreError.insecureLeaf
-        }
-        #if DEBUG
-            debugAttempt.readbackDecodeDurationNanoseconds = debugElapsedNanoseconds(
-                from: debugReadbackStartedUptimeNanoseconds,
-                to: DispatchTime.now().uptimeNanoseconds
-            )
-            debugAttempt.published = true
-        #endif
-        try cacheDecodedManifest(
+        cacheDecodedManifest(
             at: ManifestCacheLocation(shard: namespace.shard, digest: name),
             identity: committed,
             snapshot: snapshot,
-            validatedContentChecksum: CodeMapRootManifestCodec.validatedContentChecksum(readBack)
+            validatedContentChecksum: readBackChecksum
         )
         if !canSkipGlobalReconciliation {
             try reconcileAfterCommittedPublication(
@@ -1346,6 +1392,12 @@ actor CodeMapRootManifestStore {
                 protectingDigest: name,
                 committedIdentity: committed
             )
+            // The publication's scans warmed the scan summaries, so the pass costs a warm scan plus
+            // the file moves. It runs as a separate actor job after this publication returns.
+            if runsMaintenanceAfterFirstPublication, !maintenanceAfterFirstPublicationScheduled {
+                maintenanceAfterFirstPublicationScheduled = true
+                Task { [weak self] in await self?.runMaintenanceAfterFirstPublication() }
+            }
         }
         #if DEBUG
             debugAttempt.succeeded = true
@@ -1458,6 +1510,53 @@ actor CodeMapRootManifestStore {
             clearCommittedMaintenanceDebt()
         }
         return result
+    }
+
+    /// Runs one maintenance pass and logs its result. A truncated or failed pass isn't retried in
+    /// this process: each scan restarts its enumeration, so a retry would repeat the same work.
+    private func runMaintenanceAfterFirstPublication() async {
+        let startedUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        let maximumManifestCount = policy.maximumManifestCount
+        let maximumQuarantineCount = policy.maximumQuarantineCount
+        do {
+            let result = try await maintain()
+            let elapsedMilliseconds = Self.elapsedMilliseconds(since: startedUptimeNanoseconds)
+            let accounting = result.accounting
+            // OSLog has no warning type; `Logger.warning` also logs at `.error`.
+            let level: OSLogType = accounting.hasMore || accounting.insecureManifestCount > 0 ? .error : .default
+            Self.logger.log(
+                level: level,
+                "manifest_maintenance_after_first_publication examined_count=\(result.examinedCount, privacy: .public) valid_manifest_count=\(accounting.manifestCount, privacy: .public) corrupt_manifest_count=\(accounting.corruptManifestCount, privacy: .public) insecure_manifest_count=\(accounting.insecureManifestCount, privacy: .public) quarantine_count=\(accounting.quarantineCount, privacy: .public) temporary_count=\(accounting.temporaryCount, privacy: .public) quarantined_corrupt_count=\(result.quarantinedCorruptCount, privacy: .public) removed_quarantine_count=\(result.removedQuarantineCount, privacy: .public) removed_temporary_count=\(result.removedTemporaryCount, privacy: .public) evicted_manifest_count=\(result.evictedManifestCount, privacy: .public) has_more=\(accounting.hasMore, privacy: .public) maximum_manifest_count=\(maximumManifestCount, privacy: .public) maximum_quarantine_count=\(maximumQuarantineCount, privacy: .public) elapsed_milliseconds=\(elapsedMilliseconds, privacy: .public)"
+            )
+        } catch {
+            let elapsedMilliseconds = Self.elapsedMilliseconds(since: startedUptimeNanoseconds)
+            let failure = Self.maintenanceFailure(error)
+            Self.logger.error(
+                "manifest_maintenance_after_first_publication error_category=\(failure.category, privacy: .public) operation=\(failure.operation, privacy: .public) errno=\(failure.code, privacy: .public) elapsed_milliseconds=\(elapsedMilliseconds, privacy: .public)"
+            )
+        }
+    }
+
+    private static func elapsedMilliseconds(since startedUptimeNanoseconds: UInt64) -> UInt64 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        return now >= startedUptimeNanoseconds ? (now - startedUptimeNanoseconds) / 1_000_000 : 0
+    }
+
+    /// A fixed category for each store error, plus the operation label and errno of an I/O failure.
+    /// Other errors are not described, because their text can carry paths or names.
+    private static func maintenanceFailure(
+        _ error: Error
+    ) -> (category: String, operation: String, code: Int32) {
+        switch error as? CodeMapRootManifestStoreError {
+        case .invalidRoot: ("invalid_root", "none", 0)
+        case .insecureDirectory: ("insecure_directory", "none", 0)
+        case .insecureLeaf: ("insecure_leaf", "none", 0)
+        case .quotaExceeded: ("quota_exceeded", "none", 0)
+        case .staleWriterAuthority: ("stale_writer_authority", "none", 0)
+        case .simulatedProcessTermination: ("simulated_process_termination", "none", 0)
+        case let .ioFailure(operation, code): ("io_failure", operation, code)
+        case nil: ("unexpected", "none", 0)
+        }
     }
 
     private func performMaintenance(maximumEntries: Int?) async throws -> CodeMapRootManifestMaintenanceResult {
@@ -2153,6 +2252,8 @@ actor CodeMapRootManifestStore {
                         )
                     )
                 case .corrupt:
+                    // Not decremented when the file moves: callers see a later non-mutating scan.
+                    result.corruptManifestCount += 1
                     if mutate, try Self.quarantineWithoutHeldDescriptor(
                         manifests: layout.manifests,
                         shard: shard,
@@ -2166,7 +2267,7 @@ actor CodeMapRootManifestStore {
                         )
                     }
                 case .insecure:
-                    break
+                    result.insecureManifestCount += 1
                 }
             }
             result.observedShardMutations[shardName] = try Self.directoryMutationIdentity(shard.rawValue)
@@ -3044,6 +3145,19 @@ private struct ManifestFileIdentity: Equatable {
         device == other.device && inode == other.inode
     }
 
+    /// Compares every field except the status-change time, which a rename updates.
+    func matchesIgnoringStatusChange(_ other: ManifestFileIdentity) -> Bool {
+        device == other.device &&
+            inode == other.inode &&
+            owner == other.owner &&
+            type == other.type &&
+            permissions == other.permissions &&
+            linkCount == other.linkCount &&
+            size == other.size &&
+            modificationSeconds == other.modificationSeconds &&
+            modificationNanoseconds == other.modificationNanoseconds
+    }
+
     func isSecureRegularFile(in expectedDevice: dev_t, expectedMode: mode_t) -> Bool {
         type == mode_t(S_IFREG) &&
             owner == getuid() &&
@@ -3128,6 +3242,8 @@ private struct ManifestScanResult {
     var manifestCount = 0
     var manifestByteCount: UInt64 = 0
     var recordCount = 0
+    var corruptManifestCount = 0
+    var insecureManifestCount = 0
     var temporaryCount = 0
     var quarantineCount = 0
     var hasMore = false
@@ -3145,6 +3261,8 @@ private struct ManifestScanResult {
             manifestCount: manifestCount,
             manifestByteCount: manifestByteCount,
             recordCount: recordCount,
+            corruptManifestCount: corruptManifestCount,
+            insecureManifestCount: insecureManifestCount,
             temporaryCount: temporaryCount,
             quarantineCount: quarantineCount,
             hasMore: hasMore
