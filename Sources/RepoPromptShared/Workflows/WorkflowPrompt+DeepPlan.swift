@@ -352,14 +352,17 @@ rpce-cli -w <window_id> -e 'read <oracle_export_path>'
 
 The Phase 6 critique checks correctness, completeness, and preservation against this baseline.
 
-### Phase 4.5: Walk the User Through the Draft (route 4B; interactive modes only)
+### Walking the User Through a Draft
 
-The user has just returned the response, so this is a conversation, not a report. In plain language, with enough context to follow without having read the plan:
+Phase 4.5 and Phase 5 both use this list. In plain language, with enough context to follow without having read the plan, cover:
 
 1. The proposed approach, in a paragraph.
 2. Each important choice and its tradeoff, with the alternative the draft rejected.
-3. For every piece of machinery the draft proposes (abstractions, packages, harnesses, tests, process steps): keep, simplify, or defer, with the user need it serves and the simplest design that meets it. Name anything overbuilt or unnecessary.
-4. The questions whose answers change scope or order.
+3. The over-engineering check: for every piece of machinery the draft proposes (abstractions, packages, harnesses, tests, process steps), keep, simplify, or defer, with the user need it serves and the simplest design that meets it. Name anything overbuilt or unnecessary.
+
+### Phase 4.5: Walk the User Through the Draft (route 4B; interactive modes only)
+
+The user has just returned the response, so this is a conversation, not a report. Walk them through the draft as **Walking the User Through a Draft** describes, then raise the questions whose answers change scope or order.
 
 Discuss, record the agreed trimming and decisions under `## Decisions` in the user's wording, apply them in the plan, and proceed only when the user confirms. This is the checkpoint the export route adds after the response: in Mid-flow it is the Phase 5 check-in, folded into one conversation; in Up front it is an added checkpoint at the same point, since the response cannot be discussed before it exists. A timeout halts, as at every checkpoint after Phase 1.
 
@@ -367,7 +370,7 @@ Discuss, record the agreed trimming and decisions under `## Decisions` in the us
 
 ## Phase 5: Mid-flow Check-in (only if "Mid-flow" on route 4A)
 
-Read your own draft and walk the user through it before you ask anything, covering Phase 4.5's items 1 to 3. Then identify 2–4 ambiguities — places where \(builderName) hedged ("could go either way"), tradeoffs without a pick, or assumptions the user might want to weigh in on. \(midFlowAsk) Fold answers in before Phase 6. A cut that comes up here, whether from the user or from you, goes under Open Questions with each view rather than into the plan; the design critique weighs in first.
+Read your own draft and walk the user through it before you ask anything, as **Walking the User Through a Draft** describes, including the over-engineering check on every piece of machinery the draft proposes. Then identify 2–4 ambiguities — places where \(builderName) hedged ("could go either way"), tradeoffs without a pick, or assumptions the user might want to weigh in on. \(midFlowAsk) Fold answers in before Phase 6. A cut that comes up here, whether from the user or from you, goes under Open Questions with each view rather than into the plan; the design critique weighs in first.
 
 The user picked **Mid-flow** — they explicitly asked to be involved here. \(anyTimesOut), **halt** — don't push to Phase 6 (the design critique) with unresolved ambiguities, don't silently demote them to Hands-off. Report you're waiting on the outstanding question(s) and stop. Resume Phase 5 from the same prompt when the user replies. (\(skipSignal) means the user is fine with your current draft on that point — continue.)
 
