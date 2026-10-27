@@ -1680,6 +1680,10 @@ final class MCPServerViewModel: ObservableObject {
             guard let self else { throw MCPError.internalError("Window deallocated while updating tab context") }
             return try await updateCurrentTabContext(toolName: toolName, mutation: mutation)
         },
+        refreshingPromptText: { [weak self] context, toolName in
+            guard let self else { throw MCPError.internalError("Window deallocated while reading the tab's prompt") }
+            return try refreshingPromptText(in: context, toolName: toolName)
+        },
         selectedRecordsForCurrentTabContext: { [weak self] metadata, lookupContextOverride in
             guard let self else { throw MCPError.internalError("Window deallocated while resolving selected files") }
             return try await selectedRecordsForCurrentTabContext(

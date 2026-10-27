@@ -434,6 +434,143 @@ import XCTest
             }
         }
 
+        func testBackgroundContextBuilderRefreshesBoundCallerPromptAndExport() async throws {
+            let builderPrompt = "builder-final-prompt-\(UUID().uuidString)"
+            let provider = ContextBuilderRoutedReplyProvider(reply: builderPrompt)
+            try await withLeasedFixture(contextBuilderProviderFactory: { _, _, _, _ in provider }) { fixture, endpoint in
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let backgroundTabID = UUID()
+                let exportURL = context.rootURL.appendingPathComponent("background-builder-export.md")
+                let receipts = ContextBuilderCommitReceipts()
+
+                try Self.appendBackgroundTab(backgroundTabID, to: context)
+                try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                try await Self.bindTab(backgroundTabID, endpoint: endpoint, context: context)
+                XCTAssertNotEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, backgroundTabID)
+                let initialPrompt = try await Self.promptGetText(endpoint)
+                XCTAssertEqual(initialPrompt, "")
+                let selected = try await endpoint.callTool(
+                    name: MCPWindowToolName.manageSelection,
+                    arguments: ["op": "set", "paths": [context.fileURL.path]]
+                )
+                XCTAssertFalse(selected.rawJSON.contains("\"isError\":true"), selected.rawJSON)
+                Self.prepareSyntheticContextBuilderRun(context, receipts: receipts)
+
+                try await Self.callContextBuilder(endpoint, instructions: "Find the fixture sentinel.")
+
+                // The builder stored its prompt in the background tab without publishing a snapshot.
+                XCTAssertEqual(receipts.values.count, 1)
+                let receipt = try XCTUnwrap(receipts.values.first)
+                XCTAssertEqual(receipt.identity.workspaceID, context.workspaceID)
+                XCTAssertEqual(receipt.identity.tabID, backgroundTabID)
+                XCTAssertEqual(receipt.tab.promptText, builderPrompt)
+                XCTAssertEqual(receipt.tab.selection.selectedPaths, [context.fileURL.path])
+                XCTAssertEqual(manager.composeTab(with: backgroundTabID)?.promptText, builderPrompt)
+
+                // The same bound caller reads and exports that prompt, with no rebind after the run.
+                let promptAfterRun = try await Self.promptGetText(endpoint)
+                XCTAssertEqual(promptAfterRun, builderPrompt)
+                let exported = try await endpoint.callTool(
+                    name: MCPWindowToolName.prompt,
+                    arguments: [
+                        "op": "export",
+                        "path": exportURL.path,
+                        "copy_preset": "plan",
+                        "operation_id": "background-builder-export-\(UUID().uuidString)",
+                        "_rawJSON": true
+                    ]
+                )
+                XCTAssertFalse(exported.rawJSON.contains("\"isError\":true"), exported.rawJSON)
+                let exportedContent = try String(contentsOf: exportURL, encoding: .utf8)
+                XCTAssertEqual(Self.userInstructionsBlocks(in: exportedContent), [builderPrompt], exportedContent)
+                XCTAssertTrue(exportedContent.contains(context.sentinel), exportedContent)
+                XCTAssertNotEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, backgroundTabID)
+            }
+        }
+
+        func testContextBuilderSeedsFromCurrentBackgroundPrompt() async throws {
+            let staleSeed = "stale-seed-\(UUID().uuidString)"
+            let currentSeed = "current-seed-\(UUID().uuidString)"
+            let provider = ContextBuilderRoutedReplyProvider(reply: "seed-check-discovery-output")
+            try await withLeasedFixture(contextBuilderProviderFactory: { _, _, _, _ in provider }) { fixture, endpoint in
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let backgroundTabID = UUID()
+
+                try Self.appendBackgroundTab(backgroundTabID, promptText: staleSeed, to: context)
+                try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                try await Self.bindTab(backgroundTabID, endpoint: endpoint, context: context)
+                XCTAssertEqual(
+                    context.window.mcpServer.tabContextByConnectionID[endpoint.connectionID]?.promptText,
+                    staleSeed
+                )
+                // A stored-only write, such as a background Context Builder commit, never reaches
+                // the caller's binding.
+                var tab = try XCTUnwrap(manager.composeTab(with: backgroundTabID))
+                tab.promptText = currentSeed
+                XCTAssertTrue(manager.updateComposeTabStoredOnly(tab, inWorkspaceID: context.workspaceID))
+                Self.prepareSyntheticContextBuilderRun(context, receipts: ContextBuilderCommitReceipts())
+
+                try await Self.callContextBuilder(endpoint, instructions: "Check the run's seed.")
+
+                let messages = provider.userMessages
+                XCTAssertEqual(messages.count, 1)
+                let message = messages.first ?? ""
+                XCTAssertTrue(message.contains(currentSeed), message)
+                XCTAssertFalse(message.contains(staleSeed), message)
+            }
+        }
+
+        func testPromptAndWorkspaceSnapshotUseUnstoredEditorText() async throws {
+            try await withLeasedFixture { fixture, endpoint in
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let editor = context.window.promptManager
+                let otherTabID = UUID()
+
+                try Self.appendBackgroundTab(otherTabID, to: context)
+                try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, context.tabID)
+                let stored = try await endpoint.callTool(
+                    name: MCPWindowToolName.prompt,
+                    arguments: ["op": "set", "text": "stored prompt"]
+                )
+                XCTAssertFalse(stored.rawJSON.contains("\"isError\":true"), stored.rawJSON)
+                // Until both reads finish, the editor's edit is in neither the stored tab nor the
+                // connection's copy of it. Suspended snapshot commits keep the edit out of storage and out
+                // of the save paths' publications. While another tab has an apply in progress, the active
+                // tab's snapshots aren't published, so the connection's mirror has nothing to copy.
+                manager.setSnapshotsSuspended(true, forTabID: context.tabID)
+                manager.beginApplyingTabContext(forTabID: otherTabID)
+                defer {
+                    manager.endApplyingTabContext(forTabID: otherTabID)
+                    manager.setSnapshotsSuspended(false, forTabID: context.tabID)
+                }
+                var publishedPrompts: [String] = []
+                let watch = manager.composeTabSnapshotPublisher(for: context.tabID)
+                    .sink { publishedPrompts.append($0.promptText) }
+                defer { watch.cancel() }
+                editor.promptText = "unstored edit"
+                manager.publishActiveComposeTabSnapshot(commitToMemory: true, touchModified: false)
+                XCTAssertEqual(
+                    context.window.mcpServer.tabContextByConnectionID[endpoint.connectionID]?.promptText,
+                    "stored prompt"
+                )
+
+                let read = try await Self.promptGetText(endpoint)
+                XCTAssertEqual(read, "unstored edit")
+                let snapshot = try await endpoint.callTool(
+                    name: MCPWindowToolName.workspaceContext,
+                    arguments: ["include": ["prompt"], "_rawJSON": true]
+                )
+                XCTAssertEqual(try Self.toolResultObject(snapshot)["prompt"] as? String, "unstored edit")
+                XCTAssertEqual(publishedPrompts, [])
+                XCTAssertEqual(manager.composeTab(with: context.tabID)?.promptText, "stored prompt")
+                XCTAssertEqual(editor.promptText, "unstored edit")
+            }
+        }
+
         func testPromptMutationTimedOutBeforeCommitIsNotAppliedAndDetaches() async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
@@ -4054,13 +4191,127 @@ import XCTest
             )
             try await activateWorkspace(for: context)
             guard bindTab else { return }
+            try await Self.bindTab(context.tabID, endpoint: endpoint, context: context)
+        }
+
+        /// Adds a tab that stays in the background to context A's workspace. Call it before
+        /// `prepareProtectedExportFixture`, which registers the workspace and loads its tabs.
+        private static func appendBackgroundTab(
+            _ tabID: UUID,
+            promptText: String = "",
+            to context: PersistentMCPTestContext
+        ) throws {
+            let manager = context.window.workspaceManager
+            let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == context.workspaceID })
+            manager.workspaces[workspaceIndex].composeTabs.append(
+                ComposeTabState(id: tabID, name: "Background", promptText: promptText)
+            )
+        }
+
+        private static func bindTab(
+            _ tabID: UUID,
+            endpoint: PersistentMCPTestEndpoint,
+            context: PersistentMCPTestContext
+        ) async throws {
             let bindResponse = try await endpoint.callTool(
                 name: "bind_context",
-                arguments: ["op": "bind", "context_id": context.tabID.uuidString]
+                arguments: ["op": "bind", "context_id": tabID.uuidString]
             )
             let bindText = try toolResultText(bindResponse)
             XCTAssertFalse(bindText.contains("Error:"), bindText)
             await context.window.mcpServer.domainRoutingPublishTask?.value
+        }
+
+        /// Lets a real `context_builder` call on context A's window reach the synthetic provider and
+        /// commit through the DEBUG path for a run without a final-context connection. The Agent
+        /// Models profile it writes applies only to the fixture's freshly generated workspace ID.
+        private static func prepareSyntheticContextBuilderRun(
+            _ context: PersistentMCPTestContext,
+            receipts: ContextBuilderCommitReceipts
+        ) {
+            let window = context.window
+            window.apiSettingsViewModel.isClaudeCodeConnected = true
+            window.apiSettingsViewModel.test_completeContextBuilderProviderValidation(verifiedProviders: [.claudeCode])
+            let settings = GlobalSettingsStore.shared
+            var profile = settings.effectiveAgentModelsProfile(workspaceID: context.workspaceID)
+            profile.contextBuilderAgentRaw = AgentProviderKind.claudeCode.rawValue
+            profile = profile.replacingContextBuilderModel(
+                AgentModel.claudeSonnet.rawValue,
+                for: AgentProviderKind.claudeCode.rawValue
+            )
+            settings.setWorkspaceAgentModelsProfile(workspaceID: context.workspaceID, profile: profile)
+            window.contextBuilderAgentViewModel.installRunTestHooks(
+                ContextBuilderAgentViewModel.RunTestHooks(
+                    beforeProcessingProviderEvent: nil,
+                    providerEventDisposition: nil,
+                    teardownCompleted: nil,
+                    allowSyntheticRoutingWithoutFinalContext: true,
+                    validateContextBuilderProviders: {},
+                    committedTabSnapshotCaptured: { _, snapshot in
+                        receipts.values.append(snapshot)
+                    }
+                )
+            )
+        }
+
+        private static func callContextBuilder(
+            _ endpoint: PersistentMCPTestEndpoint,
+            instructions: String
+        ) async throws {
+            let response = try await endpoint.callTool(
+                name: MCPWindowToolName.contextBuilder,
+                arguments: ["instructions": instructions, "response_type": "clarify"],
+                timeoutSeconds: 30
+            )
+            XCTAssertFalse(response.rawJSON.contains("\"isError\":true"), response.rawJSON)
+        }
+
+        private static func promptGetText(_ endpoint: PersistentMCPTestEndpoint) async throws -> String? {
+            let response = try await endpoint.callTool(
+                name: MCPWindowToolName.prompt,
+                arguments: ["op": "get", "_rawJSON": true]
+            )
+            let reply = try toolResultObject(response)["prompt"] as? [String: Any]
+            return reply?["prompt"] as? String
+        }
+
+        /// The text of every `<user_instructions>` block in exported content. A preset can repeat the
+        /// block at the top, so callers compare the set.
+        private static func userInstructionsBlocks(in content: String) -> Set<String> {
+            let pattern = try? NSRegularExpression(
+                pattern: "<user_instructions[^>]*>\\n(.*?)\\n</user_instructions>",
+                options: [.dotMatchesLineSeparators]
+            )
+            let range = NSRange(content.startIndex..., in: content)
+            let matches = pattern?.matches(in: content, range: range) ?? []
+            return Set(matches.compactMap { match in
+                Range(match.range(at: 1), in: content).map { String(content[$0]) }
+            })
+        }
+
+        /// Runs `body` on a leased fixture, with context A's window built on
+        /// `contextBuilderProviderFactory` when one is given. Shared cleanup runs after `body` returns
+        /// or throws, so `body` must first undo its own changes, including any endpoint it adds.
+        /// `assertCleanedUp()` runs only when `body` succeeds.
+        private func withLeasedFixture(
+            contextBuilderProviderFactory: ContextBuilderAgentViewModel.ProviderFactory? = nil,
+            _ body: @MainActor (PersistentMCPTestFixture, PersistentMCPTestEndpoint) async throws -> Void
+        ) async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime,
+                    contextBuilderProviderFactory: contextBuilderProviderFactory
+                )
+                do {
+                    try await body(fixture, fixture.endpointA())
+                } catch {
+                    await fixture.cleanup()
+                    throw error
+                }
+                await fixture.cleanup()
+                try await fixture.assertCleanedUp()
+            }
         }
 
         private struct BoundWorktreeExportFixture {
@@ -5007,7 +5258,8 @@ import XCTest
 
         static func make(
             lease: MCPSharedServerTestLease.Ownership,
-            domainRuntime: MCPDomainRuntime? = nil
+            domainRuntime: MCPDomainRuntime? = nil,
+            contextBuilderProviderFactory: ContextBuilderAgentViewModel.ProviderFactory? = nil
         ) async throws -> PersistentMCPTestFixture {
             _ = lease
             try await AppGlobalMCPServiceComposition.shared.ensureRegistered()
@@ -5019,9 +5271,14 @@ import XCTest
 
             let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
             GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-            let windowA = if let domainRuntime {
+            let windowA = switch (domainRuntime, contextBuilderProviderFactory) {
+            case let (domainRuntime?, providerFactory?):
+                WindowState(domainRuntime: domainRuntime, contextBuilderProviderFactory: providerFactory)
+            case let (domainRuntime?, nil):
                 WindowState(domainRuntime: domainRuntime)
-            } else {
+            case let (nil, providerFactory?):
+                WindowState(contextBuilderProviderFactory: providerFactory)
+            case (nil, nil):
                 WindowState()
             }
             let windowB = if let domainRuntime {
@@ -5793,6 +6050,44 @@ import XCTest
             defer { stateLock.unlock() }
             return try operation()
         }
+    }
+
+    /// A Context Builder agent for tests: it records the discovery message, reports the run's MCP
+    /// routing as the agent's own connection would, streams `reply`, and finishes.
+    private final class ContextBuilderRoutedReplyProvider: HeadlessAgentProvider, @unchecked Sendable {
+        private let reply: String
+        private let lock = NSLock()
+        private var recordedUserMessages: [String] = []
+
+        init(reply: String) {
+            self.reply = reply
+        }
+
+        var userMessages: [String] {
+            lock.withLock { recordedUserMessages }
+        }
+
+        func streamAgentMessage(
+            _ message: AgentMessage,
+            runID: UUID?
+        ) async throws -> AsyncThrowingStream<AIStreamResult, Error> {
+            lock.withLock { recordedUserMessages.append(message.userMessage) }
+            if let runID {
+                await MCPRoutingWaiter.notifyConnectionObserved(runID: runID)
+                await MCPRoutingWaiter.notifyRouted(runID: runID)
+            }
+            let reply = reply
+            return AsyncThrowingStream { continuation in
+                continuation.yield(AIStreamResult(type: "content", text: reply))
+                continuation.finish()
+            }
+        }
+
+        func dispose() async {}
+    }
+
+    private final class ContextBuilderCommitReceipts {
+        var values: [MCPServerViewModel.ContextBuilderCommittedTabSnapshot] = []
     }
 
     private enum ClientFixtureError: Error {

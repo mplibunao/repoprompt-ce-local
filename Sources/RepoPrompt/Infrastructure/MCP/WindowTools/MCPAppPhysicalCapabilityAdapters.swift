@@ -157,6 +157,10 @@ enum MCPAppPhysicalCapabilityAdapters {
         _ toolName: String,
         _ mutation: (inout MCPServerViewModel.TabContextSnapshot) -> Void
     ) async throws -> MCPServerViewModel.TabContextSnapshot
+    typealias RefreshingPromptText = @MainActor @Sendable (
+        _ context: MCPServerViewModel.TabContextSnapshot,
+        _ toolName: String
+    ) throws -> MCPServerViewModel.TabContextSnapshot
     typealias SelectedRecordsForCurrentTabContext = @MainActor @Sendable (
         _ metadata: MCPServerViewModel.RequestMetadata,
         _ lookupContextOverride: WorkspaceLookupContext?
@@ -396,6 +400,7 @@ enum MCPAppPhysicalCapabilityAdapters {
         let validateContextBuilderGitArtifactSelection: ValidateContextBuilderGitArtifactSelection
         let resolveTabContextSnapshot: ResolveTabContextSnapshot
         let updateCurrentTabContext: UpdateCurrentTabContext
+        let refreshingPromptText: RefreshingPromptText
         let selectedRecordsForCurrentTabContext: SelectedRecordsForCurrentTabContext
         let physicalSelectionForCurrentTabContext: PhysicalSelectionForCurrentTabContext
         let resolveSelectedFilesForCodeStructure: ResolveSelectedFilesForCodeStructure

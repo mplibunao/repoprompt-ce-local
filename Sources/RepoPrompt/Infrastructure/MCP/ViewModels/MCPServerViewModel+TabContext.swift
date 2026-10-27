@@ -4492,6 +4492,32 @@ extension MCPServerViewModel {
         return context
     }
 
+    /// Returns a copy of `context` with the exact tab's current prompt: the editor's text when the tab
+    /// is active, the stored text otherwise. A connection's snapshot misses stored-only writes, such as
+    /// a background Context Builder commit. This method changes only the prompt, and it leaves the
+    /// binding and the connection's snapshot as they are. A run's context is returned unchanged.
+    @MainActor
+    func refreshingPromptText(
+        in context: TabContextSnapshot,
+        toolName: String
+    ) throws -> TabContextSnapshot {
+        guard context.runID == nil else { return context }
+        guard context.windowID == windowID,
+              let workspaceID = context.workspaceID,
+              let current = workspaceManager?.collectMCPTabContextComposeSnapshot(
+                  tabID: context.tabID,
+                  workspaceID: workspaceID,
+                  captureActiveUIState: true,
+                  flushPendingUISelection: false
+              )
+        else {
+            throw MCPError.invalidParams("The bound tab is no longer available for \(toolName)")
+        }
+        var refreshed = context
+        refreshed.promptText = current.snapshot.promptText
+        return refreshed
+    }
+
     private static func isSameTab(_ lhs: TabContextSnapshot, _ rhs: TabContextSnapshot) -> Bool {
         lhs.tabID == rhs.tabID && lhs.windowID == rhs.windowID && lhs.workspaceID == rhs.workspaceID
     }

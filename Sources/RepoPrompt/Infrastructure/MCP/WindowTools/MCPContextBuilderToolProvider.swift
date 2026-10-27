@@ -488,9 +488,15 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                 throw MCPContextBuilderSelectionPrerequisiteError.invalidated
             }
             try requireControlOwnership()
+            // Start the run from the tab's current prompt, not the caller's binding, which can hold an
+            // older copy. The agent reads this prompt, and the run's commit can write it back to the tab.
+            let nestedTabContext = try dependencies.context.refreshingPromptText(
+                tabResolution.nestedTabContext,
+                MCPWindowToolName.contextBuilder
+            )
             let runAuthority = try await contextBuilderVM.resolveMCPRunAuthority(
                 identity: resolvedIdentity,
-                nestedTabContext: tabResolution.nestedTabContext,
+                nestedTabContext: nestedTabContext,
                 workspaceContext: workspaceContext,
                 responseType: responseType?.rawValue
             )
