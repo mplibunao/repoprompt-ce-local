@@ -11,7 +11,7 @@ Apply the wording approved on 2026-10-27 in the 2026-10-26 skills audit: `rp-dee
 | 3. Cleanup pass on the prompt change | done | engineer · Orchestrate 3/4: cleanup pass | none (no changes) |
 | 4. Debug-app validation | done | engineer · Debug-app validation: deep-plan/investigate walkthroughs | none (no changes) |
 | 5. Timed-out opening wizard keeps picked answers | done | engineer · Debug-app run: deep-plan wording check A | `fix(workflows): keep the answers picked before Deep Plan's opening wizard times out` |
-| 6. Shared walkthrough list with a named over-engineering check | pending | | `fix(workflows): name the over-engineering check in Deep Plan's walkthroughs` |
+| 6. Shared walkthrough list with a named over-engineering check | done | engineer · Deep Plan live run: over-engineering check | `fix(workflows): name the over-engineering check in Deep Plan's walkthroughs` |
 
 ## 1. Built-in prompt wording, version 65
 
@@ -52,3 +52,6 @@ Apply the wording approved on 2026-10-27 in the 2026-10-26 skills audit: `rp-dee
 
 - Decision: move Phase 4.5's items 1 to 3 into a shared section, "Walking the User Through a Draft", with no route label, and name item 3 the over-engineering check. Phase 4.5 and Phase 5 point to it, and Phase 5 names the check. The item 4 debug-app run showed a route 4A walkthrough without per-piece keep, simplify, or defer verdicts, when Phase 5 pointed at a list in a section headed for route 4B. One shared list keeps one copy. Source: user, approving the exact text on 2026-10-27.
 - Evidence: all 54 renders before and after the commit; the 6 Deep Plan renders each changed in exactly the two approved places, and the other 48 are unchanged; a one-word negative control failed. `make dev-format` changed no other file; `make dev-lint`, `make dev-swift-build PRODUCT=repoprompt-mcp`, `WorkflowPromptRunRecordTests`, and `DirectHeadlessCompositionTests` pass.
+- Evidence, Codex orchestrator: a debug app built from this commit installed the new text in all 18 seeded copies. A live Deep Plan run on the earlier task, with the orchestrator on GPT-6.1 Sol, walked through the approach and three choices but gave no per-piece verdict and proposed no cuts. The scratch workspaces had no Agent Models override, so `pair` resolved to the global default, GPT-6.1 Sol High; the item 4 run used the same model.
+- Evidence, Opus orchestrator (`claudeCode:opus[1m]:xhigh`, the model the user's `pair` role uses): the check-in gave an over-engineering list with Keep, Cut, and Simplify verdicts. On the user's answers, the plan cut a `--` text delimiter, reduced 11 new tests to 6, and reduced the README change to one example and one sentence, each recorded as a DECIDED line. Gaps: two kept pieces got no stated need, it used "Cut" in place of "Defer", the three cuts were already open questions in the draft, and the final plan stayed about 300 lines for a small change.
+- Decision: no output-format requirement for the over-engineering check. What matters is that the check shapes the plan, and on the model the user runs it did. Source: user.
