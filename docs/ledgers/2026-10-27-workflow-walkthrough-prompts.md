@@ -7,7 +7,7 @@ Apply the wording approved on 2026-10-27 in the 2026-10-26 skills audit: `rp-dee
 | Item | Outcome | Agent session | Commits |
 |------|---------|---------------|---------|
 | 1. Built-in prompt wording, version 65 | done | engineer · Orchestrate 1/4: built-in prompt wording v65 | `feat(workflows): explain the draft and the report before asking, version 65` |
-| 2. Toolkit wording (`unslop`, `skills-audit`, `rp-orchestrate-loop`) | done | engineer · Orchestrate 2/4: toolkit wording | claude-toolkit, branch `chore/skills-audit-2026-10-26-wording`: `docs(skills): apply the skills-audit wording edits` |
+| 2. Toolkit wording (`unslop`, `skills-audit`, `rp-orchestrate-loop`) | done | engineer · Orchestrate 2/4: toolkit wording | claude-toolkit, branch `chore/skills-audit-2026-10-26-wording`: `docs(skills): apply the skills-audit wording edits`, mplibunao/claude-tooling#84 |
 | 3. Cleanup pass on the prompt change | done | engineer · Orchestrate 3/4: cleanup pass | none (no changes) |
 | 4. Debug-app validation | done | engineer · Debug-app validation: deep-plan/investigate walkthroughs | none (no changes) |
 
@@ -23,7 +23,6 @@ Apply the wording approved on 2026-10-27 in the 2026-10-26 skills audit: `rp-dee
 - Decision: P3, P8, and P12 applied word for word to `.claude/skills/unslop/references/chat.md:15`, `.claude/skills/skills-audit/references/usage-evidence.md:9`, and `.claude/skills/rp-orchestrate-loop/SKILL.md:376,440`. Source: approved plan.
 - Decision: committed with `--no-verify`, after running every other pre-commit step by hand, because the hook's config sync would have staged a machine-local `service_tier` difference in `.codex/config.toml` into this commit. Source: agent judgment.
 - Evidence: `pnpm exec vp check` and `pnpm verify:skills` pass; `pnpm toolkit-lint` gives the same 1 error and 19 warnings as `main`; the toolkit formats no Markdown, so the step numbers stay; the Context Builder review found nothing.
-- Deferred: the branch is not pushed and has no pull request yet.
 
 ## 3. Cleanup pass on the prompt change
 
