@@ -176,53 +176,43 @@ import XCTest
         }
 
         func testPromptAppendKeepsTabStateWrittenWhileItCommits() async throws {
-            try await MCPSharedServerTestLease.shared.withLease { lease in
-                let fixture = try await PersistentMCPTestFixture.make(
-                    lease: lease,
-                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
-                )
-                let endpoint = try fixture.endpointA()
+            try await withLeasedFixture { fixture, endpoint in
                 let context = fixture.contextA
+                let manager = context.window.workspaceManager
                 let server = context.window.mcpServer
-                do {
-                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
-                    let before = try await endpoint.callTool(
-                        name: MCPWindowToolName.prompt,
-                        arguments: ["op": "set", "text": "stored"]
-                    )
-                    XCTAssertFalse(before.rawJSON.contains("\"isError\":true"), before.rawJSON)
-                    let connectionID = endpoint.connectionID
-                    let writtenGeneration = (server.tabContextByConnectionID[connectionID]?.readFileAutoSelectionGeneration ?? 0) + 1
-                    // Between resolving the tab and committing, the editor's text reaches the snapshot and
-                    // a read's auto-selection advances its generation, as the mirror and auto-selection do.
+                let editor = context.window.promptManager
+                let otherTabID = UUID()
+                try Self.appendBackgroundTab(otherTabID, to: context)
+                try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                let before = try await endpoint.callTool(
+                    name: MCPWindowToolName.prompt,
+                    arguments: ["op": "set", "text": "stored"]
+                )
+                XCTAssertFalse(before.rawJSON.contains("\"isError\":true"), before.rawJSON)
+                let connectionID = endpoint.connectionID
+                let writtenGeneration = (server.tabContextByConnectionID[connectionID]?.readFileAutoSelectionGeneration ?? 0) + 1
+                // Between resolving the tab and committing, the user types into the active tab's editor and a
+                // read's auto-selection advances the connection's generation. Until the append finishes, the
+                // typed text is in neither the stored tab nor the connection's copy of it.
+                try await Self.withActiveTabPublicationHeld(context, applyingTabID: otherTabID) {
                     server.setBeforeTabContextMutationCommitForTesting { @MainActor in
-                        server.tabContextByConnectionID[connectionID]?.promptText = "typed meanwhile"
+                        editor.promptText = "typed meanwhile"
                         server.tabContextByConnectionID[connectionID]?.readFileAutoSelectionGeneration = writtenGeneration
                     }
+                    defer { server.setBeforeTabContextMutationCommitForTesting(nil) }
 
                     let appended = try await endpoint.callTool(
                         name: MCPWindowToolName.prompt,
                         arguments: ["op": "append", "text": " then appended", "_rawJSON": true]
                     )
-                    server.setBeforeTabContextMutationCommitForTesting(nil)
                     XCTAssertFalse(appended.rawJSON.contains("\"isError\":true"), appended.rawJSON)
                     XCTAssertTrue(appended.rawJSON.contains("typed meanwhile then appended"), appended.rawJSON)
-                    XCTAssertEqual(
-                        context.window.workspaceManager.composeTab(with: context.tabID)?.promptText,
-                        "typed meanwhile then appended"
-                    )
+                    XCTAssertEqual(manager.composeTab(with: context.tabID)?.promptText, "typed meanwhile then appended")
                     XCTAssertEqual(server.tabContextByConnectionID[connectionID]?.promptText, "typed meanwhile then appended")
                     XCTAssertEqual(
                         server.tabContextByConnectionID[connectionID]?.readFileAutoSelectionGeneration,
                         writtenGeneration
                     )
-
-                    await fixture.cleanup()
-                    try await fixture.assertCleanedUp()
-                } catch {
-                    server.setBeforeTabContextMutationCommitForTesting(nil)
-                    await fixture.cleanup()
-                    throw error
                 }
             }
         }
@@ -538,36 +528,226 @@ import XCTest
                 )
                 XCTAssertFalse(stored.rawJSON.contains("\"isError\":true"), stored.rawJSON)
                 // Until both reads finish, the editor's edit is in neither the stored tab nor the
-                // connection's copy of it. Suspended snapshot commits keep the edit out of storage and out
-                // of the save paths' publications. While another tab has an apply in progress, the active
-                // tab's snapshots aren't published, so the connection's mirror has nothing to copy.
-                manager.setSnapshotsSuspended(true, forTabID: context.tabID)
-                manager.beginApplyingTabContext(forTabID: otherTabID)
-                defer {
-                    manager.endApplyingTabContext(forTabID: otherTabID)
-                    manager.setSnapshotsSuspended(false, forTabID: context.tabID)
-                }
-                var publishedPrompts: [String] = []
-                let watch = manager.composeTabSnapshotPublisher(for: context.tabID)
-                    .sink { publishedPrompts.append($0.promptText) }
-                defer { watch.cancel() }
-                editor.promptText = "unstored edit"
-                manager.publishActiveComposeTabSnapshot(commitToMemory: true, touchModified: false)
-                XCTAssertEqual(
-                    context.window.mcpServer.tabContextByConnectionID[endpoint.connectionID]?.promptText,
-                    "stored prompt"
-                )
+                // connection's copy of it.
+                try await Self.withActiveTabPublicationHeld(context, applyingTabID: otherTabID) {
+                    editor.promptText = "unstored edit"
+                    manager.publishActiveComposeTabSnapshot(commitToMemory: true, touchModified: false)
+                    XCTAssertEqual(
+                        context.window.mcpServer.tabContextByConnectionID[endpoint.connectionID]?.promptText,
+                        "stored prompt"
+                    )
 
-                let read = try await Self.promptGetText(endpoint)
-                XCTAssertEqual(read, "unstored edit")
-                let snapshot = try await endpoint.callTool(
-                    name: MCPWindowToolName.workspaceContext,
-                    arguments: ["include": ["prompt"], "_rawJSON": true]
+                    let read = try await Self.promptGetText(endpoint)
+                    XCTAssertEqual(read, "unstored edit")
+                    let snapshot = try await endpoint.callTool(
+                        name: MCPWindowToolName.workspaceContext,
+                        arguments: ["include": ["prompt"], "_rawJSON": true]
+                    )
+                    XCTAssertEqual(try Self.toolResultObject(snapshot)["prompt"] as? String, "unstored edit")
+                    XCTAssertEqual(manager.composeTab(with: context.tabID)?.promptText, "stored prompt")
+                    XCTAssertEqual(editor.promptText, "unstored edit")
+                }
+            }
+        }
+
+        func testBackgroundPromptAppendKeepsNewerTextFromAnotherConnection() async throws {
+            try await withLeasedFixture { fixture, staleCaller in
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let server = context.window.mcpServer
+                let networkManager = fixture.networkManager
+                let backgroundTabID = UUID()
+                let writer = try await PersistentMCPTestEndpoint.make(label: "prompt-writer", networkManager: networkManager)
+                @MainActor
+                func cleanupWriter() async {
+                    await Self.cleanupEndpoint(writer, manager: networkManager)
+                    await networkManager.debugSetDomainPeerIdentityForTesting(connectionID: writer.connectionID, identity: nil)
+                }
+
+                do {
+                    try Self.appendBackgroundTab(backgroundTabID, promptText: "original", to: context)
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: staleCaller, bindTab: false)
+                    await networkManager.debugSetDomainPeerIdentityForTesting(
+                        connectionID: writer.connectionID,
+                        identity: .verified(processID: Int(getpid()), fingerprint: "test:verified:prompt-writer")
+                    )
+                    for endpoint in [staleCaller, writer] {
+                        try await Self.bindTab(backgroundTabID, endpoint: endpoint, context: context)
+                        XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.promptText, "original")
+                    }
+                    let visibleTabID = manager.workspace(withID: context.workspaceID)?.activeComposeTabID
+                    XCTAssertNotEqual(visibleTabID, backgroundTabID)
+                    let visibleEditorText = context.window.promptManager.promptText
+
+                    // The writer's change is stored without publishing a snapshot, so the stale caller's
+                    // copy of the tab keeps the old text.
+                    let newer = try await writer.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "newer text"]
+                    )
+                    XCTAssertFalse(newer.rawJSON.contains("\"isError\":true"), newer.rawJSON)
+                    XCTAssertEqual(manager.composeTab(with: backgroundTabID)?.promptText, "newer text")
+                    XCTAssertEqual(server.tabContextByConnectionID[staleCaller.connectionID]?.promptText, "original")
+
+                    // No read or rebind on the stale caller before it appends.
+                    let appended = try await staleCaller.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "append", "text": " + appended", "_rawJSON": true]
+                    )
+                    XCTAssertFalse(appended.rawJSON.contains("\"isError\":true"), appended.rawJSON)
+                    XCTAssertEqual(try Self.promptReplyText(appended), "newer text + appended")
+                    XCTAssertEqual(manager.composeTab(with: backgroundTabID)?.promptText, "newer text + appended")
+                    XCTAssertEqual(
+                        server.tabContextByConnectionID[staleCaller.connectionID]?.promptText,
+                        "newer text + appended"
+                    )
+                    for endpoint in [staleCaller, writer] {
+                        XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.tabID, backgroundTabID)
+                    }
+                    XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, visibleTabID)
+                    XCTAssertEqual(context.window.promptManager.promptText, visibleEditorText)
+                } catch {
+                    await cleanupWriter()
+                    throw error
+                }
+                await cleanupWriter()
+            }
+        }
+
+        func testPromptCaptureKeepsExactOwnerAcrossRebindAndRejectsMissingOwner() async throws {
+            try await withLeasedFixture { fixture, endpoint in
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let server = context.window.mcpServer
+                let editor = context.window.promptManager
+                let connectionID = endpoint.connectionID
+                let windowID = context.window.windowID
+                let originalWorkspaceID = context.workspaceID
+                let closedTabID = UUID()
+                let movedTabID = UUID()
+                let visibleTabID = UUID()
+                var visibleWorkspace = WorkspaceModel(
+                    name: "Visible",
+                    repoPaths: [],
+                    composeTabs: [ComposeTabState(id: visibleTabID, name: "Visible", promptText: "visible prompt")],
+                    activeComposeTabID: visibleTabID
                 )
-                XCTAssertEqual(try Self.toolResultObject(snapshot)["prompt"] as? String, "unstored edit")
-                XCTAssertEqual(publishedPrompts, [])
-                XCTAssertEqual(manager.composeTab(with: context.tabID)?.promptText, "stored prompt")
-                XCTAssertEqual(editor.promptText, "unstored edit")
+                visibleWorkspace.isEphemeral = true
+                let visibleWorkspaceID = visibleWorkspace.id
+
+                /// Appends through the connection's binding, running `change` after the call resolves its tab
+                /// and before it commits.
+                @MainActor
+                func append(
+                    _ operationID: String,
+                    during change: @escaping @MainActor @Sendable () async -> Void
+                ) async throws -> PersistentMCPTestRPCResponse {
+                    server.setBeforeTabContextMutationCommitForTesting(change)
+                    defer { server.setBeforeTabContextMutationCommitForTesting(nil) }
+                    return try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "append", "text": " + appended", "operation_id": operationID, "_rawJSON": true]
+                    )
+                }
+
+                /// The append failed with the missing-tab error, and the mutation journal records it as
+                /// failed before its commit.
+                @MainActor
+                func assertBoundTabUnavailable(
+                    _ response: PersistentMCPTestRPCResponse,
+                    operationID: String,
+                    _ label: String
+                ) async throws {
+                    XCTAssertTrue(response.rawJSON.contains("\"isError\":true"), "\(label): \(response.rawJSON)")
+                    XCTAssertTrue(
+                        response.rawJSON.contains("The bound tab is no longer available for prompt"),
+                        "\(label): \(response.rawJSON)"
+                    )
+                    let record = try await Self.journalRecord(operationID: operationID)
+                    XCTAssertEqual(record.status.rawValue, DomainMutationJournalStatus.failedBeforeCommit.rawValue, label)
+                }
+
+                @MainActor
+                func restoreWorkspaces() async {
+                    try? await Self.activateWorkspace(for: context)
+                    manager.workspaces.removeAll { $0.id == visibleWorkspaceID }
+                }
+
+                do {
+                    try Self.appendBackgroundTab(closedTabID, promptText: "closed tab text", to: context)
+                    try Self.appendBackgroundTab(movedTabID, promptText: "moved tab text", to: context)
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                    manager.workspaces.append(visibleWorkspace)
+
+                    // A tab that goes missing while the append is in flight, before it commits, fails the append
+                    // with nothing written.
+                    // Closed: closing the tab purges the connection's binding.
+                    try await Self.bindTab(closedTabID, endpoint: endpoint, context: context)
+                    let closedOperationID = "exact-owner-closed-\(UUID().uuidString)"
+                    let closed = try await append(closedOperationID) { await editor.closeComposeTab(closedTabID) }
+                    try await assertBoundTabUnavailable(closed, operationID: closedOperationID, "closed")
+                    XCTAssertNil(manager.composeTab(with: closedTabID), "closed")
+                    XCTAssertNil(server.tabContextByConnectionID[connectionID], "closed")
+
+                    // Moved: the tab's ID now names a tab in another workspace, which the call doesn't follow.
+                    try await Self.bindTab(movedTabID, endpoint: endpoint, context: context)
+                    let movedOperationID = "exact-owner-moved-\(UUID().uuidString)"
+                    let moved = try await append(movedOperationID) {
+                        guard let sourceIndex = manager.workspaces.firstIndex(where: { $0.id == originalWorkspaceID }),
+                              let destinationIndex = manager.workspaces.firstIndex(where: { $0.id == visibleWorkspaceID }),
+                              let tab = manager.workspaces[sourceIndex].composeTabs.first(where: { $0.id == movedTabID })
+                        else { return XCTFail("moved: the tab to move is missing") }
+                        manager.workspaces[sourceIndex].composeTabs.removeAll { $0.id == movedTabID }
+                        manager.workspaces[destinationIndex].composeTabs.append(tab)
+                    }
+                    try await assertBoundTabUnavailable(moved, operationID: movedOperationID, "moved")
+                    XCTAssertEqual(
+                        manager.workspace(withID: visibleWorkspaceID)?.composeTabs.first { $0.id == movedTabID }?.promptText,
+                        "moved tab text"
+                    )
+                    XCTAssertEqual(
+                        manager.workspace(withID: originalWorkspaceID)?.composeTabs.contains { $0.id == movedTabID },
+                        false
+                    )
+                    XCTAssertEqual(server.tabContextByConnectionID[connectionID]?.promptText, "moved tab text")
+
+                    // Rebound: the original tab is the active tab of a workspace the window no longer shows, and
+                    // the connection binds the visible tab while the append is in flight.
+                    try await Self.bindTab(context.tabID, endpoint: endpoint, context: context)
+                    let original = try await endpoint.callTool(
+                        name: MCPWindowToolName.prompt,
+                        arguments: ["op": "set", "text": "original tab text"]
+                    )
+                    XCTAssertFalse(original.rawJSON.contains("\"isError\":true"), original.rawJSON)
+                    let shown = try XCTUnwrap(manager.workspace(withID: visibleWorkspaceID))
+                    await MCPWindowTestSupport.activateWorkspace(shown, in: context.window, reason: Self.activationReason)
+                    XCTAssertEqual(manager.activeWorkspaceID, visibleWorkspaceID)
+                    XCTAssertEqual(editor.promptText, "visible prompt")
+                    let rebound = try await append("exact-owner-rebound-\(UUID().uuidString)") {
+                        do {
+                            try server.bindTabForConnection(
+                                connectionID: connectionID,
+                                clientName: endpoint.clientName,
+                                tabID: visibleTabID,
+                                workspaceID: visibleWorkspaceID,
+                                windowID: windowID
+                            )
+                        } catch {
+                            XCTFail("rebound: \(error)")
+                        }
+                    }
+                    XCTAssertFalse(rebound.rawJSON.contains("\"isError\":true"), rebound.rawJSON)
+                    XCTAssertEqual(try Self.promptReplyText(rebound), "original tab text + appended")
+                    XCTAssertEqual(manager.composeTab(with: context.tabID)?.promptText, "original tab text + appended")
+                    XCTAssertEqual(server.tabContextByConnectionID[connectionID]?.tabID, visibleTabID)
+                    XCTAssertEqual(server.tabContextByConnectionID[connectionID]?.promptText, "visible prompt")
+                    XCTAssertEqual(manager.composeTab(with: visibleTabID)?.promptText, "visible prompt")
+                    XCTAssertEqual(editor.promptText, "visible prompt")
+                } catch {
+                    await restoreWorkspaces()
+                    throw error
+                }
+                await restoreWorkspaces()
             }
         }
 
@@ -4208,6 +4388,30 @@ import XCTest
             )
         }
 
+        /// Runs `operation` while context A's active tab neither stores nor publishes snapshots, then asserts
+        /// that none was published. Suspended snapshot commits keep editor text out of storage and out of the
+        /// save paths' publications. While `applyingTabID`, another tab, has an apply in progress, the active
+        /// tab's snapshots aren't published, so a connection's mirror has nothing to copy.
+        private static func withActiveTabPublicationHeld(
+            _ context: PersistentMCPTestContext,
+            applyingTabID: UUID,
+            _ operation: @MainActor () async throws -> Void
+        ) async throws {
+            let manager = context.window.workspaceManager
+            manager.setSnapshotsSuspended(true, forTabID: context.tabID)
+            manager.beginApplyingTabContext(forTabID: applyingTabID)
+            defer {
+                manager.endApplyingTabContext(forTabID: applyingTabID)
+                manager.setSnapshotsSuspended(false, forTabID: context.tabID)
+            }
+            var publishedPrompts: [String] = []
+            let watch = manager.composeTabSnapshotPublisher(for: context.tabID)
+                .sink { publishedPrompts.append($0.promptText) }
+            defer { watch.cancel() }
+            try await operation()
+            XCTAssertEqual(publishedPrompts, [], "the active tab published a snapshot while publication was held")
+        }
+
         private static func bindTab(
             _ tabID: UUID,
             endpoint: PersistentMCPTestEndpoint,
@@ -4271,6 +4475,11 @@ import XCTest
                 name: MCPWindowToolName.prompt,
                 arguments: ["op": "get", "_rawJSON": true]
             )
+            return try promptReplyText(response)
+        }
+
+        /// The prompt text of a `prompt` reply requested with `_rawJSON`.
+        private static func promptReplyText(_ response: PersistentMCPTestRPCResponse) throws -> String? {
             let reply = try toolResultObject(response)["prompt"] as? [String: Any]
             return reply?["prompt"] as? String
         }
@@ -4609,19 +4818,10 @@ import XCTest
             }
         }
 
+        private static let activationReason = "MCPToolExecutionWatchdogIntegrationTests"
+
         private static func activateWorkspace(for context: PersistentMCPTestContext) async throws {
-            let workspace = try XCTUnwrap(
-                context.window.workspaceManager.workspaces.first { $0.id == context.workspaceID }
-            )
-            await context.window.workspaceManager.switchWorkspace(
-                to: workspace,
-                saveState: false,
-                reason: "MCPToolExecutionWatchdogIntegrationTests"
-            )
-            context.window.promptManager.loadComposeTabsFromWorkspace(
-                workspace,
-                syncPromptText: true
-            )
+            try await MCPWindowTestSupport.activateWorkspace(context, reason: activationReason)
         }
 
         private static func waitUntil(

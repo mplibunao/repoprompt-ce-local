@@ -4427,35 +4427,52 @@ extension MCPServerViewModel {
             }
             await MCPStuckToolScenarioRegistry.shared.holdIfArmed(windowID: resolved.windowID, hook: .prompt)
         #endif
+        let latest: TabContextSnapshot?
+        let latestOnResolvedTab: TabContextSnapshot?
+        var context: TabContextSnapshot
         do {
+            // A tab gone before the commit fails as not applied; the protected-mutation layer reports a close during the commit as indeterminate.
+            if resolved.runID == nil, !composeTabExists(resolved) {
+                throw Self.boundTabUnavailable(toolName: toolName)
+            }
             try await MCPDomainMutationCommitContext.willCommit()
+            // The commit suspends, and meanwhile the compose-tab mirror, read-file auto-selection, and
+            // file-tool authority can update this connection's snapshot of the tab, and the connection can
+            // bind another tab. The mutation applies to the resolved tab, carrying the connection's latest
+            // snapshot while it still holds that tab. A run binding installed on the tab during the commit
+            // belongs to the run, so an ordinary call doesn't carry it.
+            latest = tabContextByConnectionID[connectionID]
+            latestOnResolvedTab = latest.flatMap { snapshot in
+                Self.isSameTab(snapshot, resolved) && (resolved.runID != nil || snapshot.runID == nil) ? snapshot : nil
+            }
+            if resolved.runID == nil {
+                // Another connection's change to the tab is stored without reaching this connection's
+                // snapshot, so an ordinary call starts from the tab's current prompt. Nothing is written yet,
+                // so a tab closed or moved during the commit fails the call with nothing to undo.
+                context = try refreshingPromptText(in: latestOnResolvedTab ?? resolved, toolName: toolName)
+            } else if let latestOnResolvedTab {
+                context = latestOnResolvedTab
+            } else {
+                // The connection holds no snapshot of this tab: a one-shot context hint routed the call, or
+                // the connection moved to another tab while the commit ran. Publish to the resolved tab,
+                // starting from its current prompt, which is the editor's unsaved text when the tab is
+                // active. A newer binding stays as it is.
+                context = resolved
+                context.promptText = workspaceManager?.collectMCPTabContextComposeSnapshot(
+                    tabID: resolved.tabID,
+                    workspaceID: resolved.workspaceID,
+                    captureActiveUIState: true,
+                    flushPendingUISelection: false
+                )?.snapshot.promptText ?? resolved.promptText
+            }
         } catch {
+            // Nothing was published, so a hinted call ends the mirror its resolution started.
             if routedByHint {
                 endHintedMirror(connectionID: connectionID)
             }
             throw error
         }
-        // The commit suspends, and meanwhile the compose-tab mirror, read-file auto-selection, and
-        // file-tool authority can update this connection's snapshot of the tab. Nothing from here to the
-        // snapshot write suspends or throws, and the mutation applies to the resolved tab's latest snapshot.
-        let latest = tabContextByConnectionID[connectionID]
-        let connectionStillOnResolvedTab = latest.map { Self.isSameTab($0, resolved) } ?? false
-        var context: TabContextSnapshot
-        if connectionStillOnResolvedTab, let latest {
-            context = latest
-        } else {
-            // The connection holds no snapshot of this tab: a one-shot context hint routed the call, or the
-            // connection moved to another tab while the commit ran. Publish to the resolved tab, starting
-            // from its current prompt, which is the editor's unsaved text when the tab is active. A newer
-            // binding stays as it is.
-            context = resolved
-            context.promptText = workspaceManager?.collectMCPTabContextComposeSnapshot(
-                tabID: resolved.tabID,
-                workspaceID: resolved.workspaceID,
-                captureActiveUIState: true,
-                flushPendingUISelection: false
-            )?.snapshot.promptText ?? resolved.promptText
-        }
+        // Nothing from here to the snapshot write suspends or throws.
         let previousPrompt = context.promptText
         mutation(&context)
         if context.promptText != previousPrompt {
@@ -4470,7 +4487,7 @@ extension MCPServerViewModel {
                 }
             }
         }
-        if connectionStillOnResolvedTab {
+        if latestOnResolvedTab != nil {
             tabContextByConnectionID[connectionID] = context
         } else if routedByHint {
             if latest == nil, !Task.isCancelled {
@@ -4511,11 +4528,22 @@ extension MCPServerViewModel {
                   flushPendingUISelection: false
               )
         else {
-            throw MCPError.invalidParams("The bound tab is no longer available for \(toolName)")
+            throw Self.boundTabUnavailable(toolName: toolName)
         }
         var refreshed = context
         refreshed.promptText = current.snapshot.promptText
         return refreshed
+    }
+
+    private static func boundTabUnavailable(toolName: String) -> MCPError {
+        MCPError.invalidParams("The bound tab is no longer available for \(toolName)")
+    }
+
+    /// Whether the context's exact window, workspace, and tab still exist. Reads no tab state.
+    @MainActor
+    private func composeTabExists(_ context: TabContextSnapshot) -> Bool {
+        guard context.windowID == windowID, let workspaceID = context.workspaceID else { return false }
+        return workspaceManager?.composeTab(for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: context.tabID)) != nil
     }
 
     private static func isSameTab(_ lhs: TabContextSnapshot, _ rhs: TabContextSnapshot) -> Bool {
@@ -4553,8 +4581,15 @@ extension MCPServerViewModel {
             guard manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspaceID) else { return }
         }
 
-        let isActive = manager.workspaces[workspaceIndex].activeComposeTabID == context.tabID
-        guard isActive else { return }
+        // An ordinary call read its starting text from the editor only when the editor shows this tab of
+        // the active workspace, so it writes the editor back under the same check. During a tab switch the
+        // workspace's active tab can already differ from the editor's.
+        let editorShowsTab = if context.runID == nil {
+            workspaceID == manager.activeWorkspaceID && promptVM.activeComposeTabID == context.tabID
+        } else {
+            manager.workspaces[workspaceIndex].activeComposeTabID == context.tabID
+        }
+        guard editorShowsTab else { return }
         promptVM.promptText = context.promptText
     }
 
