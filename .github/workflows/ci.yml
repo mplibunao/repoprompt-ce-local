@@ -145,7 +145,13 @@ jobs:
 
       - name: Install Swift style tools
         if: needs.changes.outputs.markdown_only != 'true'
-        run: ./Scripts/install_format_tools.sh install
+        run: |
+          brew install mise
+          ./Scripts/install_format_tools.sh install
+
+      - name: Test Swift style tool selection
+        if: needs.changes.outputs.markdown_only != 'true'
+        run: python3 Scripts/test_swift_style.py
 
       - name: Run Swift style lint
         if: needs.changes.outputs.markdown_only != 'true'

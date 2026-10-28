@@ -107,6 +107,24 @@ another Mac or redistributed.
 - Xcode 26, or matching Command Line Tools with the macOS 26 SDK. The Finder
   debug launcher and local production installer require the full Xcode app.
 
+### Development tools
+
+Install [mise](https://mise.jdx.dev/installing-mise.html), then install the
+SwiftFormat and SwiftLint versions pinned in [`mise.toml`](mise.toml):
+
+```bash
+mise trust
+make dev-install-format-tools
+```
+
+Run `make dev-format` to format Swift files and `make dev-lint` to check
+formatting and lint. These commands select the pinned executables through mise,
+so shell activation isn't required. Global tool installations remain available
+for other projects.
+
+Local promotion and archive restoration also require
+[zstd](docs/releasing.md#zstd-setup).
+
 ### Develop in Xcode
 
 Generate and open the disposable contributor workspace with:
