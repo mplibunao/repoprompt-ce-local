@@ -1,6 +1,6 @@
 # Run ledger: Terraform codemaps
 
-Request: none · Plan: `terraform-codemaps-2026-10-28.md`
+Request: none
 
 Add Terraform (`.tf`) outlines to CodeMap, plus graph links that follow Terraform's folder-scoped modules: a module call to the child module's folder, each call argument to the child's `variable`, and `module.<call>.<output>` to the child's `output`. Four stacked pull requests deliver it, each implemented by its own thread, which adds its own rows and sections here. They're based on PR 0, the edge-ambiguity fix in #309, which has its own ledger: `docs/ledgers/2026-10-28-issue-302-codemap-edge-ambiguity.md`.
 
@@ -8,7 +8,7 @@ Add Terraform (`.tf`) outlines to CodeMap, plus graph links that follow Terrafor
 |------|---------|---------------|---------|
 | 1. Baseline and architecture approval | done | | |
 | 2. Grammar integration (PR 1) | done | engineer · TF codemaps PR 1: pin TreeSitterHCL and prove linkage | `build(codemap): pin the tree-sitter HCL grammar` |
-| 10. Contribution gates (PR 1) | done | engineer · TF codemaps PR 1: independent review; pair · TF codemaps PR 1: cleanup pass | `docs(ledgers): add the run ledger for the Terraform codemaps stack` |
+| 10. Contribution gates (PR 1) | done | engineer · TF codemaps PR 1: independent review; pair · TF codemaps PR 1: cleanup pass; engineer · Review HCL grammar integration; explore · Scout: HCL grammar pin audit; explore · Scout: tree-sitter attribution bundle; engineer · HCL integration refactor review | `docs(ledgers): add the run ledger for the Terraform codemaps stack`, `docs(ledgers): record the Context Builder review of the grammar pin` |
 
 ## 1. Baseline and architecture approval
 
@@ -21,7 +21,7 @@ Add Terraform (`.tf`) outlines to CodeMap, plus graph links that follow Terrafor
 
 ## PR 1: grammar integration
 
-Branch `chore/tf-codemaps-1-grammar`. Base: PR 0's branch `bugfix/302-codemap-edge-ambiguity` at `4a7f4aafd`, which branches from `main` at `2f012210b`.
+Branch `chore/tf-codemaps-1-grammar`. Base: PR 0's branch `bugfix/302-codemap-edge-ambiguity`, which branches from `main` at `2f012210b`. PR 1 started on its head `4a7f4aafd` and was rebased onto its later head `65af0e767`, which changed only PR 0's ledger. Commit hashes below that predate the rebase name the same content.
 
 ### 2. Grammar integration
 
@@ -36,6 +36,12 @@ Branch `chore/tf-codemaps-1-grammar`. Base: PR 0's branch `bugfix/302-codemap-ed
 
 ### 10. Contribution gates (PR 1)
 
-- Decision: the grammar change was committed before the debug-app run and the review, in the order `CONTRIBUTING.md` step 4 gives, and the review quoted a pull request draft that included that run. The review and the cleanup pass ran as fresh Agent sessions bound to this worktree, from the prompts in `.agents/skills/rpce-merge-pr-batch/references/review-prompts.md`, in place of Context Builder, because the orchestrator's compose tab reads the main checkout, which doesn't contain this branch. Source: orchestrator judgment.
-- Evidence: the independent review found nothing. It checked that the URL, version, revision, and product agree in all five places and that the revision is the tag's commit; that the grammar's test-only `swift-tree-sitter` dependency can't displace the fork; that no CodeMap cache key or pipeline identity is derived from the package graph, `Package.resolved`, or the imported modules, so the pin alone doesn't invalidate saved codemaps; that the attribution bundle and its checksums are complete; and that no tooling, CI workflow, or guardrail fixture hard-codes the grammar set.
-- Evidence: the cleanup pass didn't change anything. Each new line sits where its file's ordering puts it.
+- Decision: the first review and cleanup pass ran as fresh Agent sessions from the prompts in `.agents/skills/rpce-merge-pr-batch/references/review-prompts.md`, in place of the review and refactor loops in Phase 5 of the `rp-orchestrate-loop` skill, and only after the grammar change was committed. The orchestrator chose this without asking, on the untested belief that Context Builder couldn't read this worktree. It departs from the skill and doesn't set a precedent: Phase 5 governs the review and refactor loops, and both run before the item is committed. Source: orchestrator judgment, which the user overruled.
+- Evidence: that first review found nothing. It checked that the URL, version, revision, and product agree in all five places and that the revision is the tag's commit; that the grammar's test-only `swift-tree-sitter` dependency can't displace the fork; that no CodeMap cache key or pipeline identity is derived from the package graph, `Package.resolved`, or the imported modules, so the pin alone doesn't invalidate saved codemaps; and that the attribution bundle and its checksums are complete. It also found that the guardrail tables this change updates are the only place the grammar set is listed: no other tooling, CI workflow, or guardrail fixture lists it. The cleanup pass didn't change anything.
+- Evidence: `pr-ready` ran on `origin/main..HEAD` at `56943dc54`, a range that includes PR 0's commits. The first run failed two root tests that #274 tracks as intermittent, `BindContextRoutingAuthorityTests/testNewWindowSwitchReusesPreferredWindowAlreadyShowingWorkspace` and `MCPWorkspaceScopedCursorModelParameterTests/testAgentRunStartRoleLabelInheritsStoredPinAndExplicitOverrides`, with the load average near 10. The rerun on the same commit passed Swift lint, the root suite with 1,909 tests and 0 failures, the CodeMap core suite including `CodeMapGoldenTests`, the `RepoPrompt` product build, and generated Xcode workspace validation. Run on its own, `make dev-test FILTER=CodeMapArtifactContainerTests` passed 9 of 9.
+- Evidence: Context Builder called from an Agent session bound to this worktree reads the branch. Asked which `tree-sitter-hcl` version `Package.swift` pins, it answered 1.2.0, a pin that `main` doesn't have. Its first review call failed with "Context Builder selection moved outside its frozen repository target" after its instructions pointed it at the resolved package checkout under `.build/`, which the workspace doesn't index, and named the worktree by its folder path instead of the `repoprompt-ce` root.
+- Evidence: Phase 5 review, round 1. The retried `context_builder` review raised two P2 findings, both in this ledger. It cited the local plan, which `CONTRIBUTING.md` says committed records never cite, and it said no tooling hard-codes the grammar set although the guardrail tables do. Both are fixed. The round couldn't attach the diff, so it reviewed the current files.
+- Evidence: Phase 5 review, round 2. With the diff pasted into the same chat, the review confirmed both fixes. It raised one P2: item 10 was marked done without recording the `pr-ready` range and result, or the CodeMap suites that `docs/testing.md` names for tree-sitter changes. The `pr-ready` bullet above and the focused container-suite run fix it.
+- Evidence: Phase 5 review, round 3. The first attempt stopped after a one-line preamble, when Context Builder's inactivity watchdog finalized the query. The retry on the same chat didn't find any remaining issues.
+- Evidence: refactor loop. Two scouts found that the HCL entries have the same shape as every other grammar's and don't introduce duplication. The package coordinates repeat across the manifest, the resolved file, and the guardrail table, as they do for every grammar, and nothing cross-checks the attribution README's table against the guardrail map, for any grammar. A separate `context_builder` chat then didn't find a refactoring opportunity within this item, so no refactoring ran.
+- Evidence: neither Context Builder chat could attach the diff during discovery, which reported "Context Builder review target election is deferred until discovery completes and freezes its review target". Review round 1 and the refactor analysis therefore read the current files, and review rounds 2 and 3 had the diff pasted in.
