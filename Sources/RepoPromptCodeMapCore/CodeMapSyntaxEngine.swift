@@ -5,6 +5,7 @@ import TreeSitterC
 import TreeSitterCPP
 import TreeSitterCSharp
 import TreeSitterGo
+import TreeSitterHCL
 import TreeSitterJava
 import TreeSitterJavaScript
 import TreeSitterPHP

@@ -1,5 +1,5 @@
 {
-  "originHash" : "fd6d03b35845f23bcc7a241e790ce22e61f89129f73fa0c127816caa1c7921bf",
+  "originHash" : "f69f69342b78075fcf080d608b695d0cc155a2b72fc33c9f55f3cee1c2a025e0",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -346,6 +346,15 @@
       "state" : {
         "revision" : "1547678a9da59885853f5f5cc8a99cc203fa2e2c",
         "version" : "0.25.0"
+      }
+    },
+    {
+      "identity" : "tree-sitter-hcl",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/tree-sitter-grammars/tree-sitter-hcl",
+      "state" : {
+        "revision" : "fad991865fee927dd1de5e172fb3f08ac674d914",
+        "version" : "1.2.0"
       }
     },
     {
