@@ -320,13 +320,23 @@ enum CodeMapArtifactContainer {
         )
     }
 
-    /// A ready artifact carries a Terraform payload exactly when its key is a Terraform key.
+    /// A ready outcome has a Terraform payload exactly when its key is a Terraform key. A Terraform
+    /// file with no declarations is `.ready` with an empty payload, so `.readyNoSymbols` never
+    /// belongs to a Terraform key.
     private static func validatePayloadLanguage(
         of outcome: CodeMapSyntaxArtifactOutcome,
         key: CodeMapArtifactKey
     ) throws {
-        guard case let .ready(artifact) = outcome else { return }
-        guard (key.pipelineIdentity.languageID == .terraform) == (artifact.terraform != nil) else {
+        let hasTerraformPayload: Bool
+        switch outcome {
+        case let .ready(artifact):
+            hasTerraformPayload = artifact.terraform != nil
+        case .readyNoSymbols:
+            hasTerraformPayload = false
+        case .oversize, .decodeFailed, .parseFailed:
+            return
+        }
+        guard (key.pipelineIdentity.languageID == .terraform) == hasTerraformPayload else {
             throw CodeMapArtifactContainerError.payloadLanguageMismatch
         }
     }
