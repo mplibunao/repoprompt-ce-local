@@ -121,7 +121,8 @@ Work is tracked as issues and pull requests there.
 Approved pull requests, one or many, reach `main` through one path: a release
 candidate, and nothing lands without MP's go. An approved pull request waits
 for the next candidate, and the agent doesn't ask whether to land it. When MP
-says to cut, the candidate takes every approved pull request. A request to
+gives the go, in whatever words, the candidate takes every approved pull
+request. A request to
 promote a build is a go, and its `BUILD_NUMBER` bump joins that candidate. A
 re-cut after a failed candidate needs no new go. `$rpce-merge-pr-batch`
 (`.agents/skills/rpce-merge-pr-batch/SKILL.md`) runs the procedure and holds the
