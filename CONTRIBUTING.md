@@ -120,11 +120,13 @@ Work is tracked as issues and pull requests there.
 
 Approved pull requests, one or many, reach `main` through one path: a release
 candidate. No agent starts one unless MP asks for it, and a re-cut after a
-failed candidate continues that request. The agent running it lists every open
-pull request that is ready to land, and the candidate lands the ones MP
-confirms, so one validation run covers the whole batch. `$rpce-merge-pr-batch`
-(`.agents/skills/rpce-merge-pr-batch/SKILL.md`) runs the procedure and holds the
-commands and checks. These are its steps.
+failed candidate continues that request. A request to promote a build also asks
+for the candidate that lands its `BUILD_NUMBER` bump, and the bump goes in the
+same candidate as the other pull requests ready to land. The agent running a
+candidate lists every open pull request that is ready to land, and the
+candidate lands the ones MP confirms, so one validation run covers the whole
+batch. `$rpce-merge-pr-batch` (`.agents/skills/rpce-merge-pr-batch/SKILL.md`)
+runs the procedure and holds the commands and checks. These are its steps.
 
 1. **Cut.** In the candidate worktree, a plain worktree kept across candidates
    so its `.build` stays warm, start `release/<version>-rc<N>` from
