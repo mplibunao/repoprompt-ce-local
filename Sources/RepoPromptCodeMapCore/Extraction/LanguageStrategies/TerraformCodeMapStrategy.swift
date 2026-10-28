@@ -16,6 +16,13 @@ enum TerraformCodeMapStrategy {
         "source", "version", "count", "for_each", "providers", "depends_on", "ignore_nested_deprecations"
     ]
 
+    /// Root names that never name a declaration in this folder: iteration and object context,
+    /// path and workspace values, and ephemeral resources and actions, which the outline keeps as
+    /// `other`.
+    fileprivate static let nonDeclarationRoots: Set<String> = [
+        "each", "count", "self", "path", "terraform", "ephemeral", "action"
+    ]
+
     static func extract(root: Node, content: String) throws -> TerraformCodeMapArtifact {
         guard !root.hasError else {
             throw TerraformCodeMapSyntaxError(reason: "the parser recovered from a syntax error")
@@ -41,24 +48,108 @@ enum TerraformCodeMapStrategy {
                 throw TerraformCodeMapSyntaxError(reason: "unexpected root node")
             }
         }
-        return TerraformCodeMapArtifact(declarations: walker.declarations, references: [])
+        return TerraformCodeMapArtifact(declarations: walker.declarations, references: walker.references)
     }
 
     /// Children other than comments, which the grammar allows between any two tokens.
     fileprivate static func syntaxChildren(of node: Node) -> [Node] {
         (0 ..< node.childCount).compactMap { node.child(at: $0) }.filter { !$0.isExtra }
     }
+
+    /// How a block's direct attribute reads references. `parentBlockType` is the type of the block
+    /// whose body holds this one, or nil for a top-level block. A `provider` or `providers`
+    /// meta-argument selects provider configurations, not resources, and the only nested block
+    /// that takes one is a `data` block scoped to a `check`. A type constraint, `ignore_changes`
+    /// attribute paths, and a dynamic block's `iterator`, which declares a name, aren't references
+    /// either. An `import` target and both ends of a `moved` block are object addresses; a move can
+    /// relocate one instance of a resource that stays declared. A `removed` source is an address
+    /// too, but Terraform requires the object it names to be absent from the configuration.
+    fileprivate static func referenceReading(
+        blockType: String,
+        parentBlockType: String?,
+        attributeName: String
+    ) -> Walker.ReferenceReading {
+        switch (parentBlockType, blockType, attributeName) {
+        case (nil, "resource", "provider"), (nil, "data", "provider"), (nil, "ephemeral", "provider"),
+             (nil, "action", "provider"), (nil, "import", "provider"), ("check", "data", "provider"),
+             (nil, "module", "providers"), (nil, "variable", "type"),
+             (_, "lifecycle", "ignore_changes"), (_, "dynamic", "iterator"):
+            .skipped
+        case (nil, "import", "to"), (nil, "moved", "from"), (nil, "moved", "to"):
+            .address
+        case (nil, "removed", "from"):
+            .removedAddress
+        default:
+            .expressions
+        }
+    }
 }
 
 // MARK: - Walk
 
 private struct Walker {
-    /// A subtree under a top-level block that the walk has yet to visit. `inQuotedTemplate` is true
-    /// when the nearest enclosing template is a quoted string, where HCL processes backslash
-    /// escapes; a heredoc keeps them as literal text.
+    /// A subtree under a top-level block that the walk has yet to visit, with the context its
+    /// position gives it.
     struct Frame {
         let node: Node
+        /// True when the nearest enclosing template is a quoted string, where HCL processes
+        /// backslash escapes; a heredoc keeps them as literal text.
         let inQuotedTemplate: Bool
+        /// How the traversals among this node's children are read.
+        let reading: ReferenceReading
+        /// For a nested block, the type of the block whose body holds it, which the walk has
+        /// already read; nil for every other node.
+        let parentBlockType: String?
+
+        static func root(_ node: Node, reading: ReferenceReading, parentBlockType: String? = nil) -> Frame {
+            Frame(node: node, inQuotedTemplate: false, reading: reading, parentBlockType: parentBlockType)
+        }
+
+        /// A frame for a child node: this frame's context with the child's reading. Nothing below a
+        /// skipped subtree is read.
+        func child(
+            _ node: Node,
+            inQuotedTemplate: Bool,
+            reading: ReferenceReading = .expressions,
+            parentBlockType: String? = nil
+        ) -> Frame {
+            Frame(
+                node: node,
+                inQuotedTemplate: inQuotedTemplate,
+                reading: self.reading == .skipped ? .skipped : reading,
+                parentBlockType: parentBlockType
+            )
+        }
+    }
+
+    /// One step of the walk: a subtree to visit, or the start or end of a lexical scope. A scope's
+    /// entries enclose the frames its binders cover, so the walk visits those subtrees, and only
+    /// those, while the binders are active.
+    enum StackEntry {
+        case frame(Frame)
+        case enterScope([String])
+        case exitScope([String])
+
+        /// Entries that visit `frames` with `names` bound around them.
+        static func scope(_ names: [String], around frames: [Frame]) -> [StackEntry] {
+            let visits = frames.map(StackEntry.frame)
+            return names.isEmpty ? visits : [.enterScope(names)] + visits + [.exitScope(names)]
+        }
+    }
+
+    /// How a frame reads the traversals among its node's children.
+    enum ReferenceReading {
+        /// Nothing in the subtree names a declaration in this folder.
+        case skipped
+        case expressions
+        /// An object address, such as an `import` target. It names a resource or a module call, and
+        /// what follows a call is a path inside the child module, not an output. Instance keys
+        /// inside the address are read as expressions.
+        case address
+        /// The address of an object a `removed` block deletes. The object is gone from the
+        /// configuration, but a module call the address passes through still exists. Instance
+        /// keys inside the address are read as expressions.
+        case removedAddress
     }
 
     struct Attribute {
@@ -67,8 +158,28 @@ private struct Walker {
         let expression: Node
     }
 
+    /// One step after a traversal's root name.
+    enum TraversalStep {
+        case attribute(String)
+        /// An index or splat, which selects instances or elements without naming anything.
+        case selector
+
+        var attributeName: String? {
+            if case let .attribute(name) = self { return name }
+            return nil
+        }
+    }
+
     let source: SourceText
     private(set) var declarations: [TerraformCodeMapDeclaration] = []
+    private(set) var references: [TerraformCodeMapReference] = []
+    /// IDs of parenthesized expressions an enclosing traversal already read through. Reading one
+    /// again would repeat the rest of that traversal, which makes nested parentheses quadratic.
+    private var readParentheses: Set<UInt> = []
+    /// How many active scopes bind each name. Scopes enter and exit through the walk's stack, so
+    /// each binder costs one update on entry and one on exit, and a nested binder that reuses a
+    /// name doesn't end the outer binding.
+    private var bindingCounts: [String: Int] = [:]
 
     init(source: SourceText) {
         self.source = source
@@ -94,18 +205,34 @@ private struct Walker {
             case "block_start", "block_end":
                 continue
             case "body":
+                // A `terraform` block configures Terraform itself: its provider and backend settings
+                // never name a declaration.
+                let readsReferences = blockType != "terraform"
                 for item in TerraformCodeMapStrategy.syntaxChildren(of: child) {
                     try requirePresent(item)
                     switch item.nodeType {
                     case "attribute":
                         let attribute = try readAttribute(item)
                         attributes.append(attribute)
-                        subtrees.append(Frame(node: attribute.expression, inQuotedTemplate: false))
+                        subtrees.append(.root(
+                            attribute.expression,
+                            reading: readsReferences
+                                ? TerraformCodeMapStrategy.referenceReading(
+                                    blockType: blockType ?? "",
+                                    parentBlockType: nil,
+                                    attributeName: attribute.name
+                                )
+                                : .skipped
+                        ))
                     case "block":
                         // Always read the header: a source block must not skip validating later nested blocks.
                         let nestedName = try nestedBlockName(item)
                         hasSourceBlock = hasSourceBlock || nestedName == "source"
-                        subtrees.append(Frame(node: item, inQuotedTemplate: false))
+                        subtrees.append(.root(
+                            item,
+                            reading: readsReferences ? .expressions : .skipped,
+                            parentBlockType: blockType
+                        ))
                     default:
                         throw TerraformCodeMapSyntaxError(reason: "unexpected block body item")
                     }
@@ -131,14 +258,33 @@ private struct Walker {
     /// node in one still makes the file invalid HCL.
     mutating func validateTopLevelAttribute(_ attribute: Node) throws {
         try requirePresent(attribute)
-        try visit([Frame(node: readAttribute(attribute).expression, inQuotedTemplate: false)])
+        try visit([.root(readAttribute(attribute).expression, reading: .skipped)])
     }
 
     /// Visits every node below the given subtrees once with an explicit stack, so nesting depth in
     /// the source never deepens the call stack.
     private mutating func visit(_ subtrees: [Frame]) throws {
-        var stack = subtrees
-        while let frame = stack.popLast() {
+        var stack = subtrees.map(StackEntry.frame)
+        while let entry = stack.popLast() {
+            let frame: Frame
+            switch entry {
+            case let .frame(next):
+                frame = next
+            case let .enterScope(names):
+                for name in names {
+                    bindingCounts[name, default: 0] += 1
+                }
+                continue
+            case let .exitScope(names):
+                for name in names {
+                    if let count = bindingCounts[name], count > 1 {
+                        bindingCounts[name] = count - 1
+                    } else {
+                        bindingCounts[name] = nil
+                    }
+                }
+                continue
+            }
             let node = frame.node
             try requirePresent(node)
             let nodeType = node.nodeType
@@ -146,17 +292,258 @@ private struct Walker {
                 // HCL rejects an invalid escape in any quoted string, including values the outline omits.
                 _ = try SourceText.decodedQuotedText(source.text(of: node))
             }
+            let children = TerraformCodeMapStrategy.syntaxChildren(of: node)
+            let wasReadThrough = readParentheses.remove(node.id) != nil
+            if frame.reading != .skipped, !wasReadThrough {
+                try collectReferences(among: children, reading: frame.reading)
+            }
             let childrenInQuotedTemplate = switch nodeType {
             case "string_lit", "quoted_template": true
             case "heredoc_template": false
             default: frame.inQuotedTemplate
             }
-            for index in (0 ..< node.childCount).reversed() {
-                if let child = node.child(at: index) {
-                    stack.append(Frame(node: child, inQuotedTemplate: childrenInQuotedTemplate))
-                }
+            let childEntries: [StackEntry] = switch nodeType {
+            case "block":
+                try nestedBlockEntries(children, of: frame)
+            case "for_tuple_expr", "for_object_expr":
+                try scopedEntries(
+                    children,
+                    introType: "for_intro",
+                    of: frame,
+                    inQuotedTemplate: childrenInQuotedTemplate
+                )
+            case "template_for":
+                try scopedEntries(
+                    children,
+                    introType: "template_for_start",
+                    of: frame,
+                    inQuotedTemplate: childrenInQuotedTemplate
+                )
+            default:
+                children.map { .frame(frame.child($0, inQuotedTemplate: childrenInQuotedTemplate)) }
+            }
+            stack.append(contentsOf: childEntries.reversed())
+        }
+    }
+
+    /// Stack entries for a nested block's labels and body. A `dynamic` block binds its iterator,
+    /// named by `iterator` or else by its label, around `labels` and `content` but not `for_each`.
+    private func nestedBlockEntries(_ children: [Node], of frame: Frame) throws -> [StackEntry] {
+        guard let typeNode = children.first, typeNode.nodeType == "identifier" else {
+            throw TerraformCodeMapSyntaxError(reason: "block without a type")
+        }
+        let blockType = source.text(of: typeNode)
+        var unscoped: [Frame] = []
+        var firstLabel: Node?
+        var items: [Node] = []
+        for child in children.dropFirst() {
+            switch child.nodeType {
+            case "string_lit", "identifier":
+                firstLabel = firstLabel ?? child
+                unscoped.append(frame.child(child, inQuotedTemplate: false))
+            case "body":
+                items = TerraformCodeMapStrategy.syntaxChildren(of: child)
+            default:
+                continue
             }
         }
+
+        var attributes: [Attribute] = []
+        var blocks: [Node] = []
+        for item in items {
+            try requirePresent(item)
+            switch item.nodeType {
+            case "attribute": try attributes.append(readAttribute(item))
+            case "block": blocks.append(item)
+            default: throw TerraformCodeMapSyntaxError(reason: "unexpected block body item")
+            }
+        }
+
+        var iterator: [String] = []
+        if blockType == "dynamic" {
+            if let name = attributes.first(where: { $0.name == "iterator" }).flatMap({ bareIdentifier($0) }) {
+                iterator = [name]
+            } else if let firstLabel {
+                iterator = try [firstLabel.nodeType == "string_lit"
+                    ? source.decodedStringLiteral(firstLabel)
+                    : source.text(of: firstLabel)]
+            }
+        }
+        var scoped: [Frame] = []
+        for attribute in attributes {
+            let attributeFrame = frame.child(
+                attribute.expression,
+                inQuotedTemplate: false,
+                reading: TerraformCodeMapStrategy.referenceReading(
+                    blockType: blockType,
+                    parentBlockType: frame.parentBlockType,
+                    attributeName: attribute.name
+                )
+            )
+            if attribute.name == "for_each" {
+                unscoped.append(attributeFrame)
+            } else {
+                scoped.append(attributeFrame)
+            }
+        }
+        scoped += blocks.map { frame.child($0, inQuotedTemplate: false, parentBlockType: blockType) }
+        return unscoped.map(StackEntry.frame) + StackEntry.scope(iterator, around: scoped)
+    }
+
+    /// Stack entries for a `for` expression or template `for`. The intro's identifiers bind around
+    /// the body, filter, and template contents; its collection expression stays outside that scope,
+    /// and the identifiers are declarations, not references.
+    private func scopedEntries(
+        _ children: [Node],
+        introType: String,
+        of frame: Frame,
+        inQuotedTemplate: Bool
+    ) throws -> [StackEntry] {
+        guard let intro = children.first(where: { $0.nodeType == introType }) else {
+            throw TerraformCodeMapSyntaxError(reason: "for expression without an intro")
+        }
+        try requirePresent(intro)
+        let introParts = TerraformCodeMapStrategy.syntaxChildren(of: intro)
+        let bound = introParts.filter { $0.nodeType == "identifier" }.map(source.text(of:))
+        let collection = introParts.filter { $0.nodeType == "expression" }.map {
+            StackEntry.frame(frame.child($0, inQuotedTemplate: inQuotedTemplate))
+        }
+        let scoped = children.filter { $0.nodeType != introType }.map {
+            frame.child($0, inQuotedTemplate: inQuotedTemplate)
+        }
+        return collection + StackEntry.scope(bound, around: scoped)
+    }
+
+    /// Reads every traversal among one node's children. The grammar puts a traversal's steps beside
+    /// its base rather than inside it, and an operator's operands have no `expression` wrapper, so
+    /// the steps are the base's following siblings up to the first node of another kind. Index
+    /// expressions inside the steps are visited as their own subtrees. A root an enclosing scope
+    /// binds names a local value, not a declaration.
+    private mutating func collectReferences(among children: [Node], reading: ReferenceReading) throws {
+        for offset in children.indices {
+            guard let traversal = traversal(at: offset, in: children), bindingCounts[traversal.root] == nil else {
+                continue
+            }
+            try references += Self.references(root: traversal.root, steps: traversal.steps, reading: reading)
+        }
+    }
+
+    /// The traversal whose base is `children[offset]`, or nil when that node isn't a base. A base
+    /// is a `variable_expr`, or a parenthesized expression whose content is exactly one traversal:
+    /// parentheses don't change the object a traversal names, so the steps after them continue the
+    /// inner traversal. Other content, such as a function call, keeps its result opaque. A loop
+    /// reads nested parentheses, so their depth never deepens the call stack, and each
+    /// parenthesized expression it reads through is recorded so `visit` doesn't read it again.
+    private mutating func traversal(at offset: Int, in children: [Node]) -> (root: String, steps: [TraversalStep])? {
+        var level = children
+        var baseOffset = offset
+        var stepsByLevel: [[TraversalStep]] = []
+        var readThrough: [UInt] = []
+        defer { readParentheses.formUnion(readThrough) }
+        while level.indices.contains(baseOffset) {
+            let base = level[baseOffset]
+            let isParenthesized = base.nodeType == "expression" && baseOffset > 0 && baseOffset + 1 < level.count
+                && level[baseOffset - 1].nodeType == "(" && level[baseOffset + 1].nodeType == ")"
+            guard base.nodeType == "variable_expr" || isParenthesized else { return nil }
+            var steps: [TraversalStep] = []
+            for postfix in level[(baseOffset + (isParenthesized ? 2 : 1))...] {
+                guard let postfixSteps = traversalSteps(of: postfix) else {
+                    // Inside parentheses, anything after the traversal makes the content something
+                    // else. The expression holding this level reads it as its own outer level,
+                    // where trailing nodes are allowed, so that one isn't read through.
+                    guard stepsByLevel.isEmpty else {
+                        readThrough.removeLast()
+                        return nil
+                    }
+                    break
+                }
+                steps += postfixSteps
+            }
+            stepsByLevel.append(steps)
+            guard isParenthesized else {
+                guard let name = TerraformCodeMapStrategy.syntaxChildren(of: base).first else { return nil }
+                return (source.text(of: name), stepsByLevel.reversed().flatMap { $0 })
+            }
+            readThrough.append(base.id)
+            level = TerraformCodeMapStrategy.syntaxChildren(of: base)
+            baseOffset = level.first?.nodeType == "(" ? 1 : 0
+        }
+        return nil
+    }
+
+    /// The steps one postfix node adds, or nil when the node isn't a traversal step.
+    private func traversalSteps(of node: Node) -> [TraversalStep]? {
+        switch node.nodeType {
+        case "get_attr":
+            let name = TerraformCodeMapStrategy.syntaxChildren(of: node).first { $0.nodeType == "identifier" }
+            return name.map { [.attribute(source.text(of: $0))] } ?? []
+        case "index":
+            return [.selector]
+        case "splat":
+            // The steps after a splat sit inside its `attr_splat` or `full_splat` child.
+            let inner = TerraformCodeMapStrategy.syntaxChildren(of: node).flatMap {
+                TerraformCodeMapStrategy.syntaxChildren(of: $0)
+            }
+            return [.selector] + inner.flatMap { traversalSteps(of: $0) ?? [] }
+        default:
+            return nil
+        }
+    }
+
+    /// The declaration-level references one traversal makes. An instance selector after a module
+    /// call doesn't change which output an attribute names, but a call followed by a selector and
+    /// no attribute names only the call, because the selector could be an instance key or an
+    /// output name. In an address, a call names only the call. A removed object's address names
+    /// only a call it continues past, because a whole call it names is gone too.
+    private static func references(
+        root: String,
+        steps: [TraversalStep],
+        reading: ReferenceReading
+    ) throws -> [TerraformCodeMapReference] {
+        guard !TerraformCodeMapStrategy.nonDeclarationRoots.contains(root),
+              let first = steps.first?.attributeName
+        else {
+            return []
+        }
+        // A removed object's address names only a module call, so no other root counts.
+        if reading == .removedAddress, root != "module" { return [] }
+
+        switch root {
+        case "var":
+            return try [TerraformCodeMapReference(kind: .variable, parts: [first])]
+        case "local":
+            return try [TerraformCodeMapReference(kind: .local, parts: [first])]
+        case "data", "resource":
+            // `resource.type.name` is the explicit form of `type.name`.
+            guard let name = steps.dropFirst().first?.attributeName else { return [] }
+            return try [TerraformCodeMapReference(kind: root == "data" ? .data : .resource, parts: [first, name])]
+        case "module":
+            // A removed call that nothing continues past is gone too, so it names no reference.
+            if reading == .removedAddress, !steps.dropFirst().contains(where: { $0.attributeName != nil }) {
+                return []
+            }
+            let moduleCall = try TerraformCodeMapReference(kind: .moduleCall, parts: [first])
+            guard reading != .address, reading != .removedAddress else { return [moduleCall] }
+            var afterCall = steps.dropFirst()
+            if case .selector = afterCall.first {
+                afterCall = afterCall.dropFirst()
+            }
+            guard let output = afterCall.first?.attributeName else { return [moduleCall] }
+            return try [moduleCall, TerraformCodeMapReference(kind: .moduleOutput, parts: [first, output])]
+        default:
+            return try [TerraformCodeMapReference(kind: .resource, parts: [root, first])]
+        }
+    }
+
+    /// The name in an expression that is exactly one identifier, such as a dynamic block's `iterator`.
+    private func bareIdentifier(_ attribute: Attribute) -> String? {
+        let terms = TerraformCodeMapStrategy.syntaxChildren(of: attribute.expression)
+        guard terms.count == 1, terms[0].nodeType == "variable_expr",
+              let name = TerraformCodeMapStrategy.syntaxChildren(of: terms[0]).first
+        else {
+            return nil
+        }
+        return source.text(of: name)
     }
 
     private func makeDeclarations(

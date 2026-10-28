@@ -53,6 +53,7 @@ enum CodeMapFixtureRunner {
     static let terraformFixtureRelativePaths = [
         "tf/interface.tf",
         "tf/calls.tf",
+        "tf/expressions.tf",
         "tf/blocks.tf",
         "tf/empty.tf"
     ]

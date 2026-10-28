@@ -1,0 +1,19 @@
+File: <ROOT>/tf/expressions.tf
+Imports:
+---
+Terraform:
+  - L2: module "worker"
+      source: "./modules/worker"
+      for_each: toset(var.zones)
+      inputs: zone
+  - L8: output "blue_endpoint"
+  - L12: output "endpoints"
+  - L16: output "splat_endpoints"
+      sensitive: false
+  - L22: local.legacy_endpoint
+  - L23: local.summary
+  - L24: local.banner
+  - L27: local.by_module
+  - L30: resource "example_bucket" "logs"
+      provider: example.secondary
+---
