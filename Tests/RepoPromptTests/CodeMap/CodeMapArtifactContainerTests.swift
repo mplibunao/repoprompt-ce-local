@@ -16,7 +16,8 @@ final class CodeMapArtifactContainerTests: XCTestCase {
             .oversize(.lines(actual: 40, limit: 30)),
             .decodeFailed(.undecodable),
             .parseFailed(.parserReturnedNilTree),
-            .parseFailed(.parserReturnedNilRoot)
+            .parseFailed(.parserReturnedNilRoot),
+            .parseFailed(.invalidTerraformSyntax)
         ]
 
         for outcome in outcomes {

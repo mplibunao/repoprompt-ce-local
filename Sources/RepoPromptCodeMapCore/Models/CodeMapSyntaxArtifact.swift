@@ -421,6 +421,9 @@ package enum CodeMapSyntaxOversizeReason: Codable, Equatable, Sendable {
 package enum CodeMapSyntaxParseFailure: String, Codable, Equatable, Sendable {
     case parserReturnedNilTree
     case parserReturnedNilRoot
+    /// The Terraform parse tree has an error or missing node, or isn't native syntax. Terraform
+    /// publishes no partial outline from such a tree, because recovered syntax could invent links.
+    case invalidTerraformSyntax
 }
 
 package enum CodeMapSyntaxArtifactOutcome: Codable, Equatable, Sendable {
