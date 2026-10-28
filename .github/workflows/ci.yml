@@ -145,7 +145,11 @@ jobs:
 
       - name: Install Swift style tools
         if: needs.changes.outputs.markdown_only != 'true'
-        run: ./Scripts/install_format_tools.sh install
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          brew install mise
+          ./Scripts/install_format_tools.sh install
 
       - name: Run Swift style lint
         if: needs.changes.outputs.markdown_only != 'true'

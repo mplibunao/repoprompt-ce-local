@@ -5,6 +5,18 @@ packaged from a pushed `main` commit, accepted against a live matrix, and record
 annotated `local/v<version>-b<build>` tag with a GitHub Release receipt. Promote with MP
 present; the previous install and its state are archived first so the step is reversible.
 
+## zstd setup
+
+Local rollback archives and restores require the `zstd` executable on `PATH`.
+Install it with your package manager. With Homebrew:
+
+```bash
+brew install zstd
+```
+
+An existing Nix or other installation works too. Run `zstd --version` in the
+shell that will run the release commands to check that it's available.
+
 ## Promotion procedure
 
 Before you start:
@@ -15,7 +27,7 @@ Before you start:
   ([`CONTRIBUTING.md`](../CONTRIBUTING.md), "Landing"), and the tracked tree is clean, so
   [build provenance](#build-provenance) records that commit with `dirty: false`.
 - `BUILD_NUMBER` in [`version.env`](../version.env) is bumped for this build.
-- `zstd` is on `PATH`. The archive and the restore both need it.
+- [zstd](#zstd-setup) is on `PATH`. The archive and the restore both need it.
 - The signing registry already records the Apple Development team the build will use.
   Preparation refuses a first install, a move from self-signed signing, and a rotation. A
   first install has nothing to archive: use the

@@ -80,6 +80,11 @@ On a failure, read the highlights first, then open the printed log path or rerun
 
 ## Style jobs
 
+[`mise.toml`](../../mise.toml) pins SwiftFormat and SwiftLint. The style scripts
+resolve their executables through mise for this checkout, without relying on
+shell activation. Follow the [development tool setup](../../README.md#development-tools)
+before running a style job.
+
 Neither `make dev-format-check` nor `make dev-lint` installs missing tools; `make dev-install-format-tools` does. If a `format` job is canceled after it starts, inspect `git diff`, then rerun the format or restore the files.
 
 ## Build outputs

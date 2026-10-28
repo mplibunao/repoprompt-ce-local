@@ -56,10 +56,6 @@ EXCLUDED_SWIFT_FILES=(
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
 
-ensure_tool(){
-    command -v "$1" >/dev/null 2>&1 || fail "Missing required tool: $1. Run 'make install-format-tools'."
-}
-
 run(){
     printf '+ '
     printf '%q ' "$@"
@@ -135,7 +131,8 @@ run_swiftformat(){
 }
 
 run_swiftlint(){
-    ensure_tool swiftlint
+    local swiftlint_bin
+    swiftlint_bin="$("$ROOT_DIR/Scripts/install_format_tools.sh" resolve-swiftlint)" || exit
 
     # Full-repo lint lets SwiftLint discover files from .swiftlint.yml instead of
     # paying the large environment/script-input overhead for every Swift file.
@@ -145,7 +142,7 @@ run_swiftlint(){
     fi
 
     cd "$ROOT_DIR"
-    run swiftlint "${args[@]}"
+    run "$swiftlint_bin" "${args[@]}"
 }
 
 case "$ACTION" in
