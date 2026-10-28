@@ -6,9 +6,10 @@ description: "Land an ordered set of approved RepoPrompt CE pull requests, one o
 # Land RepoPrompt CE Pull Requests
 
 Approved pull requests reach `main` only through a release candidate (`CONTRIBUTING.md`,
-"Landing"). This skill runs that procedure. It lands approved heads as they are: it does not
-review, edit, squash, or rebase them, except that a head which no longer merges cleanly with
-`main` is rebased onto `origin/main` on its own branch per `CONTRIBUTING.md` step 7. Review
+"Landing"). This skill runs that procedure, and only when MP asks for a candidate. It lands
+approved heads as they are: it does not review, edit, squash, or rebase them, except that a
+head which no longer merges cleanly with `main` is rebased onto `origin/main` on its own branch
+per `CONTRIBUTING.md` step 7. Review
 and cleanup passes happen before the pull request opens (`CONTRIBUTING.md` step 4, with the
 prompts in [references/review-prompts.md](references/review-prompts.md)).
 
@@ -27,7 +28,9 @@ prompts in [references/review-prompts.md](references/review-prompts.md)).
    hooks that rewrite `git diff` output leave these plumbing commands alone. Use that checkout
    only for read-only inspection; never edit, switch, stash, reset, clean, build, or commit
    there.
-3. Confirm the ordered pull request list with MP. Without an order, land in ascending number.
+3. List every open pull request that meets the requirements in "1. Inspect" other than
+   approval, mark each one whose approval isn't in this conversation, and confirm the ordered
+   list with MP. Without an order, land in ascending number.
    Show each pull request's current head SHA and newest commit subject with the list. When
    MP's approval of a pull request isn't in this conversation, his confirmation of the list
    approves it (`CONTRIBUTING.md` step 7). Confirm separately any requested
