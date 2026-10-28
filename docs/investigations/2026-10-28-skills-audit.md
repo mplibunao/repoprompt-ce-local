@@ -81,7 +81,7 @@ The final text has the right shape: nothing lands without MP's go signal, the ag
 
 ## Applied
 
-None. This was a read-only run, so the agent that asked for the audit applies the decided rows: 2, 4 to 9, 13, 14, and 17. No row waits for MP: none of these files is reserved for his approval, and rows 5, 7, and 10 apply his stated requirement rather than widening what his request covers. Rows 4 to 9 compose into one Landing paragraph in their order, between the unchanged first sentence and row 10.
+The audit was read-only. MP rejected the paragraph that rows 4 to 9 compose as too long, and `3876f8808` replaced it with a shorter rule. That rule applies rows 7 and 9, and row 6 in part. It removes the sentences that rows 4 and 8 correct. Rows 2, 5, 13, 14, and 17 aren't applied.
 
 ## Not checked
 
