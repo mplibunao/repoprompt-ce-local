@@ -122,6 +122,10 @@ formatting and lint. These commands select the pinned executables through mise,
 so shell activation isn't required. Global tool installations remain available
 for other projects.
 
+[`mise.lock`](mise.lock) records download URLs and checksums for Apple Silicon
+and Intel Macs. After changing a tool version, refresh the lockfile with
+`mise lock --platform macos-arm64,macos-x64` and commit both files.
+
 Local promotion and archive restoration also require
 [zstd](docs/releasing.md#zstd-setup).
 

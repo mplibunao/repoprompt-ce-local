@@ -54,19 +54,18 @@ class SwiftStyleToolTests(unittest.TestCase):
             shift 2
             case "$1" in
                 which)
-                    [[ -f "$FIXTURE_READY" ]] || exit 1
-                    case "$2" in
-                        swiftformat) backend='github:nicklockwood/SwiftFormat' ;;
-                        swiftlint) backend='aqua:realm/SwiftLint' ;;
-                    esac
-                    if [[ "${3:-}" == --tool && "${4:-}" == "$backend" ]]; then
+                    if [[ -f "$FIXTURE_READY" ]]; then
                         echo "$FIXTURE_MANAGED/$2"
                     else
                         command -v "$2"
                     fi
                     ;;
+                where)
+                    [[ -f "$FIXTURE_READY" ]] || exit 1
+                    echo "$FIXTURE_MANAGED"
+                    ;;
                 install)
-                    [[ "$*" == 'install github:nicklockwood/SwiftFormat aqua:realm/SwiftLint' ]] || exit 93
+                    [[ "$*" == 'install --locked --quiet github:nicklockwood/SwiftFormat aqua:realm/SwiftLint' ]] || exit 93
                     echo install >> "$FIXTURE_LOG"
                     touch "$FIXTURE_READY"
                     ;;

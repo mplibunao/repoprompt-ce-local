@@ -146,6 +146,7 @@ conductor-selftest:
 	python3 Scripts/test_local_production_installer.py
 	python3 Scripts/test_local_release_archive.py
 	python3 Scripts/test_security_inventory.py
+	python3 Scripts/test_swift_style.py
 
 ci-app-test-runner-selftest:
 	python3 Scripts/test_ci_app_test_runner.py

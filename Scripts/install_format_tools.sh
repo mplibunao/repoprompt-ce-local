@@ -31,7 +31,7 @@ esac
 fail(){ echo "ERROR: $*" >&2; exit 1; }
 
 if ! command -v mise >/dev/null 2>&1; then
-    echo "mise is missing. Install mise, then run 'make dev-install-format-tools'." >&2
+    echo "ERROR: Missing required tool: mise. Install mise, then run 'make dev-install-format-tools'." >&2
     [[ "$ACTION" == status ]] && exit 0
     exit 1
 fi
@@ -42,8 +42,8 @@ resolve_tool(){
         swiftformat) backend="github:nicklockwood/SwiftFormat" ;;
         swiftlint) backend="aqua:realm/SwiftLint" ;;
     esac
-    # Select this tool explicitly so a global tool using another backend cannot win.
-    path="$(mise -C "$ROOT_DIR" which "$tool" --tool "$backend")" || return
+    # `mise which` can fall back to global tools when the requested version is missing.
+    path="$(mise -C "$ROOT_DIR" where "$backend")/$tool" || return
     [[ -x "$path" ]] || return 1
     printf '%s\n' "$path"
 }
@@ -64,7 +64,7 @@ check_tools(){
     local tool
     for tool in swiftformat swiftlint; do
         resolve_tool "$tool" >/dev/null 2>&1 ||
-            fail "$tool from mise.toml is unavailable. Run 'make dev-install-format-tools'."
+            fail "Missing required tool: $tool from mise.toml. Run 'make dev-install-format-tools'."
     done
 }
 
@@ -72,12 +72,13 @@ case "$ACTION" in
     status) print_status ;;
     check) check_tools ;;
     install)
-        mise -C "$ROOT_DIR" install github:nicklockwood/SwiftFormat aqua:realm/SwiftLint
+        echo "Installing Swift style tools from mise.lock..."
+        mise -C "$ROOT_DIR" install --locked --quiet github:nicklockwood/SwiftFormat aqua:realm/SwiftLint
         check_tools
         print_status
         ;;
     resolve-*)
         resolve_tool "${ACTION#resolve-}" ||
-            fail "${ACTION#resolve-} from mise.toml is unavailable. Run 'make dev-install-format-tools'."
+            fail "Missing required tool: ${ACTION#resolve-} from mise.toml. Run 'make dev-install-format-tools'."
         ;;
 esac
