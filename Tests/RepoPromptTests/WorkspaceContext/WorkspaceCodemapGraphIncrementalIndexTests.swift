@@ -1025,7 +1025,10 @@ final class WorkspaceCodemapGraphIncrementalIndexTests: XCTestCase {
     // MARK: - Edge ambiguity
 
     /// A name with one definer proves the dependency by itself, so an edge matched through several
-    /// names reports the smallest candidate count among them, whichever name sorts last.
+    /// names reports the smallest candidate count among them, whichever name sorts last. Runs on the
+    /// main actor because the second row's assertions end the test, and XCTest can drop an off-main
+    /// assertion failure that it hasn't recorded by the time an async test returns.
+    @MainActor
     func testEdgeCandidateCountDoesNotDependOnMatchedNameOrder() async throws {
         // `Status` has three definers in both rows; the single-definer name sorts before it in the
         // first row and after it in the second.
