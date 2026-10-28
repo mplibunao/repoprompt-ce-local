@@ -15,9 +15,10 @@ final class CodeMapSyntaxArtifactTests: XCTestCase {
             Set(object.keys),
             [
                 "aliases", "classes", "enums", "exports", "functions", "globalVars", "imports",
-                "interfaces", "literalUnions", "macros", "referencedTypes"
+                "interfaces", "literalUnions", "macros", "referencedTypes", "terraform"
             ]
         )
+        XCTAssertTrue(object["terraform"] is NSNull)
         let forbiddenFragments = [
             "path", "root", "fileid", "session", "worktree", "modification", "fingerprint",
             "digest", "token", "validation"

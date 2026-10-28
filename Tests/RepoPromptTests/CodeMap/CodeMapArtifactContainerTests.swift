@@ -50,7 +50,7 @@ final class CodeMapArtifactContainerTests: XCTestCase {
         assertDecode(wrongMagic, key: key, throws: .invalidMagic)
 
         var wrongVersion = canonical
-        replaceUInt32(&wrongVersion, at: 16, with: 2)
+        replaceUInt32(&wrongVersion, at: 16, with: 1)
         assertDecode(wrongVersion, key: key, throws: .unsupportedContainerVersion)
 
         var wrongHeaderLength = canonical
@@ -68,6 +68,20 @@ final class CodeMapArtifactContainerTests: XCTestCase {
         assertDecode(canonical, key: otherKey, filenameDigest: otherKey.storageDigestHex, throws: .keyMismatch)
         assertDecode(canonical, key: key, filenameDigest: String(repeating: "a", count: 64), throws: .filenameDigestMismatch)
         assertDecode(canonical, key: key, filenameDigest: key.storageDigestHex.uppercased(), throws: .filenameDigestMismatch)
+
+        let terraformKey = try makeKey(sourceText: "strict framing", languageID: .terraform)
+        let terraformArtifact = try makeTerraformArtifact()
+        let terraformContainer = try CodeMapArtifactContainer.encode(key: terraformKey, outcome: .ready(terraformArtifact))
+        let payloadLanguageMismatches: [(String, CodeMapArtifactKey, CodeMapSyntaxArtifact, Data)] = [
+            ("Terraform payload, Swift key", key, terraformArtifact, transplantPayload(from: terraformContainer, into: canonical)),
+            ("legacy payload, Terraform key", terraformKey, makeArtifact(), transplantPayload(from: canonical, into: terraformContainer))
+        ]
+        for (name, mismatchedKey, artifact, transplanted) in payloadLanguageMismatches {
+            XCTAssertThrowsError(try CodeMapArtifactContainer.encode(key: mismatchedKey, outcome: .ready(artifact)), name) { error in
+                XCTAssertEqual(error as? CodeMapArtifactContainerError, .payloadLanguageMismatch, name)
+            }
+            assertDecode(transplanted, key: mismatchedKey, throws: .payloadLanguageMismatch)
+        }
 
         var wrongSchema = canonical
         replaceUInt32(&wrongSchema, at: layout.schemaOffset, with: key.pipelineIdentity.artifactSchemaVersion + 1)
@@ -90,11 +104,11 @@ final class CodeMapArtifactContainerTests: XCTestCase {
         assertDecode(wrongChecksum, key: key, throws: .checksumMismatch)
 
         var wrongSummaryVersion = canonical
-        replaceUInt32(&wrongSummaryVersion, at: layout.summaryVersionOffset, with: 2)
+        replaceUInt32(&wrongSummaryVersion, at: layout.summaryVersionOffset, with: 1)
         assertDecode(wrongSummaryVersion, key: key, throws: .invalidSummary)
 
         var wrongSummaryCount = canonical
-        replaceUInt32(&wrongSummaryCount, at: layout.summaryCountOffset, with: 19)
+        replaceUInt32(&wrongSummaryCount, at: layout.summaryCountOffset, with: 20)
         assertDecode(wrongSummaryCount, key: key, throws: .invalidSummary)
 
         var wrongSummaryValue = canonical
@@ -159,6 +173,87 @@ final class CodeMapArtifactContainerTests: XCTestCase {
             )
         ) { error in
             XCTAssertEqual(error as? CodeMapArtifactContainerError, .invalidPayloadLength)
+        }
+    }
+
+    func testTerraformSummaryAccountsForEveryPersistedField() throws {
+        let key = try makeKey(sourceText: "terraform summary", languageID: .terraform)
+        let count = TerraformOutlineAttribute(name: "count", valueText: "1")
+        let version = TerraformOutlineAttribute(name: "version", valueText: #""1.0""#)
+        // The base artifact holds 12 strings of 50 UTF-8 bytes, the longest being "provider" and
+        // "variable" at 8 bytes, in 8 collection entries: 2 declarations, 1 reference, 2 labels,
+        // 1 attribute, 1 argument, 1 part.
+        let rows: [(String, CodeMapSyntaxArtifact, [UInt64])] = try [
+            ("base", makeTerraformArtifact(), terraformSummary(strings: 12, collections: 8, bytes: 50)),
+            (
+                "second label",
+                makeTerraformArtifact(providerLabels: ["c", "dd"]),
+                terraformSummary(labels: 3, strings: 13, collections: 9, bytes: 52)
+            ),
+            (
+                "second outline attribute",
+                makeTerraformArtifact(moduleAttributes: [count, version]),
+                terraformSummary(attributes: 2, strings: 14, collections: 9, bytes: 62)
+            ),
+            (
+                "second argument name",
+                makeTerraformArtifact(argumentNames: ["x", "yy"]),
+                terraformSummary(arguments: 2, strings: 13, collections: 9, bytes: 52)
+            ),
+            (
+                "literal source",
+                makeTerraformArtifact(moduleSource: .literal("./m")),
+                terraformSummary(strings: 13, collections: 8, bytes: 53)
+            ),
+            (
+                "two-part reference",
+                makeTerraformArtifact(reference: TerraformCodeMapReference(kind: .moduleOutput, parts: ["x", "yy"])),
+                terraformSummary(parts: 2, strings: 13, collections: 9, bytes: 56, maximum: 12)
+            )
+        ]
+        for (name, artifact, expected) in rows {
+            let encoded = try CodeMapArtifactContainer.encode(key: key, outcome: .ready(artifact))
+            XCTAssertEqual(summaryFields(encoded), expected, name)
+            let decoded = try CodeMapArtifactContainer.decode(
+                encoded,
+                expectedKey: key,
+                filenameDigest: key.storageDigestHex
+            )
+            XCTAssertEqual(decoded.outcome, .ready(artifact), name)
+        }
+
+        let base = try CodeMapSyntaxArtifactOutcome.ready(makeTerraformArtifact())
+        let limits: [(String, CodeMapArtifactContainerPolicy, CodeMapArtifactContainerPolicy, CodeMapArtifactContainerError)] = [
+            (
+                "collection entries",
+                CodeMapArtifactContainerPolicy(maximumCollectionEntryCount: 8),
+                CodeMapArtifactContainerPolicy(maximumCollectionEntryCount: 7),
+                .collectionLimitExceeded
+            ),
+            (
+                "strings",
+                CodeMapArtifactContainerPolicy(maximumStringCount: 12),
+                CodeMapArtifactContainerPolicy(maximumStringCount: 11),
+                .stringLimitExceeded
+            ),
+            (
+                "string bytes",
+                CodeMapArtifactContainerPolicy(maximumStringUTF8ByteCount: 50),
+                CodeMapArtifactContainerPolicy(maximumStringUTF8ByteCount: 49),
+                .stringLimitExceeded
+            ),
+            (
+                "individual string bytes",
+                CodeMapArtifactContainerPolicy(maximumIndividualStringUTF8ByteCount: 8),
+                CodeMapArtifactContainerPolicy(maximumIndividualStringUTF8ByteCount: 7),
+                .stringLimitExceeded
+            )
+        ]
+        for (name, fitting, exceeded, expectedError) in limits {
+            XCTAssertNoThrow(try CodeMapArtifactContainer.encode(key: key, outcome: base, policy: fitting), name)
+            XCTAssertThrowsError(try CodeMapArtifactContainer.encode(key: key, outcome: base, policy: exceeded), name) { error in
+                XCTAssertEqual(error as? CodeMapArtifactContainerError, expectedError, name)
+            }
         }
     }
 
@@ -425,9 +520,95 @@ final class CodeMapArtifactContainerTests: XCTestCase {
         )
     }
 
-    private func makeKey(sourceText: String) throws -> CodeMapArtifactKey {
-        let identity = try SyntaxManager().pipelineIdentity(for: .swift, decoderPolicy: .workspaceAutomaticV1)
+    /// Builds a key whose identity matches Swift's except for its language ID. The container reads
+    /// only the language ID to decide which payload a ready artifact must carry.
+    private func makeKey(
+        sourceText: String,
+        languageID: CodeMapPipelineLanguageID = .swift
+    ) throws -> CodeMapArtifactKey {
+        let swift = try SyntaxManager().pipelineIdentity(for: .swift, decoderPolicy: .workspaceAutomaticV1)
+        let identity = try CodeMapPipelineIdentity(
+            languageID: languageID,
+            decoderPolicy: swift.decoderPolicy,
+            grammarRevision: swift.grammarRevision,
+            treeSitterABIVersion: swift.treeSitterABIVersion,
+            codeMapQuerySHA256: swift.codeMapQuerySHA256,
+            extractorVersion: swift.extractorVersion,
+            generatorVersion: swift.generatorVersion,
+            artifactSchemaVersion: swift.artifactSchemaVersion,
+            oversizeParsePolicyVersion: swift.oversizeParsePolicyVersion,
+            limits: swift.limits,
+            flags: swift.flags
+        )
         return try CodeMapArtifactKey(source: makeSource(text: sourceText), pipelineIdentity: identity)
+    }
+
+    /// A `provider "c"` block and a `module "m"` call with a `count` attribute, a missing source, and
+    /// input `x`, referencing `var.x`. Each parameter replaces one of those facts. The provider
+    /// block's kind (`other`) and block type differ in length, so the byte total shows which of
+    /// the two the summary counted.
+    private func makeTerraformArtifact(
+        providerLabels: [String] = ["c"],
+        moduleAttributes: [TerraformOutlineAttribute] = [TerraformOutlineAttribute(name: "count", valueText: "1")],
+        moduleSource: TerraformModuleSource = .missing,
+        argumentNames: [String] = ["x"],
+        reference: TerraformCodeMapReference? = nil
+    ) throws -> CodeMapSyntaxArtifact {
+        let terraform = try TerraformCodeMapArtifact(
+            declarations: [
+                TerraformCodeMapDeclaration(kind: .other, blockType: "provider", labels: providerLabels, lineNumber: 1),
+                TerraformCodeMapDeclaration(
+                    kind: .module,
+                    blockType: "module",
+                    labels: ["m"],
+                    lineNumber: 2,
+                    attributes: moduleAttributes,
+                    moduleSource: moduleSource,
+                    argumentNames: argumentNames
+                )
+            ],
+            references: [reference ?? TerraformCodeMapReference(kind: .variable, parts: ["x"])]
+        )
+        return CodeMapSyntaxArtifact(
+            imports: [],
+            classes: [],
+            functions: [],
+            enums: [],
+            globalVars: [],
+            macros: [],
+            referencedTypes: [],
+            terraform: terraform
+        )
+    }
+
+    /// The 26 summary fields of an artifact shaped like `makeTerraformArtifact`, which always has
+    /// 2 declarations, 1 reference, and no legacy symbols.
+    private func terraformSummary(
+        labels: UInt64 = 2,
+        attributes: UInt64 = 1,
+        arguments: UInt64 = 1,
+        parts: UInt64 = 1,
+        strings: UInt64,
+        collections: UInt64,
+        bytes: UInt64,
+        maximum: UInt64 = 8
+    ) -> [UInt64] {
+        Array(repeating: 0, count: 11) + [2, 1] +
+            Array(repeating: 0, count: 5) + [labels, attributes, arguments, parts] +
+            [strings, collections, bytes, maximum]
+    }
+
+    private func summaryFields(_ data: Data) -> [UInt64] {
+        let layout = parseLayout(data)
+        let fieldCount = Int(readUInt32(data, at: layout.summaryCountOffset))
+        return (0 ..< fieldCount).map { readUInt64(data, at: layout.summaryFieldsOffset + $0 * 8) }
+    }
+
+    /// Joins `recipient`'s header up to its outcome kind with `donor`'s payload length, checksum,
+    /// summary, and payload, so framing, checksum, and summary checks all pass.
+    private func transplantPayload(from donor: Data, into recipient: Data) -> Data {
+        recipient.prefix(parseLayout(recipient).payloadLengthOffset) +
+            donor.suffix(from: parseLayout(donor).payloadLengthOffset)
     }
 
     private func makeSource(text: String) -> CodeMapSourceSnapshot {
@@ -509,6 +690,12 @@ final class CodeMapArtifactContainerTests: XCTestCase {
     private func readUInt32(_ data: Data, at offset: Int) -> UInt32 {
         data[offset ..< offset + 4].reduce(into: UInt32(0)) { result, byte in
             result = (result << 8) | UInt32(byte)
+        }
+    }
+
+    private func readUInt64(_ data: Data, at offset: Int) -> UInt64 {
+        data[offset ..< offset + 8].reduce(into: UInt64(0)) { result, byte in
+            result = (result << 8) | UInt64(byte)
         }
     }
 

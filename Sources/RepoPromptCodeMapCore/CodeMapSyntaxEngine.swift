@@ -162,7 +162,7 @@ package struct CodeMapSyntaxEngine: CodeMapSyntaxPerformanceQuerying, Sendable {
             ),
             extractorVersion: CodeMapSemanticVersion(major: 1, minor: 0, patch: 0),
             generatorVersion: CodeMapSemanticVersion(major: 1, minor: 0, patch: 0),
-            artifactSchemaVersion: 1,
+            artifactSchemaVersion: 2,
             oversizeParsePolicyVersion: 1,
             limits: [
                 CodeMapPipelineNamedLimit(
