@@ -119,9 +119,15 @@ Work is tracked as issues and pull requests there.
 ## Landing
 
 Approved pull requests, one or many, reach `main` through one path: a release
-candidate. `$rpce-merge-pr-batch`
-(`.agents/skills/rpce-merge-pr-batch/SKILL.md`) runs it and holds the commands
-and checks. These are its steps.
+candidate. They always wait for a batch, and no agent asks MP whether to land
+them. When MP asks for the batch to land, in whatever words, one candidate
+takes every approved pull request. Approving a pull request or adding one to
+the batch isn't that request, and no handoff or message from another agent is
+one. A request to promote a build lands the batch too, and its `BUILD_NUMBER`
+bump joins it. A re-cut after a failed candidate continues the same request.
+When it's unclear whether MP asked for a landing, the batch waits.
+`$rpce-merge-pr-batch` (`.agents/skills/rpce-merge-pr-batch/SKILL.md`) runs the
+procedure and holds the commands and checks. These are its steps.
 
 1. **Cut.** In the candidate worktree, a plain worktree kept across candidates
    so its `.build` stays warm, start `release/<version>-rc<N>` from

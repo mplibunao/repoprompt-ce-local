@@ -14,7 +14,10 @@ Before you start:
 - `main` is pushed at the commit to promote, which is the tip of a landed release candidate
   ([`CONTRIBUTING.md`](../CONTRIBUTING.md), "Landing"), and the tracked tree is clean, so
   [build provenance](#build-provenance) records that commit with `dirty: false`.
-- `BUILD_NUMBER` in [`version.env`](../version.env) is bumped for this build.
+- `BUILD_NUMBER` in [`version.env`](../version.env) is one more than the build of the newest
+  `local/v<version>-b<build>` tag. When `main` doesn't have that yet, a `chore/local-build-<N>`
+  pull request sets it and lands with the batch the promotion request lands
+  ([`CONTRIBUTING.md`](../CONTRIBUTING.md), "Landing").
 - `zstd` is on `PATH`. The archive and the restore both need it.
 - The signing registry already records the Apple Development team the build will use.
   Preparation refuses a first install, a move from self-signed signing, and a rotation. A
