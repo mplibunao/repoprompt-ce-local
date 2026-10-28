@@ -36,6 +36,7 @@ var packageDependencies: [Package.Dependency] = [
     .package(url: "https://github.com/tree-sitter/tree-sitter-c-sharp.git", exact: "0.23.5"),
     .package(url: "https://github.com/tree-sitter/tree-sitter-cpp", exact: "0.23.4"),
     .package(url: "https://github.com/tree-sitter/tree-sitter-php.git", exact: "0.24.2"),
+    .package(url: "https://github.com/tree-sitter-grammars/tree-sitter-hcl", exact: "1.2.0"),
     .package(url: "https://github.com/jamesrochabrun/SwiftAnthropic", revision: "b7d030cd7453f314c780f5492385f73d704cbd5d"),
     .package(url: "https://github.com/repoprompt/SwiftOpenAI", revision: "1211782eb337e7968124448a20d9260df1952012"),
     .package(path: "Vendor/UniversalCharsetDetection"),
@@ -160,7 +161,8 @@ let package = Package(
                 .product(name: "TreeSitterSwift", package: "tree-sitter-swift"),
                 .product(name: "TreeSitterCSharp", package: "tree-sitter-c-sharp"),
                 .product(name: "TreeSitterCPP", package: "tree-sitter-cpp"),
-                .product(name: "TreeSitterPHP", package: "tree-sitter-php")
+                .product(name: "TreeSitterPHP", package: "tree-sitter-php"),
+                .product(name: "TreeSitterHCL", package: "tree-sitter-hcl")
             ],
             path: "Sources/RepoPromptCodeMapCore",
             swiftSettings: swift6LanguageMode + [

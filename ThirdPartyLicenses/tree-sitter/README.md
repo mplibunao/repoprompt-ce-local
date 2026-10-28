@@ -21,6 +21,7 @@ to their copied licenses.
 | C# | <https://github.com/tree-sitter/tree-sitter-c-sharp.git> | `0.23.5` | `cac6d5fb595f5811a076336682d5d595ac1c9e85` | `TreeSitterCSharp` | [`LICENSE-tree-sitter-c-sharp.txt`](LICENSE-tree-sitter-c-sharp.txt) |
 | C++ | <https://github.com/tree-sitter/tree-sitter-cpp> | `0.23.4` | `f41e1a044c8a84ea9fa8577fdd2eab92ec96de02` | `TreeSitterCPP` | [`LICENSE-tree-sitter-max-brunsfeld-2014.txt`](LICENSE-tree-sitter-max-brunsfeld-2014.txt) |
 | PHP | <https://github.com/tree-sitter/tree-sitter-php.git> | `0.24.2` | `5b5627faaa290d89eb3d01b9bf47c3bb9e797dea` | `TreeSitterPHP` | [`LICENSE-tree-sitter-php.txt`](LICENSE-tree-sitter-php.txt) |
+| HCL | <https://github.com/tree-sitter-grammars/tree-sitter-hcl> | `1.2.0` | `fad991865fee927dd1de5e172fb3f08ac674d914` | `TreeSitterHCL` | [`LICENSE-tree-sitter-hcl.txt`](LICENSE-tree-sitter-hcl.txt) |
 
 SwiftPM accepts Swift's buildable `0.7.3-with-generated-files` companion tag as an exact semantic version; its plain `0.7.3` release omits generated parser sources. The resolved revisions above remain the CodeMap grammar/cache identity inputs.
 
