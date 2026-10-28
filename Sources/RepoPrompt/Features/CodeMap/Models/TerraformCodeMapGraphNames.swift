@@ -39,7 +39,36 @@ enum TerraformCodeMapGraphNames {
         case childOutput(call: String, output: String)
     }
 
+    /// A fact the graph posts under a folder. A `call` symbol has no source: the graph keeps a
+    /// call's source in its call bindings.
+    enum Symbol: Hashable {
+        case folder
+        case variable(name: String)
+        case output(name: String)
+        case local(name: String)
+        case resource(type: String, name: String)
+        case data(type: String, name: String)
+        case call(name: String)
+    }
+
     private static let prefix = "tf1:"
+
+    /// The graph's posting key for `symbol` in `folder`, the loaded-root-relative folder that is
+    /// empty for the loaded root: U+0000, then the encoding of the tuple that puts the folder before
+    /// the symbol's tag. Contribution names never start with U+0000, so no other name equals a key.
+    static func postingKey(folder: String, symbol: Symbol) -> String {
+        typealias Tag = Definition.Tag
+        let components: [String] = switch symbol {
+        case .folder: [Tag.folder.rawValue]
+        case let .variable(name): [Tag.variable.rawValue, name]
+        case let .output(name): [Tag.output.rawValue, name]
+        case let .local(name): [Tag.local.rawValue, name]
+        case let .resource(type, name): [Tag.resource.rawValue, type, name]
+        case let .data(type, name): [Tag.data.rawValue, type, name]
+        case let .call(name): [Tag.call.rawValue, name]
+        }
+        return "\u{0}" + encode([folder] + components)
+    }
 
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
@@ -163,7 +192,7 @@ enum TerraformCodeMapGraphNames {
 }
 
 extension TerraformCodeMapGraphNames.Definition {
-    private enum Tag: String {
+    fileprivate enum Tag: String {
         case folder
         case variable
         case output
