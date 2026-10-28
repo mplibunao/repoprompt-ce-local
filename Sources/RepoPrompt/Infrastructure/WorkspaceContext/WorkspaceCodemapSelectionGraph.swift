@@ -1432,9 +1432,12 @@ actor WorkspaceCodemapSelectionGraph {
                     continue
                 }
                 visits &+= UInt64(candidates.count)
+                let candidateCount = UInt64(candidates.count)
                 for target in candidates {
                     namesByTarget[target, default: []].insert(name)
-                    candidateCountByTarget[target] = UInt64(candidates.count)
+                    // A name with one definer proves the edge on its own, so the edge keeps the
+                    // smallest candidate count among its matched names.
+                    candidateCountByTarget[target] = min(candidateCountByTarget[target] ?? candidateCount, candidateCount)
                 }
             }
             var sourceEvidence: [WorkspaceCodemapGraphEdgeEvidence] = []
