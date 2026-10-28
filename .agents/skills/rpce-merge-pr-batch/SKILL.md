@@ -6,7 +6,7 @@ description: "Land an ordered set of approved RepoPrompt CE pull requests, one o
 # Land RepoPrompt CE Pull Requests
 
 Approved pull requests reach `main` only through a release candidate (`CONTRIBUTING.md`,
-"Landing"). This skill runs that procedure, and only after MP's go signal. It lands
+"Landing"). This skill runs that procedure, and only after MP's go. It lands
 approved heads as they are: it does not review, edit, squash, or rebase them, except that a
 head which no longer merges cleanly with `main` is rebased onto `origin/main` on its own branch
 per `CONTRIBUTING.md` step 7. Review
@@ -30,7 +30,7 @@ prompts in [references/review-prompts.md](references/review-prompts.md)).
    there.
 3. List every open pull request that meets the requirements in "1. Inspect" other than
    approval, mark each one whose approval isn't in this conversation, and confirm the ordered
-   list with MP. A go signal given in answer to a question that showed this list confirms it.
+   list with MP. A go given in answer to a question that showed this list confirms it.
    Without an order, land in ascending number.
    Show each pull request's current head SHA and newest commit subject with the list. When
    MP's approval of a pull request isn't in this conversation, his confirmation of the list

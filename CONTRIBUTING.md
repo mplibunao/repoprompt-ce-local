@@ -119,17 +119,12 @@ Work is tracked as issues and pull requests there.
 ## Landing
 
 Approved pull requests, one or many, reach `main` through one path: a release
-candidate. Landing works like a team release: nothing reaches `main` without a
-go signal from MP, and he hears what the release would carry before he gives
-it. When MP approves a pull request, or hands one to another session, the agent
-holding it asks him one question: land it now, or hold it for a batch. The
-question lists the open pull requests ready to land and the work in progress
-the agent knows of. No agent starts a candidate without his answer. "Land now"
-is the go signal for every listed pull request, and one candidate lands them
-all. A held pull request stays open until a later candidate takes it. A request
-to promote a build is the go signal for the candidate that carries its
-`BUILD_NUMBER` bump along with the other pull requests ready to land. A re-cut
-after a failed candidate continues the same go signal. `$rpce-merge-pr-batch`
+candidate, and nothing lands without MP's go. When MP approves a pull request,
+the agent asks him: land it now, or hold it for a batch? The question lists the
+other pull requests ready to land. "Land now" lands them all in one candidate.
+On "hold", the agent stops, and the next go takes the pull request. A request to
+promote a build is a go, and its `BUILD_NUMBER` bump joins that candidate. A
+re-cut after a failed candidate needs no new go. `$rpce-merge-pr-batch`
 (`.agents/skills/rpce-merge-pr-batch/SKILL.md`) runs the procedure and holds the
 commands and checks. These are its steps.
 
