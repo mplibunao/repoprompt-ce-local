@@ -1022,6 +1022,73 @@ final class WorkspaceCodemapGraphIncrementalIndexTests: XCTestCase {
         XCTAssertEqual(accounting.activeGraphIndexBatchCount, 0)
     }
 
+    // MARK: - Edge ambiguity
+
+    /// A name with one definer proves the dependency by itself, so an edge matched through several
+    /// names reports the smallest candidate count among them, whichever name sorts last. Runs on the
+    /// main actor because the second row's assertions end the test, and XCTest can drop an off-main
+    /// assertion failure that it hasn't recorded by the time an async test returns.
+    @MainActor
+    func testEdgeCandidateCountDoesNotDependOnMatchedNameOrder() async throws {
+        // `Status` has three definers in both rows; the single-definer name sorts before it in the
+        // first row and after it in the second.
+        let sharedName = "Status"
+        let rows: [(label: String, singleDefinerName: String)] = [
+            ("single-definer name sorts first", "Money"),
+            ("single-definer name sorts last", "Wallet")
+        ]
+        for row in rows {
+            let harness = try await CodemapGraphIndexHarness(seed: 0x91)
+            let source = harness.fileID(0)
+            let proven = harness.fileID(1)
+            let onlyShared = harness.fileID(2)
+            let slots = try [
+                harness.makeSlot(
+                    fileID: source,
+                    path: "Sources/Caller.swift",
+                    definitions: ["Caller"],
+                    references: [row.singleDefinerName, sharedName]
+                ),
+                harness.makeSlot(
+                    fileID: proven,
+                    path: "Sources/Proven.swift",
+                    definitions: [row.singleDefinerName, sharedName],
+                    references: []
+                ),
+                harness.makeSlot(
+                    fileID: onlyShared,
+                    path: "Sources/OnlyShared.swift",
+                    definitions: [sharedName],
+                    references: []
+                ),
+                harness.makeSlot(
+                    fileID: harness.fileID(3),
+                    path: "Sources/AlsoShared.swift",
+                    definitions: [sharedName],
+                    references: []
+                )
+            ]
+            let published = await harness.publish(slots, projectedTotal: UInt64(slots.count))
+            XCTAssertTrue(published, row.label)
+            _ = await harness.pull()
+
+            let edges = try await harness.latestSnapshot().outgoingEdgesBySource[source] ?? []
+            let provenEdge = try XCTUnwrap(edges.first { $0.targetFileID == proven }, row.label)
+            XCTAssertEqual(
+                provenEdge.matchedNames,
+                [row.singleDefinerName, sharedName].sorted(),
+                "\(row.label): the edge must aggregate both names"
+            )
+            XCTAssertEqual(provenEdge.candidateCount, 1, row.label)
+            XCTAssertFalse(provenEdge.ambiguous, row.label)
+
+            let sharedEdge = try XCTUnwrap(edges.first { $0.targetFileID == onlyShared }, row.label)
+            XCTAssertEqual(sharedEdge.matchedNames, [sharedName], row.label)
+            XCTAssertEqual(sharedEdge.candidateCount, 3, row.label)
+            XCTAssertTrue(sharedEdge.ambiguous, row.label)
+        }
+    }
+
     // MARK: - Helpers
 
     private func waitForGraphIndexRoot(
