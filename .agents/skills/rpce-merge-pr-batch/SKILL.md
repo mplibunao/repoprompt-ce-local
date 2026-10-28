@@ -30,7 +30,7 @@ prompts in [references/review-prompts.md](references/review-prompts.md)).
    there.
 3. List every open pull request that meets the requirements in "1. Inspect" other than
    approval, mark each one whose approval isn't in this conversation, and confirm the ordered
-   list with MP. A go given in answer to a question that showed this list confirms it.
+   list with MP. A go given after MP has seen this list confirms it.
    Without an order, land in ascending number.
    Show each pull request's current head SHA and newest commit subject with the list. When
    MP's approval of a pull request isn't in this conversation, his confirmation of the list
