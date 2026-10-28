@@ -1,0 +1,87 @@
+# Skills audit 2026-10-28: who starts a release candidate, and batching
+
+> Investigation report, observed 2026-10-28 on `chore/batch-release-candidates` at `be9554a90` (pull request #308), over `main` at `2f012210b`. It records what was true then. Where it disagrees with a current document, the current document is right.
+> Current guidance: [CONTRIBUTING.md](../../CONTRIBUTING.md), Landing; [AGENTS.md](../../AGENTS.md), Branch model; [.agents/skills/rpce-merge-pr-batch/SKILL.md](../../.agents/skills/rpce-merge-pr-batch/SKILL.md).
+
+## Scope
+
+The range `2f012210b..be9554a90` is one commit, `be9554a90`, "docs(landing): let MP decide when to cut a release candidate". The Markdown files it touches, read whole:
+
+- `AGENTS.md` (`CLAUDE.md` is a symlink to it, so it is audited once)
+- `CONTRIBUTING.md`
+- `.agents/skills/rpce-merge-pr-batch/SKILL.md`, "the landing skill" below
+
+Neighbours read for the restated-rules pass: `docs/releasing.md`, `docs/porting.md`, `.agents/skills/rpce-contribution-check/SKILL.md`, the landing skill's `references/review-prompts.md` and `agents/openai.yaml`, `.agents/skills/rpce-release/SKILL.md`, the built-in workflow prompts under `Sources/RepoPromptShared/Workflows/`, and the toolkit's `memory/common/repoprompt-ce.md`. No file in scope is marked `repoprompt_managed`.
+
+The requirement, from MP in chat, paraphrased here: agents should batch release candidates instead of cutting one candidate per pull request, because every candidate pays for a full validation run and hosted CI; and an agent starts a candidate only when MP asks for one. A pull request that one session handed to another was handed over so that the receiving session could batch it, not so that either session would cut a candidate for it.
+
+The question: does the range state that rule in general terms, or does it fit the one incident that prompted it?
+
+Usage window: 2026-09-28 to 2026-10-28.
+
+Nothing outside this report was changed.
+
+## Measurement: pull requests per landed candidate
+
+Source: the first-parent history of `main` from 2026-10-16, when the landing procedure took its current form ([2026-10-16-skills-audit-landing.md](2026-10-16-skills-audit-landing.md)), to 2026-10-28, read from the local `origin/main` last fetched on 2026-10-28 at 11:04. A candidate's merge commits are made seconds apart, so merges more than ten minutes apart count as different candidates. The history shows the pattern; it doesn't show who asked for each candidate.
+
+- 24 candidates landed 57 pull requests.
+- Pull requests per candidate: 1 (9 candidates), 2 (7), 3 (3), 4 (2), 5 (1), 6 (2).
+- Three of the nine single-PR candidates carried only a `chore/local-build-<N>` pull request, which bumps `BUILD_NUMBER` in `version.env` as `docs/releasing.md:17` requires before a promotion. Each one landed 17 to 82 minutes after a candidate of other pull requests: #283 after #279 to #281, #286 after #284 and #285, and #293 after #290 and #291. Four other bumps (#262, #265, #273, #298) landed in the same candidate as other pull requests.
+
+Landing one pull request at a time recurred across the whole period, so a general rule fits better than a fix for one handover.
+
+## Verdict
+
+The range states the right rule, mostly in general terms. Removing "and the landing" from the owning agent's flow in `AGENTS.md` removes the text that made landing that agent's next step, and step 3 of the landing skill is what actually batches: the agent running a candidate lists every open pull request that is ready to land, not only the ones it was handed.
+
+Three changed passages miss:
+
+- `CONTRIBUTING.md` names the handover in a clause that "No agent" already covers (row 4).
+- The batching clause in `AGENTS.md` and `CONTRIBUTING.md` is circular. "Lands every pull request on the list MP confirms" is true of a candidate of one, so the always-loaded copy never tells an agent to batch (rows 2 and 5).
+- In `AGENTS.md`, "It" refers back to "The agent that owns a pull request", which is narrower than the "No agent" in `CONTRIBUTING.md` (row 2).
+
+Two neighbours leave gaps. `docs/porting.md:37` still ends a port at landing (row 12). Nothing says whether a request to promote a build asks for the candidate that lands its `BUILD_NUMBER` bump, the case behind three of the nine single-PR candidates (row 11).
+
+## Checks run
+
+| Check | Command or method | Result |
+| --- | --- | --- |
+| Structure | The repository has no skill lint. `Scripts/guardrails.sh` (source layout, contributor allowlist, Claude skill links, SwiftPM notices, Codex vendor, headless runtime, xcframework paths) run at `be9554a90` | Exit 0. The landing skill's `name:` matches its folder. Its description is quoted, 197 characters, and unchanged by the range |
+| Usage and dependents | `skillUsage` in `~/.claude.json`; Claude Code transcripts under `~/.claude/projects` modified in the window (1,695 files); Codex logs under `~/.codex/sessions` (208) and `~/.codex/archived_sessions` (10); RepoPrompt CE's Codex logs under `~/Library/Application Support/RepoPrompt CE/Codex/Release/home/sessions` (723) and `archived_sessions` (181); a dependents search over this repository and the toolkit. Counts only. The counting script ran from a scratch folder that was deleted afterwards | The landing skill was used in the window: row 15 |
+| Prose | Vale 3.15.1 with `~/.config/vale/.vale.ini` on each file, keeping the alerts on the changed lines (`AGENTS.md:30`, `CONTRIBUTING.md:121-127`, landing skill :8-14 and :31-33); the unslop skill's docs rules applied report-only; every link, anchor, and path in the changed lines resolved | Alerts on changed text: `Microsoft.Terms` on "agent" (`CONTRIBUTING.md:122`, twice; project vocabulary), `ai-tells.AnthropomorphicCognition` on "one unless MP asks for" (:122; MP is a person), `alex.ProfanityUnlikely` on "failed" (:125), and `ai-tells.FigurativeLands` on "lands every pull request" (`AGENTS.md:30`; landing is the repository's defined term). The remaining alerts are on sentences the range only rewrapped: sentence length and a tricolon at `AGENTS.md:30`, and sentence length, contractions, and passive voice at skill :9-11. None adopted. `CONTRIBUTING.md#landing`, the skill's "1. Inspect" (:51), and `.agents/skills/rpce-merge-pr-batch/SKILL.md` resolve. Reader findings: rows 2, 4, 5, 13 |
+| Restated rules | Rules in the changed passages listed, compared within each file, across the three files, and against the neighbours | Rows 7, 8, 12 |
+| Platform claims | The changed passages make no vendor claim. The unchanged passages' claims were checked in [2026-10-16-skills-audit-landing.md](2026-10-16-skills-audit-landing.md), findings 19 to 23 and 31 to 33 | No new claims. The earlier verdicts (13 hold, 6 not verified) are carried, not re-checked |
+| Rigidity | Reading pass over the changed passages of `AGENTS.md` and the landing skill | Two gates, skill :9 and :31-33. Both are decisions only MP makes, so neither is a finding |
+| Pruning | `AGENTS.md`, audited once, and the landing skill | `AGENTS.md:30` loads on every turn. It stays because most sessions in this repository own a pull request; row 2 rewrites it at about the same length. The incident clause in `CONTRIBUTING.md` is row 4 |
+
+## Findings
+
+| # | Location | Check | Evidence | Disposition | Proposed change | Effect |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `AGENTS.md:30` | requirement fit (root cause) | The owning agent's flow now ends "then labels and MP's approval." Before the range it ended "then labels, MP's approval, and the landing", which listed landing as that agent's job. The commit message names that inference as the cause | keep | None | None |
+| 2 | `AGENTS.md:30` | requirement fit; prose (reader) | "It doesn't start a release candidate unless MP asks for one, and each candidate lands every pull request on the list MP confirms ([`CONTRIBUTING.md`, Landing](CONTRIBUTING.md#landing))." "It" refers back to "The agent that owns a pull request", so a coordinating session that holds pull requests it didn't open reads the rule as someone else's, while `CONTRIBUTING.md:122` says "No agent". The second clause holds for a candidate of one, so it doesn't say to batch. The batch comes only from skill :31, which an agent reads only after it invokes the skill. MP asked for the batching instruction in `AGENTS.md` | correct | Replace the sentence with: "No agent starts a release candidate unless MP asks for one. The agent running it lists every open pull request that is ready to land, so one candidate covers the batch ([`CONTRIBUTING.md`, Landing](CONTRIBUTING.md#landing))." | From the first turn, every session in this checkout (Claude Code through the `CLAUDE.md` symlink, Codex, and RepoPrompt-launched agents) has both halves: no agent cuts a candidate on its own, and the agent MP asks proposes everything that is ready, before it opens the skill |
+| 3 | `AGENTS.md:30` | prose (reader) | "That document also covers stacked pull requests and the Codex review bot": "landing" left this list because the sentence before it now links Landing | keep | None | None |
+| 4 | `CONTRIBUTING.md:122-123` | prose (sediment) | "No agent starts one unless MP asks for it, whether the agent owns the pull request or took it over from another session." "No agent" already covers an agent that was handed a pull request. The clause names the handover that prompted the change and makes the rule read as two cases | trim | Keep "No agent starts one unless MP asks for it"; the full paragraph is in row 5 | Nothing is lost. The rule covers every agent, including one that was handed a pull request |
+| 5 | `CONTRIBUTING.md:123-125` | requirement fit (circular) | "Each candidate lands every pull request on the list MP confirms, so one validation run covers the whole batch." This holds for a candidate of one. What batches is who builds the list (skill :31-33), and this sentence doesn't say it | correct | Replace :121-127 with:<br>"Approved pull requests, one or many, reach `main` through one path: a release candidate. No agent starts one unless MP asks for it, and a re-cut after a failed candidate continues that request. The agent running it lists every open pull request that is ready to land, and the candidate lands the ones MP confirms, so one validation run covers the whole batch. `$rpce-merge-pr-batch` (`.agents/skills/rpce-merge-pr-batch/SKILL.md`) runs the procedure and holds the commands and checks. These are its steps." | An agent that reads Landing learns that the list holds every ready pull request, not only the ones it was handed, without opening the skill |
+| 6 | `CONTRIBUTING.md:125` | requirement fit | "A re-cut after a failed candidate continues the same request." Without it, "No agent starts one unless MP asks for it" could stop an agent at step 5 ("then cut rc<N+1>") to ask again | keep | Joined to the rule it qualifies in row 5's replacement | None |
+| 7 | `CONTRIBUTING.md:101-103`; `CONTRIBUTING.md:123-125` | restated rule (same file) | Step 7: "waits for a release candidate ([Landing](#landing)), which merges the head of every approved pull request onto `origin/main`, validates that candidate once, and pushes it to `main`." / Landing: "Each candidate lands every pull request on the list MP confirms, so one validation run covers the whole batch." | keep | None | None. Step 7 is where the owning agent stops, and its "waits" tells that agent the pull request is out of its hands; Landing owns the procedure. After row 5 the two agree |
+| 8 | Skill :9; `AGENTS.md:30`; `CONTRIBUTING.md:122` | restated rule (three copies) | "This skill runs that procedure, and only when MP asks for a candidate." / "It doesn't start a release candidate unless MP asks for one" / "No agent starts one unless MP asks for it" | keep | None | None. Each copy is load-bearing where it stands. `AGENTS.md` loads on every turn and is where MP asked for the rule; `CONTRIBUTING.md` owns Landing; the skill's clause states when the skill runs, costs seven words, cites Landing in the same sentence, and is what an agent reads at the moment it would cut. The copies stay in agreement as long as Landing words each qualification as part of MP's request, as the re-cut (row 6) and the promotion proposal (row 11) do |
+| 9 | Skill :31-33 | requirement fit | "List every open pull request that meets the requirements in "1. Inspect" other than approval, mark each one whose approval isn't in this conversation, and confirm the ordered list with MP." This is the batching mechanism, and it holds in general: the agent proposes every ready pull request, and MP's confirmation approves the marked ones (`CONTRIBUTING.md:98-99`). Because `CONTRIBUTING.md` step 5 opens every pull request ready for review, the "not a draft" filter doesn't exclude pull requests whose owners are still working, and the mark tells MP which ones he hasn't approved. It isn't rigid: which pull requests land is MP's decision, and a missing order defaults to ascending number | keep | None | None |
+| 10 | Skill :3 | requirement fit (trigger) | The description says when to land, not who decides. An agent that selects the skill on its own meets :9 as soon as the skill loads. Adding the condition would lengthen a line that loads in every session's skill list, only to repeat `AGENTS.md:30` | keep | None | None |
+| 11 | `CONTRIBUTING.md:121-127`; `docs/releasing.md:14-17` | requirement fit (gap: promotion) | A promotion needs `main` at a landed candidate and `BUILD_NUMBER` bumped, so the bump lands through a candidate of its own. No document says whether a request to promote asks for that candidate: the promotion clause in `AGENTS.md` covers app stops and relaunches only. Three bump-only candidates landed 17 to 82 minutes after a batch (see Measurement) | correct (waits for approval) | In row 5's replacement, after "continues that request.", add: "A request to promote a build also asks for the candidate that lands its `BUILD_NUMBER` bump, and the bump goes in the same candidate as the other pull requests ready to land." | This waits for MP because it sets what his request covers, the way the promotion clause in `AGENTS.md` does for app restarts. With it, a promotion agent cuts the bump's candidate without a second question, and when MP asks for a candidate and a promotion together, the bump lands with the batch, so no second candidate runs. Without it, a promotion agent stops to ask whether it may cut that candidate |
+| 12 | `docs/porting.md:37` | restated rule (conflicts after the range) | "The port ends when the pull request lands through a release candidate ([Landing](../CONTRIBUTING.md#landing))." Like the "and the landing" the range removed, this makes landing the last step of the porting agent's task, while step 6 above it sends the agent through steps 3 to 7 only | correct | "The pull request then waits for a release candidate ([Landing](../CONTRIBUTING.md#landing)). Promotion is a separate step that [`releasing.md`](releasing.md) owns." | A porting agent stops at MP's approval, as every other owning agent does. A candidate that fails on the port still comes back to it through `CONTRIBUTING.md` step 7 |
+| 13 | All three files | prose (unslop voice rule) | The unslop docs rules say prose that ships in a repository never refers to MP as "MP" or in the third person. These documents name MP as the approver throughout, and the range follows that convention | keep | None in this range. Changing the convention is a repository-wide decision for MP | None |
+| 14 | `CONTRIBUTING.md:126-127` | prose (reader) | "`$rpce-merge-pr-batch` (…) runs the procedure and holds the commands and checks." The old "runs it" became "runs the procedure" because "it" now sits after a different sentence | keep | None; row 5's replacement keeps it | None |
+| 15 | `.agents/skills/rpce-merge-pr-batch/` | usage | `skillUsage`: 12 uses, last on 2026-10-28 (misses Codex and RepoPrompt sessions, and the vendor doesn't document what counts as a use). Claude Code transcripts: 9 Skill-tool calls, 20 user messages that name it with `/` or `$`, and 20 sessions in which a tool read its `SKILL.md`. The eight-skill audit exclusion wasn't applied, so the reads include audit and editing sessions (misses anything past retention and Claude Desktop sessions). Codex logs: 0 loads, 3 read sessions. RepoPrompt CE Codex logs: 0 loads, 68 read sessions (misses the debug profile). Toolkit telemetry: not a toolkit package. Dependents: `CONTRIBUTING.md:39` (links its `references/review-prompts.md`), `:126` and `:165` (name the skill); its own `agents/openai.yaml` and the `.claude/skills` symlink. No file in the toolkit routes to it | keep | None | None |
+
+## Applied
+
+None. This was a read-only run, so the agent that asked for the audit applies the decided rows: 2, 4 and 5 (one replacement paragraph), and 12. Row 11 waits for MP.
+
+## Not checked
+
+- Platform claims in unchanged passages: carried from the 2026-10-16 audit and not re-checked; the range adds none.
+- Vale alerts outside the changed lines were left as review input: 174 alerts in `AGENTS.md`, 219 in `CONTRIBUTING.md`, and 158 in the landing skill.
+- The commit message and the text of pull request #308 aren't Markdown files in the range. The commit message says the skill "lists every open pull request with passing checks"; step 3 filters on the requirements in "1. Inspect", which don't include hosted checks.
+- No candidate was cut and no GitHub data was queried. The measurement uses local refs only.

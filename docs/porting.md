@@ -34,7 +34,7 @@ Use the read-only reference clone at:
    Upstream-Ref: upstream commit <sha>
    ```
 
-   The port ends when the pull request lands through a release candidate ([Landing](../CONTRIBUTING.md#landing)). Promotion is a separate step that [`releasing.md`](releasing.md) owns.
+   The pull request then waits for a release candidate ([Landing](../CONTRIBUTING.md#landing)). Promotion is a separate step that [`releasing.md`](releasing.md) owns.
 
 ## Workflow prompts and `skillsVersion`
 
