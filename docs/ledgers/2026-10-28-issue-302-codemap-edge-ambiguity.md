@@ -1,0 +1,32 @@
+# Run ledger: CodeMap graph edge ambiguity across matched names
+
+Request: #302
+
+Make a CodeMap graph edge matched through several names report the same `ambiguous` flag and candidate count whatever the names are called, prove it with a focused test and on the debug app, and open the pull request. It's the first pull request in the stack that adds Terraform to CodeMap. The stack's later pull requests share a separate ledger.
+
+Base: `main` at `2f012210b`.
+
+| Item | Outcome | Agent session | Commits |
+|------|---------|---------------|---------|
+| 1. Aggregation fix and its legacy test | done | engineer · #302 W1: edge ambiguity aggregation fix and test | `fix(codemap): stop an edge's ambiguity from depending on how its names sort`, `test(codemap): run the edge ambiguity test on the main actor` |
+| 2. Debug-app proof of the edge flag | done | engineer · #302 W2: debug-app proof of the edge flag | `docs(ledgers): add the run ledger for issue 302` |
+
+## 1. Aggregation fix and its legacy test
+
+- Decision: an edge is ambiguous only when every matched name has more than one definer, and its candidate count is the smallest among its matched names. A name with one definer proves the dependency on its own. Source: user, approving this rule in place of the first draft of #302, which marked an edge ambiguous when any matched name had several definers.
+- Decision: the edge-resolution loop in `WorkspaceCodemapSelectionGraph.swift` keeps the smallest candidate count among the names that match each target. `ambiguous` stays `count > 1`, which on the smallest count is the rule above. That loop is the only constructor of `WorkspaceCodemapGraphEdgeEvidence` in `Sources/` and `Packages/`. Source: approved plan for the rule, and implementing agent judgment for the code change.
+- Evidence: `testEdgeCandidateCountDoesNotDependOnMatchedNameOrder` in `WorkspaceCodemapGraphIncrementalIndexTests` runs two rows, with a single-definer name that sorts before and after the three-definer name `Status`. On unchanged source the suite ran 14 tests with 2 failures, both in the row where `Status` sorts last: the edge to the file that alone defines the other name reported candidate count 3 and `ambiguous` true. The conductor's cold-build retry failed the same way. After the fix the suite passed 14 of 14.
+- Evidence: no existing test asserts `ambiguous` or `candidateCount` on an edge. The shared fixture's sources that reference a one-definer name and an eight-definer name already sorted the one-definer name last, so they report 1 before and after the fix. `make dev-format` changed 0 files and `make dev-lint` passed.
+- Decision: the fix was committed before the debug-app run and the review, in the order `CONTRIBUTING.md` step 4 gives. The debug app then ran a clean build of the commit, and the review quoted a pull request draft that included that run. Source: orchestrator judgment.
+- Decision: the review and the cleanup pass ran as fresh Agent sessions bound to this worktree, from the prompts in `.agents/skills/rpce-merge-pr-batch/references/review-prompts.md`, in place of Context Builder. The orchestrator's compose tab reads the main checkout, which doesn't contain this branch. Source: orchestrator judgment.
+- Evidence: the independent review found no blocker or should-fix issue. It confirmed the smallest-count rule against the decided rule, that no consumer reads `candidateCount` and every consumer of `ambiguous` copies it through unchanged, and that an incremental diff re-resolves every source that references a name whose definers changed, so the incremental and full-rebuild results stay equal.
+- Decision: the review's one nit was accepted. The test is `@MainActor`, because a regression that keeps the first matched name's count fails only in the second row, whose assertions end the test, and nonisolated async tests can drop late failures (#292). Source: review finding.
+- Evidence: with the `@MainActor` test, a throwaway mutation that kept the first matched name's count, since reverted, ran 14 tests with 2 failures, both in the row where the one-definer name sorts last: candidate count 3 and `ambiguous` true. With the fix restored, the suite passed 14 of 14, `make dev-format` changed 0 files, and `make dev-lint` passed.
+- Evidence: the cleanup pass made no changes. It found that the new `min` update follows the file's existing `max(… ?? 0, duration)` form, the test calls the harness the way the file's other tests do, and both new comments say why the code is correct.
+
+## 2. Debug-app proof of the edge flag
+
+- Evidence: the debug-app block ran from 10:53 to 11:02 (+0800) on 2026-10-28. `make dev-smoke-launch` built this branch at `bc1dd91ff` (not dirty) and launched the debug app, then its smoke failed at `workspace switch` because the debug profile's 152-tab workspace was still restoring. A rerun of `make dev-smoke` against the same app passed. Production RepoPrompt CE kept the same PID and start time throughout and was never driven.
+- Evidence: the fixture was two synthetic Swift Git repositories, each opened as its own disposable workspace. In each, `Order.swift` holds properties of a one-definer type and of `Status`; `Types.swift` defines both, and `StatusB.swift` and `StatusC.swift` each define another `Status`. The one-definer type was `Money` in scenario A, which sorts before `Status`, the order in which the item 1 test fails on unchanged source, and `Wallet` in scenario B. The debug app ran only this branch. Both reported 4 of 4 files indexed with no unresolved references.
+- Evidence: `get_code_structure` on `Order.swift` with `expand: "uses"` returned the same edges in both scenarios. The edge to `Types.swift` listed both names with no `ambiguous` key, which the MCP output omits when false, and the edges to `StatusB.swift` and `StatusC.swift` listed only `Status` with `ambiguous: true`. The output has no candidate-count field, so the count was checked only by the test in item 1.
+- Evidence: cleanup deleted both disposable workspaces and the fixture and left the debug window on its earlier workspace and tab. The debug app still runs this branch's build.
