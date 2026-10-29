@@ -158,6 +158,44 @@ final class WorkspaceFilesAutoCodemapModeTests: XCTestCase {
         }
     }
 
+    func testAutoAppendsLinkedOutlinesAfterSelectedFullText() async throws {
+        let repository = try ReviewGitRepositoryFixture(name: #function)
+        let clientSource = "struct Client { let model: Model }\n"
+        let rootURL = try repository.makeRepository(named: "root", files: [
+            "Sources/Client.swift": clientSource,
+            "Sources/Model.swift": "struct Model { let id: Int }\n"
+        ])
+        let fixture = try CodemapStoreFixture(name: #function)
+        let store = fixture.makeStore()
+        let loaded = try await store.loadRoot(path: rootURL.path)
+        addTeardownBlock {
+            await store.unloadRoot(id: loaded.id)
+            await fixture.shutdown()
+            repository.cleanup()
+        }
+        let selection = StoredSelection(
+            selectedPaths: [rootURL.appendingPathComponent("Sources/Client.swift").path],
+            codemapAutoEnabled: true
+        )
+
+        // Codemaps index in the background, so resolve until the linked outline is ready.
+        let accounting = PromptContextAccountingService()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(20))
+        var resolution = await accounting.resolveEntries(selection: selection, store: store, codeMapUsage: .auto)
+        while resolution.codemapPresentation.coverage != .complete, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+            resolution = await accounting.resolveEntries(selection: selection, store: store, codeMapUsage: .auto)
+        }
+
+        XCTAssertEqual(resolution.codemapPresentation.coverage, .complete)
+        XCTAssertEqual(
+            resolution.entries.map { "\($0.file.standardizedRelativePath) \($0.mode)" },
+            ["Sources/Client.swift fullFile", "Sources/Model.swift codemap"]
+        )
+        XCTAssertEqual(resolution.entries.first?.loadedContent, clientSource)
+    }
+
     private func makeFixture(fileName: String) -> (
         viewModel: WorkspaceFilesViewModel,
         file: FileViewModel

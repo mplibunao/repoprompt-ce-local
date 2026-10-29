@@ -70,6 +70,27 @@ make dev-test FILTER=CodeMapArtifactContainerTests
 
 Run these when changes touch CodeMap generation, syntax parsing, artifact storage, or Tree-sitter support. The packaged-app live codemap projection-demand gate is documented later in this guide.
 
+### Terraform codemaps
+
+A change to Terraform extraction, the `tf1` contribution codec in `TerraformCodeMapGraphNames`, or the folder-scoped graph runs each of these with `make dev-test FILTER=<suite>`:
+
+- `TerraformCodeMapTests`: outline, references, and the outcome for malformed source.
+- `TerraformCodemapPersistenceTests`: the `tf1` codec and agreement between contribution producers.
+- `TerraformCodemapGraphTests`: folder-scoped links, module-call bindings, incremental updates, and fencing.
+- `TerraformCodeStructureTests`: the edge `symbols`, ambiguity, and unresolved reasons in `get_code_structure` output.
+- `RepoPromptTests.CodemapAutomaticSelectionGraphNativeTests/testTerraformManifestLifecycleProducesIdenticalGraph`: a cold build, a warm manifest load, a live edit, and a move into another folder against a real store. The test hands the move to the store as a removal and an addition, so it doesn't cover how the app detects a move on disk.
+
+The graph resolves module calls statically and lists what it can't resolve under `unresolved` in `get_code_structure` output instead of guessing:
+
+- Only `.tf` files get outlines and links. `.tfvars` (#303), `.tf.json` (#305), and other `.hcl` files don't.
+- The graph reads `override.tf` and `*_override.tf` as ordinary `.tf` files, because it doesn't apply Terraform's override merge (#307). A module call that an override file repeats reports `ambiguous_module_call`.
+- A call links only through a static `source` string starting with `./` or `../`, resolved as text and case-sensitively against the caller's folder. A registry, Git, HTTP, absolute, or computed source reports `unsupported_module_source` (#300, #306); a source that leaves the loaded root, `outside_loaded_root`; a missing, empty, or repeated source, `invalid_module_call`; a label declared twice in one folder, `ambiguous_module_call`.
+- A module is the `.tf` files directly in one folder. Nested folders are separate modules.
+- `terraform_remote_state` links only to its local `data` block (#304).
+- A `.tf` file with a syntax error has no outline or links until it parses again, so references to its declarations report `missing`.
+
+For the live check, follow [Debug CLI and live MCP smoke](#debug-cli-and-live-mcp-smoke) and open a disposable synthetic repository as its own workspace, with a stack folder whose `module` calls `../../modules/<name>` and a sibling file that reads `module.<call>.<output>`. Once indexing completes, call `get_code_structure` with `"expand":"uses"` on the call file and on the sibling at depths 1 and 2, and with `"expand":"used_by"` on the child's output file. Expect the call file to link to every `.tf` file directly in the child folder, and its edge to the child's variables file to name the input. At depth 1, expect the sibling to link to the call file and the child's output file. Then check a prompt export with codemaps set to Auto, a debug-app restart after which the app parses no unchanged file, and an edit, a move, and a delete in the synthetic repository. A private Terraform corpus is read-only, and its paths, source, and logs stay out of committed evidence.
+
 ## Performance and optimization evidence
 
 Define the workload, acceptance threshold, comparable environment, sample count, warmup policy, source-state controls, invalid-sample rules, and retained evidence before measuring. Keep root and provider timings separate unless a derived serial estimate is clearly labeled. Diagnostic and wake-probe runs are lifecycle evidence, not valid timing samples.
