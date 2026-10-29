@@ -15,9 +15,10 @@ final class CodeMapSyntaxArtifactTests: XCTestCase {
             Set(object.keys),
             [
                 "aliases", "classes", "enums", "exports", "functions", "globalVars", "imports",
-                "interfaces", "literalUnions", "macros", "referencedTypes"
+                "interfaces", "literalUnions", "macros", "referencedTypes", "terraform"
             ]
         )
+        XCTAssertTrue(object["terraform"] is NSNull)
         let forbiddenFragments = [
             "path", "root", "fileid", "session", "worktree", "modification", "fingerprint",
             "digest", "token", "validation"
@@ -55,7 +56,11 @@ final class CodeMapSyntaxArtifactTests: XCTestCase {
                 #"{"kind":"oversize","reason":{"actual":12,"kind":"utf8Bytes","limit":10}}"#
             ),
             (.parseFailed(.parserReturnedNilTree), #"{"failure":"parserReturnedNilTree","kind":"parseFailed"}"#),
-            (.parseFailed(.parserReturnedNilRoot), #"{"failure":"parserReturnedNilRoot","kind":"parseFailed"}"#)
+            (.parseFailed(.parserReturnedNilRoot), #"{"failure":"parserReturnedNilRoot","kind":"parseFailed"}"#),
+            (
+                .parseFailed(.invalidTerraformSyntax),
+                #"{"failure":"invalidTerraformSyntax","kind":"parseFailed"}"#
+            )
         ]
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -186,6 +191,16 @@ final class CodeMapSyntaxArtifactTests: XCTestCase {
         }
         XCTAssertEqual(javaArtifact.functions.map(\.name), ["helper"])
         XCTAssertTrue(javaArtifact.classes.isEmpty)
+    }
+
+    func testTerraformPipelineIdentityUsesItsOwnStableLanguageID() throws {
+        // The stable ID is part of every persisted artifact key; it must not alias another language.
+        let identity = try CodeMapSyntaxEngine.shared.pipelineIdentity(
+            for: .terraform,
+            decoderPolicy: .workspaceAutomaticV1
+        )
+        XCTAssertEqual(identity.languageID, .terraform)
+        XCTAssertEqual(identity.languageID.rawValue, "terraform")
     }
 
     func testUnsupportedExtensionsRemainOutsideArtifactOutcomes() {

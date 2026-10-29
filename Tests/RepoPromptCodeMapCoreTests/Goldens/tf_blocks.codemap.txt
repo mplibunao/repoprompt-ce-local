@@ -1,0 +1,25 @@
+File: <ROOT>/tf/blocks.tf
+Imports:
+---
+Terraform:
+  - L1: terraform
+      required_version: ">= 1.10"
+  - L15: provider "example"
+      alias: "secondary"
+  - L20: resource "example_bucket" "logs"
+      count: 2
+      provider: example.secondary
+  - L37: data "example_zone" "primary"
+      for_each: toset(var.zones)
+  - L42: resource "example_marker" "empty"
+  - L44: moved
+      from: example_bucket.old
+      to: example_bucket.logs
+  - L49: import
+      to: example_bucket.logs[0]
+  - L54: removed
+      from: example_bucket.legacy
+  - L62: check "health"
+  - L69: variable "orphan" "extra"
+  - L73: widget "custom"
+---

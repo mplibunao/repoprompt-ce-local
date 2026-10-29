@@ -250,13 +250,16 @@ package struct CodeMapSyntaxArtifact: Codable, Equatable, Sendable {
     package let globalVars: [VariableInfo]
     package let macros: [String]
     package let referencedTypes: [String]
+    /// Terraform facts. A Terraform artifact has empty legacy symbol arrays, renders through
+    /// `TerraformCodeMapFormatter`, and defines no type names.
+    package let terraform: TerraformCodeMapArtifact?
 
     package let apiDescription: String
     package let definedTypeNames: Set<String>
 
     private enum CodingKeys: String, CodingKey {
         case imports, exports, classes, interfaces, aliases, literalUnions,
-             functions, enums, globalVars, macros, referencedTypes
+             functions, enums, globalVars, macros, referencedTypes, terraform
     }
 
     package init(
@@ -270,7 +273,8 @@ package struct CodeMapSyntaxArtifact: Codable, Equatable, Sendable {
         enums: [EnumInfo],
         globalVars: [VariableInfo],
         macros: [String],
-        referencedTypes: [String]
+        referencedTypes: [String],
+        terraform: TerraformCodeMapArtifact? = nil
     ) {
         self.imports = imports
         self.exports = exports
@@ -283,6 +287,20 @@ package struct CodeMapSyntaxArtifact: Codable, Equatable, Sendable {
         self.globalVars = globalVars
         self.macros = macros
         self.referencedTypes = referencedTypes
+        self.terraform = terraform
+
+        if let terraform {
+            precondition(
+                Self.areEmpty([
+                    imports, exports, classes, interfaces, aliases, literalUnions,
+                    functions, enums, globalVars, macros, referencedTypes
+                ]),
+                "A Terraform artifact carries no legacy symbols."
+            )
+            apiDescription = TerraformCodeMapFormatter.render(terraform)
+            definedTypeNames = []
+            return
+        }
 
         let summary = CodeMapAPIContentFormatter.summarize(
             classes: classes,
@@ -301,19 +319,64 @@ package struct CodeMapSyntaxArtifact: Codable, Equatable, Sendable {
 
     package init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        try self.init(
-            imports: container.decode([String].self, forKey: .imports),
-            exports: container.decode([String].self, forKey: .exports),
-            classes: container.decode([ClassInfo].self, forKey: .classes),
-            interfaces: container.decode([InterfaceInfo].self, forKey: .interfaces),
-            aliases: container.decode([TypeAliasInfo].self, forKey: .aliases),
-            literalUnions: container.decode([String].self, forKey: .literalUnions),
-            functions: container.decode([FunctionInfo].self, forKey: .functions),
-            enums: container.decode([EnumInfo].self, forKey: .enums),
-            globalVars: container.decode([VariableInfo].self, forKey: .globalVars),
-            macros: container.decode([String].self, forKey: .macros),
-            referencedTypes: container.decode([String].self, forKey: .referencedTypes)
+        let imports = try container.decode([String].self, forKey: .imports)
+        let exports = try container.decode([String].self, forKey: .exports)
+        let classes = try container.decode([ClassInfo].self, forKey: .classes)
+        let interfaces = try container.decode([InterfaceInfo].self, forKey: .interfaces)
+        let aliases = try container.decode([TypeAliasInfo].self, forKey: .aliases)
+        let literalUnions = try container.decode([String].self, forKey: .literalUnions)
+        let functions = try container.decode([FunctionInfo].self, forKey: .functions)
+        let enums = try container.decode([EnumInfo].self, forKey: .enums)
+        let globalVars = try container.decode([VariableInfo].self, forKey: .globalVars)
+        let macros = try container.decode([String].self, forKey: .macros)
+        let referencedTypes = try container.decode([String].self, forKey: .referencedTypes)
+        let terraform = try container.decodeIfPresent(TerraformCodeMapArtifact.self, forKey: .terraform)
+        if terraform != nil, !Self.areEmpty([
+            imports, exports, classes, interfaces, aliases, literalUnions,
+            functions, enums, globalVars, macros, referencedTypes
+        ]) {
+            throw DecodingError.dataCorruptedError(
+                forKey: .terraform,
+                in: container,
+                debugDescription: "A Terraform artifact carries no legacy symbols."
+            )
+        }
+        self.init(
+            imports: imports,
+            exports: exports,
+            classes: classes,
+            interfaces: interfaces,
+            aliases: aliases,
+            literalUnions: literalUnions,
+            functions: functions,
+            enums: enums,
+            globalVars: globalVars,
+            macros: macros,
+            referencedTypes: referencedTypes,
+            terraform: terraform
         )
+    }
+
+    /// Writes every field, including a null `terraform` for other languages, so each artifact has
+    /// one canonical encoding.
+    package func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(imports, forKey: .imports)
+        try container.encode(exports, forKey: .exports)
+        try container.encode(classes, forKey: .classes)
+        try container.encode(interfaces, forKey: .interfaces)
+        try container.encode(aliases, forKey: .aliases)
+        try container.encode(literalUnions, forKey: .literalUnions)
+        try container.encode(functions, forKey: .functions)
+        try container.encode(enums, forKey: .enums)
+        try container.encode(globalVars, forKey: .globalVars)
+        try container.encode(macros, forKey: .macros)
+        try container.encode(referencedTypes, forKey: .referencedTypes)
+        try container.encode(terraform, forKey: .terraform)
+    }
+
+    private static func areEmpty(_ collections: [any Collection]) -> Bool {
+        collections.allSatisfy { $0.isEmpty }
     }
 }
 
@@ -358,6 +421,9 @@ package enum CodeMapSyntaxOversizeReason: Codable, Equatable, Sendable {
 package enum CodeMapSyntaxParseFailure: String, Codable, Equatable, Sendable {
     case parserReturnedNilTree
     case parserReturnedNilRoot
+    /// The Terraform parse tree has an error or missing node, or isn't native syntax. Terraform
+    /// publishes no partial outline from such a tree, because recovered syntax could invent links.
+    case invalidTerraformSyntax
 }
 
 package enum CodeMapSyntaxArtifactOutcome: Codable, Equatable, Sendable {

@@ -17,7 +17,7 @@ import TreeSitterTSX
 import TreeSitterTypeScript
 
 package enum LanguageType: String, CaseIterable, Comparable, Codable, Sendable {
-    case swift, js, c_sharp, python, c, rust, cpp, go, java, ts, tsx, php, ruby
+    case swift, js, c_sharp, python, c, rust, cpp, go, java, ts, tsx, php, ruby, terraform
 
     package var displayName: String {
         switch self {
@@ -34,6 +34,7 @@ package enum LanguageType: String, CaseIterable, Comparable, Codable, Sendable {
         case .tsx: "TSX"
         case .php: "PHP"
         case .ruby: "Ruby"
+        case .terraform: "Terraform"
         }
     }
 
@@ -44,6 +45,8 @@ package enum LanguageType: String, CaseIterable, Comparable, Codable, Sendable {
 
 package enum CodeMapSyntaxQueryOutcome: Sendable {
     case captures([NamedRange])
+    /// Facts a language strategy copied out of the parsed tree; only Terraform produces them.
+    case terraformFacts(TerraformCodeMapArtifact)
     case oversize(CodeMapSyntaxOversizeReason)
     case parseFailed(CodeMapSyntaxParseFailure)
 }
@@ -162,7 +165,7 @@ package struct CodeMapSyntaxEngine: CodeMapSyntaxPerformanceQuerying, Sendable {
             ),
             extractorVersion: CodeMapSemanticVersion(major: 1, minor: 0, patch: 0),
             generatorVersion: CodeMapSemanticVersion(major: 1, minor: 0, patch: 0),
-            artifactSchemaVersion: 1,
+            artifactSchemaVersion: 2,
             oversizeParsePolicyVersion: 1,
             limits: [
                 CodeMapPipelineNamedLimit(
@@ -282,6 +285,15 @@ package struct CodeMapSyntaxEngine: CodeMapSyntaxPerformanceQuerying, Sendable {
         guard let root = tree.rootNode else {
             performanceCollector?.syntaxParseNilRoot += 1
             return .parseFailed(.parserReturnedNilRoot)
+        }
+
+        // Terraform's strategy reads the tree directly, so its registered query never runs.
+        if language == .terraform {
+            do {
+                return try .terraformFacts(TerraformCodeMapStrategy.extract(root: root, content: content))
+            } catch is TerraformCodeMapSyntaxError {
+                return .parseFailed(.invalidTerraformSyntax)
+            }
         }
 
         let queryLookupStart = collect ? ProcessInfo.processInfo.systemUptime : nil
@@ -485,6 +497,14 @@ private enum RegisteredLanguageStore {
                 grammarRevision: "71bd32fb7607035768799732addba884a37a6210",
                 queryText: rubyCodeMapQuery
             )
+        case .terraform:
+            CodeMapLanguageRecipe(
+                stableLanguageID: .terraform,
+                displayName: "Terraform",
+                makeLanguage: { wrapGrammarLanguage(tree_sitter_hcl()) },
+                grammarRevision: "fad991865fee927dd1de5e172fb3f08ac674d914",
+                queryText: terraformCodeMapQuery
+            )
         }
     }
 
@@ -503,6 +523,7 @@ private enum RegisteredLanguageStore {
         case .tsx: try TSXDescriptor.result.get()
         case .php: try PHPDescriptor.result.get()
         case .ruby: try RubyDescriptor.result.get()
+        case .terraform: try TerraformDescriptor.result.get()
         }
     }
 
@@ -519,6 +540,7 @@ private enum RegisteredLanguageStore {
     private enum TSXDescriptor { static let result = make(languageType: .tsx) }
     private enum PHPDescriptor { static let result = make(languageType: .php) }
     private enum RubyDescriptor { static let result = make(languageType: .ruby) }
+    private enum TerraformDescriptor { static let result = make(languageType: .terraform) }
 
     private static func make(
         languageType: LanguageType
@@ -565,6 +587,7 @@ private enum QueryStore {
         case .tsx: try TSXQuery.result.get()
         case .php: try PHPQuery.result.get()
         case .ruby: try RubyQuery.result.get()
+        case .terraform: try TerraformQuery.result.get()
         }
     }
 
@@ -581,6 +604,7 @@ private enum QueryStore {
     private enum TSXQuery { static let result = make(languageType: .tsx) }
     private enum PHPQuery { static let result = make(languageType: .php) }
     private enum RubyQuery { static let result = make(languageType: .ruby) }
+    private enum TerraformQuery { static let result = make(languageType: .terraform) }
 
     private static func make(
         languageType: LanguageType

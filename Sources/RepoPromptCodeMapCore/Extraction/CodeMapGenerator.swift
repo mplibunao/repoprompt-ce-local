@@ -312,6 +312,21 @@ struct CodeMapGenerator {
         )
     }
 
+    /// Wraps Terraform facts in an artifact with no legacy symbols. Terraform skips `extractCodeMap`
+    /// and its class, type, and reference heuristics, which model other languages.
+    static func generateTerraformSyntaxArtifact(from terraform: TerraformCodeMapArtifact) -> CodeMapSyntaxArtifact {
+        CodeMapSyntaxArtifact(
+            imports: [],
+            classes: [],
+            functions: [],
+            enums: [],
+            globalVars: [],
+            macros: [],
+            referencedTypes: [],
+            terraform: terraform
+        )
+    }
+
     private static func declarationTerminator(for language: LanguageType) -> Character {
         switch language {
         case .python: ":"

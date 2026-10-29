@@ -545,6 +545,8 @@ enum LanguageTypeExtractor {
 
         case .php, .ruby:
             return nil // PHP/Ruby handled purely by AST captures
+        case .terraform:
+            return nil // Terraform declarations come from TerraformCodeMapStrategy
         case .tsx:
             // same approach for TSX
             if let m = tsTypeAliasRegex.firstMatch(in: line), let name = capture(m, at: 1) {
@@ -1427,6 +1429,9 @@ enum LanguageTypeExtractor {
 
         case .php, .ruby:
             // PHP/Ruby function extraction is handled by AST captures, not regex
+            return nil
+        case .terraform:
+            // Terraform has no functions; its declarations come from TerraformCodeMapStrategy
             return nil
         }
     }
