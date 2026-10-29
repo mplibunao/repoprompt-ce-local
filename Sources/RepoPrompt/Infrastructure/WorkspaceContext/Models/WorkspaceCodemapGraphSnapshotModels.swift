@@ -4,6 +4,14 @@ enum WorkspaceCodemapGraphUnresolvedReason: Hashable {
     case notIndexedYet
     case missing
     case tooCommon
+    /// A Terraform module call whose source is a registry, Git, HTTP, absolute, or computed address.
+    case unsupportedModuleSource
+    /// A Terraform module call whose local source leaves the loaded root.
+    case outsideLoadedRoot
+    /// A Terraform module call whose source is missing, repeated, empty, or malformed.
+    case invalidModuleCall
+    /// A Terraform module call label declared more than once in its folder.
+    case ambiguousModuleCall
 }
 
 struct WorkspaceCodemapGraphSnapshotReceipt: Hashable {

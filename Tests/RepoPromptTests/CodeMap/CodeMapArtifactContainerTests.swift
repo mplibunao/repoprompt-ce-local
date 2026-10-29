@@ -73,12 +73,24 @@ final class CodeMapArtifactContainerTests: XCTestCase {
         let terraformKey = try makeKey(sourceText: "strict framing", languageID: .terraform)
         let terraformArtifact = try makeTerraformArtifact()
         let terraformContainer = try CodeMapArtifactContainer.encode(key: terraformKey, outcome: .ready(terraformArtifact))
-        let payloadLanguageMismatches: [(String, CodeMapArtifactKey, CodeMapSyntaxArtifact, Data)] = [
-            ("Terraform payload, Swift key", key, terraformArtifact, transplantPayload(from: terraformContainer, into: canonical)),
-            ("legacy payload, Terraform key", terraformKey, makeArtifact(), transplantPayload(from: canonical, into: terraformContainer))
+        let noSymbols = try CodeMapArtifactContainer.encode(key: key, outcome: .readyNoSymbols)
+        let payloadLanguageMismatches: [(String, CodeMapArtifactKey, CodeMapSyntaxArtifactOutcome, Data)] = [
+            (
+                "Terraform payload, Swift key",
+                key,
+                .ready(terraformArtifact),
+                transplantPayload(from: terraformContainer, into: canonical)
+            ),
+            (
+                "legacy payload, Terraform key",
+                terraformKey,
+                .ready(makeArtifact()),
+                transplantPayload(from: canonical, into: terraformContainer)
+            ),
+            ("no symbols, Terraform key", terraformKey, .readyNoSymbols, transplantPayload(from: noSymbols, into: terraformContainer))
         ]
-        for (name, mismatchedKey, artifact, transplanted) in payloadLanguageMismatches {
-            XCTAssertThrowsError(try CodeMapArtifactContainer.encode(key: mismatchedKey, outcome: .ready(artifact)), name) { error in
+        for (name, mismatchedKey, outcome, transplanted) in payloadLanguageMismatches {
+            XCTAssertThrowsError(try CodeMapArtifactContainer.encode(key: mismatchedKey, outcome: outcome), name) { error in
                 XCTAssertEqual(error as? CodeMapArtifactContainerError, .payloadLanguageMismatch, name)
             }
             assertDecode(transplanted, key: mismatchedKey, throws: .payloadLanguageMismatch)
@@ -605,11 +617,10 @@ final class CodeMapArtifactContainerTests: XCTestCase {
         return (0 ..< fieldCount).map { readUInt64(data, at: layout.summaryFieldsOffset + $0 * 8) }
     }
 
-    /// Joins `recipient`'s header up to its outcome kind with `donor`'s payload length, checksum,
-    /// summary, and payload, so framing, checksum, and summary checks all pass.
+    /// Joins `recipient`'s header up to its outcome kind with `donor`'s outcome kind, payload length,
+    /// checksum, summary, and payload, so framing, kind, checksum, and summary checks all pass.
     private func transplantPayload(from donor: Data, into recipient: Data) -> Data {
-        recipient.prefix(parseLayout(recipient).payloadLengthOffset) +
-            donor.suffix(from: parseLayout(donor).payloadLengthOffset)
+        recipient.prefix(parseLayout(recipient).kindOffset) + donor.suffix(from: parseLayout(donor).kindOffset)
     }
 
     private func makeSource(text: String) -> CodeMapSourceSnapshot {
@@ -722,7 +733,7 @@ private extension NSLock {
     }
 }
 
-private func makeSecureRoot() throws -> URL {
+func makeSecureRoot() throws -> URL {
     let base = FileManager.default.temporaryDirectory
         .appendingPathComponent("CodeMapArtifactContainerTests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(

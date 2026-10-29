@@ -6778,6 +6778,10 @@ final class MCPServerViewModel: ObservableObject {
         case .notIndexedYet: .notIndexedYet
         case .missing: .missing
         case .tooCommon: .tooCommon
+        case .unsupportedModuleSource: .unsupportedModuleSource
+        case .outsideLoadedRoot: .outsideLoadedRoot
+        case .invalidModuleCall: .invalidModuleCall
+        case .ambiguousModuleCall: .ambiguousModuleCall
         }
     }
 

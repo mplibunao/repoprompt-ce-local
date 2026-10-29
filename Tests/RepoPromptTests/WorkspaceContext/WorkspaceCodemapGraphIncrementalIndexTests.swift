@@ -1127,41 +1127,4 @@ final class WorkspaceCodemapGraphIncrementalIndexTests: XCTestCase {
         }
         throw CodemapGraphIndexHarnessError.timedOut
     }
-
-    /// Compares the two overlays' ledgers and the graphs each one fed, and (when constructible)
-    /// the incrementally applied graph against a from-scratch checkpoint rebuild.
-    private func assertParity(
-        _ incremental: CodemapGraphIndexHarness,
-        _ full: CodemapGraphIndexHarness,
-        step: String,
-        expectCheckpoint: Bool,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
-        let left = await incremental.overlay.graphCheckpoint(rootEpoch: incremental.rootEpoch)
-        let right = await full.overlay.graphCheckpoint(rootEpoch: full.rootEpoch)
-        XCTAssertEqual(left, right, step, file: file, line: line)
-        if expectCheckpoint, case .revoked = left {
-            XCTFail("Expected a constructible checkpoint at \(step)", file: file, line: line)
-        }
-        let leftLedger = try await incremental.ledger()
-        let rightLedger = try await full.ledger()
-        XCTAssertEqual(leftLedger.contributionGeneration, rightLedger.contributionGeneration, step, file: file, line: line)
-        XCTAssertEqual(leftLedger.floorGeneration, rightLedger.floorGeneration, step, file: file, line: line)
-        XCTAssertEqual(leftLedger.slotCount, rightLedger.slotCount, step, file: file, line: line)
-        let leftChanges = await incremental.overlay.graphChanges(
-            rootEpoch: incremental.rootEpoch,
-            since: leftLedger.floorGeneration
-        )
-        let rightChanges = await full.overlay.graphChanges(rootEpoch: full.rootEpoch, since: rightLedger.floorGeneration)
-        XCTAssertEqual(leftChanges, rightChanges, step, file: file, line: line)
-
-        let incrementalGraph = try await incremental.latestSnapshot()
-        let fullGraph = try await full.latestSnapshot()
-        assertSameGraph(incrementalGraph, fullGraph, "graphs at \(step)", file: file, line: line)
-        if case .checkpoint = left {
-            let rebuilt = try await incremental.rebuiltFromCheckpoint()
-            assertSameGraph(incrementalGraph, rebuilt, "rebuild at \(step)", file: file, line: line)
-        }
-    }
 }
