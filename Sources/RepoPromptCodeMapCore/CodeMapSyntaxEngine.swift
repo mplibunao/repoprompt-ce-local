@@ -105,7 +105,8 @@ package struct CodeMapSyntaxEngine: CodeMapSyntaxPerformanceQuerying, Sendable {
         "ts": .ts,
         "tsx": .tsx,
         "php": .php,
-        "rb": .ruby
+        "rb": .ruby,
+        "tf": .terraform
     ]
 
     package init() {}
