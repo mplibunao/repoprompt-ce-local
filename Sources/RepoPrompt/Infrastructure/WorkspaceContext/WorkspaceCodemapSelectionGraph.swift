@@ -7,7 +7,8 @@ actor WorkspaceCodemapSelectionGraph {
     private struct CandidateBuild {
         let snapshot: WorkspaceCodemapGraphCommittedSnapshot
         let changedFileCount: Int
-        let affectedSourceCount: Int
+        /// Sources whose edges and unresolved records the candidate rebuilt.
+        let affectedSourceIDs: Set<UUID>
         let resync: Bool
         /// Ordering comparisons performed while building the candidate.
         let comparisonCount: UInt64
@@ -15,12 +16,45 @@ actor WorkspaceCodemapSelectionGraph {
         let visitCount: UInt64
         /// Entries copied or shifted to derive the candidate's storage from its base.
         let copiedEntryCount: UInt64
+        /// Terraform calls whose declarations the candidate changed.
+        let changedCallKeys: Set<TerraformCallKey>
+        /// Terraform call subscriptions the candidate adds, by subscribing file.
+        let addedCallSubscriptions: [UUID: [TerraformCallKey]]
+
+        var affectedSourceCount: Int {
+            affectedSourceIDs.count
+        }
     }
 
     private enum CandidateBuildOutcome {
         case success(CandidateBuild)
         case failure(WorkspaceCodemapGraphApplyRejection)
         case cancelled
+    }
+
+    /// The derived fences one fence request or commit adds. It stores at most the fence capacity the
+    /// graph has left and refuses the first new entry past it, so the work done before a
+    /// capacity revocation is proportional to the capacity, even for a call label thousands of
+    /// files share.
+    private struct DerivedFenceBuilder {
+        private let existing: Set<WorkspaceCodemapGraphDerivedFence>
+        private let capacity: Int
+        private(set) var added: Set<WorkspaceCodemapGraphDerivedFence> = []
+
+        /// Fails when the capacity is already negative.
+        init?(existing: Set<WorkspaceCodemapGraphDerivedFence>, capacity: Int) {
+            guard capacity >= 0 else { return nil }
+            self.existing = existing
+            self.capacity = capacity
+        }
+
+        /// Adds a fence the graph doesn't hold yet. Returns false when it would exceed the capacity.
+        mutating func insert(_ fence: WorkspaceCodemapGraphDerivedFence) -> Bool {
+            if existing.contains(fence) || added.contains(fence) { return true }
+            guard added.count < capacity else { return false }
+            added.insert(fence)
+            return true
+        }
     }
 
     private let rootEpoch: WorkspaceCodemapRootEpoch
@@ -35,12 +69,18 @@ actor WorkspaceCodemapSelectionGraph {
     private var observedGeneration = WorkspaceCodemapSelectionGraphContributionGeneration(rawValue: 0)
     private var graphRevision: UInt64 = 0
     private var fenceIdentities: Set<WorkspaceCodemapGraphFenceIdentity> = []
+    /// Files hidden while a fenced Terraform call file still holds the binding their links use.
+    /// They count against the same capacity as `fenceIdentities`.
+    private var derivedFences: Set<WorkspaceCodemapGraphDerivedFence> = []
     private var safetyCounter: UInt64 = 0
     private var revocationReason: WorkspaceCodemapGraphRevocationReason?
     private var activeApply = false
     private var applyWaiters: [CheckedContinuation<Void, Never>] = []
     private var shuttingDown = false
     private var activeCandidateTask: Task<CandidateBuildOutcome, Never>?
+    #if DEBUG
+        private var debugLastAffectedSourceIDs: Set<UUID> = []
+    #endif
 
     private var reconciling = false
     private var reconciliationAttempt = 0
@@ -283,17 +323,27 @@ actor WorkspaceCodemapSelectionGraph {
                 WorkspaceCodemapGraphFenceIdentity(fileID: $0, slot: base?.slotsByFileID[$0])
             })
             let newFenceIdentities = destructiveIdentities.subtracting(fenceIdentities)
-            guard fenceIdentities.count + newFenceIdentities.count <= graphPolicy.maximumFencedFileIDCount else {
+            // Deriving fences is part of applying the candidate, so its work counts as candidate visits.
+            var fenceVisits: UInt64 = 0
+            guard var fenceBuilder = derivedFenceBuilder(addingIdentityCount: newFenceIdentities.count),
+                  newFenceIdentities.allSatisfy({
+                      Self.deriveFences(for: $0, in: base, into: &fenceBuilder, visits: &fenceVisits)
+                  }),
+                  deriveFencesForCallChanges(candidate, into: &fenceBuilder, visits: &fenceVisits)
+            else {
                 revoke(.fenceCapacityExceeded)
                 return .revoked(.fenceCapacityExceeded)
             }
-            if !newFenceIdentities.isEmpty {
+            let newDerivedFences = fenceBuilder.added
+            let visitCount = candidate.visitCount &+ fenceVisits
+            if !newFenceIdentities.isEmpty || !newDerivedFences.isEmpty {
                 let (nextCounter, overflow) = safetyCounter.addingReportingOverflow(1)
                 guard !overflow else {
                     revoke(.safetyCounterExhausted)
                     return .revoked(.safetyCounterExhausted)
                 }
                 fenceIdentities.formUnion(newFenceIdentities)
+                derivedFences.formUnion(newDerivedFences)
                 safetyCounter = nextCounter
             }
             repositoryAuthority = authority
@@ -304,16 +354,19 @@ actor WorkspaceCodemapSelectionGraph {
             successfulCommitCount &+= 1
             lastChangedFileCount = candidate.changedFileCount
             lastAffectedSourceCount = candidate.affectedSourceCount
+            #if DEBUG
+                debugLastAffectedSourceIDs = candidate.affectedSourceIDs
+            #endif
             totalChangedFileCount &+= UInt64(candidate.changedFileCount)
             totalAffectedSourceCount &+= UInt64(candidate.affectedSourceCount)
             lastCandidateComparisonCount = candidate.comparisonCount
-            lastCandidateVisitCount = candidate.visitCount
+            lastCandidateVisitCount = visitCount
             lastCandidateCopiedEntryCount = candidate.copiedEntryCount
             totalCandidateCopiedEntryCount &+= candidate.copiedEntryCount
             totalCandidateComparisonCount &+= candidate.comparisonCount
-            totalCandidateVisitCount &+= candidate.visitCount
+            totalCandidateVisitCount &+= visitCount
             if !resync {
-                maximumDiffCandidateVisitCount = max(maximumDiffCandidateVisitCount, candidate.visitCount)
+                maximumDiffCandidateVisitCount = max(maximumDiffCandidateVisitCount, visitCount)
                 maximumDiffCandidateCopiedEntryCount = max(
                     maximumDiffCandidateCopiedEntryCount,
                     candidate.copiedEntryCount
@@ -377,7 +430,8 @@ actor WorkspaceCodemapSelectionGraph {
             receipt: receipt,
             freshness: freshness,
             reconciling: reconciling,
-            fenceIdentities: fenceIdentities
+            fenceIdentities: fenceIdentities,
+            derivedFences: derivedFences
         ))
     }
 
@@ -896,10 +950,17 @@ actor WorkspaceCodemapSelectionGraph {
             return WorkspaceCodemapGraphFenceIdentity(fileID: fileID, slot: currentSlot)
         })
         let newFenceIdentities = requestedIdentities.subtracting(fenceIdentities)
-        guard fenceIdentities.count + newFenceIdentities.count <= graphPolicy.maximumFencedFileIDCount else {
+        var derivationVisits: UInt64 = 0
+        let snapshot = committedSnapshot
+        guard var fenceBuilder = derivedFenceBuilder(addingIdentityCount: newFenceIdentities.count),
+              newFenceIdentities.allSatisfy({
+                  Self.deriveFences(for: $0, in: snapshot, into: &fenceBuilder, visits: &derivationVisits)
+              })
+        else {
             revoke(.fenceCapacityExceeded)
             return .revoked(.fenceCapacityExceeded)
         }
+        let newDerivedFences = fenceBuilder.added
         guard !newFenceIdentities.isEmpty else { return .fenced(safetyCounter: safetyCounter) }
         let (nextCounter, overflow) = safetyCounter.addingReportingOverflow(1)
         guard !overflow else {
@@ -907,6 +968,7 @@ actor WorkspaceCodemapSelectionGraph {
             return .revoked(.safetyCounterExhausted)
         }
         fenceIdentities.formUnion(newFenceIdentities)
+        derivedFences.formUnion(newDerivedFences)
         safetyCounter = nextCounter
         publishAccounting()
         return .fenced(safetyCounter: safetyCounter)
@@ -938,7 +1000,7 @@ actor WorkspaceCodemapSelectionGraph {
             receiptRejectionCount &+= 1
             return .invalid(.policyMismatch)
         }
-        let fencedIdentityFileIDs = Set(fenceIdentities.map(\.fileID))
+        let fencedIdentityFileIDs = Set(fenceIdentities.map(\.fileID)).union(derivedFences.map(\.dependentFileID))
         if receipt.safetyCounter != safetyCounter,
            !affectedFileIDs.isDisjoint(with: fencedIdentityFileIDs)
         {
@@ -949,6 +1011,98 @@ actor WorkspaceCodemapSelectionGraph {
             ? .updatesPending(observedGeneration: observedGeneration)
             : .current
         return .valid(freshness)
+    }
+
+    /// A builder for the derived fences that accompany `count` new fence identities, or nil when the
+    /// identities alone exceed the fence capacity.
+    private func derivedFenceBuilder(addingIdentityCount count: Int) -> DerivedFenceBuilder? {
+        DerivedFenceBuilder(
+            existing: derivedFences,
+            capacity: graphPolicy.maximumFencedFileIDCount - fenceIdentities.count - derivedFences.count - count
+        )
+    }
+
+    /// Fences the files whose child references bind through a Terraform call the fenced file declares
+    /// in `snapshot`, the snapshot `identity` was captured from. The derivation is one level deep.
+    /// Every dependent examined is a visit. Returns false when the fences exceed the capacity.
+    private static func deriveFences(
+        for identity: WorkspaceCodemapGraphFenceIdentity,
+        in snapshot: WorkspaceCodemapGraphCommittedSnapshot?,
+        into fences: inout DerivedFenceBuilder,
+        visits: inout UInt64
+    ) -> Bool {
+        guard let snapshot,
+              let node = snapshot.nodesByFileID[identity.fileID],
+              let facts = terraformFacts(
+                  path: node.standardizedRelativePath,
+                  contribution: node.contribution,
+                  visits: &visits
+              )
+        else { return true }
+        for key in WorkspaceTerraformCodeMapGraphProjection.callBindings(facts: facts).keys {
+            for dependent in snapshot.terraformCallDependents[key] ?? [] {
+                visits &+= 1
+                guard dependent != identity.fileID else { continue }
+                guard fences.insert(WorkspaceCodemapGraphDerivedFence(dependentFileID: dependent, parent: identity))
+                else { return false }
+            }
+        }
+        return true
+    }
+
+    /// A commit can give a file links through a call declaration whose file is still fenced: every
+    /// subscriber of a call whose declarations changed, such as one a pending call file just
+    /// resolved, and every new subscriber. Those files are fenced too. Every declaration and every
+    /// dependent and parent pair examined is a visit. Returns false when the fences exceed the capacity.
+    private func deriveFencesForCallChanges(
+        _ candidate: CandidateBuild,
+        into fences: inout DerivedFenceBuilder,
+        visits: inout UInt64
+    ) -> Bool {
+        guard !fenceIdentities.isEmpty else { return true }
+        let snapshot = candidate.snapshot
+        func fence(_ dependents: some Sequence<UUID>, of key: TerraformCallKey) -> Bool {
+            guard let bindings = snapshot.terraformCallsByKey[key] else { return true }
+            var parents: [WorkspaceCodemapGraphFenceIdentity] = []
+            for declaringFileID in bindings.keys {
+                visits &+= 1
+                parents += liveFenceIdentities(of: declaringFileID, in: snapshot)
+            }
+            guard !parents.isEmpty else { return true }
+            for dependent in dependents {
+                for parent in parents {
+                    visits &+= 1
+                    guard parent.fileID != dependent else { continue }
+                    guard fences.insert(WorkspaceCodemapGraphDerivedFence(dependentFileID: dependent, parent: parent))
+                    else { return false }
+                }
+            }
+            return true
+        }
+        for key in candidate.changedCallKeys {
+            guard fence(snapshot.terraformCallDependents[key] ?? [], of: key) else { return false }
+        }
+        for (dependent, keys) in candidate.addedCallSubscriptions {
+            for key in keys {
+                guard fence([dependent], of: key) else { return false }
+            }
+        }
+        return true
+    }
+
+    /// The fence identities that still cover `fileID` in `snapshot`. An identity covers the file when
+    /// it was captured from the file's current slot, or while the file had no slot. Two set lookups
+    /// find both, so the cost doesn't depend on how many other files are fenced.
+    private func liveFenceIdentities(
+        of fileID: UUID,
+        in snapshot: WorkspaceCodemapGraphCommittedSnapshot
+    ) -> [WorkspaceCodemapGraphFenceIdentity] {
+        let slot = snapshot.slotsByFileID[fileID]
+        var candidates = [WorkspaceCodemapGraphFenceIdentity(fileID: fileID, slot: slot)]
+        if slot != nil {
+            candidates.append(WorkspaceCodemapGraphFenceIdentity(fileID: fileID, slot: nil))
+        }
+        return candidates.filter(fenceIdentities.contains)
     }
 
     func beginWatcherGapReconciliation() -> WorkspaceCodemapGraphReconciliationDisposition {
@@ -1030,7 +1184,7 @@ actor WorkspaceCodemapSelectionGraph {
             appliedGeneration: appliedGeneration,
             observedGeneration: observedGeneration,
             safetyCounter: safetyCounter,
-            fencedFileCount: fenceIdentities.count,
+            fencedFileCount: fenceIdentities.count + derivedFences.count,
             updatesPending: observedGeneration > appliedGeneration,
             reconciling: reconciling,
             reconciliationAttempt: reconciling ? reconciliationAttempt : nil,
@@ -1103,6 +1257,11 @@ actor WorkspaceCodemapSelectionGraph {
     #if DEBUG
         func hasActiveCandidateBuildForTesting() -> Bool {
             activeCandidateTask != nil
+        }
+
+        /// The sources the last commit re-resolved.
+        func lastAffectedSourceIDsForTesting() -> Set<UUID> {
+            debugLastAffectedSourceIDs
         }
     #endif
 
@@ -1268,12 +1427,43 @@ actor WorkspaceCodemapSelectionGraph {
         let baseNodes = incrementalBase?.nodesByFileID ?? PersistentHashMap()
         let baseDefinitions = incrementalBase?.definitionPostings ?? PersistentHashMap()
         let baseReferences = incrementalBase?.referencePostings ?? PersistentHashMap()
+        let baseCalls = incrementalBase?.terraformCallsByKey ?? PersistentHashMap()
+        let baseCallDependents = incrementalBase?.terraformCallDependents ?? PersistentHashMap()
         var nodes = baseNodes
         var definitions = baseDefinitions
         var references = baseReferences
         var outgoing = incrementalBase?.outgoingEdgesBySource ?? PersistentHashMap()
         var reverse = incrementalBase?.reverseEdgesByTarget ?? PersistentHashMap()
         var unresolved = incrementalBase?.unresolvedBySource ?? PersistentHashMap()
+        var calls = baseCalls
+        var callDependents = baseCallDependents
+
+        guard let terraform = prepareTerraformCandidate(
+            changedIDs: changedIDs,
+            baseNodes: baseNodes,
+            slots: slots,
+            calls: &calls,
+            callDependents: &callDependents,
+            visits: &visits,
+            copies: &copies
+        ) else { return .cancelled }
+        let terraformFactsByFileID = terraform.factsByFileID
+        let changedCallKeys = terraform.changedCallKeys
+        let changedDependentKeys = terraform.changedDependentKeys
+        let addedCallSubscriptions = terraform.addedCallSubscriptions
+        let finalCalls = terraform.finalCalls
+        let subscriberIDs = terraform.subscriberIDs
+        typealias Projection = WorkspaceTerraformCodeMapGraphProjection
+        func projection(_ fileID: UUID, _ facts: Projection.Facts) -> WorkspaceCodemapGraphNodeProjection {
+            visits &+= UInt64(facts.definitions.count + facts.references.count)
+            return Projection.projection(
+                fileID: fileID,
+                facts: facts,
+                candidateOverflowThreshold: graphPolicy.candidateOverflowThreshold,
+                bindings: { finalCalls[$0] },
+                comparisons: &comparisons
+            )
+        }
 
         var changedDefinitionNames = Set<String>()
         var changedReferenceNames = Set<String>()
@@ -1284,22 +1474,63 @@ actor WorkspaceCodemapSelectionGraph {
         for fileID in changedIDs {
             guard !Task.isCancelled else { return .cancelled }
             if let oldNode = nodes.removeValue(forKey: fileID) {
-                for name in oldNode.contribution.sortedUniqueDefinitions {
+                for name in oldNode.definitionKeys {
                     changedDefinitionNames.insert(name)
                     removedDefinitionIDsByName[name, default: []].append(fileID)
                 }
-                for name in oldNode.contribution.sortedUniqueReferences {
+                for name in oldNode.referenceKeys {
                     changedReferenceNames.insert(name)
                     removedReferenceIDsByName[name, default: []].append(fileID)
                 }
             }
-            guard let slot = slots[fileID], let node = snapshotNode(from: slot) else { continue }
+            guard let slot = slots[fileID],
+                  let node = snapshotNode(
+                      from: slot,
+                      projection: terraformFactsByFileID[fileID].map { projection(fileID, $0) }
+                  )
+            else { continue }
             nodes[fileID] = node
-            for name in node.contribution.sortedUniqueDefinitions {
+            for name in node.definitionKeys {
                 changedDefinitionNames.insert(name)
                 insertedDefinitionIDsByName[name, default: []].append(fileID)
             }
-            for name in node.contribution.sortedUniqueReferences {
+            for name in node.referenceKeys {
+                changedReferenceNames.insert(name)
+                insertedReferenceIDsByName[name, default: []].append(fileID)
+            }
+        }
+        // A file's definitions don't depend on call bindings, so reprojecting an unchanged file
+        // moves only the reference keys that differ.
+        var reprojectedIDs = Set<UUID>()
+        for fileID in subscriberIDs {
+            guard !Task.isCancelled else { return .cancelled }
+            guard let oldNode = nodes[fileID],
+                  let facts = terraformFacts(
+                      path: oldNode.standardizedRelativePath,
+                      contribution: oldNode.contribution,
+                      visits: &visits
+                  )
+            else { continue }
+            let newProjection = projection(fileID, facts)
+            guard newProjection != oldNode.projection else { continue }
+            let node = WorkspaceCodemapGraphSnapshotNode(
+                fileID: oldNode.fileID,
+                standardizedRelativePath: oldNode.standardizedRelativePath,
+                requestGeneration: oldNode.requestGeneration,
+                pathGeneration: oldNode.pathGeneration,
+                contribution: oldNode.contribution,
+                projection: newProjection
+            )
+            nodes[fileID] = node
+            reprojectedIDs.insert(fileID)
+            let oldKeys = Set(oldNode.referenceKeys)
+            let newKeys = Set(node.referenceKeys)
+            visits &+= UInt64(oldKeys.count + newKeys.count)
+            for name in oldKeys.subtracting(newKeys) {
+                changedReferenceNames.insert(name)
+                removedReferenceIDsByName[name, default: []].append(fileID)
+            }
+            for name in newKeys.subtracting(oldKeys) {
                 changedReferenceNames.insert(name)
                 insertedReferenceIDsByName[name, default: []].append(fileID)
             }
@@ -1345,10 +1576,10 @@ actor WorkspaceCodemapSelectionGraph {
             insertedIDsByName: insertedReferenceIDsByName
         ) else { return .cancelled }
 
-        // A source's evidence can change only when its own contribution changed or a definition
-        // candidate set it references changed. Referrers are enumerated from the postings, which is
-        // inherent: a new definer of a name gains an edge from every referrer of that name.
-        var affectedSources = changedIDs
+        // A source's evidence can change only when its own contribution or projection changed or a
+        // definition candidate set it references changed. Referrers are enumerated from the postings,
+        // which is inherent: a new definer of a name gains an edge from every referrer of that name.
+        var affectedSources = changedIDs.union(reprojectedIDs)
         for name in changedDefinitionNames {
             for fileID in incrementalBase?.referencePostings[name] ?? [] {
                 affectedSources.insert(fileID)
@@ -1412,16 +1643,17 @@ actor WorkspaceCodemapSelectionGraph {
             var namesByTarget: [UUID: Set<String>] = [:]
             var candidateCountByTarget: [UUID: UInt64] = [:]
             var sourceUnresolved: [WorkspaceCodemapGraphUnresolvedRecord] = []
-            visits &+= UInt64(node.contribution.sortedUniqueReferences.count)
-            for name in node.contribution.sortedUniqueReferences {
-                let candidates = definitions[name] ?? []
+            /// Resolves the posting `key` and records `name` as the evidence. A nil key, a Terraform
+            /// reference through a call nothing declares, resolves like an undefined name.
+            func resolve(key: String?, name: String) {
+                let candidates = key.flatMap { definitions[$0] } ?? []
                 guard !candidates.isEmpty else {
                     sourceUnresolved.append(.init(
                         sourceFileID: source,
                         referencedName: name,
                         reason: coverage.isComplete ? .missing : .notIndexedYet
                     ))
-                    continue
+                    return
                 }
                 guard candidates.count <= graphPolicy.candidateOverflowThreshold else {
                     sourceUnresolved.append(.init(
@@ -1429,7 +1661,7 @@ actor WorkspaceCodemapSelectionGraph {
                         referencedName: name,
                         reason: .tooCommon
                     ))
-                    continue
+                    return
                 }
                 visits &+= UInt64(candidates.count)
                 let candidateCount = UInt64(candidates.count)
@@ -1438,6 +1670,18 @@ actor WorkspaceCodemapSelectionGraph {
                     // A name with one definer proves the edge on its own, so the edge keeps the
                     // smallest candidate count among its matched names.
                     candidateCountByTarget[target] = min(candidateCountByTarget[target] ?? candidateCount, candidateCount)
+                }
+            }
+            if let projection = node.projection {
+                visits &+= UInt64(projection.references.count + projection.unresolved.count)
+                for reference in projection.references {
+                    resolve(key: reference.key, name: reference.evidence)
+                }
+                sourceUnresolved += projection.unresolved
+            } else {
+                visits &+= UInt64(node.contribution.sortedUniqueReferences.count)
+                for name in node.contribution.sortedUniqueReferences {
+                    resolve(key: name, name: name)
                 }
             }
             var sourceEvidence: [WorkspaceCodemapGraphEdgeEvidence] = []
@@ -1503,6 +1747,31 @@ actor WorkspaceCodemapSelectionGraph {
             if let old = oldSlots[fileID] { delta.remove(bytes: slotBytes(old)) }
             if let new = slots[fileID] { delta.add(bytes: slotBytes(new)) }
         }
+        for fileID in reprojectedIDs {
+            if let old = baseNodes[fileID] { delta.remove(bytes: nodeBytes(old)) }
+            if let new = nodes[fileID] { delta.add(bytes: nodeBytes(new)) }
+        }
+        // Each call declaration and subscription is one membership in the postings budget.
+        for key in changedCallKeys {
+            if let old = baseCalls[key] {
+                delta.removedPostings &+= UInt64(old.count)
+                delta.remove(bytes: callBindingBytes(key: key, bindings: old, visits: &visits))
+            }
+            if let new = calls[key] {
+                delta.addedPostings &+= UInt64(new.count)
+                delta.add(bytes: callBindingBytes(key: key, bindings: new, visits: &visits))
+            }
+        }
+        for key in changedDependentKeys {
+            if let old = baseCallDependents[key] {
+                delta.removedPostings &+= UInt64(old.count)
+                delta.remove(bytes: callKeyBytes(key, memberCount: old.count))
+            }
+            if let new = callDependents[key] {
+                delta.addedPostings &+= UInt64(new.count)
+                delta.add(bytes: callKeyBytes(key, memberCount: new.count))
+            }
+        }
         for name in changedDefinitionNames.union(changedReferenceNames) {
             let oldCount = (baseDefinitions[name]?.count ?? 0) + (baseReferences[name]?.count ?? 0)
             let newCount = (definitions[name]?.count ?? 0) + (references[name]?.count ?? 0)
@@ -1523,7 +1792,9 @@ actor WorkspaceCodemapSelectionGraph {
             size = incremental
         } else {
             // Resyncs (and any inconsistent delta) recount the whole candidate conservatively.
-            visits &+= UInt64(nodes.count + slots.count + definitions.count + references.count)
+            visits &+= UInt64(
+                nodes.count + slots.count + definitions.count + references.count + calls.count + callDependents.count
+            )
             switch fullSize(
                 slots: slots,
                 nodes: nodes,
@@ -1531,7 +1802,10 @@ actor WorkspaceCodemapSelectionGraph {
                 references: references,
                 outgoing: outgoing,
                 reverse: reverse,
-                unresolved: unresolved
+                unresolved: unresolved,
+                calls: calls,
+                callDependents: callDependents,
+                visits: &visits
             ) {
             case let .size(value): size = value
             case .overflow: return .failure(.accountingOverflow)
@@ -1552,6 +1826,8 @@ actor WorkspaceCodemapSelectionGraph {
         copies &+= UInt64(outgoing.takeCopiedEntryCount())
         copies &+= UInt64(reverse.takeCopiedEntryCount())
         copies &+= UInt64(unresolved.takeCopiedEntryCount())
+        copies &+= UInt64(calls.takeCopiedEntryCount())
+        copies &+= UInt64(callDependents.takeCopiedEntryCount())
 
         let snapshot = WorkspaceCodemapGraphCommittedSnapshot(
             snapshotID: UUID(),
@@ -1570,17 +1846,125 @@ actor WorkspaceCodemapSelectionGraph {
             outgoingEdgesBySource: outgoing,
             reverseEdgesByTarget: reverse,
             unresolvedBySource: unresolved,
+            terraformCallsByKey: calls,
+            terraformCallDependents: callDependents,
             sizeAccounting: size
         )
         return .success(CandidateBuild(
             snapshot: snapshot,
             changedFileCount: changedIDs.count,
-            affectedSourceCount: affectedSources.count,
+            affectedSourceIDs: affectedSources,
             resync: resync,
             comparisonCount: comparisons,
             visitCount: visits,
-            copiedEntryCount: copies
+            copiedEntryCount: copies,
+            changedCallKeys: changedCallKeys,
+            addedCallSubscriptions: addedCallSubscriptions
         ))
+    }
+
+    /// The Terraform phase of a candidate build. Call bindings and subscriptions follow the changed raw
+    /// contributions into `calls` and `callDependents`. A call key changes only when one of its
+    /// declarations does, so a rename that keeps a file in its folder reprojects no subscriber. Returns
+    /// the new facts of the changed files, the call keys whose bindings or subscribers changed, the
+    /// complete binding index the projections read, and the unchanged files subscribed to a changed
+    /// call, which the caller reprojects. Returns nil when the build is cancelled.
+    private static func prepareTerraformCandidate(
+        changedIDs: Set<UUID>,
+        baseNodes: PersistentHashMap<UUID, WorkspaceCodemapGraphSnapshotNode>,
+        slots: PersistentHashMap<UUID, WorkspaceCodemapGraphSlot>,
+        calls: inout PersistentHashMap<TerraformCallKey, PersistentHashMap<UUID, TerraformCallBinding>>,
+        callDependents: inout PersistentHashMap<TerraformCallKey, PersistentHashSet<UUID>>,
+        visits: inout UInt64,
+        copies: inout UInt64
+    ) -> (
+        factsByFileID: [UUID: WorkspaceTerraformCodeMapGraphProjection.Facts],
+        changedCallKeys: Set<TerraformCallKey>,
+        changedDependentKeys: Set<TerraformCallKey>,
+        addedCallSubscriptions: [UUID: [TerraformCallKey]],
+        finalCalls: PersistentHashMap<TerraformCallKey, PersistentHashMap<UUID, TerraformCallBinding>>,
+        subscriberIDs: Set<UUID>
+    )? {
+        typealias Projection = WorkspaceTerraformCodeMapGraphProjection
+        var factsByFileID: [UUID: Projection.Facts] = [:]
+        var changedCallKeys = Set<TerraformCallKey>()
+        var changedDependentKeys = Set<TerraformCallKey>()
+        var addedCallSubscriptions: [UUID: [TerraformCallKey]] = [:]
+        for fileID in changedIDs {
+            guard !Task.isCancelled else { return nil }
+            let oldFacts = baseNodes[fileID].flatMap {
+                terraformFacts(path: $0.standardizedRelativePath, contribution: $0.contribution, visits: &visits)
+            }
+            let newFacts = slots[fileID].flatMap { slot in
+                slot.state.contribution.flatMap {
+                    terraformFacts(path: slot.standardizedRelativePath, contribution: $0, visits: &visits)
+                }
+            }
+            guard oldFacts != nil || newFacts != nil else { continue }
+            factsByFileID[fileID] = newFacts
+            let oldBindings = oldFacts.map { Projection.callBindings(facts: $0) } ?? [:]
+            let newBindings = newFacts.map { Projection.callBindings(facts: $0) } ?? [:]
+            visits &+= UInt64(oldBindings.count + newBindings.count)
+            for key in Set(oldBindings.keys).union(newBindings.keys) where oldBindings[key] != newBindings[key] {
+                var bindings = calls[key] ?? PersistentHashMap()
+                bindings[fileID] = newBindings[key]
+                visits &+= 1
+                copies &+= UInt64(bindings.takeCopiedEntryCount())
+                calls[key] = bindings.isEmpty ? nil : bindings
+                changedCallKeys.insert(key)
+            }
+            let oldDependencyKeys = Set(oldFacts.map(Projection.callDependencyKeys) ?? [])
+            let newDependencyKeys = Set(newFacts.map(Projection.callDependencyKeys) ?? [])
+            visits &+= UInt64(oldDependencyKeys.count + newDependencyKeys.count)
+            for key in oldDependencyKeys.symmetricDifference(newDependencyKeys) {
+                var members = callDependents[key] ?? []
+                if newDependencyKeys.contains(key) {
+                    members.insert(fileID)
+                    addedCallSubscriptions[fileID, default: []].append(key)
+                } else {
+                    members.remove(fileID)
+                }
+                visits &+= 1
+                copies &+= UInt64(members.takeCopiedEntryCount())
+                callDependents[key] = members.isEmpty ? nil : members
+                changedDependentKeys.insert(key)
+            }
+        }
+
+        // Projections read the candidate's complete binding index, so an unchanged file whose call
+        // changed is reprojected too. An unchanged file has the same subscriptions in the base and the
+        // candidate, so the candidate's subscribers are both the old and the new ones.
+        let finalCalls = calls
+        var subscriberIDs = Set<UUID>()
+        for key in changedCallKeys {
+            let members = callDependents[key] ?? []
+            visits &+= UInt64(members.count)
+            for fileID in members where !changedIDs.contains(fileID) {
+                subscriberIDs.insert(fileID)
+            }
+        }
+        return (
+            factsByFileID: factsByFileID,
+            changedCallKeys: changedCallKeys,
+            changedDependentKeys: changedDependentKeys,
+            addedCallSubscriptions: addedCallSubscriptions,
+            finalCalls: finalCalls,
+            subscriberIDs: subscriberIDs
+        )
+    }
+
+    /// Every walk over Terraform tuples or call-index memberships counts its items as visits before
+    /// filtering. Work that grows with an index raises the bounded-work counters.
+    private static func terraformFacts(
+        path: String,
+        contribution: CodeMapSelectionGraphContribution,
+        visits: inout UInt64
+    ) -> WorkspaceTerraformCodeMapGraphProjection.Facts? {
+        guard let facts = WorkspaceTerraformCodeMapGraphProjection.facts(path: path, contribution: contribution) else {
+            return nil
+        }
+        visits &+= UInt64(facts.definitions.count + facts.references.count)
+        return facts
     }
 
     private static func applying(
@@ -1615,7 +1999,10 @@ actor WorkspaceCodemapSelectionGraph {
         references: PersistentHashMap<String, PersistentHashSet<UUID>>,
         outgoing: PersistentHashMap<UUID, [WorkspaceCodemapGraphEdgeEvidence]>,
         reverse: PersistentHashMap<UUID, PersistentHashMap<UUID, WorkspaceCodemapGraphEdgeEvidence>>,
-        unresolved: PersistentHashMap<UUID, [WorkspaceCodemapGraphUnresolvedRecord]>
+        unresolved: PersistentHashMap<UUID, [WorkspaceCodemapGraphUnresolvedRecord]>,
+        calls: PersistentHashMap<TerraformCallKey, PersistentHashMap<UUID, TerraformCallBinding>>,
+        callDependents: PersistentHashMap<TerraformCallKey, PersistentHashSet<UUID>>,
+        visits: inout UInt64
     ) -> CandidateSizeOutcome {
         var postingCount: UInt64 = 0
         var edgeCount: UInt64 = 0
@@ -1670,6 +2057,18 @@ actor WorkspaceCodemapSelectionGraph {
                 guard charge(unresolvedBytes(record)) else { return .overflow }
             }
         }
+        for (key, bindings) in calls {
+            guard !Task.isCancelled else { return .cancelled }
+            guard count(bindings.count, into: &postingCount),
+                  charge(callBindingBytes(key: key, bindings: bindings, visits: &visits))
+            else { return .overflow }
+        }
+        for (key, members) in callDependents {
+            guard !Task.isCancelled else { return .cancelled }
+            guard count(members.count, into: &postingCount),
+                  charge(callKeyBytes(key, memberCount: members.count))
+            else { return .overflow }
+        }
         guard charge(checkedMultiply(edgeCount, 96)),
               charge(checkedMultiply(postingCount, 24)),
               let nodeCount = UInt64(exactly: nodes.count)
@@ -1687,7 +2086,48 @@ actor WorkspaceCodemapSelectionGraph {
               let definitionBytes = checkedStringBytes(node.contribution.sortedUniqueDefinitions),
               let referenceBytes = checkedStringBytes(node.contribution.sortedUniqueReferences)
         else { return nil }
-        return checkedAdd(checkedAdd(checkedAdd(192, pathBytes), definitionBytes), referenceBytes)
+        let bytes = checkedAdd(checkedAdd(checkedAdd(192, pathBytes), definitionBytes), referenceBytes)
+        guard let projection = node.projection else { return bytes }
+        return checkedAdd(bytes, projectionBytes(projection))
+    }
+
+    /// A projection retains its keys, evidence, call keys, and withheld references beside the raw
+    /// contribution.
+    private static func projectionBytes(_ projection: WorkspaceCodemapGraphNodeProjection) -> UInt64? {
+        var bytes = checkedStringBytes(projection.definitionKeys)
+        for reference in projection.references {
+            bytes = checkedAdd(bytes, checkedStringBytes([reference.key ?? "", reference.evidence]))
+        }
+        for key in projection.callDependencyKeys {
+            bytes = checkedAdd(bytes, checkedStringBytes([key.folder, key.call]))
+        }
+        for record in projection.unresolved {
+            bytes = checkedAdd(bytes, unresolvedBytes(record))
+        }
+        return bytes
+    }
+
+    /// Priced like a posting: fixed overhead, the key's strings, and 16 bytes per member file ID.
+    private static func callKeyBytes(_ key: TerraformCallKey, memberCount: Int) -> UInt64? {
+        guard let folderBytes = UInt64(exactly: key.folder.utf8.count),
+              let callBytes = UInt64(exactly: key.call.utf8.count),
+              let count = UInt64(exactly: memberCount)
+        else { return nil }
+        return checkedAdd(checkedAdd(checkedAdd(64, folderBytes), callBytes), checkedMultiply(count, 16))
+    }
+
+    /// Walks every declaration of the call to price its source. Each declaration walked is a visit.
+    private static func callBindingBytes(
+        key: TerraformCallKey,
+        bindings: PersistentHashMap<UUID, TerraformCallBinding>,
+        visits: inout UInt64
+    ) -> UInt64? {
+        var bytes = callKeyBytes(key, memberCount: bindings.count)
+        for binding in bindings.values {
+            visits &+= 1
+            bytes = checkedAdd(bytes, UInt64(exactly: binding.source.literalValue?.utf8.count ?? 0))
+        }
+        return bytes
     }
 
     private static func slotBytes(_ slot: WorkspaceCodemapGraphSlot) -> UInt64? {
@@ -1715,7 +2155,8 @@ actor WorkspaceCodemapSelectionGraph {
     }
 
     private static func snapshotNode(
-        from slot: WorkspaceCodemapGraphSlot
+        from slot: WorkspaceCodemapGraphSlot,
+        projection: WorkspaceCodemapGraphNodeProjection?
     ) -> WorkspaceCodemapGraphSnapshotNode? {
         guard let contribution = slot.state.contribution else { return nil }
         return WorkspaceCodemapGraphSnapshotNode(
@@ -1723,7 +2164,8 @@ actor WorkspaceCodemapSelectionGraph {
             standardizedRelativePath: slot.standardizedRelativePath,
             requestGeneration: slot.requestGeneration,
             pathGeneration: slot.pathGeneration,
-            contribution: contribution
+            contribution: contribution,
+            projection: projection
         )
     }
 

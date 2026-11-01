@@ -26,8 +26,7 @@ struct WorkspaceCodemapArtifactBindingIdentity: Hashable {
         let standardizedRelative = StandardizedPath.relative(relativePath)
         let standardizedFull = StandardizedPath.absolute(fullPath)
         guard !standardizedRelative.isEmpty,
-              standardizedRelative != "..",
-              !standardizedRelative.hasPrefix("../"),
+              !Self.escapesRoot(standardizedRelative),
               StandardizedPath.isDescendant(standardizedFull, of: standardizedRoot),
               standardizedFull != standardizedRoot,
               standardizedFull == StandardizedPath.join(
@@ -42,6 +41,12 @@ struct WorkspaceCodemapArtifactBindingIdentity: Hashable {
         standardizedRootPath = standardizedRoot
         standardizedRelativePath = standardizedRelative
         standardizedFullPath = standardizedFull
+    }
+
+    /// Whether a path from `StandardizedPath.relative` leaves its root, which that function shows by
+    /// keeping a leading `..` it can't pop.
+    static func escapesRoot(_ standardizedRelativePath: String) -> Bool {
+        standardizedRelativePath == ".." || standardizedRelativePath.hasPrefix("../")
     }
 }
 

@@ -55,6 +55,7 @@ final class CodemapGraphIndexHarness {
     let capability: GitCodemapRootCapability
     private let graphPolicy: WorkspaceCodemapGraphPolicy
     private let seed: UInt8
+    private var pipelinesByLanguage: [LanguageType: CodeMapPipelineIdentity] = [:]
 
     /// Registers a synthetic root. Pass `overlay` to share one overlay between several roots and
     /// `capability` to register a capability issued by a real `WorkspaceCodemapGitCapabilityService`.
@@ -69,6 +70,7 @@ final class CodemapGraphIndexHarness {
         self.seed = seed
         self.graphPolicy = graphPolicy
         pipeline = try SyntaxManager().pipelineIdentity(for: .swift, decoderPolicy: .workspaceAutomaticV1)
+        pipelinesByLanguage[.swift] = pipeline
         if let suppliedCapability {
             capability = suppliedCapability
         } else {
@@ -166,14 +168,15 @@ final class CodemapGraphIndexHarness {
         definitions: [String],
         references: [String],
         requestGeneration: UInt64 = 1,
-        pathGeneration: UInt64 = 1
+        pathGeneration: UInt64 = 1,
+        language: LanguageType = .swift
     ) throws -> WorkspaceCodemapGraphSlot {
         let digest = Data(SHA256.hash(data: Data((fileID.uuidString + path).utf8)))
-        let contribution = CodeMapSelectionGraphContribution(
+        let contribution = try CodeMapSelectionGraphContribution(
             artifactKey: CodeMapArtifactKey(
                 rawSHA256: CodeMapRawSourceDigest(bytes: digest),
                 rawByteCount: UInt64(path.utf8.count),
-                pipelineIdentity: pipeline
+                pipelineIdentity: pipelineIdentity(for: language)
             ),
             definitions: definitions,
             references: references
@@ -183,7 +186,8 @@ final class CodemapGraphIndexHarness {
             path: path,
             state: .contributed(contribution),
             requestGeneration: requestGeneration,
-            pathGeneration: pathGeneration
+            pathGeneration: pathGeneration,
+            language: language
         )
     }
 
@@ -192,7 +196,8 @@ final class CodemapGraphIndexHarness {
         path: String,
         state: WorkspaceCodemapGraphSlotState,
         requestGeneration: UInt64 = 1,
-        pathGeneration: UInt64 = 1
+        pathGeneration: UInt64 = 1,
+        language: LanguageType = .swift
     ) throws -> WorkspaceCodemapGraphSlot {
         let identity = try makeIdentity(fileID: fileID, path: path)
         let digest: CodeMapSHA256Digest? = switch state {
@@ -204,10 +209,17 @@ final class CodemapGraphIndexHarness {
             identity: identity,
             requestGeneration: requestGeneration,
             pathGeneration: pathGeneration,
-            pipelineIdentity: pipeline,
+            pipelineIdentity: pipelineIdentity(for: language),
             state: state,
             diagnostics: WorkspaceCodemapGraphSlotDiagnostics(contributionDigest: digest, source: .graphIndex)
         ).get()
+    }
+
+    func pipelineIdentity(for language: LanguageType) throws -> CodeMapPipelineIdentity {
+        if let pipeline = pipelinesByLanguage[language] { return pipeline }
+        let pipeline = try SyntaxManager().pipelineIdentity(for: language, decoderPolicy: .workspaceAutomaticV1)
+        pipelinesByLanguage[language] = pipeline
+        return pipeline
     }
 
     func makeIdentity(fileID: UUID, path: String) throws -> WorkspaceCodemapArtifactBindingIdentity {
@@ -318,6 +330,8 @@ struct CodemapMaterializedGraph: Equatable {
     let outgoing: [UUID: [WorkspaceCodemapGraphEdgeEvidence]]
     let reverse: [UUID: [UUID: WorkspaceCodemapGraphEdgeEvidence]]
     let unresolved: [UUID: [WorkspaceCodemapGraphUnresolvedRecord]]
+    let callBindings: [TerraformCallKey: [UUID: TerraformCallBinding]]
+    let callDependents: [TerraformCallKey: Set<UUID>]
     let size: WorkspaceCodemapGraphSizeAccounting
 
     init(_ snapshot: WorkspaceCodemapGraphCommittedSnapshot) {
@@ -330,16 +344,24 @@ struct CodemapMaterializedGraph: Equatable {
             (target, Dictionary(uniqueKeysWithValues: bySource.map { ($0.key, $0.value) }))
         })
         unresolved = Dictionary(uniqueKeysWithValues: snapshot.unresolvedBySource.map { ($0.key, $0.value) })
+        callBindings = Dictionary(uniqueKeysWithValues: snapshot.terraformCallsByKey.map { key, bindings in
+            (key, Dictionary(uniqueKeysWithValues: bindings.map { ($0.key, $0.value) }))
+        })
+        callDependents = Dictionary(uniqueKeysWithValues: snapshot.terraformCallDependents.map {
+            ($0.key, Set($0.value))
+        })
         size = snapshot.sizeAccounting
     }
 
     /// Entries a copy-everything commit would duplicate for this snapshot: every resident map
-    /// entry plus every posting and reverse-adjacency member.
+    /// entry plus every posting, reverse-adjacency, call-binding, and call-dependent member.
     var fullCopyEntryCount: Int {
         slots.count + nodes.count + outgoing.count + unresolved.count +
             definitions.count + definitions.values.reduce(0) { $0 + $1.count } +
             references.count + references.values.reduce(0) { $0 + $1.count } +
-            reverse.count + reverse.values.reduce(0) { $0 + $1.count }
+            reverse.count + reverse.values.reduce(0) { $0 + $1.count } +
+            callBindings.count + callBindings.values.reduce(0) { $0 + $1.count } +
+            callDependents.count + callDependents.values.reduce(0) { $0 + $1.count }
     }
 }
 
@@ -358,6 +380,43 @@ func assertSameGraph(
     XCTAssertEqual(lhs.coverage, rhs.coverage, message(), file: file, line: line)
     XCTAssertEqual(lhs.appliedGeneration, rhs.appliedGeneration, message(), file: file, line: line)
     XCTAssertEqual(CodemapMaterializedGraph(lhs), CodemapMaterializedGraph(rhs), message(), file: file, line: line)
+}
+
+/// Compares the two overlays' ledgers and the graphs each one fed, and (when constructible)
+/// the incrementally applied graph against a from-scratch checkpoint rebuild.
+func assertParity(
+    _ incremental: CodemapGraphIndexHarness,
+    _ full: CodemapGraphIndexHarness,
+    step: String,
+    expectCheckpoint: Bool,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async throws {
+    let left = await incremental.overlay.graphCheckpoint(rootEpoch: incremental.rootEpoch)
+    let right = await full.overlay.graphCheckpoint(rootEpoch: full.rootEpoch)
+    XCTAssertEqual(left, right, step, file: file, line: line)
+    if expectCheckpoint, case .revoked = left {
+        XCTFail("Expected a constructible checkpoint at \(step)", file: file, line: line)
+    }
+    let leftLedger = try await incremental.ledger()
+    let rightLedger = try await full.ledger()
+    XCTAssertEqual(leftLedger.contributionGeneration, rightLedger.contributionGeneration, step, file: file, line: line)
+    XCTAssertEqual(leftLedger.floorGeneration, rightLedger.floorGeneration, step, file: file, line: line)
+    XCTAssertEqual(leftLedger.slotCount, rightLedger.slotCount, step, file: file, line: line)
+    let leftChanges = await incremental.overlay.graphChanges(
+        rootEpoch: incremental.rootEpoch,
+        since: leftLedger.floorGeneration
+    )
+    let rightChanges = await full.overlay.graphChanges(rootEpoch: full.rootEpoch, since: rightLedger.floorGeneration)
+    XCTAssertEqual(leftChanges, rightChanges, step, file: file, line: line)
+
+    let incrementalGraph = try await incremental.latestSnapshot()
+    let fullGraph = try await full.latestSnapshot()
+    assertSameGraph(incrementalGraph, fullGraph, "graphs at \(step)", file: file, line: line)
+    if case .checkpoint = left {
+        let rebuilt = try await incremental.rebuiltFromCheckpoint()
+        assertSameGraph(incrementalGraph, rebuilt, "rebuild at \(step)", file: file, line: line)
+    }
 }
 
 /// SplitMix64, a small deterministic generator. `SystemRandomNumberGenerator` can't be seeded, so

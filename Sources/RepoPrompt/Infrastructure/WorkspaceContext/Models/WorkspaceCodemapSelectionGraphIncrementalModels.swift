@@ -16,7 +16,20 @@ struct WorkspaceCodemapGraphSnapshotNode: Hashable {
     let standardizedRelativePath: String
     let requestGeneration: UInt64
     let pathGeneration: UInt64
+    /// The file's raw, path-free facts, which diagnostics and manifest identity refer to.
     let contribution: CodeMapSelectionGraphContribution
+    /// The folder-qualified facts of a Terraform node, or nil for any other language.
+    let projection: WorkspaceCodemapGraphNodeProjection?
+
+    /// The posting keys the node defines: a Terraform node's projected keys, or else its names.
+    var definitionKeys: [String] {
+        projection?.definitionKeys ?? contribution.sortedUniqueDefinitions
+    }
+
+    /// The posting keys the node's references resolve against.
+    var referenceKeys: [String] {
+        projection?.referenceKeys ?? contribution.sortedUniqueReferences
+    }
 }
 
 struct WorkspaceCodemapGraphEdgeEvidence: Hashable {
@@ -55,6 +68,11 @@ struct WorkspaceCodemapGraphCommittedSnapshot: Hashable {
     /// Target file ID -> source file ID -> evidence.
     let reverseEdgesByTarget: PersistentHashMap<UUID, PersistentHashMap<UUID, WorkspaceCodemapGraphEdgeEvidence>>
     let unresolvedBySource: PersistentHashMap<UUID, [WorkspaceCodemapGraphUnresolvedRecord]>
+    /// Terraform module call -> declaring file ID -> its declaration.
+    let terraformCallsByKey: PersistentHashMap<TerraformCallKey, PersistentHashMap<UUID, TerraformCallBinding>>
+    /// Terraform module call -> files whose child references resolve through it. A file stays
+    /// subscribed while the call is missing, pending, or ambiguous, so a later declaration repairs it.
+    let terraformCallDependents: PersistentHashMap<TerraformCallKey, PersistentHashSet<UUID>>
     let sizeAccounting: WorkspaceCodemapGraphSizeAccounting
 
     /// Incoming evidence for `target`, in unspecified order.
@@ -113,15 +131,26 @@ struct WorkspaceCodemapGraphFenceIdentity: Hashable {
     }
 }
 
+/// Hides a dependent file's links while the Terraform call file its child references bind through
+/// stays fenced. It lapses once `parent` no longer matches that file's slot.
+struct WorkspaceCodemapGraphDerivedFence: Hashable {
+    let dependentFileID: UUID
+    let parent: WorkspaceCodemapGraphFenceIdentity
+}
+
 struct WorkspaceCodemapGraphPinnedSnapshot: Hashable {
     let snapshot: WorkspaceCodemapGraphCommittedSnapshot
     let receipt: WorkspaceCodemapGraphSnapshotReceipt
     let freshness: WorkspaceCodemapGraphSnapshotFreshness
     let reconciling: Bool
     let fenceIdentities: Set<WorkspaceCodemapGraphFenceIdentity>
+    let derivedFences: Set<WorkspaceCodemapGraphDerivedFence>
 
     func isFenced(_ fileID: UUID) -> Bool {
-        fenceIdentities.contains { $0.fileID == fileID && $0.matches(snapshot.slotsByFileID[fileID]) }
+        fenceIdentities.contains { $0.fileID == fileID && $0.matches(snapshot.slotsByFileID[fileID]) } ||
+            derivedFences.contains {
+                $0.dependentFileID == fileID && $0.parent.matches(snapshot.slotsByFileID[$0.parent.fileID])
+            }
     }
 }
 
@@ -177,8 +206,9 @@ struct WorkspaceCodemapGraphIncrementalAccounting: Hashable {
     var lastApplyDurationMilliseconds: UInt64?
     var maximumApplyDurationMilliseconds: UInt64?
     var highFanoutApplyCount: UInt64 = 0
-    /// Ordering comparisons and visited items of the last candidate build. Diff builds stay
-    /// proportional to the diff and the postings/edges it reaches, not to the resident graph.
+    /// Ordering comparisons and visited items of the last candidate build, with visits including the
+    /// fences its commit derives. Diff builds stay proportional to the diff and the postings/edges it
+    /// reaches, not to the resident graph.
     var lastCandidateComparisonCount: UInt64 = 0
     var lastCandidateVisitCount: UInt64 = 0
     var maximumDiffCandidateVisitCount: UInt64 = 0

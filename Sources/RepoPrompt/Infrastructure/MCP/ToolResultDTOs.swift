@@ -324,6 +324,10 @@ enum ToolResultDTOs {
             case notIndexedYet = "not_indexed_yet"
             case missing
             case tooCommon = "too_common"
+            case unsupportedModuleSource = "unsupported_module_source"
+            case outsideLoadedRoot = "outside_loaded_root"
+            case invalidModuleCall = "invalid_module_call"
+            case ambiguousModuleCall = "ambiguous_module_call"
         }
 
         struct FileDTO: Codable, Equatable {

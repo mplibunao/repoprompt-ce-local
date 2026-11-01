@@ -399,9 +399,13 @@ struct CodeMapRootManifestContributionEnvelope: Hashable {
             definitions: definitions,
             references: references
         )
+        // `==` compares strings only up to canonical equivalence, so the Terraform check reads the
+        // persisted bytes.
         guard identity == CodeMapRootManifestContributionIdentity(contribution),
               definitions == contribution.sortedUniqueDefinitions,
-              references == contribution.sortedUniqueReferences
+              references == contribution.sortedUniqueReferences,
+              artifactKey.pipelineIdentity.languageID != .terraform ||
+              TerraformCodeMapGraphNames.isValidContribution(definitions: definitions, references: references)
         else { throw CodeMapRootManifestModelError.invalidContribution }
         self.identity = identity
         sortedUniqueDefinitions = definitions

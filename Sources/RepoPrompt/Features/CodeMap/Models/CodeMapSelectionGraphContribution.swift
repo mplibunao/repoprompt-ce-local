@@ -4,7 +4,7 @@ import RepoPromptCodeMapCore
 
 struct CodeMapSelectionGraphContribution: Hashable {
     static let currentSchemaVersion: UInt32 = 1
-    static let currentPolicyVersion: UInt32 = 1
+    static let currentPolicyVersion: UInt32 = 2
 
     private static let digestDomain = "codemap-selection-graph-contribution-v1"
 
@@ -16,10 +16,21 @@ struct CodeMapSelectionGraphContribution: Hashable {
     let contributionDigest: CodeMapSHA256Digest
 
     init(artifactKey: CodeMapArtifactKey, artifact: CodeMapSyntaxArtifact) {
+        guard artifactKey.pipelineIdentity.languageID == .terraform else {
+            self.init(
+                artifactKey: artifactKey,
+                definitions: artifact.definedTypeNames,
+                references: artifact.referencedTypes
+            )
+            return
+        }
+        // The artifact container requires the payload on a ready Terraform artifact. Without it the
+        // contribution has no folder membership, which graph-slot validation rejects.
+        let names = artifact.terraform.map(TerraformCodeMapGraphNames.contributionNames)
         self.init(
             artifactKey: artifactKey,
-            definitions: artifact.definedTypeNames,
-            references: artifact.referencedTypes
+            definitions: names?.definitions ?? [],
+            references: names?.references ?? []
         )
     }
 
@@ -28,8 +39,11 @@ struct CodeMapSelectionGraphContribution: Hashable {
         definitions: some Sequence<String>,
         references: some Sequence<String>
     ) {
-        let definitions = Self.canonicalNames(definitions)
-        let references = Self.canonicalNames(references)
+        // The Terraform codec normalizes each tuple component. Normalizing a whole token could
+        // compose an escape's letter, such as the `n` of `\n`, with a combining mark that follows it.
+        let normalizing = artifactKey.pipelineIdentity.languageID != .terraform
+        let definitions = Self.canonicalNames(definitions, normalizing: normalizing)
+        let references = Self.canonicalNames(references, normalizing: normalizing)
 
         schemaVersion = Self.currentSchemaVersion
         policyVersion = Self.currentPolicyVersion
@@ -43,15 +57,26 @@ struct CodeMapSelectionGraphContribution: Hashable {
         )
     }
 
-    /// Graph names preserve case, normalize to NFC, drop names that are empty after
-    /// normalization, deduplicate, and sort by the normalized UTF-8 bytes. This policy is
-    /// independent of locale and input order. Empty names come from anonymous C enums and
-    /// the manifest decoder rejects them.
-    private static func canonicalNames(_ names: some Sequence<String>) -> [String] {
-        Set(names.lazy.map(\.precomposedStringWithCanonicalMapping).filter { !$0.isEmpty })
+    /// Keeps each name's case, normalizes it to NFC when `normalizing`, drops names that are empty or
+    /// start with U+0000, and deduplicates and sorts the rest by their UTF-8 bytes. This policy is
+    /// independent of locale and input order. Empty names come from anonymous C enums and the
+    /// manifest decoder rejects them. U+0000 starts the graph's Terraform posting keys, so no other
+    /// name can equal one.
+    private static func canonicalNames(_ names: some Sequence<String>, normalizing: Bool) -> [String] {
+        let sorted = names.lazy
+            .map { normalizing ? $0.precomposedStringWithCanonicalMapping : $0 }
+            .filter { !$0.isEmpty && $0.utf8.first != 0 }
             .sorted { lhs, rhs in
                 lhs.utf8.lexicographicallyPrecedes(rhs.utf8)
             }
+        // `String` equality is canonical equivalence, which would merge Terraform tokens whose bytes
+        // differ and hide one of them from validation. For NFC names the two comparisons agree.
+        var unique: [String] = []
+        unique.reserveCapacity(sorted.count)
+        for name in sorted where !(unique.last?.utf8.elementsEqual(name.utf8) ?? false) {
+            unique.append(name)
+        }
+        return unique
     }
 
     private static func digest(

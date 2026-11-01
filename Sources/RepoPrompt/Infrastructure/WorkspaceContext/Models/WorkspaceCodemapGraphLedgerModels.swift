@@ -39,6 +39,8 @@ enum WorkspaceCodemapGraphSlotValidationError: Error, Hashable {
     case contributedWithoutNames
     case emptyWithNames
     case contributionDigestMismatch
+    /// A Terraform contribution's names aren't the canonical `tf1` tuples its codec produces.
+    case invalidTerraformContribution
 }
 
 struct WorkspaceCodemapGraphSlot: Hashable {
@@ -100,6 +102,14 @@ struct WorkspaceCodemapGraphSlot: Hashable {
         if let contribution {
             guard contribution.artifactKey.pipelineIdentity == pipelineIdentity else {
                 return .failure(.pipelineMismatch)
+            }
+            // Only canonical tuples may enter the graph for a Terraform file. Every ready Terraform
+            // file defines its folder membership, so an empty Terraform contribution fails too.
+            guard pipelineIdentity.languageID != .terraform || TerraformCodeMapGraphNames.isValidContribution(
+                definitions: contribution.sortedUniqueDefinitions,
+                references: contribution.sortedUniqueReferences
+            ) else {
+                return .failure(.invalidTerraformContribution)
             }
             if let diagnosticDigest = diagnostics?.contributionDigest,
                diagnosticDigest != contribution.contributionDigest
