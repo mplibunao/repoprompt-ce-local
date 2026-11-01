@@ -130,6 +130,7 @@ expected_packages = {
     "tree-sitter-c-sharp": ("https://github.com/tree-sitter/tree-sitter-c-sharp.git", "0.23.5", "cac6d5fb595f5811a076336682d5d595ac1c9e85", "TreeSitterCSharp"),
     "tree-sitter-cpp": ("https://github.com/tree-sitter/tree-sitter-cpp", "0.23.4", "f41e1a044c8a84ea9fa8577fdd2eab92ec96de02", "TreeSitterCPP"),
     "tree-sitter-php": ("https://github.com/tree-sitter/tree-sitter-php.git", "0.24.2", "5b5627faaa290d89eb3d01b9bf47c3bb9e797dea", "TreeSitterPHP"),
+    "tree-sitter-hcl": ("https://github.com/tree-sitter-grammars/tree-sitter-hcl", "1.2.0", "fad991865fee927dd1de5e172fb3f08ac674d914", "TreeSitterHCL"),
 }
 errors = []
 manifest_text = Path("Package.swift").read_text()
@@ -331,7 +332,7 @@ if core_test_dependencies != ["RepoPromptCodeMapCore"]:
 core_syntax_source = Path("Sources/RepoPromptCodeMapCore/CodeMapSyntaxEngine.swift").read_text()
 required_core_imports = {
     "SwiftTreeSitter", "TreeSitterC", "TreeSitterCPP", "TreeSitterCSharp",
-    "TreeSitterGo", "TreeSitterJava", "TreeSitterJavaScript", "TreeSitterPHP", "TreeSitterPython",
+    "TreeSitterGo", "TreeSitterHCL", "TreeSitterJava", "TreeSitterJavaScript", "TreeSitterPHP", "TreeSitterPython",
     "TreeSitterRuby", "TreeSitterRust", "TreeSitterSwift", "TreeSitterTSX", "TreeSitterTypeScript",
 }
 for module in sorted(required_core_imports):
