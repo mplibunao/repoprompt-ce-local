@@ -2,7 +2,7 @@
 # The canonical first-party Swift path list lives in Scripts/swift_style.sh.
 # These exclusions mirror that script so broad/manual swiftformat runs avoid
 # generated, vendored, C, binary, and transient paths.
-# Large workflow prompt body files are excluded because SwiftFormat 0.61.1 exits
+# Large workflow prompt body files are excluded because SwiftFormat 0.64.5 crashes
 # while parsing their embedded multiline skill strings; metadata/catalog files in
 # the same directory remain formatted.
 --swiftversion 6.0
