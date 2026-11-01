@@ -265,24 +265,36 @@ class ContributionPreflightRemoteGuardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, self.output(result))
         self.assertIn("Comparison base provenance: origin_main_fallback", self.output(result))
 
-    def test_push_allows_untracked_plans_but_no_other_untracked_file(self) -> None:
+    def test_push_exempts_only_untracked_plans_from_clean_tree_check(self) -> None:
         self.prepare_push_branch()
-        plan = self.repo / "docs/plans/fixture-plan.md"
-        plan.parent.mkdir(parents=True)
-        plan.write_text("local plan\n", encoding="utf-8")
+        plans = self.repo / "docs/plans"
+        plans.mkdir(parents=True)
+        (plans / "local-plan.md").write_text("local plan\n", encoding="utf-8")
 
         result = self.run_preflight("push")
 
         self.assertEqual(result.returncode, 0, self.output(result))
 
-        (self.repo / "docs/stray.md").write_text("stray\n", encoding="utf-8")
+        stray = self.repo / "docs/stray.md"
+        stray.write_text("stray\n", encoding="utf-8")
 
         result = self.run_preflight("push")
 
         self.assertNotEqual(result.returncode, 0, self.output(result))
-        self.assertIn("working tree is not clean", self.output(result))
-        self.assertIn("docs/stray.md", self.output(result))
-        self.assertNotIn("fixture-plan.md", self.output(result))
+        self.assertIn("?? docs/stray.md", self.output(result))
+        self.assertNotIn("local-plan.md", self.output(result))
+
+        # Unstaging a committed plan leaves HEAD holding it, so the staged deletion must block.
+        stray.unlink()
+        (plans / "committed-plan.md").write_text("committed plan\n", encoding="utf-8")
+        self.git("add", "docs/plans/committed-plan.md")
+        self.git("commit", "-q", "-m", "commit a plan by mistake")
+        self.git("rm", "-q", "--cached", "docs/plans/committed-plan.md")
+
+        result = self.run_preflight("push")
+
+        self.assertNotEqual(result.returncode, 0, self.output(result))
+        self.assertIn("D  docs/plans/committed-plan.md", self.output(result))
 
     def test_push_scans_without_config_when_range_tip_deletes_it(self) -> None:
         self.install_config_sensitive_gitleaks()

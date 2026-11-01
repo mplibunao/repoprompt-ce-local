@@ -812,19 +812,21 @@ allowed_tracked_docs=(
 )
 tracked_plans=()
 existing_tracked_docs=()
-while IFS= read -r path; do
-  [[ -e "$path" ]] || continue
+while IFS= read -r -d '' path; do
+  # A staged plan is committed even when its working copy is gone, so plans skip
+  # the existence check that the other documents get.
   if [[ "$path" == docs/plans/* ]]; then
     tracked_plans+=("$path")
     continue
   fi
+  [[ -e "$path" ]] || continue
   if [[ "$path" == *.md ]]; then
     for dir in "${allowed_tracked_doc_record_dirs[@]}"; do
       [[ "$path" == "$dir"* ]] && continue 2
     done
   fi
   existing_tracked_docs+=("$path")
-done < <(git -c core.quotePath=false ls-files docs)
+done < <(git ls-files -z docs)
 if (( ${#tracked_plans[@]} )); then
   fail "plans in docs/plans/ are never committed; unstage them with 'git rm --cached -- <path>', and before pushing, rewrite any branch commit that added one so its history doesn't publish it"
   printf '%s\n' "${tracked_plans[@]}" >&2
