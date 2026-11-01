@@ -234,7 +234,7 @@ Operation commands:
   ./conductor lint                   # non-mutating format-check + SwiftLint strict
   ./conductor format-tools-status    # inspect SwiftFormat/SwiftLint availability
   ./conductor check-format-tools     # fail if style tools are missing
-  ./conductor install-format-tools   # explicit Homebrew install of missing style tools
+  ./conductor install-format-tools   # install the style tools pinned in mise.toml
   ./conductor swift-build --product RepoPrompt|repoprompt-mcp|all
   ./conductor build
   ./conductor package debug|release

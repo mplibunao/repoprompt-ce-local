@@ -22,7 +22,7 @@ Options:
   --quiet                 Suppress nonessential output. Does not require SwiftFormat or SwiftLint.
   --install-debug-cli     Package and install /usr/local/bin/rpce-cli-debug.
   --check-format-tools    Fail if SwiftFormat or SwiftLint is missing.
-  --install-format-tools  Install missing SwiftFormat/SwiftLint tools with Homebrew.
+  --install-format-tools  Install the SwiftFormat/SwiftLint versions in mise.toml.
 EOF
             exit 0
             ;;
