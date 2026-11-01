@@ -164,7 +164,9 @@ private actor DirectHeadlessFileEditHost: FileEditHost {
     func fileExists(path: String) async -> Bool {
         guard path == target.path else { return false }
         let exists = FileManager.default.fileExists(atPath: target.path)
-        if !exists { expectedMissing = true }
+        if !exists {
+            expectedMissing = true
+        }
         return exists
     }
 
@@ -284,9 +286,13 @@ actor DirectHeadlessVersionControlBackend: DomainVersionControlCapabilityBackend
             )
             try await MCPDomainMutationCommitContext.willCommit()
             var command = ["-C", repo.path, "worktree", "add"]
-            if let branch = args["branch"]?.stringValue { command += ["-b", branch] }
+            if let branch = args["branch"]?.stringValue {
+                command += ["-b", branch]
+            }
             command.append(url.path)
-            if let base = args["base_ref"]?.stringValue { command.append(base) }
+            if let base = args["base_ref"]?.stringValue {
+                command.append(base)
+            }
             let output = try await DirectProcess.run("/usr/bin/git", arguments: command)
             return try .object(["op": .string(op), "path": .string(url.path), "output": .string(output)])
         case "bind", "select":
@@ -544,8 +550,12 @@ actor DirectHeadlessVersionControlBackend: DomainVersionControlCapabilityBackend
         args: [String: Value],
         request: DomainPhysicalToolRequest
     ) throws -> UUID {
-        if let raw = args["session_id"]?.stringValue, let id = UUID(uuidString: raw) { return id }
-        if let runID = request.securityContext?.principal.runID { return runID }
+        if let raw = args["session_id"]?.stringValue, let id = UUID(uuidString: raw) {
+            return id
+        }
+        if let runID = request.securityContext?.principal.runID {
+            return runID
+        }
         throw MCPError.invalidParams("manage_worktree requires session_id outside a run-scoped child connection")
     }
 
@@ -852,7 +862,9 @@ actor DirectHeadlessAgentBackend: DomainAgentCapabilityBackend {
         switch op {
         case "start":
             var normalized = args
-            if normalized["model_id"] == nil { normalized["model_id"] = .string(defaultAgent) }
+            if normalized["model_id"] == nil {
+                normalized["model_id"] = .string(defaultAgent)
+            }
             return try await .mcp(coordinator.startAgent(args: normalized, request: request))
         case "poll":
             let sessionID = try Self.sessionID(args)
@@ -1128,7 +1140,9 @@ private final class DirectProcessInvocation: @unchecked Sendable {
                         continuation.resume(throwing: CancellationError())
                     } else {
                         var text = String(decoding: snapshot.data, as: UTF8.self)
-                        if snapshot.truncated { text += "\n[output truncated at \(Self.outputLimit) bytes]" }
+                        if snapshot.truncated {
+                            text += "\n[output truncated at \(Self.outputLimit) bytes]"
+                        }
                         if process.terminationStatus == 0 {
                             continuation.resume(returning: text)
                         } else {
@@ -1144,7 +1158,9 @@ private final class DirectProcessInvocation: @unchecked Sendable {
                         inputPipe.fileHandleForWriting.write(input)
                         try? inputPipe.fileHandleForWriting.close()
                     }
-                    if isCancellationRequested() { cancelProcess() }
+                    if isCancellationRequested() {
+                        cancelProcess()
+                    }
                 } catch {
                     pipe.fileHandleForReading.readabilityHandler = nil
                     continuation.resume(throwing: error)
@@ -1164,7 +1180,9 @@ private final class DirectProcessInvocation: @unchecked Sendable {
         }
         let remaining = Self.outputLimit - output.count
         output.append(data.prefix(remaining))
-        if data.count > remaining { truncated = true }
+        if data.count > remaining {
+            truncated = true
+        }
     }
 
     private func takeSnapshot() -> (data: Data, truncated: Bool, cancelled: Bool) {
@@ -1196,6 +1214,8 @@ private final class DirectProcessInvocation: @unchecked Sendable {
     }
 
     private func cancelProcess() {
-        if process.isRunning { process.terminate() }
+        if process.isRunning {
+            process.terminate()
+        }
     }
 }

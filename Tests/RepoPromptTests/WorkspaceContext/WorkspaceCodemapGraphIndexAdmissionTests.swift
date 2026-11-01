@@ -596,7 +596,9 @@ private func waitForValue<Value>(
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
     while clock.now < deadline {
-        if let value = await produce() { return value }
+        if let value = await produce() {
+            return value
+        }
         try await Task.sleep(for: .milliseconds(5))
     }
     throw AdmissionWaitError.timedOut(description)

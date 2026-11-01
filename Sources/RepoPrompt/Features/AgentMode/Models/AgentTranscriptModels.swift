@@ -191,8 +191,7 @@ public struct AgentTranscriptActivity: Codable, Identifiable, Sendable, Equatabl
     }
 
     private static func defaultIsSubstantiveAssistant(for item: AgentChatItem) -> Bool {
-        guard item.kind == .assistant || item.kind == .assistantInline else { return false }
-        guard AgentDisplayableText.hasDisplayableBody(item.text) else { return false }
+        guard item.kind == .assistant || item.kind == .assistantInline, AgentDisplayableText.hasDisplayableBody(item.text) else { return false }
         let trimmed = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !item.attachments.isEmpty || !item.taggedFileAttachments.isEmpty || item.workflow != nil {
             return true
@@ -631,8 +630,7 @@ func preferredDetachedPersistenceAuthority(
     live: DetachedViewportAuthority?
 ) -> DetachedViewportAuthority? {
     guard let live else { return stored }
-    guard let stored else { return live }
-    guard stored.isSameFamily(as: live) else {
+    guard let stored, stored.isSameFamily(as: live) else {
         return live
     }
     if stored.specificityRank > live.specificityRank {

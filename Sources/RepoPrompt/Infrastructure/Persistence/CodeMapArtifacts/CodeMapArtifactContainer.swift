@@ -201,7 +201,9 @@ enum CodeMapArtifactContainer {
         }
         let expectedTotalByteCount = try checkedAdd(headerByteCount, payloadByteCount)
         guard expectedTotalByteCount == totalFileByteCount else {
-            if expectedTotalByteCount > totalFileByteCount { throw CodeMapArtifactContainerError.truncated }
+            if expectedTotalByteCount > totalFileByteCount {
+                throw CodeMapArtifactContainerError.truncated
+            }
             throw CodeMapArtifactContainerError.trailingBytes
         }
         return CodeMapArtifactContainerPreflight(
@@ -693,7 +695,9 @@ private struct CodeMapArtifactSummary {
     }
 
     private mutating func addOptionalString(_ value: String?, policy: CodeMapArtifactContainerPolicy) throws {
-        if let value { try addString(value, policy: policy) }
+        if let value {
+            try addString(value, policy: policy)
+        }
     }
 
     private mutating func addString(_ value: String, policy: CodeMapArtifactContainerPolicy) throws {

@@ -354,7 +354,9 @@ private final class FakeItemAccessValidator: KeychainItemAccessValidator {
 
     func validate(_: AnyObject) throws {
         validationCount += 1
-        if let error { throw error }
+        if let error {
+            throw error
+        }
     }
 }
 

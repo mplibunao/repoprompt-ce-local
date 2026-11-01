@@ -46,8 +46,7 @@ final class MentionTextView: NSTextView {
     /// This avoids `glyphRangeForTextContainer:` crashes AND prevents multi-container drift.
     func repairTextKitIfNeeded() {
         // If we're not in a window (or are being removed), don't mutate TextKit internals.
-        guard window != nil, !isTearingDown else { return }
-        guard let lm = layoutManager, let container = textContainer else { return }
+        guard window != nil, !isTearingDown, let lm = layoutManager, let container = textContainer else { return }
 
         // 1) Ensure our container is registered.
         if !lm.textContainers.contains(where: { $0 === container }) {

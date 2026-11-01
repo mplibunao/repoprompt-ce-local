@@ -121,7 +121,9 @@ class OpenAIProvider: AIProvider {
 
     private func shouldOmitMaxOutputTokens(for model: AIModel) -> Bool {
         // Respect explicit user configuration
-        if configuredMaxTokens != nil { return false }
+        if configuredMaxTokens != nil {
+            return false
+        }
         let baseModel = model.openAIServiceTierBase
         // Don't pass max_output_tokens for first-party OpenAI models — let the API handle defaults
         switch baseModel {
@@ -329,7 +331,9 @@ class OpenAIProvider: AIProvider {
 
                     for try await result in stream {
                         // Check cancellation to exit promptly when consumer stops reading
-                        if Task.isCancelled { break }
+                        if Task.isCancelled {
+                            break
+                        }
 
                         if Self.isTransportActivityChunk(result) {
                             continuation.yield(
@@ -544,7 +548,9 @@ class OpenAIProvider: AIProvider {
         // Try the requested model first
         do {
             let response = try await callAppropriateCompletion(for: model, message: testMessage, nil)
-            if response.lowercased().contains("hello") { return true }
+            if response.lowercased().contains("hello") {
+                return true
+            }
         } catch {
             print("Initial model \(model.displayName) failed in testAPIKey: \(error)")
         }
@@ -555,7 +561,9 @@ class OpenAIProvider: AIProvider {
             do {
                 print("Falling back to \(fallback.displayName) in testAPIKey...")
                 let response = try await callAppropriateCompletion(for: fallback, message: testMessage, nil)
-                if response.lowercased().contains("hello") { return true }
+                if response.lowercased().contains("hello") {
+                    return true
+                }
             } catch {
                 print("Fallback model \(fallback.displayName) failed in testAPIKey: \(error)")
             }
@@ -575,7 +583,9 @@ class OpenAIProvider: AIProvider {
                     var observedCompletionOutcome: AIProviderCompletionOutcome?
 
                     for try await event in stream {
-                        if Task.isCancelled { break }
+                        if Task.isCancelled {
+                            break
+                        }
                         switch event {
                         case let .outputTextDelta(delta):
                             if !delta.delta.isEmpty {
@@ -815,7 +825,7 @@ extension OpenAIProvider: ResponsesJobProvider {
                     var lastStatus: ResponseModel.Status?
                     var pollCount = 0
 
-                    /// Exponential backoff: 2s, 3s, 4s, 5s... capped at 10s
+                    // Exponential backoff: 2s, 3s, 4s, 5s... capped at 10s
                     func pollInterval() -> Duration {
                         .seconds(min(2 + pollCount, 10))
                     }

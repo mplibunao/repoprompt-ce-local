@@ -359,7 +359,9 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
                 reviewGitContext: frozenReviewContext
             )
         case "add":
-            if parsedInputs.paths.isEmpty, parsedInputs.sliceInputs.isEmpty { throw MCPError.invalidParams("paths or slices required for add") }
+            if parsedInputs.paths.isEmpty, parsedInputs.sliceInputs.isEmpty {
+                throw MCPError.invalidParams("paths or slices required for add")
+            }
             let context = resolvedContext.snapshot
             selectionLog("[Virtual] manage_selection op=add mode=\(mode) paths=\(selectionPaths.count) slices=\(sliceInputs.count) tab=\(context.tabID)")
             var invalid: [String] = []
@@ -449,8 +451,12 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
                 reviewGitContext: frozenReviewContext
             )
         case "remove":
-            if parsedInputs.paths.isEmpty, parsedInputs.sliceInputs.isEmpty { throw MCPError.invalidParams("paths or slices required for remove") }
-            if mode == "codemap_only", !physicalSliceInputs.isEmpty { throw MCPError.invalidParams("mode 'codemap_only' cannot be used with slices") }
+            if parsedInputs.paths.isEmpty, parsedInputs.sliceInputs.isEmpty {
+                throw MCPError.invalidParams("paths or slices required for remove")
+            }
+            if mode == "codemap_only", !physicalSliceInputs.isEmpty {
+                throw MCPError.invalidParams("mode 'codemap_only' cannot be used with slices")
+            }
             let context = resolvedContext.snapshot
             selectionLog("[Virtual] manage_selection op=remove mode=\(mode) paths=\(selectionPaths.count) slices=\(sliceInputs.count) tab=\(context.tabID)")
             var invalid: [String] = []
@@ -521,8 +527,12 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         case "promote":
             let context = resolvedContext.snapshot
             selectionLog("[Virtual] manage_selection op=promote paths=\(selectionPaths.count) tab=\(context.tabID)")
-            if physicalSelectionPaths.isEmpty { throw MCPError.invalidParams("paths required for promote") }
-            if !physicalSliceInputs.isEmpty { throw MCPError.invalidParams("promote does not support slices") }
+            if physicalSelectionPaths.isEmpty {
+                throw MCPError.invalidParams("paths required for promote")
+            }
+            if !physicalSliceInputs.isEmpty {
+                throw MCPError.invalidParams("promote does not support slices")
+            }
             let promoteResult = await dependencies.selection.promoteStoredSelectionPaths(context.selection, physicalSelectionPaths, rawPaths, strict, lookupRootScope)
             try Task.checkCancellation()
             var combinedInvalid = promoteResult.invalidPaths
@@ -539,8 +549,12 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         case "demote":
             let context = resolvedContext.snapshot
             selectionLog("[Virtual] manage_selection op=demote paths=\(selectionPaths.count) tab=\(context.tabID)")
-            if physicalSelectionPaths.isEmpty { throw MCPError.invalidParams("paths required for demote") }
-            if !physicalSliceInputs.isEmpty { throw MCPError.invalidParams("demote does not support slices") }
+            if physicalSelectionPaths.isEmpty {
+                throw MCPError.invalidParams("paths required for demote")
+            }
+            if !physicalSliceInputs.isEmpty {
+                throw MCPError.invalidParams("demote does not support slices")
+            }
             let demoteResult = await dependencies.selection.demoteStoredSelectionPaths(context.selection, physicalSelectionPaths, rawPaths, strict, lookupRootScope)
             try Task.checkCancellation()
             var combinedInvalid = demoteResult.invalidPaths

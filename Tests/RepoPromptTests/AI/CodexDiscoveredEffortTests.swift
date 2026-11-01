@@ -1,5 +1,5 @@
-import XCTest
 @_spi(TestSupport) @testable import RepoPromptApp
+import XCTest
 
 final class CodexDiscoveredEffortTests: XCTestCase {
     func testAdvertisedAstraEffortsProduceStandardAndFastWireParameters() throws {

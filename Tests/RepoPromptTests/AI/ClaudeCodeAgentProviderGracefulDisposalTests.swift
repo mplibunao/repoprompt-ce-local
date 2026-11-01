@@ -100,7 +100,9 @@ private actor AsyncTestGate {
     }
 
     func waitUntilEntered() async {
-        if entered { return }
+        if entered {
+            return
+        }
         await withCheckedContinuation { entryWaiters.append($0) }
     }
 
@@ -126,7 +128,9 @@ private actor AsyncTestSignal {
     }
 
     func wait() async {
-        if signaled { return }
+        if signaled {
+            return
+        }
         await withCheckedContinuation { waiters.append($0) }
     }
 }

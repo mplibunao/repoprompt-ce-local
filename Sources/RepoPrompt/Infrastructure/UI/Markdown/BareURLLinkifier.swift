@@ -45,19 +45,16 @@ enum BareURLLinkifier {
         policy: BareURLLinkificationPolicy,
         suppressLinksTouchingEndBoundary: Bool = false
     ) {
-        guard policy.isEnabled, attributedString.length > 0 else { return }
-        guard let detector = linkDetector else { return }
+        guard policy.isEnabled, attributedString.length > 0, let detector = linkDetector else { return }
 
         let text = attributedString.string
         let fullRange = NSRange(location: 0, length: (text as NSString).length)
         detector.enumerateMatches(in: text, options: [], range: fullRange) { result, _, _ in
             guard let result,
                   result.resultType == .link,
-                  let candidate = allowedURLCandidate(from: result.range, in: text, policy: policy)
+                  let candidate = allowedURLCandidate(from: result.range, in: text, policy: policy),
+                  !suppressLinksTouchingEndBoundary || NSMaxRange(candidate.range) < NSMaxRange(fullRange)
             else {
-                return
-            }
-            guard !suppressLinksTouchingEndBoundary || NSMaxRange(candidate.range) < NSMaxRange(fullRange) else {
                 return
             }
 
@@ -72,16 +69,12 @@ enum BareURLLinkifier {
     ) -> (range: NSRange, url: URL)? {
         guard policy == .httpHTTPSOnly else { return nil }
         let trimmedRange = trimURLRange(detectedRange, in: text)
-        guard trimmedRange.length > 0 else { return nil }
-
-        guard hasAllowedLeadingBoundary(before: trimmedRange.location, in: text) else { return nil }
+        guard trimmedRange.length > 0, hasAllowedLeadingBoundary(before: trimmedRange.location, in: text) else { return nil }
 
         let rawCandidate = (text as NSString).substring(with: trimmedRange)
         let lowercasedCandidate = rawCandidate.lowercased()
-        guard lowercasedCandidate.hasPrefix("http://") || lowercasedCandidate.hasPrefix("https://") else {
-            return nil
-        }
-        guard let url = URL(string: rawCandidate),
+        guard lowercasedCandidate.hasPrefix("http://") || lowercasedCandidate.hasPrefix("https://"),
+              let url = URL(string: rawCandidate),
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https"
         else {

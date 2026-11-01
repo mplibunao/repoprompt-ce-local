@@ -18,10 +18,10 @@ struct IsolatedAPISettingsFixture {
     }
 }
 
+@MainActor
 extension XCTestCase {
     /// Registers cleanup for the view model's background work, the defaults suite, and the
     /// settings directory.
-    @MainActor
     func makeIsolatedAPISettingsFixture(name: String = #function) throws -> IsolatedAPISettingsFixture {
         let namespace = String(describing: type(of: self))
         let directory = try makeTestDirectory(name: name, namespace: namespace)

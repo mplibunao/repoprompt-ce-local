@@ -163,8 +163,7 @@ final class MCPReadFileAutoSelectionCoordinator {
                 guard selectedPathKeys.contains(path), normalizedSlices[path]?.isEmpty != false else { return false }
             }
             for slice in slices {
-                guard selectedPathKeys.contains(slice.path) else { return false }
-                guard normalizedSlices[slice.path]?.isEmpty != false || Self.ranges(slice.ranges, areCoveredBy: normalizedSlices[slice.path] ?? []) else {
+                guard selectedPathKeys.contains(slice.path), normalizedSlices[slice.path]?.isEmpty != false || Self.ranges(slice.ranges, areCoveredBy: normalizedSlices[slice.path] ?? []) else {
                     return false
                 }
             }
@@ -226,9 +225,7 @@ final class MCPReadFileAutoSelectionCoordinator {
         )
         guard expectedManualCodemapPaths.isSubset(
             of: candidateManualCodemapPaths.union(candidateSelectedPaths)
-        ) else { return false }
-
-        guard expected.codemapAutoEnabled == candidate.codemapAutoEnabled else { return false }
+        ), expected.codemapAutoEnabled == candidate.codemapAutoEnabled else { return false }
 
         let expectedSlices = StoredSelectionPathNormalization.standardizedSlices(expected.slices).mapValues {
             SliceRangeMath.normalize($0)
@@ -1146,7 +1143,9 @@ final class MCPReadFileAutoSelectionCoordinator {
             windowID: key.windowID,
             tabID: key.tabID,
             connectionID: {
-                if case let .bound(connectionID, _) = key.route { return connectionID }
+                if case let .bound(connectionID, _) = key.route {
+                    return connectionID
+                }
                 return nil
             }(),
             revokedReadCount: inFlight.queued.acceptedIntentCount,
@@ -1419,8 +1418,12 @@ final class MCPReadFileAutoSelectionCoordinator {
         in lane: MirrorLane,
         context: ContextKey
     ) -> SequenceWaitResult {
-        if invalidatedContexts.contains(context) { return .invalidated }
-        if lane.convergedTicket >= ticket { return .converged }
+        if invalidatedContexts.contains(context) {
+            return .invalidated
+        }
+        if lane.convergedTicket >= ticket {
+            return .converged
+        }
         return mirrorSettlement(for: ticket, in: lane) ?? .deferred
     }
 
@@ -1454,7 +1457,9 @@ final class MCPReadFileAutoSelectionCoordinator {
         if Task.isCancelled {
             return .cancelled
         }
-        if invalidatedContexts.contains(key) { return .invalidated }
+        if invalidatedContexts.contains(key) {
+            return .invalidated
+        }
         if let lane = canonicalLanes[key], lane.completedSequence >= target {
             return .completed(requiredMirrorTicket: lane.latestRequiredMirrorTicket)
         }
@@ -1497,7 +1502,9 @@ final class MCPReadFileAutoSelectionCoordinator {
         if Task.isCancelled {
             return .cancelled
         }
-        if invalidatedContexts.contains(contextKey) { return .invalidated }
+        if invalidatedContexts.contains(contextKey) {
+            return .invalidated
+        }
         if let lane = mirrorLanes[key], lane.completedTicket >= target {
             return resolvedMirrorWaitResult(for: target, in: lane, context: contextKey)
         }

@@ -1,7 +1,7 @@
 #if DEBUG
     import Foundation
-    import XCTest
     @_spi(TestSupport) @testable import RepoPromptApp
+    import XCTest
 
     @MainActor
     final class AgentToolCorrelationIndexTests: XCTestCase {

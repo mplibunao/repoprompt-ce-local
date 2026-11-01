@@ -585,8 +585,7 @@ actor OpenCodeACPModelPollingService {
     /// `observations[key]` becomes nil and the outcome is dropped. A queued job nobody still
     /// owns is pruned before it can start (see `pruneJobIfUnowned`).
     private func evictObservationIfIdle(key: OpenCodeACPModelParameterKey) {
-        guard let observation = observations[key] else { return }
-        guard observation.subscribers.isEmpty, observation.oneShotWaiters.isEmpty else { return }
+        guard let observation = observations[key], observation.subscribers.isEmpty, observation.oneShotWaiters.isEmpty else { return }
         observations.removeValue(forKey: key)
         pruneJobIfUnowned(key: key, observation: observation)
     }
@@ -607,12 +606,7 @@ actor OpenCodeACPModelPollingService {
     /// demand drops to zero. Ticks at `intervalNanos` and refreshes the catalog for the
     /// preferred workspace.
     private func updateRefreshLoop() {
-        guard !isShutdown else {
-            refreshTask?.cancel()
-            refreshTask = nil
-            return
-        }
-        guard !catalogContinuations.isEmpty else {
+        guard !isShutdown, !catalogContinuations.isEmpty else {
             refreshTask?.cancel()
             refreshTask = nil
             return
@@ -702,8 +696,7 @@ actor OpenCodeACPModelPollingService {
     }
 
     private func enqueueJob(_ key: JobKey) {
-        guard !isShutdown else { return }
-        guard jobsByKey[key] == nil else { return } // identical job coalesces
+        guard !isShutdown, jobsByKey[key] == nil else { return } // identical job coalesces
         jobsByKey[key] = JobEntry()
         queuedKeys.append(key)
         pumpRunner()
@@ -889,8 +882,7 @@ actor OpenCodeACPModelPollingService {
     }
 
     private func cancelCatalogWaiter(key: JobKey, id: UUID) {
-        guard var entry = jobsByKey[key] else { return }
-        guard let index = entry.catalogWaiters.firstIndex(where: { $0.id == id }) else { return }
+        guard var entry = jobsByKey[key], let index = entry.catalogWaiters.firstIndex(where: { $0.id == id }) else { return }
         let waiter = entry.catalogWaiters.remove(at: index)
         jobsByKey[key] = entry
         waiter.continuation.resume(throwing: CancellationError())

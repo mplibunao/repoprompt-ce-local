@@ -133,7 +133,9 @@ struct ChatPresetsSettingsView: View {
         Binding(
             get: { presetManager.persistenceErrorMessage != nil },
             set: { isPresented in
-                if !isPresented { presetManager.clearPersistenceError() }
+                if !isPresented {
+                    presetManager.clearPersistenceError()
+                }
             }
         )
     }

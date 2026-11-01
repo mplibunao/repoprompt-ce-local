@@ -351,8 +351,7 @@ final class AgentSelectedFilesModelCoordinator: ObservableObject {
     func refreshAfterTokenMetricsCompletion(
         _ request: AgentSelectedFilesModelRequest
     ) -> AgentSelectedFilesRefreshOutcome? {
-        guard let entryMetricsSnapshot = request.entryMetricsSnapshot else { return nil }
-        guard displayedModelMatches(request.identity) || loadingIdentity == request.identity else { return nil }
+        guard let entryMetricsSnapshot = request.entryMetricsSnapshot, displayedModelMatches(request.identity) || loadingIdentity == request.identity else { return nil }
         if completedDisplayedModelMatches(request.identity),
            completedEntryMetricsSnapshots[request.identity] == entryMetricsSnapshot
         {
@@ -711,7 +710,9 @@ final class AgentSelectedFilesModelCoordinator: ObservableObject {
             manualCodemapPaths: selection.manualCodemapPaths.sorted(),
             slices: selection.slices.mapValues { lineRanges in
                 lineRanges.sorted { lhs, rhs in
-                    if lhs.start != rhs.start { return lhs.start < rhs.start }
+                    if lhs.start != rhs.start {
+                        return lhs.start < rhs.start
+                    }
                     return lhs.end < rhs.end
                 }
             },
@@ -788,7 +789,9 @@ final class AgentSelectedFilesModelCoordinator: ObservableObject {
     }
 
     private static func hasExplicitFileRows(_ selection: StoredSelection) -> Bool {
-        if !selection.selectedPaths.isEmpty { return true }
+        if !selection.selectedPaths.isEmpty {
+            return true
+        }
         return selection.slices.contains { !$0.value.isEmpty }
     }
 

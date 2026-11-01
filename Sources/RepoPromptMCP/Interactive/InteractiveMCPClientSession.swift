@@ -275,7 +275,9 @@ private final class ToolCallTaskBox: @unchecked Sendable {
             self.task = task
             return false
         }
-        if shouldCancel { task.cancel() }
+        if shouldCancel {
+            task.cancel()
+        }
     }
 
     func cancel() {
@@ -1329,9 +1331,15 @@ actor InteractiveMCPClientSession {
         canonicalToolName: String
     ) -> [String: Value] {
         var arguments = normalized.payload
-        if let tabID = normalized.tabID { arguments["_tabID"] = .string(tabID.uuidString) }
-        if let windowID = normalized.windowID { arguments["_windowID"] = .int(windowID) }
-        if let contextID = normalized.contextID { arguments["context_id"] = .string(contextID.uuidString) }
+        if let tabID = normalized.tabID {
+            arguments["_tabID"] = .string(tabID.uuidString)
+        }
+        if let windowID = normalized.windowID {
+            arguments["_windowID"] = .int(windowID)
+        }
+        if let contextID = normalized.contextID {
+            arguments["context_id"] = .string(contextID.uuidString)
+        }
 
         if normalized.rawJSON {
             arguments["_rawJSON"] = .bool(true)
@@ -1343,7 +1351,9 @@ actor InteractiveMCPClientSession {
                 originalToolName: originalToolName,
                 canonicalToolName: canonicalToolName
             )
-            if presenceProbe.rawJSON { arguments["_rawJSON"] = .bool(false) }
+            if presenceProbe.rawJSON {
+                arguments["_rawJSON"] = .bool(false)
+            }
         }
         return arguments
     }
@@ -1362,7 +1372,9 @@ actor InteractiveMCPClientSession {
             }
             return value
         }
-        if marked["_rawJSON"] != nil { marked["_rawJSON"] = Value.bool(true) }
+        if marked["_rawJSON"] != nil {
+            marked["_rawJSON"] = Value.bool(true)
+        }
         return marked
     }
 
@@ -1587,8 +1599,7 @@ actor InteractiveMCPClientSession {
     #endif
 
     private func shouldSuppressWindowInjection(toolName: String, args: [String: Value]) -> Bool {
-        guard toolName != "bind_context" else { return true }
-        guard toolName != "app_settings" else { return true }
+        guard toolName != "bind_context", toolName != "app_settings" else { return true }
         guard toolName == "manage_workspaces" else { return false }
         let action = args["action"]?.stringValue?.lowercased()
         guard action == "switch" || action == "create" else { return false }
@@ -1621,8 +1632,7 @@ actor InteractiveMCPClientSession {
 
     /// Returns true when multiple windows are currently open.
     func isMultiWindowModeAvailable() async -> Bool {
-        guard !toolListFetched || hasTool(named: "bind_context") else { return false }
-        guard let state = try? await fetchBindContextState() else { return false }
+        guard !toolListFetched || hasTool(named: "bind_context"), let state = try? await fetchBindContextState() else { return false }
         return (state.windows?.count ?? 0) > 1
     }
 
@@ -1631,7 +1641,9 @@ actor InteractiveMCPClientSession {
         guard result.isError == true else { return false }
         let needle = "Tool not found: \(toolName)"
         return result.content.contains { block in
-            if case let .text(t, _, _) = block { return t.contains(needle) }
+            if case let .text(t, _, _) = block {
+                return t.contains(needle)
+            }
             return false
         }
     }
@@ -1872,7 +1884,9 @@ actor InteractiveMCPClientSession {
 
     private func decodeBindContextResponse(from result: CallTool.Result) throws -> BindContextResponse {
         guard let text = result.content.compactMap({
-            if case let .text(text, _, _) = $0 { return text }
+            if case let .text(text, _, _) = $0 {
+                return text
+            }
             return nil
         }).first else {
             throw InteractiveSessionError.handshakeFailed(reason: "bind_context returned no text payload")
@@ -1884,7 +1898,9 @@ actor InteractiveMCPClientSession {
     private func confirmedBinding(from result: CallTool.Result) throws -> BindContextBinding {
         guard result.isError != true else {
             let reason = result.content.compactMap {
-                if case let .text(text, _, _) = $0 { return text }
+                if case let .text(text, _, _) = $0 {
+                    return text
+                }
                 return nil
             }.first ?? "bind_context failed"
             throw InteractiveSessionError.handshakeFailed(reason: reason)
@@ -2039,11 +2055,15 @@ actor InteractiveMCPClientSession {
             let pollResult = poll(&pfd, 1, min(100, max(1, remaining)))
 
             if pollResult < 0 {
-                if errno == EINTR { continue }
+                if errno == EINTR {
+                    continue
+                }
                 throw InteractiveSessionError.pollFailed(errno: errno)
             }
 
-            if pollResult == 0 { continue }
+            if pollResult == 0 {
+                continue
+            }
 
             if pfd.revents & Int16(POLLHUP | POLLERR) != 0 {
                 throw InteractiveSessionError.connectionReset
@@ -2051,7 +2071,9 @@ actor InteractiveMCPClientSession {
 
             let bytesRead = Darwin.read(fd, readBuffer, 4096)
             if bytesRead <= 0 {
-                if bytesRead < 0, errno == EAGAIN || errno == EINTR { continue }
+                if bytesRead < 0, errno == EAGAIN || errno == EINTR {
+                    continue
+                }
                 throw InteractiveSessionError.serverClosed
             }
 

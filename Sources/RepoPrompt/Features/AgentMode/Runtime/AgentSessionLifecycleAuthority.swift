@@ -221,8 +221,7 @@ final class AgentSessionLifecycleAuthority {
         expected: Identity,
         current: ProtectionClaim?
     ) -> Result<MutationTarget, RejectionReason> {
-        guard let current else { return .failure(.tabMissing) }
-        guard current.identity.tabID == expected.tabID else { return .failure(.tabMissing) }
+        guard let current, current.identity.tabID == expected.tabID else { return .failure(.tabMissing) }
         guard current.identity.sessionID == expected.sessionID else {
             return .failure(.sessionIdentityChanged)
         }
@@ -266,7 +265,9 @@ final class AgentSessionLifecycleAuthority {
         case .canonicalWorking, .saved: true
         }
         let durabilityRequiresRecovery = hasCanonicalCommit || {
-            if case .persisted = receipt.outcome { return true }
+            if case .persisted = receipt.outcome {
+                return true
+            }
             return false
         }()
 

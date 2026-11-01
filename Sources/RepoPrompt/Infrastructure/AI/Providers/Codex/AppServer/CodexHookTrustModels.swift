@@ -248,12 +248,8 @@ struct CodexHookInventory: Hashable {
               standardizedPath(rawEntryCWD) == standardizedExpectedCWD,
               let rawHooks = entry["hooks"] as? [[String: Any]],
               let errors = entry["errors"] as? [String],
-              let warnings = entry["warnings"] as? [String]
-        else {
-            throw CodexHookTrustError.malformedListResponse
-        }
-
-        guard rawHooks.count <= maxHookCount,
+              let warnings = entry["warnings"] as? [String],
+              rawHooks.count <= maxHookCount,
               errors.count <= maxDiagnosticCount,
               warnings.count <= maxDiagnosticCount
         else {

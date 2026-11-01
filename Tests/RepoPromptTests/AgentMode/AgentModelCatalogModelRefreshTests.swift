@@ -238,7 +238,9 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
         let availability = AgentModelCatalog.AvailabilityContext()
         let agentRaws = AgentModelCatalog.options(for: .codexExec, availability: availability).map(\.rawValue)
         let chatRaws = AIModel.modelsForProvider(.codex).compactMap { model -> String? in
-            if case let .codexCustom(name) = model { return name }
+            if case let .codexCustom(name) = model {
+                return name
+            }
             let prefix = "codex_cli_"
             return model.rawValue.hasPrefix(prefix) ? String(model.rawValue.dropFirst(prefix.count)) : nil
         }
@@ -303,7 +305,7 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
             XCTAssertNil(AgentModel.resolvedModel(forRaw: "\(family)-ultra", agentKind: .codexExec))
         }
 
-        /// A saved selection keeps its exact raw, never the approximate UI binding, with or without discovery.
+        // A saved selection keeps its exact raw, never the approximate UI binding, with or without discovery.
         func assertPersistedRawsAreKept(_ discoveryState: String) {
             for raw in ["gpt-6.1-sol-ultra", "gpt-6.1-sol-max", "gpt-6.1-sol", "gpt-6-astra-ultra", "gpt-6-astra-max"] {
                 let normalized = AgentModelCatalog.normalizePersistedSelection(

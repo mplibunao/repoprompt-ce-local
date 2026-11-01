@@ -2427,7 +2427,9 @@ private func pollContentReadState<State>(
     let deadline = clock.now.advanced(by: contentReadPollTimeout)
     while clock.now < deadline {
         let state = await read()
-        if predicate(state) { return state }
+        if predicate(state) {
+            return state
+        }
         // A cancelled task makes every sleep throw immediately; stop instead of hot-polling.
         do { try await Task.sleep(for: contentReadPollInterval) } catch { break }
     }
@@ -2908,7 +2910,9 @@ private struct CodeMapPermitRequest {
     /// wait, so broken suppression fails the caller's held-state assertions at once instead of
     /// timing out the wait.
     func queuedOrGranted(in probe: ContentReadTestProbe) async -> Bool {
-        if probe.snapshot().queuedCount(for: .codemap) == 1 { return true }
+        if probe.snapshot().queuedCount(for: .codemap) == 1 {
+            return true
+        }
         return await granted.isSignaledSnapshot()
     }
 }
@@ -2925,7 +2929,9 @@ private actor AsyncSignal {
     }
 
     func wait() async {
-        if isSignaled { return }
+        if isSignaled {
+            return
+        }
         await withCheckedContinuation { continuation in
             waiters.append(continuation)
         }

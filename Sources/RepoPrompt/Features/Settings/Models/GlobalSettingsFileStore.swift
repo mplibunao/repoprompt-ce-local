@@ -215,8 +215,7 @@ final class GlobalSettingsFileStore: GlobalSettingsFileStoring {
     /// silently discarded without an explicit user action.
     @discardableResult
     func performUserInitiatedCompatibleImport() -> Bool {
-        guard blockReason != .automaticSchemaNormalizationFailed else { return false }
-        guard fileManager.fileExists(atPath: fileURL.path) else { return false }
+        guard blockReason != .automaticSchemaNormalizationFailed, fileManager.fileExists(atPath: fileURL.path) else { return false }
         let importedDocument: GlobalSettingsDocument
         do {
             let data = try Data(contentsOf: fileURL)
@@ -704,7 +703,9 @@ final class GlobalSettingsFileStore: GlobalSettingsFileStoring {
                 ? .unsupportedFutureSchema(onDiskVersion: schemaVersion, supportedVersion: supportedVersion)
                 : nil
         }
-        if normalizedLineage != nil { return .incompatibleSchema }
+        if normalizedLineage != nil {
+            return .incompatibleSchema
+        }
 
         // COMPATIBILITY INVARIANT — do not simplify this to `schemaVersion > supportedVersion`.
         // Numeric schema versions above the inherited v1/v2 CE baseline are ambiguous without a

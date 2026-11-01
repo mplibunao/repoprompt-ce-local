@@ -216,9 +216,8 @@ struct DomainWorkspaceAuthorityClient {
     ) async -> DomainCommandOutcome {
         let first = await store.execute(envelope)
         guard first.disposition == .failed,
-              first.errorCode == .lockTimedOut || first.errorCode == .cancelled
-        else { return first }
-        guard !Task.isCancelled else { return first }
+              first.errorCode == .lockTimedOut || first.errorCode == .cancelled,
+              !Task.isCancelled else { return first }
         await Task.yield()
         return await store.execute(envelope)
     }
@@ -278,7 +277,9 @@ final class DomainWorkspacePresentationBridge {
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: timeout)
             repeat {
-                if lastPublicationSequence >= publicationSequence { return true }
+                if lastPublicationSequence >= publicationSequence {
+                    return true
+                }
                 do {
                     try await Task.sleep(nanoseconds: 10_000_000)
                 } catch {
@@ -300,7 +301,9 @@ final class DomainWorkspacePresentationBridge {
     #endif
 
     func awaitInitialProjection() async {
-        if didCompleteInitialProjection { return }
+        if didCompleteInitialProjection {
+            return
+        }
         await withCheckedContinuation { initialProjectionWaiters.append($0) }
     }
 
@@ -364,7 +367,9 @@ final class DomainWorkspacePresentationBridge {
     private func consume(_ event: DomainWorkspaceEvent) async {
         guard event.sequence > lastPublicationSequence else { return }
         let gap = lastPublicationSequence != 0 && event.sequence != lastPublicationSequence &+ 1
-        if !gap, await suppressSelfEcho(for: event) { return }
+        if !gap, await suppressSelfEcho(for: event) {
+            return
+        }
         let snapshot = await client.snapshot()
         project(
             snapshot,
@@ -384,9 +389,8 @@ final class DomainWorkspacePresentationBridge {
               originWindowID == client.windowID,
               suppressibleKinds.contains(event.kind),
               let workspaceID = event.workspaceID,
-              projectedModels[workspaceID] != nil
-        else { return false }
-        guard let workspace = await client.canonicalWorkspaceSnapshot(workspaceID),
+              projectedModels[workspaceID] != nil,
+              let workspace = await client.canonicalWorkspaceSnapshot(workspaceID),
               workspace.health.acceptsMutations,
               let model = workspaceManager?.workspace(withID: workspaceID)
         else { return false }

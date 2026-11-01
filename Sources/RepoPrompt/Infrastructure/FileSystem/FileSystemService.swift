@@ -1,13 +1,13 @@
 import Combine
+import CoreFoundation
 import CoreServices
+import Cuchardet
 import Dispatch
 import Foundation
+import UniversalCharsetDetection
 #if DEBUG || EDIT_FLOW_PERF
     import os
 #endif
-import CoreFoundation
-import Cuchardet
-import UniversalCharsetDetection
 #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
     import Darwin
 #else

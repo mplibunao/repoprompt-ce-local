@@ -3797,8 +3797,6 @@ class Changelog {
     }
 }
 
-import MarkdownUI
-
 class VersionManager: ObservableObject {
     @Published var shouldShowVersionPopup = false
     @Published var shouldShowWelcomeView = false

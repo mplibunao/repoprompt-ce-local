@@ -182,12 +182,12 @@ extension AgentModeRunService {
 
 // MARK: - Exact session partial application for terminal settlement
 
+@MainActor
 extension AgentModeRunService.Hooks {
     /// Binds the terminal settlement surface to the exact originating object.
     ///
     /// This is the app-host composition edge: the returned value retains that
     /// object directly and never re-resolves it through the tab dictionary.
-    @MainActor
     func bindTerminalSession(
         _ session: AgentTabSession
     ) -> AgentRunTerminalSessionBinding {
@@ -323,7 +323,6 @@ extension AgentModeRunService.Hooks {
 
     /// Gives queued follow-ups that will not start back to the user, once their run's terminal
     /// commit has published without a successor for them.
-    @MainActor
     private func returnQueuedFollowUpsToComposer(_ session: AgentTabSession) {
         // A newer run owns whatever is queued now, and drains it itself.
         guard !session.runState.isActive else { return }

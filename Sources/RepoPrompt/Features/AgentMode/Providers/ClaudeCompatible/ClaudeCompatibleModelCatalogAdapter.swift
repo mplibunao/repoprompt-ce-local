@@ -187,8 +187,7 @@ enum ClaudeCompatibleModelCatalogAdapter {
         {
             return false
         }
-        guard let known = AgentModel.resolvedModel(forRaw: baseModel, agentKind: agentKind) else { return false }
-        guard known.isValidFor(agentKind) else { return false }
+        guard let known = AgentModel.resolvedModel(forRaw: baseModel, agentKind: agentKind), known.isValidFor(agentKind) else { return false }
         return known.isAvailable
     }
 
@@ -304,8 +303,7 @@ enum ClaudeCompatibleModelCatalogAdapter {
         for agentKind: AgentProviderKind,
         availability: AgentModelCatalog.AvailabilityContext
     ) -> Bool {
-        guard AgentModelCatalog.isAgentAvailable(agentKind, availability: availability) else { return false }
-        guard let config = compatibleBackendConfig(for: agentKind) else { return false }
+        guard AgentModelCatalog.isAgentAvailable(agentKind, availability: availability), let config = compatibleBackendConfig(for: agentKind) else { return false }
         let specifier = ClaudeModelSpecifier(raw: rawModel)
         switch config.modelBehavior {
         case .noModel:

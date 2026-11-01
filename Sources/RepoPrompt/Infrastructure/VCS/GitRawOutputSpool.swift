@@ -118,12 +118,11 @@ final class GitRawOutputSpool: @unchecked Sendable {
         guard !data.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
-        if let terminalError { throw terminalError }
-        guard !isClosed, descriptor >= 0 else { throw GitRawOutputSpoolError.closed }
-        guard data.count <= resourcePolicy.maximumWriteChunkByteCount else {
-            try failLocked(.resourceAdmission)
+        if let terminalError {
+            throw terminalError
         }
-        guard let incoming = UInt64(exactly: data.count) else {
+        guard !isClosed, descriptor >= 0 else { throw GitRawOutputSpoolError.closed }
+        guard data.count <= resourcePolicy.maximumWriteChunkByteCount, let incoming = UInt64(exactly: data.count) else {
             try failLocked(.resourceAdmission)
         }
         let (proposed, overflowed) = byteCount.addingReportingOverflow(incoming)
@@ -144,7 +143,9 @@ final class GitRawOutputSpool: @unchecked Sendable {
     func finish() throws -> GitRawOutputSpoolLease {
         lock.lock()
         defer { lock.unlock() }
-        if let terminalError { throw terminalError }
+        if let terminalError {
+            throw terminalError
+        }
         guard !isClosed, descriptor >= 0 else { throw GitRawOutputSpoolError.closed }
         guard fsync(descriptor) == 0 else {
             try failLocked(.io(operation: "spool-fsync", code: errno))
@@ -555,10 +556,18 @@ final class GitProcessPipeSpoolDrain: @unchecked Sendable {
             let amount = bytes.withUnsafeMutableBytes { buffer in
                 Darwin.read(descriptor, buffer.baseAddress, buffer.count)
             }
-            if amount > 0 { return .data(Data(bytes.prefix(amount))) }
-            if amount == 0 { return .terminal }
-            if errno == EINTR { continue }
-            if errno == EAGAIN || errno == EWOULDBLOCK { return .unavailable }
+            if amount > 0 {
+                return .data(Data(bytes.prefix(amount)))
+            }
+            if amount == 0 {
+                return .terminal
+            }
+            if errno == EINTR {
+                continue
+            }
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                return .unavailable
+            }
             return .failed(.io(operation: "spool-pipe-read", code: errno))
         }
     }

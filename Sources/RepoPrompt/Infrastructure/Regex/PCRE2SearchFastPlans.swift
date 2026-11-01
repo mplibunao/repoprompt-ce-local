@@ -85,7 +85,9 @@ struct PCRE2ASCIIMarkerLinePattern: Equatable {
         shouldCancel: () -> Bool = { false }
     ) -> PCRE2LineRangeScanResult? {
         guard maxCollectedMatches > 0 else { return PCRE2LineRangeScanResult(hits: [], lineMatchCount: 0) }
-        if shouldCancel() { return PCRE2LineRangeScanResult(hits: [], lineMatchCount: 0) }
+        if shouldCancel() {
+            return PCRE2LineRangeScanResult(hits: [], lineMatchCount: 0)
+        }
         guard !markerBytes.isEmpty, !requiredPrefixBytes.isEmpty else { return nil }
 
         func scan(_ buffer: UnsafeBufferPointer<UInt8>) -> PCRE2LineRangeScanResult? {
@@ -160,7 +162,9 @@ struct PCRE2ASCIIMarkerLinePattern: Equatable {
         maxCollectedMatches: Int? = nil,
         shouldCancel: () -> Bool = { false }
     ) -> PCRE2LineScanResult? {
-        if shouldCancel() { return PCRE2LineScanResult(matchingLineNumbers: [], lineMatchCount: 0) }
+        if shouldCancel() {
+            return PCRE2LineScanResult(matchingLineNumbers: [], lineMatchCount: 0)
+        }
         guard !markerBytes.isEmpty, !requiredPrefixBytes.isEmpty else { return nil }
 
         func scan(_ buffer: UnsafeBufferPointer<UInt8>) -> PCRE2LineScanResult? {
@@ -276,7 +280,9 @@ struct PCRE2ASCIIWholeWordLiteral: Equatable {
         if collectMatches, subject.utf8.count > Self.cScanCollectByteLimit {
             return nil
         }
-        if shouldCancel() { return PCRE2LineScanResult(matchingLineNumbers: [], lineMatchCount: 0) }
+        if shouldCancel() {
+            return PCRE2LineScanResult(matchingLineNumbers: [], lineMatchCount: 0)
+        }
         let needleBytes = needle.utf8.map { caseInsensitive ? Self.asciiLowercase($0) : $0 }
         guard !needleBytes.isEmpty else { return nil }
 
@@ -354,9 +360,13 @@ struct PCRE2ASCIIWholeWordLiteral: Equatable {
         if needle.count > 1 {
             for offset in 1 ..< needle.count {
                 let byte = buffer[index + offset]
-                if byte == 10 || byte == 13 { return false }
+                if byte == 10 || byte == 13 {
+                    return false
+                }
                 let hay = caseInsensitive ? asciiLowercase(byte) : byte
-                if hay != needle[offset] { return false }
+                if hay != needle[offset] {
+                    return false
+                }
             }
         }
 
@@ -445,7 +455,9 @@ struct PCRE2AnchoredDeclarationLinePattern: Equatable {
         maxCollectedMatches: Int?,
         shouldCancel: () -> Bool
     ) -> PCRE2LineScanResult? {
-        if shouldCancel() { return PCRE2LineScanResult(matchingLineNumbers: [], lineMatchCount: 0) }
+        if shouldCancel() {
+            return PCRE2LineScanResult(matchingLineNumbers: [], lineMatchCount: 0)
+        }
 
         func scan(_ buffer: UnsafeBufferPointer<UInt8>) -> PCRE2LineScanResult? {
             var lineCount = 0
@@ -510,7 +522,9 @@ struct PCRE2AnchoredDeclarationLinePattern: Equatable {
     ) -> PCRE2LineScanResult? {
         guard subject.utf8.allSatisfy({ $0 < 0x80 }) else { return nil }
         var matchingLines: [Int] = []
-        if collectMatches { matchingLines.reserveCapacity(8) }
+        if collectMatches {
+            matchingLines.reserveCapacity(8)
+        }
         var matchCount = 0
 
         func scan(_ buffer: UnsafeBufferPointer<UInt8>) {
@@ -767,7 +781,9 @@ struct PCRE2LinePrefilterMatcher {
                 next = nodes[state].transitions[byte]
             }
             state = next ?? 0
-            if nodes[state].terminal { return true }
+            if nodes[state].terminal {
+                return true
+            }
         }
         return false
     }

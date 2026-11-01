@@ -89,7 +89,9 @@ final class MCPAppToolCatalogRegistration: WindowScopedService {
             let materializationState = EditFlowPerf.begin(EditFlowPerf.Stage.MCPToolCall.serviceToolLookupWindowCatalogToolsMaterialization)
             defer { EditFlowPerf.end(EditFlowPerf.Stage.MCPToolCall.serviceToolLookupWindowCatalogToolsMaterialization, materializationState) }
         #endif
-        if let toolsCache { return toolsCache }
+        if let toolsCache {
+            return toolsCache
+        }
         materializationErrorDescription = nil
 
         var providersByGroup: [MCPAppToolGroup: [any MCPAppToolProviding]] = [:]

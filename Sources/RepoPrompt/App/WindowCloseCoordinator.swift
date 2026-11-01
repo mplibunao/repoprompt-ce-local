@@ -168,8 +168,7 @@ final class WindowCloseCoordinator {
 
         alert.beginSheetModal(for: window) { [weak self, weak windowState] response in
             Task { @MainActor in
-                guard let self else { return }
-                guard self.pendingConfirmation?.id == attempt.id else { return }
+                guard let self, self.pendingConfirmation?.id == attempt.id else { return }
 
                 self.pendingConfirmation = nil
                 self.presentedAlert = nil

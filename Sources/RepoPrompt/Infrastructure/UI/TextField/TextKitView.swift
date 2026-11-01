@@ -125,12 +125,7 @@ struct TextKitView: NSViewRepresentable {
             pendingLayoutTask?.cancel()
             pendingLayoutTask = Task { @MainActor in
                 await Task.yield()
-                guard !Task.isCancelled else { return }
-                guard isActive else { return }
-                guard generation == layoutGeneration else { return }
-                guard textView.window != nil else { return }
-                guard expectedIsEmpty == textView.string.isEmpty else { return }
-                guard !textView.hasMarkedText() else { return }
+                guard !Task.isCancelled, isActive, generation == layoutGeneration, textView.window != nil, expectedIsEmpty == textView.string.isEmpty, !textView.hasMarkedText() else { return }
 
                 textView.clampSelectionToCurrentString()
                 let nsLen = textView.currentStringLength()
@@ -277,10 +272,8 @@ struct TextKitView: NSViewRepresentable {
 
         // Non-contiguous layout: disabled by default (fixes Intel Mac scroll issues),
         // but can be enabled to avoid expensive full-layout on click.
-        if let layoutManager = textView.layoutManager {
-            if layoutManager.allowsNonContiguousLayout != allowNonContiguousLayout {
-                layoutManager.allowsNonContiguousLayout = allowNonContiguousLayout
-            }
+        if let layoutManager = textView.layoutManager, layoutManager.allowsNonContiguousLayout != allowNonContiguousLayout {
+            layoutManager.allowsNonContiguousLayout = allowNonContiguousLayout
         }
 
         // Mirror wrapping → horizontal scroller only when wrapping is disabled
@@ -316,7 +309,9 @@ struct TextKitView: NSViewRepresentable {
         let wasFirstResponder = (textView.window?.firstResponder as? NSTextView) == textView
 
         if textView.string != text {
-            if textView.hasMarkedText() { return }
+            if textView.hasMarkedText() {
+                return
+            }
             if wasFirstResponder, !shouldForce {
                 // Do not overwrite in-flight user edits; let delegate drive the binding.
             } else {

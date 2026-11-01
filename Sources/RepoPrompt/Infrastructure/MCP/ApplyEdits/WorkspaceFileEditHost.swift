@@ -38,7 +38,9 @@ struct WorkspaceFileEditHost: FileEditHost {
     }
 
     func fileExists(path _: String) async -> Bool {
-        if case .existing = target { return true }
+        if case .existing = target {
+            return true
+        }
         return false
     }
 

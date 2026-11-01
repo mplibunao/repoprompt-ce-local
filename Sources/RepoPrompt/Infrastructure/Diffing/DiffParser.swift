@@ -1,6 +1,8 @@
 // File: RepoPrompt/Models/DiffParserUtils.swift
 
 import Foundation
+import RepoPromptDomainRuntime
+import SwiftUI
 
 /// Central on/off switch for every debug print in the diff-parser stack.
 enum DebugFlags { nonisolated(unsafe) static var parser = false }
@@ -10,7 +12,9 @@ enum DebugFlags { nonisolated(unsafe) static var parser = false }
 @inline(__always)
 func dprint(_ msg: @autoclosure () -> String) {
     #if DEBUG
-        if DebugFlags.parser { print(msg()) }
+        if DebugFlags.parser {
+            print(msg())
+        }
     #endif
 }
 
@@ -158,7 +162,9 @@ enum DiffParserUtils {
     /// **left-side** inner spaces and dropping the right-side pre-fence spaces.
     /// This avoids touching real `===` operators in code.
     static func stripInlineFenceWrappersIfSingleLine(_ s: String) -> String {
-        if s.contains("\n") || s.contains("\r") { return s }
+        if s.contains("\n") || s.contains("\r") {
+            return s
+        }
         let pattern = #"^[ \t]*=+([^\r\n]*?)[ \t]*=+[ \t]*$"#
         guard let rx = cachedRegex(pattern, options: []) else { return s }
         let ns = s as NSString
@@ -171,7 +177,9 @@ enum DiffParserUtils {
     /// strip the leading `=` fence but **preserve** the inner whitespace right
     /// after the fence (e.g. "===    code" → "    code").
     static func stripLeadingInlineFenceIfSingleLinePreservingInnerSpace(_ s: String) -> String {
-        if s.contains("\n") || s.contains("\r") { return s }
+        if s.contains("\n") || s.contains("\r") {
+            return s
+        }
         let pattern = #"^[ \t]*=+([ \t]*)([^\r\n]*)$"#
         guard let rx = cachedRegex(pattern, options: []) else { return s }
         let ns = s as NSString
@@ -185,7 +193,9 @@ enum DiffParserUtils {
     /// If the entire payload is a single line and ends with an inline fence,
     /// strip the trailing fence (and any whitespace right before it).
     static func stripTrailingInlineFenceIfSingleLine(_ s: String) -> String {
-        if s.contains("\n") || s.contains("\r") { return s }
+        if s.contains("\n") || s.contains("\r") {
+            return s
+        }
         let pattern = #"^([^\r\n]*?)[ \t]*=+[ \t]*$"#
         guard let rx = cachedRegex(pattern, options: []) else { return s }
         let ns = s as NSString
@@ -630,7 +640,7 @@ enum DiffParserUtils {
             let openEnd = openRange.upperBound
             let openTag = ns.substring(with: openRange)
 
-            /// Parse attributes (normal & smart quotes)
+            // Parse attributes (normal & smart quotes)
             func attr(_ name: String) -> String? {
                 let p = "\(name)\\s*=\\s*[\"\u{201C}\u{201D}]([^\"\u{201C}\u{201D}]+)[\"\u{201C}\u{201D}]"
                 guard let r = try? NSRegularExpression(pattern: p, options: [.caseInsensitive]),
@@ -1065,10 +1075,6 @@ enum DiffParserUtils {
     }
 }
 
-import Foundation
-import RepoPromptDomainRuntime
-import SwiftUI
-
 class DiffParser {
     private let fileManager: WorkspaceFilesViewModel
 
@@ -1089,11 +1095,18 @@ class DiffParser {
     ///   otherwise        -> keeps the newestAction
     private func mergedAction(_ previous: FileAction, _ newest: FileAction) -> FileAction {
         if (previous == .delete && newest == .create) ||
-            (previous == .create && newest == .delete) { return .rewrite }
-        if previous == .rewrite || newest == .rewrite { return .rewrite }
+            (previous == .create && newest == .delete)
+        {
+            return .rewrite
+        }
+        if previous == .rewrite || newest == .rewrite {
+            return .rewrite
+        }
         // Special case: create + modify should stay as create
         // (you can't modify a file that will be created)
-        if previous == .create, newest == .modify { return .create }
+        if previous == .create, newest == .modify {
+            return .create
+        }
         return newest // fallback: latest wins
     }
 
@@ -1257,7 +1270,7 @@ class DiffParser {
                 originalFileContent: loadedFile // ← NEW
             )
 
-            /// Join content lines from parsed changes for non-create/rewrite files
+            // Join content lines from parsed changes for non-create/rewrite files
             func contentFromChanges(_ ch: [Change]) -> String {
                 ch.compactMap { $0.content?.joined(separator: "\n") }.joined(separator: "\n")
             }
@@ -1375,10 +1388,8 @@ class DiffParser {
             if let file = await fileManager.findFile(
                 atPath: locationOld.correctedPath,
                 rootIdentifier: locationOld.rootIdentifier
-            ) {
-                if let data = await file.latestContent {
-                    loadedOld = data
-                }
+            ), let data = await file.latestContent {
+                loadedOld = data
             }
         }
 

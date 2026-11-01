@@ -96,9 +96,15 @@ final class AgentContextDrawerUIStore {
         }
 
         private static func tieBreakAfterTokens(_ lhs: AgentContextExportRow, _ rhs: AgentContextExportRow) -> Bool {
-            if lhs.kind != rhs.kind { return lhs.kind.rawValue < rhs.kind.rawValue }
-            if let ordering = stringOrdering(lhs.displayName, rhs.displayName, ascending: true) { return ordering }
-            if let ordering = stringOrdering(lhs.displayPath, rhs.displayPath, ascending: true) { return ordering }
+            if lhs.kind != rhs.kind {
+                return lhs.kind.rawValue < rhs.kind.rawValue
+            }
+            if let ordering = stringOrdering(lhs.displayName, rhs.displayName, ascending: true) {
+                return ordering
+            }
+            if let ordering = stringOrdering(lhs.displayPath, rhs.displayPath, ascending: true) {
+                return ordering
+            }
             return tieBreakAfterNameAndPath(lhs, rhs)
         }
 
@@ -106,8 +112,12 @@ final class AgentContextDrawerUIStore {
             if lhs.metrics.tokenSortKey != rhs.metrics.tokenSortKey {
                 return lhs.metrics.tokenSortKey > rhs.metrics.tokenSortKey
             }
-            if lhs.kind != rhs.kind { return lhs.kind.rawValue < rhs.kind.rawValue }
-            if lhs.rootID != rhs.rootID { return lhs.rootID.uuidString < rhs.rootID.uuidString }
+            if lhs.kind != rhs.kind {
+                return lhs.kind.rawValue < rhs.kind.rawValue
+            }
+            if lhs.rootID != rhs.rootID {
+                return lhs.rootID.uuidString < rhs.rootID.uuidString
+            }
             return lhs.id.fileID.uuidString < rhs.id.fileID.uuidString
         }
     }

@@ -1152,9 +1152,7 @@ actor AgentSessionDataService {
         for workspace: WorkspaceModel
     ) async throws {
         let validatedName = AgentSession.validatedName(newName)
-        guard !validatedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        guard var session = try await loadAgentSession(id: id, for: workspace) else { return }
-        guard session.name != validatedName else { return }
+        guard !validatedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, var session = try await loadAgentSession(id: id, for: workspace), session.name != validatedName else { return }
         session.name = validatedName
         _ = try await saveAgentSession(session, for: workspace)
     }
@@ -1424,8 +1422,7 @@ actor AgentSessionDataService {
         for workspace: WorkspaceModel
     ) async throws -> UUID? {
         let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard let uuid = UUID(uuidString: trimmed) else { return nil }
+        guard !trimmed.isEmpty, let uuid = UUID(uuidString: trimmed) else { return nil }
         return try await loadAgentSession(id: uuid, for: workspace) != nil ? uuid : nil
     }
 
@@ -1470,9 +1467,9 @@ actor AgentSessionDataService {
     func findAgentSessionForTab(_ tabID: UUID, for workspace: WorkspaceModel) async throws -> AgentSession? {
         if let records = try? await metadataRecords(for: workspace),
            let best = records
-           .filter({ $0.composeTabID == tabID })
-           .sortedForAgentSessionMetadataIndex()
-           .first
+               .filter({ $0.composeTabID == tabID })
+               .sortedForAgentSessionMetadataIndex()
+               .first
         {
             if let session = try await loadAgentSession(id: best.id, for: workspace) {
                 return session

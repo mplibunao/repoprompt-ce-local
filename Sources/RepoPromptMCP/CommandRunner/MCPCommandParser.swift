@@ -846,18 +846,17 @@ enum MCPCommandParser {
             // Regex for detecting slice tokens: path:start-end or path:start (e.g., file.swift:10-20)
             let slicePattern = try! NSRegularExpression(pattern: #"^(.+?):(\d+)(?:-(\d+))?$"#)
 
-            /// Helper to check if a token looks like a slice
+            // Helper to check if a token looks like a slice
             func isSliceToken(_ token: String) -> Bool {
                 let range = NSRange(token.startIndex ..< token.endIndex, in: token)
                 return slicePattern.firstMatch(in: token, range: range) != nil
             }
 
-            /// Helper to parse slice tokens into path and ranges
+            // Helper to parse slice tokens into path and ranges
             func parseSliceToken(_ token: String) -> (path: String, startLine: Int, endLine: Int?)? {
                 let range = NSRange(token.startIndex ..< token.endIndex, in: token)
-                guard let match = slicePattern.firstMatch(in: token, range: range) else { return nil }
-
-                guard let pathRange = Range(match.range(at: 1), in: token),
+                guard let match = slicePattern.firstMatch(in: token, range: range),
+                      let pathRange = Range(match.range(at: 1), in: token),
                       let startRange = Range(match.range(at: 2), in: token),
                       let startLine = Int(token[startRange]) else { return nil }
 
@@ -872,7 +871,7 @@ enum MCPCommandParser {
                 return (path, startLine, endLine)
             }
 
-            /// Helper to extract mode flags, global flags, paths, and slices from tokens
+            // Helper to extract mode flags, global flags, paths, and slices from tokens
             func extractFlagsAndPaths(from tokens: [String]) -> (mode: String?, strict: Bool?, pathDisplay: String?, paths: [String], slices: [[String: Any]]?) {
                 let flags = parseFlagArgs(tokens)
                 var mode: String? = nil
@@ -1578,10 +1577,18 @@ enum MCPCommandParser {
                 args["detail"] = UncheckedSendableValue(detail)
             }
             // Convenience flags for detail level
-            if flags["summary"] != nil { args["detail"] = UncheckedSendableValue("summary") }
-            if flags["files"] != nil { args["detail"] = UncheckedSendableValue("files") }
-            if flags["patches"] != nil { args["detail"] = UncheckedSendableValue("patches") }
-            if flags["full"] != nil { args["detail"] = UncheckedSendableValue("full") }
+            if flags["summary"] != nil {
+                args["detail"] = UncheckedSendableValue("summary")
+            }
+            if flags["files"] != nil {
+                args["detail"] = UncheckedSendableValue("files")
+            }
+            if flags["patches"] != nil {
+                args["detail"] = UncheckedSendableValue("patches")
+            }
+            if flags["full"] != nil {
+                args["detail"] = UncheckedSendableValue("full")
+            }
             // Remap legacy --truncate flag to detail level (only if detail wasn't explicitly set)
             if args["detail"] == nil, let truncateRaw = flags["truncate"] ?? flags["t"] {
                 if let truncateVal = parseBoolFlag(truncateRaw) {
@@ -1954,7 +1961,9 @@ enum MCPCommandParser {
         while i < trimmed.endIndex {
             let ch = trimmed[i]
             if let q = inQuote {
-                if ch == q { inQuote = nil }
+                if ch == q {
+                    inQuote = nil
+                }
             } else if ch == "\"" || ch == "'" {
                 inQuote = ch
             } else if ch.isWhitespace {
@@ -1981,7 +1990,9 @@ enum MCPCommandParser {
         guard let start = startChar, start.isNumber else { return false }
         // Rest must be digits or decimal point
         while let ch = chars.next() {
-            if !ch.isNumber, ch != "." { return false }
+            if !ch.isNumber, ch != "." {
+                return false
+            }
         }
         return true
     }
@@ -2383,10 +2394,8 @@ enum MCPCommandParser {
 
         for cmd in allCommands {
             let dist = levenshteinDistance(normalized, cmd)
-            if dist <= threshold {
-                if bestMatch == nil || dist < bestMatch!.distance {
-                    bestMatch = (cmd, dist)
-                }
+            if dist <= threshold, bestMatch == nil || dist < bestMatch!.distance {
+                bestMatch = (cmd, dist)
             }
         }
 
@@ -2395,8 +2404,12 @@ enum MCPCommandParser {
 
     /// Simple Levenshtein distance for typo detection.
     private static func levenshteinDistance(_ s1: String, _ s2: String) -> Int {
-        if s1.isEmpty { return s2.count }
-        if s2.isEmpty { return s1.count }
+        if s1.isEmpty {
+            return s2.count
+        }
+        if s2.isEmpty {
+            return s1.count
+        }
 
         let a = Array(s1)
         let b = Array(s2)

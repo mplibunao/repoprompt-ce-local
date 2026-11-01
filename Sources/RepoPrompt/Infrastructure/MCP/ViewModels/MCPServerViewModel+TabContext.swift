@@ -139,7 +139,9 @@ extension MCPServerViewModel {
             timeoutSeconds: TimeInterval
         ) async -> ContextBuilderTeardownPublicationOutcome {
             let key = Key(runID: runID, connectionID: connectionID)
-            if let outcome = retainedOutcomes[key] { return outcome }
+            if let outcome = retainedOutcomes[key] {
+                return outcome
+            }
 
             let waiterID = UUID()
             return await withTaskCancellationHandler {
@@ -387,7 +389,9 @@ extension MCPServerViewModel {
         case tabContextSnapshot(TabContextSnapshot, source: TabContextSnapshotSource)
 
         var snapshot: TabContextSnapshot? {
-            if case let .tabContextSnapshot(snapshot, _) = self { return snapshot }
+            if case let .tabContextSnapshot(snapshot, _) = self {
+                return snapshot
+            }
             return nil
         }
     }
@@ -597,14 +601,10 @@ extension MCPServerViewModel {
             return true
         }
 
-        guard let manager = workspaceManager else {
-            return false
-        }
-
-        guard
-            let workspaceID = bound.workspaceID,
-            let workspaceIndex = manager.workspaces.firstIndex(where: { $0.id == workspaceID }),
-            manager.workspaces[workspaceIndex].composeTabs.contains(where: { $0.id == bound.tabID })
+        guard let manager = workspaceManager,
+              let workspaceID = bound.workspaceID,
+              let workspaceIndex = manager.workspaces.firstIndex(where: { $0.id == workspaceID }),
+              manager.workspaces[workspaceIndex].composeTabs.contains(where: { $0.id == bound.tabID })
         else {
             return false
         }
@@ -728,7 +728,9 @@ extension MCPServerViewModel {
 
     @MainActor
     private func beginMirroringForConnection(_ connectionID: UUID, context: TabContextSnapshot) {
-        if tabContextCancellablesByConnectionID[connectionID] != nil { return }
+        if tabContextCancellablesByConnectionID[connectionID] != nil {
+            return
+        }
 
         guard let manager = workspaceManager else {
             tabContextLog("beginMirroring skipped - no workspace manager connectionID=\(connectionID)")
@@ -1098,7 +1100,9 @@ extension MCPServerViewModel {
         flushActiveSelection: Bool
     ) -> TabContextSnapshot {
         let resolvedWorkspaceID: UUID? = {
-            if let requestedWorkspaceID { return requestedWorkspaceID }
+            if let requestedWorkspaceID {
+                return requestedWorkspaceID
+            }
             return workspaceManager?.workspaces.first(where: { workspace in
                 workspace.composeTabs.contains(where: { $0.id == composeSnapshot.id })
             })?.id ?? workspaceManager?.activeWorkspace?.id
@@ -2024,11 +2028,11 @@ extension MCPServerViewModel {
             codemapAutoEnabled: logicalSelection.codemapAutoEnabled
         )
         guard MCPReadFileAutoSelectionCoordinator.authoritativeSelection(
-            expectedBaseForPreservation,
-            isPreservedBy: persistedSelection,
-            automaticCodemapDisposition: automaticCodemapDisposition
-        ),
-            let target = currentReadFileAutoSelectionTab(for: contextKey)
+                  expectedBaseForPreservation,
+                  isPreservedBy: persistedSelection,
+                  automaticCodemapDisposition: automaticCodemapDisposition
+              ),
+              let target = currentReadFileAutoSelectionTab(for: contextKey)
         else { return nil }
         let canonicalUnchanged = target.tab.selection == persistedSelection
         var coordinatorVerified = canonicalUnchanged
@@ -2189,8 +2193,7 @@ extension MCPServerViewModel {
             tabID: tabID,
             workspaceID: workspaceID,
             expectedSourceIdentity: authority.sourceIdentity
-        ) else { return false }
-        guard let workspaceManager else { return false }
+        ), let workspaceManager else { return false }
         do {
             try await authority.validate(
                 workspaceManager: workspaceManager,
@@ -2327,10 +2330,10 @@ extension MCPServerViewModel {
                 sourceIdentity: authoritySource.authorityIdentity
             )
             guard fileToolLookupSnapshotIsCurrent(
-                authoritySnapshot,
-                connectionID: bindingConnectionID
-            ), fileToolBindingSourceIsCurrent(authoritySource, for: authoritySnapshot),
-            fileToolRootCatalogSnapshotIsCurrent(rootCatalogSnapshot)
+                      authoritySnapshot,
+                      connectionID: bindingConnectionID
+                  ), fileToolBindingSourceIsCurrent(authoritySource, for: authoritySnapshot),
+                  fileToolRootCatalogSnapshotIsCurrent(rootCatalogSnapshot)
             else {
                 throw FileToolAuthorityFailure.superseded
             }
@@ -2809,12 +2812,12 @@ extension MCPServerViewModel {
         let bindingGeneration = snapshot.readFileAutoSelectionGeneration
         let hydratedState = await agentWorktreeBindingStateResolver(sessionID, snapshot.tabID)
         guard fileToolLookupSnapshotIsCurrent(
-            snapshot,
-            connectionID: connectionID,
-            expectedBindingGeneration: bindingGeneration
-        ),
-            agentWorktreeBindingStateProvider?(sessionID, snapshot.tabID) == hydratedState
-            || agentWorktreeBindingStateProvider == nil
+                  snapshot,
+                  connectionID: connectionID,
+                  expectedBindingGeneration: bindingGeneration
+              ),
+              agentWorktreeBindingStateProvider?(sessionID, snapshot.tabID) == hydratedState
+              || agentWorktreeBindingStateProvider == nil
         else {
             #if DEBUG
                 fileToolLookupContextStaleCompletionCount += 1
@@ -3358,8 +3361,12 @@ extension MCPServerViewModel {
 
     private static func hint(_ hint: TabContextHint, matches context: TabContextSnapshot) -> Bool {
         guard hint.tabID == context.tabID else { return false }
-        if let workspaceID = hint.workspaceID, context.workspaceID != workspaceID { return false }
-        if let windowID = hint.windowID, context.windowID != windowID { return false }
+        if let workspaceID = hint.workspaceID, context.workspaceID != workspaceID {
+            return false
+        }
+        if let windowID = hint.windowID, context.windowID != windowID {
+            return false
+        }
         return true
     }
 
@@ -3400,7 +3407,9 @@ extension MCPServerViewModel {
         tabContextByConnectionID[connectionID] = rebound
         presentationWindowByConnection[connectionID] = rebound.windowID
         let mappingOK = registerRunIDMapping(connectionID: connectionID, runID: runID, windowID: rebound.windowID)
-        if let clientName { recordLastContext(clientName: clientName, context: rebound) }
+        if let clientName {
+            recordLastContext(clientName: clientName, context: rebound)
+        }
         beginMirroringForConnection(connectionID, context: rebound)
         tabContextLog("resolveTabContext handover: runID=\(runID) \(previousConnection) -> \(connectionID) mappingOK=\(mappingOK) window=\(providedWindowID?.description ?? "nil")")
         return rebound
@@ -3938,10 +3947,10 @@ extension MCPServerViewModel {
             return .conflict(reason: "canonical selection changed concurrently")
         }
         guard let canonicalSelection = selectionCoordinator.selectionSnapshot(
-            for: fence.identity,
-            flushPendingUIIfActive: false
-        )?.selection,
-            canonicalSelection == requested
+                  for: fence.identity,
+                  flushPendingUIIfActive: false
+              )?.selection,
+              canonicalSelection == requested
         else {
             return .conflict(reason: "canonical selection verification failed")
         }
@@ -3974,12 +3983,12 @@ extension MCPServerViewModel {
             path: fence.capability.gitDataRoot.standardizedFullPath,
             kind: .workspaceGitData
         )
-        guard currentRoot == fence.capability.gitDataRoot else { return false }
-        guard await SelectedGitDiffArtifactAuthorizationService()
-            .visibleRootCheckoutsAreCurrent(
-                capability: fence.capability,
-                store: promptVM.workspaceFileContextStore
-            )
+        guard currentRoot == fence.capability.gitDataRoot,
+              await SelectedGitDiffArtifactAuthorizationService()
+                  .visibleRootCheckoutsAreCurrent(
+                      capability: fence.capability,
+                      store: promptVM.workspaceFileContextStore
+                  )
         else { return false }
         guard let snapshot = fence.grantSnapshot else { return true }
         return gitArtifactAdvertisementRegistry.isCurrent(snapshot)
@@ -3990,10 +3999,7 @@ extension MCPServerViewModel {
         connectionIDByRunID: [UUID: UUID],
         connectionIDToRunID: [UUID: UUID]
     ) -> UUID? {
-        guard let connectionID = connectionIDByRunID[runID] else {
-            return nil
-        }
-        guard connectionIDToRunID[connectionID] == runID else {
+        guard let connectionID = connectionIDByRunID[runID], connectionIDToRunID[connectionID] == runID else {
             return nil
         }
         return connectionID
@@ -5120,8 +5126,7 @@ extension MCPServerViewModel {
         }
 
         // 1) Persist to backing store without publishing UI snapshots (prevents tool echo)
-        guard isStillCurrent(), !Task.isCancelled else { return nil }
-        guard manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspaceID) else { return nil }
+        guard isStillCurrent(), !Task.isCancelled, manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspaceID) else { return nil }
         let identity = WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: context.tabID)
         guard let storedTab = manager.composeTab(for: identity) else { return nil }
         let committedSelectionRevision = manager.selectionRevisionForMCP(

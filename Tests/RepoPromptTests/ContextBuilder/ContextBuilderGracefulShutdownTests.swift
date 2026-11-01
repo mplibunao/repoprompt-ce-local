@@ -516,7 +516,9 @@ final class ContextBuilderGracefulShutdownTests: XCTestCase {
     ) async -> Bool {
         let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutNanoseconds
         while DispatchTime.now().uptimeNanoseconds < deadline {
-            if await condition() { return true }
+            if await condition() {
+                return true
+            }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         return await condition()
@@ -649,7 +651,9 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
         let viewModel = window.contextBuilderAgentViewModel
         var runs = try await [startRun(window, tabID: tabIDs[0])]
         // A second run that does not start has already failed the test; the close is checked anyway.
-        if let second = try? await startRun(window, tabID: tabIDs[1]) { runs.append(second) }
+        if let second = try? await startRun(window, tabID: tabIDs[1]) {
+            runs.append(second)
+        }
 
         window.beginClose()
         let cancelledAsCloseBegan = await waitUntil {
@@ -939,7 +943,9 @@ final class ContextBuilderWindowAdmissionTests: XCTestCase {
     ) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while ContinuousClock.now < deadline {
-            if await condition() { return true }
+            if await condition() {
+                return true
+            }
             try? await Task.sleep(for: .milliseconds(5))
         }
         return await condition()
@@ -1013,7 +1019,9 @@ private actor GatedHeadlessAgentProviderState {
     }
 
     func waitUntilDisposeStarted() async {
-        if disposeCallCount > 0 { return }
+        if disposeCallCount > 0 {
+            return
+        }
         await withCheckedContinuation { waiters.append($0) }
     }
 }
@@ -1034,7 +1042,9 @@ actor ContextBuilderTestGate {
     }
 
     func waitUntilEntered() async {
-        if entered { return }
+        if entered {
+            return
+        }
         await withCheckedContinuation { entryWaiters.append($0) }
     }
 
@@ -1065,7 +1075,9 @@ private actor ContextBuilderTestFirstEvent {
     }
 
     func wait() async -> Event {
-        if let firstEvent { return firstEvent }
+        if let firstEvent {
+            return firstEvent
+        }
         return await withCheckedContinuation { waiters.append($0) }
     }
 }

@@ -458,11 +458,7 @@ public enum GitignoreCompiler {
         directoryOnly: Bool,
         absolute: Bool
     ) -> GitPatternPrefilter {
-        guard !pattern.isEmpty else { return .always }
-        guard !pattern.contains("\\") else { return .always }
-        guard !pattern.contains("**") else { return .always }
-        guard !pattern.contains("?") else { return .always }
-        guard !pattern.contains("[") && !pattern.contains("]") else { return .always }
+        guard !pattern.isEmpty, !pattern.contains("\\"), !pattern.contains("**"), !pattern.contains("?"), !pattern.contains("[") && !pattern.contains("]") else { return .always }
 
         let containsSlash = pattern.contains("/")
         let starCount = pattern.reduce(0) { partialResult, character in
@@ -535,7 +531,9 @@ public enum GitignoreCompiler {
         var variants: [[String]] = [[]]
 
         for part in components {
-            if part.isEmpty { continue }
+            if part.isEmpty {
+                continue
+            }
             guard let expansions = expandLiteralComponent(part) else {
                 return nil
             }
@@ -623,9 +621,7 @@ public enum GitignoreCompiler {
     }
 
     private static func expandSimpleCaseFold(_ content: Substring) -> [String]? {
-        guard content.count == 2 else { return nil }
-        guard let first = content.first, let second = content.last else { return nil }
-        guard first.isLetter, second.isLetter else { return nil }
+        guard content.count == 2, let first = content.first, let second = content.last, first.isLetter, second.isLetter else { return nil }
         let lowerFirst = String(first).lowercased()
         let lowerSecond = String(second).lowercased()
         guard lowerFirst == lowerSecond else { return nil }

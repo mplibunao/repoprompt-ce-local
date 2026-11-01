@@ -140,8 +140,12 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
             "contract=\(contractKind.rawValue)",
             "elapsed_ms=\(String(format: "%.3f", elapsedMilliseconds))"
         ]
-        if let runID { fields.append("run_id=\(runID.uuidString)") }
-        if let windowID { fields.append("window_id=\(windowID)") }
+        if let runID {
+            fields.append("run_id=\(runID.uuidString)")
+        }
+        if let windowID {
+            fields.append("window_id=\(windowID)")
+        }
         if let requestIdentity {
             if let requestID = requestIdentity.jsonRPCRequestID {
                 fields.append("request_id=\(Self.quotedClientValue("\(requestID)"))")
@@ -156,15 +160,33 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
                 fields.append("request_ordinal=\(requestOrdinal)")
             }
         }
-        if let executionDeadlineSeconds { fields.append("deadline_s=\(executionDeadlineSeconds)") }
-        if let cleanupGraceSeconds { fields.append("grace_s=\(cleanupGraceSeconds)") }
-        if let cleanupDisposition { fields.append("cleanup_disposition=\(cleanupDisposition.rawValue)") }
-        if let cancellationRequested { fields.append("cancellation_requested=\(cancellationRequested)") }
-        if let cancellationOutcome { fields.append("cancellation_outcome=\(cancellationOutcome)") }
-        if let cancellationOrigin { fields.append("cancellation_origin=\(cancellationOrigin.rawValue)") }
-        if let settlement { fields.append("settlement=\(settlement)") }
-        if let graceOutcome { fields.append("grace_outcome=\(graceOutcome)") }
-        if let escalationReason { fields.append("escalation_reason=\(escalationReason)") }
+        if let executionDeadlineSeconds {
+            fields.append("deadline_s=\(executionDeadlineSeconds)")
+        }
+        if let cleanupGraceSeconds {
+            fields.append("grace_s=\(cleanupGraceSeconds)")
+        }
+        if let cleanupDisposition {
+            fields.append("cleanup_disposition=\(cleanupDisposition.rawValue)")
+        }
+        if let cancellationRequested {
+            fields.append("cancellation_requested=\(cancellationRequested)")
+        }
+        if let cancellationOutcome {
+            fields.append("cancellation_outcome=\(cancellationOutcome)")
+        }
+        if let cancellationOrigin {
+            fields.append("cancellation_origin=\(cancellationOrigin.rawValue)")
+        }
+        if let settlement {
+            fields.append("settlement=\(settlement)")
+        }
+        if let graceOutcome {
+            fields.append("grace_outcome=\(graceOutcome)")
+        }
+        if let escalationReason {
+            fields.append("escalation_reason=\(escalationReason)")
+        }
         if let handlerPhase {
             fields.append("handler_phase=\(handlerPhase.phase.rawValue)")
             fields.append("handler_phase_transition=\(handlerPhase.transition.rawValue)")
@@ -173,10 +195,18 @@ struct MCPToolExecutionTraceEvent: Equatable, CustomStringConvertible {
         if let handlerPhaseAgeMilliseconds {
             fields.append("handler_phase_age_ms=\(String(format: "%.3f", handlerPhaseAgeMilliseconds))")
         }
-        if let blockingProviderCount { fields.append("blocking_count=\(blockingProviderCount)") }
-        if let releasedProviderCount { fields.append("released_count=\(releasedProviderCount)") }
-        if let mutationState { fields.append("mutation_state=\(mutationState.rawValue)") }
-        if let mutationOperationID { fields.append("operation_id=\(Self.quotedClientValue(mutationOperationID))") }
+        if let blockingProviderCount {
+            fields.append("blocking_count=\(blockingProviderCount)")
+        }
+        if let releasedProviderCount {
+            fields.append("released_count=\(releasedProviderCount)")
+        }
+        if let mutationState {
+            fields.append("mutation_state=\(mutationState.rawValue)")
+        }
+        if let mutationOperationID {
+            fields.append("operation_id=\(Self.quotedClientValue(mutationOperationID))")
+        }
         return fields.joined(separator: " ")
     }
 
@@ -244,8 +274,7 @@ enum MCPToolExecutionTracer {
                 "\(event.description, privacy: .public)"
             )
         }
-        guard event.isAlwaysEmitted || successTracingEnabled else { return }
-        guard let data = "[MCPToolExecution] \(event)\n".data(using: .utf8) else { return }
+        guard event.isAlwaysEmitted || successTracingEnabled, let data = "[MCPToolExecution] \(event)\n".data(using: .utf8) else { return }
         state.lock.lock()
         defer { state.lock.unlock() }
         // Best-effort raw write; FileHandle.write raises an uncatchable ObjC

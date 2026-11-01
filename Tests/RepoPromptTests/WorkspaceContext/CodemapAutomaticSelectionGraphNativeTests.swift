@@ -117,7 +117,9 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
             return XCTFail("Nested source should contribute to the completed graph")
         }
         XCTAssertFalse(pinned.snapshot.slotsByFileID.values.contains { slot in
-            if case .terminalExcluded(.repositoryBoundary) = slot.state { return true }
+            if case .terminalExcluded(.repositoryBoundary) = slot.state {
+                return true
+            }
             return false
         })
         XCTAssertTrue(fixture.builtSourceTexts.values.contains { $0.contains("NestedWorktreeOnly") })
@@ -317,7 +319,9 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
                pinned.snapshot.coverage.isComplete
             {
                 let graph = PathKeyedGraph(pinned.snapshot)
-                if condition(graph) { return graph }
+                if condition(graph) {
+                    return graph
+                }
             }
             try await Task.sleep(for: .milliseconds(25))
         }
@@ -366,10 +370,10 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
         while clock.now < deadline {
             let accounting = await engine.accounting()
             if let root = accounting.graphIndexRoots.first(where: {
-                $0.rootEpoch.rootID == rootID && $0.rootEpoch != excludedRootEpoch
-            }),
-                root.phase == .complete,
-                afterCompletedRunCount.map({ accounting.counters.graphIndexCoveragesCompleted > $0 }) ?? true
+                   $0.rootEpoch.rootID == rootID && $0.rootEpoch != excludedRootEpoch
+               }),
+               root.phase == .complete,
+               afterCompletedRunCount.map({ accounting.counters.graphIndexCoveragesCompleted > $0 }) ?? true
             {
                 return root
             }

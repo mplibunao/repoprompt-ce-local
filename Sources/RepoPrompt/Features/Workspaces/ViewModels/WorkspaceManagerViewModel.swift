@@ -1865,7 +1865,9 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     /// Async helper to await initialization completion.
     func awaitInitialized() async {
-        if isInitialized, !isSwitchingWorkspace { return }
+        if isInitialized, !isSwitchingWorkspace {
+            return
+        }
         await withCheckedContinuation { continuation in
             onceInitialized { [weak self] in
                 guard let self else {
@@ -2684,9 +2686,15 @@ class WorkspaceManagerViewModel: ObservableObject {
                     let ws = loadResult.workspace
                     #if DEBUG
                         decodedWorkspaceCount += 1
-                        if loadResult.cacheHit { workspaceDecodeCacheHitCount += 1 }
-                        if loadResult.composeTabsNormalized { composeTabNormalizationCount += 1 }
-                        if loadResult.normalizationRequiresSave { normalizationSaveBackCount += 1 }
+                        if loadResult.cacheHit {
+                            workspaceDecodeCacheHitCount += 1
+                        }
+                        if loadResult.composeTabsNormalized {
+                            composeTabNormalizationCount += 1
+                        }
+                        if loadResult.normalizationRequiresSave {
+                            normalizationSaveBackCount += 1
+                        }
                     #endif
                     loaded.append(ws)
                 } else {
@@ -2858,14 +2866,18 @@ class WorkspaceManagerViewModel: ObservableObject {
         guard pollTimer?.isValid == true else { return }
         if let activeWorkspaceID,
            agentAdmissionRecoveryOwnsWorkspace(activeWorkspaceID)
-        { return }
+        {
+            return
+        }
 
         pollTimerSaveTask?.cancel()
         pollTimerSaveTask = Task { @MainActor [weak self] in
             guard let self else { return }
 
             // Skip while switching workspaces or performing a refresh
-            if isSwitchingWorkspace || isRefreshing { return }
+            if isSwitchingWorkspace || isRefreshing {
+                return
+            }
 
             // Check if multiple windows have the same workspace open
             // Only check if we have a valid activeWorkspaceID
@@ -3002,7 +3014,9 @@ class WorkspaceManagerViewModel: ObservableObject {
             var loadedMutable: [WorkspaceModel] = []
 
             for entry in indexEntries {
-                if Task.isCancelled { return }
+                if Task.isCancelled {
+                    return
+                }
                 guard let wURL = Self.admittedWorkspaceFileURL(for: entry, base: base) else { continue }
 
                 if FileManager.default.fileExists(atPath: wURL.path) {
@@ -3023,7 +3037,9 @@ class WorkspaceManagerViewModel: ObservableObject {
 
             // Freeze mutable collection before crossing actor boundary
             let loaded = loadedMutable
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                return
+            }
 
             await MainActor.run { [weak self, loaded, token, currentActiveID] in
                 guard let self else { return }
@@ -3062,8 +3078,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
         do {
             let diskWorkspace = try await Self.loadWorkspaceFromFileAsync(at: fileURL, scheduleNormalizationWriteback: false)
-            guard let latestIndex = workspaceIndex(for: workspaceID) else { return }
-            guard !hasLocalRepoPathEdit(for: workspaces[latestIndex]) else { return }
+            guard let latestIndex = workspaceIndex(for: workspaceID), !hasLocalRepoPathEdit(for: workspaces[latestIndex]) else { return }
             let previousRepoPaths = workspaces[latestIndex].repoPaths
             workspaces[latestIndex].repoPaths = diskWorkspace.repoPaths
             workspaces[latestIndex].dateModified = diskWorkspace.dateModified
@@ -3160,10 +3175,10 @@ class WorkspaceManagerViewModel: ObservableObject {
             var updatesMutable: [(id: UUID, presets: [WorkspacePreset], activePresetID: UUID?)] = []
 
             for entry in indexEntries {
-                if Task.isCancelled { return }
-                guard let wURL = Self.admittedWorkspaceFileURL(for: entry, base: base) else { continue }
-
-                guard FileManager.default.fileExists(atPath: wURL.path) else {
+                if Task.isCancelled {
+                    return
+                }
+                guard let wURL = Self.admittedWorkspaceFileURL(for: entry, base: base), FileManager.default.fileExists(atPath: wURL.path) else {
                     continue
                 }
 
@@ -3181,7 +3196,9 @@ class WorkspaceManagerViewModel: ObservableObject {
 
             // Freeze mutable collection before crossing actor boundary
             let updates = updatesMutable
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                return
+            }
 
             await MainActor.run { [weak self, updates, token] in
                 guard let self else { return }
@@ -3688,7 +3705,9 @@ class WorkspaceManagerViewModel: ObservableObject {
             } catch {
                 return false
             }
-            if Task.isCancelled { return false }
+            if Task.isCancelled {
+                return false
+            }
             remaining -= interval
         }
         return !isChatBusy
@@ -3881,7 +3900,9 @@ class WorkspaceManagerViewModel: ObservableObject {
     ) async -> Bool {
         guard pendingSwitchConfirmationRequest == nil else { return false }
         return await withTaskCancellationHandler {
-            if Task.isCancelled { return false }
+            if Task.isCancelled {
+                return false
+            }
             return await withCheckedContinuation { continuation in
                 guard ownsWorkspaceSwitchOperation(operationID), !Task.isCancelled else {
                     continuation.resume(returning: false)
@@ -4584,9 +4605,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         runGitDataMaintenanceOnWorkspaceOpen(activeWS)
 
         let overlayVisibilityGate = WorkspaceSwitchOverlayVisibilityGate { [weak self] in
-            guard let self else { return }
-            guard !Task.isCancelled else { return }
-            guard isHydrationGenerationCurrent(hydrationGeneration, workspaceID: activeWS.id) else { return }
+            guard let self, !Task.isCancelled, isHydrationGenerationCurrent(hydrationGeneration, workspaceID: activeWS.id) else { return }
             hideWorkspaceSwitchOverlay(reason: "primary roots visible workspace=\"\(activeWS.name)\"")
         }
         func loadTargetWorkspaceFolders() async {
@@ -5789,11 +5808,8 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     private func adoptProjectedActiveWorkspaceID(_ workspaceID: UUID?) {
-        guard let workspaceID else {
-            activeWorkspaceID = nil
-            return
-        }
-        guard let workspace = workspace(withID: workspaceID),
+        guard let workspaceID,
+              let workspace = workspace(withID: workspaceID),
               workspace.consolidatedIntoWorkspaceID == nil,
               !pendingConsolidatedRestoreIDs.contains(workspaceID)
         else {
@@ -5953,7 +5969,9 @@ class WorkspaceManagerViewModel: ObservableObject {
 
         let oldSelection = workspaces[workspaceIndex].composeTabs[tabIndex].selection
         var updatedTab = tab
-        if touchModified { updatedTab.lastModified = Date() }
+        if touchModified {
+            updatedTab.lastModified = Date()
+        }
         workspaces[workspaceIndex].composeTabs[tabIndex] = updatedTab
         recordSelectionRevisionIfChanged(
             workspaceIndex: workspaceIndex,
@@ -6110,8 +6128,7 @@ class WorkspaceManagerViewModel: ObservableObject {
             await composeTabFastStateDidApplyHandlerForTesting?(tabID)
         #endif
         await Task.yield()
-        guard !Task.isCancelled else { return }
-        guard let refreshedTab = composeTab(with: tabID) else { return }
+        guard !Task.isCancelled, let refreshedTab = composeTab(with: tabID) else { return }
         await applyComposeTabHeavyFileState(refreshedTab)
         guard !Task.isCancelled else { return }
         if performFinalRecount {
@@ -6141,8 +6158,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     @MainActor
     private func applyComposeTabHeavyFileState(_ tab: ComposeTabState) async {
-        guard !Task.isCancelled else { return }
-        guard let active = activeWorkspace, active.activeComposeTabID == tab.id else { return }
+        guard !Task.isCancelled, let active = activeWorkspace, active.activeComposeTabID == tab.id else { return }
         #if DEBUG
             await composeTabHeavyFileStateWillApplyHandlerForTesting?(tab.id)
         #endif
@@ -6476,7 +6492,9 @@ class WorkspaceManagerViewModel: ObservableObject {
     }
 
     private nonisolated static func bindingPath(_ child: String, isWithinOrEqualTo parent: String) -> Bool {
-        if child == parent { return true }
+        if child == parent {
+            return true
+        }
         let normalizedParent = parent.hasSuffix("/") ? parent : parent + "/"
         return child.hasPrefix(normalizedParent)
     }
@@ -7231,7 +7249,9 @@ class WorkspaceManagerViewModel: ObservableObject {
         case conflict
 
         var containsIdentity: Bool {
-            if case .removed = self { return true }
+            if case .removed = self {
+                return true
+            }
             return false
         }
     }
@@ -7263,8 +7283,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         let matchingTabIndices = workspace.composeTabs.indices.filter {
             workspace.composeTabs[$0].id == identity.tabID
         }
-        guard matchingTabIndices.count <= 1 else { return .conflict }
-        guard !workspace.stashedTabs.contains(where: {
+        guard matchingTabIndices.count <= 1, !workspace.stashedTabs.contains(where: {
             $0.tab.id == identity.tabID || $0.tab.activeAgentSessionID == identity.sessionID
         }) else { return .conflict }
 
@@ -8077,12 +8096,12 @@ class WorkspaceManagerViewModel: ObservableObject {
                       in: verified,
                       identity: identity,
                       mutation: mutation
+                  ),
+                  let currentRemoval = prepareProvisionalAdmissionRemovalFromMemory(
+                      identity,
+                      mutation: mutation
                   )
-            else { return .failed(.durabilityUncertain) }
-            guard let currentRemoval = prepareProvisionalAdmissionRemovalFromMemory(
-                identity,
-                mutation: mutation
-            ) else {
+            else {
                 return .failed(.durabilityUncertain)
             }
             if stateVersionByWorkspaceID[identity.workspaceID, default: 0] == removalBeforeWrite.stateVersion,
@@ -9683,11 +9702,15 @@ class WorkspaceManagerViewModel: ObservableObject {
         return workspaces.sorted { lhs, rhs in
             let lhsActiveWork = activeWork(lhs)
             let rhsActiveWork = activeWork(rhs)
-            if lhsActiveWork != rhsActiveWork { return lhsActiveWork }
+            if lhsActiveWork != rhsActiveWork {
+                return lhsActiveWork
+            }
 
             let lhsFocused = focused(lhs)
             let rhsFocused = focused(rhs)
-            if lhsFocused != rhsFocused { return lhsFocused }
+            if lhsFocused != rhsFocused {
+                return lhsFocused
+            }
 
             switch (lowestWindowID(lhs), lowestWindowID(rhs)) {
             case let (.some(lhsWindowID), .some(rhsWindowID)) where lhsWindowID != rhsWindowID:
@@ -9702,9 +9725,15 @@ class WorkspaceManagerViewModel: ObservableObject {
 
             let lhsVisible = !lhs.isHiddenInMenus
             let rhsVisible = !rhs.isHiddenInMenus
-            if lhsVisible != rhsVisible { return lhsVisible }
-            if lhs.lastUsed != rhs.lastUsed { return lhs.lastUsed > rhs.lastUsed }
-            if lhs.dateModified != rhs.dateModified { return lhs.dateModified > rhs.dateModified }
+            if lhsVisible != rhsVisible {
+                return lhsVisible
+            }
+            if lhs.lastUsed != rhs.lastUsed {
+                return lhs.lastUsed > rhs.lastUsed
+            }
+            if lhs.dateModified != rhs.dateModified {
+                return lhs.dateModified > rhs.dateModified
+            }
             return cleanupWorkspaceSort(lhs, rhs)
         }.first
     }
@@ -9956,8 +9985,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         let snapshot = await domainWorkspaceAuthorityClient.snapshot()
         let records = snapshot.workspaces.compactMap { authoritative -> WorkspaceLeakCleanupRecord? in
             let metadata = authoritative.document.metadata
-            guard let fixtureIdentity = Self.leakedTestFixtureIdentity(metadata) else { return nil }
-            guard let workspace = try? Self.decodeDomainWorkspaceProjection(
+            guard let fixtureIdentity = Self.leakedTestFixtureIdentity(metadata), let workspace = try? Self.decodeDomainWorkspaceProjection(
                 documentBytes: authoritative.document.documentBytes,
                 fileURL: authoritative.document.fileURL
             ) else { return nil }
@@ -10569,8 +10597,7 @@ class WorkspaceManagerViewModel: ObservableObject {
         consolidatedIntoWorkspaceID: UUID?,
         dateModified: Date
     ) {
-        guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
-        guard workspaces[index].consolidatedIntoWorkspaceID == consolidatedIntoWorkspaceID else { return }
+        guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }), workspaces[index].consolidatedIntoWorkspaceID == consolidatedIntoWorkspaceID else { return }
         workspaces[index].isHiddenInMenus = hidden
         workspaces[index].dateModified = dateModified
     }
@@ -10989,8 +11016,12 @@ class WorkspaceManagerViewModel: ObservableObject {
             let initialIndexedResult = await indexedResult
             let initialWarmedResult = await warmedResult
             var indexGeneration = initialIndexedResult.generation
-            if let duration = initialIndexedResult.durationMS { totalSearchIndexRebuildDurationMS += duration }
-            if let duration = initialWarmedResult.durationMS { totalPathLookupWarmDurationMS += duration }
+            if let duration = initialIndexedResult.durationMS {
+                totalSearchIndexRebuildDurationMS += duration
+            }
+            if let duration = initialWarmedResult.durationMS {
+                totalPathLookupWarmDurationMS += duration
+            }
         #else
             async let indexedGeneration = workspaceSearchService.rebuildIndex(from: initialSearchSnapshot)
             async let warmedGeneration = fileManager.workspaceFileContextStore.warmPathLookupIndexes(rootScope: .visibleWorkspace)
@@ -11044,7 +11075,9 @@ class WorkspaceManagerViewModel: ObservableObject {
                     hydrationGeneration: hydrationGeneration
                 )
                 indexGeneration = rebuildResult.generation
-                if let duration = rebuildResult.durationMS { totalSearchIndexRebuildDurationMS += duration }
+                if let duration = rebuildResult.durationMS {
+                    totalSearchIndexRebuildDurationMS += duration
+                }
             #else
                 indexGeneration = await workspaceSearchService.rebuildIndex(from: snapshot)
             #endif
@@ -11537,7 +11570,9 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
 
         func flush(url: URL) async {
-            if pendingByURL[url] == nil { return }
+            if pendingByURL[url] == nil {
+                return
+            }
             let lifecycleCorrelation = EditFlowPerf.currentLifecycleCorrelation
             let flushState = EditFlowPerf.begin(EditFlowPerf.Stage.WorkspaceDurability.flushWait)
             EditFlowPerf.lifecycleEvent(
@@ -12763,8 +12798,7 @@ class WorkspaceManagerViewModel: ObservableObject {
     @MainActor
     func refreshWorkspace(soft: Bool, for workspace: WorkspaceModel) async {
         let wsID = workspace.id
-        guard wsID == activeWorkspaceID else { return }
-        guard !isRefreshing, !isSwitchingWorkspace else { return }
+        guard wsID == activeWorkspaceID, !isRefreshing, !isSwitchingWorkspace else { return }
 
         stopPollTimer()
         isRefreshing = true
@@ -12786,8 +12820,7 @@ class WorkspaceManagerViewModel: ObservableObject {
 
         // Helper: refetch workspace after each await to avoid stale indices.
         func currentWorkspaceForRefresh() -> WorkspaceModel? {
-            guard !isSwitchingWorkspace else { return nil }
-            guard activeWorkspaceID == wsID else { return nil } // deleted or switched
+            guard !isSwitchingWorkspace, activeWorkspaceID == wsID else { return nil } // deleted or switched
             guard let idx = workspaceIndex(for: wsID) else { return nil }
             return workspaces[idx]
         }
@@ -12892,23 +12925,26 @@ class WorkspaceManagerViewModel: ObservableObject {
 
     private func handleAllFoldersUnloaded() {
         guard let active = activeWorkspace else { return }
-        if isRefreshing { return }
+        if isRefreshing {
+            return
+        }
 
-        if active.repoPaths.isEmpty {
-            if let fallback = findOrCreateDefaultWorkspace(),
-               fallback.id != active.id,
-               !fallback.repoPaths.isEmpty
-            {
-                Task {
-                    await switchWorkspace(to: fallback, saveState: false)
-                }
+        if active.repoPaths.isEmpty,
+           let fallback = findOrCreateDefaultWorkspace(),
+           fallback.id != active.id,
+           !fallback.repoPaths.isEmpty
+        {
+            Task {
+                await switchWorkspace(to: fallback, saveState: false)
             }
         }
     }
 
     @MainActor
     func removeActiveWorkspaceRoot(path: String) async {
-        if isRefreshing { return }
+        if isRefreshing {
+            return
+        }
         await removeFolder(path)
     }
 
@@ -13442,8 +13478,8 @@ class WorkspaceManagerViewModel: ObservableObject {
     /// This was moved from ContentView so the UI only calls this in one place.
     @MainActor
     func switchToPreset(_ index: Int, isWindowFocused: Bool) async {
-        guard isWindowFocused else { return }
-        guard let ws = activeWorkspace,
+        guard isWindowFocused,
+              let ws = activeWorkspace,
               index > 0,
               index <= ws.presets.count
         else { return }
@@ -13456,8 +13492,7 @@ class WorkspaceManagerViewModel: ObservableObject {
     /// Previously in ContentView; now resides in the manager.
     @MainActor
     func saveToPreset(_ index: Int, isWindowFocused: Bool) {
-        guard isWindowFocused else { return }
-        guard let ws = activeWorkspace else { return }
+        guard isWindowFocused, let ws = activeWorkspace else { return }
 
         let presets = ws.presets
         if index <= presets.count, index > 0 {

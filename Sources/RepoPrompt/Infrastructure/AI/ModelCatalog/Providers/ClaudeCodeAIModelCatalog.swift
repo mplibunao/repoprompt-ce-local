@@ -95,10 +95,7 @@ enum ClaudeCodeAIModelCatalog {
     }
 
     static func validatedAgentCatalogEffortModel(specifier rawSpecifier: String) -> AIModel? {
-        guard let canonical = canonicalAgentCatalogEffortSpecifier(rawSpecifier) else {
-            return nil
-        }
-        guard AgentModelCatalog.isValid(
+        guard let canonical = canonicalAgentCatalogEffortSpecifier(rawSpecifier), AgentModelCatalog.isValid(
             rawModel: canonical,
             for: .claudeCode,
             availability: agentCatalogValidationAvailability
@@ -260,8 +257,12 @@ enum ClaudeCodeAIModelCatalog {
         let lhsCompatible = compatibleBackendDescriptor(for: lhs)
         let rhsCompatible = compatibleBackendDescriptor(for: rhs)
         if lhsCompatible != nil || rhsCompatible != nil {
-            if lhsCompatible == nil { return true }
-            if rhsCompatible == nil { return false }
+            if lhsCompatible == nil {
+                return true
+            }
+            if rhsCompatible == nil {
+                return false
+            }
             return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
         }
         let leftBaseRank = baseSortRank(baseModelRaw(for: lhs))
@@ -393,7 +394,9 @@ enum ClaudeCodeAIModelCatalog {
                 .sorted { lhs, rhs in
                     let lhsRank = compatibleBackendOptionRank(lhs.1.requestedModelRaw)
                     let rhsRank = compatibleBackendOptionRank(rhs.1.requestedModelRaw)
-                    if lhsRank != rhsRank { return lhsRank < rhsRank }
+                    if lhsRank != rhsRank {
+                        return lhsRank < rhsRank
+                    }
                     return lhs.1.optionDisplayName.localizedCaseInsensitiveCompare(rhs.1.optionDisplayName) == .orderedAscending
                 }
                 .map { model, descriptor in
@@ -427,9 +430,15 @@ enum ClaudeCodeAIModelCatalog {
     }
 
     private static func compatibleBackendSortRank(_ raw: String) -> Int {
-        if raw.contains(compatibleBackendAlias(for: .glmZAI)) { return 0 }
-        if raw.contains(compatibleBackendAlias(for: .kimi)) { return 1 }
-        if raw.contains(compatibleBackendAlias(for: .custom)) { return 2 }
+        if raw.contains(compatibleBackendAlias(for: .glmZAI)) {
+            return 0
+        }
+        if raw.contains(compatibleBackendAlias(for: .kimi)) {
+            return 1
+        }
+        if raw.contains(compatibleBackendAlias(for: .custom)) {
+            return 2
+        }
         return 99
     }
 

@@ -64,7 +64,6 @@ enum DebugBuildIdentity {
 extension View {
     /// Draws the debug accent rule along the top content edge without taking layout height,
     /// hit testing, or accessibility focus. Release builds return `self` unchanged.
-    @ViewBuilder
     func debugBuildWindowEdge() -> some View {
         #if DEBUG
             overlay(alignment: .top) {

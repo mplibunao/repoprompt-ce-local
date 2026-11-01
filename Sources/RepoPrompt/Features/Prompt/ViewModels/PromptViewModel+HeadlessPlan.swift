@@ -56,6 +56,7 @@ struct HeadlessContextSnapshot {
 
 // MARK: - Headless AIMessage Builders
 
+@MainActor
 extension PromptViewModel {
     /// Builds an AIMessage for a headless request from a frozen snapshot.
     /// Does NOT read from live tab state - uses only the snapshot data.
@@ -66,7 +67,6 @@ extension PromptViewModel {
     /// - Git diff: included only for review
     /// - Warning: NOT included
     /// - System prompt depends on mode (plan uses architect, chat uses default chat, review uses stored review prompt)
-    @MainActor
     func buildHeadlessAIMessage(
         from snapshot: HeadlessContextSnapshot,
         model: AIModel,

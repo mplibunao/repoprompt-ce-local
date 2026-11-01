@@ -223,7 +223,9 @@ actor DirectHeadlessProviderCoordinator {
                     )
                     return .completed(assistantText: text)
                 } catch {
-                    if Task.isCancelled { throw CancellationError() }
+                    if Task.isCancelled {
+                        throw CancellationError()
+                    }
                     throw error
                 }
             }
@@ -514,7 +516,9 @@ actor DirectHeadlessProviderCoordinator {
     }
 
     private nonisolated static func findExecutable(named command: String, path: String?) -> String? {
-        if command.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: command) { return command }
+        if command.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: command) {
+            return command
+        }
         let paths = path?.split(separator: ":").map(String.init) ?? []
         return paths.map { URL(fileURLWithPath: $0).appendingPathComponent(command).path }
             .first(where: FileManager.default.isExecutableFile)

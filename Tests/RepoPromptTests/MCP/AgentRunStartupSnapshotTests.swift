@@ -677,7 +677,9 @@ import XCTest
             let deadline = Date().addingTimeInterval(5)
             while Date() < deadline {
                 let snapshot = await AgentRunSessionStore.snapshot(for: registration)
-                if condition(snapshot) { return snapshot }
+                if condition(snapshot) {
+                    return snapshot
+                }
                 try await Task.sleep(nanoseconds: 2_000_000)
             }
             XCTFail("the store never reached the expected snapshot", file: file, line: line)
@@ -695,7 +697,9 @@ import XCTest
                 case let .snapshotReady(snapshot):
                     return snapshot
                 case let .noteworthySnapshot(wake):
-                    if wake.snapshot.isActionableForMCPWait { return wake.snapshot }
+                    if wake.snapshot.isActionableForMCPWait {
+                        return wake.snapshot
+                    }
                 case let .epochAdvanced(epoch, kind):
                     guard kind != .unrelated else { return nil }
                     cursor = .init(registration: cursor.registration, epoch: epoch)
@@ -881,7 +885,9 @@ import XCTest
                     XCTFail("the waiting caller was never woken", file: file, line: line)
                     return nil
                 }
-                if let error = outcome.error { throw error }
+                if let error = outcome.error {
+                    throw error
+                }
                 return outcome.value
             }
 
@@ -1010,11 +1016,15 @@ import XCTest
             struct ConditionTimeout: Error {}
             let deadline = Date().addingTimeInterval(seconds)
             while Date() < deadline {
-                if await condition() { return }
+                if await condition() {
+                    return
+                }
                 await Task.yield()
                 try? await Task.sleep(nanoseconds: 2_000_000)
             }
-            if await condition() { return }
+            if await condition() {
+                return
+            }
             XCTFail("Timed out waiting for condition", file: file, line: line)
             throw ConditionTimeout()
         }

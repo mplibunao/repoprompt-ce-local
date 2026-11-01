@@ -122,8 +122,7 @@ enum ProcessEnvironmentBuilder {
         launchContext: ProcessLaunchContext,
         forceRefreshShellEnvironment: Bool
     ) -> Bool {
-        guard !forceRefreshShellEnvironment else { return false }
-        guard launchContext.source == .terminalInherited else { return false }
+        guard !forceRefreshShellEnvironment, launchContext.source == .terminalInherited else { return false }
         switch purpose {
         case .codexAppServer, .codexPreflight, .shellEnvironmentProbe:
             return false

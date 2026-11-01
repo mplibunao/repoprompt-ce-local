@@ -201,9 +201,15 @@
             }
 
             var name: String {
-                if forceFullCrawl { return "forcedFullCrawl" }
-                if serve { return "diffSeedServing" }
-                if observe { return "diffSeedObservation" }
+                if forceFullCrawl {
+                    return "forcedFullCrawl"
+                }
+                if serve {
+                    return "diffSeedServing"
+                }
+                if observe {
+                    return "diffSeedObservation"
+                }
                 return "fullCrawl"
             }
         }
@@ -1334,8 +1340,7 @@
 
         private func purgeExpiredPreparationsLocked(now: UInt64) {
             preparationsByID = preparationsByID.filter { _, record in
-                guard let completedAt = record.completedAtNanoseconds else { return true }
-                guard now >= completedAt else { return true }
+                guard let completedAt = record.completedAtNanoseconds, now >= completedAt else { return true }
                 return now - completedAt < completedPreparationTTLNanoseconds
             }
         }

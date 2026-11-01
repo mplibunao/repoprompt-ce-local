@@ -149,7 +149,9 @@ final class CodemapGraphIndexHarness {
             let fileID = fileID(index)
             let path = "\(prefix)/Module\(index % 16)/File\(index).swift"
             var definitions = ["Type\(index)"]
-            if index < 8 { definitions.append("Shared") }
+            if index < 8 {
+                definitions.append("Shared")
+            }
             let references = ["Type\((index + 1) % count)", "Type0", "Shared", "Missing\(index % 5)"]
             let pending = try makeSlot(fileID: fileID, path: path, state: .pending)
             let contributed = try makeSlot(
@@ -216,7 +218,9 @@ final class CodemapGraphIndexHarness {
     }
 
     func pipelineIdentity(for language: LanguageType) throws -> CodeMapPipelineIdentity {
-        if let pipeline = pipelinesByLanguage[language] { return pipeline }
+        if let pipeline = pipelinesByLanguage[language] {
+            return pipeline
+        }
         let pipeline = try SyntaxManager().pipelineIdentity(for: language, decoderPolicy: .workspaceAutomaticV1)
         pipelinesByLanguage[language] = pipeline
         return pipeline
@@ -276,7 +280,7 @@ final class CodemapGraphIndexHarness {
 
     func checkpoint() async throws -> WorkspaceCodemapGraphCheckpoint {
         switch await overlay.graphCheckpoint(rootEpoch: rootEpoch) {
-        case let .checkpoint(checkpoint): return checkpoint
+        case let .checkpoint(checkpoint): checkpoint
         case let .revoked(reason): throw CodemapGraphIndexHarnessError.unexpectedDisposition("\(reason)")
         }
     }
@@ -294,7 +298,9 @@ final class CodemapGraphIndexHarness {
             await overlay.acknowledgeGraphChanges(rootEpoch: rootEpoch, through: accounting.appliedGeneration)
         }
         let changes = await overlay.graphChanges(rootEpoch: rootEpoch, since: accounting.appliedGeneration)
-        if case .unchanged = changes { return nil }
+        if case .unchanged = changes {
+            return nil
+        }
         return await target.apply(changes)
     }
 
@@ -302,7 +308,7 @@ final class CodemapGraphIndexHarness {
         _ consumer: WorkspaceCodemapSelectionGraph? = nil
     ) async throws -> WorkspaceCodemapGraphCommittedSnapshot {
         switch await (consumer ?? graph).latestSnapshot() {
-        case let .ready(pinned): return pinned.snapshot
+        case let .ready(pinned): pinned.snapshot
         case .pending: throw CodemapGraphIndexHarnessError.unexpectedDisposition("pending snapshot")
         case let .revoked(reason): throw CodemapGraphIndexHarnessError.unexpectedDisposition("\(reason)")
         }

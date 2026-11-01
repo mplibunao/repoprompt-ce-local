@@ -51,7 +51,9 @@ import XCTest
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: timeout)
             while clock.now < deadline {
-                if await condition() { return true }
+                if await condition() {
+                    return true
+                }
                 try? await clock.sleep(for: .milliseconds(5))
             }
             return await condition()
@@ -101,7 +103,9 @@ import XCTest
                 var snapshots: [MCPService.Snapshot] = []
                 for await snapshot in stream {
                     snapshots.append(snapshot)
-                    if snapshots.count == limit { return snapshots }
+                    if snapshots.count == limit {
+                        return snapshots
+                    }
                 }
                 return Task.isCancelled ? nil : snapshots
             }

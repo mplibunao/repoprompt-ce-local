@@ -195,19 +195,7 @@ final class FileTagMentionHelper {
     }
 
     private func refreshSuggestions(for textView: NSTextView, enabled: Bool) {
-        guard enabled else {
-            dismiss()
-            return
-        }
-        guard !textView.hasMarkedText() else {
-            dismiss()
-            return
-        }
-        guard let trigger = detectTrigger(in: textView) else {
-            dismiss()
-            return
-        }
-        guard let service else {
+        guard enabled, !textView.hasMarkedText(), let trigger = detectTrigger(in: textView), let service else {
             dismiss()
             return
         }
@@ -225,9 +213,8 @@ final class FileTagMentionHelper {
             guard let self else { return }
             let freshSuggestions = await service.suggestions(for: requestedQuery)
             guard !Task.isCancelled,
-                  suggestionRequestID == requestID
-            else { return }
-            guard let textView else { return }
+                  suggestionRequestID == requestID,
+                  let textView else { return }
             guard enabled, !textView.hasMarkedText() else {
                 dismiss()
                 return
@@ -262,8 +249,7 @@ final class FileTagMentionHelper {
 
         let fullText = textView.string as NSString
         let cursor = selectedRange.location
-        guard cursor != NSNotFound, cursor <= fullText.length else { return nil }
-        guard cursor > 0 else { return nil }
+        guard cursor != NSNotFound, cursor <= fullText.length, cursor > 0 else { return nil }
 
         var cursorIndex = cursor - 1
         let whitespace = CharacterSet.whitespacesAndNewlines
@@ -301,15 +287,7 @@ final class FileTagMentionHelper {
     }
 
     private func commitHighlighted(in textView: NSTextView, onCommit: ((MentionSuggestion) -> Void)?) {
-        guard !suggestions.isEmpty else {
-            dismiss()
-            return
-        }
-        guard suggestions.indices.contains(highlightedIndex) else {
-            dismiss()
-            return
-        }
-        guard let triggerRange else {
+        guard !suggestions.isEmpty, suggestions.indices.contains(highlightedIndex), let triggerRange else {
             dismiss()
             return
         }
@@ -341,7 +319,7 @@ final class FileTagMentionHelper {
     static func committedReplacementText(for suggestion: MentionSuggestion) -> String {
         if let commitDisplayText = suggestion.commitDisplayText?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-            !commitDisplayText.isEmpty
+           !commitDisplayText.isEmpty
         {
             return "@\(escapePathForAtCommand(commitDisplayText)) "
         }
@@ -546,19 +524,7 @@ final class SlashSkillMentionHelper {
     }
 
     private func refreshSuggestions(for textView: NSTextView, enabled: Bool) {
-        guard enabled else {
-            dismiss()
-            return
-        }
-        guard !textView.hasMarkedText() else {
-            dismiss()
-            return
-        }
-        guard let provider = suggestionsProvider else {
-            dismiss()
-            return
-        }
-        guard let trigger = detectTrigger(in: textView) else {
+        guard enabled, !textView.hasMarkedText(), let provider = suggestionsProvider, let trigger = detectTrigger(in: textView) else {
             dismiss()
             return
         }
@@ -576,9 +542,8 @@ final class SlashSkillMentionHelper {
             guard let self else { return }
             let freshSuggestions = await provider(requestedQuery)
             guard !Task.isCancelled,
-                  suggestionRequestID == requestID
-            else { return }
-            guard let textView else { return }
+                  suggestionRequestID == requestID,
+                  let textView else { return }
             guard enabled, !textView.hasMarkedText() else {
                 dismiss()
                 return
@@ -615,8 +580,7 @@ final class SlashSkillMentionHelper {
 
         let fullText = textView.string as NSString
         let cursor = selectedRange.location
-        guard cursor != NSNotFound, cursor <= fullText.length else { return nil }
-        guard cursor > 0 else { return nil }
+        guard cursor != NSNotFound, cursor <= fullText.length, cursor > 0 else { return nil }
 
         // Find the first non-whitespace character in the input.
         let whitespace = CharacterSet.whitespacesAndNewlines
@@ -659,15 +623,7 @@ final class SlashSkillMentionHelper {
     }
 
     private func commitHighlighted(in textView: NSTextView) {
-        guard !suggestions.isEmpty else {
-            dismiss()
-            return
-        }
-        guard suggestions.indices.contains(highlightedIndex) else {
-            dismiss()
-            return
-        }
-        guard let triggerRange else {
+        guard !suggestions.isEmpty, suggestions.indices.contains(highlightedIndex), let triggerRange else {
             dismiss()
             return
         }

@@ -324,9 +324,8 @@ final class AgentModeRunService {
             steeringDebugLog("[AgentRunSteeringWake] ACP flush already active tab=\(session.tabID) queue=\(session.pendingACPSteeringInstructions.count)")
             return true
         }
-        guard !session.pendingACPSteeringInstructions.isEmpty else { return false }
-
-        guard let runID = session.runID,
+        guard !session.pendingACPSteeringInstructions.isEmpty,
+              let runID = session.runID,
               let runAttemptID = session.activeRunAttemptID,
               let controller = session.acpController else { return false }
 
@@ -773,9 +772,8 @@ final class AgentModeRunService {
             return true
         }
 
-        guard !session.pendingClaudeSteeringInstructions.isEmpty else { return false }
-
-        guard let runID = session.runID,
+        guard !session.pendingClaudeSteeringInstructions.isEmpty,
+              let runID = session.runID,
               let ownership = session.activeRunOwnership else { return false }
         let runAttemptID = ownership.attemptID
 

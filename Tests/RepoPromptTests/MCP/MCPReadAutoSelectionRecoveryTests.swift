@@ -661,7 +661,9 @@ final class MCPReadAutoSelectionRecoveryTests: XCTestCase {
                 await deadlineHandled.wait()
             },
             beforeEventConsumption: { point in
-                if point == .deadlineExpired { deadlineHandled.signal() }
+                if point == .deadlineExpired {
+                    deadlineHandled.signal()
+                }
             }
         )
 
@@ -839,11 +841,15 @@ private final class RecoveryEventSignal: @unchecked Sendable {
     func wait() async {
         await withCheckedContinuation { continuation in
             let ready = lock.withLock {
-                if signalled { return true }
+                if signalled {
+                    return true
+                }
                 waiters.append(continuation)
                 return false
             }
-            if ready { continuation.resume() }
+            if ready {
+                continuation.resume()
+            }
         }
     }
 }

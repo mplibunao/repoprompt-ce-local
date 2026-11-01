@@ -419,7 +419,7 @@ final class AutoRecommendationEngine {
     ) -> Bool {
         if agent == .openCode,
            rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
-           .caseInsensitiveCompare(AgentModel.defaultModel.rawValue) == .orderedSame
+               .caseInsensitiveCompare(AgentModel.defaultModel.rawValue) == .orderedSame
         {
             return true
         }
@@ -878,11 +878,8 @@ final class AutoRecommendationEngine {
             : nil
         guard let baseModel = (modelSpecifier.baseModel ?? rawSpecifier.baseModel ?? unprefixedRawSpecifier?.baseModel)?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-            !baseModel.isEmpty
-        else {
-            return nil
-        }
-        guard let effort = CodexReasoningEffort.parse(model.defaultReasoningEffort)
+            !baseModel.isEmpty,
+            let effort = CodexReasoningEffort.parse(model.defaultReasoningEffort)
             ?? rawSpecifier.reasoningEffort
             ?? unprefixedRawSpecifier?.reasoningEffort
             ?? modelSpecifier.reasoningEffort

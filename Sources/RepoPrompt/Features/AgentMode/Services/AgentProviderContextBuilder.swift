@@ -201,11 +201,11 @@ enum AgentProviderContextBuilder {
         if selectionTokens > tokenCap {
             await overTokenCapSummaryWillBegin?()
             if let summary = await overTokenCapSummaryProvider?(
-                logicalSelection,
-                lookupContext,
-                resolvedPresentation
-            ),
-                !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                   logicalSelection,
+                   lookupContext,
+                   resolvedPresentation
+               ),
+               !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             {
                 return summary
             }

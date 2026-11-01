@@ -443,7 +443,9 @@ private final class MCPExecutionWatchdogResponseLedger: @unchecked Sendable {
         else {
             return nil
         }
-        if hadNewline { encoded.append(UInt8(ascii: "\n")) }
+        if hadNewline {
+            encoded.append(UInt8(ascii: "\n"))
+        }
         return encoded
     }
 }
@@ -541,7 +543,9 @@ final class MCPExportResponseDeliveryDeadlineRegistry: @unchecked Sendable {
         guard !recordedTokens.isEmpty,
               var encoded = try? JSONSerialization.data(withJSONObject: annotated, options: [.sortedKeys])
         else { return frame }
-        if hadNewline { encoded.append(UInt8(ascii: "\n")) }
+        if hadNewline {
+            encoded.append(UInt8(ascii: "\n"))
+        }
         lock.withLock { pendingRequests.formUnion(recordedTokens) }
         return encoded
     }
@@ -1849,7 +1853,9 @@ public actor UnixSocketMCPTransport: Transport {
             let result = poll(&pfd, 1, pollTimeout)
 
             if result < 0 {
-                if errno == EINTR { continue }
+                if errno == EINTR {
+                    continue
+                }
                 let err = errno
                 let error = MCPError.transportError(POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO))
                 closeAfterSendFailure(error, cause: .writeFailure, errno: err)
@@ -2152,8 +2158,7 @@ public actor UnixSocketMCPTransport: Transport {
         _ error: MCPReceiveBufferOverflowError,
         from identity: ReaderIdentity
     ) {
-        guard activeReaderOwnership?.identity == identity else { return }
-        guard !streamFinished else { return }
+        guard activeReaderOwnership?.identity == identity, !streamFinished else { return }
         #if DEBUG
             if deferNextReceiveOverflowTeardown {
                 deferNextReceiveOverflowTeardown = false

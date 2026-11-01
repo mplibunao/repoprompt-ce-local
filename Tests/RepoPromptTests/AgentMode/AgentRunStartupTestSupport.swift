@@ -10,7 +10,9 @@ import XCTest
     func startupTestWaitBounded(seconds: TimeInterval = 5, until condition: @MainActor () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
-            if condition() { return true }
+            if condition() {
+                return true
+            }
             await Task.yield()
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
@@ -27,7 +29,9 @@ import XCTest
         _ condition: @MainActor () -> Bool
     ) async throws {
         struct ConditionTimeout: Error {}
-        if await startupTestWaitBounded(seconds: seconds, until: condition) { return }
+        if await startupTestWaitBounded(seconds: seconds, until: condition) {
+            return
+        }
         XCTFail("Timed out waiting for condition", file: file, line: line)
         throw ConditionTimeout()
     }
@@ -172,7 +176,9 @@ import XCTest
     ) async throws {
         struct SettleTimeout: Error {}
         let finished = startupTestRunTracked(operation, in: fixture.cleanup.trackedOperations)
-        if await startupTestWaitBounded(seconds: seconds, until: { finished.value }) { return }
+        if await startupTestWaitBounded(seconds: seconds, until: { finished.value }) {
+            return
+        }
         XCTFail("Timed out waiting for condition", file: file, line: line)
         throw SettleTimeout()
     }
@@ -204,7 +210,9 @@ import XCTest
                 { runID, _, _, _ in MainActor.assumeIsolated { recorder.makeRuntime(runID: runID) } }
             },
             acpProviderFactory: { agent, modelString in
-                if let acpProvider { return acpProvider }
+                if let acpProvider {
+                    return acpProvider
+                }
                 return try await ACPAgentProviderFactory.makeProvider(for: agent, modelString: modelString)
             },
             mcpServerEnabler: { await readiness.enter() },
@@ -847,7 +855,9 @@ import XCTest
         }
 
         func enter() async -> Bool {
-            if case .success = await nextOutcome() { return true }
+            if case .success = await nextOutcome() {
+                return true
+            }
             return false
         }
 

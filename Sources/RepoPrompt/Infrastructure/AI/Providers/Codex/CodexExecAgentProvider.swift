@@ -342,7 +342,9 @@ final class CodexExecAgentProvider: RelaunchingHeadlessAgentProvider {
                                             }
                                             var sawStopThisChunk = false
                                             framer.feed(chunk) { lineData in
-                                                if sawStopThisChunk { return }
+                                                if sawStopThisChunk {
+                                                    return
+                                                }
                                                 if let streamResult = self.parseJSONLEvent(lineData) {
                                                     if self.enableDebugLogging {
                                                         print("[DEBUG] CodexExec: Parsed event type: \(streamResult.type)")
@@ -632,8 +634,7 @@ final class CodexExecAgentProvider: RelaunchingHeadlessAgentProvider {
     }
 
     func parseJSONLEvent(_ data: Data) -> AIStreamResult? {
-        guard let trimmed = trimmedASCIIWhitespace(data) else { return nil }
-        guard let raw = try? JSONSerialization.jsonObject(with: trimmed) as? [String: Any] else { return nil }
+        guard let trimmed = trimmedASCIIWhitespace(data), let raw = try? JSONSerialization.jsonObject(with: trimmed) as? [String: Any] else { return nil }
 
         // Current/legacy format (try this first): {"type":"item.completed","item":{...}}
         if let typeValue = raw["type"] as? String {
@@ -723,10 +724,9 @@ final class CodexExecAgentProvider: RelaunchingHeadlessAgentProvider {
               itemType != "message",
               itemType != "assistant",
               itemType != "reasoning",
-              itemType != "error" else { return nil }
-
-        guard let toolName = codexToolName(from: item, itemType: itemType) else { return nil }
-        guard !isRepoPromptTool(item: item, toolName: toolName) else { return nil }
+              itemType != "error",
+              let toolName = codexToolName(from: item, itemType: itemType),
+              !isRepoPromptTool(item: item, toolName: toolName) else { return nil }
 
         let itemID = (item["id"] as? String)
             ?? (item["item_id"] as? String)

@@ -128,15 +128,23 @@ enum DirectHeadlessChildBridge {
         while !Task.isCancelled {
             var descriptor = pollfd(fd: source, events: Int16(POLLIN | POLLERR | POLLHUP), revents: 0)
             let polled = Darwin.poll(&descriptor, 1, 100)
-            if polled == 0 { continue }
+            if polled == 0 {
+                continue
+            }
             if polled < 0 {
-                if errno == EINTR { continue }
+                if errno == EINTR {
+                    continue
+                }
                 throw BridgeError.read(errno: errno)
             }
             let count = Darwin.read(source, &buffer, buffer.count)
-            if count == 0 { return }
+            if count == 0 {
+                return
+            }
             if count < 0 {
-                if errno == EINTR || errno == EAGAIN { continue }
+                if errno == EINTR || errno == EAGAIN {
+                    continue
+                }
                 throw BridgeError.read(errno: errno)
             }
             try buffer.withUnsafeBytes { raw in
@@ -157,7 +165,9 @@ enum DirectHeadlessChildBridge {
                 written += count
                 continue
             }
-            if count < 0, errno == EINTR { continue }
+            if count < 0, errno == EINTR {
+                continue
+            }
             if count < 0, errno != EAGAIN, errno != EWOULDBLOCK {
                 throw BridgeError.write(errno: errno)
             }

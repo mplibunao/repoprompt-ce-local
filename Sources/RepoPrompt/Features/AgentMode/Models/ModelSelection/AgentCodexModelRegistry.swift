@@ -114,8 +114,8 @@ final class AgentCodexModelRegistry {
                       baseModelID: baseModel,
                       reasoningEffort: specifier.reasoningEffort,
                       discoveredRecords: discoveredRecords
-                  ) else { continue }
-            guard seen.insert(fastID.lowercased()).inserted else { continue }
+                  ),
+                  seen.insert(fastID.lowercased()).inserted else { continue }
 
             synthesized.append(AgentModelOption(
                 rawValue: fastID,

@@ -335,7 +335,9 @@ struct WorkspaceReadableFileService {
                 let remaining = byteLimit - data.count
                 let next = try handle.read(upToCount: min(chunkSize, remaining + 1)) ?? Data()
                 try Task.checkCancellation()
-                if next.isEmpty { break }
+                if next.isEmpty {
+                    break
+                }
                 let observedByteCount = data.count + next.count
                 if observedByteCount > byteLimit {
                     return "[File too large: \(observedByteCount) bytes]"

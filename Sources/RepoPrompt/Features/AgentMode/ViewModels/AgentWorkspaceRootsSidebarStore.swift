@@ -75,7 +75,9 @@ struct AgentWorkspaceCodemapPresentation: Equatable {
     }
 
     var progressFraction: Double? {
-        if state == .ready, supportedCount == 0 { return 1 }
+        if state == .ready, supportedCount == 0 {
+            return 1
+        }
         guard isCatalogSealed, let supportedCount, supportedCount > 0 else { return nil }
         let fraction = min(1, Double(min(classifiedCount, supportedCount)) / Double(supportedCount))
         return state == .ready ? fraction : min(0.99, fraction)
@@ -83,7 +85,9 @@ struct AgentWorkspaceCodemapPresentation: Equatable {
 
     var percentageText: String? {
         progressFraction.map { progress in
-            if state != .ready, progress > 0, progress < 0.01 { return "<1%" }
+            if state != .ready, progress > 0, progress < 0.01 {
+                return "<1%"
+            }
             let percentage = Int((progress * 100).rounded(.down))
             return "\(state == .ready ? 100 : min(99, percentage))%"
         }
@@ -226,8 +230,12 @@ struct AgentWorkspaceCodemapSummary: Equatable {
         case .indexing:
             let primary = progressPercentage.map { "Indexing \($0)%" } ?? preSealHeaderText
             var details = [primary]
-            if reconcilingRootCount > 0 { details.append("\(reconcilingRootCount) reconciling") }
-            if pausedRootCount > 0 { details.append("\(pausedRootCount) paused") }
+            if reconcilingRootCount > 0 {
+                details.append("\(reconcilingRootCount) reconciling")
+            }
+            if pausedRootCount > 0 {
+                details.append("\(pausedRootCount) paused")
+            }
             return details.joined(separator: " • ")
         case .reconciling:
             let primary = progressPercentage.map { "Reconciling watcher changes • \($0)%" }

@@ -157,8 +157,7 @@ actor GitWorkspaceMetadataMonitor {
                 // gitfile, create, remove, and replacement events must
                 // invalidate prefix-control evidence. Ignore descendants of
                 // either metadata directory after matching the boundary.
-                guard gitComponentIndex > components.startIndex else { return false }
-                guard gitComponentIndex == components.index(before: components.endIndex) else { return false }
+                guard gitComponentIndex > components.startIndex, gitComponentIndex == components.index(before: components.endIndex) else { return false }
                 let boundaryDirectory = components[..<gitComponentIndex].joined(separator: "/")
                 return relativePrefix.isEmpty
                     || boundaryDirectory == relativePrefix
@@ -168,7 +167,9 @@ actor GitWorkspaceMetadataMonitor {
             let isControl = [".gitignore", ".repo_ignore", ".cursorignore", ".gitattributes"]
                 .contains(components.last.map(String.init) ?? "")
                 && (isAtOrBelowPrefix || parentIsPrefixAncestor)
-            if isControl { return true }
+            if isControl {
+                return true
+            }
 
             let itemIsDirectory = flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir) != 0
             let itemIsSymlink = flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsSymlink) != 0

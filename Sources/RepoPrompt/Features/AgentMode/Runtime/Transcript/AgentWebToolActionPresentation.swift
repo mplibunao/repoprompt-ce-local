@@ -83,8 +83,12 @@ enum AgentWebToolCanonicalNames {
     static func canonicalToolCardName(_ raw: String?) -> String? {
         guard let raw = AgentToolNamePolicy.accepted(raw) else { return nil }
         let names = normalizedNameCandidates(raw)
-        if names.contains(where: isWebSearchName) { return "search" }
-        if names.contains(where: isWebReadName) { return "web_read" }
+        if names.contains(where: isWebSearchName) {
+            return "search"
+        }
+        if names.contains(where: isWebReadName) {
+            return "web_read"
+        }
         return nil
     }
 
@@ -124,8 +128,12 @@ enum AgentWebToolCanonicalNames {
 
     static func nameCandidates(rawToolName: String?, normalizedToolName: String?) -> [String] {
         var names: [String] = []
-        if let rawToolName { names.append(contentsOf: normalizedNameCandidates(rawToolName)) }
-        if let normalizedToolName { names.append(contentsOf: normalizedNameCandidates(normalizedToolName)) }
+        if let rawToolName {
+            names.append(contentsOf: normalizedNameCandidates(rawToolName))
+        }
+        if let normalizedToolName {
+            names.append(contentsOf: normalizedNameCandidates(normalizedToolName))
+        }
         var seen = Set<String>()
         return names.filter { seen.insert($0).inserted }
     }
@@ -400,7 +408,9 @@ private enum AgentWebToolActionClassifier {
         for object in objects {
             for key in keys {
                 guard let value = object[key] else { continue }
-                if let string = stringValue(value) { return string }
+                if let string = stringValue(value) {
+                    return string
+                }
             }
         }
         return nil
@@ -497,7 +507,9 @@ private enum AgentWebToolActionClassifier {
     }
 
     private static func targetIsURL(_ target: Target) -> Bool {
-        if case .url = target { return true }
+        if case .url = target {
+            return true
+        }
         return false
     }
 
@@ -537,8 +549,12 @@ private enum AgentWebToolActionClassifier {
 
     private static func isLocalOrInternalTarget(_ raw: String) -> Bool {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if trimmed.hasPrefix("file:") || trimmed.hasPrefix("repoprompt:") || trimmed.hasPrefix("mcp:") { return true }
-        if raw.hasPrefix("/") || raw.hasPrefix("~") || raw.hasPrefix("./") || raw.hasPrefix("../") { return true }
+        if trimmed.hasPrefix("file:") || trimmed.hasPrefix("repoprompt:") || trimmed.hasPrefix("mcp:") {
+            return true
+        }
+        if raw.hasPrefix("/") || raw.hasPrefix("~") || raw.hasPrefix("./") || raw.hasPrefix("../") {
+            return true
+        }
         return false
     }
 
@@ -556,7 +572,9 @@ private enum AgentWebToolActionClassifier {
                 output.unicodeScalars.append(scalar)
                 lastWasWhitespace = false
             }
-            if output.count > maxLength * 2 { break }
+            if output.count > maxLength * 2 {
+                break
+            }
         }
         return compactMiddle(output.trimmingCharacters(in: .whitespacesAndNewlines), maxLength: maxLength)
     }

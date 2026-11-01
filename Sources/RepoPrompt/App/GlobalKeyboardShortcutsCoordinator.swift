@@ -42,8 +42,7 @@ final class GlobalKeyboardShortcutsCoordinator {
     }
 
     private func guardedFocusedWindowState() -> WindowState? {
-        guard NSApplication.shared.isActive else { return nil }
-        guard let win = focusedWindowState(), win.isCurrentlyFocused else { return nil }
+        guard NSApplication.shared.isActive, let win = focusedWindowState(), win.isCurrentlyFocused else { return nil }
         return win
     }
 
@@ -91,8 +90,7 @@ final class GlobalKeyboardShortcutsCoordinator {
     }
 
     private func saveAndExitWorkspace() {
-        guard let win = guardedFocusedWindowState() else { return }
-        guard let fallback = win.workspaceManager.workspaces.first(where: { $0.isSystemWorkspace }) else { return }
+        guard let win = guardedFocusedWindowState(), let fallback = win.workspaceManager.workspaces.first(where: { $0.isSystemWorkspace }) else { return }
         Task {
             win.workspaceManager.pollAndSaveState()
             _ = await win.workspaceManager.requestWorkspaceSwitch(to: fallback)
@@ -151,8 +149,7 @@ final class GlobalKeyboardShortcutsCoordinator {
     }
 
     private func focusAdjacentComposeTab(forward: Bool) {
-        guard let win = guardedFocusedWindowState() else { return }
-        guard win.promptManager.composeTabCount > 1 else { return }
+        guard let win = guardedFocusedWindowState(), win.promptManager.composeTabCount > 1 else { return }
 
         let tabs = win.promptManager.currentComposeTabs
         let activeTabID = win.promptManager.activeComposeTabID

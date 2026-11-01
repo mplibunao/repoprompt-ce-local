@@ -150,7 +150,9 @@ final class BindContextOutputFormattingTests: XCTestCase {
                 value: Value(response)
             )
             let lines = content.compactMap { item -> String? in
-                if case let .text(text, _, _) = item { return text }
+                if case let .text(text, _, _) = item {
+                    return text
+                }
                 return nil
             }.joined(separator: "\n").components(separatedBy: "\n")
             XCTAssertEqual(lines.first, testCase.heading, testCase.label)
@@ -241,7 +243,9 @@ final class BindContextOutputFormattingTests: XCTestCase {
             value: Value(BindContextResponse(windows: windows, binding: binding))
         )
         return content.compactMap { item -> String? in
-            if case let .text(text, _, _) = item { return text }
+            if case let .text(text, _, _) = item {
+                return text
+            }
             return nil
         }.joined(separator: "\n")
     }

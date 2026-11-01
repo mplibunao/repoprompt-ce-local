@@ -251,11 +251,12 @@ struct GitRepoTargetResolver {
             }
 
             if let worktree = try await resolveWorktreeSelector(
-                trimmed,
-                in: candidateRepos(allRepos: allRepos, defaultRepo: defaultRepo),
-                selectorKind: .path
-            ), let resolved = await dependencies.resolveRepo(URL(fileURLWithPath: worktree.path)),
-            samePath(resolved.rootPath, worktree.path) {
+                   trimmed,
+                   in: candidateRepos(allRepos: allRepos, defaultRepo: defaultRepo),
+                   selectorKind: .path
+               ), let resolved = await dependencies.resolveRepo(URL(fileURLWithPath: worktree.path)),
+               samePath(resolved.rootPath, worktree.path)
+            {
                 return resolved
             }
 
@@ -517,7 +518,9 @@ struct GitRepoTargetResolver {
     private func matchesBranch(_ requested: String, headRef: String) -> Bool {
         let trimmed = requested.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        if headRef == trimmed { return true }
+        if headRef == trimmed {
+            return true
+        }
         if headRef.hasPrefix("refs/heads/") {
             let short = String(headRef.dropFirst("refs/heads/".count))
             return short == trimmed
@@ -546,18 +549,16 @@ struct GitRepoTargetResolver {
         let fileManager = FileManager.default
         let worktreesDir = layout.commonDir.appendingPathComponent("worktrees", isDirectory: true)
         var isDir: ObjCBool = false
-        if fileManager.fileExists(atPath: worktreesDir.path, isDirectory: &isDir), isDir.boolValue {
-            if let entries = try? fileManager.contentsOfDirectory(at: worktreesDir, includingPropertiesForKeys: [.isDirectoryKey]) {
-                for entry in entries {
-                    var isEntryDir: ObjCBool = false
-                    guard fileManager.fileExists(atPath: entry.path, isDirectory: &isEntryDir), isEntryDir.boolValue else { continue }
-                    let headURL = entry.appendingPathComponent("HEAD")
-                    guard let headRef = readHeadRef(from: headURL), matchesBranch(target, headRef: headRef) else {
-                        continue
-                    }
-                    if let root = resolveWorktreeRootFromEntry(entry) {
-                        return root
-                    }
+        if fileManager.fileExists(atPath: worktreesDir.path, isDirectory: &isDir), isDir.boolValue, let entries = try? fileManager.contentsOfDirectory(at: worktreesDir, includingPropertiesForKeys: [.isDirectoryKey]) {
+            for entry in entries {
+                var isEntryDir: ObjCBool = false
+                guard fileManager.fileExists(atPath: entry.path, isDirectory: &isEntryDir), isEntryDir.boolValue else { continue }
+                let headURL = entry.appendingPathComponent("HEAD")
+                guard let headRef = readHeadRef(from: headURL), matchesBranch(target, headRef: headRef) else {
+                    continue
+                }
+                if let root = resolveWorktreeRootFromEntry(entry) {
+                    return root
                 }
             }
         }

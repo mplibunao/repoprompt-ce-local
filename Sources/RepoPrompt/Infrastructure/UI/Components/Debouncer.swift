@@ -5,6 +5,7 @@
 //  Created by Eric Provencher on 2024-07-19.
 //
 
+import Combine
 import Foundation
 
 /// Coalesces delayed work items so only the latest runs, unless explicitly canceled.
@@ -115,8 +116,6 @@ class Debouncer {
         }
     }
 }
-
-import Combine
 
 func debounce<T>(_ duration: TimeInterval = 0.3) -> Publishers.Debounce<PassthroughSubject<T, Never>, DispatchQueue> {
     let subject = PassthroughSubject<T, Never>()

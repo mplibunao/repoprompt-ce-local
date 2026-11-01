@@ -289,7 +289,9 @@ public actor JujutsuBackend: VCSBackendWithWarnings {
         paths: [String]?,
         at repoURL: URL
     ) async throws -> [VCSUncommittedFile] {
-        if let paths, paths.isEmpty { return [] }
+        if let paths, paths.isEmpty {
+            return []
+        }
         // jj has no untracked concept; ignore includeUntrackedWhenApplicable.
         // jj rename detection differs; ignore detectRenames.
         let normalized = normalizeCompareSpecWithWarning(compare).spec
@@ -735,10 +737,14 @@ public actor JujutsuBackend: VCSBackendWithWarnings {
             // Name is before ":" if present, otherwise first whitespace token.
             if let colon = line.firstIndex(of: ":") {
                 let name = line[..<colon].trimmingCharacters(in: .whitespacesAndNewlines)
-                if !name.isEmpty { results.append(String(name)) }
+                if !name.isEmpty {
+                    results.append(String(name))
+                }
             } else {
                 let parts = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-                if let first = parts.first, !first.isEmpty { results.append(first) }
+                if let first = parts.first, !first.isEmpty {
+                    results.append(first)
+                }
             }
         }
         return Array(Set(results)).sorted()
@@ -786,7 +792,9 @@ public actor JujutsuBackend: VCSBackendWithWarnings {
         matches.reserveCapacity(4)
 
         for name in bookmarks.prefix(cap) {
-            if Task.isCancelled { break }
+            if Task.isCancelled {
+                break
+            }
             let id = try? await getRefID(ref: name, at: repoURL)
             if id == atID {
                 matches.append(name)
@@ -895,8 +903,7 @@ public actor JujutsuBackend: VCSBackendWithWarnings {
         let lines = output.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
         for raw in lines {
             let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty else { continue }
-            guard line.contains("|") else { continue }
+            guard !line.isEmpty, line.contains("|") else { continue }
             let parts = line.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
             guard parts.count == 2 else { continue }
 
@@ -1029,10 +1036,8 @@ public actor JujutsuBackend: VCSBackendWithWarnings {
     private func showStatsForCommit(id: String, repoURL: URL) async throws -> (filesChanged: Int, insertions: Int, deletions: Int) {
         // Prefer `jj show --stat` and parse its output.
         let (stdout, _, exit) = try await runner.run(["show", "--color=never", "--stat", "--no-patch", id], at: repoURL)
-        if exit == 0 {
-            if let summary = parseShowStat(stdout) {
-                return summary
-            }
+        if exit == 0, let summary = parseShowStat(stdout) {
+            return summary
         }
 
         // Fallback: compute from git-format diff between commit parent and commit.
@@ -1102,7 +1107,9 @@ public actor JujutsuBackend: VCSBackendWithWarnings {
         var capture = false
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty { continue }
+            if trimmed.isEmpty {
+                continue
+            }
             if loweredMarkers.contains(trimmed.lowercased()) {
                 capture = true
                 continue
@@ -1119,7 +1126,9 @@ public actor JujutsuBackend: VCSBackendWithWarnings {
             (lower: f.path.lowercased(), original: f.path, file: f)
         }
         return keyed.sorted { a, b in
-            if a.lower != b.lower { return a.lower < b.lower }
+            if a.lower != b.lower {
+                return a.lower < b.lower
+            }
             return a.original < b.original
         }.map(\.file)
     }

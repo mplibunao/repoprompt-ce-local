@@ -228,15 +228,12 @@ struct AgentContextDrawerFilesTab: View {
             }
         }
         .onReceive(exportContext.selectionChangesPublisher) { change in
-            guard !isSwitchBlankingRows else { return }
-            guard !exportContext.promptManager.isSwitchingComposeTab else { return }
+            guard !isSwitchBlankingRows, !exportContext.promptManager.isSwitchingComposeTab else { return }
             browseModel.applySelectionChange(change, exportRows: modelCoordinator.rowSplit.rows)
             handleSelectionChange(change, isVisible: true)
         }
         .onChange(of: exportContext.modelRequestIdentity) { previousIdentity, currentIdentity in
-            guard !isSwitchBlankingRows else { return }
-            guard !exportContext.promptManager.isSwitchingComposeTab else { return }
-            guard agentContextFilesShouldResetModel(
+            guard !isSwitchBlankingRows, !exportContext.promptManager.isSwitchingComposeTab, agentContextFilesShouldResetModel(
                 previousIdentity: previousIdentity,
                 currentIdentity: currentIdentity
             ) else { return }
@@ -246,7 +243,9 @@ struct AgentContextDrawerFilesTab: View {
             browseModel.updateMutationRouteProof(proof)
         }
         .onChange(of: isSwitchBlankingRows) { _, isBlanking in
-            if isBlanking { terminateBrowseSession() }
+            if isBlanking {
+                terminateBrowseSession()
+            }
         }
         .onChange(of: modelCoordinator.model) { _, newModel in
             guard browseModel.isActive, let newModel else { return }
@@ -572,8 +571,7 @@ struct AgentContextDrawerFilesTab: View {
     }
 
     private func refreshIfNeeded(force: Bool = false, preserveDisplayedModel: Bool = false) {
-        guard !isSwitchBlankingRows else { return }
-        guard !exportContext.promptManager.isSwitchingComposeTab else { return }
+        guard !isSwitchBlankingRows, !exportContext.promptManager.isSwitchingComposeTab else { return }
         modelCoordinator.refreshIfNeeded(
             exportContext.makeModelRequest(flushPendingUI: true),
             force: force,
@@ -582,8 +580,7 @@ struct AgentContextDrawerFilesTab: View {
     }
 
     private func resetOrRefresh(isVisible: Bool) {
-        guard !isSwitchBlankingRows else { return }
-        guard !exportContext.promptManager.isSwitchingComposeTab else { return }
+        guard !isSwitchBlankingRows, !exportContext.promptManager.isSwitchingComposeTab else { return }
         modelCoordinator.invalidate()
         if isVisible {
             refreshIfNeeded()
@@ -701,9 +698,7 @@ struct AgentContextDrawerFilesTab: View {
     }
 
     private func adjustActiveSubtab() {
-        guard !isSwitchBlankingRows else { return }
-        guard !exportContext.promptManager.isSwitchingComposeTab else { return }
-        guard !isResolvingWithoutModel else { return }
+        guard !isSwitchBlankingRows, !exportContext.promptManager.isSwitchingComposeTab, !isResolvingWithoutModel else { return }
         if detailStore.filesSubtab == .files, fileRows.isEmpty, !codemapRows.isEmpty {
             detailStore.filesSubtab = .codemaps
         } else if detailStore.filesSubtab == .codemaps, codemapRows.isEmpty, !fileRows.isEmpty, !isAwaitingCodemapRows {

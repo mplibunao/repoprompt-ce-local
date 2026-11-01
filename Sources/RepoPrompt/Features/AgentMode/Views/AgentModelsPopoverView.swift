@@ -423,14 +423,13 @@ struct AgentModelsPopoverView: View {
                         guard change.targets(providerID: providerID, modelRaw: expectedModelRaw),
                               editingScope == expectedScope,
                               let live = roleResolutions.first(where: { $0.role == resolution.role }),
-                              live.effective.isPinTarget(providerID: providerID, modelRaw: expectedModelRaw)
-                        else { return }
-                        guard MCPAgentRoleDefaultsService.setModelParameter(
-                            change,
-                            for: live.role,
-                            displayed: live.effective,
-                            scope: editingScope
-                        ) else { return }
+                              live.effective.isPinTarget(providerID: providerID, modelRaw: expectedModelRaw),
+                              MCPAgentRoleDefaultsService.setModelParameter(
+                                  change,
+                                  for: live.role,
+                                  displayed: live.effective,
+                                  scope: editingScope
+                              ) else { return }
                         bumpRoleDefaults()
                     }
                 }

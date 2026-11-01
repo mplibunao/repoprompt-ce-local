@@ -40,7 +40,9 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
         /// `resolvedModel(forRaw:agentKind:)`; without one, only an exact raw match
         /// can be trusted because the specifier grammar is agent-specific.
         var effectiveContextWindowTokens: Int {
-            if let contextWindowTokens { return contextWindowTokens }
+            if let contextWindowTokens {
+                return contextWindowTokens
+            }
             let model: AgentModel? = if let selectedAgent {
                 AgentModel.resolvedModel(forRaw: selectedModelRaw, agentKind: selectedAgent)
             } else {
@@ -89,10 +91,7 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
         guard let liveSelectionFileCount else {
             return metrics.tokens
         }
-        guard liveSelectionFileCount > 0 else {
-            return nil
-        }
-        guard metrics.fileCount == liveSelectionFileCount else {
+        guard liveSelectionFileCount > 0, metrics.fileCount == liveSelectionFileCount else {
             return nil
         }
         return metrics.tokens

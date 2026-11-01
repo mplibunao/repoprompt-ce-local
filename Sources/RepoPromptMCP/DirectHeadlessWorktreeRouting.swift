@@ -437,7 +437,9 @@ enum DirectHeadlessWorktreeRouting {
     private static func relativeSuffix(of child: URL, within parent: URL) -> String? {
         let childPath = canonicalPath(child).path
         let parentPath = canonicalPath(parent).path
-        if childPath == parentPath { return "" }
+        if childPath == parentPath {
+            return ""
+        }
         guard childPath.hasPrefix(parentPath + "/") else { return nil }
         return String(childPath.dropFirst(parentPath.count + 1))
     }
@@ -454,9 +456,15 @@ enum DirectHeadlessWorktreeRouting {
             var head: String?
             var branch: String?
             for line in block.split(separator: "\n") {
-                if line.hasPrefix("worktree ") { path = String(line.dropFirst(9)) }
-                if line.hasPrefix("HEAD ") { head = String(line.dropFirst(5)) }
-                if line.hasPrefix("branch refs/heads/") { branch = String(line.dropFirst(18)) }
+                if line.hasPrefix("worktree ") {
+                    path = String(line.dropFirst(9))
+                }
+                if line.hasPrefix("HEAD ") {
+                    head = String(line.dropFirst(5))
+                }
+                if line.hasPrefix("branch refs/heads/") {
+                    branch = String(line.dropFirst(18))
+                }
             }
             return path.map { PorcelainRecord(path: $0, head: head, branch: branch) }
         }
@@ -580,7 +588,9 @@ enum DirectHeadlessWorktreeRouting {
     private static func sameDirectoryIdentity(_ lhs: URL, _ rhs: URL) -> Bool {
         let canonicalLHS = canonicalPath(lhs)
         let canonicalRHS = canonicalPath(rhs)
-        if canonicalLHS.path == canonicalRHS.path { return true }
+        if canonicalLHS.path == canonicalRHS.path {
+            return true
+        }
         var lhsMetadata = stat()
         var rhsMetadata = stat()
         guard stat(canonicalLHS.path, &lhsMetadata) == 0,

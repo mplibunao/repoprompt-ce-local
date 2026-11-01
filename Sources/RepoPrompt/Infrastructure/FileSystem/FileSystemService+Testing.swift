@@ -83,8 +83,7 @@ import Foundation
             return flags.withUnsafeBufferPointer { flagBuffer in
                 guard let flagBase = flagBuffer.baseAddress else { return nil }
                 return ids.withUnsafeBufferPointer { idBuffer in
-                    guard let idBase = idBuffer.baseAddress else { return nil }
-                    guard let payload = buildOwnedFSEventPayload(
+                    guard let idBase = idBuffer.baseAddress, let payload = buildOwnedFSEventPayload(
                         numEvents: safeCount,
                         eventPaths: eventPaths,
                         eventFlags: flagBase,

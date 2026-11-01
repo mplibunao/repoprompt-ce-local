@@ -316,12 +316,7 @@ final class WorkspaceSelectionCoordinator {
               let fence = deferredUISelectionFenceByIdentity[identity]
         else { return liveUISelection }
 
-        guard workspaceManager.composeTab(for: identity)?.selection == fence.selection else {
-            deferredUISelectionFenceByIdentity.removeValue(forKey: identity)
-            return liveUISelection
-        }
-
-        guard workspaceManager.liveUISelectionRevision == fence.liveUISelectionRevision else {
+        guard workspaceManager.composeTab(for: identity)?.selection == fence.selection, workspaceManager.liveUISelectionRevision == fence.liveUISelectionRevision else {
             deferredUISelectionFenceByIdentity.removeValue(forKey: identity)
             return liveUISelection
         }
@@ -1276,9 +1271,7 @@ final class WorkspaceSelectionCoordinator {
         for identity: WorkspaceSelectionIdentity,
         peerMutationFence: MCPSelectionPeerMutationFence? = nil
     ) -> UInt64? {
-        guard let workspaceManager, var tab = workspaceManager.composeTab(for: identity) else { return nil }
-        guard tab.selection != selection else { return nil }
-        guard canApplyPeerMirror(peerMutationFence, workspaceManager: workspaceManager) else { return nil }
+        guard let workspaceManager, var tab = workspaceManager.composeTab(for: identity), tab.selection != selection, canApplyPeerMirror(peerMutationFence, workspaceManager: workspaceManager) else { return nil }
         tab.selection = selection
         tab.lastModified = Date()
         guard workspaceManager.updateComposeTabStoredOnly(tab, inWorkspaceID: identity.workspaceID) else { return nil }

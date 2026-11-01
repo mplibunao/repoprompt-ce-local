@@ -669,7 +669,9 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
     #if DEBUG
         private func toolText(_ result: (content: [MCP.Tool.Content], isError: Bool?)) -> String {
             result.content.compactMap { content -> String? in
-                if case let .text(text, _, _) = content { return text }
+                if case let .text(text, _, _) = content {
+                    return text
+                }
                 return nil
             }.joined(separator: "\n")
         }

@@ -136,10 +136,7 @@ extension AgentModeViewModel {
         if let explicitEntry = lookup.explicitEntry(for: stashedTab.tab.activeAgentSessionID) {
             return sessionIndexEntryHasConversationContent(explicitEntry)
         }
-        guard stashedTab.tab.activeAgentSessionID != nil || lookup.hasEntries(for: stashedTab.tab.id) else {
-            return false
-        }
-        guard let entry = preferredArchivedSidebarEntry(for: stashedTab.tab.id, tabName: stashedTab.tab.name, lookup: lookup) else {
+        guard stashedTab.tab.activeAgentSessionID != nil || lookup.hasEntries(for: stashedTab.tab.id), let entry = preferredArchivedSidebarEntry(for: stashedTab.tab.id, tabName: stashedTab.tab.name, lookup: lookup) else {
             return false
         }
         return sessionIndexEntryHasConversationContent(entry)
@@ -682,8 +679,14 @@ extension AgentModeViewModel {
             case let .active(tabID):
                 guard let row = activeRowsByID[tabID], let tab = composeTabsByID[tabID] else { return nil }
                 activeIDs.insert(tabID)
-                if row.canStash { stashIDs.insert(tabID) }
-                if tab.isPinned { unpinIDs.insert(tabID) } else { pinIDs.insert(tabID) }
+                if row.canStash {
+                    stashIDs.insert(tabID)
+                }
+                if tab.isPinned {
+                    unpinIDs.insert(tabID)
+                } else {
+                    pinIDs.insert(tabID)
+                }
             case let .archived(stashedTabID, tabID):
                 guard archivedTabsByID[stashedTabID]?.tab.id == tabID else { return nil }
                 archivedTargets.insert(.init(stashedTabID: stashedTabID, tabID: tabID))

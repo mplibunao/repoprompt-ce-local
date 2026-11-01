@@ -145,19 +145,7 @@ enum MarkdownStreamingCompilePolicy {
             return .skip
         }
 
-        guard cadence == .streamingCoalesced else {
-            return .compileNow
-        }
-
-        guard hasCompiledText else {
-            return .compileNow
-        }
-
-        guard let lastPublishedSignature else {
-            return .compileNow
-        }
-
-        guard let appendDelta = MarkdownStreamingAppendDelta.between(previous: lastPublishedSignature, requested: requestedSignature) else {
+        guard cadence == .streamingCoalesced, hasCompiledText, let lastPublishedSignature, let appendDelta = MarkdownStreamingAppendDelta.between(previous: lastPublishedSignature, requested: requestedSignature) else {
             return .compileNow
         }
 
@@ -286,9 +274,7 @@ enum MarkdownStreamingFreezeBoundaryResolver {
         }
 
         let tailLineCount = lineCount(in: split.tail)
-        guard tailLineCount >= minimumTailLineCount else { return nil }
-        guard !isFenceOpen(in: split.prefix) else { return nil }
-        guard !startsInPipeTable(tail: split.tail, prefix: split.prefix) else { return nil }
+        guard tailLineCount >= minimumTailLineCount, !isFenceOpen(in: split.prefix), !startsInPipeTable(tail: split.tail, prefix: split.prefix) else { return nil }
 
         let prefixLineCount = max(0, totalLineCount - tailLineCount)
         return MarkdownStreamingFreezeBoundary(
@@ -652,9 +638,7 @@ struct MarkdownTextView: View, Equatable {
                 try? await Task.sleep(nanoseconds: nanoseconds)
             }
 
-            guard !Task.isCancelled else { return }
-            guard latestRequestID == requestID else { return }
-            guard latestRequestedSignature == signature else { return }
+            guard !Task.isCancelled, latestRequestID == requestID, latestRequestedSignature == signature else { return }
 
             compileMarkdown(for: signature, requestID: requestID)
         }
@@ -698,10 +682,7 @@ struct MarkdownTextView: View, Equatable {
             )
         }
 
-        guard !Task.isCancelled else { return }
-        guard latestRequestID == requestID else { return }
-        guard latestRequestedSignature == signature else { return }
-        guard renderRequestContext.signature == signature else { return }
+        guard !Task.isCancelled, latestRequestID == requestID, latestRequestedSignature == signature, renderRequestContext.signature == signature else { return }
 
         attributedText = compiled
         lastPublishedSignature = signature

@@ -367,7 +367,9 @@ import XCTest
             _ condition: @MainActor () -> Bool
         ) async throws {
             struct ConditionTimeout: Error {}
-            if await startupTestWaitBounded(seconds: seconds, until: condition) { return }
+            if await startupTestWaitBounded(seconds: seconds, until: condition) {
+                return
+            }
             XCTFail("Timed out waiting for condition", file: file, line: line)
             throw ConditionTimeout()
         }

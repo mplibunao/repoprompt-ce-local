@@ -39,8 +39,12 @@ enum SparkleVersionComparison {
             let v1Part = index < v1Components.count ? v1Components[index] : 0
             let v2Part = index < v2Components.count ? v2Components[index] : 0
 
-            if v1Part > v2Part { return true }
-            if v1Part < v2Part { return false }
+            if v1Part > v2Part {
+                return true
+            }
+            if v1Part < v2Part {
+                return false
+            }
         }
         return false
     }

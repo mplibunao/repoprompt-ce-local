@@ -22,8 +22,7 @@ final class ChatWorkspaceSwitchSessionProvider: WorkspaceSwitchSessionProvider {
     }
 
     func cancelSwitchSessions() async {
-        guard let workspaceManager, let oracleViewModel else { return }
-        guard activeChatCount() > 0 else { return }
+        guard let workspaceManager, let oracleViewModel, activeChatCount() > 0 else { return }
 
         await oracleViewModel.cancelAllActiveSessionStreams()
         workspaceManager.setActiveChatTabs([])

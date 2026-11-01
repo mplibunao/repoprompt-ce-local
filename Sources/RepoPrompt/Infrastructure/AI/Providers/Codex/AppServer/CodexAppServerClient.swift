@@ -562,11 +562,7 @@ actor CodexAppServerClient {
 
     func setExpectedAgentPIDRegistration(_ registration: ExpectedAgentPIDRegistration?) async {
         expectedAgentPIDRegistration = registration
-        guard registration != nil else {
-            await clearRegisteredExpectedAgentPIDIfNeeded()
-            return
-        }
-        guard let activeTransport else {
+        guard registration != nil, let activeTransport else {
             await clearRegisteredExpectedAgentPIDIfNeeded()
             return
         }
@@ -804,7 +800,9 @@ actor CodexAppServerClient {
         requestFailure: ClientError,
         reason: TransportTerminationReason
     ) -> Task<Void, Never>? {
-        if let expectedGeneration, expectedGeneration != transportGeneration { return nil }
+        if let expectedGeneration, expectedGeneration != transportGeneration {
+            return nil
+        }
         let generation = transportGeneration
         return installTransportTermination(
             generation: generation,
@@ -1446,9 +1444,8 @@ actor CodexAppServerClient {
             for entry in pageItems {
                 guard
                     let id = entry["id"] as? String,
-                    !id.isEmpty
-                else { continue }
-                guard seenModelIDs.insert(id).inserted else { continue }
+                    !id.isEmpty,
+                    seenModelIDs.insert(id).inserted else { continue }
 
                 let model = (entry["model"] as? String) ?? id
                 let displayName = (entry["displayName"] as? String) ?? model
@@ -1697,8 +1694,7 @@ actor CodexAppServerClient {
             // Stream ended — could be genuine EOF or cancellation/finish from teardown.
             // Only trigger teardown on genuine EOF (not cancellation), and scope to
             // this transport generation so a stale task can't kill a new process.
-            guard !Task.isCancelled else { return }
-            guard let self else { return }
+            guard !Task.isCancelled, let self else { return }
             await handleStdoutEOF(generation: generation)
         }
     }
@@ -1984,8 +1980,7 @@ actor CodexAppServerClient {
     }
 
     private func recoverInvalidJSONStringControlChars(from lineData: Data) -> Bool {
-        guard let repaired = repairJSONStringControlCharacters(lineData) else { return false }
-        guard let json = try? JSONSerialization.jsonObject(with: repaired) as? [String: Any] else {
+        guard let repaired = repairJSONStringControlCharacters(lineData), let json = try? JSONSerialization.jsonObject(with: repaired) as? [String: Any] else {
             return false
         }
         if config.enableDebugLogging {
@@ -2028,21 +2023,19 @@ actor CodexAppServerClient {
                 } else if character == "\"" {
                     inString = false
                 }
-            } else {
-                if character == "\"" {
-                    inString = true
-                } else if character == "{" {
-                    depth += 1
-                } else if character == "}" {
-                    depth -= 1
-                    if depth == 0, let segmentStart = start {
-                        let segmentEnd = text.index(after: index)
-                        let segment = String(text[segmentStart ..< segmentEnd])
-                        if let segmentData = segment.data(using: .utf8), !segmentData.isEmpty {
-                            results.append(segmentData)
-                        }
-                        start = nil
+            } else if character == "\"" {
+                inString = true
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0, let segmentStart = start {
+                    let segmentEnd = text.index(after: index)
+                    let segment = String(text[segmentStart ..< segmentEnd])
+                    if let segmentData = segment.data(using: .utf8), !segmentData.isEmpty {
+                        results.append(segmentData)
                     }
+                    start = nil
                 }
             }
             index = text.index(after: index)
@@ -2112,10 +2105,8 @@ actor CodexAppServerClient {
         }
         let process = activeTransport.process
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        if config.enableDebugLogging {
-            if let line = String(data: data, encoding: .utf8) {
-                print("[CodexAppServer] -> \(line)")
-            }
+        if config.enableDebugLogging, let line = String(data: data, encoding: .utf8) {
+            print("[CodexAppServer] -> \(line)")
         }
         guard let stdinDescriptor = process.stdinDescriptor else {
             throw ClientError.processNotRunning

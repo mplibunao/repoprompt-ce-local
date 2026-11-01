@@ -211,7 +211,9 @@ actor MCPService: Sendable {
               activeStartAttempt?.generation == attempt.generation,
               lifecycleGeneration == attempt.generation
         else {
-            if state.isRunning { return }
+            if state.isRunning {
+                return
+            }
             throw LifecycleError.startSuperseded
         }
 

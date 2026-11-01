@@ -396,10 +396,7 @@ struct WorkspaceCodemapArtifactBinding: Equatable {
             guard association.artifactKey.rawSHA256 == completion.artifactKey.rawSHA256 else {
                 return .rawDigestMismatch
             }
-            guard association.artifactKey.rawByteCount == completion.artifactKey.rawByteCount else {
-                return .cleanBlobArtifactKeyMismatch
-            }
-            guard association.artifactKey == completion.artifactKey else {
+            guard association.artifactKey.rawByteCount == completion.artifactKey.rawByteCount, association.artifactKey == completion.artifactKey else {
                 return .cleanBlobArtifactKeyMismatch
             }
             guard association.outcome == completion.outcome else {

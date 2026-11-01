@@ -1,7 +1,7 @@
 import Foundation
 
+@MainActor
 extension MCPBootstrapLeaseSpec {
-    @MainActor
     static func agentMode(
         tabID: UUID,
         runID: UUID,

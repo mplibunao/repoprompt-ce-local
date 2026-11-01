@@ -37,8 +37,12 @@ enum FileTreeCardPresentationBuilder {
         let isFallbackMessage = dto.note != nil
         let wasTruncated = dto.wasTruncated == true
         let status: ToolCardStatus = {
-            if isFallbackMessage || wasTruncated { return .warning }
-            if !dto.tree.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .success }
+            if isFallbackMessage || wasTruncated {
+                return .warning
+            }
+            if !dto.tree.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return .success
+            }
             return .neutral
         }()
 
@@ -231,7 +235,9 @@ struct CodeStructureResultCard: View {
     }
 
     private var status: ToolCardStatus {
-        if item.toolIsError == true { return .failure }
+        if item.toolIsError == true {
+            return .failure
+        }
         if let storedStatus = StoredToolCardPresentation.fromSummaryOnly(raw: item.toolResultJSON)?.status {
             return storedStatus
         }
@@ -304,7 +310,9 @@ struct ManageSelectionResultCard: View {
     }
 
     private var status: ToolCardStatus {
-        if item.toolIsError == true { return .failure }
+        if item.toolIsError == true {
+            return .failure
+        }
         if let status = StoredToolCardPresentation.fromSummaryOnly(raw: item.toolResultJSON)?.status {
             return status
         }
@@ -347,13 +355,27 @@ struct WorkspaceContextResultCard: View {
         }
         guard let dto else { return nil }
         var sections: [String] = []
-        if !dto.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { sections.append("prompt") }
-        if dto.selection != nil { sections.append("selection") }
-        if dto.fileTree != nil { sections.append("file tree") }
-        if dto.codeStructure != nil { sections.append("code structure") }
-        if dto.fileBlocks?.isEmpty == false { sections.append("file blocks") }
-        if dto.copyPreset != nil { sections.append("copy preset") }
-        if dto.copyPresets?.isEmpty == false { sections.append("presets") }
+        if !dto.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sections.append("prompt")
+        }
+        if dto.selection != nil {
+            sections.append("selection")
+        }
+        if dto.fileTree != nil {
+            sections.append("file tree")
+        }
+        if dto.codeStructure != nil {
+            sections.append("code structure")
+        }
+        if dto.fileBlocks?.isEmpty == false {
+            sections.append("file blocks")
+        }
+        if dto.copyPreset != nil {
+            sections.append("copy preset")
+        }
+        if dto.copyPresets?.isEmpty == false {
+            sections.append("presets")
+        }
         guard !sections.isEmpty else { return nil }
         let visible = Array(sections.prefix(3))
         if sections.count > visible.count {
@@ -378,11 +400,15 @@ struct WorkspaceContextResultCard: View {
     }
 
     private var status: ToolCardStatus {
-        if item.toolIsError == true { return .failure }
+        if item.toolIsError == true {
+            return .failure
+        }
         if let status = StoredToolCardPresentation.fromSummaryOnly(raw: item.toolResultJSON)?.status {
             return status
         }
-        if dto != nil { return .success }
+        if dto != nil {
+            return .success
+        }
         return ToolResultStatusResolver.resolve(toolIsError: item.toolIsError, raw: item.toolResultJSON, fallback: .neutral)
     }
 

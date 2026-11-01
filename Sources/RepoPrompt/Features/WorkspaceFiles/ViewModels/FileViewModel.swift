@@ -240,7 +240,9 @@ class FileViewModel: ObservableObject, Identifiable, FileSystemItemViewModel, Eq
         func joinOrStart(
             make: @escaping @Sendable (_ gen: UInt64) -> Task<String?, Never>
         ) -> Task<String?, Never> {
-            if let t = task { return t }
+            if let t = task {
+                return t
+            }
             generation &+= 1
             let gen = generation
             let t = make(gen)
@@ -434,12 +436,7 @@ class FileViewModel: ObservableObject, Identifiable, FileSystemItemViewModel, Eq
             return FileSearchContentSnapshot(content: nil, contentRevision: nil, modificationDate: mtime, isFresh: false)
         }
 
-        guard let provider = await MainActor.run(body: { self.contentProvider }) else {
-            let (mtime, _, _) = await stateCache.snapshot()
-            return FileSearchContentSnapshot(content: nil, contentRevision: nil, modificationDate: mtime, isFresh: false)
-        }
-
-        guard await provider.regularFileExistsOnDisk() else {
+        guard let provider = await MainActor.run(body: { self.contentProvider }), await provider.regularFileExistsOnDisk() else {
             let (mtime, _, _) = await stateCache.snapshot()
             return FileSearchContentSnapshot(content: nil, contentRevision: nil, modificationDate: mtime, isFresh: false)
         }
@@ -755,7 +752,9 @@ class FileViewModel: ObservableObject, Identifiable, FileSystemItemViewModel, Eq
             let (mtime, lastLoaded, _) = await stateCache.snapshot()
             let fresh = lastLoaded.map { $0 >= mtime } ?? false
             let content = await contentStore.get()
-            if fresh, let content { return content }
+            if fresh, let content {
+                return content
+            }
         }
 
         // Atomically start or join the loader
@@ -808,13 +807,17 @@ class FileViewModel: ObservableObject, Identifiable, FileSystemItemViewModel, Eq
                     return stored
                 }
                 let fallback = await getCachedContentFallback()
-                if fallback != nil { logFallback("service unavailable → cachedContent") }
+                if fallback != nil {
+                    logFallback("service unavailable → cachedContent")
+                }
                 return fallback
             }
 
             do {
                 let (contentOpt, diskDate) = try await provider.loadContentWithDate()
-                if Task.isCancelled { return await contentStore.get() }
+                if Task.isCancelled {
+                    return await contentStore.get()
+                }
 
                 // Detect staleness during read
                 let (currentMTime, _, currentVersion) = await stateCache.snapshot()
@@ -836,7 +839,9 @@ class FileViewModel: ObservableObject, Identifiable, FileSystemItemViewModel, Eq
                     return stored
                 }
                 let fallback = await getCachedContentFallback()
-                if fallback != nil { logFallback("cancellation → cachedContent") }
+                if fallback != nil {
+                    logFallback("cancellation → cachedContent")
+                }
                 return fallback
             } catch {
                 // Surface the error to UI and allow retry on next call
@@ -851,7 +856,9 @@ class FileViewModel: ObservableObject, Identifiable, FileSystemItemViewModel, Eq
                     return stored
                 }
                 let fallback = await getCachedContentFallback()
-                if fallback != nil { logFallback("error → cachedContent") }
+                if fallback != nil {
+                    logFallback("error → cachedContent")
+                }
                 return fallback
             }
         }
@@ -1158,9 +1165,15 @@ class FileViewModel: ObservableObject, Identifiable, FileSystemItemViewModel, Eq
         let cutIndex = safeStringIndex(cutUTF8, in: content)
 
         let lineEnding: String = {
-            if crlfCount >= lfCount, crlfCount >= crCount, crlfCount > 0 { return "\r\n" }
-            if lfCount >= crCount, lfCount > 0 { return "\n" }
-            if crCount > 0 { return "\r" }
+            if crlfCount >= lfCount, crlfCount >= crCount, crlfCount > 0 {
+                return "\r\n"
+            }
+            if lfCount >= crCount, lfCount > 0 {
+                return "\n"
+            }
+            if crCount > 0 {
+                return "\r"
+            }
             return "\n"
         }()
 
@@ -1208,7 +1221,9 @@ class FileViewModel: ObservableObject, Identifiable, FileSystemItemViewModel, Eq
             let b = utf8[i]
             if b == 0x0A { // '\n'
                 count += 1
-                if count >= cap { return cap }
+                if count >= cap {
+                    return cap
+                }
                 let next = utf8.index(after: i)
                 endedWithLineEnding = (next == end)
                 i = next
@@ -1217,14 +1232,18 @@ class FileViewModel: ObservableObject, Identifiable, FileSystemItemViewModel, Eq
                 let n1 = utf8.index(after: i)
                 if n1 < end, utf8[n1] == 0x0A {
                     count += 1
-                    if count >= cap { return cap }
+                    if count >= cap {
+                        return cap
+                    }
                     let next = utf8.index(after: n1)
                     endedWithLineEnding = (next == end)
                     i = next
                     continue
                 } else {
                     count += 1
-                    if count >= cap { return cap }
+                    if count >= cap {
+                        return cap
+                    }
                     endedWithLineEnding = (n1 == end)
                     i = n1
                     continue

@@ -155,7 +155,9 @@ struct AgentExploreMCPToolService {
         }
 
         var isBatch: Bool {
-            if case .batch = self { return true }
+            if case .batch = self {
+                return true
+            }
             return false
         }
     }
@@ -308,7 +310,9 @@ struct AgentExploreMCPToolService {
                 await context.agentModeVM.mcpDiscardSessionTarget(target)
                 let remainingTargets = Array(targets.dropFirst(index + 1))
                 await discardTargets(remainingTargets, agentModeVM: context.agentModeVM)
-                if error is CancellationError { throw error }
+                if error is CancellationError {
+                    throw error
+                }
                 guard !started.isEmpty else { throw error }
                 let startedIDs = started.map(\.outcome.snapshot.sessionID.uuidString).joined(separator: ", ")
                 throw MCPError.internalError(
@@ -393,11 +397,9 @@ struct AgentExploreMCPToolService {
     ) async throws -> (sourceTabID: UUID, sourceSessionID: UUID) {
         guard let sourceTabID = await resolveSpawnSourceTabID(metadata),
               let sourceSession = agentModeVM.session(for: sourceTabID, createIfNeeded: false),
-              let controlContext = sourceSession.mcpControlContext
+              let controlContext = sourceSession.mcpControlContext,
+              let taskLabelKind = controlContext.taskLabelKind
         else {
-            throw MCPError.invalidParams("agent_explore is only available from MCP-started Agent Mode sessions with a non-explore role.")
-        }
-        guard let taskLabelKind = controlContext.taskLabelKind else {
             throw MCPError.invalidParams("agent_explore is only available from MCP-started Agent Mode sessions with a non-explore role.")
         }
         guard taskLabelKind != .explore else {

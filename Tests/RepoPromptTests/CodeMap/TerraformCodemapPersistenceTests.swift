@@ -468,7 +468,9 @@ final class TerraformCodemapPersistenceTests: XCTestCase {
 
 private extension CodeMapSyntaxArtifactOutcome {
     var readyArtifact: CodeMapSyntaxArtifact? {
-        if case let .ready(artifact) = self { return artifact }
+        if case let .ready(artifact) = self {
+            return artifact
+        }
         return nil
     }
 }

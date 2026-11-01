@@ -633,10 +633,10 @@ public struct ClaudeCompatibleLaunchEnvironmentResolver: Sendable {
                 break
             }
             guard let slot = ClaudeCompatibleModelNormalizer.normalizedSlotModel(
-                requestedModel,
-                config: config
-            ),
-                let backendModelID = backendModelID(forSlot: slot, config: config)
+                      requestedModel,
+                      config: config
+                  ),
+                  let backendModelID = backendModelID(forSlot: slot, config: config)
             else {
                 throw ClaudeCompatibleProviderError.invalidConfiguration(detail: "Unsupported \(config.normalizedDisplayName) model selection.")
             }

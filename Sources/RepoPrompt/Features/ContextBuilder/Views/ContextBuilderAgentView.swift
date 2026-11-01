@@ -790,8 +790,8 @@ struct ContextBuilderAgentView: View {
     /// Generate a plan/review/answer from built context based on selected follow-up type.
     /// Always uses headless generation so we can offer "View in Chat" or "Use as Prompt" options.
     private func generatePlan() {
-        guard let tabID = viewModel.currentTabID else { return }
-        guard viewModel.effectivePrompt(for: tabID) != nil,
+        guard let tabID = viewModel.currentTabID,
+              viewModel.effectivePrompt(for: tabID) != nil,
               viewModel.admitsManualFollowUp(forTabID: tabID)
         else { return }
 
@@ -830,70 +830,68 @@ struct ContextBuilderAgentView: View {
     }
 
     private var headerSection: some View {
-        Group {
-            HStack(spacing: 8) {
-                // Nested Agent/Model menu picker
-                StableMenuButton(
-                    items: contextBuilderAgentModelMenuItems,
-                    triggerStyle: .borderless
-                ) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "cpu")
-                            .font(.callout)
-                            .foregroundColor(.secondary)
-                        AgentModelSelectionSummaryLabel(
-                            agentKind: viewModel.selectedAgent,
-                            rawModel: viewModel.selectedModelRaw,
-                            title: "\(viewModel.selectedAgent.displayName) · \(viewModel.selectedModelDisplayName)",
-                            iconFont: .caption
-                        )
+        HStack(spacing: 8) {
+            // Nested Agent/Model menu picker
+            StableMenuButton(
+                items: contextBuilderAgentModelMenuItems,
+                triggerStyle: .borderless
+            ) {
+                HStack(spacing: 4) {
+                    Image(systemName: "cpu")
                         .font(.callout)
-                    }
+                        .foregroundColor(.secondary)
+                    AgentModelSelectionSummaryLabel(
+                        agentKind: viewModel.selectedAgent,
+                        rawModel: viewModel.selectedModelRaw,
+                        title: "\(viewModel.selectedAgent.displayName) · \(viewModel.selectedModelDisplayName)",
+                        iconFont: .caption
+                    )
+                    .font(.callout)
                 }
-                .disabled(isContextBuilderRunningForTab)
-                .hoverTooltip("Select agent and model for Context Builder")
+            }
+            .disabled(isContextBuilderRunningForTab)
+            .hoverTooltip("Select agent and model for Context Builder")
 
-                if let providerID = viewModel.selectedAgent.acpProviderID {
-                    let expectedModelRaw = viewModel.selectedModelRaw
-                    let expectedScope = viewModel.contextBuilderEditingScope
-                    ACPModelParameterProbeView(
-                        modelRaw: expectedModelRaw,
-                        providerID: providerID,
-                        providerDisplayName: viewModel.selectedAgent.displayName,
-                        probeContext: .resolved(viewModel.chooserProbeWorkspacePath),
-                        savedSelections: viewModel.contextBuilderModelParameters,
-                        isEnabled: !isContextBuilderRunningForTab
-                    ) { change in
-                        // Guarded write: re-check the live run permission, then re-check the
-                        // captured provider/model against live state inside the setter.
-                        guard !isContextBuilderRunningForTab else { return }
-                        viewModel.setContextBuilderModelParameter(
-                            change,
-                            expectedProviderID: providerID,
-                            expectedModelRaw: expectedModelRaw,
-                            expectedScope: expectedScope
-                        )
-                    }
+            if let providerID = viewModel.selectedAgent.acpProviderID {
+                let expectedModelRaw = viewModel.selectedModelRaw
+                let expectedScope = viewModel.contextBuilderEditingScope
+                ACPModelParameterProbeView(
+                    modelRaw: expectedModelRaw,
+                    providerID: providerID,
+                    providerDisplayName: viewModel.selectedAgent.displayName,
+                    probeContext: .resolved(viewModel.chooserProbeWorkspacePath),
+                    savedSelections: viewModel.contextBuilderModelParameters,
+                    isEnabled: !isContextBuilderRunningForTab
+                ) { change in
+                    // Guarded write: re-check the live run permission, then re-check the
+                    // captured provider/model against live state inside the setter.
+                    guard !isContextBuilderRunningForTab else { return }
+                    viewModel.setContextBuilderModelParameter(
+                        change,
+                        expectedProviderID: providerID,
+                        expectedModelRaw: expectedModelRaw,
+                        expectedScope: expectedScope
+                    )
                 }
-
-                // Context Builder Prompts button
-                ContextBuilderPromptsButton(
-                    selectedPromptIDs: $viewModel.selectedContextBuilderPromptIDs,
-                    showOverlay: $showPromptsOverlay,
-                    storage: promptStorage
-                )
-                .disabled(isContextBuilderRunningForTab)
-                .hoverTooltip("Prompts to include for this Context Builder run")
-
-                Spacer()
             }
-            .sheet(isPresented: $showPromptsOverlay) {
-                ContextBuilderPromptsOverlay(
-                    isVisible: $showPromptsOverlay,
-                    selectedPromptIDs: $viewModel.selectedContextBuilderPromptIDs,
-                    storage: promptStorage
-                )
-            }
+
+            // Context Builder Prompts button
+            ContextBuilderPromptsButton(
+                selectedPromptIDs: $viewModel.selectedContextBuilderPromptIDs,
+                showOverlay: $showPromptsOverlay,
+                storage: promptStorage
+            )
+            .disabled(isContextBuilderRunningForTab)
+            .hoverTooltip("Prompts to include for this Context Builder run")
+
+            Spacer()
+        }
+        .sheet(isPresented: $showPromptsOverlay) {
+            ContextBuilderPromptsOverlay(
+                isVisible: $showPromptsOverlay,
+                selectedPromptIDs: $viewModel.selectedContextBuilderPromptIDs,
+                storage: promptStorage
+            )
         }
     }
 

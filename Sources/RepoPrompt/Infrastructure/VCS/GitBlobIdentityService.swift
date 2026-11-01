@@ -276,7 +276,9 @@ actor GitBlobIdentityService {
                 postWorktree: postFileFingerprints[index]
             )
             let pathSecurityStable = preSecurity[index] == postSecurity[index]
-            if !tokens.isStable || !pathSecurityStable { unstable = true }
+            if !tokens.isStable || !pathSecurityStable {
+                unstable = true
+            }
             let entries = (entriesByPath[repositoryPath] ?? []).sorted { $0.stage < $1.stage }
             let record = recordsByPath[repositoryPath]
             let attributes = preAttributes[repositoryPath] ?? .unspecified
@@ -475,8 +477,12 @@ actor GitBlobIdentityService {
         configuration: GitBlobCheckoutConfiguration
     ) -> GitBlobCheckoutMaterialization {
         var reasons: [GitBlobCheckoutTransformReason] = []
-        if case .set = attributes.text { reasons.append(.textAttribute) }
-        if case .set = attributes.eol { reasons.append(.eolAttribute) }
+        if case .set = attributes.text {
+            reasons.append(.textAttribute)
+        }
+        if case .set = attributes.eol {
+            reasons.append(.eolAttribute)
+        }
         if let value = configuration.coreAutoCRLF, value != "false" {
             reasons.append(.coreAutoCRLF)
         }
@@ -504,8 +510,12 @@ actor GitBlobIdentityService {
         case .unspecified:
             break
         }
-        if case .set = attributes.ident { reasons.append(.identAttribute) }
-        if case .set = attributes.workingTreeEncoding { reasons.append(.workingTreeEncoding) }
+        if case .set = attributes.ident {
+            reasons.append(.identAttribute)
+        }
+        if case .set = attributes.workingTreeEncoding {
+            reasons.append(.workingTreeEncoding)
+        }
         return reasons.isEmpty ? .bytePreserving : .requiresValidatedWorktreeBytes(Array(Set(reasons)).sorted {
             $0.rawValue < $1.rawValue
         })
@@ -596,7 +606,9 @@ actor GitBlobIdentityService {
     private static func repositoryPrefix(workspaceRoot: URL, repositoryRoot: URL) -> String? {
         let workspace = workspaceRoot.standardizedFileURL.path
         let repository = repositoryRoot.standardizedFileURL.path
-        if workspace == repository { return "" }
+        if workspace == repository {
+            return ""
+        }
         let prefix = repository.hasSuffix("/") ? repository : repository + "/"
         guard workspace.hasPrefix(prefix) else { return nil }
         return String(workspace.dropFirst(prefix.count))
@@ -616,7 +628,9 @@ actor GitBlobIdentityService {
         var directoryDescriptor = rootDescriptor
         var crossedNestedRepository = false
         defer {
-            if directoryDescriptor != rootDescriptor { close(directoryDescriptor) }
+            if directoryDescriptor != rootDescriptor {
+                close(directoryDescriptor)
+            }
             close(rootDescriptor)
         }
 
@@ -661,7 +675,9 @@ actor GitBlobIdentityService {
                     )
                 }
             }
-            if directoryDescriptor != rootDescriptor { close(directoryDescriptor) }
+            if directoryDescriptor != rootDescriptor {
+                close(directoryDescriptor)
+            }
             directoryDescriptor = nextDescriptor
             hooks.afterPathSecurityComponentOpen(components[0 ... index].joined(separator: "/"))
         }

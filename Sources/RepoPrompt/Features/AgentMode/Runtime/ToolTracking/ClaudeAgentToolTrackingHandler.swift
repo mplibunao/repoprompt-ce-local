@@ -381,8 +381,7 @@ final class ClaudeAgentToolTrackingHandler {
         argsJSON: String?,
         session: AgentTabSession
     ) {
-        guard AgentToolTrackingSupport.isExplicitRepoPromptTool(toolName) else { return }
-        guard !AgentToolTrackingSupport.shouldHideToolFromTranscript(toolName) else { return }
+        guard AgentToolTrackingSupport.isExplicitRepoPromptTool(toolName), !AgentToolTrackingSupport.shouldHideToolFromTranscript(toolName) else { return }
 
         let storedToolName = Self.canonicalTranscriptToolName(toolName)
         let signature = Self.repoPromptInvocationSignature(toolName: toolName, argsJSON: argsJSON)
@@ -534,8 +533,7 @@ final class ClaudeAgentToolTrackingHandler {
         args: [String: Value]?,
         session: AgentTabSession
     ) {
-        guard AgentToolTrackingSupport.isRepoPromptTool(toolName) else { return }
-        guard !AgentToolTrackingSupport.shouldHideToolFromTranscript(toolName) else { return }
+        guard AgentToolTrackingSupport.isRepoPromptTool(toolName), !AgentToolTrackingSupport.shouldHideToolFromTranscript(toolName) else { return }
         // Flush buffered assistant content before inserting tool card to preserve interleaving order.
         hooks.flushPendingAssistantDelta(session)
         hooks.endActiveAssistantSegment(session)
@@ -731,8 +729,7 @@ final class ClaudeAgentToolTrackingHandler {
         isError: Bool,
         session: AgentTabSession
     ) {
-        guard AgentToolTrackingSupport.isRepoPromptTool(toolName) else { return }
-        guard !AgentToolTrackingSupport.shouldHideToolFromTranscript(toolName) else { return }
+        guard AgentToolTrackingSupport.isRepoPromptTool(toolName), !AgentToolTrackingSupport.shouldHideToolFromTranscript(toolName) else { return }
         // Flush buffered assistant content before inserting tool result to preserve interleaving order.
         hooks.flushPendingAssistantDelta(session)
         hooks.endActiveAssistantSegment(session)
@@ -1073,8 +1070,7 @@ final class ClaudeAgentToolTrackingHandler {
             return byName
         }
         return session.activeTurnToolItemIndices(where: { item in
-            guard isEligible(item) else { return false }
-            guard AgentTabSession.normalizedToolCorrelationName(item.toolName) == normalizedToolName else {
+            guard isEligible(item), AgentTabSession.normalizedToolCorrelationName(item.toolName) == normalizedToolName else {
                 return false
             }
             if item.kind == .toolCall {

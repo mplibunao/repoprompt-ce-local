@@ -83,11 +83,7 @@ struct ToolSchemaDoc {
 enum ToolSchemaIntrospector {
     /// Extracts a ToolSchemaDoc from an MCP Value representing a JSON Schema.
     static func extractDoc(from schema: Value?) -> ToolSchemaDoc {
-        guard let schema else {
-            return ToolSchemaDoc(title: nil, description: nil, parameters: [])
-        }
-
-        guard case let .object(obj) = schema else {
+        guard let schema, case let .object(obj) = schema else {
             return ToolSchemaDoc(title: nil, description: nil, parameters: [])
         }
 
@@ -139,7 +135,9 @@ enum ToolSchemaIntrospector {
 
         // Sort with required parameters first, then alphabetically
         parameters.sort { a, b in
-            if a.required != b.required { return a.required }
+            if a.required != b.required {
+                return a.required
+            }
             return a.name < b.name
         }
 
@@ -290,21 +288,19 @@ enum ToolSchemaIntrospector {
         }
 
         // For arrays, extract item schema as a single child
-        if let typeValue = obj["type"], case let .string(t) = typeValue, t == "array" {
-            if let items = obj["items"], case let .object(itemObj) = items {
-                // If items is an object type with properties, show those
-                if let itemType = itemObj["type"], case let .string(it) = itemType, it == "object" {
-                    let requiredNames = extractStringArray(itemObj["required"])
-                    let properties = extractObject(itemObj["properties"])
+        if let typeValue = obj["type"], case let .string(t) = typeValue, t == "array", let items = obj["items"], case let .object(itemObj) = items,
+           // If items is an object type with properties, show those
+           let itemType = itemObj["type"], case let .string(it) = itemType, it == "object"
+        {
+            let requiredNames = extractStringArray(itemObj["required"])
+            let properties = extractObject(itemObj["properties"])
 
-                    var children: [ToolParameterDoc] = []
-                    for (name, propValue) in properties.sorted(by: { $0.key < $1.key }) {
-                        let param = extractParameter(name: name, value: propValue, required: requiredNames.contains(name))
-                        children.append(param)
-                    }
-                    return children
-                }
+            var children: [ToolParameterDoc] = []
+            for (name, propValue) in properties.sorted(by: { $0.key < $1.key }) {
+                let param = extractParameter(name: name, value: propValue, required: requiredNames.contains(name))
+                children.append(param)
             }
+            return children
         }
 
         return []
@@ -314,11 +310,11 @@ enum ToolSchemaIntrospector {
         guard case let .array(arr) = value else { return nil }
         let values = arr.compactMap { v -> String? in
             switch v {
-            case let .string(s): return s
-            case let .int(i): return String(i)
-            case let .double(d): return String(d)
-            case let .bool(b): return String(b)
-            default: return nil
+            case let .string(s): s
+            case let .int(i): String(i)
+            case let .double(d): String(d)
+            case let .bool(b): String(b)
+            default: nil
             }
         }
         return values.isEmpty ? nil : values

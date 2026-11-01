@@ -187,7 +187,9 @@
             _ result: CallTool.Result
         ) throws -> [String: Any] {
             let text = try XCTUnwrap(result.content.compactMap { content -> String? in
-                if case let .text(text, _, _) = content { return text }
+                if case let .text(text, _, _) = content {
+                    return text
+                }
                 return nil
             }.first)
             let data = try XCTUnwrap(text.data(using: .utf8))

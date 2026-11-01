@@ -1,7 +1,7 @@
 import Foundation
 
+@MainActor
 extension MCPServerViewModel {
-    @MainActor
     func buildTabWorkspaceContext(
         context: TabContextSnapshot,
         include: Set<String>,
@@ -197,11 +197,12 @@ extension MCPServerViewModel {
         )
     }
 
-    @MainActor
     private func resolvedContextForExportSelectedFiles(
         _ resolvedContext: ResolvedTabContextSnapshot?
     ) async throws -> ResolvedTabContextSnapshot? {
-        if let resolvedContext { return resolvedContext }
+        if let resolvedContext {
+            return resolvedContext
+        }
         let metadata = await captureRequestMetadata()
         return try resolveTabContextSnapshot(
             from: metadata,
@@ -209,7 +210,6 @@ extension MCPServerViewModel {
         )
     }
 
-    @MainActor
     func buildExportSelectedFileInfos(
         resolvedContext: ResolvedTabContextSnapshot? = nil,
         cfg: PromptContextResolved,
@@ -274,7 +274,6 @@ extension MCPServerViewModel {
         return reply.files
     }
 
-    @MainActor
     func buildTabClipboardContent(
         cfg: PromptContextResolved,
         context: TabContextSnapshot
@@ -350,8 +349,8 @@ extension MCPServerViewModel {
     }
 }
 
+@MainActor
 extension MCPServerViewModel {
-    @MainActor
     func latestTokenBreakdown() -> TokenCountingViewModel.TokenBreakdown {
         promptVM.tokenCountingViewModel.latestTokenBreakdown()
     }

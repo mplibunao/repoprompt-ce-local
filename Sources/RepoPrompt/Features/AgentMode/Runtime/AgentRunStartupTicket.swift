@@ -169,7 +169,9 @@ final class AgentRunStartupTicket {
     private func chainReaches(_ ticket: AgentRunStartupTicket) -> Bool {
         var node: AgentRunStartupTicket? = self
         while let current = node {
-            if current === ticket { return true }
+            if current === ticket {
+                return true
+            }
             node = current.successor
         }
         return false

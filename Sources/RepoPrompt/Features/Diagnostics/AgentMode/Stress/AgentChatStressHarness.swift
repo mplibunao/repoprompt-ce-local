@@ -455,8 +455,7 @@
         }
 
         func bootstrapIfNeeded(currentTabID: UUID?) {
-            guard configuration.autoStart else { return }
-            guard status != .bootstrapping, status != .running else { return }
+            guard configuration.autoStart, status != .bootstrapping, status != .running else { return }
             if let requiredWorkspaceName = configuration.workspaceName,
                workspaceManager.activeWorkspace?.name != requiredWorkspaceName
             {
@@ -1370,16 +1369,12 @@
             isError: Bool
         ) async throws -> PersistedCodexFixtureBashReplay? {
             let events = try await collectPersistedCodexFixtureEvents(named: fixtureName, threadID: threadID)
-            guard !events.isEmpty else { return nil }
-            guard let toolCall = events.first(where: {
+            guard !events.isEmpty, let toolCall = events.first(where: {
                 if case let .toolCall(name, _, _) = $0 {
                     return name == "bash"
                 }
                 return false
-            }) else {
-                return nil
-            }
-            guard case let .toolCall(_, invocationID, argsJSON) = toolCall else {
+            }), case let .toolCall(_, invocationID, argsJSON) = toolCall else {
                 return nil
             }
             let runningUpdates = events.compactMap { event -> CodexNativeSessionController.CommandExecutionRunningUpdate? in
@@ -1439,8 +1434,8 @@
             let contents = try String(contentsOf: fixtureURL, encoding: .utf8)
             for rawLine in contents.split(whereSeparator: \.isNewline) {
                 let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !line.isEmpty else { continue }
-                guard let data = line.data(using: .utf8),
+                guard !line.isEmpty,
+                      let data = line.data(using: .utf8),
                       let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let method = object["method"] as? String,
                       let payload = object["payload"] as? [String: Any]

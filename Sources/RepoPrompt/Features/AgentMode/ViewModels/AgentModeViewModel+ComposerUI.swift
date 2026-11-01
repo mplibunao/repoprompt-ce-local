@@ -149,8 +149,8 @@ extension AgentModeViewModel {
             guard expectedSourceAgentSessionID != nil else { return nil }
             route = .existingAgentSession
         } else {
-            guard expectedSourceAgentSessionID == nil else { return nil }
-            guard !resolvedSession.runState.isActive,
+            guard expectedSourceAgentSessionID == nil,
+                  !resolvedSession.runState.isActive,
                   resolvedSession.runID == nil,
                   resolvedSession.activeRunAttemptID == nil
             else { return nil }

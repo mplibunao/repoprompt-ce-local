@@ -314,7 +314,9 @@ struct WorkspaceCodemapPresentationCoordinator {
                     case let .stale(reason):
                         lastStaleReason = reason
                         await release(ownership)
-                        if attempt == 0, clock.now < deadline { continue }
+                        if attempt == 0, clock.now < deadline {
+                            continue
+                        }
                         let fallbackValue = try await operation(
                             prepared.context,
                             incompletePublication(reason: reason)
@@ -327,7 +329,9 @@ struct WorkspaceCodemapPresentationCoordinator {
                 return value
             } catch {
                 await release(ownership)
-                if Task.isCancelled || error is CancellationError { throw CancellationError() }
+                if Task.isCancelled || error is CancellationError {
+                    throw CancellationError()
+                }
                 throw error
             }
         }
@@ -707,12 +711,16 @@ struct WorkspaceCodemapPresentationCoordinator {
                     if case let .unavailable(.busy(milliseconds)) = refreshed {
                         hasPending = true
                         hasBusy = true
-                        if let milliseconds { retryAfter.append(milliseconds) }
+                        if let milliseconds {
+                            retryAfter.append(milliseconds)
+                        }
                     }
                 case let .unavailable(.busy(milliseconds)):
                     hasPending = true
                     hasBusy = true
-                    if let milliseconds { retryAfter.append(milliseconds) }
+                    if let milliseconds {
+                        retryAfter.append(milliseconds)
+                    }
                 case .ready, .unavailable:
                     break
                 }
@@ -861,9 +869,13 @@ struct WorkspaceCodemapPresentationCoordinator {
         issues: [WorkspaceCodemapOperationIssue]
     ) -> WorkspaceCodemapOperationPresentationCoverage {
         guard !issues.isEmpty else { return .complete }
-        if !renderedEntries.isEmpty { return .partial(issues) }
+        if !renderedEntries.isEmpty {
+            return .partial(issues)
+        }
         if issues.contains(where: { issue in
-            if case .pending = issue { return true }
+            if case .pending = issue {
+                return true
+            }
             if case let .automatic(coverage) = issue {
                 switch coverage {
                 case .pending:

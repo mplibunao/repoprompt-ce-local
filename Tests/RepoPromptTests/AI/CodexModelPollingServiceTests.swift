@@ -268,7 +268,9 @@ private actor BlockingCodexModelClient: CodexModelListingClient {
     }
 
     func reachesCallCount(_ expected: Int, within timeout: Duration) async -> Bool {
-        if listingCallCount >= expected { return true }
+        if listingCallCount >= expected {
+            return true
+        }
 
         let stream = callCountUpdates()
         return await withTaskGroup(of: Bool.self) { group in

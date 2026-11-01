@@ -137,8 +137,7 @@ private struct HoverTooltipModifier: ViewModifier {
 
                     // Avoid retain cycle: runtime -> pendingWork -> closure -> runtime
                     rt.pendingWork = rt.pendingWorkGate.schedule(after: showDelay) { [tooltipContent, placement, preset, weak rt] in
-                        guard let rt else { return }
-                        guard let hostWindow = rt.anchorInfo.window else { return }
+                        guard let rt, let hostWindow = rt.anchorInfo.window else { return }
                         defer { rt.pendingWork = nil }
 
                         hideOverlay()

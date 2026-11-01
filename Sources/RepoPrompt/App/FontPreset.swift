@@ -180,8 +180,8 @@ extension FontScalePreset {
         let size = scaledMetric(sizeAtNormal)
         if rounded,
            let descriptor = NSFont.systemFont(ofSize: size, weight: weight)
-           .fontDescriptor
-           .withDesign(.rounded),
+               .fontDescriptor
+               .withDesign(.rounded),
            let font = NSFont(descriptor: descriptor, size: size)
         {
             return font

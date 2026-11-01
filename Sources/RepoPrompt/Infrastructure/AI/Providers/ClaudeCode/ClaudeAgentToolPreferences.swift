@@ -136,8 +136,7 @@ struct ClaudeAgentToolPreferences {
         agentKind: AgentProviderKind,
         selectedModelRaw: String?
     ) -> Bool {
-        guard agentKind == .claudeCode else { return false }
-        guard let baseModel = ClaudeModelSpecifier(raw: selectedModelRaw).baseModel else { return false }
+        guard agentKind == .claudeCode, let baseModel = ClaudeModelSpecifier(raw: selectedModelRaw).baseModel else { return false }
         return baseModel.caseInsensitiveCompare(AgentModel.claudeOpus.rawValue) == .orderedSame
             || baseModel.caseInsensitiveCompare(AgentModel.claudeOpus1m.rawValue) == .orderedSame
     }

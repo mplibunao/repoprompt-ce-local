@@ -425,8 +425,12 @@ actor BootstrapSocketServer {
                 releaseLease.signal()
                 continueShutdown.signal()
                 if workerGroup.wait(timeout: .now() + 2) == .success {
-                    if fcntl(descriptors[0], F_GETFD) >= 0 { Darwin.close(descriptors[0]) }
-                    if fcntl(descriptors[1], F_GETFD) >= 0 { Darwin.close(descriptors[1]) }
+                    if fcntl(descriptors[0], F_GETFD) >= 0 {
+                        Darwin.close(descriptors[0])
+                    }
+                    if fcntl(descriptors[1], F_GETFD) >= 0 {
+                        Darwin.close(descriptors[1])
+                    }
                 }
             }
 
@@ -529,8 +533,7 @@ actor BootstrapSocketServer {
     // MARK: - Accept Loop
 
     private func startAcceptSource() throws {
-        guard listenFD >= 0 else { return }
-        guard acceptSource == nil else { return }
+        guard listenFD >= 0, acceptSource == nil else { return }
 
         let source = try ReadSourceFDPreflight.makeReadSource(
             fileDescriptor: listenFD,
@@ -602,8 +605,12 @@ actor BootstrapSocketServer {
 
             if clientFD < 0 {
                 let err = errno
-                if err == EINTR { continue }
-                if err == EAGAIN || err == EWOULDBLOCK { break }
+                if err == EINTR {
+                    continue
+                }
+                if err == EAGAIN || err == EWOULDBLOCK {
+                    break
+                }
                 logger.error("BootstrapSocketServer: accept failed with errno \(err)")
                 break
             }
@@ -1037,7 +1044,9 @@ actor BootstrapSocketServer {
             }
 
             let err = errno
-            if err == EINTR { continue }
+            if err == EINTR {
+                continue
+            }
 
             // Timeout (EAGAIN with SO_SNDTIMEO) or error
             // shutdown() wakes any blocked I/O and signals the other end

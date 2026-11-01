@@ -5,7 +5,9 @@ enum ContextBuilderRunOrigin: Equatable {
     case mcp(controlToken: UUID)
 
     var isMCP: Bool {
-        if case .mcp = self { return true }
+        if case .mcp = self {
+            return true
+        }
         return false
     }
 }
@@ -74,7 +76,9 @@ enum ContextBuilderResponseDeliveryDrainResolver {
         isAuthoritativeDetached: @MainActor () -> Bool,
         awaitTeardownPublication: @MainActor () async -> MCPServerViewModel.ContextBuilderTeardownPublicationOutcome
     ) async -> ContextBuilderResponseDeliveryDrainOutcome {
-        if !initiallyDetached, await awaitDrain() { return .drained }
+        if !initiallyDetached, await awaitDrain() {
+            return .drained
+        }
 
         let publication = await awaitTeardownPublication()
         guard publication.completedDiscoveryCanCommit,
@@ -108,8 +112,7 @@ enum ContextBuilderChildConnectionFinalizer {
         cleanupMapping: CleanupMapping
     ) async -> Bool {
         for connectionID in connectionIDs {
-            guard await awaitResponseDeliveryDrain(connectionID) else { return false }
-            guard await commitContext(connectionID) else { return false }
+            guard await awaitResponseDeliveryDrain(connectionID), await commitContext(connectionID) else { return false }
         }
 
         await beforeTerminationRequest()
@@ -619,7 +622,9 @@ final class ContextBuilderRunRecord {
     /// without waiting for the provider's disposal. Teardown is what ends this wait, and every
     /// run that reaches a terminal state is given one.
     func awaitExecutionSettlement() async {
-        if executionTaskFinished { return }
+        if executionTaskFinished {
+            return
+        }
         await withCheckedContinuation { continuation in
             if executionTaskFinished {
                 continuation.resume()
@@ -648,7 +653,9 @@ final class ContextBuilderRunRecord {
     }
 
     func awaitTeardownSettlement() async {
-        if teardownFinishedAt != nil { return }
+        if teardownFinishedAt != nil {
+            return
+        }
         await withCheckedContinuation { continuation in
             if teardownFinishedAt != nil {
                 continuation.resume()

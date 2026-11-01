@@ -1,10 +1,7 @@
 import Foundation
 
 func toolResultHasPayload(_ item: AgentChatItem) -> Bool {
-    guard let raw = item.toolResultJSON?.trimmingCharacters(in: .whitespacesAndNewlines) else {
-        return false
-    }
-    guard !raw.isEmpty else { return false }
+    guard let raw = item.toolResultJSON?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return false }
     if let object = ToolJSON.rawObject(from: item.toolResultJSON),
        ToolRawJSON.bool(object, key: "summary_only") == true
     {

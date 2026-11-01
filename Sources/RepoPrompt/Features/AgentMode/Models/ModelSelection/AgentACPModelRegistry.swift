@@ -19,10 +19,10 @@ final class AgentACPModelRegistry {
         for providerID: ACPProviderID
     ) -> Bool {
         guard let providerRecord = ACPDynamicModelStore.canonicalProviderRecord(
-            from: snapshot,
-            providerID: providerID
-        ),
-            let normalizedSnapshot = ACPDynamicModelStore.snapshot(from: providerRecord)
+                  from: snapshot,
+                  providerID: providerID
+              ),
+              let normalizedSnapshot = ACPDynamicModelStore.snapshot(from: providerRecord)
         else {
             return false
         }

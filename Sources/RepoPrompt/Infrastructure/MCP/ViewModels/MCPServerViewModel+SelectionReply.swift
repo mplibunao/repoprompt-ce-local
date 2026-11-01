@@ -764,8 +764,7 @@ extension MCPServerViewModel {
         projection: WorkspaceRootBindingProjection? = nil,
         rootScope: WorkspaceLookupRootScope = .visibleWorkspace
     ) async -> ToolResultDTOs.SelectedCodeStructureDTO? {
-        guard !promptVM.codeMapsGloballyDisabled else { return nil }
-        guard collections.codeMapUsage != .none else { return nil }
+        guard !promptVM.codeMapsGloballyDisabled, collections.codeMapUsage != .none else { return nil }
 
         let files = SelectionReplyAssembler.codemapDiagnosticFiles(for: collections)
         guard !files.isEmpty else { return nil }

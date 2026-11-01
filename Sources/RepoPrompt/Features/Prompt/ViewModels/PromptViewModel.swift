@@ -550,7 +550,9 @@ class PromptViewModel: ObservableObject {
     @Published var contextBuilderAgent: AgentProviderKind = .claudeCode {
         didSet {
             guard oldValue != contextBuilderAgent else { return }
-            if isSyncingSettings { return }
+            if isSyncingSettings {
+                return
+            }
             if !isContextBuilderModelRawValidForAgent(contextBuilderAgentModelRaw, agent: contextBuilderAgent) {
                 contextBuilderAgentModelRaw = defaultModelRaw(for: contextBuilderAgent)
             }
@@ -569,7 +571,9 @@ class PromptViewModel: ObservableObject {
                 contextBuilderAgentModelRaw = effectiveRaw
                 return
             }
-            if isSyncingSettings { return }
+            if isSyncingSettings {
+                return
+            }
             if !isContextBuilderModelRawValidForAgent(effectiveRaw, agent: contextBuilderAgent) {
                 contextBuilderAgentModelRaw = defaultModelRaw(for: contextBuilderAgent)
                 return
@@ -674,7 +678,9 @@ class PromptViewModel: ObservableObject {
     @Published var planActMode: PlanActMode = .chat {
         didSet {
             guard oldValue != planActMode else { return }
-            if isSyncingSettings { return }
+            if isSyncingSettings {
+                return
+            }
             guard let workspaceID = currentWorkspaceID else { return }
 
             var settings = settingsManager.chatSettings(for: workspaceID)
@@ -740,7 +746,9 @@ class PromptViewModel: ObservableObject {
     }
 
     private func targetFileEditFormat(for model: AIModel) -> FileEditFormat {
-        if fileEditFormat == .none { return .none }
+        if fileEditFormat == .none {
+            return .none
+        }
         return model.isModelCapableOfDiff ? fileEditFormat : .whole
     }
 
@@ -873,7 +881,9 @@ class PromptViewModel: ObservableObject {
             guard oldValue != fileTreeOption else { return }
             // Recompute file-tree tokens regardless of sync state
             tokenCountingViewModel.markDirty(.fileTree)
-            if isSyncingSettings { return }
+            if isSyncingSettings {
+                return
+            }
             guard let workspaceID = currentWorkspaceID else { return }
 
             var settings = settingsManager.copySettings(for: workspaceID)
@@ -952,7 +962,9 @@ class PromptViewModel: ObservableObject {
     @Published var fileTreeOptionForChat: FileTreeOption = .auto {
         didSet {
             guard oldValue != fileTreeOptionForChat else { return }
-            if isSyncingSettings { return }
+            if isSyncingSettings {
+                return
+            }
             guard let workspaceID = currentWorkspaceID else { return }
 
             var settings = settingsManager.chatSettings(for: workspaceID)
@@ -977,7 +989,9 @@ class PromptViewModel: ObservableObject {
             // Always refresh codemap tokens when chat usage changes
             tokenCountingViewModel.markDirty(.codeMap)
 
-            if isSyncingSettings { return }
+            if isSyncingSettings {
+                return
+            }
             guard let workspaceID = currentWorkspaceID else { return }
 
             var settings = settingsManager.chatSettings(for: workspaceID)
@@ -998,7 +1012,9 @@ class PromptViewModel: ObservableObject {
     @Published var gitDiffInclusionModeForChat: GitDiffInclusionMode = .none {
         didSet {
             guard oldValue != gitDiffInclusionModeForChat else { return }
-            if isSyncingSettings { return }
+            if isSyncingSettings {
+                return
+            }
             guard let workspaceID = currentWorkspaceID else { return }
 
             var settings = settingsManager.chatSettings(for: workspaceID)
@@ -4297,8 +4313,7 @@ class PromptViewModel: ObservableObject {
 
     @MainActor
     private func cleanupMCPStateForClosingTabs(_ tabIDs: Set<UUID>) async {
-        guard !tabIDs.isEmpty else { return }
-        guard let windowState = WindowStatesManager.shared.allWindows.first(where: { $0.windowID == windowID }) else { return }
+        guard !tabIDs.isEmpty, let windowState = WindowStatesManager.shared.allWindows.first(where: { $0.windowID == windowID }) else { return }
 
         for tabID in tabIDs {
             windowState.mcpServer.purgeClosedTabContext(tabID: tabID)
@@ -4311,13 +4326,17 @@ class PromptViewModel: ObservableObject {
         if activeIndex + 1 < tabs.count {
             for index in (activeIndex + 1) ..< tabs.count {
                 let candidate = tabs[index].id
-                if !closingIDs.contains(candidate) { return candidate }
+                if !closingIDs.contains(candidate) {
+                    return candidate
+                }
             }
         }
         if activeIndex > 0 {
             for index in stride(from: activeIndex - 1, through: 0, by: -1) {
                 let candidate = tabs[index].id
-                if !closingIDs.contains(candidate) { return candidate }
+                if !closingIDs.contains(candidate) {
+                    return candidate
+                }
             }
         }
         return nil
@@ -4329,8 +4348,7 @@ class PromptViewModel: ObservableObject {
         manager: WorkspaceManagerViewModel,
         workspaceIndex: Int
     ) -> ComposeTabState? {
-        guard manager.workspaces[workspaceIndex].composeTabs.isEmpty else { return nil }
-        guard let blankTab = makeComposeTab(
+        guard manager.workspaces[workspaceIndex].composeTabs.isEmpty, let blankTab = makeComposeTab(
             for: .blank,
             explicitName: nil,
             workspaceIndex: workspaceIndex,
@@ -4738,8 +4756,8 @@ class PromptViewModel: ObservableObject {
             let index = manager.workspaces.firstIndex(where: { $0.id == workspace.id })
         else { return }
         let tabs = manager.workspaces[index].composeTabs
-        guard tabs.count > 1 else { return }
-        guard let activeID = manager.workspaces[index].activeComposeTabID,
+        guard tabs.count > 1,
+              let activeID = manager.workspaces[index].activeComposeTabID,
               let currentIndex = tabs.firstIndex(where: { $0.id == activeID }) else { return }
         let offset = forward ? 1 : -1
         let nextIndex = (currentIndex + offset + tabs.count) % tabs.count
@@ -4769,10 +4787,8 @@ class PromptViewModel: ObservableObject {
         let activeTabID = manager.workspaces[workspaceIndex].activeComposeTabID ?? manager.workspaces[workspaceIndex].composeTabs.first?.id
         guard
             let tabID = activeTabID,
-            let tabIndex = manager.workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == tabID })
-        else { return }
-
-        guard manager.workspaces[workspaceIndex].composeTabs[tabIndex].contextOverrides != overrides else { return }
+            let tabIndex = manager.workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == tabID }),
+            manager.workspaces[workspaceIndex].composeTabs[tabIndex].contextOverrides != overrides else { return }
 
         manager.workspaces[workspaceIndex].composeTabs[tabIndex].contextOverrides = overrides
         manager.workspaces[workspaceIndex].dateModified = Date()
@@ -5985,13 +6001,23 @@ class PromptViewModel: ObservableObject {
         }
         // Fall back to built-in presets by stable IDs even if the manager
         // hasn't finished loading yet, to avoid mode/UI mismatches.
-        if id == ChatPreset.BuiltIn.manual.id { return ChatPreset.BuiltIn.manual }
-        if id == ChatPreset.BuiltIn.chat.id { return ChatPreset.BuiltIn.chat }
-        if id == ChatPreset.BuiltIn.plan.id { return ChatPreset.BuiltIn.plan }
-        if id == ChatPreset.BuiltIn.review.id { return ChatPreset.BuiltIn.review }
+        if id == ChatPreset.BuiltIn.manual.id {
+            return ChatPreset.BuiltIn.manual
+        }
+        if id == ChatPreset.BuiltIn.chat.id {
+            return ChatPreset.BuiltIn.chat
+        }
+        if id == ChatPreset.BuiltIn.plan.id {
+            return ChatPreset.BuiltIn.plan
+        }
+        if id == ChatPreset.BuiltIn.review.id {
+            return ChatPreset.BuiltIn.review
+        }
         let legacyEditID = UUID(uuidString: "A3333333-3333-3333-3333-333333333333")!
         let legacyDelegatedEditID = UUID(uuidString: "A3333334-3334-3334-3334-333333333334")!
-        if id == legacyEditID || id == legacyDelegatedEditID { return ChatPreset.BuiltIn.chat }
+        if id == legacyEditID || id == legacyDelegatedEditID {
+            return ChatPreset.BuiltIn.chat
+        }
         return ChatPreset.BuiltIn.chat
     }
 
@@ -6156,13 +6182,21 @@ class PromptViewModel: ObservableObject {
         let persistedManualCustomizations = sanitizedManualCustomizations?.hasCustomizations == true
             ? sanitizedManualCustomizations
             : nil
-        if let v = s.manualFileTreeOption { fileTreeOption = v }
-        if let v = s.manualCodeMapUsage { codeMapUsage = v }
-        if let v = s.manualGitInclusion { gitDiffInclusionModeForCopy = v }
+        if let v = s.manualFileTreeOption {
+            fileTreeOption = v
+        }
+        if let v = s.manualCodeMapUsage {
+            codeMapUsage = v
+        }
+        if let v = s.manualGitInclusion {
+            gitDiffInclusionModeForCopy = v
+        }
         if let v = s.manualSelectedPromptIDs {
             selectedPromptIDs = v
         }
-        if let v = s.manualHasManualPromptSelection { hasManualCopyPromptSelection = v }
+        if let v = s.manualHasManualPromptSelection {
+            hasManualCopyPromptSelection = v
+        }
         workingCopyCustomizations = persistedManualCustomizations ?? .init()
         if persistedManualCustomizations != s.manualWorkingCopyCustomizations {
             var updatedSettings = s
@@ -6187,12 +6221,24 @@ class PromptViewModel: ObservableObject {
     private func restoreManualChatSettingsIfAvailable() {
         guard let workspaceID = currentWorkspaceID else { return }
         let s = settingsManager.chatSettings(for: workspaceID)
-        if let v = s.manualFileTreeOption { fileTreeOptionForChat = v }
-        if let v = s.manualCodeMapUsage { codeMapUsageForChat = v }
-        if let v = s.manualGitInclusion { gitDiffInclusionModeForChat = v }
-        if let v = s.manualPlanActMode { planActMode = v == .edit ? .chat : v }
-        if let v = s.manualSelectedPromptIDs { selectedPromptIDsForChat = v }
-        if let v = s.manualHasManualPromptSelection { hasManualChatPromptSelection = v }
+        if let v = s.manualFileTreeOption {
+            fileTreeOptionForChat = v
+        }
+        if let v = s.manualCodeMapUsage {
+            codeMapUsageForChat = v
+        }
+        if let v = s.manualGitInclusion {
+            gitDiffInclusionModeForChat = v
+        }
+        if let v = s.manualPlanActMode {
+            planActMode = v == .edit ? .chat : v
+        }
+        if let v = s.manualSelectedPromptIDs {
+            selectedPromptIDsForChat = v
+        }
+        if let v = s.manualHasManualPromptSelection {
+            hasManualChatPromptSelection = v
+        }
         updateSelectedInstructions()
     }
 
@@ -6282,7 +6328,9 @@ class PromptViewModel: ObservableObject {
 
         // Determine effective read-only mode. Legacy/manual edit settings are treated as Chat.
         let effectiveMode: PlanActMode = {
-            if let override = overrideMode { return override == .edit ? .chat : override }
+            if let override = overrideMode {
+                return override == .edit ? .chat : override
+            }
             if preset.id == ChatPreset.BuiltIn.manual.id {
                 return self.planActMode == .edit ? .chat : self.planActMode
             }
@@ -6524,7 +6572,9 @@ class PromptViewModel: ObservableObject {
         // Try to parse the rawValue
         if let model = AIModel.fromModelName(rawValue) {
             // Custom models are always valid (user explicitly configured them)
-            if model.isCustom { return true }
+            if model.isCustom {
+                return true
+            }
             switch model.providerType {
             case .claudeCode, .codex, .openCode, .cursor, .grokBuild:
                 return true
@@ -6657,7 +6707,9 @@ class PromptViewModel: ObservableObject {
     @MainActor
     func isModelAvailable(_ model: AIModel) -> Bool {
         // Custom models are always considered available if parseable
-        if model.isCustom { return true }
+        if model.isCustom {
+            return true
+        }
         // Check if the model's provider has an API key configured
         // This is more stable than array membership which can fail when enum definitions change
         return isProviderConfigured(for: model)
@@ -6826,8 +6878,12 @@ extension PromptViewModel {
         uiMode: GitDiffInclusionMode,
         isManualPreset: Bool
     ) -> GitInclusion {
-        if let c = custom { return c }
-        if let p = preset { return p }
+        if let c = custom {
+            return c
+        }
+        if let p = preset {
+            return p
+        }
         if isManualPreset {
             switch uiMode {
             case .none:
@@ -7030,15 +7086,13 @@ extension PromptViewModel {
         base: String? = nil
     ) async -> FrozenPromptGitReviewContext {
         let effectiveBase = base ?? gitViewModel.selectedDiffBranch
-        guard let manager = workspaceManager else {
-            return .automaticOnly(base: effectiveBase, bindings: bindings)
-        }
-        guard let workspace = Self.workspaceForFrozenPromptGitReviewContext(
-            requestedWorkspaceID: workspaceID,
-            workspaces: manager.workspaces,
-            activeWorkspace: manager.activeWorkspace
-        ),
-            let creatorTabID = tabID ?? activeComposeTabID
+        guard let manager = workspaceManager,
+              let workspace = Self.workspaceForFrozenPromptGitReviewContext(
+                  requestedWorkspaceID: workspaceID,
+                  workspaces: manager.workspaces,
+                  activeWorkspace: manager.activeWorkspace
+              ),
+              let creatorTabID = tabID ?? activeComposeTabID
         else {
             return .automaticOnly(
                 base: effectiveBase,
@@ -7343,18 +7397,14 @@ extension PromptViewModel {
 
         var appliedExplicitSettings = false
 
-        if let fileTree = preset.fileTreeMode {
-            if fileTreeOptionForChat != fileTree {
-                fileTreeOptionForChat = fileTree
-                appliedExplicitSettings = true
-            }
+        if let fileTree = preset.fileTreeMode, fileTreeOptionForChat != fileTree {
+            fileTreeOptionForChat = fileTree
+            appliedExplicitSettings = true
         }
 
-        if let codeMap = preset.codeMapUsage {
-            if codeMapUsageForChat != codeMap {
-                codeMapUsageForChat = codeMap
-                appliedExplicitSettings = true
-            }
+        if let codeMap = preset.codeMapUsage, codeMapUsageForChat != codeMap {
+            codeMapUsageForChat = codeMap
+            appliedExplicitSettings = true
         }
 
         if let gitSetting = preset.gitInclusion {

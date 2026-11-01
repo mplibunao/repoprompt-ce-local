@@ -27,7 +27,7 @@ private enum MCPApplicationSupportRootResolver {
             // Deriving the profile from the suite sandbox keeps independently sharded test processes disjoint.
             if let sandboxRoot = environment["REPOPROMPT_TEST_SANDBOX_ROOT"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-                !sandboxRoot.isEmpty
+               !sandboxRoot.isEmpty
             {
                 return URL(fileURLWithPath: sandboxRoot, isDirectory: true)
                     .appendingPathComponent("profile", isDirectory: true)
@@ -382,7 +382,9 @@ public enum MCPFilesystemPathContainment {
         var missingComponents: [String] = []
         while existing.path != "/" {
             var status = Darwin.stat()
-            if lstat(existing.path, &status) == 0 { break }
+            if lstat(existing.path, &status) == 0 {
+                break
+            }
             guard errno == ENOENT || errno == ENOTDIR else {
                 throw MCPProfileIsolationError.uninspectablePath(url)
             }

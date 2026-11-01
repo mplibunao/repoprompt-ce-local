@@ -50,7 +50,9 @@ actor WorkspaceCodemapSelectionGraph {
 
         /// Adds a fence the graph doesn't hold yet. Returns false when it would exceed the capacity.
         mutating func insert(_ fence: WorkspaceCodemapGraphDerivedFence) -> Bool {
-            if existing.contains(fence) || added.contains(fence) { return true }
+            if existing.contains(fence) || added.contains(fence) {
+                return true
+            }
             guard added.count < capacity else { return false }
             added.insert(fence)
             return true
@@ -181,8 +183,12 @@ actor WorkspaceCodemapSelectionGraph {
         case .unchanged: break
         }
 
-        if let revocationReason { return .revoked(revocationReason) }
-        if shuttingDown { return .cancelled }
+        if let revocationReason {
+            return .revoked(revocationReason)
+        }
+        if shuttingDown {
+            return .cancelled
+        }
 
         switch changes {
         case let .unchanged(generation):
@@ -194,7 +200,9 @@ actor WorkspaceCodemapSelectionGraph {
         case let .diff(changedSlots, removed, coverage, generation):
             observe(generation: generation)
             guard generation > appliedGeneration else {
-                if generation == appliedGeneration { return .unchanged(generation: generation) }
+                if generation == appliedGeneration {
+                    return .unchanged(generation: generation)
+                }
                 rejectedApplyCount &+= 1
                 return .rejected(.staleGeneration)
             }
@@ -306,7 +314,9 @@ actor WorkspaceCodemapSelectionGraph {
         activeCandidateTask = nil
 
         guard !shuttingDown else { return .cancelled }
-        if let revocationReason { return .revoked(revocationReason) }
+        if let revocationReason {
+            return .revoked(revocationReason)
+        }
         guard graphRevision == baseRevision else {
             rejectedApplyCount &+= 1
             return .rejected(.generationContinuity)
@@ -349,7 +359,9 @@ actor WorkspaceCodemapSelectionGraph {
             repositoryAuthority = authority
             committedSnapshot = candidate.snapshot
             appliedGeneration = generation
-            if observedGeneration < generation { observedGeneration = generation }
+            if observedGeneration < generation {
+                observedGeneration = generation
+            }
             graphRevision = candidate.snapshot.graphRevision
             successfulCommitCount &+= 1
             lastChangedFileCount = candidate.changedFileCount
@@ -377,7 +389,9 @@ actor WorkspaceCodemapSelectionGraph {
             }
             if resync {
                 resyncCommitCount &+= 1
-                if reconciling { reconciliationCommittedCount &+= 1 }
+                if reconciling {
+                    reconciliationCommittedCount &+= 1
+                }
             }
             let committedAt = uptimeNanoseconds()
             if let previous = lastCommittedUptimeNanoseconds, committedAt >= previous {
@@ -408,7 +422,9 @@ actor WorkspaceCodemapSelectionGraph {
     }
 
     func latestSnapshot() -> WorkspaceCodemapGraphLatestSnapshotDisposition {
-        if let revocationReason { return .revoked(revocationReason) }
+        if let revocationReason {
+            return .revoked(revocationReason)
+        }
         guard let snapshot = committedSnapshot,
               let receipt = WorkspaceCodemapGraphSnapshotReceipt(
                   snapshotID: snapshot.snapshotID,
@@ -441,7 +457,9 @@ actor WorkspaceCodemapSelectionGraph {
         guard query.rootEpoch == rootEpoch else {
             return .revoked(.repositoryAuthorityChanged)
         }
-        if Task.isCancelled { return .cancelled }
+        if Task.isCancelled {
+            return .cancelled
+        }
         switch latestSnapshot() {
         case .pending:
             pendingQueryCount &+= 1
@@ -696,9 +714,15 @@ actor WorkspaceCodemapSelectionGraph {
             ))
         }
 
-        if case .updatesPending = pinned.freshness { issues.append(.updatesPending) }
-        if pinned.reconciling { issues.append(.watcherGapReconciling) }
-        if !snapshot.coverage.isComplete { issues.append(.indexing) }
+        if case .updatesPending = pinned.freshness {
+            issues.append(.updatesPending)
+        }
+        if pinned.reconciling {
+            issues.append(.watcherGapReconciling)
+        }
+        if !snapshot.coverage.isComplete {
+            issues.append(.indexing)
+        }
 
         guard !usableSeedIDs.isEmpty else {
             let hasPending = seeds.contains { $0.state == .pending } || !snapshot.coverage.isComplete
@@ -867,7 +891,9 @@ actor WorkspaceCodemapSelectionGraph {
         }
 
         let orderedNodes = nodesByFileID.values.sorted {
-            if $0.depth != $1.depth { return $0.depth < $1.depth }
+            if $0.depth != $1.depth {
+                return $0.depth < $1.depth
+            }
             if $0.standardizedRelativePath != $1.standardizedRelativePath {
                 return Self.utf8Precedes($0.standardizedRelativePath, $1.standardizedRelativePath)
             }
@@ -876,10 +902,14 @@ actor WorkspaceCodemapSelectionGraph {
         let orderedEdges = emittedEdges.sorted {
             let leftSource = snapshot.nodesByFileID[$0.sourceFileID]?.standardizedRelativePath ?? ""
             let rightSource = snapshot.nodesByFileID[$1.sourceFileID]?.standardizedRelativePath ?? ""
-            if leftSource != rightSource { return Self.utf8Precedes(leftSource, rightSource) }
+            if leftSource != rightSource {
+                return Self.utf8Precedes(leftSource, rightSource)
+            }
             let leftTarget = snapshot.nodesByFileID[$0.targetFileID]?.standardizedRelativePath ?? ""
             let rightTarget = snapshot.nodesByFileID[$1.targetFileID]?.standardizedRelativePath ?? ""
-            if leftTarget != rightTarget { return Self.utf8Precedes(leftTarget, rightTarget) }
+            if leftTarget != rightTarget {
+                return Self.utf8Precedes(leftTarget, rightTarget)
+            }
             return $0.symbols.lexicographicallyPrecedes($1.symbols, by: Self.utf8Precedes)
         }
         let visitedIDs = Set(nodesByFileID.keys)
@@ -903,8 +933,12 @@ actor WorkspaceCodemapSelectionGraph {
             return String(describing: lhs.reason) < String(describing: rhs.reason)
         }
 
-        if truncated { issues.append(.sizeLimit) }
-        if deadlineReached { issues.append(.deadline) }
+        if truncated {
+            issues.append(.sizeLimit)
+        }
+        if deadlineReached {
+            issues.append(.deadline)
+        }
         let hasPartialIssue = !issues.isEmpty || unresolved.contains { $0.reason == .notIndexedYet }
         return WorkspaceCodemapGraphStructureRootResult(
             rootEpoch: rootEpoch,
@@ -938,10 +972,7 @@ actor WorkspaceCodemapSelectionGraph {
         reason _: WorkspaceCodemapGraphFenceReason
     ) -> WorkspaceCodemapGraphFenceDisposition {
         guard !fileIDs.isEmpty else { return .rejected(.emptyFileIDs) }
-        guard let currentAuthority = repositoryAuthority else {
-            return .rejected(.repositoryAuthorityMismatch)
-        }
-        guard currentAuthority == authority else { return .rejected(.repositoryAuthorityMismatch) }
+        guard let currentAuthority = repositoryAuthority, currentAuthority == authority else { return .rejected(.repositoryAuthorityMismatch) }
         let requestedIdentities = Set(fileIDs.compactMap { fileID -> WorkspaceCodemapGraphFenceIdentity? in
             let currentSlot = committedSnapshot?.slotsByFileID[fileID]
             if currentSlot == nil, fenceIdentities.contains(where: { $0.fileID == fileID }) {
@@ -1113,7 +1144,9 @@ actor WorkspaceCodemapSelectionGraph {
     func beginWatcherGapReconciliation(
         authority: WorkspaceCodemapRepositoryAuthorityToken
     ) -> WorkspaceCodemapGraphReconciliationDisposition {
-        if let revocationReason { return .revoked(revocationReason) }
+        if let revocationReason {
+            return .revoked(revocationReason)
+        }
         guard repositoryAuthority == authority else {
             revoke(.repositoryAuthorityChanged)
             return .revoked(.repositoryAuthorityChanged)
@@ -1141,7 +1174,9 @@ actor WorkspaceCodemapSelectionGraph {
     func recordWatcherGapReconciliationFailure(
         authority: WorkspaceCodemapRepositoryAuthorityToken
     ) -> WorkspaceCodemapGraphReconciliationDisposition {
-        if let revocationReason { return .revoked(revocationReason) }
+        if let revocationReason {
+            return .revoked(revocationReason)
+        }
         guard repositoryAuthority == authority else {
             revoke(.repositoryAuthorityChanged)
             return .revoked(.repositoryAuthorityChanged)
@@ -1307,7 +1342,9 @@ actor WorkspaceCodemapSelectionGraph {
         case .current: currentQueryCount &+= 1
         case .updatesPending: pendingQueryCount &+= 1
         }
-        if !pinned.snapshot.coverage.isComplete { partialCoverageQueryCount &+= 1 }
+        if !pinned.snapshot.coverage.isComplete {
+            partialCoverageQueryCount &+= 1
+        }
     }
 
     private func recordApplyDuration() {
@@ -1537,7 +1574,7 @@ actor WorkspaceCodemapSelectionGraph {
         }
         let finalNodes = nodes
 
-        /// Posting sets are updated per changed ID; a hub name's set is never walked or copied whole.
+        // Posting sets are updated per changed ID; a hub name's set is never walked or copied whole.
         func updatePostings(
             _ postings: inout PersistentHashMap<String, PersistentHashSet<UUID>>,
             names: Set<String>,
@@ -1643,8 +1680,8 @@ actor WorkspaceCodemapSelectionGraph {
             var namesByTarget: [UUID: Set<String>] = [:]
             var candidateCountByTarget: [UUID: UInt64] = [:]
             var sourceUnresolved: [WorkspaceCodemapGraphUnresolvedRecord] = []
-            /// Resolves the posting `key` and records `name` as the evidence. A nil key, a Terraform
-            /// reference through a call nothing declares, resolves like an undefined name.
+            // Resolves the posting `key` and records `name` as the evidence. A nil key, a Terraform
+            // reference through a call nothing declares, resolves like an undefined name.
             func resolve(key: String?, name: String) {
                 let candidates = key.flatMap { definitions[$0] } ?? []
                 guard !candidates.isEmpty else {
@@ -1742,14 +1779,26 @@ actor WorkspaceCodemapSelectionGraph {
 
         // Price the diff. Node, slot, and posting deltas come from the changed IDs and names only.
         for fileID in changedIDs {
-            if let old = baseNodes[fileID] { delta.remove(bytes: nodeBytes(old)) }
-            if let new = nodes[fileID] { delta.add(bytes: nodeBytes(new)) }
-            if let old = oldSlots[fileID] { delta.remove(bytes: slotBytes(old)) }
-            if let new = slots[fileID] { delta.add(bytes: slotBytes(new)) }
+            if let old = baseNodes[fileID] {
+                delta.remove(bytes: nodeBytes(old))
+            }
+            if let new = nodes[fileID] {
+                delta.add(bytes: nodeBytes(new))
+            }
+            if let old = oldSlots[fileID] {
+                delta.remove(bytes: slotBytes(old))
+            }
+            if let new = slots[fileID] {
+                delta.add(bytes: slotBytes(new))
+            }
         }
         for fileID in reprojectedIDs {
-            if let old = baseNodes[fileID] { delta.remove(bytes: nodeBytes(old)) }
-            if let new = nodes[fileID] { delta.add(bytes: nodeBytes(new)) }
+            if let old = baseNodes[fileID] {
+                delta.remove(bytes: nodeBytes(old))
+            }
+            if let new = nodes[fileID] {
+                delta.add(bytes: nodeBytes(new))
+            }
         }
         // Each call declaration and subscription is one membership in the postings budget.
         for key in changedCallKeys {
@@ -1813,10 +1862,18 @@ actor WorkspaceCodemapSelectionGraph {
             }
         }
         let limits = graphPolicy.graphSizePolicy
-        if size.nodes > limits.maxNodes { return .failure(.graphSize(.limitExceeded(dimension: .nodes, attempted: size.nodes, limit: limits.maxNodes))) }
-        if size.postings > limits.maxPostings { return .failure(.graphSize(.limitExceeded(dimension: .postings, attempted: size.postings, limit: limits.maxPostings))) }
-        if size.edges > limits.maxEdges { return .failure(.graphSize(.limitExceeded(dimension: .edges, attempted: size.edges, limit: limits.maxEdges))) }
-        if size.bytes > limits.maxBytes { return .failure(.graphSize(.limitExceeded(dimension: .bytes, attempted: size.bytes, limit: limits.maxBytes))) }
+        if size.nodes > limits.maxNodes {
+            return .failure(.graphSize(.limitExceeded(dimension: .nodes, attempted: size.nodes, limit: limits.maxNodes)))
+        }
+        if size.postings > limits.maxPostings {
+            return .failure(.graphSize(.limitExceeded(dimension: .postings, attempted: size.postings, limit: limits.maxPostings)))
+        }
+        if size.edges > limits.maxEdges {
+            return .failure(.graphSize(.limitExceeded(dimension: .edges, attempted: size.edges, limit: limits.maxEdges)))
+        }
+        if size.bytes > limits.maxBytes {
+            return .failure(.graphSize(.limitExceeded(dimension: .bytes, attempted: size.bytes, limit: limits.maxBytes)))
+        }
 
         // Account every trie entry the persistent maps copied or shifted for this candidate.
         copies &+= UInt64(slots.takeCopiedEntryCount())
@@ -2207,7 +2264,9 @@ actor WorkspaceCodemapSelectionGraph {
     ) -> Bool {
         let left = nodes[lhs]?.standardizedRelativePath ?? ""
         let right = nodes[rhs]?.standardizedRelativePath ?? ""
-        if left != right { return utf8Precedes(left, right) }
+        if left != right {
+            return utf8Precedes(left, right)
+        }
         return WorkspaceCodemapGraphOrdering.uuidPrecedes(lhs, rhs)
     }
 
@@ -2216,8 +2275,12 @@ actor WorkspaceCodemapSelectionGraph {
         _ rhs: WorkspaceCodemapGraphEdgeEvidence,
         nodes: PersistentHashMap<UUID, WorkspaceCodemapGraphSnapshotNode>
     ) -> Bool {
-        if lhs.sourceFileID != rhs.sourceFileID { return fileIDPrecedes(lhs.sourceFileID, rhs.sourceFileID, nodes: nodes) }
-        if lhs.targetFileID != rhs.targetFileID { return fileIDPrecedes(lhs.targetFileID, rhs.targetFileID, nodes: nodes) }
+        if lhs.sourceFileID != rhs.sourceFileID {
+            return fileIDPrecedes(lhs.sourceFileID, rhs.sourceFileID, nodes: nodes)
+        }
+        if lhs.targetFileID != rhs.targetFileID {
+            return fileIDPrecedes(lhs.targetFileID, rhs.targetFileID, nodes: nodes)
+        }
         return lhs.matchedNames.lexicographicallyPrecedes(rhs.matchedNames, by: utf8Precedes)
     }
 

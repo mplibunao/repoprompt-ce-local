@@ -145,7 +145,9 @@ actor InteractiveREPL {
             }
 
             var trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { continue }
+            if trimmed.isEmpty {
+                continue
+            }
 
             // Handle !! (repeat last command)
             if trimmed == "!!" {
@@ -438,27 +440,43 @@ actor InteractiveREPL {
 
         switch name {
         case "pretty", "json":
-            if isOn { settings.prettyJSON = true }
-            else if isOff { settings.prettyJSON = false }
-            else { settings.prettyJSON.toggle() }
+            if isOn {
+                settings.prettyJSON = true
+            } else if isOff {
+                settings.prettyJSON = false
+            } else {
+                settings.prettyJSON.toggle()
+            }
             print("pretty = \(settings.prettyJSON ? "on" : "off")")
 
         case "colors", "color":
-            if isOn { settings.colors = true }
-            else if isOff { settings.colors = false }
-            else { settings.colors.toggle() }
+            if isOn {
+                settings.colors = true
+            } else if isOff {
+                settings.colors = false
+            } else {
+                settings.colors.toggle()
+            }
             print("colors = \(settings.colors ? "on" : "off")")
 
         case "verbose", "v":
-            if isOn { settings.verbose = true }
-            else if isOff { settings.verbose = false }
-            else { settings.verbose.toggle() }
+            if isOn {
+                settings.verbose = true
+            } else if isOff {
+                settings.verbose = false
+            } else {
+                settings.verbose.toggle()
+            }
             print("verbose = \(settings.verbose ? "on" : "off")")
 
         case "timing", "time", "t":
-            if isOn { settings.timing = true }
-            else if isOff { settings.timing = false }
-            else { settings.timing.toggle() }
+            if isOn {
+                settings.timing = true
+            } else if isOff {
+                settings.timing = false
+            } else {
+                settings.timing.toggle()
+            }
             print("timing = \(settings.timing ? "on" : "off")")
 
         default:
@@ -867,10 +885,18 @@ actor InteractiveREPL {
 
         // Settings summary
         var flags: [String] = []
-        if settings.prettyJSON { flags.append("pretty") }
-        if settings.colors { flags.append("colors") }
-        if settings.timing { flags.append("timing") }
-        if settings.verbose { flags.append("verbose") }
+        if settings.prettyJSON {
+            flags.append("pretty")
+        }
+        if settings.colors {
+            flags.append("colors")
+        }
+        if settings.timing {
+            flags.append("timing")
+        }
+        if settings.verbose {
+            flags.append("verbose")
+        }
         print("  Settings:   \(flags.joined(separator: ", "))")
 
         print(colorize("──────────────", .bold))
@@ -933,8 +959,7 @@ actor InteractiveREPL {
     // MARK: - Raw JSON detection (avoid breaking JSON with prefixes)
 
     private static func isRawJSONResult(_ result: CallTool.Result) -> Bool {
-        guard result.content.count == 1 else { return false }
-        guard case let .text(text, _, _) = result.content[0] else { return false }
+        guard result.content.count == 1, case let .text(text, _, _) = result.content[0] else { return false }
         return isJSONText(text)
     }
 

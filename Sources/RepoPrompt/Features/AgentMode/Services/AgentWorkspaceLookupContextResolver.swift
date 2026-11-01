@@ -226,12 +226,12 @@ enum AgentWorkspaceLookupContextResolver {
         }
 
         guard let projection = await WorkspaceRootBindingProjectionMaterializer(store: store).materialize(
-            sessionID: sessionID,
-            bindings: bindings,
-            visibleRoots: visibleRoots
-        ),
-            !projection.isEmpty,
-            projection.isFullyMaterialized
+                  sessionID: sessionID,
+                  bindings: bindings,
+                  visibleRoots: visibleRoots
+              ),
+              !projection.isEmpty,
+              projection.isFullyMaterialized
         else {
             throw AgentWorkspaceLookupContextResolutionError.unavailableProjection
         }
@@ -283,10 +283,7 @@ enum AgentWorkspaceLookupContextResolver {
             visibleRoots.map { ($0.standardizedFullPath, $0.id) },
             uniquingKeysWith: { first, _ in first }
         )
-        guard Set(projection.visibleLogicalRootRefs) == Set(visibleRoots) else {
-            return false
-        }
-        guard projection.logicalRootRefs.allSatisfy({ visibleRootIDsByPath[$0.standardizedFullPath] == $0.id }) else {
+        guard Set(projection.visibleLogicalRootRefs) == Set(visibleRoots), projection.logicalRootRefs.allSatisfy({ visibleRootIDsByPath[$0.standardizedFullPath] == $0.id }) else {
             return false
         }
 
@@ -344,10 +341,10 @@ enum AgentWorkspaceLookupContextResolver {
         }
 
         guard let projection = await WorkspaceRootBindingProjectionMaterializer(store: store).materialize(
-            sessionID: sessionID,
-            bindings: bindings
-        ),
-            !projection.isEmpty
+                  sessionID: sessionID,
+                  bindings: bindings
+              ),
+              !projection.isEmpty
         else {
             fields["result"] = "visibleWorkspace"
             AgentSelectedFilesDiagnostics.durationEvent("lookupResolver.lookupContext", startMS: startMS, fields: fields)

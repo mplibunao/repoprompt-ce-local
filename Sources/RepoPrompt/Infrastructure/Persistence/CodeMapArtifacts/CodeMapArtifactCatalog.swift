@@ -16,7 +16,11 @@ enum CodeMapArtifactCatalogOutcomeClass: UInt8, Equatable {
     case negative = 2
 
     init(outcome: CodeMapSyntaxArtifactOutcome) {
-        self = if case .ready = outcome { .positive } else { .negative }
+        self = if case .ready = outcome {
+            .positive
+        } else {
+            .negative
+        }
     }
 }
 
@@ -338,7 +342,9 @@ struct CodeMapArtifactCatalog {
         maximumReadByteCount: UInt64,
         epochSeconds: UInt64
     ) throws -> CodeMapArtifactCatalogScanStep {
-        if session.completed { return .complete }
+        if session.completed {
+            return .complete
+        }
         if let pending = session.pending {
             return try processPendingScanEntry(
                 pending,
@@ -594,11 +600,7 @@ struct CodeMapArtifactCatalog {
             )
 
         case .quarantineCatalog:
-            guard components.count == 3, let epoch = Self.canonicalEpoch(components[0]) else {
-                session.pending = nil
-                return .visit(.junk, chargeEntry: chargeEntry)
-            }
-            guard let parts = Self.quarantineTombstoneParts(name), parts.digest.hasPrefix(shard) else {
+            guard components.count == 3, let epoch = Self.canonicalEpoch(components[0]), let parts = Self.quarantineTombstoneParts(name), parts.digest.hasPrefix(shard) else {
                 session.pending = nil
                 return .visit(.junk, chargeEntry: chargeEntry)
             }
@@ -885,12 +887,12 @@ struct CodeMapArtifactCatalog {
             }
             if requireValidContainer {
                 guard case let .hit(verified) = try fileStore.readVerified(
-                    key: expectedRecord.key,
-                    quarantineCorruption: false
-                ),
-                    UInt64(verified.containerByteCount) == current.containerByteCount,
-                    UInt64(verified.payloadByteCount) == current.payloadByteCount,
-                    CodeMapArtifactCatalogOutcomeClass(outcome: verified.outcome) == current.outcomeClass
+                          key: expectedRecord.key,
+                          quarantineCorruption: false
+                      ),
+                      UInt64(verified.containerByteCount) == current.containerByteCount,
+                      UInt64(verified.payloadByteCount) == current.payloadByteCount,
+                      CodeMapArtifactCatalogOutcomeClass(outcome: verified.outcome) == current.outcomeClass
                 else {
                     return .missingOrChanged
                 }
@@ -907,11 +909,11 @@ struct CodeMapArtifactCatalog {
             let quarantineCatalog = try requireDirectory(parent: epoch, name: "catalog")
             let destinationArtifacts = try requireDirectory(parent: quarantineArtifacts, name: current.key.shard)
             guard let sourceArtifacts = try openDirectory(
-                parent: layout.artifacts,
-                name: current.key.shard,
-                create: false
-            ),
-                let sourceCatalog = try openDirectory(parent: layout.catalog, name: current.key.shard, create: false)
+                      parent: layout.artifacts,
+                      name: current.key.shard,
+                      create: false
+                  ),
+                  let sourceCatalog = try openDirectory(parent: layout.catalog, name: current.key.shard, create: false)
             else { return .missingOrChanged }
 
             let artifactName = current.digest
@@ -924,7 +926,9 @@ struct CodeMapArtifactCatalog {
                 artifactDestination,
                 UInt32(RENAME_EXCL)
             ) == 0 else {
-                if errno == ENOENT { return .missingOrChanged }
+                if errno == ENOENT {
+                    return .missingOrChanged
+                }
                 throw Self.ioError("gc-artifact-quarantine")
             }
             guard try Self.fileIdentity(sourceArtifact.rawValue) == sourceArtifact.identity,
@@ -1028,16 +1032,16 @@ struct CodeMapArtifactCatalog {
         do {
             return try withMaintenanceAndExclusiveLease(shard: shard, digest: parts.digest) {
                 guard let epoch = try openDirectory(
-                    parent: layout.quarantine,
-                    name: String(epochSeconds),
-                    create: false
-                ),
-                    let artifacts = try openDirectory(parent: epoch, name: "artifacts", create: false),
-                    let artifactShard = try openDirectory(parent: artifacts, name: shard, create: false),
-                    let identity = try? secureFileIdentity(parent: artifactShard, name: artifactName),
-                    identity.isSecureRegular(in: artifactShard.identity.device),
-                    identity.size >= 0,
-                    UInt64(identity.size) == byteCount
+                          parent: layout.quarantine,
+                          name: String(epochSeconds),
+                          create: false
+                      ),
+                      let artifacts = try openDirectory(parent: epoch, name: "artifacts", create: false),
+                      let artifactShard = try openDirectory(parent: artifacts, name: shard, create: false),
+                      let identity = try? secureFileIdentity(parent: artifactShard, name: artifactName),
+                      identity.isSecureRegular(in: artifactShard.identity.device),
+                      identity.size >= 0,
+                      UInt64(identity.size) == byteCount
                 else { return .missingOrChanged }
                 let quarantineCatalog = try requireDirectory(parent: epoch, name: "catalog")
                 let catalogShard = try requireDirectory(parent: quarantineCatalog, name: shard)
@@ -1096,12 +1100,12 @@ struct CodeMapArtifactCatalog {
     func sweep(_ candidate: CodeMapArtifactQuarantineCandidate) throws -> CodeMapArtifactCatalogMutationResult {
         try withMaintenanceAndDigestMutation(shard: candidate.shard, digest: candidate.tombstone.digest) {
             guard let epoch = try openDirectory(
-                parent: layout.quarantine,
-                name: String(candidate.epochSeconds),
-                create: false
-            ),
-                let catalog = try openDirectory(parent: epoch, name: "catalog", create: false),
-                let catalogShard = try openDirectory(parent: catalog, name: candidate.shard, create: false)
+                      parent: layout.quarantine,
+                      name: String(candidate.epochSeconds),
+                      create: false
+                  ),
+                  let catalog = try openDirectory(parent: epoch, name: "catalog", create: false),
+                  let catalogShard = try openDirectory(parent: catalog, name: candidate.shard, create: false)
             else { return .missingOrChanged }
             let data: Data
             do {
@@ -1151,10 +1155,7 @@ struct CodeMapArtifactCatalog {
 
     static func decodeRecord(_ data: Data) throws -> CodeMapArtifactCatalogRecord {
         var reader = CatalogReader(data: data)
-        guard try reader.readData(count: metadataMagic.count) == metadataMagic else {
-            throw CodeMapArtifactCatalogError.invalidMetadata
-        }
-        guard try reader.readUInt32() == metadataVersion else {
+        guard try reader.readData(count: metadataMagic.count) == metadataMagic, try reader.readUInt32() == metadataVersion else {
             throw CodeMapArtifactCatalogError.invalidMetadata
         }
         let bodyCount = try Int(reader.readUInt32())
@@ -1505,7 +1506,9 @@ struct CodeMapArtifactCatalog {
             let descriptor = try openLeaseDescriptor(shard: shard, digest: digest)
             defer { Darwin.close(descriptor) }
             guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
-                if errno == EWOULDBLOCK { throw CodeMapArtifactCatalogError.ioFailure(operation: "lease-busy", code: EWOULDBLOCK) }
+                if errno == EWOULDBLOCK {
+                    throw CodeMapArtifactCatalogError.ioFailure(operation: "lease-busy", code: EWOULDBLOCK)
+                }
                 throw Self.ioError("lease-exclusive-lock")
             }
             defer { _ = flock(descriptor, LOCK_UN) }
@@ -1725,10 +1728,14 @@ struct CodeMapArtifactCatalog {
             }
         }
         let descriptor = openat(parent.rawValue, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        if descriptor < 0, !create, errno == ENOENT { return nil }
+        if descriptor < 0, !create, errno == ENOENT {
+            return nil
+        }
         guard descriptor >= 0 else { throw ioError("directory-open") }
         do {
-            if created, fchmod(descriptor, directoryMode) != 0 { throw ioError("directory-mode") }
+            if created, fchmod(descriptor, directoryMode) != 0 {
+                throw ioError("directory-mode")
+            }
             let identity = try directoryIdentity(descriptor)
             var pathStatus = stat()
             guard fstatat(parent.rawValue, name, &pathStatus, AT_SYMLINK_NOFOLLOW) == 0 else {
@@ -1740,7 +1747,9 @@ struct CodeMapArtifactCatalog {
                   identity.permissions == directoryMode,
                   identity.device == parent.identity.device
             else { throw CodeMapArtifactCatalogError.insecureEntry }
-            if created { try synchronize(parent.rawValue, operation: "directory-parent-fsync") }
+            if created {
+                try synchronize(parent.rawValue, operation: "directory-parent-fsync")
+            }
             return CatalogDirectory(rawValue: descriptor, identity: identity)
         } catch {
             Darwin.close(descriptor)
@@ -1778,7 +1787,9 @@ struct CodeMapArtifactCatalog {
         name: String
     ) throws -> CatalogFile? {
         let descriptor = openat(parent.rawValue, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
-        if descriptor < 0, errno == ENOENT { return nil }
+        if descriptor < 0, errno == ENOENT {
+            return nil
+        }
         guard descriptor >= 0 else { throw Self.ioError("scan-leaf-open") }
         do {
             let identity = try Self.fileIdentity(descriptor)
@@ -1896,9 +1907,13 @@ struct CodeMapArtifactCatalog {
         try data.withUnsafeMutableBytes { buffer in
             while completed < byteCount {
                 let result = Darwin.read(descriptor, buffer.baseAddress!.advanced(by: completed), byteCount - completed)
-                if result > 0 { completed += result }
-                else if result == 0 { throw CodeMapArtifactCatalogError.invalidMetadata }
-                else if errno != EINTR { throw ioError("file-read") }
+                if result > 0 {
+                    completed += result
+                } else if result == 0 {
+                    throw CodeMapArtifactCatalogError.invalidMetadata
+                } else if errno != EINTR {
+                    throw ioError("file-read")
+                }
             }
         }
         return data
@@ -1909,9 +1924,13 @@ struct CodeMapArtifactCatalog {
             var completed = 0
             while completed < buffer.count {
                 let result = Darwin.write(descriptor, buffer.baseAddress!.advanced(by: completed), buffer.count - completed)
-                if result > 0 { completed += result }
-                else if result == 0 { throw ioError("file-write-zero") }
-                else if errno != EINTR { throw ioError("file-write") }
+                if result > 0 {
+                    completed += result
+                } else if result == 0 {
+                    throw ioError("file-write-zero")
+                } else if errno != EINTR {
+                    throw ioError("file-write")
+                }
             }
         }
     }
@@ -1992,8 +2011,12 @@ struct CodeMapArtifactCatalog {
     }
 
     private static func processIsActive(_ pid: pid_t) -> Bool {
-        if pid == getpid() { return true }
-        if kill(pid, 0) == 0 { return true }
+        if pid == getpid() {
+            return true
+        }
+        if kill(pid, 0) == 0 {
+            return true
+        }
         return errno != ESRCH
     }
 

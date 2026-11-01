@@ -185,14 +185,14 @@ struct AgentManageMCPToolService {
         // synchronous and cheap.
         var probedOpenCodeCanonicals = Set<String>()
         let openCodeEnrichmentTargetRaw = openCodeCatalogSnapshot?.models.currentModelRaw
-        /// Returns whether an OpenCode enumeration for `agent`/`modelRaw` should acquire
-        /// metadata now: deduped per canonical model, and targeted at the advertised
-        /// current/default model only so list_agents never starts N serialized controllers.
+        // Returns whether an OpenCode enumeration for `agent`/`modelRaw` should acquire
+        // metadata now: deduped per canonical model, and targeted at the advertised
+        // current/default model only so list_agents never starts N serialized controllers.
         func shouldEnrichOpenCodeModel(agent: AgentProviderKind, modelRaw: String) -> Bool {
             guard agent.acpProviderID == .openCode else { return true }
             let canonical = ACPModelParameterIdentity.canonicalBaseModelRaw(modelRaw, providerID: .openCode)
-            guard !probedOpenCodeCanonicals.contains(canonical) else { return false }
-            guard let openCodeEnrichmentTargetRaw,
+            guard !probedOpenCodeCanonicals.contains(canonical),
+                  let openCodeEnrichmentTargetRaw,
                   ACPModelParameterIdentity.canonicalBaseModelRaw(openCodeEnrichmentTargetRaw, providerID: .openCode) == canonical
             else { return false }
             probedOpenCodeCanonicals.insert(canonical)
@@ -385,8 +385,12 @@ struct AgentManageMCPToolService {
                     ?? object["agent"]?.stringValue
                     ?? ""
             ).lowercased()
-            if let agentFilter, agent != agentFilter { return false }
-            if let stateFilter, !sessionStateMatches(object: object, filter: stateFilter) { return false }
+            if let agentFilter, agent != agentFilter {
+                return false
+            }
+            if let stateFilter, !sessionStateMatches(object: object, filter: stateFilter) {
+                return false
+            }
             return true
         }
         .sorted {
@@ -971,7 +975,9 @@ struct AgentManageMCPToolService {
 
     private func agentModeViewModel(of window: WindowState) -> AgentModeViewModel {
         #if DEBUG
-            if let test_agentModeViewModel { return test_agentModeViewModel }
+            if let test_agentModeViewModel {
+                return test_agentModeViewModel
+            }
         #endif
         return window.agentModeViewModel
     }

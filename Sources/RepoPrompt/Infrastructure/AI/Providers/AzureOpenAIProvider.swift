@@ -191,7 +191,7 @@ extension AzureOpenAIProvider: ResponsesJobProvider {
                     var lastStatus: ResponseModel.Status?
                     var pollCount = 0
 
-                    /// Exponential backoff: 2s, 3s, 4s, 5s... capped at 10s
+                    // Exponential backoff: 2s, 3s, 4s, 5s... capped at 10s
                     func pollInterval() -> Duration {
                         .seconds(min(2 + pollCount, 10))
                     }
@@ -404,32 +404,30 @@ final class AzureOpenAIProvider: AIProvider {
                 Self.normalizedModelName(from: $0.id).lowercased() == normalizedName.lowercased()
             } ?? false
 
-            if descriptor == nil || descriptorMatchesRequested {
-                if let aiModel = AIModel.fromModelName(normalizedName) {
-                    let (baseModel, _) = resolveBaseModelAndEffort(for: aiModel)
-                    // A configured deployment is authoritative even when it is named like an effort
-                    // variant; only a variant without its own deployment routes to the base deployment.
-                    if baseModel != aiModel, configuredDescriptor == nil {
-                        let baseName = Self.normalizedModelName(from: baseModel.modelName)
-                        let baseDescriptor = configuration.descriptor(for: baseName)
-                            ?? Self.defaultDescriptor(for: baseName)
+            if descriptor == nil || descriptorMatchesRequested, let aiModel = AIModel.fromModelName(normalizedName) {
+                let (baseModel, _) = resolveBaseModelAndEffort(for: aiModel)
+                // A configured deployment is authoritative even when it is named like an effort
+                // variant; only a variant without its own deployment routes to the base deployment.
+                if baseModel != aiModel, configuredDescriptor == nil {
+                    let baseName = Self.normalizedModelName(from: baseModel.modelName)
+                    let baseDescriptor = configuration.descriptor(for: baseName)
+                        ?? Self.defaultDescriptor(for: baseName)
 
-                        if let baseDescriptor {
-                            let variantDisplay = AIModel.azureCustom(name: normalizedName).displayName
-                            let resolvedDisplay = variantDisplay.isEmpty ? baseDescriptor.displayName : variantDisplay
-                            descriptor = AzureOpenAIConfiguration.ModelDescriptor(
-                                id: baseDescriptor.id,
-                                displayName: resolvedDisplay,
-                                endpoint: baseDescriptor.endpoint,
-                                supportsStreaming: baseDescriptor.supportsStreaming,
-                                baseModelID: normalizedName,
-                                supportsChatCompletions: baseDescriptor.supportsChatCompletions,
-                                supportsResponses: baseDescriptor.supportsResponses
-                            )
-                            deploymentID = baseDescriptor.id
-                        } else {
-                            deploymentID = baseName
-                        }
+                    if let baseDescriptor {
+                        let variantDisplay = AIModel.azureCustom(name: normalizedName).displayName
+                        let resolvedDisplay = variantDisplay.isEmpty ? baseDescriptor.displayName : variantDisplay
+                        descriptor = AzureOpenAIConfiguration.ModelDescriptor(
+                            id: baseDescriptor.id,
+                            displayName: resolvedDisplay,
+                            endpoint: baseDescriptor.endpoint,
+                            supportsStreaming: baseDescriptor.supportsStreaming,
+                            baseModelID: normalizedName,
+                            supportsChatCompletions: baseDescriptor.supportsChatCompletions,
+                            supportsResponses: baseDescriptor.supportsResponses
+                        )
+                        deploymentID = baseDescriptor.id
+                    } else {
+                        deploymentID = baseName
                     }
                 }
             }
@@ -705,7 +703,9 @@ final class AzureOpenAIProvider: AIProvider {
                     var observedCompletionOutcome: AIProviderCompletionOutcome?
 
                     for try await event in stream {
-                        if Task.isCancelled { break }
+                        if Task.isCancelled {
+                            break
+                        }
                         switch event {
                         case let .outputTextDelta(delta):
                             if !delta.delta.isEmpty {
@@ -832,7 +832,9 @@ final class AzureOpenAIProvider: AIProvider {
                     var observedCompletionOutcome: AIProviderCompletionOutcome?
 
                     for try await chunk in stream {
-                        if Task.isCancelled { break }
+                        if Task.isCancelled {
+                            break
+                        }
 
                         if let usage = chunk.usage {
                             promptTokens = usage.promptTokens

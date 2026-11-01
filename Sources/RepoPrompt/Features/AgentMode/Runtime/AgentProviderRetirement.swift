@@ -10,7 +10,9 @@ enum AgentProviderRetirementReason {
     case automaticIdle(anchor: ContinuousClock.Instant)
 
     var isAutomatic: Bool {
-        if case .automaticIdle = self { return true }
+        if case .automaticIdle = self {
+            return true
+        }
         return false
     }
 

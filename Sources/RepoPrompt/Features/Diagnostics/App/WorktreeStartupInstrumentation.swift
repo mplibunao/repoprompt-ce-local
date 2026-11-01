@@ -30,14 +30,14 @@ struct WorktreeStartupFeatureFlags: Equatable {
             // Diff-seeded worktree startup is always on. In DEBUG we still honor optional
             // UserDefaults kill switches so we can force the legacy full-crawl path for
             // benchmarks/troubleshooting; an absent key means enabled.
-            return Self(
+            Self(
                 observeDiffSeededWorktreeStartup: defaults.object(forKey: observeDefaultsKey) as? Bool ?? true,
                 serveDiffSeededWorktreeStartup: defaults.object(forKey: serveDefaultsKey) as? Bool ?? true
             )
         #else
             // Hardcoded on in release: there is no production preference to disable diff-seeded
             // worktree startup. The kill switches above exist only for DEBUG diagnostics.
-            return Self(
+            Self(
                 observeDiffSeededWorktreeStartup: true,
                 serveDiffSeededWorktreeStartup: true
             )

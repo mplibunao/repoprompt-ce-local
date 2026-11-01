@@ -255,10 +255,10 @@ actor DirectHeadlessDomainContext {
     ) async throws -> Snapshot {
         let current = try await snapshot(for: request)
         guard var document = try JSONSerialization.jsonObject(
-            with: current.workspace.document.documentBytes
-        ) as? [String: Any],
-            var contexts = document["composeTabs"] as? [[String: Any]],
-            let index = contexts.firstIndex(where: { ($0["id"] as? String) == current.identity.contextID.uuidString })
+                  with: current.workspace.document.documentBytes
+              ) as? [String: Any],
+              var contexts = document["composeTabs"] as? [[String: Any]],
+              let index = contexts.firstIndex(where: { ($0["id"] as? String) == current.identity.contextID.uuidString })
         else {
             throw Error.invalidWorkspaceDocument
         }
@@ -455,10 +455,10 @@ actor DirectHeadlessDomainContext {
         contextID: UUID
     ) throws -> [String: Any] {
         guard let document = try JSONSerialization.jsonObject(
-            with: workspace.document.documentBytes
-        ) as? [String: Any],
-            let contexts = document["composeTabs"] as? [[String: Any]],
-            let context = contexts.first(where: { ($0["id"] as? String) == contextID.uuidString })
+                  with: workspace.document.documentBytes
+              ) as? [String: Any],
+              let contexts = document["composeTabs"] as? [[String: Any]],
+              let context = contexts.first(where: { ($0["id"] as? String) == contextID.uuidString })
         else {
             throw Error.invalidWorkspaceDocument
         }

@@ -140,19 +140,25 @@ func filterPathIndicesResult(
         var fullLowerCache: String? = nil
         var displayLowerCache: String? = nil
         func relLower() -> String {
-            if let cached = relLowerCache { return cached }
+            if let cached = relLowerCache {
+                return cached
+            }
             let value = rel.lowercased()
             relLowerCache = value
             return value
         }
         func fullLower() -> String {
-            if let cached = fullLowerCache { return cached }
+            if let cached = fullLowerCache {
+                return cached
+            }
             let value = full.lowercased()
             fullLowerCache = value
             return value
         }
         func displayLower() -> String {
-            if let cached = displayLowerCache { return cached }
+            if let cached = displayLowerCache {
+                return cached
+            }
             let value = clientDisplay.lowercased()
             displayLowerCache = value
             return value
@@ -267,11 +273,8 @@ func resolveFoldersBySuffixFragment<T>(
     caseInsensitive: Bool = true
 ) -> [T] {
     guard let candidate = normalizedFolderSuffixFragment(fragment, caseInsensitive: caseInsensitive),
-          let lastComponent = candidate.split(separator: "/").last.map(String.init)
-    else {
-        return []
-    }
-    guard let candidates = suffixIndex[lastComponent], !candidates.isEmpty else { return [] }
+          let lastComponent = candidate.split(separator: "/").last.map(String.init),
+          let candidates = suffixIndex[lastComponent], !candidates.isEmpty else { return [] }
 
     let boundarySuffix = "/" + candidate
     var out: [T] = []

@@ -163,16 +163,15 @@ final class MCPGitArtifactAdvertisementRegistry {
         var artifactsByAlias: [String: GitDiffPublishedArtifact] = [:]
         for artifact in artifacts {
             guard artifact.selectionDisposition == .primaryAutoSelect
-                || artifact.selectionDisposition == .advertisedSelectable
-            else { continue }
-            guard let alias = artifact.clientAlias,
-                  alias == "_git_data/\(artifact.gitDataRelativePath)",
-                  alias.hasPrefix("_git_data/"),
-                  GitDiffArtifactPathPolicy.isSafeRelativeArtifactPath(artifact.gitDataRelativePath),
-                  artifact.absolutePath == StandardizedPath.join(
-                      standardizedRoot: rootPath,
-                      standardizedRelativePath: artifact.gitDataRelativePath
-                  )
+                || artifact.selectionDisposition == .advertisedSelectable,
+                let alias = artifact.clientAlias,
+                alias == "_git_data/\(artifact.gitDataRelativePath)",
+                alias.hasPrefix("_git_data/"),
+                GitDiffArtifactPathPolicy.isSafeRelativeArtifactPath(artifact.gitDataRelativePath),
+                artifact.absolutePath == StandardizedPath.join(
+                    standardizedRoot: rootPath,
+                    standardizedRelativePath: artifact.gitDataRelativePath
+                )
             else { continue }
             if artifactsByAlias[alias] == nil {
                 artifactsByAlias[alias] = artifact
@@ -180,7 +179,9 @@ final class MCPGitArtifactAdvertisementRegistry {
         }
 
         nextGeneration &+= 1
-        if nextGeneration == 0 { nextGeneration = 1 }
+        if nextGeneration == 0 {
+            nextGeneration = 1
+        }
         let provenance = MCPGitArtifactAdvertisementProvenance(
             identity: identity,
             capability: capability

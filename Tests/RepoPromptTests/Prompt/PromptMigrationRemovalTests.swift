@@ -33,7 +33,7 @@ final class PromptMigrationRemovalTests: XCTestCase {
 
     func testLegacyCopyPresetEditAndMCPFieldsDecodeSafelyAndDoNotReencode() throws {
         let id = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000123"))
-        let raw = """
+        let raw = try XCTUnwrap("""
         {
           "id": "\(id.uuidString)",
           "name": "Legacy MCP XML",
@@ -44,7 +44,7 @@ final class PromptMigrationRemovalTests: XCTestCase {
           "systemPromptFlavor": "mcpAgent",
           "includeMCPMetadata": true
         }
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
 
         let preset = try JSONDecoder().decode(CopyPreset.self, from: raw)
         XCTAssertEqual(preset.builtInKind, .standard)
@@ -58,7 +58,7 @@ final class PromptMigrationRemovalTests: XCTestCase {
 
     func testLegacyCopyOverridesAndCustomizationsIgnoreRemovedFields() throws {
         let presetID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000456"))
-        let overridesRaw = """
+        let overridesRaw = try XCTUnwrap("""
         {
           "presetID": "\(presetID.uuidString)",
           "includeFiles": false,
@@ -66,19 +66,19 @@ final class PromptMigrationRemovalTests: XCTestCase {
           "systemPromptFlavor": "mcpBuilder",
           "includeMCPMetadata": true
         }
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         let overrides = try JSONDecoder().decode(CopyPresetOverrides.self, from: overridesRaw)
         XCTAssertEqual(overrides.presetID, presetID)
         XCTAssertEqual(overrides.includeFiles, false)
 
-        let customRaw = """
+        let customRaw = try XCTUnwrap("""
         {
           "includeUserPrompt": false,
           "xmlFormat": "architect",
           "systemPromptFlavor": "mcpDiscover",
           "includeMCPMetadata": true
         }
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         let custom = try JSONDecoder().decode(CopyCustomizations.self, from: customRaw)
         XCTAssertEqual(custom.includeUserPrompt, false)
 
@@ -135,8 +135,8 @@ final class ReviewPromptUpgradeTests: XCTestCase {
         let freshInstall = try loadReviewPrompt(seeding: [])
         XCTAssertNotEqual(freshInstall.loaded.content, Self.previousShippedReviewDefault)
 
-        /// A store saved by any earlier launch holds every built-in, so seeding all of them leaves
-        /// the [Review] decision as the only reason the load can save.
+        // A store saved by any earlier launch holds every built-in, so seeding all of them leaves
+        // the [Review] decision as the only reason the load can save.
         func storeWithReview(content: String) -> [StoredPromptRecord] {
             freshInstall.storedPrompts.map { prompt in
                 guard prompt.id == Self.reviewPromptID else { return prompt }

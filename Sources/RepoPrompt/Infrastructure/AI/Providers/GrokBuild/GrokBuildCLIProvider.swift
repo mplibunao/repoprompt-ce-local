@@ -98,9 +98,15 @@ final class GrokBuildCLIProvider: AIProvider {
                 }
             case "message_stop":
                 completionOutcome = .completed
-                if let value = result.promptTokens { promptTokens = value }
-                if let value = result.completionTokens { completionTokens = value }
-                if let value = result.cost { cost = value }
+                if let value = result.promptTokens {
+                    promptTokens = value
+                }
+                if let value = result.completionTokens {
+                    completionTokens = value
+                }
+                if let value = result.cost {
+                    cost = value
+                }
             case AIStreamResult.incompleteType:
                 guard let reason = result.stopReason?.trimmingCharacters(in: .whitespacesAndNewlines),
                       !reason.isEmpty
@@ -110,9 +116,15 @@ final class GrokBuildCLIProvider: AIProvider {
                     )
                 }
                 completionOutcome = .incomplete(reason: reason)
-                if let value = result.promptTokens { promptTokens = value }
-                if let value = result.completionTokens { completionTokens = value }
-                if let value = result.cost { cost = value }
+                if let value = result.promptTokens {
+                    promptTokens = value
+                }
+                if let value = result.completionTokens {
+                    completionTokens = value
+                }
+                if let value = result.cost {
+                    cost = value
+                }
             case "error":
                 throw AIProviderError.invalidConfiguration(
                     detail: result.text ?? "Grok Build reported an error"
@@ -163,8 +175,8 @@ final class GrokBuildCLIProvider: AIProvider {
     private static func normalizedTerminalResult(_ result: AIStreamResult) -> AIStreamResult {
         guard result.type == "message_stop",
               let stopReason = result.stopReason?
-              .trimmingCharacters(in: .whitespacesAndNewlines)
-              .lowercased(),
+                  .trimmingCharacters(in: .whitespacesAndNewlines)
+                  .lowercased(),
               !stopReason.isEmpty,
               !successfulTerminalStopReasons.contains(stopReason)
         else {

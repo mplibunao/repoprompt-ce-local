@@ -787,8 +787,12 @@ final class ACPIntegratedAgentModeRunnerExecutionTests: XCTestCase {
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: .seconds(30))
             while clock.now < deadline {
-                if await isWaiting() { return .waiting }
-                if finished.value { return .finished }
+                if await isWaiting() {
+                    return .waiting
+                }
+                if finished.value {
+                    return .finished
+                }
                 try? await clock.sleep(for: .milliseconds(2))
             }
             return .neither

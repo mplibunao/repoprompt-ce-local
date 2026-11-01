@@ -15,7 +15,9 @@ enum WorkspaceCodemapGraphOrdering {
                 bytesPrecede(UnsafeRawBufferPointer(left), UnsafeRawBufferPointer(right))
             }
         }
-        if let outer = fastResult, let result = outer { return result }
+        if let outer = fastResult, let result = outer {
+            return result
+        }
         return lhs.utf8.lexicographicallyPrecedes(rhs.utf8)
     }
 
@@ -35,7 +37,9 @@ enum WorkspaceCodemapGraphOrdering {
         let common = Swift.min(lhs.count, rhs.count)
         if common > 0, let left = lhs.baseAddress, let right = rhs.baseAddress {
             let comparison = memcmp(left, right, common)
-            if comparison != 0 { return comparison < 0 }
+            if comparison != 0 {
+                return comparison < 0
+            }
         }
         return lhs.count < rhs.count
     }

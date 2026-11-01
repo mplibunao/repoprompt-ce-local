@@ -672,7 +672,9 @@ actor GitWorkspaceStateAuthority {
 
         if initial.isCancelled {
             let pending = takePendingPrefixControlAdmission(key, flightID: flightID)
-            if let pending { await metadataMonitor.release(pending.observationToken) }
+            if let pending {
+                await metadataMonitor.release(pending.observationToken)
+            }
             return
         }
 
@@ -680,7 +682,9 @@ actor GitWorkspaceStateAuthority {
         case let .failure(error):
             let pending = takePendingPrefixControlAdmission(key, flightID: flightID)
             pending?.waiters.values.forEach { $0.resume(throwing: error) }
-            if let pending { await metadataMonitor.release(pending.observationToken) }
+            if let pending {
+                await metadataMonitor.release(pending.observationToken)
+            }
         case let .success(evidence):
             #if DEBUG
                 let admissionSpan = WorktreeStartupPreparationInstrumentation.currentRecorder?
@@ -692,7 +696,9 @@ actor GitWorkspaceStateAuthority {
                 pending?.waiters.values.forEach {
                     $0.resume(throwing: GitPrefixControlEvidenceCacheError.corruptFooter)
                 }
-                if let pending { await metadataMonitor.release(pending.observationToken) }
+                if let pending {
+                    await metadataMonitor.release(pending.observationToken)
+                }
                 #if DEBUG
                     WorktreeStartupPreparationInstrumentation.currentRecorder?.recordReason(.failure)
                 #endif
@@ -719,7 +725,9 @@ actor GitWorkspaceStateAuthority {
                 removed?.waiters.values.forEach {
                     $0.resume(throwing: GitPrefixControlEvidenceCacheError.invalidatedDuringCollection)
                 }
-                if let removed { await metadataMonitor.release(removed.observationToken) }
+                if let removed {
+                    await metadataMonitor.release(removed.observationToken)
+                }
                 #if DEBUG
                     WorktreeStartupPreparationInstrumentation.currentRecorder?
                         .increment(.prefixCacheInvalidations)
@@ -871,8 +879,7 @@ actor GitWorkspaceStateAuthority {
         flightID: UUID,
         result: Result<GitPrefixControlCollectedEvidence, Error>
     ) {
-        guard let completed = takePendingUncachedPrefixControlFlight(key, flightID: flightID) else { return }
-        guard !completed.isCancelled else { return }
+        guard let completed = takePendingUncachedPrefixControlFlight(key, flightID: flightID), !completed.isCancelled else { return }
         switch result {
         case let .success(evidence):
             completed.waiters.values.forEach { $0.resume(returning: evidence) }
@@ -1090,14 +1097,13 @@ actor GitWorkspaceStateAuthority {
               metadataMonitor.acceptedWatermarkIsCurrent(
                   for: fence.repositoryKey,
                   expected: fence.acceptedMetadataWatermark
-              )
-        else { return false }
-        guard await metadataObservationIsCurrent(
-            fence.metadataObservationToken,
-            for: fence.targetLayout,
-            additionalAuthorityPaths: fence.additionalAuthorityPaths,
-            expectedAcceptedWatermark: fence.acceptedMetadataWatermark
-        ) else { return false }
+              ),
+              await metadataObservationIsCurrent(
+                  fence.metadataObservationToken,
+                  for: fence.targetLayout,
+                  additionalAuthorityPaths: fence.additionalAuthorityPaths,
+                  expectedAcceptedWatermark: fence.acceptedMetadataWatermark
+              ) else { return false }
         // The monitor actor hop above is an await boundary. Reprove both actor
         // generation and callback-accepted watermark after resumption.
         return isCurrent(fence.lease)
@@ -1110,8 +1116,7 @@ actor GitWorkspaceStateAuthority {
     nonisolated func pendingInitializationAuthorityFenceIsSynchronouslyCurrent(
         _ fence: GitWorkspacePendingInitializationAuthorityFence
     ) -> Bool {
-        guard synchronousState.isCurrent(fence) else { return false }
-        guard metadataMonitor.acceptedWatermarkIsCurrent(
+        guard synchronousState.isCurrent(fence), metadataMonitor.acceptedWatermarkIsCurrent(
             for: fence.repositoryKey,
             expected: fence.acceptedMetadataWatermark
         ) else { return false }
@@ -1674,7 +1679,9 @@ actor GitWorkspaceStateAuthority {
         prefixControlCacheArtifactBytes = prefixControlCacheArtifactBytes >= removed.artifactBytes
             ? prefixControlCacheArtifactBytes - removed.artifactBytes
             : 0
-        if invalidated { prefixControlCacheInvalidationCount &+= 1 }
+        if invalidated {
+            prefixControlCacheInvalidationCount &+= 1
+        }
         await metadataMonitor.release(removed.observationToken)
     }
 

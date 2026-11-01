@@ -115,9 +115,8 @@ final class GitWorkspaceAuthorityLockReentryGuardTests: XCTestCase {
         let range = NSRange(source.startIndex..., in: source)
         return expression.matches(in: source, range: range).compactMap { match in
             guard let declaration = Range(match.range, in: source),
-                  let openingBrace = source[declaration.upperBound...].firstIndex(of: "{")
-            else { return nil }
-            guard let closingBrace = try? matchingBrace(after: openingBrace, in: source) else { return nil }
+                  let openingBrace = source[declaration.upperBound...].firstIndex(of: "{"),
+                  let closingBrace = try? matchingBrace(after: openingBrace, in: source) else { return nil }
             return String(source[declaration.lowerBound ... closingBrace])
         }
     }
@@ -171,7 +170,9 @@ final class GitWorkspaceAuthorityLockReentryGuardTests: XCTestCase {
             case "{": depth += 1
             case "}":
                 depth -= 1
-                if depth == 0 { return index }
+                if depth == 0 {
+                    return index
+                }
             default: break
             }
             index = source.index(after: index)

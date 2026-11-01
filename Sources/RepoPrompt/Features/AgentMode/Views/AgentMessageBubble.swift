@@ -33,7 +33,9 @@ private struct MessageFooterStrip: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            if isTrailing { Spacer(minLength: 0) }
+            if isTrailing {
+                Spacer(minLength: 0)
+            }
 
             if isTrailing {
                 elapsedStatusView
@@ -47,7 +49,9 @@ private struct MessageFooterStrip: View {
                 elapsedStatusView
             }
 
-            if !isTrailing { Spacer(minLength: 0) }
+            if !isTrailing {
+                Spacer(minLength: 0)
+            }
         }
         .padding(.horizontal, 4)
     }
@@ -79,8 +83,8 @@ private struct MessageFooterStrip: View {
                 }
                 #if DEBUG
                 .onAppear {
-                        AgentModePerfDiagnostics.increment("timeline.messageFooter.liveMount")
-                    }
+                    AgentModePerfDiagnostics.increment("timeline.messageFooter.liveMount")
+                }
                 #endif
             } else {
                 #if DEBUG
@@ -479,10 +483,7 @@ struct AgentMessageBubble: View {
     }
 
     private var shouldShowCollapsedAssistantView: Bool {
-        guard item.kind == .assistant || item.kind == .assistantInline else { return false }
-        guard !item.isStreaming else { return false }
-        guard !recentAssistantItemIDs.contains(item.id) else { return false }
-        guard item.attachments.isEmpty, item.taggedFileAttachments.isEmpty, item.workflow == nil else { return false }
+        guard item.kind == .assistant || item.kind == .assistantInline, !item.isStreaming, !recentAssistantItemIDs.contains(item.id), item.attachments.isEmpty, item.taggedFileAttachments.isEmpty, item.workflow == nil else { return false }
         let lineLimit = 10
         #if DEBUG
             let diagnosticsStartMS = AgentTextDerivationPerfDiagnostics.start()
@@ -1276,10 +1277,8 @@ struct AgentMessageBubble: View {
             return "\(lines) lines"
         case "file_search":
             // Look for match count in result
-            if result.contains("matches") || result.contains("match") {
-                if let range = result.range(of: #"(\d+)\s*(match|result)"#, options: .regularExpression) {
-                    return String(result[range])
-                }
+            if result.contains("matches") || result.contains("match"), let range = result.range(of: #"(\d+)\s*(match|result)"#, options: .regularExpression) {
+                return String(result[range])
             }
         case "apply_edits":
             if result.contains("✅") || result.lowercased().contains("success") {
@@ -1338,8 +1337,12 @@ private struct AskUserQuestionSummary {
     }
 
     var statusText: String? {
-        if skipped { return "Skipped" }
-        if timedOut { return "Timed out" }
+        if skipped {
+            return "Skipped"
+        }
+        if timedOut {
+            return "Timed out"
+        }
         return nil
     }
 }
@@ -1485,8 +1488,12 @@ private func displayAnswer(from answer: AskUserQuestionResult.Answer?, timedOut:
 }
 
 private func scalarDisplayAnswer(response: String?, skipped: Bool, timedOut: Bool) -> String {
-    if skipped { return "Skipped" }
-    if timedOut { return response ?? "Timed out" }
+    if skipped {
+        return "Skipped"
+    }
+    if timedOut {
+        return response ?? "Timed out"
+    }
     return response ?? "No response"
 }
 

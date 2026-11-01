@@ -369,11 +369,15 @@ struct AgentContextFileBrowseView: View {
             return .handled
         }
         .onKeyPress(.leftArrow) {
-            if isExpanded { model.toggleExpansion(nodeID) }
+            if isExpanded {
+                model.toggleExpansion(nodeID)
+            }
             return .handled
         }
         .onKeyPress(.rightArrow) {
-            if !isExpanded { model.toggleExpansion(nodeID) }
+            if !isExpanded {
+                model.toggleExpansion(nodeID)
+            }
             return .handled
         }
         .onKeyPress(.space) {
@@ -416,7 +420,9 @@ struct AgentContextFileBrowseView: View {
         nodeID: AgentContextFileBrowseNodeID,
         title: String
     ) -> String {
-        if model.expandedNodeIDs.contains(nodeID) { return "Loading folder contents" }
+        if model.expandedNodeIDs.contains(nodeID) {
+            return "Loading folder contents"
+        }
         return model.containerDisplayMembership(for: nodeID) == .mixed
             ? "\(title) contains selected files \u{2014} expand it to change the selection"
             : "Expand \(title) to change its selection"
@@ -428,7 +434,9 @@ struct AgentContextFileBrowseView: View {
         status: AgentContextFileBrowseContainerStatus?
     ) -> String {
         guard let status else { return unresolvedContainerDescription(nodeID: nodeID, title: title) }
-        if status.totalFileCount == 0 { return "This folder contains no selectable files" }
+        if status.totalFileCount == 0 {
+            return "This folder contains no selectable files"
+        }
         if status.membership == .all {
             return "Remove \(status.selectedFileCount) selected \(pluralFiles(status.selectedFileCount)) in \(title)"
         }
@@ -456,7 +464,9 @@ struct AgentContextFileBrowseView: View {
         status: AgentContextFileBrowseContainerStatus?
     ) -> String {
         guard let status else {
-            if model.expandedNodeIDs.contains(nodeID) { return "Loading" }
+            if model.expandedNodeIDs.contains(nodeID) {
+                return "Loading"
+            }
             return model.containerDisplayMembership(for: nodeID) == .mixed ? "Mixed" : "Unchecked"
         }
         var parts = ["\(status.selectedFileCount) of \(status.selectableFileCount) selected"]
@@ -540,8 +550,12 @@ struct AgentContextFileBrowseView: View {
         heldMode: AgentContextFileBrowseHeldMode?,
         isCodemapBlocked: Bool
     ) -> String {
-        if heldMode != nil { return "Remove \(file.name) from selection" }
-        if isCodemapBlocked { return codemapBlockedExplanation(file: file) }
+        if heldMode != nil {
+            return "Remove \(file.name) from selection"
+        }
+        if isCodemapBlocked {
+            return codemapBlockedExplanation(file: file)
+        }
         return model.addMode == .full ? "Add \(file.name) as full file" : "Add \(file.name) as codemap"
     }
 
@@ -549,7 +563,9 @@ struct AgentContextFileBrowseView: View {
         file: AgentContextFileBrowseFile,
         heldMode: AgentContextFileBrowseHeldMode?
     ) -> String {
-        if heldMode != nil { return "Remove \(file.name) from selection" }
+        if heldMode != nil {
+            return "Remove \(file.name) from selection"
+        }
         return model.addMode == .full ? "Add \(file.name) as full file" : "Add \(file.name) as codemap"
     }
 
@@ -625,8 +641,12 @@ struct AgentContextFileBrowseView: View {
         case .notRequested, .loading, .unavailable:
             return "—"
         case let .known(tokens):
-            if tokens < 1000 { return "~\(tokens)" }
-            if tokens < 1_000_000 { return "~" + String(format: "%.1fk", Double(tokens) / 1000) }
+            if tokens < 1000 {
+                return "~\(tokens)"
+            }
+            if tokens < 1_000_000 {
+                return "~" + String(format: "%.1fk", Double(tokens) / 1000)
+            }
             return "~" + String(format: "%.1fM", Double(tokens) / 1_000_000)
         }
     }

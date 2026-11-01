@@ -261,7 +261,9 @@ enum CodeHighlighter {
         var examined = 0
         var angleCount = 0
         for scalar in s.unicodeScalars {
-            if examined >= sampleLimit { break }
+            if examined >= sampleLimit {
+                break
+            }
             examined &+= 1
             if scalar.value == 60 || scalar.value == 62 {
                 angleCount &+= 1
@@ -281,7 +283,9 @@ enum CodeHighlighter {
             let endExclusive = min(start + chunkSizeUTF16, len)
             ranges.append(NSRange(location: start, length: endExclusive - start))
 
-            if endExclusive == len { break }
+            if endExclusive == len {
+                break
+            }
             start = max(endExclusive - chunkOverlapUTF16, start + 1)
         }
         return ranges

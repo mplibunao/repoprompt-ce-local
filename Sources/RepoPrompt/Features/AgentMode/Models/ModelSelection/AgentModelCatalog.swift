@@ -402,8 +402,7 @@ enum AgentModelCatalog {
         if agentKind == .codexExec {
             return true
         }
-        guard let known = AgentModel.resolvedModel(forRaw: normalized, agentKind: agentKind) else { return false }
-        guard known.isValidFor(agentKind) else { return false }
+        guard let known = AgentModel.resolvedModel(forRaw: normalized, agentKind: agentKind), known.isValidFor(agentKind) else { return false }
         return isAvailable(known, for: agentKind, availability: availability)
     }
 
@@ -638,9 +637,15 @@ enum AgentModelCatalog {
                 .split(separator: " ")
                 .map { token -> String in
                     let lower = token.lowercased()
-                    if lower == "gpt" { return "GPT" }
-                    if lower == "codex" { return "Codex" }
-                    if lower == "xhigh" { return "XHigh" }
+                    if lower == "gpt" {
+                        return "GPT"
+                    }
+                    if lower == "codex" {
+                        return "Codex"
+                    }
+                    if lower == "xhigh" {
+                        return "XHigh"
+                    }
                     if lower.range(of: "^[0-9]+(\\.[0-9]+)*$", options: .regularExpression) != nil {
                         return String(token)
                     }
@@ -738,8 +743,12 @@ enum AgentModelCatalog {
                 options: sortedOptions.map(\.option)
             )
         }.sorted { lhs, rhs in
-            if AIModel.codexBaseModelPrecedes(lhs.baseModelID, rhs.baseModelID) { return true }
-            if AIModel.codexBaseModelPrecedes(rhs.baseModelID, lhs.baseModelID) { return false }
+            if AIModel.codexBaseModelPrecedes(lhs.baseModelID, rhs.baseModelID) {
+                return true
+            }
+            if AIModel.codexBaseModelPrecedes(rhs.baseModelID, lhs.baseModelID) {
+                return false
+            }
             let displayComparison = ModelPickerStringOrdering.compare(
                 lhs.displayName,
                 rhs.displayName,
@@ -1313,7 +1322,9 @@ enum AgentModelCatalog {
 
     private static func normalizedOpenCodeBaseLabel(_ value: String, fallback: String) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty { return trimmed }
+        if !trimmed.isEmpty {
+            return trimmed
+        }
         return fallback.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -1546,8 +1557,7 @@ enum AgentModelCatalog {
         for agentKind: AgentProviderKind,
         availability: AvailabilityContext
     ) -> Bool {
-        guard isAgentAvailable(agentKind, availability: availability) else { return false }
-        guard let config = compatibleBackendConfig(for: agentKind) else { return false }
+        guard isAgentAvailable(agentKind, availability: availability), let config = compatibleBackendConfig(for: agentKind) else { return false }
         let specifier = ClaudeModelSpecifier(raw: rawModel)
         switch config.modelBehavior {
         case .noModel:
@@ -1596,10 +1606,7 @@ enum AgentModelCatalog {
             return ClaudeCodeGLMIntegration.normalizedGLMModel(nil)
         }
         let specifier = ClaudeModelSpecifier(raw: rawModel)
-        guard let baseModel = specifier.baseModel else {
-            return rawModel
-        }
-        guard let mappedBaseModel = ClaudeCodeGLMIntegration.normalizedGLMModel(baseModel) else {
+        guard let baseModel = specifier.baseModel, let mappedBaseModel = ClaudeCodeGLMIntegration.normalizedGLMModel(baseModel) else {
             return rawModel
         }
         if let effort = specifier.effortLevel {
@@ -1636,11 +1643,9 @@ enum AgentModelCatalog {
         availability: AvailabilityContext = .current
     ) -> AgentProviderKind? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard let match = AgentProviderKind.allCases.first(where: {
+        guard !trimmed.isEmpty, let match = AgentProviderKind.allCases.first(where: {
             $0.rawValue.caseInsensitiveCompare(trimmed) == .orderedSame
-        }) else { return nil }
-        guard isAgentAvailable(match, availability: availability) else { return nil }
+        }), isAgentAvailable(match, availability: availability) else { return nil }
         return match
     }
 
@@ -1844,7 +1849,9 @@ enum AgentModelCatalog {
         for index in 0 ..< count {
             let left = index < lhs.count ? lhs[index] : 0
             let right = index < rhs.count ? rhs[index] : 0
-            if left != right { return left < right }
+            if left != right {
+                return left < right
+            }
         }
         return false
     }
@@ -1989,8 +1996,7 @@ enum AgentModelCatalog {
         _ raw: String,
         availability: AvailabilityContext = .current
     ) -> NormalizedAgentSelection? {
-        guard let parsed = AgentModelSelectionID.parse(raw) else { return nil }
-        guard let agent = AgentProviderKind(rawValue: parsed.agentRaw) else { return nil }
+        guard let parsed = AgentModelSelectionID.parse(raw), let agent = AgentProviderKind(rawValue: parsed.agentRaw) else { return nil }
         // For non-Codex agents, validate the model is known
         if agent != .codexExec {
             guard isValid(rawModel: parsed.modelRaw, for: agent, availability: availability) else {

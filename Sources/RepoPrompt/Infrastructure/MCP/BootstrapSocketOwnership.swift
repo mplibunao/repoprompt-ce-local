@@ -92,11 +92,8 @@ final class BootstrapSocketOwnership: @unchecked Sendable {
                   descriptorIdentity.isRegularFile,
                   descriptorIdentity.owner == getuid(),
                   let pathIdentity = identity(atPath: lockURL.path),
-                  pathIdentity == descriptorIdentity
-            else {
-                throw OwnershipError.lockInvalid(path: lockURL.path)
-            }
-            guard fchmod(fd, mode_t(0o600)) == 0,
+                  pathIdentity == descriptorIdentity,
+                  fchmod(fd, mode_t(0o600)) == 0,
                   let securedDescriptorIdentity = identity(forDescriptor: fd),
                   securedDescriptorIdentity.isRegularFile,
                   securedDescriptorIdentity.owner == getuid(),
@@ -181,7 +178,9 @@ final class BootstrapSocketOwnership: @unchecked Sendable {
                 return pwrite(lockFD, baseAddress.advanced(by: offset), bytes.count - offset, off_t(offset))
             }
             if written < 0 {
-                if errno == EINTR { continue }
+                if errno == EINTR {
+                    continue
+                }
                 throw OwnershipError.boundIdentityRecordWriteFailed(path: lockURL.path, errno: errno)
             }
             guard written > 0 else {
@@ -289,9 +288,13 @@ final class BootstrapSocketOwnership: @unchecked Sendable {
                 connect(fd, socketAddress, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        if result == 0 { return .live }
+        if result == 0 {
+            return .live
+        }
         let code = errno
-        if code == ECONNREFUSED || code == ENOENT { return .stale }
+        if code == ECONNREFUSED || code == ENOENT {
+            return .stale
+        }
         throw OwnershipError.socketProbeFailed(path: url.path, errno: code)
     }
 }
