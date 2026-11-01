@@ -204,8 +204,28 @@ final class CodeMapSyntaxArtifactTests: XCTestCase {
     }
 
     func testUnsupportedExtensionsRemainOutsideArtifactOutcomes() {
-        XCTAssertNil(CodeMapSyntaxEngine.shared.language(forFileExtension: "unsupported"))
-        XCTAssertFalse(CodeMapSyntaxEngine.supportsCodeMap(fileExtension: "unsupported"))
+        // Only `.tf` selects Terraform. `.tfvars` files, other HCL files, and JSON configuration stay
+        // unsupported, so they never reach Terraform extraction or the graph.
+        let rows: [(fileExtension: String, language: LanguageType?)] = [
+            ("tf", .terraform),
+            ("TF", .terraform),
+            ("hcl", nil),
+            ("tfvars", nil),
+            ("json", nil),
+            ("unsupported", nil)
+        ]
+        for row in rows {
+            XCTAssertEqual(
+                CodeMapSyntaxEngine.shared.language(forFileExtension: row.fileExtension),
+                row.language,
+                row.fileExtension
+            )
+            XCTAssertEqual(
+                CodeMapSyntaxEngine.supportsCodeMap(fileExtension: row.fileExtension),
+                row.language != nil,
+                row.fileExtension
+            )
+        }
     }
 
     private func makeArtifact() -> CodeMapSyntaxArtifact {

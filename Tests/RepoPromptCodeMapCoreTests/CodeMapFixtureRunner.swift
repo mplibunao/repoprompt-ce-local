@@ -90,14 +90,8 @@ enum CodeMapFixtureRunner {
         return try normalize(String(contentsOf: url, encoding: .utf8))
     }
 
-    /// `language` replaces the extension lookup, for fixtures whose extension the engine doesn't map.
-    static func outcome(
-        for fixture: CodeMapFixture,
-        language: LanguageType? = nil
-    ) throws -> CodeMapSyntaxArtifactOutcome {
-        guard let language = language ??
-            CodeMapSyntaxEngine.shared.language(forFileExtension: fixture.fileExtension)
-        else {
+    static func outcome(for fixture: CodeMapFixture) throws -> CodeMapSyntaxArtifactOutcome {
+        guard let language = CodeMapSyntaxEngine.shared.language(forFileExtension: fixture.fileExtension) else {
             throw CodeMapFixtureError.unsupportedExtension(fixture.fileExtension)
         }
         return try CodeMapSyntaxArtifactBuilder.build(
@@ -106,12 +100,8 @@ enum CodeMapFixtureRunner {
         )
     }
 
-    static func renderArtifactCodeMap(
-        for fixture: CodeMapFixture,
-        tempRoot: URL,
-        language: LanguageType? = nil
-    ) throws -> String {
-        guard case let .ready(artifact) = try outcome(for: fixture, language: language) else {
+    static func renderArtifactCodeMap(for fixture: CodeMapFixture, tempRoot: URL) throws -> String {
+        guard case let .ready(artifact) = try outcome(for: fixture) else {
             throw CodeMapFixtureError.noArtifact(fixture.relativePath)
         }
         let virtualURL = tempRoot.appendingPathComponent(fixture.relativePath)
