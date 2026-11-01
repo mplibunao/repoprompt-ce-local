@@ -63,6 +63,7 @@ enum CodeMapArtifactContainerError: Error, Equatable {
     case payloadDecodeFailed
     case outcomeKindMismatch
     case nonCanonicalPayload
+    case payloadLanguageMismatch
 }
 
 struct DecodedCodeMapArtifactContainer: Equatable {
@@ -80,10 +81,10 @@ struct CodeMapArtifactContainerPreflight: Equatable {
 
 enum CodeMapArtifactContainer {
     static let magic = Data("RPCMAPCASARTIF01".utf8)
-    static let containerVersion: UInt32 = 1
+    static let containerVersion: UInt32 = 2
 
-    private static let summaryVersion: UInt32 = 1
-    private static let summaryFieldCount: UInt32 = 20
+    private static let summaryVersion: UInt32 = 2
+    private static let summaryFieldCount = UInt32(CodeMapArtifactSummary.fieldCount)
     private static let fixedHeaderByteCount = 16 + 4 + 4 + 4 + 4 + 1 + 8 + 32 + 4 + 4 + Int(summaryFieldCount) * 8
 
     static func encode(
@@ -91,6 +92,7 @@ enum CodeMapArtifactContainer {
         outcome: CodeMapSyntaxArtifactOutcome,
         policy: CodeMapArtifactContainerPolicy = .default
     ) throws -> Data {
+        try validatePayloadLanguage(of: outcome, key: key)
         let payload = try canonicalPayload(for: outcome)
         guard payload.count <= policy.maximumPayloadByteCount else {
             throw CodeMapArtifactContainerError.invalidPayloadLength
@@ -302,6 +304,7 @@ enum CodeMapArtifactContainer {
         guard CodeMapArtifactOutcomeKind(outcome: outcome) == outcomeKind else {
             throw CodeMapArtifactContainerError.outcomeKindMismatch
         }
+        try validatePayloadLanguage(of: outcome, key: decodedKey)
         guard try canonicalPayload(for: outcome) == payload else {
             throw CodeMapArtifactContainerError.nonCanonicalPayload
         }
@@ -315,6 +318,17 @@ enum CodeMapArtifactContainer {
             payloadByteCount: payloadByteCount,
             containerByteCount: data.count
         )
+    }
+
+    /// A ready artifact carries a Terraform payload exactly when its key is a Terraform key.
+    private static func validatePayloadLanguage(
+        of outcome: CodeMapSyntaxArtifactOutcome,
+        key: CodeMapArtifactKey
+    ) throws {
+        guard case let .ready(artifact) = outcome else { return }
+        guard (key.pipelineIdentity.languageID == .terraform) == (artifact.terraform != nil) else {
+            throw CodeMapArtifactContainerError.payloadLanguageMismatch
+        }
     }
 
     private static func canonicalPayload(for outcome: CodeMapSyntaxArtifactOutcome) throws -> Data {
@@ -448,9 +462,28 @@ private enum CodeMapArtifactOutcomeKind: UInt8 {
     }
 }
 
+/// Header counts of a payload's collections and strings, so a reader can reject an over-budget
+/// payload before decoding it. Fields, in order: 13 top-level collection counts (the 11 legacy
+/// arrays, then Terraform declarations and references), 9 nested collection counts (5 legacy, then
+/// Terraform labels, outline attributes, argument names, and reference parts), and 4 aggregates.
 private struct CodeMapArtifactSummary {
-    private(set) var topLevelCounts = [UInt64](repeating: 0, count: 11)
-    private(set) var nestedCounts = [UInt64](repeating: 0, count: 5)
+    private static let topLevelCountFieldCount = 13
+    private static let nestedCountFieldCount = 9
+    /// The top-level and nested counts, each a subset of `collectionEntryCount`.
+    private static let visibleCollectionFieldCount = topLevelCountFieldCount + nestedCountFieldCount
+    static let fieldCount = visibleCollectionFieldCount + 4
+
+    // Positions in `topLevelCounts`.
+    private static let terraformDeclarationField = 11
+    private static let terraformReferenceField = 12
+    // Positions in `nestedCounts`.
+    private static let terraformLabelField = 5
+    private static let terraformAttributeField = 6
+    private static let terraformArgumentNameField = 7
+    private static let terraformReferencePartField = 8
+
+    private(set) var topLevelCounts = [UInt64](repeating: 0, count: CodeMapArtifactSummary.topLevelCountFieldCount)
+    private(set) var nestedCounts = [UInt64](repeating: 0, count: CodeMapArtifactSummary.nestedCountFieldCount)
     private(set) var stringCount: UInt64 = 0
     private(set) var collectionEntryCount: UInt64 = 0
     private(set) var stringUTF8ByteCount: UInt64 = 0
@@ -469,11 +502,11 @@ private struct CodeMapArtifactSummary {
         fields: [UInt64],
         policy: CodeMapArtifactContainerPolicy
     ) throws {
-        guard fields.count == 20 else { throw CodeMapArtifactContainerError.invalidSummary }
-        let declaredStringCount = fields[16]
-        let declaredCollectionCount = fields[17]
-        let declaredStringByteCount = fields[18]
-        let declaredMaximumStringByteCount = fields[19]
+        guard fields.count == fieldCount else { throw CodeMapArtifactContainerError.invalidSummary }
+        let declaredStringCount = fields[visibleCollectionFieldCount]
+        let declaredCollectionCount = fields[visibleCollectionFieldCount + 1]
+        let declaredStringByteCount = fields[visibleCollectionFieldCount + 2]
+        let declaredMaximumStringByteCount = fields[visibleCollectionFieldCount + 3]
         guard declaredCollectionCount <= policy.maximumCollectionEntryCount else {
             throw CodeMapArtifactContainerError.collectionLimitExceeded
         }
@@ -485,7 +518,7 @@ private struct CodeMapArtifactSummary {
             throw CodeMapArtifactContainerError.stringLimitExceeded
         }
         var visibleCollectionCount: UInt64 = 0
-        for field in fields[0 ..< 16] {
+        for field in fields[0 ..< visibleCollectionFieldCount] {
             let (next, overflow) = visibleCollectionCount.addingReportingOverflow(field)
             guard !overflow, field <= declaredCollectionCount else {
                 throw CodeMapArtifactContainerError.invalidSummary
@@ -562,6 +595,52 @@ private struct CodeMapArtifactSummary {
             try addOptionalString(variable.typeName, policy: policy)
             try addString(variable.definitionLine, policy: policy)
         }
+        if let terraform = artifact.terraform {
+            try add(terraform, policy: policy)
+        }
+    }
+
+    private mutating func add(_ terraform: TerraformCodeMapArtifact, policy: CodeMapArtifactContainerPolicy) throws {
+        topLevelCounts[Self.terraformDeclarationField] = UInt64(terraform.declarations.count)
+        topLevelCounts[Self.terraformReferenceField] = UInt64(terraform.references.count)
+        try addCollection(count: terraform.declarations.count, policy: policy)
+        try addCollection(count: terraform.references.count, policy: policy)
+
+        for declaration in terraform.declarations {
+            try addString(declaration.kind.rawValue, policy: policy)
+            try addString(declaration.blockType, policy: policy)
+            try addNestedStrings(declaration.labels, field: Self.terraformLabelField, policy: policy)
+            try addNested(declaration.attributes.count, field: Self.terraformAttributeField, policy: policy)
+            for attribute in declaration.attributes {
+                try addString(attribute.name, policy: policy)
+                try addString(attribute.valueText, policy: policy)
+            }
+            if let source = declaration.moduleSource {
+                try addString(source.kind.rawValue, policy: policy)
+                try addOptionalString(source.literalValue, policy: policy)
+            }
+            try addNestedStrings(declaration.argumentNames, field: Self.terraformArgumentNameField, policy: policy)
+        }
+        for reference in terraform.references {
+            try addString(reference.kind.rawValue, policy: policy)
+            try addNestedStrings(reference.parts, field: Self.terraformReferencePartField, policy: policy)
+        }
+    }
+
+    private mutating func addNestedStrings(
+        _ values: [String],
+        field: Int,
+        policy: CodeMapArtifactContainerPolicy
+    ) throws {
+        try addNested(values.count, field: field, policy: policy)
+        for value in values {
+            try addString(value, policy: policy)
+        }
+    }
+
+    private mutating func addNested(_ count: Int, field: Int, policy: CodeMapArtifactContainerPolicy) throws {
+        nestedCounts[field] = try adding(nestedCounts[field], UInt64(count))
+        try addCollection(count: count, policy: policy)
     }
 
     private static func validateNegativeOutcome(_ outcome: CodeMapSyntaxArtifactOutcome) throws {

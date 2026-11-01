@@ -101,6 +101,9 @@ enum TypeCleaner {
         switch language {
         case .ts, .tsx:
             extractBaseTypesTS(rawType, language: language)
+        case .terraform:
+            // Terraform type constraints are outline text, not type references.
+            []
         default:
             extractBaseTypesNonTS(rawType, language: language)
         }
@@ -134,6 +137,8 @@ enum TypeCleaner {
         let result: [String] = switch language {
         case .ts, .tsx:
             extractBaseTypesTSCached(rawType, language: language, cache: &cache, stats: activeStats)
+        case .terraform:
+            []
         default:
             extractBaseTypesNonTSCached(rawType, language: language, cache: &cache, stats: activeStats)
         }
@@ -738,7 +743,7 @@ enum TypeCleaner {
     private static func removeComments(from type: String, language: LanguageType) -> String {
         var cleaned = type
         switch language {
-        case .swift, .js, .c_sharp, .c, .rust, .cpp, .go, .java, .ts, .tsx, .php:
+        case .swift, .js, .c_sharp, .c, .rust, .cpp, .go, .java, .ts, .tsx, .php, .terraform:
             cleaned = removeBlockComments(from: cleaned)
         case .python, .ruby:
             break
@@ -1402,7 +1407,7 @@ enum TypeCleaner {
             // define if needed
             return false
 
-        case .ruby:
+        case .ruby, .terraform:
             return false
 
         case .php: // ➜ NEW
@@ -1441,7 +1446,7 @@ enum TypeCleaner {
         case .swift:
             return TypeCleanerSets.universalContainers.contains(lower) || TypeCleanerSets.swiftContainers.contains(lower)
 
-        case .js:
+        case .js, .terraform:
             return false
 
         case .php: // ➜ NEW

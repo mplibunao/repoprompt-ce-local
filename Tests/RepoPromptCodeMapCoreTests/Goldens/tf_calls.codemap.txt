@@ -1,0 +1,24 @@
+File: <ROOT>/tf/calls.tf
+Imports:
+---
+Terraform:
+  - L1: module "worker"
+      source: "../../modules/worker"
+      count: var.enabled ? 1 : 0
+      inputs: project_id, settings, workers
+  - L18: module "network"
+      source: "example-org/network/example"
+      version: "~> 2.1"
+      for_each: toset(["blue", "green"])
+      inputs: name
+  - L27: module "dns"
+      source: [non-literal]
+      inputs: zone
+  - L32: module "unsourced"
+      source: [missing]
+      inputs: zone
+  - L36: module "twice"
+      source: [invalid]
+  - L41: module "accented"
+      source: "./modules/café"
+---

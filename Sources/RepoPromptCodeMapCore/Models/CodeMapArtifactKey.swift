@@ -62,6 +62,7 @@ package enum CodeMapPipelineLanguageID: String, CaseIterable, Hashable, Sendable
     case tsx
     case php
     case ruby
+    case terraform
 }
 
 package struct CodeMapPipelineNamedLimit: Hashable, Sendable {

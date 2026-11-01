@@ -1,0 +1,6 @@
+File: <ROOT>/tf/empty.tf
+Imports:
+---
+Terraform:
+  (no declarations)
+---

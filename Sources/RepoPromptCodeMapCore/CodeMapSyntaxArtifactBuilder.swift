@@ -1,5 +1,10 @@
 import Foundation
 
+package enum CodeMapSyntaxArtifactBuilderError: Error, Equatable, Sendable {
+    /// The syntax engine returned facts of a kind this language doesn't produce, a wiring defect.
+    case outcomeLanguageMismatch(language: LanguageType)
+}
+
 package enum CodeMapSyntaxArtifactBuilder {
     package static func build(
         source: CodeMapCoreSourceSnapshot,
@@ -36,6 +41,9 @@ package enum CodeMapSyntaxArtifactBuilder {
 
         switch syntaxOutcome {
         case let .captures(captures):
+            guard language != .terraform else {
+                throw CodeMapSyntaxArtifactBuilderError.outcomeLanguageMismatch(language: language)
+            }
             let generatorStart = performanceCollector.map { _ in ProcessInfo.processInfo.systemUptime }
             let artifact = CodeMapGenerator.generateSyntaxArtifact(
                 from: captures,
@@ -51,6 +59,12 @@ package enum CodeMapSyntaxArtifactBuilder {
                 return .readyNoSymbols
             }
             return .ready(artifact)
+        case let .terraformFacts(terraform):
+            guard language == .terraform else {
+                throw CodeMapSyntaxArtifactBuilderError.outcomeLanguageMismatch(language: language)
+            }
+            // An empty Terraform file is still ready: it belongs to its module folder.
+            return .ready(CodeMapGenerator.generateTerraformSyntaxArtifact(from: terraform))
         case let .oversize(reason):
             return .oversize(reason)
         case let .parseFailed(failure):

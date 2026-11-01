@@ -1,0 +1,24 @@
+File: <ROOT>/tf/interface.tf
+Imports:
+---
+Terraform:
+  - L2: variable "project_id": string [required]
+  - L7: variable "workers": map(object({
+        image       = string
+        concurrency = optional(number, 4)
+        labels      = optional(map(string), {})
+      })) [default present; value omitted]
+  - L22: variable "api_token": string [required]
+      sensitive: true
+      nullable: false
+      ephemeral: true
+  - L29: variable "region" [default present; value omitted]
+      const: true
+  - L34: output "endpoint"
+  - L39: output "token_hint"
+      sensitive: true
+      ephemeral: true
+  - L46: local.name_prefix
+  - L47: local.worker_names
+  - L50: locals
+---

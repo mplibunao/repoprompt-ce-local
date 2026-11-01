@@ -521,6 +521,7 @@ private extension LanguageType {
         case .tsx: .tsx
         case .php: .php
         case .ruby: .ruby
+        case .terraform: .terraform
         }
     }
 }
