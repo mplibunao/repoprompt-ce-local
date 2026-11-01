@@ -7,7 +7,7 @@ Use this after the mandatory safety preflight when the touched boundary needs fo
 | Gate | Required command / evidence |
 | --- | --- |
 | Before every commit | `.agents/skills/rpce-contribution-check/scripts/preflight.sh commit` runs whitespace checks, a redacted staged-index secret scan, and `make guardrails`. Rerun after any staging change. |
-| Before every push | `.agents/skills/rpce-contribution-check/scripts/preflight.sh push` reruns commit safety, requires a clean working tree, prints the current-branch outgoing range, and runs a redacted outgoing-range secret scan. |
+| Before every push | `.agents/skills/rpce-contribution-check/scripts/preflight.sh push` reruns commit safety, requires a clean working tree apart from untracked plans in `docs/plans/`, prints the current-branch outgoing range, and runs a redacted outgoing-range secret scan. |
 | Before a candidate lands | `.agents/skills/rpce-contribution-check/scripts/preflight.sh candidate` on the candidate branch. [Candidate validation](../SKILL.md#candidate-validation) lists what it runs and the debug-app checks it prints. |
 
 Default `push` is a safety gate. It does not run heavyweight lint, test, provider, conductor, product-build, or full Xcode workspace validation lanes. Run focused commands during iteration, and run `.agents/skills/rpce-contribution-check/scripts/preflight.sh pr-ready` when a computed-outgoing-range path-selected local PR-ready pass is required. Conductor-coordinated Swift/Xcode-heavy lanes may report `global-wait` while another worktree holds the per-user heavy slot; wait on the conductor ticket instead of bypassing the daemon or starting redundant heavy jobs.

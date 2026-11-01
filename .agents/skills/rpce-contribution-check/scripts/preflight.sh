@@ -198,11 +198,14 @@ scan_staged_index_blobs() {
 
 require_clean_worktree() {
   local status_file
+  # Plans in docs/plans/ stay untracked until their work is done (CONTRIBUTING.md, "Plans and
+  # committed records"). Guardrails check 8 rejects a staged plan, so this check skips them.
+  local pathspec=(. ':(exclude)docs/plans')
   ensure_tmp_root
   status_file="$tmp_root/status.z"
-  git status --porcelain=v1 -z --untracked-files=all > "$status_file"
+  git status --porcelain=v1 -z --untracked-files=all -- "${pathspec[@]}" > "$status_file"
   if [[ -s "$status_file" ]]; then
-    git status --short
+    git status --short --untracked-files=all -- "${pathspec[@]}"
     fail "working tree is not clean; commit, stash, or discard changes before pushing"
   fi
 }
