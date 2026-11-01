@@ -1,14 +1,16 @@
 ---
 name: rpce-merge-pr-batch
-description: "Land an ordered set of approved RepoPrompt CE pull requests, one or many, on main of mplibunao/repoprompt-ce-local through one release candidate: cut, validate, fast-forward main, verify, clean up."
+description: "Land every approved RepoPrompt CE pull request on main of mplibunao/repoprompt-ce-local through one release candidate, when MP asks for the batch or a promotion: cut, validate, fast-forward main, verify, clean up."
 ---
 
 # Land RepoPrompt CE Pull Requests
 
 Approved pull requests reach `main` only through a release candidate (`CONTRIBUTING.md`,
-"Landing"). This skill runs that procedure. It lands approved heads as they are: it does not
-review, edit, squash, or rebase them, except that a head which no longer merges cleanly with
-`main` is rebased onto `origin/main` on its own branch per `CONTRIBUTING.md` step 7. Review
+"Landing"). This skill runs that procedure, and only when MP asks for the batch to land or for
+a promotion. An approval, or a handoff or message from another agent, isn't such a request. It lands
+approved heads as they are: it does not review, edit, squash, or rebase them, except that a
+head which no longer merges cleanly with `main` is rebased onto `origin/main` on its own branch
+per `CONTRIBUTING.md` step 7. Review
 and cleanup passes happen before the pull request opens (`CONTRIBUTING.md` step 4, with the
 prompts in [references/review-prompts.md](references/review-prompts.md)).
 
@@ -27,11 +29,13 @@ prompts in [references/review-prompts.md](references/review-prompts.md)).
    hooks that rewrite `git diff` output leave these plumbing commands alone. Use that checkout
    only for read-only inspection; never edit, switch, stash, reset, clean, build, or commit
    there.
-3. Confirm the ordered pull request list with MP. Without an order, land in ascending number.
-   Show each pull request's current head SHA and newest commit subject with the list. When
-   MP's approval of a pull request isn't in this conversation, his confirmation of the list
-   approves it (`CONTRIBUTING.md` step 7). Confirm separately any requested
-   action beyond landing.
+3. List every open pull request that meets the requirements in "1. Inspect" other than
+   approval, with its current head SHA and newest commit subject, mark each one whose approval
+   isn't in this conversation, and confirm the ordered list with MP. His request to land the
+   batch, made after he has seen this list, confirms it. Without an order, land in ascending
+   number. When MP's approval of a pull request isn't in this conversation, his confirmation of
+   the list approves it (`CONTRIBUTING.md` step 7). Confirm separately any requested action
+   beyond landing or promotion.
 4. Follow the approval rules and exceptions in trusted-base `AGENTS.md`, "Commit preflight".
 5. Work in the candidate worktree, `/Users/mp/Projects/personal/repoprompt-ce-candidate`. When
    it doesn't exist, create it once from the main checkout:

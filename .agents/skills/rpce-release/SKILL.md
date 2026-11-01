@@ -16,7 +16,7 @@ Confirm these before starting:
 - the archive tag for the installed build
 - the GitHub Release receipt path
 
-Ask MP for any missing or ambiguous input instead of inferring it.
+A promotion request first lands the batch through `$rpce-merge-pr-batch`, and the `main` tip it lands is the commit to promote. `docs/releasing.md` says how to choose the build number. Ask MP for any other missing or ambiguous input instead of inferring it.
 
 ## Invocation boundary
 
