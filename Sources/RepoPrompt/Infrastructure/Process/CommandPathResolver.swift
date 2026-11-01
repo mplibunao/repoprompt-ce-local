@@ -540,9 +540,10 @@ enum CommandPathResolver {
             if token == "is" || token == "=" {
                 continue
             }
+            // $@, $*, $1, etc.
             if token.hasPrefix("$") {
                 continue
-            } // $@, $*, $1, etc.
+            }
             if !isAliasTarget, token == originalCommand {
                 continue
             }

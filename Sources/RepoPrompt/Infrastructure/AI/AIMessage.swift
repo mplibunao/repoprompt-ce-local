@@ -200,8 +200,9 @@ struct AIMessage {
         // ───── 3)  Inline system prompt (optional)  ─────
         if embedSystemPrompt, !systemPrompt.isEmpty {
             if !parts.isEmpty {
+                // blank line separator
                 parts.append("")
-            } // blank line separator
+            }
             parts.append(systemPrompt)
         }
 

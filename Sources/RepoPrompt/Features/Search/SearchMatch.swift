@@ -686,9 +686,10 @@ actor FileSearchActor {
 
     /// Looks like a literal with unnecessary escapes (e.g., "\\(") and no "\\\\"
     private static func looksOverEscapedLiteral(_ s: String) -> Bool {
+        // double-backslash present → likely intended literal backslash
         if s.contains("\\\\") {
             return false
-        } // double-backslash present → likely intended literal backslash
+        }
         let chars = Array(s)
         var i = 0
         var saw = false

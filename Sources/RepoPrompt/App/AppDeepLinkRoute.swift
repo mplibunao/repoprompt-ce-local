@@ -65,7 +65,8 @@ struct AgentSessionDeepLinkRoute: Equatable {
     }
 
     static func parse(notificationUserInfo userInfo: [AnyHashable: Any]) -> AgentSessionDeepLinkRoute? {
-        guard stringValue(for: AppDeepLinkRouteUserInfoKey.routeKind, in: userInfo) == AppDeepLinkRouteUserInfoValue.agentSessionKind, intValue(for: AppDeepLinkRouteUserInfoKey.routeVersion, in: userInfo) == AppDeepLinkRouteUserInfoValue.currentRouteVersion,
+        guard stringValue(for: AppDeepLinkRouteUserInfoKey.routeKind, in: userInfo) == AppDeepLinkRouteUserInfoValue.agentSessionKind,
+              intValue(for: AppDeepLinkRouteUserInfoKey.routeVersion, in: userInfo) == AppDeepLinkRouteUserInfoValue.currentRouteVersion,
               let workspaceID = uuidValue(for: AppDeepLinkRouteUserInfoKey.workspaceID, in: userInfo),
               let tabID = uuidValue(for: AppDeepLinkRouteUserInfoKey.tabID, in: userInfo)
         else {

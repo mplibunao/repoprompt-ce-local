@@ -247,7 +247,15 @@ enum CodexProviderHelpers {
     }
 
     private static func shouldInsertAssistantSentenceBreak(existingText: String, delta: String) -> Bool {
-        guard !existingText.isEmpty, !delta.isEmpty, !isInsideFencedCodeBlock(existingText), !isInsideInlineCodeSpan(existingText), let lastCharacter = existingText.last, lastCharacter == ".", let previousCharacter = existingText.dropLast().last, previousCharacter.isLowercase else { return false }
+        guard !existingText.isEmpty,
+              !delta.isEmpty,
+              !isInsideFencedCodeBlock(existingText),
+              !isInsideInlineCodeSpan(existingText),
+              let lastCharacter = existingText.last,
+              lastCharacter == ".",
+              let previousCharacter = existingText.dropLast().last,
+              previousCharacter.isLowercase
+        else { return false }
         return startsWithSentenceLikeWord(delta)
     }
 

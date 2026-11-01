@@ -7339,7 +7339,11 @@ class WorkspaceFilesViewModel: ObservableObject {
         for normalizedUserPath: String,
         preflight: CreatePathPreflight.Result
     ) -> FileCreationResult? {
-        guard !preflight.isAbsolute, case let .uniqueRoot(root, alias) = preflight.aliasCheck, let rootVM = visibleRootFolders.first(where: { $0.id == root.id }), rootHasRealSubfolder(named: alias, under: rootVM) else { return nil }
+        guard !preflight.isAbsolute,
+              case let .uniqueRoot(root, alias) = preflight.aliasCheck,
+              let rootVM = visibleRootFolders.first(where: { $0.id == root.id }),
+              rootHasRealSubfolder(named: alias, under: rootVM)
+        else { return nil }
         let literalBaseAbsolutePath = StandardizedPath.join(
             standardizedRoot: rootVM.standardizedFullPath,
             standardizedRelativePath: StandardizedPath.relative(alias)
@@ -12430,7 +12434,7 @@ extension WorkspaceFilesViewModel {
 
                 if alreadyPresent {
                     return
-                } // nothing to do
+                }
 
                 let needsNL = existing.isEmpty ? "" :
                     (existing.hasSuffix("\n") ? "" : "\n")

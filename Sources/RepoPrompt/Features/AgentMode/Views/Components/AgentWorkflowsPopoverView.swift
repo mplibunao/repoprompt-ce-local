@@ -227,9 +227,10 @@ struct AgentWorkflowsPopoverView: View {
         let isSelected = selection?.id == workflow.id
         let iconColumnWidth = fontPreset.scaledClamped(16, max: 22)
         return Button {
+            // hidden rows can't be selected; unhide first
             if dimmed {
                 return
-            } // hidden rows can't be selected; unhide first
+            }
             if isSelected {
                 selectWorkflow(nil)
             } else {

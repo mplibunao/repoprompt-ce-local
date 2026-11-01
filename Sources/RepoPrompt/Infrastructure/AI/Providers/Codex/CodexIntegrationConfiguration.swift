@@ -154,7 +154,10 @@ enum CodexIntegrationConfiguration {
         var ordered: [ServerEntry] = []
 
         for line in splitTOMLLines(content) {
-            guard let serverName = mcpServerName(fromHeaderLine: line), !serverName.normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, seenNormalizedNames.insert(serverName.normalized).inserted else { continue }
+            guard let serverName = mcpServerName(fromHeaderLine: line),
+                  !serverName.normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  seenNormalizedNames.insert(serverName.normalized).inserted
+            else { continue }
 
             let cliPath = cliPathComponent(forNormalizedServerName: serverName.normalized)
             ordered.append(ServerEntry(rawName: serverName.raw, normalizedName: serverName.normalized, cliPathComponent: cliPath))

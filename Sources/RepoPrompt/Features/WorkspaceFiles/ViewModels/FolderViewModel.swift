@@ -817,8 +817,9 @@ class FolderViewModel: ObservableObject, Identifiable, FileSystemItemViewModel, 
         var visited = Set<UUID>()
         while let folder = current {
             if !visited.insert(folder.id).inserted {
+                // cycle detected
                 break
-            } // cycle detected
+            }
             folder.updateCheckboxStateImmediately()
             current = folder.parent
         }

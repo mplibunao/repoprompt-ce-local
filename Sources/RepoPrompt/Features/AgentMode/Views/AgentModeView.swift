@@ -4719,7 +4719,12 @@ struct AgentModeChatDetailView: View {
         Task { @MainActor in
             await Task.yield()
             await Task.yield()
-            guard token == rehydrateLayoutPassToken, case let .awaitingLayout(phaseTabID, phaseRevision, target) = rehydrateRestorePhase, phaseTabID == tabID, phaseRevision == presentationRevision, currentTabID == tabID else { return }
+            guard token == rehydrateLayoutPassToken,
+                  case let .awaitingLayout(phaseTabID, phaseRevision, target) = rehydrateRestorePhase,
+                  phaseTabID == tabID,
+                  phaseRevision == presentationRevision,
+                  currentTabID == tabID
+            else { return }
             guard isCurrentTranscriptPresentationHydrated else {
                 rehydrateRestorePhase = .awaitingHydration(tabID: tabID, target: target)
                 return
@@ -4846,7 +4851,15 @@ struct AgentModeChatDetailView: View {
     }
 
     private func continueRehydrateRestoreIfNeeded(proxy: ScrollViewProxy, source: RehydrateRestoreContinuationSource) -> Bool {
-        guard source == .settled, case let .driving(tabID, _, target) = rehydrateRestorePhase, case .liveBottom = target, tabID == currentTabID, !programmaticScrollGate.isInFlight, isCurrentTranscriptPresentationHydrated, !isUserInteractingWithScroll, !isNearBottom else { return false }
+        guard source == .settled,
+              case let .driving(tabID, _, target) = rehydrateRestorePhase,
+              case .liveBottom = target,
+              tabID == currentTabID,
+              !programmaticScrollGate.isInFlight,
+              isCurrentTranscriptPresentationHydrated,
+              !isUserInteractingWithScroll,
+              !isNearBottom
+        else { return false }
         let currentRevision = currentTranscriptPresentationRevision
         let retryKey = AgentTranscriptRehydrateRetryKey(
             tabID: tabID,

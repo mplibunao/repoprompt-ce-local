@@ -113,9 +113,10 @@ enum PathMatcher {
                         if byte >= 0x80 {
                             return unicodeSimilarityScore(a, b, threshold: t, caseSensitive: caseSensitive, stripSeparators: stripSeparators)
                         }
+                        // '-' or '_'
                         if stripSeparators && (byte == 0x2D || byte == 0x5F) {
                             continue
-                        } // '-' or '_'
+                        }
                         aTmp[aLen] = caseSensitive ? byte : PathCharPolicy.toLowerASCII(byte)
                         aLen += 1
                     }
@@ -132,8 +133,9 @@ enum PathMatcher {
 
                     let maxLen = max(aLen, bLen)
                     if maxLen == 0 {
+                        // both became empty after stripping
                         return 1.0
-                    } // both became empty after stripping
+                    }
 
                     // If threshold is 1.0, only exact matches can pass.
                     if t >= 1.0 {
@@ -798,9 +800,10 @@ enum PathMatcher {
             func componentCount(_ relativePath: String) -> Int {
                 guard !relativePath.isEmpty else { return 0 }
                 return relativePath.utf8.reduce(into: 1) { count, byte in
+                    // '/'
                     if byte == 47 {
                         count += 1
-                    } // '/'
+                    }
                 }
             }
 
@@ -1862,8 +1865,9 @@ enum PathMatcher {
                 candidates.append(contentsOf: group)
                 added += group.count
                 if added >= 12000 {
+                    // cap to avoid pathological growth
                     break
-                } // cap to avoid pathological growth
+                }
             }
         }
 
@@ -2053,8 +2057,9 @@ enum PathMatcher {
                 }
             }
             if !candidates.isEmpty {
+                // prefer the shortest qualifying tail
                 break
-            } // prefer the shortest qualifying tail
+            }
         }
 
         if candidates.isEmpty {

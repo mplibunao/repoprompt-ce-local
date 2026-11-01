@@ -668,10 +668,10 @@ public enum AIModel: Equatable, Hashable {
         }
         if case let .grokCustom(n) = self {
             return "Grok/\(n)"
-        } // <-- Handle Grok custom model displayName
+        }
         if case let .groqCustom(n) = self {
             return "Groq/\(n)"
-        } // <-- Handle Groq custom model displayName
+        }
         if case let .zaiCustom(n) = self {
             return "Z.AI/\(n)"
         }
@@ -787,16 +787,16 @@ public enum AIModel: Equatable, Hashable {
             }
             if Self.modelGroups[ProviderIndex.grok].contains(self) {
                 return .grok
-            } // <-- Add Grok to providerType check
+            }
             if Self.modelGroups[ProviderIndex.groq].contains(self) {
                 return .groq
-            } // <-- Add Groq to providerType check
+            }
             if Self.modelGroups[ProviderIndex.zAI].contains(self) {
                 return .zAI
             }
             if Self.modelGroups[ProviderIndex.claudeCode].contains(self) {
                 return .claudeCode
-            } // <-- Add Claude Code to providerType check
+            }
             if Self.modelGroups[ProviderIndex.codex].contains(self) {
                 return .codex
             }

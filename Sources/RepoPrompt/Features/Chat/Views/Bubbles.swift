@@ -807,7 +807,7 @@ private struct MessageBubbleContent: View {
 
     @ViewBuilder
     private var reasoningButtonIfNeeded: some View {
-        // Always render container to prevent layout shifts.
+        // Render a zero-size Color.clear placeholder when the reasoning button is hidden to prevent layout shifts.
         if shouldShowReasoningButton {
             let binding = viewModel.bindingForReasoningContent(of: message.id)
             ReasoningButton(

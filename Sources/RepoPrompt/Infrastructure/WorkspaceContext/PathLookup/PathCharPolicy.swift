@@ -168,7 +168,7 @@ enum PathCharPolicy {
         for sc in base.unicodeScalars {
             if isZeroWidthOrFormat(sc) {
                 continue
-            } // drop invisibles
+            }
             emitFolded(sc, into: &view) // handles multi-length (⸻ → ---)
         }
         return String(view)

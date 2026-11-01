@@ -2816,9 +2816,10 @@ extension FileSystemService {
     /// Detect a Unicode BOM and return the matching encoding, or `nil`.
     static func detectBOMEncoding(in data: Data) -> String.Encoding? {
         guard data.count >= 2 else { return nil }
+        // UTF‑8 BOM
         if data.starts(with: [0xEF, 0xBB, 0xBF]) {
             return .utf8
-        } // UTF‑8 BOM
+        }
         if data.starts(with: [0x00, 0x00, 0xFE, 0xFF]) {
             return .utf32BigEndian
         }

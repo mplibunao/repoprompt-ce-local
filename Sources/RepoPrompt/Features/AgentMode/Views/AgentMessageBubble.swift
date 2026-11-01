@@ -483,7 +483,13 @@ struct AgentMessageBubble: View {
     }
 
     private var shouldShowCollapsedAssistantView: Bool {
-        guard item.kind == .assistant || item.kind == .assistantInline, !item.isStreaming, !recentAssistantItemIDs.contains(item.id), item.attachments.isEmpty, item.taggedFileAttachments.isEmpty, item.workflow == nil else { return false }
+        guard item.kind == .assistant || item.kind == .assistantInline,
+              !item.isStreaming,
+              !recentAssistantItemIDs.contains(item.id),
+              item.attachments.isEmpty,
+              item.taggedFileAttachments.isEmpty,
+              item.workflow == nil
+        else { return false }
         let lineLimit = 10
         #if DEBUG
             let diagnosticsStartMS = AgentTextDerivationPerfDiagnostics.start()

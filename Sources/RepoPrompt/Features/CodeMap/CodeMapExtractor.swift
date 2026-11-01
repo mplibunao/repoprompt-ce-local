@@ -393,9 +393,10 @@ enum CodeMapExtractor {
                 sb.appendLine(ellPrefix + "...")
             }
 
+            // blank line between roots
             if idx < roots.count - 1 {
                 sb.appendLine("")
-            } // blank line between roots
+            }
         }
 
         return .ok

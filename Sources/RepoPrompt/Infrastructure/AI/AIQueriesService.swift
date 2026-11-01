@@ -188,7 +188,7 @@ actor TaskManager {
         }
         if let costValue = cost {
             buffer.cost = costValue
-        } // NEW
+        }
 
         let now = Date()
         let elapsed = now.timeIntervalSince(buffer.lastFlushTime)
