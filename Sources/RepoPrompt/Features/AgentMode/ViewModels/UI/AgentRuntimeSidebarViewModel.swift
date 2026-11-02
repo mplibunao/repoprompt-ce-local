@@ -29,9 +29,7 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
         var selectionFileCount: Int?
         var selectionSummary: AgentContextSelectionSummary?
         var selectionTokens: Int?
-        var selectionDeltaTokens: Int?
         var observedReadFileCount: Int = 0
-        var tokenStatsTotal: Int?
         var selectedAgent: AgentProviderKind?
         var selectedModelRaw: String?
 
@@ -170,14 +168,12 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
             lastUpdatedAt = Date()
         }
 
-        let previousSnapshot = snapshot
         var next = ContextSnapshot()
         next.updatedAt = lastUpdatedAt
         next.observedReadFileCount = observedReadFiles.count
         next.estimatedTranscriptTokens = transcriptSnapshot.estimatedTranscriptTokens
 
         let toolTotalTokens = latestWorkspaceContext?.value.tokenStats?.total ?? latestManageSelection?.value.tokenStats?.total
-        next.tokenStatsTotal = toolTotalTokens
 
         if let codexUsage {
             let last = codexUsage.lastTotalTokens ?? 0
@@ -206,13 +202,6 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
 
         if let selectionFiles {
             next.selectionFileCount = selectionFiles
-        }
-
-        if let previousTokens = previousSnapshot.selectionTokens,
-           let selectionTokens,
-           previousTokens != selectionTokens
-        {
-            next.selectionDeltaTokens = selectionTokens - previousTokens
         }
 
         next.selectedAgent = selectedAgent ?? transcriptSnapshot.selectedAgent
@@ -239,7 +228,6 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
             lastUpdatedAt = Date()
         }
 
-        let previousSnapshot = snapshot
         var next = ContextSnapshot()
         next.updatedAt = lastUpdatedAt
         next.observedReadFileCount = observedReadFiles.count
@@ -247,7 +235,6 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
         next.estimatedTranscriptTokens = transcriptChars > 0 ? transcriptChars / 4 : nil
 
         let toolTotalTokens = latestWorkspaceContext?.value.tokenStats?.total ?? latestManageSelection?.value.tokenStats?.total
-        next.tokenStatsTotal = toolTotalTokens
 
         if let codexUsage {
             let last = codexUsage.lastTotalTokens ?? 0
@@ -276,13 +263,6 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
 
         if let selectionFiles {
             next.selectionFileCount = selectionFiles
-        }
-
-        if let previousTokens = previousSnapshot.selectionTokens,
-           let selectionTokens,
-           previousTokens != selectionTokens
-        {
-            next.selectionDeltaTokens = selectionTokens - previousTokens
         }
 
         next.selectedAgent = selectedAgent
