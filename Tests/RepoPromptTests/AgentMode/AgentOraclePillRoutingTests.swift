@@ -135,11 +135,6 @@ final class AgentOraclePillRoutingTests: XCTestCase {
             eligibleSessions: eligible,
             streamingSessionIDs: []
         ), previous.id)
-        XCTAssertEqual(AgentOraclePillLogic.selectedSessionID(
-            currentSelectionID: previous.id,
-            in: eligible,
-            streamingSessionIDs: []
-        ), previous.id)
     }
 
     func testCurrentRunOracleDisplacesHistoryOnlyWhenRenderableOrStreaming() {
@@ -179,11 +174,6 @@ final class AgentOraclePillRoutingTests: XCTestCase {
             activeRunID: runID
         )
         XCTAssertEqual(eligible.map(\.id), [current.id], "live message count displaces history")
-        XCTAssertEqual(AgentOraclePillLogic.selectedSessionID(
-            currentSelectionID: history.id,
-            in: eligible,
-            streamingSessionIDs: []
-        ), current.id)
     }
 
     func testOracleHistoryFallbackPreservesOwnerAndLegacyPrecedence() {
@@ -283,16 +273,6 @@ final class AgentOraclePillRoutingTests: XCTestCase {
             AgentOraclePillLogic.latestSession(in: eligible, streamingSessionIDs: [])?.id,
             histories[1].id
         )
-        XCTAssertEqual(AgentOraclePillLogic.selectedSessionID(
-            currentSelectionID: nil,
-            in: eligible,
-            streamingSessionIDs: []
-        ), histories[1].id)
-        XCTAssertEqual(AgentOraclePillLogic.selectedSessionID(
-            currentSelectionID: histories[2].id,
-            in: eligible,
-            streamingSessionIDs: []
-        ), histories[2].id)
     }
 
     func testTranscriptActionPolicyMatchesPopoverPresentation() {

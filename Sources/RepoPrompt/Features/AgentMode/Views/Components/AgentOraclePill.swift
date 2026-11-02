@@ -124,19 +124,6 @@ enum AgentOraclePillLogic {
             .max(by: { $0.savedAt < $1.savedAt })
     }
 
-    static func selectedSessionID(
-        currentSelectionID: UUID?,
-        in sessions: [ChatSession],
-        streamingSessionIDs: Set<UUID>
-    ) -> UUID? {
-        if let currentSelectionID,
-           sessions.contains(where: { $0.id == currentSelectionID })
-        {
-            return currentSelectionID
-        }
-        return latestSession(in: sessions, streamingSessionIDs: streamingSessionIDs)?.id
-    }
-
     static func reconciledPresentedSessionID(
         currentSessionID: UUID?,
         isExplicit: Bool,
