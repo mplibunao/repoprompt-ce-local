@@ -218,9 +218,18 @@ The associated event/session/turn types are currently `typealias`es over the Cla
 
 RepoPrompt CE cannot impose one MCP tool-call timeout across external ACP providers; configure the provider where supported.
 
-- **OpenCode:** Timeout values are milliseconds. For a 10,000-second call, set `"timeout": 10000000` on the existing RepoPrompt MCP server entry, preserving its `type`, `command`, and `environment` fields.
+- **OpenCode:** Timeout values are milliseconds. For a 10,000-second call, set `"timeout": 10000000` on the existing RepoPrompt MCP server entry, preserving its `type`, `command`, `environment`, and `codemode` fields.
 - **Cursor Agent:** Current builds expose no supported ACP, CLI, environment, or configuration override that RepoPrompt CE can set to 10,000 seconds. Do not add a speculative CE timeout control; add one only if Cursor documents a supported configuration surface.
 - **Grok Build:** The session-injected RepoPrompt MCP server follows Grok's default MCP timeout. To pin one, add `tool_timeout_sec` under `[mcp_servers.RepoPromptCE]` in `~/.grok/config.toml` (Grok's per-server MCP config; seconds).
+
+### OpenCode provider notes
+
+OpenCode 2.x reaches MCP tools only through its built-in `execute` tool, which it calls Code Mode, unless a server's entry sets `"codemode": false`. RepoPrompt's entry, `mcp.RepoPromptCE`, sets it, so OpenCode 2.x lists RepoPrompt's tools to the model directly as `RepoPromptCE_<tool>` and leaves them out of `execute`. OpenCode 1.x ignores the field.
+
+- Agent Mode and Context Builder pass the entry to every OpenCode process they launch, so they work without installing it.
+- Settings → MCP → **Install MCP…** → **OpenCode** writes the same entry to `~/.config/opencode/opencode.json`. Other MCP servers in that file keep OpenCode's default and stay in Code Mode.
+- An entry installed by an earlier RepoPrompt build has no `codemode` field, so standalone OpenCode 2.x keeps RepoPrompt's tools in Code Mode. Install again to add it. The install replaces the whole `RepoPromptCE` entry, even when its message says "OpenCode already configured" because the entry existed.
+- After `opencode mcp add --global`, the global file keeps its servers under `mcp.servers`, OpenCode 2.x's layout. The install writes `mcp.RepoPromptCE` beside `mcp.servers`, and OpenCode 2.x loads it as one more server, with `codemode` intact.
 
 ### Grok Build provider notes
 
