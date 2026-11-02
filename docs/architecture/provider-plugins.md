@@ -226,8 +226,8 @@ RepoPrompt CE cannot impose one MCP tool-call timeout across external ACP provid
 
 OpenCode 2.x reaches MCP tools only through its built-in `execute` tool, which it calls Code Mode, unless a server's entry sets `"codemode": false`. RepoPrompt's entry, `mcp.RepoPromptCE`, sets it, so OpenCode 2.x lists RepoPrompt's tools to the model directly as `RepoPromptCE_<tool>` and leaves them out of `execute`. OpenCode 1.x ignores the field.
 
-- Agent Mode and Context Builder pass the entry to every OpenCode process they launch, so they work without installing it.
-- Settings → MCP → **Install MCP…** → **OpenCode** writes the same entry to `~/.config/opencode/opencode.json`. Other MCP servers in that file keep OpenCode's default and stay in Code Mode.
+- Agent Mode and Context Builder pass the entry to every OpenCode process they launch, so they work without installing it. Chat, Oracle, and model polling pass a `RepoPromptCE` entry with `"enabled": false` instead. OpenCode has no RepoPrompt tools in those runs.
+- Settings → MCP → **Install MCP…** → **OpenCode** writes the same entry to `~/.config/opencode/opencode.json`. The install leaves other MCP servers in that file unchanged. Each keeps its own `codemode` setting or OpenCode's default.
 - An entry installed by an earlier RepoPrompt build has no `codemode` field, so standalone OpenCode 2.x keeps RepoPrompt's tools in Code Mode. Install again to add it. The install replaces the whole `RepoPromptCE` entry, even when its message says "OpenCode already configured" because the entry existed.
 - After `opencode mcp add --global`, the global file keeps its servers under `mcp.servers`, OpenCode 2.x's layout. The install writes `mcp.RepoPromptCE` beside `mcp.servers`, and OpenCode 2.x loads it as one more server, with `codemode` intact.
 
