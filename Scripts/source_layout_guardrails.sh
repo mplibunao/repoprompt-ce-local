@@ -767,9 +767,11 @@ print_matches \
   grep -R -n -E 'PresetBottomBar|SelectedFilesContentView|SelectedFilesPanelViewModel|PresetTwoPanePopover_Copy|CopyPresetPreviewView|PresetTwoPanePopover_Chat' \
     Sources/RepoPrompt
 
-# 8. Tracked docs are either listed below or Markdown records in the committed
-# record folders (CONTRIBUTING.md, "Plans and committed records"). Plans,
-# reviews, and other agent working notes stay local.
+# 8. Tracked docs, staged ones included, are either listed below or Markdown
+# records in the committed record folders (CONTRIBUTING.md, "Plans and committed
+# records"). Plans, reviews, and other agent working notes stay local. Git
+# doesn't ignore docs/plans/ so that RepoPrompt can search and select plans.
+# This check keeps plans out of commits instead, and the allowlist never admits one.
 allowed_tracked_doc_record_dirs=(
   "docs/adr/"
   "docs/investigations/"
@@ -808,8 +810,15 @@ allowed_tracked_docs=(
   "docs/spec/mcp-domain-canonical-tool-definitions.generated.json"
   "docs/worktrees.md"
 )
+tracked_plans=()
 existing_tracked_docs=()
-while IFS= read -r path; do
+while IFS= read -r -d '' path; do
+  # A staged plan is committed even when its working copy is gone, so plans skip
+  # the existence check that the other documents get.
+  if [[ "$path" == docs/plans/* ]]; then
+    tracked_plans+=("$path")
+    continue
+  fi
   [[ -e "$path" ]] || continue
   if [[ "$path" == *.md ]]; then
     for dir in "${allowed_tracked_doc_record_dirs[@]}"; do
@@ -817,7 +826,11 @@ while IFS= read -r path; do
     done
   fi
   existing_tracked_docs+=("$path")
-done < <(git -c core.quotePath=false ls-files docs)
+done < <(git ls-files -z docs)
+if (( ${#tracked_plans[@]} )); then
+  fail "plans in docs/plans/ are never committed; unstage them with 'git rm --cached -- <path>', and before pushing, rewrite any branch commit that added one so its history doesn't publish it"
+  printf '%s\n' "${tracked_plans[@]}" >&2
+fi
 unexpected_tracked_docs="$(comm -23 \
   <(printf '%s\n' "${existing_tracked_docs[@]}" | sort) \
   <(printf '%s\n' "${allowed_tracked_docs[@]}" | sort))"

@@ -22,7 +22,7 @@ Run the repository-local safety preflight before every commit and push. Read `AG
 
 ## Before pushing
 
-1. Ensure the working tree is clean.
+1. Ensure the working tree is clean. Untracked plans in `docs/plans/` don't count.
 2. Run the immediate push safety gate:
 
 ```bash

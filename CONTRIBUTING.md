@@ -179,8 +179,11 @@ Ports from upstream follow [`docs/porting.md`](docs/porting.md).
 
 ## Plans and committed records
 
-Plans are local working documents in `docs/plans/`, which git ignores. They are
-never committed. Three kinds of agent-written records are committed, because
+Plans are local working documents in `docs/plans/`. They're never committed.
+Git doesn't ignore the folder, so that RepoPrompt can search plans and add them
+to a selection: `rp-deep-plan` gives Context Builder the plan it's writing
+there. Guardrail check 8, described below, keeps plans out of commits instead.
+Three kinds of agent-written records are committed, because
 Context Builder and later agents can read files in the checkout but not git
 history or GitHub:
 
@@ -212,7 +215,10 @@ durable document. Under `docs/`, check 8 of
 `Scripts/source_layout_guardrails.sh` fails on any tracked file that is neither
 a Markdown record in the three folders above nor on the script's allowlist of
 durable documents; adding a document to that list is how a working document is
-promoted.
+promoted. A plan can't be promoted this way: the check rejects any file in
+`docs/plans/`, staged or committed. The commit preflight runs it, and CI runs it
+on every pull request. The push preflight's clean-tree check skips untracked
+plans. A plan can stay in the checkout while you push its branch.
 
 **Run ledgers.** Run ledgers are committed in `docs/ledgers/`, as part of the
 run's pull request. The built-in Orchestrate workflow and the

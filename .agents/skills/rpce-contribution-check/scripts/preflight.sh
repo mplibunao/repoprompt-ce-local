@@ -198,11 +198,19 @@ scan_staged_index_blobs() {
 
 require_clean_worktree() {
   local status_file
+  # Plans in docs/plans/ stay untracked until their work is done (CONTRIBUTING.md, "Plans and
+  # committed records"), so untracked files there don't count. A tracked change there still
+  # does: a staged deletion of a committed plan means HEAD would publish that plan.
+  local outside_plans=(. ':(exclude)docs/plans')
   ensure_tmp_root
   status_file="$tmp_root/status.z"
-  git status --porcelain=v1 -z --untracked-files=all > "$status_file"
+  {
+    git status --porcelain=v1 -z --untracked-files=all -- "${outside_plans[@]}"
+    git status --porcelain=v1 -z --untracked-files=no -- docs/plans
+  } > "$status_file"
   if [[ -s "$status_file" ]]; then
-    git status --short
+    git status --short --untracked-files=all -- "${outside_plans[@]}"
+    git status --short --untracked-files=no -- docs/plans
     fail "working tree is not clean; commit, stash, or discard changes before pushing"
   fi
 }

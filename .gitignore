@@ -37,7 +37,6 @@ docs/analysis/
 docs/designs/
 docs/references/
 docs/reviews/
-docs/plans/*
 
 # Python cache artifacts
 __pycache__/
