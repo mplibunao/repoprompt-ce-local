@@ -47,11 +47,15 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
         func wait() async {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 let resumeNow: Bool = lock.withLock {
-                    if isSignalled { return true }
+                    if isSignalled {
+                        return true
+                    }
                     waiters.append(continuation)
                     return false
                 }
-                if resumeNow { continuation.resume() }
+                if resumeNow {
+                    continuation.resume()
+                }
             }
         }
     }
@@ -66,7 +70,9 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
         func wait() async {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 let resumeNow: Bool = lock.withLock {
-                    if isReleased { return true }
+                    if isReleased {
+                        return true
+                    }
                     self.continuation = continuation
                     return false
                 }
@@ -165,7 +171,9 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
         ) {
             lock.withLock {
                 names.append(name)
-                if let phase { phases[name] = phase }
+                if let phase {
+                    phases[name] = phase
+                }
                 selections[name] = selectedPaths
             }
         }
@@ -453,13 +461,17 @@ final class MCPSelectionConstructionWatchdogTests: XCTestCase {
                 }
             },
             beforeEventConsumption: { point in
-                if point == .operationCompleted { operationCompletionConsumed.signal() }
+                if point == .operationCompleted {
+                    operationCompletionConsumed.signal()
+                }
             },
             beforeCleanupGraceTaskRegistration: {
                 // The watchdog has cancelled the operation. Move virtual time past the deadline so
                 // a late completion is classified as a post-deadline settlement, not a timely one.
                 watchdogClock.advance(to: deadline + .milliseconds(1))
-                if releaseAt == .beforeCleanupGrace { gate.release() }
+                if releaseAt == .beforeCleanupGrace {
+                    gate.release()
+                }
             }
         )
 

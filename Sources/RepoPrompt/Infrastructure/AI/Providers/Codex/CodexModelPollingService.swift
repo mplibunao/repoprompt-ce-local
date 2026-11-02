@@ -192,9 +192,7 @@ actor CodexModelPollingService {
     // MARK: - Internal
 
     private func startPollingIfNeeded() {
-        guard !isShutdown, !isSuspendedForManagedSignOut else { return }
-        guard !isStoppingClientForIdle else { return }
-        guard pollingTask == nil else { return }
+        guard !isShutdown, !isSuspendedForManagedSignOut, !isStoppingClientForIdle, pollingTask == nil else { return }
         pollingTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -212,8 +210,7 @@ actor CodexModelPollingService {
         guard continuations.isEmpty else { return }
         pollingTask?.cancel()
         pollingTask = nil
-        guard stopClientWhenIdle else { return }
-        guard !isStoppingClientForIdle else { return }
+        guard stopClientWhenIdle, !isStoppingClientForIdle else { return }
 
         isStoppingClientForIdle = true
         if let inFlightRefresh {

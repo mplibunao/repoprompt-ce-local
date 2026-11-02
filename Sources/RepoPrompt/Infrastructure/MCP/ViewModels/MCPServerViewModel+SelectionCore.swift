@@ -386,8 +386,7 @@ extension MCPServerViewModel {
             var seen = Set<UUID>()
             var missing: [WorkspaceFileRecord] = []
             for file in files {
-                guard seen.insert(file.id).inserted else { continue }
-                guard presentation.renderedEntriesByFileID[file.id] == nil else { continue }
+                guard seen.insert(file.id).inserted, presentation.renderedEntriesByFileID[file.id] == nil else { continue }
                 missing.append(file)
             }
             return missing
@@ -416,9 +415,15 @@ extension MCPServerViewModel {
                     sawTerminalUnmapped = sawTerminalUnmapped || terminal
                 }
             }
-            if sawTerminalUnmapped { return .unmapped }
-            if sawPending { return .pending }
-            if sawUnmapped { return .unmapped }
+            if sawTerminalUnmapped {
+                return .unmapped
+            }
+            if sawPending {
+                return .pending
+            }
+            if sawUnmapped {
+                return .unmapped
+            }
 
             if presentationCoverageIsIncomplete(presentation.coverage) || !issues.isEmpty {
                 return .pending

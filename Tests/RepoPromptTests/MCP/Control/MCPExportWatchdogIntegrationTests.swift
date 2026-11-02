@@ -415,7 +415,9 @@ import XCTest
                 } catch {
                     responseTask?.cancel()
                     await gate.release()
-                    if let responseTask { _ = try? await responseTask.value }
+                    if let responseTask {
+                        _ = try? await responseTask.value
+                    }
                     server.setBeforeTabContextMutationCommitForTesting(nil)
                     await networkManager.debugResetToolExecutionWatchdogEnvironment()
                     await fixture.cleanup()
@@ -635,8 +637,8 @@ import XCTest
                 visibleWorkspace.isEphemeral = true
                 let visibleWorkspaceID = visibleWorkspace.id
 
-                /// Appends through the connection's binding, running `change` after the call resolves its tab
-                /// and before it commits.
+                // Appends through the connection's binding, running `change` after the call resolves its tab
+                // and before it commits.
                 @MainActor
                 func append(
                     _ operationID: String,
@@ -650,8 +652,8 @@ import XCTest
                     )
                 }
 
-                /// The append failed with the missing-tab error, and the mutation journal records it as
-                /// failed before its commit.
+                // The append failed with the missing-tab error, and the mutation journal records it as
+                // failed before its commit.
                 @MainActor
                 func assertBoundTabUnavailable(
                     _ response: PersistentMCPTestRPCResponse,
@@ -839,7 +841,9 @@ import XCTest
                 } catch {
                     responseTask?.cancel()
                     await gate.release()
-                    if let responseTask { _ = try? await responseTask.value }
+                    if let responseTask {
+                        _ = try? await responseTask.value
+                    }
                     context.window.mcpServer.setBeforeTabContextMutationCommitForTesting(nil)
                     MCPToolExecutionTracer.setTestSink(nil)
                     await manager.debugResetToolExecutionWatchdogEnvironment()
@@ -1009,7 +1013,9 @@ import XCTest
                 } catch {
                     await heldEdit?.finish(manager: manager)
                     MCPToolExecutionTracer.setTestSink(nil)
-                    if let queuedEndpoint { await Self.cleanupEndpoint(queuedEndpoint, manager: manager) }
+                    if let queuedEndpoint {
+                        await Self.cleanupEndpoint(queuedEndpoint, manager: manager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -1062,7 +1068,9 @@ import XCTest
                     try await fixture.assertCleanedUp()
                 } catch {
                     await heldEdit?.finish(manager: manager)
-                    if let queuedEndpoint { await Self.cleanupEndpoint(queuedEndpoint, manager: manager) }
+                    if let queuedEndpoint {
+                        await Self.cleanupEndpoint(queuedEndpoint, manager: manager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -1126,7 +1134,9 @@ import XCTest
                 } catch {
                     await gate.release()
                     editTask?.cancel()
-                    if let editTask { _ = try? await editTask.value }
+                    if let editTask {
+                        _ = try? await editTask.value
+                    }
                     await manager.debugSetResolvedToolOperationOverride(toolName: MCPWindowToolName.applyEdits, operation: nil)
                     await fixture.cleanup()
                     throw error
@@ -1242,7 +1252,9 @@ import XCTest
                     await commitGate.release()
                     await fileService.setMutationWillCommitHandlerForTesting(nil)
                     MCPToolExecutionTracer.setTestSink(nil)
-                    if let queuedEndpoint { await Self.cleanupEndpoint(queuedEndpoint, manager: manager) }
+                    if let queuedEndpoint {
+                        await Self.cleanupEndpoint(queuedEndpoint, manager: manager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -1329,7 +1341,9 @@ import XCTest
                 } catch {
                     editTask?.cancel()
                     await ioGate.release()
-                    if let editTask { _ = try? await editTask.value }
+                    if let editTask {
+                        _ = try? await editTask.value
+                    }
                     await fileService.setMutationIOWillBeginHandlerForTesting(nil)
                     await manager.debugResetToolExecutionWatchdogEnvironment()
                     await fixture.cleanup()
@@ -1936,7 +1950,9 @@ import XCTest
                         await preWriteGate.release()
                         await schedulingGate.open()
                         responseTask?.cancel()
-                        if let responseTask { _ = try? await responseTask.value }
+                        if let responseTask {
+                            _ = try? await responseTask.value
+                        }
                         MCPAppPhysicalCapabilityAdapters.setPromptExportPhaseHookForTesting(nil)
                         await manager.debugSetDomainPeerIdentityForTesting(
                             connectionID: endpoint.connectionID,
@@ -2025,7 +2041,9 @@ import XCTest
                     } catch {
                         await phaseGate.release()
                         responseTask?.cancel()
-                        if let responseTask { _ = try? await responseTask.value }
+                        if let responseTask {
+                            _ = try? await responseTask.value
+                        }
                         MCPAppPhysicalCapabilityAdapters.setPromptExportPhaseHookForTesting(nil)
                         await manager.debugSetDomainPeerIdentityForTesting(
                             connectionID: endpoint.connectionID,
@@ -2116,7 +2134,9 @@ import XCTest
                     } catch {
                         await afterWriteGate.release()
                         responseTask?.cancel()
-                        if let responseTask { _ = try? await responseTask.value }
+                        if let responseTask {
+                            _ = try? await responseTask.value
+                        }
                         MCPAppPhysicalCapabilityAdapters.setPromptExportPhaseHookForTesting(nil)
                         await manager.debugSetDomainPeerIdentityForTesting(
                             connectionID: endpoint.connectionID,
@@ -2236,8 +2256,12 @@ import XCTest
                     await providerGate.release()
                     firstTask?.cancel()
                     secondTask?.cancel()
-                    if let firstTask { _ = try? await firstTask.value }
-                    if let secondTask { _ = try? await secondTask.value }
+                    if let firstTask {
+                        _ = try? await firstTask.value
+                    }
+                    if let secondTask {
+                        _ = try? await secondTask.value
+                    }
                     await manager.debugSetResolvedToolOperationOverride(
                         toolName: MCPWindowToolName.prompt,
                         operation: nil
@@ -2365,9 +2389,15 @@ import XCTest
                     server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
                     MCPToolExecutionTracer.setTestSink(nil)
                     await manager.debugResetToolExecutionWatchdogEnvironment()
-                    if let manageTask { _ = try? await manageTask.value }
-                    if let queuedReadTask { _ = try? await queuedReadTask.value }
-                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: manager) }
+                    if let manageTask {
+                        _ = try? await manageTask.value
+                    }
+                    if let queuedReadTask {
+                        _ = try? await queuedReadTask.value
+                    }
+                    if let endpoint {
+                        await Self.cleanupEndpoint(endpoint, manager: manager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -2509,7 +2539,9 @@ import XCTest
                 } catch {
                     await gate.release()
                     server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
-                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: manager) }
+                    if let endpoint {
+                        await Self.cleanupEndpoint(endpoint, manager: manager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -2700,7 +2732,9 @@ import XCTest
                     } catch {
                         await formattingGate?.release()
                         responseTask?.cancel()
-                        if let responseTask { _ = try? await responseTask.value }
+                        if let responseTask {
+                            _ = try? await responseTask.value
+                        }
                         MCPToolExecutionTracer.setTestSink(nil)
                         MCPResponseDeliveryTracer.resetDebugEvents()
                         await manager.debugSetBeforeToolResultFormattingForTesting(nil)
@@ -3289,8 +3323,12 @@ import XCTest
                     await firstFormattingGate.release()
                     firstTask?.cancel()
                     secondTask?.cancel()
-                    if let firstTask { _ = try? await firstTask.value }
-                    if let secondTask { _ = try? await secondTask.value }
+                    if let firstTask {
+                        _ = try? await firstTask.value
+                    }
+                    if let secondTask {
+                        _ = try? await secondTask.value
+                    }
                     await manager.debugSetBeforeToolRequestIdentityClaimForTesting(nil)
                     await manager.debugSetBeforeToolResultFormattingForTesting(nil)
                     await manager.debugSetResolvedToolOperationOverride(
@@ -3763,9 +3801,13 @@ import XCTest
             } catch {
                 releaseOrdinaryWriter.signal()
                 ordinaryResponseTask?.cancel()
-                if let ordinaryResponseTask { _ = try? await ordinaryResponseTask.value }
+                if let ordinaryResponseTask {
+                    _ = try? await ordinaryResponseTask.value
+                }
                 terminalTask?.cancel()
-                if let terminalTask { _ = await terminalTask.value }
+                if let terminalTask {
+                    _ = await terminalTask.value
+                }
                 await transport.debugSetOrdinaryWriteWouldBlockForTesting(nil)
                 await transport.debugSetExecutionWatchdogDidSealForTesting(nil)
                 await transport.disconnect()
@@ -5083,7 +5125,9 @@ import XCTest
                 var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
                 let pollResult = Darwin.poll(&descriptor, 1, 100)
                 if pollResult < 0 {
-                    if errno == EINTR { continue }
+                    if errno == EINTR {
+                        continue
+                    }
                     throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
                 }
                 guard pollResult > 0 else { continue }
@@ -5093,7 +5137,9 @@ import XCTest
                     Darwin.read(fd, bytes.baseAddress, bytes.count)
                 }
                 if byteCount < 0 {
-                    if errno == EINTR { continue }
+                    if errno == EINTR {
+                        continue
+                    }
                     throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
                 }
                 guard byteCount > 0 else { break }
@@ -5295,7 +5341,9 @@ import XCTest
         }
 
         func waitUntilProduced(_ point: MCPToolExecutionWatchdogSchedulingPoint) async {
-            if producedPoints.contains(point) { return }
+            if producedPoints.contains(point) {
+                return
+            }
             await withCheckedContinuation { continuation in
                 productionWaiters.append((point, continuation))
             }
@@ -5312,7 +5360,9 @@ import XCTest
         }
 
         func waitUntilConsumptionPaused() async {
-            if !blockedContinuations.isEmpty { return }
+            if !blockedContinuations.isEmpty {
+                return
+            }
             await withCheckedContinuation { continuation in
                 consumptionPauseWaiters.append(continuation)
             }
@@ -5414,23 +5464,32 @@ import XCTest
         private var waiters: [CheckedContinuation<Void, Never>] = []
 
         func withLease<T>(_ operation: (Ownership) async throws -> T) async throws -> T {
-            if occupied { await withCheckedContinuation { waiters.append($0) } }
+            if occupied {
+                await withCheckedContinuation { waiters.append($0) }
+            }
             occupied = true
             let baseline = await ServerNetworkManager.shared.debugTransportState()
             defer {
-                if let next = waiters.first { waiters.removeFirst()
+                if let next = waiters.first {
+                    waiters.removeFirst()
                     next.resume()
-                } else { occupied = false }
+                } else {
+                    occupied = false
+                }
             }
             let result: Result<T, Error>
             do { result = try await .success(operation(Ownership())) } catch { result = .failure(error) }
             let manager = ServerNetworkManager.shared
             let observed = await manager.debugTransportState()
             if baseline.isRunning {
-                if !observed.isRunning { await manager.start() }
+                if !observed.isRunning {
+                    await manager.start()
+                }
                 await manager.setEnabled(baseline.isEnabled)
             } else {
-                if observed.isRunning { await manager.stop() }
+                if observed.isRunning {
+                    await manager.stop()
+                }
                 await manager.setEnabled(baseline.isEnabled)
             }
             return try result.get()
@@ -5530,8 +5589,12 @@ import XCTest
                 if let constructedFixture {
                     await constructedFixture.cleanup()
                 } else {
-                    if let contextB { await cleanupContext(contextB) }
-                    if let contextA { await cleanupContext(contextA) }
+                    if let contextB {
+                        await cleanupContext(contextB)
+                    }
+                    if let contextA {
+                        await cleanupContext(contextA)
+                    }
                     WindowStatesManager.shared.unregisterWindowState(windowB)
                     WindowStatesManager.shared.unregisterWindowState(windowA)
                     try? FileManager.default.removeItem(at: rootURL)
@@ -6032,7 +6095,9 @@ import XCTest
                         written += result
                         continue
                     }
-                    if result < 0, errno == EINTR { continue }
+                    if result < 0, errno == EINTR {
+                        continue
+                    }
                     throw ClientError.posix(operation: "write", code: errno)
                 }
             }
@@ -6046,12 +6111,18 @@ import XCTest
                 var descriptor = pollfd(fd: activeFD, events: Int16(POLLIN), revents: 0)
                 let pollResult = Darwin.poll(&descriptor, 1, 100)
                 if pollResult == 0 {
-                    if withStateLock({ isClosed }) { return }
+                    if withStateLock({ isClosed }) {
+                        return
+                    }
                     continue
                 }
                 if pollResult < 0 {
-                    if errno == EINTR { continue }
-                    if withStateLock({ isClosed }) { return }
+                    if errno == EINTR {
+                        continue
+                    }
+                    if withStateLock({ isClosed }) {
+                        return
+                    }
                     close(with: ClientError.posix(operation: "poll", code: errno))
                     return
                 }
@@ -6061,7 +6132,9 @@ import XCTest
                     close(with: ClientError.closed)
                     return
                 }
-                if withStateLock({ isClosed }) { return }
+                if withStateLock({ isClosed }) {
+                    return
+                }
                 var bytes = [UInt8](repeating: 0, count: 4096)
                 let readCount = bytes.withUnsafeMutableBytes { storage in
                     Darwin.read(activeFD, storage.baseAddress, storage.count)
@@ -6079,8 +6152,12 @@ import XCTest
                     close(with: ClientError.closed)
                     return
                 }
-                if errno == EINTR { continue }
-                if withStateLock({ isClosed }) { return }
+                if errno == EINTR {
+                    continue
+                }
+                if withStateLock({ isClosed }) {
+                    return
+                }
                 close(with: ClientError.posix(operation: "read", code: errno))
                 return
             }
@@ -6146,7 +6223,9 @@ import XCTest
                 interceptingResponses[id] = response
                 return false
             }
-            if shouldCancelTask { task.cancel() }
+            if shouldCancelTask {
+                task.cancel()
+            }
         }
 
         private func takeIntercepting(
@@ -6208,7 +6287,9 @@ import XCTest
 
         @discardableResult
         private func failRequest(id: Int, error: Error) -> Bool {
-            if failPending(id: id, error: error) { return true }
+            if failPending(id: id, error: error) {
+                return true
+            }
             return failIntercepting(id: id, error: error)
         }
 
@@ -6238,7 +6319,9 @@ import XCTest
                 }
                 return (activeFD, pendingContinuations, interceptingContinuations, tasks)
             }
-            if snapshot.activeFD >= 0 { Darwin.close(snapshot.activeFD) }
+            if snapshot.activeFD >= 0 {
+                Darwin.close(snapshot.activeFD)
+            }
             snapshot.tasks.forEach { $0.cancel() }
             for continuation in snapshot.pendingContinuations + snapshot.interceptingContinuations {
                 continuation.resume(throwing: error)

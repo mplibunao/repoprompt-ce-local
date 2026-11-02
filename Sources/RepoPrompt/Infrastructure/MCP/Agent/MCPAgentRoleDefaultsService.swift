@@ -333,8 +333,7 @@ enum MCPAgentRoleDefaultsService {
         recommendedAvailability: AgentModelCatalog.AvailabilityContext,
         codexDynamicModels: [CodexAppServerClient.RemoteModel]?
     ) -> RoleDefaultResolution? {
-        guard let taskLabel = AgentModelCatalog.taskLabel(for: kind) else { return nil }
-        guard let recommended = resolvedRecommendedSelection(
+        guard let taskLabel = AgentModelCatalog.taskLabel(for: kind), let recommended = resolvedRecommendedSelection(
             for: kind,
             recommendedAvailability: recommendedAvailability,
             fallbackAvailability: availability

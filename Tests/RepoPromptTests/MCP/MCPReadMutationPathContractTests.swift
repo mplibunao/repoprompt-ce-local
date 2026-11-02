@@ -307,7 +307,9 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             completion.release()
             let completed = ExactResolutionPeerProbe()
             await store.setWatcherSinkWillApplyHandler { rootID in
-                if rootID == root.id { await watcher.enterAndWait() }
+                if rootID == root.id {
+                    await watcher.enterAndWait()
+                }
             }
             await store.setExactFileSuspensionGateForTesting(point: .missingFilePruneFence, rootID: root.id) {
                 await deletion.enterAndWait()
@@ -348,7 +350,9 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             XCTAssertEqual(completionCount, 0)
             deletion.release()
             let finished = await completion.waitUntilEntered()
-            if !finished { watcher.release() }
+            if !finished {
+                watcher.release()
+            }
             let result = await task.result
             let after = await store.file(rootID: root.id, relativePath: "Target.swift")
             let remaining = await store.codemapPathFenceCountForTesting(rootID: root.id, relativePath: "Target.swift")
@@ -374,7 +378,9 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             let completion = MCPPathContractReleaseGate(name: "disk recheck completion")
             completion.release()
             await store.setWatcherSinkWillApplyHandler { rootID in
-                if rootID == root.id { await watcher.enterAndWait() }
+                if rootID == root.id {
+                    await watcher.enterAndWait()
+                }
             }
             await store.setExactFileSuspensionGateForTesting(point: .candidateEligibility, rootID: root.id) {
                 await eligibility.enterAndWait()
@@ -414,7 +420,9 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             XCTAssertNil(before)
             eligibility.release()
             let finished = await completion.waitUntilEntered()
-            if !finished { watcher.release() }
+            if !finished {
+                watcher.release()
+            }
             let result = await task.result
             await store.setWatcherSinkWillApplyHandler(nil)
             watcher.release()
@@ -443,7 +451,9 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             let returned = MCPPathContractReleaseGate(name: "fence bound request returned")
             returned.release()
             await store.setWatcherSinkWillApplyHandler { rootID in
-                if rootID == root.id { await watcher.enterAndWait() }
+                if rootID == root.id {
+                    await watcher.enterAndWait()
+                }
             }
             await store.setExactFileSuspensionGateForTesting(point: .missingFilePruneFence, rootID: root.id) {
                 await heldPrune.enterAndWait()
@@ -508,7 +518,9 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             let completion = MCPPathContractReleaseGate(name: "cancelled prune completion")
             completion.release()
             await store.setWatcherSinkWillApplyHandler { rootID in
-                if rootID == root.id { await watcher.enterAndWait() }
+                if rootID == root.id {
+                    await watcher.enterAndWait()
+                }
             }
             await store.setExactFileSuspensionGateForTesting(point: .missingFilePruneFence, rootID: root.id) {
                 await deletion.enterAndWaitIgnoringCancellationUntilRelease()
@@ -544,7 +556,9 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             task.cancel()
             deletion.release()
             let finished = await completion.waitUntilEntered()
-            if !finished { watcher.release() }
+            if !finished {
+                watcher.release()
+            }
             let result = await task.result
             let after = await store.file(rootID: root.id, relativePath: "Target.swift")
             let remaining = await store.codemapPathFenceCountForTesting(rootID: root.id, relativePath: "Target.swift")
@@ -2986,11 +3000,9 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             )
             guard case let .matched(match) = resolution,
                   case .explicitRoot = try WorkspaceExactFileInput.parse(match.canonicalPath),
-                  let peerRoot = roots.first(where: { $0.id == peerRecord.id })
+                  let peerRoot = roots.first(where: { $0.id == peerRecord.id }),
+                  match.file.rootID == addressedRecord.id
             else {
-                throw MCPPathContractTestError.unexpectedResolution(String(describing: resolution))
-            }
-            guard match.file.rootID == addressedRecord.id else {
                 throw MCPPathContractTestError.unexpectedResolution(String(describing: resolution))
             }
             return MCPPathContractQualifiedReplayFixture(

@@ -273,7 +273,9 @@ struct ContextBuilderReviewTargetResolver {
                 )
             )
             let rejectedCount = authorization.dispositions.reduce(into: 0) { count, disposition in
-                if case .rejected = disposition { count += 1 }
+                if case .rejected = disposition {
+                    count += 1
+                }
             }
             let authorizedArtifacts = authorization.dispositions.compactMap { disposition
                 -> ContextBuilderFinalSelectedArtifactAuthorization? in
@@ -324,7 +326,7 @@ struct ContextBuilderReviewTargetResolver {
                 : StandardizedPath.relative(expanded)
             guard standardized.hasPrefix("/"),
                   let boundRoot = input.lookupContext.bindingProjection?
-                  .boundRoot(containingPhysicalAbsolutePath: standardized)
+                      .boundRoot(containingPhysicalAbsolutePath: standardized)
             else {
                 canonicalCandidates.append(candidate)
                 continue
@@ -552,8 +554,12 @@ struct ContextBuilderReviewTargetResolver {
                 if lhs.logicalWorkspaceRoot.name != rhs.logicalWorkspaceRoot.name {
                     return lhs.logicalWorkspaceRoot.name < rhs.logicalWorkspaceRoot.name
                 }
-                if lhs.repoKey != rhs.repoKey { return lhs.repoKey < rhs.repoKey }
-                if lhs.repositoryID != rhs.repositoryID { return lhs.repositoryID < rhs.repositoryID }
+                if lhs.repoKey != rhs.repoKey {
+                    return lhs.repoKey < rhs.repoKey
+                }
+                if lhs.repositoryID != rhs.repositoryID {
+                    return lhs.repositoryID < rhs.repositoryID
+                }
                 return lhs.worktreeID < rhs.worktreeID
             }
         guard !targets.isEmpty else { return .unavailable(.emptySelection) }
@@ -629,12 +635,12 @@ struct ContextBuilderReviewTargetResolver {
             }
 
             guard let resolved = await vcsService.resolveRepo(
-                from: URL(fileURLWithPath: checkout.checkoutRootPath, isDirectory: true)
-            ),
-                resolved.backendKind == .git,
-                GitRepoRootAuthorization.canonicalPath(resolved.rootURL.path)
-                == GitRepoRootAuthorization.canonicalPath(checkout.checkoutRootPath),
-                let layout = GitRepositoryLayoutResolver.resolve(atWorkTreeRoot: resolved.rootURL)
+                      from: URL(fileURLWithPath: checkout.checkoutRootPath, isDirectory: true)
+                  ),
+                  resolved.backendKind == .git,
+                  GitRepoRootAuthorization.canonicalPath(resolved.rootURL.path)
+                  == GitRepoRootAuthorization.canonicalPath(checkout.checkoutRootPath),
+                  let layout = GitRepositoryLayoutResolver.resolve(atWorkTreeRoot: resolved.rootURL)
             else { return .checkoutIdentityChanged }
 
             if let authorization = sessionAuthorization,

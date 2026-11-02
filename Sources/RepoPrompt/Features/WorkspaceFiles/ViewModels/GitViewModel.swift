@@ -255,9 +255,13 @@ final class GitViewModel: ObservableObject {
         resolvedStateTask = Task.detached(
             priority: .userInitiated
         ) { [input, generation, rebuildGeneration, rootPath, selectedRootPath] in
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                return
+            }
             let output = Self.buildResolvedState(input: input)
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                return
+            }
 
             await MainActor.run { [weak self] in
                 guard !Task.isCancelled else { return }
@@ -279,8 +283,7 @@ final class GitViewModel: ObservableObject {
         rootPath: String?,
         selectedRootPath: String?
     ) {
-        guard rebuildGeneration == resolvedStateGeneration else { return }
-        guard statusGeneration == latestStatusGeneration else { return }
+        guard rebuildGeneration == resolvedStateGeneration, statusGeneration == latestStatusGeneration else { return }
         if let rootPath {
             guard rootPath == latestStatusRootPath else { return }
         }
@@ -433,9 +436,7 @@ final class GitViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
 
             let updateResult = await MainActor.run { [weak self] () -> (isCurrent: Bool, selectedRootPath: String?) in
-                guard let self else { return (false, nil) }
-                guard generation == rootUpdateGeneration else { return (false, nil) }
-                guard standardizedRootPaths == lastVisibleRootPaths else { return (false, nil) }
+                guard let self, generation == rootUpdateGeneration, standardizedRootPaths == lastVisibleRootPaths else { return (false, nil) }
 
                 applyRootDetections(detections, standardizedPathByRootPath: standardizedPathByRootPath)
 
@@ -495,7 +496,9 @@ final class GitViewModel: ObservableObject {
                 }
                 guard !Task.isCancelled else { break }
                 guard let request = self?.beginPeriodicGitContextRefresh() else {
-                    if self == nil { break }
+                    if self == nil {
+                        break
+                    }
                     continue
                 }
                 let detections = await refreshGitContexts(request.rootPaths)
@@ -907,8 +910,7 @@ final class GitViewModel: ObservableObject {
     }
 
     func getDiffUsing(inclusionMode mode: GitDiffInclusionMode, vs branch: String? = nil, forceRefreshStatus: Bool = false) async -> String? {
-        guard mode != .none else { return nil }
-        guard let rootPath = selectedRootFolder?.fullPath else { return nil }
+        guard mode != .none, let rootPath = selectedRootFolder?.fullPath else { return nil }
 
         let effectiveBranch = branch ?? selectedDiffBranch
         let selectedAbs: [String]
@@ -933,8 +935,7 @@ final class GitViewModel: ObservableObject {
     }
 
     func getDiffForAbsolutePaths(_ absolutePaths: [String], vs branch: String? = nil, forceRefreshStatus: Bool = false) async -> String? {
-        guard !absolutePaths.isEmpty else { return nil }
-        guard let rootPath = selectedRootFolder?.fullPath else { return nil }
+        guard !absolutePaths.isEmpty, let rootPath = selectedRootFolder?.fullPath else { return nil }
         let effectiveBranch = branch ?? selectedDiffBranch
         let normalized = Array(Set(absolutePaths.map { ($0 as NSString).standardizingPath })).sorted()
         return await statusActor.generateDiff(
@@ -993,8 +994,7 @@ final class GitViewModel: ObservableObject {
     }
 
     private func reconcileSelectedDiffBranchIfInvalid() {
-        guard selectedDiffBranch != "HEAD" else { return }
-        guard !availableBranches.isEmpty || !availableRemoteBranches.isEmpty || !availableTags.isEmpty else { return }
+        guard selectedDiffBranch != "HEAD", !availableBranches.isEmpty || !availableRemoteBranches.isEmpty || !availableTags.isEmpty else { return }
 
         let branchNames = Set(availableBranches.map(\.name))
         let remoteBranchNames = Set(availableRemoteBranches.map(\.name))
@@ -1159,8 +1159,7 @@ final class GitViewModel: ObservableObject {
     }
 
     func getSelectedFilesDiff(vs branch: String? = nil, forceFresh: Bool = false) async -> String? {
-        guard isGitActive else { return nil }
-        guard let rootPath = selectedRootFolder?.fullPath else { return nil }
+        guard isGitActive, let rootPath = selectedRootFolder?.fullPath else { return nil }
 
         let effectiveBranch = branch ?? selectedDiffBranch
         if forceFresh {

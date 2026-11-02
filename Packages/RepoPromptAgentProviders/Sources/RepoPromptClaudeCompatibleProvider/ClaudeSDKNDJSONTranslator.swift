@@ -609,7 +609,7 @@ public struct ClaudeSDKNDJSONTranslator {
                 case let object as [String: Any]:
                     if let message = firstString(in: object, keys: ["message", "error"])?
                         .trimmingCharacters(in: .whitespacesAndNewlines),
-                        !message.isEmpty
+                       !message.isEmpty
                     {
                         messages.append(message)
                     }
@@ -621,8 +621,8 @@ public struct ClaudeSDKNDJSONTranslator {
 
         if let explicit = firstString(in: json, keys: ["error", "message"])?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-            !explicit.isEmpty,
-            !messages.contains(explicit)
+           !explicit.isEmpty,
+           !messages.contains(explicit)
         {
             messages.append(explicit)
         }
@@ -722,8 +722,8 @@ public struct ClaudeSDKNDJSONTranslator {
             guard !trimmed.isEmpty else { return nil }
             if (trimmed.hasPrefix("{") && trimmed.hasSuffix("}"))
                 || (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")),
-                let data = trimmed.data(using: .utf8),
-                let json = try? JSONSerialization.jsonObject(with: data)
+               let data = trimmed.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data)
             {
                 return inferToolResultErrorSignal(from: json)
             }
@@ -745,8 +745,12 @@ public struct ClaudeSDKNDJSONTranslator {
         }
 
         if let exitCode = intValue(in: object, keys: ["exitCode", "exit_code", "code"]) {
-            if exitCode == 0 { return false }
-            if exitCode > 0 { return true }
+            if exitCode == 0 {
+                return false
+            }
+            if exitCode > 0 {
+                return true
+            }
         }
 
         if let error = firstString(in: object, keys: ["error", "error_message", "errorMessage"]),
@@ -838,8 +842,7 @@ public struct ClaudeSDKNDJSONTranslator {
     }
 
     private func serializeJSONObjectString(_ value: [String: Any]) -> String? {
-        guard !value.isEmpty, JSONSerialization.isValidJSONObject(value) else { return nil }
-        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]) else {
+        guard !value.isEmpty, JSONSerialization.isValidJSONObject(value), let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]) else {
             return nil
         }
         return String(data: data, encoding: .utf8)
@@ -878,7 +881,9 @@ public struct ClaudeSDKNDJSONTranslator {
         case let string as String:
             return string
         case let dict as [String: Any]:
-            if let text = dict["text"] as? String { return text }
+            if let text = dict["text"] as? String {
+                return text
+            }
             return nil
         case let array as [Any]:
             return array.compactMap { extractString($0) }.joined(separator: "")
@@ -948,7 +953,9 @@ public struct ClaudeSDKNDJSONTranslator {
             guard double.isFinite else { return nil }
             return Int(exactly: double)
         case let number as NSNumber:
-            if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return nil
+            }
             if let exactInteger = Int(number.stringValue) {
                 return exactInteger
             }

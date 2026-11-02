@@ -90,7 +90,9 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
     /// Repeated callers join the one app-lifetime attempt instead of retrying or logging.
     @discardableResult
     func startGlobalMCPServiceRegistration() -> Task<Void, Never> {
-        if let domainRuntimeStartupTask { return domainRuntimeStartupTask }
+        if let domainRuntimeStartupTask {
+            return domainRuntimeStartupTask
+        }
 
         domainRuntimeStartupFailureDescription = nil
         let registrationOperation = globalMCPRegistrationOperation

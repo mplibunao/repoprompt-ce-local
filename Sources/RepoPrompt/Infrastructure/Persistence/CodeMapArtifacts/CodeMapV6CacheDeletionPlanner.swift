@@ -196,7 +196,9 @@ struct CodeMapV6CacheDeletionPlanner {
             while true {
                 errno = 0
                 guard let entry = readdir(directory) else {
-                    if errno != 0 { throw Self.ioError("cache-directory-read") }
+                    if errno != 0 {
+                        throw Self.ioError("cache-directory-read")
+                    }
                     break
                 }
                 let name = Self.directoryEntryName(entry)
@@ -317,7 +319,9 @@ struct CodeMapV6CacheDeletionPlanner {
                     off_t(offset)
                 )
             }
-            if count < 0, errno == EINTR { continue }
+            if count < 0, errno == EINTR {
+                continue
+            }
             guard count > 0 else { throw Self.ioError("candidate-read") }
             offset += count
         }
@@ -340,8 +344,7 @@ struct CodeMapV6CacheDeletionPlanner {
 
     private static func isCandidateName(_ name: String) -> Bool {
         let bytes = Array(name.utf8)
-        guard bytes.count == 69 else { return false }
-        guard Array(bytes[64...]) == Array(".json".utf8) else { return false }
+        guard bytes.count == 69, Array(bytes[64...]) == Array(".json".utf8) else { return false }
         return bytes[..<64].allSatisfy { byte in
             (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(byte) ||
                 (UInt8(ascii: "a") ... UInt8(ascii: "f")).contains(byte)

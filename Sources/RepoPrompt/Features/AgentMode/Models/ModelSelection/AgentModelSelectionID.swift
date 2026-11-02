@@ -50,8 +50,7 @@ struct AgentModelSelectionID: Equatable, Hashable, CustomStringConvertible {
     /// Returns `nil` if the format is invalid.
     static func parse(_ raw: String) -> AgentModelSelectionID? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard !trimmed.hasPrefix("agent-selection:") else { return nil }
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("agent-selection:") else { return nil }
 
         // Short format: <agent>:<model> — split on first colon only
         guard let colonIndex = trimmed.firstIndex(of: ":") else { return nil }

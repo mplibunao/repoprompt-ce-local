@@ -30,8 +30,12 @@ struct AgentExportCard: View {
 
     private var tokenColor: Color {
         guard let tokens = displayTokens else { return .secondary }
-        if tokens > 100_000 { return .red }
-        if tokens >= 60000 { return .orange }
+        if tokens > 100_000 {
+            return .red
+        }
+        if tokens >= 60000 {
+            return .orange
+        }
         return .green
     }
 
@@ -1122,7 +1126,9 @@ private struct AgentFileRowActionButton: View {
 
     private var foregroundColor: Color {
         guard !isDisabled else { return .secondary.opacity(0.35) }
-        if isButtonHovered { return hoverColor }
+        if isButtonHovered {
+            return hoverColor
+        }
         return .secondary.opacity(rowIsHovered ? 1 : 0.55)
     }
 

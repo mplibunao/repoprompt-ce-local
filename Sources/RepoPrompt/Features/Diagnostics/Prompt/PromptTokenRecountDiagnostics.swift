@@ -158,8 +158,7 @@ import Foundation
             func shouldLogReadProgress() -> Bool {
                 lock.lock()
                 defer { lock.unlock() }
-                guard filesRead >= 25 else { return false }
-                guard filesRead == 25 || filesRead - lastProgressLoggedReadCount >= 100 else { return false }
+                guard filesRead >= 25, filesRead == 25 || filesRead - lastProgressLoggedReadCount >= 100 else { return false }
                 lastProgressLoggedReadCount = filesRead
                 return true
             }

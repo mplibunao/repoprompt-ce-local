@@ -153,9 +153,13 @@ actor DirectHeadlessChildEndpoint {
         while !Task.isCancelled {
             var descriptor = pollfd(fd: fd, events: Int16(POLLIN | POLLERR | POLLHUP), revents: 0)
             let polled = Darwin.poll(&descriptor, 1, 100)
-            if polled == 0 { continue }
+            if polled == 0 {
+                continue
+            }
             if polled < 0 {
-                if errno == EINTR { continue }
+                if errno == EINTR {
+                    continue
+                }
                 return
             }
             var address = sockaddr_un()
@@ -166,7 +170,9 @@ actor DirectHeadlessChildEndpoint {
                 }
             }
             if clientFD < 0 {
-                if errno == EINTR || errno == EAGAIN { continue }
+                if errno == EINTR || errno == EAGAIN {
+                    continue
+                }
                 return
             }
             var noSigPipe: Int32 = 1
@@ -203,15 +209,23 @@ actor DirectHeadlessChildEndpoint {
         while ContinuousClock().now < deadline {
             var descriptor = pollfd(fd: fd, events: Int16(POLLIN | POLLERR | POLLHUP), revents: 0)
             let polled = Darwin.poll(&descriptor, 1, 100)
-            if polled == 0 { continue }
+            if polled == 0 {
+                continue
+            }
             if polled < 0 {
-                if errno == EINTR { continue }
+                if errno == EINTR {
+                    continue
+                }
                 throw EndpointError.handshakeRead(errno: errno)
             }
             let count = Darwin.read(fd, &byte, 1)
-            if count == 0 { throw EndpointError.invalidHandshake }
+            if count == 0 {
+                throw EndpointError.invalidHandshake
+            }
             if count < 0 {
-                if errno == EINTR || errno == EAGAIN { continue }
+                if errno == EINTR || errno == EAGAIN {
+                    continue
+                }
                 throw EndpointError.handshakeRead(errno: errno)
             }
             if byte == 0x0A {
@@ -221,7 +235,9 @@ actor DirectHeadlessChildEndpoint {
                 return handshake
             }
             bytes.append(byte)
-            if bytes.count > 16 * 1024 { throw EndpointError.handshakeTooLarge }
+            if bytes.count > 16 * 1024 {
+                throw EndpointError.handshakeTooLarge
+            }
         }
         throw EndpointError.handshakeTimeout
     }
@@ -303,7 +319,9 @@ actor DirectHeadlessChildLaunchCoordinator {
             .lowercased()
         let createsSession = (toolName == "agent_run" && (operation ?? "start") == "start")
             || (toolName == "agent_explore" && operation == "start")
-        if createsSession { return UUID() }
+        if createsSession {
+            return UUID()
+        }
         return securityContext.principal.runID ?? UUID()
     }
 }

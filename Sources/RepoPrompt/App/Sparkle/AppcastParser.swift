@@ -143,7 +143,9 @@ final class AppcastParser: NSObject, XMLParserDelegate {
             return numbered.max { $0.build < $1.build }?.item
         }
         return eligible.max { lhs, rhs in
-            if SparkleVersionComparison.isVersion(lhs.version, newerThan: rhs.version) { return false }
+            if SparkleVersionComparison.isVersion(lhs.version, newerThan: rhs.version) {
+                return false
+            }
             return SparkleVersionComparison.isVersion(rhs.version, newerThan: lhs.version)
         }
     }

@@ -203,11 +203,8 @@ actor MCPOutstandingRequestReplayState {
         var didRecord = false
         let isBatch = Self.frameIsBatch(frame)
         for object in Self.jsonObjects(from: frame) {
-            guard let method = object["method"] as? String else {
-                continue
-            }
-
-            guard object["id"] != nil,
+            guard let method = object["method"] as? String,
+                  object["id"] != nil,
                   method != "initialize",
                   let id = MCPInitializeReplayState.jsonRPCID(from: object["id"]),
                   id != .null,

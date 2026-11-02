@@ -587,7 +587,9 @@ actor GitStatusActor {
         pollingTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
-                if Task.isCancelled { break }
+                if Task.isCancelled {
+                    break
+                }
 
                 guard inclusionMode != .none else { break }
                 _ = await refresh(trigger: .backgroundPoll)
@@ -621,8 +623,8 @@ actor GitStatusActor {
         vsBranch explicitBranch: String? = nil,
         forceRefreshSnapshot: Bool = false
     ) async -> String? {
-        guard inclusionMode != .none else { return nil }
-        guard let snap = await ensureSnapshot(for: rootPath, forceRefresh: forceRefreshSnapshot),
+        guard inclusionMode != .none,
+              let snap = await ensureSnapshot(for: rootPath, forceRefresh: forceRefreshSnapshot),
               snap.rootPath == rootPath,
               snap.isGitRepo,
               let gitRoot = snap.gitRootPath

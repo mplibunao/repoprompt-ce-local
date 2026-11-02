@@ -49,8 +49,7 @@ enum WindowSessionSnapshotBuilder {
     ) -> WindowSessionSnapshot {
         var entries: [WindowSessionEntry] = []
         for candidate in candidates {
-            guard !excludedWindowIDs.contains(candidate.windowID) else { continue }
-            guard let entry = candidate.entry else { continue }
+            guard !excludedWindowIDs.contains(candidate.windowID), let entry = candidate.entry else { continue }
             entries.append(entry)
         }
         return WindowSessionSnapshot(version: version, windows: entries)
@@ -806,8 +805,7 @@ class WindowStatesManager: ObservableObject {
     /// concurrently. Called when the session file finishes loading, when a restore attempt
     /// returns, and when a restoring window closes.
     private func advanceLaunchRestore() {
-        guard !isTerminating, !launchRestoreOpenInFlight else { return }
-        guard restorePersistenceGate.restoringWindowIDs.isEmpty else { return }
+        guard !isTerminating, !launchRestoreOpenInFlight, restorePersistenceGate.restoringWindowIDs.isEmpty else { return }
         guard !restoreQueue.isEmpty else {
             #if DEBUG
                 if launchRestoreDriverStarted, !launchRestoreDoneLogged {
@@ -995,9 +993,7 @@ class WindowStatesManager: ObservableObject {
     }
 
     func markWindowAsExplicitlyClosing(windowID: Int) {
-        guard !isTerminating else { return }
-        guard allWindows.contains(where: { $0.windowID == windowID }) else { return }
-        guard explicitlyClosingWindowIDs.insert(windowID).inserted else { return }
+        guard !isTerminating, allWindows.contains(where: { $0.windowID == windowID }), explicitlyClosingWindowIDs.insert(windowID).inserted else { return }
 
         Task { @MainActor in
             await self.persistWindowSessionImmediately(reason: "explicitClose:\(windowID)")
@@ -1039,10 +1035,7 @@ class WindowStatesManager: ObservableObject {
     /// made before the launch restore finishes keeps the windows still waiting to reopen.
     private func captureCurrentSession() -> WindowSessionSnapshot {
         let candidates = allWindows.map { window -> WindowSessionCaptureCandidate in
-            guard let workspace = window.workspaceManager.activeWorkspace else {
-                return WindowSessionCaptureCandidate(windowID: window.windowID, entry: nil)
-            }
-            guard !workspace.isEphemeral else {
+            guard let workspace = window.workspaceManager.activeWorkspace, !workspace.isEphemeral else {
                 return WindowSessionCaptureCandidate(windowID: window.windowID, entry: nil)
             }
             // A window whose restore target could not be resolved sits on the system Default

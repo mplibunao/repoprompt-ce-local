@@ -93,12 +93,7 @@ final class GitProcessActivityTimeoutController: @unchecked Sendable {
         // Do not rely on scheduling a zero-duration Task: a fast child/reaper
         // could otherwise commit success before the timer runs.
         if timeout <= .zero {
-            guard isProcessRunning(target) else {
-                task = nil
-                lock.unlock()
-                return
-            }
-            guard terminate(target) else {
+            guard isProcessRunning(target), terminate(target) else {
                 task = nil
                 lock.unlock()
                 return
@@ -169,10 +164,7 @@ final class GitProcessActivityTimeoutController: @unchecked Sendable {
     ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard generation == scheduledGeneration, !Task.isCancelled, isProcessRunning(target) else {
-            return false
-        }
-        guard terminate(target) else { return false }
+        guard generation == scheduledGeneration, !Task.isCancelled, isProcessRunning(target), terminate(target) else { return false }
         timedOut = true
         return true
     }

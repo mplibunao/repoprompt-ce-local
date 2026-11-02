@@ -142,12 +142,8 @@ struct WorkspaceCodemapLocalGitClassificationProbe {
               let lexicalPathWitnesses = lexicalPathWitnesses(rootPath),
               lexicalPathWitnesses.count <= 512,
               let rootIdentity = lexicalPathWitnesses.last?.identity,
-              (rootIdentity.mode & UInt32(S_IFMT)) == UInt32(S_IFDIR)
-        else {
-            return nil
-        }
-
-        guard let resolvedRootPath = resolvedPath(rootPath),
+              (rootIdentity.mode & UInt32(S_IFMT)) == UInt32(S_IFDIR),
+              let resolvedRootPath = resolvedPath(rootPath),
               resolvedRootPath.hasPrefix("/"),
               resolvedRootPath.utf8.count <= Int(PATH_MAX)
         else {
@@ -164,12 +160,8 @@ struct WorkspaceCodemapLocalGitClassificationProbe {
                   let dotGit = entryWitness(atPath: candidate.appendingPathComponent(".git")),
                   let head = entryWitness(atPath: candidate.appendingPathComponent("HEAD")),
                   let objects = entryWitness(atPath: candidate.appendingPathComponent("objects")),
-                  let refs = entryWitness(atPath: candidate.appendingPathComponent("refs"))
-            else {
-                return nil
-            }
-
-            guard dotGit == .absent,
+                  let refs = entryWitness(atPath: candidate.appendingPathComponent("refs")),
+                  dotGit == .absent,
                   !resemblesBareRepository(head: head, objects: objects, refs: refs)
             else {
                 return nil
@@ -274,8 +266,12 @@ struct WorkspaceCodemapLocalGitClassificationProbe {
         refs: WorkspaceCodemapNonGitFilesystemProof.EntryWitness
     ) -> Bool {
         guard case .present = head else { return false }
-        if case .present = objects { return true }
-        if case .present = refs { return true }
+        if case .present = objects {
+            return true
+        }
+        if case .present = refs {
+            return true
+        }
         return false
     }
 }

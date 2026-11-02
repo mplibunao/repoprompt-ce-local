@@ -151,7 +151,9 @@ enum HistoryMCPToolService {
             by: sessionSortComparator(by: initialSortKey, idleThresholdMinutes: idleThresholdMinutes)
         )
         var sorted = initialSort.values
-        if let diagnostic = initialSort.diagnostic { workDiagnostics.append(diagnostic) }
+        if let diagnostic = initialSort.diagnostic {
+            workDiagnostics.append(diagnostic)
+        }
         let candidates = Array(sorted.prefix(maxSessionsScanned))
         var scanTruncated = sorted.count > candidates.count
             || inventory.isTruncated
@@ -167,7 +169,9 @@ enum HistoryMCPToolService {
         var hydrated = enrichment.sessions
         let sessionsScanned = enrichment.sessionsScanned
         workDiagnostics.append(contentsOf: enrichment.diagnostics)
-        if !enrichment.diagnostics.isEmpty { scanTruncated = true }
+        if !enrichment.diagnostics.isEmpty {
+            scanTruncated = true
+        }
         if sortRaw == "duration" {
             let durationSort = try await cooperativelySorted(
                 hydrated,
@@ -385,7 +389,9 @@ enum HistoryMCPToolService {
         let budgetOrder = window.sorted { lhs, rhs in
             let lhsDist = abs(lhs.offset - targetTurnIndex)
             let rhsDist = abs(rhs.offset - targetTurnIndex)
-            if lhsDist != rhsDist { return lhsDist < rhsDist }
+            if lhsDist != rhsDist {
+                return lhsDist < rhsDist
+            }
             return lhs.offset < rhs.offset
         }
 
@@ -414,13 +420,19 @@ enum HistoryMCPToolService {
                 lookupDiagnostics.append(diagnostic)
                 replyTruncated = true
             }
-            if rendered.truncated { replyTruncated = true }
+            if rendered.truncated {
+                replyTruncated = true
+            }
             renderedTurnsByIndex[turnIndex] = rendered.dto
-            if rendered.diagnostic != nil { break }
+            if rendered.diagnostic != nil {
+                break
+            }
         }
 
         let turnDTOs = window.compactMap { renderedTurnsByIndex[$0.offset] }
-        if turnDTOs.count < window.count { replyTruncated = true }
+        if turnDTOs.count < window.count {
+            replyTruncated = true
+        }
         let returnedTurnStart = turnDTOs.map(\.turnIndex).min() ?? requestedRange.lowerBound
         let returnedTurnEnd = turnDTOs.map(\.turnIndex).max() ?? requestedRange.lowerBound
 
@@ -539,7 +551,9 @@ enum HistoryMCPToolService {
                 let diagnostic = sessionReadFailureDiagnostic(for: error, phase: "transcript_scan")
                 workDiagnostics.append(diagnostic)
                 scanTruncated = true
-                if isRequestWideStop(diagnostic) { break }
+                if isRequestWideStop(diagnostic) {
+                    break
+                }
                 continue
             } catch {
                 workDiagnostics.append(sessionReadFailureDiagnostic(phase: "transcript_scan"))
@@ -773,7 +787,9 @@ enum HistoryMCPToolService {
             phase: "time_session_sort",
             by: sessionSortComparator(by: "last_activity", idleThresholdMinutes: idleThresholdMinutes)
         )
-        if let diagnostic = candidateSort.diagnostic { workDiagnostics.append(diagnostic) }
+        if let diagnostic = candidateSort.diagnostic {
+            workDiagnostics.append(diagnostic)
+        }
         let candidates = Array(candidateSort.values.prefix(maxSessionsScanned))
         var scanTruncated = filtered.count > candidates.count
             || inventory.isTruncated
@@ -789,7 +805,9 @@ enum HistoryMCPToolService {
         let enriched = enrichment.sessions
         let sessionsScanned = enrichment.sessionsScanned
         workDiagnostics.append(contentsOf: enrichment.diagnostics)
-        if !enrichment.diagnostics.isEmpty { scanTruncated = true }
+        if !enrichment.diagnostics.isEmpty {
+            scanTruncated = true
+        }
         // Report the full filtered count
         // `sessionsScanned`/`scanTruncated` convey the bounded-scan semantic separately.
         let totalSessions = filtered.count
@@ -839,7 +857,9 @@ enum HistoryMCPToolService {
         var sessionsScanned = 0
         enriched.reserveCapacity(sessions.count)
         for (offset, session) in sessions.enumerated() {
-            if offset > 0, offset.isMultiple(of: 16) { await Task.yield() }
+            if offset > 0, offset.isMultiple(of: 16) {
+                await Task.yield()
+            }
             if let diagnostic = try await cooperativeCheckpoint(
                 requestBudget: requestBudget,
                 turnsProcessed: 0,
@@ -1023,11 +1043,11 @@ enum HistoryMCPToolService {
     ) async throws -> HistoryToolReply {
         let calendar = Calendar.current
 
-        /// Group boundary for a date: [start, end) + key. Used to clip each turn's
-        /// interval to the group it falls in, so a turn that crosses a group boundary
-        /// (e.g. spans midnight) contributes only its in-boundary portion to each group
-        /// — preventing an overlap with a turn in the next group from being counted
-        /// twice (the all-turns session path merges it once).
+        // Group boundary for a date: [start, end) + key. Used to clip each turn's
+        // interval to the group it falls in, so a turn that crosses a group boundary
+        // (e.g. spans midnight) contributes only its in-boundary portion to each group
+        // — preventing an overlap with a turn in the next group from being counted
+        // twice (the all-turns session path merges it once).
         func groupBounds(for date: Date) -> (start: Date, end: Date, key: String)? {
             let dayStart = calendar.startOfDay(for: date)
             switch groupBy {
@@ -1105,7 +1125,9 @@ enum HistoryMCPToolService {
                 let diagnostic = sessionReadFailureDiagnostic(for: error, phase: "calendar_transcript_scan")
                 workDiagnostics.append(diagnostic)
                 scanTruncated = true
-                if isRequestWideStop(diagnostic) { break }
+                if isRequestWideStop(diagnostic) {
+                    break
+                }
                 continue
             } catch {
                 workDiagnostics.append(sessionReadFailureDiagnostic(phase: "calendar_transcript_scan"))
@@ -1138,8 +1160,12 @@ enum HistoryMCPToolService {
                 }
                 turnsProcessed += 1
                 let start = turn.startedAt
-                if let dateFrom, start < dateFrom { continue }
-                if let dateTo, start > dateTo { continue }
+                if let dateFrom, start < dateFrom {
+                    continue
+                }
+                if let dateTo, start > dateTo {
+                    continue
+                }
                 let end = turn.completedAt ?? turn.lastActivityAt ?? start
                 guard end >= start else { continue }
 
@@ -1165,10 +1191,14 @@ enum HistoryMCPToolService {
                                 budgetStopped = true
                                 break spanLoop
                             }
-                            if activity.toolExecution != nil { fallbackToolCalls += 1 }
+                            if activity.toolExecution != nil {
+                                fallbackToolCalls += 1
+                            }
                         }
                     }
-                    if budgetStopped { break }
+                    if budgetStopped {
+                        break
+                    }
                     toolCallsByKey[startGroup.key, default: 0] += fallbackToolCalls
                 }
 
@@ -1200,11 +1230,15 @@ enum HistoryMCPToolService {
                         intervalsByKey[g.key, default: []].append((cursor, clippedEnd))
                         cursor = g.end
                     }
-                    if budgetStopped { break }
+                    if budgetStopped {
+                        break
+                    }
                 }
             }
 
-            if budgetStopped { break calendarLoop }
+            if budgetStopped {
+                break calendarLoop
+            }
 
             for (key, intervals) in intervalsByKey {
                 try Task.checkCancellation()
@@ -1268,7 +1302,9 @@ enum HistoryMCPToolService {
                         turnCount: dt[sid] ?? 0
                     )
                 }
-            } else { details = nil }
+            } else {
+                details = nil
+            }
             allGroupDTOs.append(HistoryTimeReply.GroupDTO(
                 key: key,
                 sessions: groupSessionIDs[key]?.count ?? 0,
@@ -1431,10 +1467,14 @@ enum HistoryMCPToolService {
         var grouped: [String: [HistoryFilteredSessionRecord]] = [:]
         for session in sessions {
             let key = keyProvider(session)
-            if grouped[key] == nil { orderedKeys.append(key) }
+            if grouped[key] == nil {
+                orderedKeys.append(key)
+            }
             grouped[key, default: []].append(session)
         }
-        if let sortKeys { sortKeys(&orderedKeys) }
+        if let sortKeys {
+            sortKeys(&orderedKeys)
+        }
 
         return orderedKeys.compactMap { key in
             guard let sessionsInGroup = grouped[key] else { return nil }
@@ -1579,7 +1619,9 @@ enum HistoryMCPToolService {
             }
             if let tool = activity.toolExecution {
                 let key = "\(tool.toolName ?? "unknown") \(tool.status.rawValue)"
-                if toolCounts[key] == nil { toolOrder.append(key) }
+                if toolCounts[key] == nil {
+                    toolOrder.append(key)
+                }
                 toolCounts[key, default: 0] += 1
             }
             guard remainingChars > 0 else {
@@ -1705,7 +1747,9 @@ enum HistoryMCPToolService {
     private static func clipHistoryText(_ text: String, maxChars: Int) -> (text: String, truncated: Bool) {
         guard maxChars > 0 else { return ("", true) }
         guard text.count > maxChars else { return (text, false) }
-        if maxChars == 1 { return ("…", true) }
+        if maxChars == 1 {
+            return ("…", true)
+        }
         return (String(text.prefix(maxChars - 1)) + "…", true)
     }
 
@@ -1810,7 +1854,9 @@ enum HistoryMCPToolService {
                 nil
             }
             guard let reason else { continue }
-            if counts[reason] == nil { order.append(reason) }
+            if counts[reason] == nil {
+                order.append(reason)
+            }
             counts[reason, default: 0] += 1
         }
         return order.prefix(10).map { reason in

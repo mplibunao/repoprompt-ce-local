@@ -120,7 +120,9 @@ enum CodexGlobalInstructionsProjection {
             return stat(path, &metadata)
         }
         guard result == 0 else {
-            if errno == ENOENT || errno == ENOTDIR { return nil }
+            if errno == ENOENT || errno == ENOTDIR {
+                return nil
+            }
             throw Failure.inspectionFailed(url, posixErrorDescription())
         }
         guard metadata.st_mode & S_IFMT == S_IFREG else { return nil }
@@ -136,7 +138,9 @@ enum CodexGlobalInstructionsProjection {
     private static func destinationSnapshot(at url: URL) throws -> DestinationSnapshot {
         var metadata = Darwin.stat()
         guard lstat(url.path, &metadata) == 0 else {
-            if errno == ENOENT || errno == ENOTDIR { return .missing }
+            if errno == ENOENT || errno == ENOTDIR {
+                return .missing
+            }
             throw Failure.inspectionFailed(url, posixErrorDescription())
         }
 
@@ -245,7 +249,9 @@ enum CodexGlobalInstructionsProjection {
     ) throws {
         do {
             if projectedFileHashes.isEmpty {
-                if case .missing = try destinationSnapshot(at: url) { return }
+                if case .missing = try destinationSnapshot(at: url) {
+                    return
+                }
                 try fileManager.removeItem(at: url)
                 return
             }

@@ -87,18 +87,15 @@ struct AgentContextDrawerPromptTab: View {
             }
         }
         .onReceive(exportContext.selectionChangesPublisher) { change in
-            guard !isSwitchBlankingSelectedFiles else { return }
-            guard !exportContext.promptManager.isSwitchingComposeTab else { return }
+            guard !isSwitchBlankingSelectedFiles, !exportContext.promptManager.isSwitchingComposeTab else { return }
             handleSelectionChange(change, isVisible: true)
         }
         .onChange(of: exportContext.modelRequestIdentity) { _, _ in
-            guard !isSwitchBlankingSelectedFiles else { return }
-            guard !exportContext.promptManager.isSwitchingComposeTab else { return }
+            guard !isSwitchBlankingSelectedFiles, !exportContext.promptManager.isSwitchingComposeTab else { return }
             resetOrRefresh(isVisible: true)
         }
         .onChange(of: state.selectedPresetID) { _, _ in
-            guard !isSwitchBlankingSelectedFiles else { return }
-            guard !exportContext.promptManager.isSwitchingComposeTab else { return }
+            guard !isSwitchBlankingSelectedFiles, !exportContext.promptManager.isSwitchingComposeTab else { return }
             copyStatus = .idle
             storedPromptActionMessage = nil
             refreshIfNeeded()
@@ -131,8 +128,7 @@ struct AgentContextDrawerPromptTab: View {
     }
 
     private func refreshIfNeeded(force: Bool = false, preserveDisplayedModel: Bool = false) {
-        guard !isSwitchBlankingSelectedFiles else { return }
-        guard !exportContext.promptManager.isSwitchingComposeTab else { return }
+        guard !isSwitchBlankingSelectedFiles, !exportContext.promptManager.isSwitchingComposeTab else { return }
         modelCoordinator.refreshIfNeeded(
             exportContext.makeModelRequest(flushPendingUI: true),
             force: force,
@@ -141,8 +137,7 @@ struct AgentContextDrawerPromptTab: View {
     }
 
     private func resetOrRefresh(isVisible: Bool) {
-        guard !isSwitchBlankingSelectedFiles else { return }
-        guard !exportContext.promptManager.isSwitchingComposeTab else { return }
+        guard !isSwitchBlankingSelectedFiles, !exportContext.promptManager.isSwitchingComposeTab else { return }
         modelCoordinator.invalidate()
         if isVisible {
             refreshIfNeeded()
@@ -1238,9 +1233,15 @@ private struct AgentContextDrawerGitFileRow: View {
     }
 
     private var statusColor: Color {
-        if file.status.contains("D") { return .red }
-        if file.status.contains("A") || file.status == "??" { return .green }
-        if file.status.contains("R") { return .purple }
+        if file.status.contains("D") {
+            return .red
+        }
+        if file.status.contains("A") || file.status == "??" {
+            return .green
+        }
+        if file.status.contains("R") {
+            return .purple
+        }
         return .orange
     }
 

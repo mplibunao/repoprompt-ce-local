@@ -94,8 +94,12 @@ enum ProcessLauncher {
         var stderrPipe: [Int32] = [-1, -1]
 
         func closePipe(_ pipe: inout [Int32]) {
-            if pipe[0] != -1 { close(pipe[0]) }
-            if pipe[1] != -1 { close(pipe[1]) }
+            if pipe[0] != -1 {
+                close(pipe[0])
+            }
+            if pipe[1] != -1 {
+                close(pipe[1])
+            }
             pipe = [-1, -1]
         }
 
@@ -185,9 +189,9 @@ enum ProcessLauncher {
         if let workingDirectory {
             let result = workingDirectory.withCString { pointer -> Int32 in
                 #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
-                    return posix_spawn_file_actions_addchdir_np(&fileActions, pointer)
+                    posix_spawn_file_actions_addchdir_np(&fileActions, pointer)
                 #else
-                    return 0
+                    0
                 #endif
             }
             if result != 0 {

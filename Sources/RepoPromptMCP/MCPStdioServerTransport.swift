@@ -108,9 +108,13 @@ actor MCPStdioServerTransport: Transport {
                 }
                 var descriptor = pollfd(fd: stdinFD, events: Int16(POLLIN | POLLHUP | POLLERR), revents: 0)
                 let pollResult = poll(&descriptor, 1, pollIntervalMilliseconds)
-                if pollResult == 0 { continue }
+                if pollResult == 0 {
+                    continue
+                }
                 if pollResult < 0 {
-                    if errno == EINTR { continue }
+                    if errno == EINTR {
+                        continue
+                    }
                     let terminal = TerminalError.stdinPoll(errno: errno)
                     await terminalState.record(terminal)
                     captured.finish(throwing: terminal)
@@ -129,7 +133,9 @@ actor MCPStdioServerTransport: Transport {
                     return
                 }
                 if count < 0 {
-                    if errno == EINTR || errno == EAGAIN { continue }
+                    if errno == EINTR || errno == EAGAIN {
+                        continue
+                    }
                     let terminal = TerminalError.stdinRead(errno: errno)
                     await terminalState.record(terminal)
                     captured.finish(throwing: terminal)
@@ -190,7 +196,9 @@ actor MCPStdioServerTransport: Transport {
                                 return
                             }
                         }
-                        if Task.isCancelled { break }
+                        if Task.isCancelled {
+                            break
+                        }
                     }
                 }
             }
@@ -215,7 +223,9 @@ actor MCPStdioServerTransport: Transport {
 
     func send(_ data: Data) async throws {
         var bytes = data
-        if bytes.last != 0x0A { bytes.append(0x0A) }
+        if bytes.last != 0x0A {
+            bytes.append(0x0A)
+        }
         let deadline = ContinuousClock().now.advanced(by: writeStallTimeout)
         var written = 0
         while written < bytes.count {
@@ -228,7 +238,9 @@ actor MCPStdioServerTransport: Transport {
                 written += result
                 continue
             }
-            if result < 0, errno == EINTR { continue }
+            if result < 0, errno == EINTR {
+                continue
+            }
             if result < 0, errno == EPIPE {
                 let terminal = TerminalError.stdoutBrokenPipe(bytesWritten: written, totalBytes: bytes.count)
                 await terminalState.record(terminal)
@@ -267,8 +279,12 @@ actor MCPStdioServerTransport: Transport {
     func waitForDeliveryDrain(timeout: Duration) async -> Bool {
         let deadline = ContinuousClock().now.advanced(by: timeout)
         while ContinuousClock().now < deadline {
-            if deliveryTracker.snapshot().acceptedRequestsFullyResponded { return true }
-            if Task.isCancelled { return false }
+            if deliveryTracker.snapshot().acceptedRequestsFullyResponded {
+                return true
+            }
+            if Task.isCancelled {
+                return false
+            }
             do {
                 try await Task.sleep(for: .milliseconds(10))
             } catch {
@@ -300,7 +316,9 @@ private actor MCPStdioTerminalState {
     }
 
     func wait() async -> MCPStdioServerTransport.TerminalError {
-        if let terminal { return terminal }
+        if let terminal {
+            return terminal
+        }
         return await withCheckedContinuation { continuation in
             waiters.append(continuation)
         }

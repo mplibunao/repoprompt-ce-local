@@ -258,8 +258,7 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
                 guard let text = delta["text"] as? String, !text.isEmpty else { return [] }
                 return [.message(content: text, reasoning: nil)]
             case "thinking_delta":
-                guard ClaudeReasoningExtractionFeature.isEnabled else { return [] }
-                guard let thinking = delta["thinking"] as? String, !thinking.isEmpty else { return [] }
+                guard ClaudeReasoningExtractionFeature.isEnabled, let thinking = delta["thinking"] as? String, !thinking.isEmpty else { return [] }
                 return [.message(content: "", reasoning: thinking)]
             default:
                 return []
@@ -464,7 +463,9 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
                                             appendTail(&stdoutTail, chunk: chunk, limit: 128 * 1024)
                                             var sawStopThisChunk = false
                                             framer.feed(chunk) { lineData in
-                                                if sawStopThisChunk { return }
+                                                if sawStopThisChunk {
+                                                    return
+                                                }
                                                 guard !lineData.isEmpty else { return }
                                                 if Task.isCancelled {
                                                     return
@@ -485,7 +486,9 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
                                                     }
                                                     continuation.yield(mapped)
                                                     eventCount += 1
-                                                    if sawStopThisChunk { break }
+                                                    if sawStopThisChunk {
+                                                        break
+                                                    }
                                                 }
                                             }
                                             if sawStopThisChunk {
@@ -642,8 +645,8 @@ final class ClaudeCodeAgentProvider: HeadlessAgentProvider {
 
     /// Encode tool arguments dictionary to JSON string for display
     private func encodeArgsToJSON(_ args: [String: Any]) -> String? {
-        guard !args.isEmpty else { return nil }
-        guard let data = try? JSONSerialization.data(withJSONObject: args, options: [.prettyPrinted, .sortedKeys]),
+        guard !args.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: args, options: [.prettyPrinted, .sortedKeys]),
               let jsonString = String(data: data, encoding: .utf8)
         else { return nil }
         return jsonString
@@ -770,7 +773,9 @@ private enum ClaudeEventParser {
         case let string as String:
             return string
         case let dict as [String: Any]:
-            if let text = dict["text"] as? String { return text }
+            if let text = dict["text"] as? String {
+                return text
+            }
             return nil
         case let array as [Any]:
             return array.compactMap { extractString($0) }.joined(separator: "")

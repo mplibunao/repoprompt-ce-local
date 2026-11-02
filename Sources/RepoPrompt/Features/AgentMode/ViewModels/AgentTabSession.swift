@@ -1269,8 +1269,7 @@ final class AgentTabSession: ObservableObject {
 
     @discardableResult
     func endCurrentRunAttempt(source: String) -> Bool {
-        guard let ownership = activeRunOwnership else { return false }
-        guard runLifecycle.endAttempt(ifCurrent: ownership) else { return false }
+        guard let ownership = activeRunOwnership, runLifecycle.endAttempt(ifCurrent: ownership) else { return false }
         recordRunAttemptEnded(ownership, source: source)
         return true
     }

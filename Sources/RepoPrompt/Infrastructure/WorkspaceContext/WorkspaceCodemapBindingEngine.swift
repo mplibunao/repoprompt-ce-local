@@ -1093,7 +1093,9 @@ actor WorkspaceCodemapBindingEngine {
                         return
                     }
                 }
-                if shouldPull { continue }
+                if shouldPull {
+                    continue
+                }
             }
             guard let notification = await iterator.next() else {
                 if !Task.isCancelled {
@@ -1128,8 +1130,7 @@ actor WorkspaceCodemapBindingEngine {
     ) async {
         // Root shutdown detaches a pull task before cancelling it. Until the cancellation lands,
         // the detached loop must not take the pause slot of a replacement for the same root.
-        guard graphPullTasksByRootEpoch[rootEpoch]?.id == taskID else { return }
-        guard graphFlushWaiters[rootEpoch]?.isEmpty ?? true, !Task.isCancelled else { return }
+        guard graphPullTasksByRootEpoch[rootEpoch]?.id == taskID, graphFlushWaiters[rootEpoch]?.isEmpty ?? true, !Task.isCancelled else { return }
         let pauseID = UUID()
         let policy = graphPullPause
         await withTaskCancellationHandler {
@@ -1172,7 +1173,9 @@ actor WorkspaceCodemapBindingEngine {
         // Root shutdown can detach this graph and pull task during either await, and a replacement
         // can register for the same root. The waiter must join only the bucket its own loop settles.
         guard graphPullIsCurrent(rootEpoch: rootEpoch, graph: graph, taskID: taskID) else { return false }
-        if applied >= target { return true }
+        if applied >= target {
+            return true
+        }
         return await withCheckedContinuation { continuation in
             graphFlushWaiters[rootEpoch, default: []].append(
                 GraphFlushWaiter(target: target, continuation: continuation)
@@ -1415,10 +1418,9 @@ actor WorkspaceCodemapBindingEngine {
               job.id == jobID,
               job.task == nil,
               !job.workerRecoveryExhausted,
-              graphIndexJobIsCurrent(job)
-        else { return false }
-        guard recoveryReason == nil ||
-            job.workerRecoveryCount < policy.maximumGraphIndexWorkerRecoveryCount
+              graphIndexJobIsCurrent(job),
+              recoveryReason == nil ||
+              job.workerRecoveryCount < policy.maximumGraphIndexWorkerRecoveryCount
         else { return false }
         let workerID = UUID()
         job.workerID = workerID
@@ -2006,7 +2008,9 @@ actor WorkspaceCodemapBindingEngine {
         let orderedGraphIndexAdmissionQueue = graphIndexAdmissionQueue.sorted { left, right in
             let leftAdmission = graphIndexRootLastAdmission[left.rootEpoch] ?? 0
             let rightAdmission = graphIndexRootLastAdmission[right.rootEpoch] ?? 0
-            if leftAdmission != rightAdmission { return leftAdmission < rightAdmission }
+            if leftAdmission != rightAdmission {
+                return leftAdmission < rightAdmission
+            }
             if left.enqueueOrdinal != right.enqueueOrdinal {
                 return left.enqueueOrdinal < right.enqueueOrdinal
             }
@@ -2903,7 +2907,9 @@ actor WorkspaceCodemapBindingEngine {
                     let right = graphIndexAdmissionQueue[rhs]
                     let leftAdmission = graphIndexRootLastAdmission[left.rootEpoch] ?? 0
                     let rightAdmission = graphIndexRootLastAdmission[right.rootEpoch] ?? 0
-                    if leftAdmission != rightAdmission { return leftAdmission < rightAdmission }
+                    if leftAdmission != rightAdmission {
+                        return leftAdmission < rightAdmission
+                    }
                     if left.enqueueOrdinal != right.enqueueOrdinal {
                         return left.enqueueOrdinal < right.enqueueOrdinal
                     }
@@ -3811,7 +3817,11 @@ actor WorkspaceCodemapBindingEngine {
                         ),
                         retainRecordsInMemory: true
                     )
-                    let recoveryPersisted = if case .persisted = recovery { true } else { false }
+                    let recoveryPersisted = if case .persisted = recovery {
+                        true
+                    } else {
+                        false
+                    }
                     finishGraphIndexManifestStage(
                         jobID: jobID,
                         rootEpoch: rootEpoch,
@@ -4900,11 +4910,11 @@ actor WorkspaceCodemapBindingEngine {
         markerReadinessUnavailableFileIDs: Set<UUID> = []
     ) async -> GraphIndexPublicationDisposition {
         guard updateGraphIndexPhase(
-            jobID: jobID,
-            rootEpoch: rootEpoch,
-            phase: .publishingGraphChanges
-        ), let job = currentGraphIndexJob(jobID: jobID, rootEpoch: rootEpoch),
-        let generation = job.generation
+                  jobID: jobID,
+                  rootEpoch: rootEpoch,
+                  phase: .publishingGraphChanges
+              ), let job = currentGraphIndexJob(jobID: jobID, rootEpoch: rootEpoch),
+              let generation = job.generation
         else { return .superseded }
         let slots = entries.compactMap(Self.graphSlot)
         guard slots.count == entries.count,
@@ -5906,14 +5916,14 @@ actor WorkspaceCodemapBindingEngine {
         else { return .superseded }
         let pipelineScope = attempt.scope
         guard let ticket = await overlay.beginManifestAdoption(
-            rootEpoch: rootEpoch,
-            namespace: attempt.namespace
-        ),
-            case let .eligible(afterTicket)? = roots[rootEpoch],
-            afterTicket.id == attempt.sessionID,
-            afterTicket.pipelines[pipelineIdentity]?.id == attempt.pipelineSessionID,
-            afterTicket.generation == attempt.sessionGeneration,
-            afterTicket.invalidationGeneration == attempt.invalidationGeneration
+                  rootEpoch: rootEpoch,
+                  namespace: attempt.namespace
+              ),
+              case let .eligible(afterTicket)? = roots[rootEpoch],
+              afterTicket.id == attempt.sessionID,
+              afterTicket.pipelines[pipelineIdentity]?.id == attempt.pipelineSessionID,
+              afterTicket.generation == attempt.sessionGeneration,
+              afterTicket.invalidationGeneration == attempt.invalidationGeneration
         else { return .retryable }
         let context = ManifestAdoptionContext(
             operationID: attempt.operationID,
@@ -6287,10 +6297,10 @@ actor WorkspaceCodemapBindingEngine {
             pathGenerations[item.candidate.identity.standardizedRelativePath] = item.candidate.pathGeneration
             guard let lease = item.lease else { continue }
             guard let expectation = WorkspaceCodemapSourceExpectation.cleanGitBlob(
-                bindingIdentity: item.candidate.identity,
-                locatorIdentity: item.record.locatorIdentity,
-                sourceAuthority: item.sourceAuthority
-            ), let token = WorkspaceCodemapArtifactRequestToken.issue(
+                      bindingIdentity: item.candidate.identity,
+                      locatorIdentity: item.record.locatorIdentity,
+                      sourceAuthority: item.sourceAuthority
+                  ), let token = WorkspaceCodemapArtifactRequestToken.issue(
                 identity: item.candidate.identity,
                 requestGeneration: item.candidate.requestGeneration,
                 catalogGeneration: initial.registration.catalogGeneration,
@@ -6300,7 +6310,7 @@ actor WorkspaceCodemapBindingEngine {
                 language: initialPipeline.language,
                 association: item.association
             ), var binding = WorkspaceCodemapArtifactBinding(pending: token),
-            binding.apply(completion) == .accepted
+                  binding.apply(completion) == .accepted
             else {
                 await closePreparedManifestAdoptions(prepared)
                 releaseAdoptionReservation(scope: pipelineScope, adoptionID: adoptionID)
@@ -6498,19 +6508,18 @@ actor WorkspaceCodemapBindingEngine {
         guard observedAuthority != currentAuthority,
               observedAuthority.authorityGeneration >= currentAuthority.authorityGeneration,
               observedAuthority.authorityGeneration < UInt64.max,
-              manifestPipelineIsVirgin(scope: scope, session: session, pipeline: pipeline)
-        else { return false }
-        guard let lifted = try? CodeMapRootManifestAuthority(
-            authorityGeneration: observedAuthority.authorityGeneration + 1,
-            repositoryBindingEpoch: currentAuthority.repositoryBindingEpoch,
-            worktreeBindingEpoch: currentAuthority.worktreeBindingEpoch,
-            layoutGeneration: currentAuthority.layoutGeneration,
-            indexGeneration: currentAuthority.indexGeneration,
-            checkoutConfigurationGeneration: currentAuthority.checkoutConfigurationGeneration,
-            attributeGeneration: currentAuthority.attributeGeneration,
-            sparseGeneration: currentAuthority.sparseGeneration,
-            metadataGeneration: currentAuthority.metadataGeneration
-        )
+              manifestPipelineIsVirgin(scope: scope, session: session, pipeline: pipeline),
+              let lifted = try? CodeMapRootManifestAuthority(
+                  authorityGeneration: observedAuthority.authorityGeneration + 1,
+                  repositoryBindingEpoch: currentAuthority.repositoryBindingEpoch,
+                  worktreeBindingEpoch: currentAuthority.worktreeBindingEpoch,
+                  layoutGeneration: currentAuthority.layoutGeneration,
+                  indexGeneration: currentAuthority.indexGeneration,
+                  checkoutConfigurationGeneration: currentAuthority.checkoutConfigurationGeneration,
+                  attributeGeneration: currentAuthority.attributeGeneration,
+                  sparseGeneration: currentAuthority.sparseGeneration,
+                  metadataGeneration: currentAuthority.metadataGeneration
+              )
         else { return false }
         pipeline.authority = lifted
         pipeline.previouslyObservedManifestAuthority = observedAuthority
@@ -6598,8 +6607,7 @@ actor WorkspaceCodemapBindingEngine {
         _ context: ManifestAdoptionContext,
         rootEpoch: WorkspaceCodemapRootEpoch
     ) async -> Bool {
-        guard adoptionContextIsCurrent(context, rootEpoch: rootEpoch) else { return false }
-        guard await overlay.isManifestAdoptionTicketCurrent(context.ticket) else { return false }
+        guard adoptionContextIsCurrent(context, rootEpoch: rootEpoch), await overlay.isManifestAdoptionTicketCurrent(context.ticket) else { return false }
         return adoptionContextIsCurrent(context, rootEpoch: rootEpoch)
     }
 
@@ -6677,17 +6685,17 @@ actor WorkspaceCodemapBindingEngine {
             addingSaturating($0, $1.recordCount)
         }
         guard let projectedRootCount = addingChecked(
-            max(0, currentRootRecordCount - replacedRecordCount),
-            addingSaturating(pendingRootCount, count)
-        ),
-            projectedRootCount <= policy.maximumRetainedManifestRecordCountPerRoot,
-            adoptionReservations[scope] == nil,
-            let reservedCount = addingChecked(
-                max(0, retainedManifestRecordCount(excluding: nil) - replacedRecordCount),
-                pendingCount
-            ),
-            let projectedCount = addingChecked(reservedCount, count),
-            projectedCount <= policy.maximumRetainedManifestRecordCount
+                  max(0, currentRootRecordCount - replacedRecordCount),
+                  addingSaturating(pendingRootCount, count)
+              ),
+              projectedRootCount <= policy.maximumRetainedManifestRecordCountPerRoot,
+              adoptionReservations[scope] == nil,
+              let reservedCount = addingChecked(
+                  max(0, retainedManifestRecordCount(excluding: nil) - replacedRecordCount),
+                  pendingCount
+              ),
+              let projectedCount = addingChecked(reservedCount, count),
+              projectedCount <= policy.maximumRetainedManifestRecordCount
         else { return nil }
         let adoptionID = UUID()
         adoptionReservations[scope] = AdoptionReservation(
@@ -8761,7 +8769,7 @@ actor WorkspaceCodemapBindingEngine {
                 recordManifestWriterPeakQueuedItems(in: currentWriter)
                 if failureDisposition.terminalObservedStaleAuthority ||
                     currentWriter.deferredFailureCount >= Self.maximumManifestWriterDeferredAttempts,
-                    let exhaustedHead = currentWriter.deferredHeadBatch
+                   let exhaustedHead = currentWriter.deferredHeadBatch
                 {
                     currentWriter.deferredHeadBatch = nil
                     currentWriter.deferredFailureCount = 0
@@ -10070,7 +10078,9 @@ actor WorkspaceCodemapBindingEngine {
             let orderedQueue = graphIndexAdmissionQueue.sorted { left, right in
                 let leftAdmission = graphIndexRootLastAdmission[left.rootEpoch] ?? 0
                 let rightAdmission = graphIndexRootLastAdmission[right.rootEpoch] ?? 0
-                if leftAdmission != rightAdmission { return leftAdmission < rightAdmission }
+                if leftAdmission != rightAdmission {
+                    return leftAdmission < rightAdmission
+                }
                 if left.enqueueOrdinal != right.enqueueOrdinal {
                     return left.enqueueOrdinal < right.enqueueOrdinal
                 }

@@ -220,7 +220,7 @@ extension OracleViewModel {
         let effectivePresets: [ModelPreset] = (useModelPresets && temporarilyDisabled) ? [] : allPresets
         let hasAnyModelPresets = !effectivePresets.isEmpty
 
-        /// Helpers for consistent info labels
+        // Helpers for consistent info labels
         func infoLine(reason: String, model: AIModel) -> String {
             "\(modeLabel) mode • \(reason) (\(model.displayName))"
         }
@@ -456,9 +456,15 @@ extension OracleViewModel {
         guard isSupported else {
             // Build list of supported modes
             var supportedModesList: [String] = []
-            if supportedModes.chat { supportedModesList.append("chat") }
-            if supportedModes.plan { supportedModesList.append("plan") }
-            if supportedModes.review { supportedModesList.append("review") }
+            if supportedModes.chat {
+                supportedModesList.append("chat")
+            }
+            if supportedModes.plan {
+                supportedModesList.append("plan")
+            }
+            if supportedModes.review {
+                supportedModesList.append("review")
+            }
 
             let supportedModesStr = supportedModesList.isEmpty ?
                 "no modes" :
@@ -821,13 +827,19 @@ extension OracleViewModel {
                 return (allowUnownedLegacy && sessionIsUnowned) ? 2 : nil
             }
             guard let agentModeRunID else { return 0 }
-            if session.agentModeRunID == agentModeRunID { return 0 }
-            if session.agentModeRunID == nil, allowUnownedLegacy { return 1 }
+            if session.agentModeRunID == agentModeRunID {
+                return 0
+            }
+            if session.agentModeRunID == nil, allowUnownedLegacy {
+                return 1
+            }
             return nil
         }
 
         if let agentModeRunID {
-            if session.agentModeRunID == agentModeRunID { return 0 }
+            if session.agentModeRunID == agentModeRunID {
+                return 0
+            }
             return (allowUnownedLegacy && sessionIsUnowned) ? 2 : nil
         }
 
@@ -863,8 +875,7 @@ extension OracleViewModel {
         agentModeSessionID: UUID?,
         agentModeRunID: UUID?
     ) async {
-        guard agentModeSessionID != nil || agentModeRunID != nil else { return }
-        guard let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
+        guard agentModeSessionID != nil || agentModeRunID != nil, let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
 
         var changed = false
         if let tabID, sessions[index].composeTabID == nil {

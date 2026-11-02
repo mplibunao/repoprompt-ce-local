@@ -1167,8 +1167,12 @@ struct AgentRunMCPToolService {
 
         // Steer-and-wait: optionally block until the agent reaches an interesting state
         let shouldWait: Bool = {
-            if let explicit = parseBool(args["wait"]) { return explicit }
-            if args["timeout_seconds"] != nil { return true }
+            if let explicit = parseBool(args["wait"]) {
+                return explicit
+            }
+            if args["timeout_seconds"] != nil {
+                return true
+            }
             return false
         }()
         let rawSteerTimeoutSeconds = args["timeout_seconds"]
@@ -2687,7 +2691,9 @@ struct AgentRunMCPToolService {
 
     private func optionalString(in object: [String: Value], key: String) throws -> String? {
         guard let value = object[key] else { return nil }
-        if case .null = value { return nil }
+        if case .null = value {
+            return nil
+        }
         guard let string = value.stringValue else {
             throw MCPError.internalError("Agent run snapshot interaction contained a malformed string field.")
         }
@@ -2704,7 +2710,9 @@ struct AgentRunMCPToolService {
 
     private func nullableBool(in object: [String: Value], key: String) throws -> Bool? {
         guard let value = object[key] else { return nil }
-        if case .null = value { return nil }
+        if case .null = value {
+            return nil
+        }
         return try optionalBool(in: object, key: key)
     }
 
@@ -2867,19 +2875,19 @@ struct AgentRunMCPToolService {
     private func agentJSONValue(from value: Value) throws -> AgentJSONValue {
         switch value {
         case .null:
-            return .null
+            .null
         case let .bool(boolValue):
-            return .bool(boolValue)
+            .bool(boolValue)
         case let .int(intValue):
-            return .int(intValue)
+            .int(intValue)
         case let .double(doubleValue):
-            return .double(doubleValue)
+            .double(doubleValue)
         case let .string(stringValue):
-            return .string(stringValue)
+            .string(stringValue)
         case let .array(values):
-            return try .array(values.map { try agentJSONValue(from: $0) })
+            try .array(values.map { try agentJSONValue(from: $0) })
         case let .object(object):
-            return try .object(object.reduce(into: [String: AgentJSONValue]()) { partialResult, entry in
+            try .object(object.reduce(into: [String: AgentJSONValue]()) { partialResult, entry in
                 partialResult[entry.key] = try agentJSONValue(from: entry.value)
             })
         default:

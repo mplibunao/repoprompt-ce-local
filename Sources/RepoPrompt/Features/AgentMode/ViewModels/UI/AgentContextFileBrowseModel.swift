@@ -409,8 +409,7 @@ final class AgentContextFileBrowseModel: ObservableObject {
     }
 
     func setAddMode(_ mode: AgentContextFileBrowseAddMode) {
-        guard session != nil else { return }
-        guard mode != .codemapOnly || !codeMapsGloballyDisabled else { return }
+        guard session != nil, mode != .codemapOnly || !codeMapsGloballyDisabled else { return }
         addMode = mode
         rebuildContainerAggregates()
         rebuildRows()
@@ -419,7 +418,9 @@ final class AgentContextFileBrowseModel: ObservableObject {
     func setCodeMapsGloballyDisabled(_ disabled: Bool) {
         guard session != nil else { return }
         codeMapsGloballyDisabled = disabled
-        if disabled { addMode = .full }
+        if disabled {
+            addMode = .full
+        }
         rebuildContainerAggregates()
         rebuildRows()
     }
@@ -490,8 +491,12 @@ final class AgentContextFileBrowseModel: ObservableObject {
     func membership(for nodeID: AgentContextFileBrowseNodeID) -> AgentContextFileBrowseContainerMembership? {
         guard let aggregate = containerAggregates[nodeID] else { return nil }
         guard aggregate.selectableFileCount > 0 else { return AgentContextFileBrowseContainerMembership.none }
-        if aggregate.selectedFileCount == 0 { return AgentContextFileBrowseContainerMembership.none }
-        if aggregate.selectedFileCount == aggregate.selectableFileCount { return .all }
+        if aggregate.selectedFileCount == 0 {
+            return AgentContextFileBrowseContainerMembership.none
+        }
+        if aggregate.selectedFileCount == aggregate.selectableFileCount {
+            return .all
+        }
         return .mixed
     }
 
@@ -501,7 +506,9 @@ final class AgentContextFileBrowseModel: ObservableObject {
     func containerDisplayMembership(
         for nodeID: AgentContextFileBrowseNodeID
     ) -> AgentContextFileBrowseContainerMembership {
-        if let membership = membership(for: nodeID) { return membership }
+        if let membership = membership(for: nodeID) {
+            return membership
+        }
         guard let path = containerPath(for: nodeID) else {
             return AgentContextFileBrowseContainerMembership.none
         }
@@ -541,11 +548,15 @@ final class AgentContextFileBrowseModel: ObservableObject {
             return tokenEstimatesByFileID[fileID] ?? .notRequested
         case .root, .folder:
             guard let aggregate = containerAggregates[nodeID] else { return .notRequested }
-            if aggregate.loadingEstimateCount > 0 { return .loading }
+            if aggregate.loadingEstimateCount > 0 {
+                return .loading
+            }
             if aggregate.knownEstimateCount + aggregate.unavailableEstimateCount < aggregate.totalFileCount {
                 return .notRequested
             }
-            if aggregate.unavailableEstimateCount > 0 { return .unavailable }
+            if aggregate.unavailableEstimateCount > 0 {
+                return .unavailable
+            }
             return .known(aggregate.knownTokenTotal)
         case .searchRootHeader, .searchDirectoryHeader:
             return .notRequested
@@ -570,8 +581,7 @@ final class AgentContextFileBrowseModel: ObservableObject {
     ) {
         guard !pendingExpansionRestorePaths.isEmpty else { return }
         for container in containers {
-            guard pendingExpansionRestorePaths.remove(Self.normalizedPath(container.path)) != nil else { continue }
-            guard expandedNodeIDs.insert(container.nodeID).inserted else { continue }
+            guard pendingExpansionRestorePaths.remove(Self.normalizedPath(container.path)) != nil, expandedNodeIDs.insert(container.nodeID).inserted else { continue }
             requestHierarchy(for: container.nodeID)
         }
     }
@@ -925,7 +935,9 @@ final class AgentContextFileBrowseModel: ObservableObject {
                     rebuildRows()
                     return
                 }
-                if wasExpanded { expandedNodeIDs.insert(nodeID) }
+                if wasExpanded {
+                    expandedNodeIDs.insert(nodeID)
+                }
                 hierarchyByContainer[nodeID] = hierarchy
                 indexHierarchy(hierarchy)
                 rebuildContainerAggregates()
@@ -1007,7 +1019,9 @@ final class AgentContextFileBrowseModel: ObservableObject {
             }
             changed = true
         }
-        if changed { tokenReadinessRevision &+= 1 }
+        if changed {
+            tokenReadinessRevision &+= 1
+        }
     }
 
     private func cancelEstimateRequest(owner: AgentContextFileBrowseNodeID) {
@@ -1142,7 +1156,9 @@ final class AgentContextFileBrowseModel: ObservableObject {
     private func finishMutationWorker(workerID: UUID, generation: UInt64) {
         guard mutationWorker?.id == workerID, mutationWorker?.generation == generation else { return }
         mutationWorker = nil
-        if !mutationQueue.isEmpty { startMutationWorkerIfNeeded() }
+        if !mutationQueue.isEmpty {
+            startMutationWorkerIfNeeded()
+        }
     }
 
     private func finishPendingMutation(_ request: MutationRequest) {
@@ -1320,7 +1336,9 @@ final class AgentContextFileBrowseModel: ObservableObject {
         rebuildContainerAggregates()
         searchGroups.removeAll { $0.root.id == rootID }
         enabledNodeIDs.subtract(derivedNodeIDs)
-        if phase == .ready { rebuildRows() }
+        if phase == .ready {
+            rebuildRows()
+        }
     }
 
     private func indexHierarchy(_ hierarchy: AgentContextFileBrowseHierarchy) {

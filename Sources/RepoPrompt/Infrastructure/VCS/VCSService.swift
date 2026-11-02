@@ -241,10 +241,8 @@ public actor VCSService {
 
         // Ensure we're starting from a directory
         var isDir: ObjCBool = false
-        if fm.fileExists(atPath: currentURL.path, isDirectory: &isDir) {
-            if !isDir.boolValue {
-                currentURL = currentURL.deletingLastPathComponent()
-            }
+        if fm.fileExists(atPath: currentURL.path, isDirectory: &isDir), !isDir.boolValue {
+            currentURL = currentURL.deletingLastPathComponent()
         }
 
         while currentURL.path != "/", currentURL.path != "" {
@@ -255,11 +253,11 @@ public actor VCSService {
             let hasGit = fm.fileExists(atPath: gitPath)
 
             // Policy: prefer jj when both exist (jj colocates with git)
-            if hasJJ {
-                // Verify jj is actually available
-                if await isJJAvailable() {
-                    return VCSResolvedRepo(rootURL: currentURL, backendKind: .jujutsu)
-                }
+            if hasJJ,
+               // Verify jj is actually available
+               await isJJAvailable()
+            {
+                return VCSResolvedRepo(rootURL: currentURL, backendKind: .jujutsu)
                 // If jj not available but .jj exists, fall through to git check
             }
 
@@ -816,7 +814,9 @@ public extension VCSService {
         sourceHead: String
     ) -> String {
         let trimmed = requested?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmed, !trimmed.isEmpty { return trimmed }
+        if let trimmed, !trimmed.isEmpty {
+            return trimmed
+        }
         let sourceLabel = source.branch ?? source.displayName
         let targetLabel = target.branch ?? target.displayName
         return "Merge \(sourceLabel) into \(targetLabel)\n\nRepoPrompt-Source-Head: \(sourceHead)"

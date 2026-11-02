@@ -208,8 +208,7 @@ private final class StableMenuPresenter: NSObject, ObservableObject, NSMenuDeleg
     private var retainedMenu: NSMenu?
 
     func present(_ items: [StableMenuItem]) {
-        guard !items.isEmpty else { return }
-        guard let anchorView else { return }
+        guard !items.isEmpty, let anchorView else { return }
 
         retainedMenu?.cancelTracking()
         let menu = NSMenu.stableMenu(from: items, fontPreset: FontScalePreset.current)

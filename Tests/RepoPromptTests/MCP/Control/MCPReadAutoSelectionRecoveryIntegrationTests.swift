@@ -59,7 +59,9 @@ import XCTest
                     await fixture.cleanup()
                     try await fixture.assertCleanedUp()
                 } catch {
-                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager) }
+                    if let endpoint {
+                        await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -135,9 +137,13 @@ import XCTest
                     read?.cancel()
                     server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
                     await gate.release()
-                    if let read { _ = try? await read.value }
+                    if let read {
+                        _ = try? await read.value
+                    }
                     await manager.debugResetToolExecutionWatchdogEnvironment()
-                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: manager) }
+                    if let endpoint {
+                        await Self.cleanupEndpoint(endpoint, manager: manager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -221,10 +227,14 @@ import XCTest
                     server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
                     await gate.release()
                     hintedRead?.cancel()
-                    if let hintedRead { _ = try? await hintedRead.value }
+                    if let hintedRead {
+                        _ = try? await hintedRead.value
+                    }
                     _ = await server.setWindowToolsEnabled(false)
                     await manager.debugResetToolExecutionWatchdogEnvironment()
-                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: manager) }
+                    if let endpoint {
+                        await Self.cleanupEndpoint(endpoint, manager: manager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -267,7 +277,7 @@ import XCTest
                             arguments: ["path": context.fileURL.path, "_rawJSON": true]
                         )
                     }
-                    /// The read's apply sticks at hold `index`, and the read times out at its deadline.
+                    // The read's apply sticks at hold `index`, and the read times out at its deadline.
                     func stuckRead(_ index: Int) async throws {
                         let pending = Task { try await read() }
                         do {
@@ -339,7 +349,9 @@ import XCTest
                     server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
                     await holds.releaseAll()
                     await manager.debugResetToolExecutionWatchdogEnvironment()
-                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: manager) }
+                    if let endpoint {
+                        await Self.cleanupEndpoint(endpoint, manager: manager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -431,7 +443,9 @@ import XCTest
                 } catch {
                     server.setReadFileAutoSelectionPersistenceGateForTesting(nil)
                     await gate.release()
-                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager) }
+                    if let endpoint {
+                        await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -532,9 +546,15 @@ import XCTest
                     firstReadTask?.cancel()
                     await mirrorGate.release()
                     server.setReadFileAutoSelectionMirrorGateForTesting(nil)
-                    if let firstReadTask { _ = try? await firstReadTask.value }
-                    if let removedEndpoint { await Self.cleanupEndpoint(removedEndpoint, manager: manager) }
-                    if let survivorEndpoint { await Self.cleanupEndpoint(survivorEndpoint, manager: manager) }
+                    if let firstReadTask {
+                        _ = try? await firstReadTask.value
+                    }
+                    if let removedEndpoint {
+                        await Self.cleanupEndpoint(removedEndpoint, manager: manager)
+                    }
+                    if let survivorEndpoint {
+                        await Self.cleanupEndpoint(survivorEndpoint, manager: manager)
+                    }
                     await fixture.cleanup()
                     throw error
                 }
@@ -788,7 +808,9 @@ import XCTest
                     }
                     server.setReadFileAutoSelectionMirrorGateForTesting(nil)
                     MCPReadFileAutoSelectionDiagnosticTracer.setTestSink(nil)
-                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager) }
+                    if let endpoint {
+                        await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager)
+                    }
                     endpoint = nil
                     await fixture.cleanup()
                 }
@@ -863,7 +885,9 @@ import XCTest
                     }
                     server.setReadFileAutoSelectionCanonicalApplyGateForTesting(nil)
                     MCPReadFileAutoSelectionDiagnosticTracer.setTestSink(nil)
-                    if let endpoint { await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager) }
+                    if let endpoint {
+                        await Self.cleanupEndpoint(endpoint, manager: fixture.networkManager)
+                    }
                     endpoint = nil
                     await fixture.cleanup()
                 }

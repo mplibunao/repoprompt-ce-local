@@ -244,8 +244,7 @@ func trimmedASCIIWhitespace(_ data: Data) -> Data? {
 /// Returns `nil` when no repair is needed or when the payload is not a JSON
 /// candidate (`{...}` / `[...]`).
 func repairJSONStringControlCharacters(_ data: Data) -> Data? {
-    guard !data.isEmpty else { return nil }
-    guard data.contains(0x0A) || data.contains(0x0D) else { return nil }
+    guard !data.isEmpty, data.contains(0x0A) || data.contains(0x0D) else { return nil }
 
     var firstIndex = data.startIndex
     while firstIndex < data.endIndex, isASCIIWhitespace(data[firstIndex]) {

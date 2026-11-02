@@ -372,8 +372,7 @@ enum ACPModelParameterResolver {
         // canonical at construction, so re-canonicalizing them would be a no-op. Key equality
         // covers both the canonical model identity and the normalized workspace.
         let expectedKey = OpenCodeACPModelParameterKey(workspacePath: workspacePath, modelRaw: selectedModelRaw)
-        guard observation.key == expectedKey else { return nil }
-        guard ACPModelParameterIdentity.canonicalBaseModelRaw(
+        guard observation.key == expectedKey, ACPModelParameterIdentity.canonicalBaseModelRaw(
             parameterSet.baseModelRaw,
             providerID: .openCode
         ) == targetIdentity else { return nil }

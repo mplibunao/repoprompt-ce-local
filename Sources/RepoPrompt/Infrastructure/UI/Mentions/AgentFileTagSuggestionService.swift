@@ -323,9 +323,9 @@ final class AgentFileTagSuggestionService {
 
         for path in selection.selectedPaths {
             guard let lookup = await store.lookupPath(WorkspacePathLookupRequest(userPath: path, profile: .mcpSelection, rootScope: lookupContext.rootScope)),
-                  let file = lookup.file else { continue }
-            guard !Self.shouldExcludeFromSuggestions(relativePath: file.standardizedRelativePath) else { continue }
-            guard seenIdentities.insert(file.standardizedFullPath).inserted else { continue }
+                  let file = lookup.file,
+                  !Self.shouldExcludeFromSuggestions(relativePath: file.standardizedRelativePath),
+                  seenIdentities.insert(file.standardizedFullPath).inserted else { continue }
             let tokenRelativePath = tokenPath(
                 for: file,
                 roots: visibleRoots,
@@ -349,7 +349,9 @@ final class AgentFileTagSuggestionService {
                     )
                 ))
             }
-            if suggestions.count >= maxResults { break }
+            if suggestions.count >= maxResults {
+                break
+            }
         }
         return suggestions
     }

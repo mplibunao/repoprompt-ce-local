@@ -96,7 +96,9 @@ final class AgentWorkflowStore: ObservableObject {
     }
 
     func canFeature(_ workflow: AgentWorkflowDefinition) -> Bool {
-        if isFeatured(workflow) { return true }
+        if isFeatured(workflow) {
+            return true
+        }
         guard !isHiddenBuiltIn(workflow) else { return false }
         return featuredWorkflowIDs.count < Self.maxFeaturedWorkflowCount
     }
@@ -376,10 +378,18 @@ final class AgentWorkflowStore: ObservableObject {
         var lines = ["---"]
         lines.append("id: \(id.uuidString)")
         lines.append("name: \"\(name)\"")
-        if let icon { lines.append("icon: \"\(icon)\"") }
-        if let accentColor { lines.append("accent_color: \"\(accentColor)\"") }
-        if let tooltip { lines.append("tooltip: \"\(tooltip)\"") }
-        if let description { lines.append("description: \"\(description)\"") }
+        if let icon {
+            lines.append("icon: \"\(icon)\"")
+        }
+        if let accentColor {
+            lines.append("accent_color: \"\(accentColor)\"")
+        }
+        if let tooltip {
+            lines.append("tooltip: \"\(tooltip)\"")
+        }
+        if let description {
+            lines.append("description: \"\(description)\"")
+        }
         lines.append("---")
         lines.append("")
         lines.append(templateBody)
@@ -429,9 +439,7 @@ final class AgentWorkflowStore: ObservableObject {
         var seenIDs: Set<String> = []
 
         func appendIfValid(_ workflowID: String) {
-            guard !seenIDs.contains(workflowID) else { return }
-            guard let workflow = resolveWorkflow(workflowID) else { return }
-            guard !isHiddenBuiltIn(workflow) else { return }
+            guard !seenIDs.contains(workflowID), let workflow = resolveWorkflow(workflowID), !isHiddenBuiltIn(workflow) else { return }
             orderedIDs.append(workflowID)
             seenIDs.insert(workflowID)
         }

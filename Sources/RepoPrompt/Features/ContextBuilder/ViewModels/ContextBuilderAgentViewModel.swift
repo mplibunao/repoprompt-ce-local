@@ -12,7 +12,9 @@ enum AgentRunState: Equatable {
     case failed(String)
 
     var isRunning: Bool {
-        if case .running = self { return true }
+        if case .running = self {
+            return true
+        }
         return false
     }
 
@@ -411,8 +413,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
         @discardableResult
         func endCurrentRunAttempt(source: String) -> Bool {
-            guard let ownership = activeRunOwnership else { return false }
-            guard runLifecycleTracker.end(ifCurrent: ownership) else { return false }
+            guard let ownership = activeRunOwnership, runLifecycleTracker.end(ifCurrent: ownership) else { return false }
             recordRunAttemptEnded(source: source)
             return true
         }
@@ -554,7 +555,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// window: while it is open, and afterwards through a closing-window reference that still
     /// resolves.
     func holdsOperation(onTab tabID: UUID, inWorkspace workspaceID: UUID) -> Bool {
-        if sessions[tabID]?.operationToken?.workspaceID == workspaceID { return true }
+        if sessions[tabID]?.operationToken?.workspaceID == workspaceID {
+            return true
+        }
         guard let record = runRegistry.activeRecord(tabID: tabID) else { return false }
         // A UI run records no workspace of its own; the claim it runs under does.
         let recordWorkspaceID = record.mcpConfiguration?.identity.workspaceID
@@ -805,8 +808,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     @Published private(set) var availableAgents: [AgentProviderKind] = AgentModelCatalog.selectableAgents(availability: .none)
     @Published var selectedAgent: AgentProviderKind = .claudeCode {
         didSet {
-            guard selectedAgent != oldValue else { return }
-            guard !isRestoringState else { return }
+            guard selectedAgent != oldValue, !isRestoringState else { return }
             if !isModelRawValidForSelectedAgent(selectedModelRaw) {
                 isRestoringState = true
                 selectedModelRaw = defaultModelRaw(for: selectedAgent)
@@ -823,8 +825,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     @Published var selectedModelRaw: String = AgentModel.defaultModel.rawValue {
         didSet {
-            guard selectedModelRaw != oldValue else { return }
-            guard !isRestoringState else { return }
+            guard selectedModelRaw != oldValue, !isRestoringState else { return }
             if !isModelRawValidForSelectedAgent(selectedModelRaw) {
                 isRestoringState = true
                 selectedModelRaw = defaultModelRaw(for: selectedAgent)
@@ -847,8 +848,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     @Published var selectedModel: AgentModel = .defaultModel {
         didSet {
-            guard selectedModel != oldValue else { return }
-            guard !isRestoringState else { return }
+            guard selectedModel != oldValue, !isRestoringState else { return }
             if !isModelRawValidForSelectedAgent(selectedModel.rawValue), selectedAgent != .codexExec {
                 isRestoringState = true
                 selectedModelRaw = defaultModelRaw(for: selectedAgent)
@@ -872,8 +872,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     @Published var contextBuilderInstructions: String = "" {
         didSet {
-            guard contextBuilderInstructions != oldValue else { return }
-            guard !isRestoringState, let session = activeSession else { return }
+            guard contextBuilderInstructions != oldValue, !isRestoringState, let session = activeSession else { return }
             session.contextBuilderInstructions = contextBuilderInstructions
             persistSessionConfig(session)
         }
@@ -882,8 +881,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Selected context builder prompt IDs for the current tab
     @Published var selectedContextBuilderPromptIDs: Set<UUID> = [] {
         didSet {
-            guard selectedContextBuilderPromptIDs != oldValue else { return }
-            guard !isRestoringState, let session = activeSession else { return }
+            guard selectedContextBuilderPromptIDs != oldValue, !isRestoringState, let session = activeSession else { return }
             session.selectedContextBuilderPromptIDs = selectedContextBuilderPromptIDs
             persistSessionConfig(session)
         }
@@ -912,8 +910,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Selected follow-up type for automatic analysis (plan/review/question)
     @Published var selectedFollowUpType: ContextBuilderFollowUpType = .plan {
         didSet {
-            guard selectedFollowUpType != oldValue else { return }
-            guard !isRestoringState else { return }
+            guard selectedFollowUpType != oldValue, !isRestoringState else { return }
             if let session = activeSession {
                 session.selectedFollowUpType = selectedFollowUpType
                 persistSessionConfig(session)
@@ -1085,8 +1082,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         guard !pendingBackgroundPlanRefreshTabIDs.isEmpty else { return }
         let tabIDs = pendingBackgroundPlanRefreshTabIDs
         pendingBackgroundPlanRefreshTabIDs.removeAll()
-        guard let currentTabID else { return }
-        guard tabIDs.contains(currentTabID),
+        guard let currentTabID,
+              tabIDs.contains(currentTabID),
               let session = sessions[currentTabID],
               isMirroredByWindow(session)
         else { return }
@@ -1467,8 +1464,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     private func handleAgentProviderAvailabilityChanged() {
         refreshAvailableAgents()
-        guard let normalized = resolvedPersistedContextBuilderSelection() else { return }
-        guard normalized.agent != selectedAgent || normalized.modelRaw.caseInsensitiveCompare(selectedModelRaw) != .orderedSame else {
+        guard let normalized = resolvedPersistedContextBuilderSelection(), normalized.agent != selectedAgent || normalized.modelRaw.caseInsensitiveCompare(selectedModelRaw) != .orderedSame else {
             return
         }
         isRestoringState = true
@@ -1495,8 +1491,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     }
 
     private func startCodexModelsSubscriptionIfNeeded() {
-        guard !hasPreparedForWindowClose else { return }
-        guard codexModelsSubscriptionTask == nil else { return }
+        guard !hasPreparedForWindowClose, codexModelsSubscriptionTask == nil else { return }
         let codexModelPollingService = codexModelPollingService
         codexModelsSubscriptionTask = Task { [weak self, codexModelPollingService] in
             guard let self else { return }
@@ -1542,8 +1537,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     }
 
     private func startOpenCodeModelsSubscriptionIfNeeded() {
-        guard !hasPreparedForWindowClose else { return }
-        guard openCodeModelsSubscriptionTask == nil else { return }
+        guard !hasPreparedForWindowClose, openCodeModelsSubscriptionTask == nil else { return }
         let workspacePath = currentWorkspacePath
         openCodeModelsSubscriptionTask = Task { [weak self, workspacePath] in
             let stream = await OpenCodeACPModelPollingService.shared.subscribe(workspacePath: workspacePath)
@@ -1578,8 +1572,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     }
 
     private func startCursorModelsSubscriptionIfNeeded() {
-        guard !hasPreparedForWindowClose else { return }
-        guard cursorModelsSubscriptionTask == nil else { return }
+        guard !hasPreparedForWindowClose, cursorModelsSubscriptionTask == nil else { return }
         let workspacePath = currentWorkspacePath
         cursorModelsSubscriptionTask = Task { [weak self, workspacePath] in
             let stream = await CursorACPModelPollingService.shared.subscribe(workspacePath: workspacePath)
@@ -1614,8 +1607,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     }
 
     private func startGrokBuildModelsSubscriptionIfNeeded() {
-        guard !hasPreparedForWindowClose else { return }
-        guard grokBuildModelsSubscriptionTask == nil else { return }
+        guard !hasPreparedForWindowClose, grokBuildModelsSubscriptionTask == nil else { return }
         let workspacePath = currentWorkspacePath
         grokBuildModelsSubscriptionTask = Task { [weak self, workspacePath] in
             let stream = await GrokBuildACPModelPollingService.shared.subscribe(workspacePath: workspacePath)
@@ -1637,8 +1629,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     }
 
     private func syncSelectedACPModelFromRegistryIfNeeded(for agent: AgentProviderKind) {
-        guard Self.shouldAdoptDiscoveredPreferredModel(for: agent) else { return }
-        guard selectedAgent == agent,
+        guard Self.shouldAdoptDiscoveredPreferredModel(for: agent),
+              selectedAgent == agent,
               let providerID = agent.acpProviderID,
               let snapshot = AgentACPModelRegistry.shared.resolvedSnapshot(for: providerID),
               let preferredModelRaw = snapshot.preferredModelRaw
@@ -1651,8 +1643,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             || trimmedSelection.caseInsensitiveCompare(AgentModel.defaultModel.rawValue) == .orderedSame
         let selectedOption = snapshot.option(matching: selectedModelRaw)
         let selectedIsPlaceholder = selectedIsDefault || selectedOption?.isPlaceholderDefault == true
-        guard selectedIsPlaceholder else { return }
-        guard selectedModelRaw.caseInsensitiveCompare(preferredModelRaw) != .orderedSame else { return }
+        guard selectedIsPlaceholder, selectedModelRaw.caseInsensitiveCompare(preferredModelRaw) != .orderedSame else { return }
 
         isRestoringState = true
         selectedModelRaw = preferredModelRaw
@@ -3741,7 +3732,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             activeSession
         }
         guard let session else { return false }
-        if session.isCancelling { return false }
+        if session.isCancelling {
+            return false
+        }
         session.isCancelling = true
         session.didUserCancelActiveContextBuilderRun = true
         updateRuntimeBindings(from: session)
@@ -4156,7 +4149,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             }
         )
         guard finalizedConnections else {
-            if let contextCommitResult { return contextCommitResult }
+            if let contextCommitResult {
+                return contextCommitResult
+            }
             if !acceptsEvents(from: record) {
                 return MCPServerViewModel.ContextBuilderTabContextCommitResult(
                     outcome: .staleOrNoLongerCurrent,
@@ -4974,8 +4969,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         updateRuntimeBindings(from: session)
 
         session.backgroundPlanTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard let session = sessions[tabID], session.currentFollowUpID == followUpID else { return }
+            guard let self, let session = sessions[tabID], session.currentFollowUpID == followUpID else { return }
 
             do {
                 let reply = try await runUIFollowUp(
@@ -5050,11 +5044,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         guard let targetTabID, let session = sessions[targetTabID] else { return }
 
         // 1) Cancel the underlying follow-up stream in OracleViewModel
-        if let oracleVM = oracleViewModel {
-            if let followUpSessionID = session.followUpOracleSessionID {
-                Task { @MainActor in
-                    await oracleVM.cancelStreaming(in: followUpSessionID)
-                }
+        if let oracleVM = oracleViewModel, let followUpSessionID = session.followUpOracleSessionID {
+            Task { @MainActor in
+                await oracleVM.cancelStreaming(in: followUpSessionID)
             }
         }
 
@@ -5168,7 +5160,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         guard let result = outcome.result else { throw CancellationError() }
         // A cancelled call reports its cancellation whatever the step it was suspended in went on
         // to return, so a call cut off by a tab or window close never answers for that tab.
-        if work.isCancelled { throw CancellationError() }
+        if work.isCancelled {
+            throw CancellationError()
+        }
         return try result.get()
     }
 
@@ -5425,9 +5419,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     ) async throws -> ChatSendReply {
         let session = owner?.session ?? session(for: tabID)
         let ownerStillOwns: @MainActor () -> Bool = { owner?.stillOwns() ?? true }
-        /// Every write below is to state a replacement follow-up owns once it has launched, so a
-        /// replaced follow-up stops at its next step instead of resetting or publishing over it.
-        /// An MCP follow-up stops the same way once its owner has lost the session.
+        // Every write below is to state a replacement follow-up owns once it has launched, so a
+        // replaced follow-up stops at its next step instead of resetting or publishing over it.
+        // An MCP follow-up stops the same way once its owner has lost the session.
         func ownsFollowUpState() -> Bool {
             session.ownsFollowUpState(followUpID) && ownerStillOwns()
         }
@@ -6092,9 +6086,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
               pendingAskUserIsOwnedByActiveRun(session, interactionID: interactionID),
               var pending = session.pendingAskUser,
               pending.interaction.id == interactionID,
-              pending.interaction.questions.contains(where: { $0.id == questionID })
-        else { return }
-        guard pending.draftsByQuestionID[questionID] != draft else { return }
+              pending.interaction.questions.contains(where: { $0.id == questionID }),
+              pending.draftsByQuestionID[questionID] != draft else { return }
         pending.draftsByQuestionID[questionID] = draft
         session.pendingAskUser = pending
         updateRuntimeBindings(from: session)
@@ -6105,9 +6098,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
               pendingAskUserIsOwnedByActiveRun(session, interactionID: interactionID),
               var pending = session.pendingAskUser,
               pending.interaction.id == interactionID,
-              pending.interaction.questions.indices.contains(index)
-        else { return }
-        guard pending.currentQuestionIndex != index else { return }
+              pending.interaction.questions.indices.contains(index),
+              pending.currentQuestionIndex != index else { return }
         pending.currentQuestionIndex = index
         session.pendingAskUser = pending
         updateRuntimeBindings(from: session)
@@ -6283,7 +6275,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     /// Cancel any pending question for a session (internal helper).
     private func cancelPendingQuestion(for session: TabSession, expectedRunID: UUID? = nil) {
-        if let expectedRunID, session.pendingAskUserRunID != expectedRunID { return }
+        if let expectedRunID, session.pendingAskUserRunID != expectedRunID {
+            return
+        }
         invalidatePendingAskUserTimeout(for: session)
         let continuation = session.askUserContinuation
         session.askUserContinuation = nil

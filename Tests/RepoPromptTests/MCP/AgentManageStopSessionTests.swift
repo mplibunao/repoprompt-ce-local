@@ -326,7 +326,13 @@ import XCTest
             var shutdownsFinished: Int {
                 switch session.selectedAgent {
                 case .codexExec:
-                    codex.events.count { if case .shutdownFinished = $0 { true } else { false } }
+                    codex.events.count {
+                        if case .shutdownFinished = $0 {
+                            true
+                        } else {
+                            false
+                        }
+                    }
                 case .cursor:
                     peer.records.count { $0.event == "exit" }
                 default:

@@ -196,7 +196,7 @@ enum ACPDefaultSessionUpdateNormalizer {
         case "session_info_update":
             if let title = ACPRuntimeEventParsing.firstString(in: payload, keys: ["title"])?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-                !title.isEmpty
+               !title.isEmpty
             {
                 return [.stream(AIStreamResult(type: "status", text: title))]
             }
@@ -595,9 +595,15 @@ enum ACPToolUpdateResultAdapter {
     }
 
     private static func intValue(_ value: Any?) -> Int? {
-        if let value = value as? Int { return value }
-        if let value = value as? NSNumber { return value.intValue }
-        if let value = value as? String { return Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        if let value = value as? Int {
+            return value
+        }
+        if let value = value as? NSNumber {
+            return value.intValue
+        }
+        if let value = value as? String {
+            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
         return nil
     }
 

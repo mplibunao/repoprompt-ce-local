@@ -380,7 +380,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         case superseded
 
         var failure: CodexStartupFailure? {
-            if case let .failed(failure) = self { return failure }
+            if case let .failed(failure) = self {
+                return failure
+            }
             return nil
         }
     }
@@ -801,11 +803,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         guard !session.hasPendingCodexHookReviewWait,
               let turnID,
               hasPendingCodexInteraction(for: session),
-              !pendingCodexInteractionMatches(turnID: turnID, session: session)
-        else {
-            return
-        }
-        guard clearCodexPendingInteractions(in: session) else { return }
+              !pendingCodexInteractionMatches(turnID: turnID, session: session),
+              clearCodexPendingInteractions(in: session) else { return }
         viewModel?.reconcileInteractiveRunState(session)
         viewModel?.publishMCPStateChange(for: session)
         handleRunInteractionStateChange(for: session, reason: .pendingQuestionCancelled)
@@ -1252,10 +1251,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         controller: any CodexSessionControlling,
         binding: AgentTabSession.CodexHookGateBindingIdentity
     ) async throws {
-        guard request.phase.allowsTrustDecision else {
-            throw AgentCodexHookReviewResolutionError.invalidDecision
-        }
-        guard let fingerprint = session.codexHookGateInventoryFingerprint else {
+        guard request.phase.allowsTrustDecision, let fingerprint = session.codexHookGateInventoryFingerprint else {
             throw AgentCodexHookReviewResolutionError.invalidDecision
         }
         var submittingRequest = request
@@ -1630,8 +1626,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         argsJSON: String?,
         session: AgentTabSession
     ) {
-        guard !AgentToolTrackingSupport.isRepoPromptTool(toolName) else { return }
-        guard let key = Self.matchingNativeToolLivenessKey(
+        guard !AgentToolTrackingSupport.isRepoPromptTool(toolName), let key = Self.matchingNativeToolLivenessKey(
             in: session.codexNativeToolLiveness,
             toolName: toolName,
             invocationID: invocationID,
@@ -2286,8 +2281,12 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 return lhs.isPlaceholderDefault && !rhs.isPlaceholderDefault
             }
 
-            if AIModel.codexBaseModelPrecedes(lhs.rawValue, rhs.rawValue) { return true }
-            if AIModel.codexBaseModelPrecedes(rhs.rawValue, lhs.rawValue) { return false }
+            if AIModel.codexBaseModelPrecedes(lhs.rawValue, rhs.rawValue) {
+                return true
+            }
+            if AIModel.codexBaseModelPrecedes(rhs.rawValue, lhs.rawValue) {
+                return false
+            }
 
             let leftInsertionOrder = insertionOrderByRaw[lhs.rawValue.lowercased()] ?? Int.max
             let rightInsertionOrder = insertionOrderByRaw[rhs.rawValue.lowercased()] ?? Int.max
@@ -2411,8 +2410,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         from agentSession: AgentSession,
         session: AgentTabSession
     ) {
-        guard session.selectedAgent == .codexExec else { return }
-        guard let modelRaw = agentSession.agentModel,
+        guard session.selectedAgent == .codexExec,
+              let modelRaw = agentSession.agentModel,
               !modelRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
             return
@@ -2766,11 +2765,21 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         )
         let chosenEffort: CodexReasoningEffort? = {
             guard !options.isEmpty else { return nil }
-            if let explicitEffort, options.contains(explicitEffort) { return explicitEffort }
-            if let parsedEffort = parsed.reasoningEffort, options.contains(parsedEffort) { return parsedEffort }
-            if let lastUsed, options.contains(lastUsed) { return lastUsed }
-            if let defaultEffort, options.contains(defaultEffort) { return defaultEffort }
-            if options.contains(.medium) { return .medium }
+            if let explicitEffort, options.contains(explicitEffort) {
+                return explicitEffort
+            }
+            if let parsedEffort = parsed.reasoningEffort, options.contains(parsedEffort) {
+                return parsedEffort
+            }
+            if let lastUsed, options.contains(lastUsed) {
+                return lastUsed
+            }
+            if let defaultEffort, options.contains(defaultEffort) {
+                return defaultEffort
+            }
+            if options.contains(.medium) {
+                return .medium
+            }
             return options.first
         }()
         let model = normalizedSpecifier.appServerModelParam
@@ -3359,8 +3368,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         session: AgentTabSession
     ) -> Bool {
         guard !entry.images.isEmpty else { return true }
-        guard let reservationID = entry.attachmentReservationID else { return false }
-        guard case .idle = session.attachmentTurnState else { return false }
+        guard let reservationID = entry.attachmentReservationID, case .idle = session.attachmentTurnState else { return false }
         session.attachmentTurnState = .reserved(
             reservationID: reservationID,
             attachments: entry.images
@@ -4138,11 +4146,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         matchingRunID runID: UUID?
     ) async {
         guard let runID else { return }
-        guard let controller = toolTrackingByTabID[session.tabID] else {
-            await ServerNetworkManager.shared.unregisterToolObservers(for: runID)
-            return
-        }
-        guard controller.trackedRunID == runID else {
+        guard let controller = toolTrackingByTabID[session.tabID], controller.trackedRunID == runID else {
             await ServerNetworkManager.shared.unregisterToolObservers(for: runID)
             return
         }
@@ -4264,7 +4268,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         error: Error
     ) -> Bool {
         guard existingRef != nil else { return false }
-        if error is CancellationError { return false }
+        if error is CancellationError {
+            return false
+        }
 
         let nsError = error as NSError
         let candidates = [
@@ -5411,8 +5417,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         message: String,
         sourceController: (any CodexSessionControlling)?
     ) async -> Bool {
-        guard session.selectedAgent == .codexExec, session.runState.isActive else { return false }
-        guard session.pendingApproval == nil, session.runState != .waitingForApproval else { return false }
+        guard session.selectedAgent == .codexExec, session.runState.isActive, session.pendingApproval == nil, session.runState != .waitingForApproval else { return false }
         if let issue {
             guard CodexManagedAuthRecoveryClassifier.isRecoverable(issue: issue) else { return false }
         } else {
@@ -5816,8 +5821,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             task: Task { [weak self, weak session] in
                 guard let self else { return }
                 try? await Task.sleep(nanoseconds: graceIntervalNanos)
-                guard !Task.isCancelled else { return }
-                guard let session,
+                guard !Task.isCancelled,
+                      let session,
                       session.runID == runID,
                       session.activeRunAttemptID == runAttemptID,
                       session.selectedAgent == .codexExec,
@@ -6255,8 +6260,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     for await event in controller.events {
                         guard !Task.isCancelled else { break }
                         // Guard against stale events from a previous run reaching a new session.
-                        guard session.runID == taskRunID else { break }
-                        guard let activeController = session.codexController,
+                        guard session.runID == taskRunID,
+                              let activeController = session.codexController,
                               Self.sameCodexControllerInstance(activeController, controller)
                         else {
                             break
@@ -6269,8 +6274,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
 
                     // --- Stream ended without an explicit terminal event ---
                     // If the task was cancelled (intentional teardown) or run has moved on, do nothing.
-                    guard !Task.isCancelled else { return }
-                    guard session.runID == taskRunID else { return }
+                    guard !Task.isCancelled, session.runID == taskRunID else { return }
 
                     guard session.runState.isActive else {
                         guard invalidateCodexControllerForReconnect(
@@ -6486,19 +6490,19 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         let existingRef = shouldSkipTimedOutResumeTarget ? nil : resumeCandidate
         // The controller whose start produced the error the catch below reports.
         var failedCandidateController = session.codexController
-        /// A start's failure belongs to the controller and attempt it began under. Once either was
-        /// replaced while the start was suspended, the failure is obsolete: it reports superseded
-        /// and neither retires nor marks for reconnect the controller that replaced it. A candidate
-        /// that was only cleared has no replacement to protect, so its failure is still reported.
+        // A start's failure belongs to the controller and attempt it began under. Once either was
+        // replaced while the start was suspended, the failure is obsolete: it reports superseded
+        // and neither retires nor marks for reconnect the controller that replaced it. A candidate
+        // that was only cleared has no replacement to protect, so its failure is still reported.
         func failedCandidateIsCurrent(_ candidate: (any CodexSessionControlling)?) -> Bool {
             guard session.activeRunAttemptID == runAttemptIDAtEntry else { return false }
             guard let installed = session.codexController else { return true }
             guard let candidate else { return false }
             return Self.sameCodexControllerInstance(installed, candidate)
         }
-        /// A timed-out start retires the installed controller; a binding response that named no
-        /// thread retires the controller that produced it. Anything else, or a controller that is
-        /// no longer installed, leaves the session to reconnect on its next start.
+        // A timed-out start retires the installed controller; a binding response that named no
+        // thread retires the controller that produced it. Anything else, or a controller that is
+        // no longer installed, leaves the session to reconnect on its next start.
         func retireOrMarkFailedStartup(
             error: Error,
             candidate: (any CodexSessionControlling)?,
@@ -6672,7 +6676,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 } catch {
                     guard failedCandidateIsCurrent(freshController) else { return .superseded }
                     retireOrMarkFailedStartup(error: error, candidate: freshController, timeoutSource: "fresh-start-timeout")
-                    if error is CancellationError { return .cancelled }
+                    if error is CancellationError {
+                        return .cancelled
+                    }
                     return .failed(.nativeSession(error, attemptedResume: false))
                 }
             }
@@ -6684,7 +6690,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 candidate: failedCandidateController,
                 timeoutSource: attemptedResume ? "resume-timeout" : "start-timeout"
             )
-            if effectiveError is CancellationError { return .cancelled }
+            if effectiveError is CancellationError {
+                return .cancelled
+            }
             return .failed(.nativeSession(effectiveError, attemptedResume: attemptedResume))
         }
     }
@@ -6943,7 +6951,13 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             deferReconnectForCurrentActiveTurn: wasRunAlreadyActive,
             skipResumeWhenNoPriorCodexHistory: !wasRunAlreadyActive && !hadResumeEligibleCodexHistoryBeforeSend
         )
-        if Task.isCancelled || { if case .cancelled = readiness { true } else { false } }() {
+        if Task.isCancelled || {
+            if case .cancelled = readiness {
+                true
+            } else {
+                false
+            }
+        }() {
             // The run was cancelled during startup — e.g. while the MCP routing wait was suspended. The
             // controller may still report an active thread before the run's cancellation machinery
             // invalidates it, so re-check cancellation here rather than trusting the controller guard,
@@ -7134,14 +7148,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                             images: attachments,
                             expectedTurnID: actualTurnID
                         )
-                        guard receipt.acceptedTurnID == actualTurnID else {
-                            throw CodexTurnSteerError.expectedTurnMismatch(
-                                expectedTurnID: expectedTurnID,
-                                actualTurnID: actualTurnID,
-                                failure: failure
-                            )
-                        }
-                        guard await controller.prepareLifecycleAuthorityReconciliationAfterAcceptedMismatch(
+                        guard receipt.acceptedTurnID == actualTurnID, await controller.prepareLifecycleAuthorityReconciliationAfterAcceptedMismatch(
                             expectedCurrentTurnID: identity.turnID,
                             acceptedDispatchTurnID: actualTurnID
                         ) else {
@@ -7330,10 +7337,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     }
 
     private func ensureCodexToolTrackingForReadySessionIfNeeded(for session: AgentTabSession, runID: UUID) async {
-        guard shouldManageCodexTooling else { return }
-        guard session.selectedAgent == .codexExec else { return }
-        guard session.runID == runID else { return }
-        guard session.codexController?.hasActiveThread == true else { return }
+        guard shouldManageCodexTooling, session.selectedAgent == .codexExec, session.runID == runID, session.codexController?.hasActiveThread == true else { return }
         await ensureCodexToolTrackingIfNeeded(for: session, runID: runID)
     }
 
@@ -7515,8 +7519,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         toolName: String
     ) -> Bool {
         let normalized = Self.normalizedExternalToolName(toolName)
-        guard normalized == "apply_patch" else { return false }
-        guard CodexNativeSessionController.applyPatchResultIndicatesTerminal(raw: existingResultJSON) else {
+        guard normalized == "apply_patch", CodexNativeSessionController.applyPatchResultIndicatesTerminal(raw: existingResultJSON) else {
             return false
         }
         return CodexNativeSessionController.applyPatchResultIndicatesRunning(raw: incomingResultJSON)
@@ -7860,8 +7863,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
 
     private static func shouldUseReasoningSummaryAsStatus(_ title: String) -> Bool {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 60 else { return false }
-        guard let firstWord = trimmed.split(whereSeparator: \.isWhitespace).first else { return false }
+        guard !trimmed.isEmpty, trimmed.count <= 60, let firstWord = trimmed.split(whereSeparator: \.isWhitespace).first else { return false }
         let normalizedFirstWord = firstWord
             .trimmingCharacters(in: CharacterSet(charactersIn: ":.,!?()[]{}\"'“”‘’"))
             .lowercased()
@@ -8361,14 +8363,12 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         }
         switch event {
         case let .assistantDelta(delta):
-            guard session.runState.isActive else { return }
-            guard !delta.isEmpty else { return }
+            guard session.runState.isActive, !delta.isEmpty else { return }
             clearCodexPendingAuthRetryTurn(session)
             enqueueAssistantDelta(delta, session: session)
             return
         case let .canonicalAssistantDelta(text, scope):
-            guard session.runState.isActive else { return }
-            guard !text.isEmpty else { return }
+            guard session.runState.isActive, !text.isEmpty else { return }
             clearCodexPendingAuthRetryTurn(session)
             enqueueAssistantDelta(text, scope: scope, session: session)
             return
@@ -8780,8 +8780,12 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 AgentModeViewModel.logCodexDebug("[AgentModeVM][CodexUI] compact turnCompleted turnID=\(turnID ?? "nil") status=\(status) runState=\(session.runState)")
                 return
             }
-            if session.runState == .cancelled, status != .interrupted { return }
-            if session.runState == .failed, status != .failed { return }
+            if session.runState == .cancelled, status != .interrupted {
+                return
+            }
+            if session.runState == .failed, status != .failed {
+                return
+            }
             await finalizeCodexRun(
                 session,
                 turnStatus: status,
@@ -9056,8 +9060,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     }
 
     private static func unquotedCommandText(_ raw: String) -> String? {
-        guard raw.count >= 2 else { return nil }
-        guard let first = raw.first, let last = raw.last, first == last, first == "\"" || first == "'" else {
+        guard raw.count >= 2, let first = raw.first, let last = raw.last, first == last, first == "\"" || first == "'" else {
             return nil
         }
         let inner = String(raw.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -9065,10 +9068,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     }
 
     private static func extractProcessIDFromArgsJSON(_ argsJSON: String?) -> String? {
-        guard let argsJSON = argsJSON?.trimmingCharacters(in: .whitespacesAndNewlines), !argsJSON.isEmpty else {
-            return nil
-        }
-        guard let data = argsJSON.data(using: .utf8),
+        guard let argsJSON = argsJSON?.trimmingCharacters(in: .whitespacesAndNewlines), !argsJSON.isEmpty,
+              let data = argsJSON.data(using: .utf8),
               let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else {
             return nil
@@ -9076,11 +9077,15 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         for key in ["processId", "process_id"] {
             if let value = object[key] as? String {
                 let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { return trimmed }
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
             }
             if let value = object[key] as? NSNumber {
                 let text = value.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty { return text }
+                if !text.isEmpty {
+                    return text
+                }
             }
         }
         return nil
@@ -9208,7 +9213,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         }
         let item = session.items[index]
         let metadata = BashToolResultParser.parseLivenessMetadata(raw: item.toolResultJSON)
-        if metadata.isRunning { return true }
+        if metadata.isRunning {
+            return true
+        }
         return Self.isTerminalBashTranscriptItem(item, metadata: metadata)
     }
 
@@ -9220,10 +9227,13 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         _ item: AgentChatItem,
         metadata: BashToolResultParser.Metadata
     ) -> Bool {
-        guard item.kind == .toolResult else { return false }
-        guard !metadata.isRunning else { return false }
-        if item.toolIsError != nil { return true }
-        if metadata.exitCode != nil { return true }
+        guard item.kind == .toolResult, !metadata.isRunning else { return false }
+        if item.toolIsError != nil {
+            return true
+        }
+        if metadata.exitCode != nil {
+            return true
+        }
         return AgentTranscriptToolStatusSemantics.isTerminalStatusWord(metadata.statusWord)
     }
 
@@ -9231,8 +9241,12 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         _ item: AgentChatItem,
         metadata: BashToolResultParser.Metadata
     ) -> Bool {
-        if item.toolIsError == true { return true }
-        if let exitCode = metadata.exitCode, exitCode != 0 { return true }
+        if item.toolIsError == true {
+            return true
+        }
+        if let exitCode = metadata.exitCode, exitCode != 0 {
+            return true
+        }
         let normalizedStatus = AgentTranscriptToolStatusSemantics.normalizedStatusWord(metadata.statusWord)
         return normalizedStatus == "failed" || normalizedStatus == "cancelled"
     }
@@ -9485,8 +9499,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         let canMaterializeRunningOutput = canMaterializeRunningBashOutput(for: session)
         let shouldMaterializeToTranscript: Bool = {
             guard canMaterializeRunningOutput else { return false }
-            guard let existingLookup else { return true }
-            guard let item = session.items.first(where: { $0.id == existingLookup.state.transcriptItemID }) else {
+            guard let existingLookup, let item = session.items.first(where: { $0.id == existingLookup.state.transcriptItemID }) else {
                 return true
             }
             if item.kind != .toolResult || item.toolIsError == true {
@@ -9641,8 +9654,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     private func rebuildLiveBashExecutionState(from session: AgentTabSession) {
         session.clearBashLiveExecutions()
         for item in session.items {
-            guard item.kind == .toolResult else { continue }
-            guard Self.normalizedExternalToolName(item.toolName) == "bash" else { continue }
+            guard item.kind == .toolResult, Self.normalizedExternalToolName(item.toolName) == "bash" else { continue }
             let metadata = BashToolResultParser.parseLivenessMetadata(raw: item.toolResultJSON)
             if metadata.isRunning {
                 _ = upsertLiveBashExecution(
@@ -9930,8 +9942,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         session.pendingCommandRunningFlushUsesLiveOutputDelay = usesLiveOutputDelay
         session.pendingCommandRunningFlushTask = Task { [weak self, weak session] in
             try? await Task.sleep(nanoseconds: delayNanos)
-            guard !Task.isCancelled else { return }
-            guard let self, let session else { return }
+            guard !Task.isCancelled, let self, let session else { return }
             flushCommandExecutionRunningUpdates(session: session)
         }
     }
@@ -10024,9 +10035,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 guard let self else { return }
                 try? await Task.sleep(nanoseconds: delayNanos)
                 defer { self.codexIdleShutdownTasksByTabID.remove(tabID, ifToken: token) }
-                guard !Task.isCancelled else { return }
-                guard let session else { return }
-                guard session.selectedAgent == .codexExec,
+                guard !Task.isCancelled, let session,
+                      session.selectedAgent == .codexExec,
                       session.codexController != nil,
                       session.pendingApproval == nil,
                       !session.runState.isActive,
@@ -10063,11 +10073,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     }
 
     private func updateCodexStallWatchdogState(for session: AgentTabSession) {
-        guard codexStallWatchdogProbeThreshold > 0, codexStallWatchdogRecoveryThreshold > 0 else {
-            stopCodexStallWatchdog(for: session.tabID)
-            return
-        }
-        guard session.selectedAgent == .codexExec,
+        guard codexStallWatchdogProbeThreshold > 0, codexStallWatchdogRecoveryThreshold > 0,
+              session.selectedAgent == .codexExec,
               session.codexController != nil,
               session.runState.isActive,
               !hasPendingCodexInteraction(for: session)
@@ -10109,8 +10116,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 while !Task.isCancelled {
                     guard let self else { return }
                     try? await Task.sleep(nanoseconds: codexStallWatchdogPollIntervalNanos)
-                    guard !Task.isCancelled else { return }
-                    guard let session else { return }
+                    guard !Task.isCancelled, let session else { return }
                     guard session.selectedAgent == .codexExec,
                           session.codexController != nil,
                           session.runState.isActive,
@@ -10194,11 +10200,10 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         var processIDs: Set<String> = []
         for index in items.indices {
             let item = items[index]
-            guard item.kind == .toolResult else { continue }
-            guard normalizedExternalToolName(item.toolName) == "bash" else { continue }
+            guard item.kind == .toolResult, normalizedExternalToolName(item.toolName) == "bash" else { continue }
             let parsed = BashToolResultParser.parseLivenessMetadata(raw: item.toolResultJSON)
-            guard parsed.isRunning else { continue }
-            guard let processID = parsed.processID?.trimmingCharacters(in: .whitespacesAndNewlines),
+            guard parsed.isRunning,
+                  let processID = parsed.processID?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !processID.isEmpty
             else {
                 continue
@@ -11085,8 +11090,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
 }
 
 #if DEBUG
+    @MainActor
     extension CodexAgentModeCoordinator {
-        @MainActor
         func testSimulateRepoPromptToolCall(
             invocationID: UUID?,
             toolName: String,
@@ -11096,7 +11101,6 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             handleCodexToolCall(invocationID: invocationID, toolName: toolName, args: args, session: session)
         }
 
-        @MainActor
         func testSimulateRepoPromptToolResult(
             invocationID: UUID?,
             toolName: String,
@@ -11115,7 +11119,6 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             )
         }
 
-        @MainActor
         func testFinalizePendingToolCalls(
             in session: AgentTabSession,
             turnStatus: CodexNativeSessionController.TurnStatus
@@ -11123,7 +11126,6 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             finalizePendingToolCalls(in: session, turnStatus: turnStatus)
         }
 
-        @MainActor
         func testSimulateBashRunningUpdate(
             invocationID: UUID?,
             processID: String,

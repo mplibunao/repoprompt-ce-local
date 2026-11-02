@@ -17,7 +17,9 @@ private actor GateReleaseCoordinator {
     private var released = false
 
     func markReleased() -> Bool {
-        if released { return false }
+        if released {
+            return false
+        }
         released = true
         return true
     }
@@ -56,7 +58,11 @@ private actor ResolvedCommandCache {
     }
 
     func invalidate(_ command: String? = nil) {
-        if let command { map.removeValue(forKey: command) } else { map.removeAll() }
+        if let command {
+            map.removeValue(forKey: command)
+        } else {
+            map.removeAll()
+        }
     }
 }
 
@@ -843,7 +849,9 @@ final class CLIProcessRunner {
             // 0 is EOF, or a read of the retired endpoint's /dev/null.
             guard count < 0 else { return }
             let failure = errno
-            if failure == EINTR { continue }
+            if failure == EINTR {
+                continue
+            }
             // A read issued while retire() runs can fail with EBADF; that is an ordinary stop.
             if endpoint.isOpen {
                 let channelName = "\(channel)"
@@ -987,7 +995,9 @@ final class CLIProcessRunner {
             for (channel, endpoint) in outputs {
                 let bufferedBytes = endpoint.bufferedByteCount()
                 // nil from an endpoint that is no longer open: it reached EOF or was retired.
-                if bufferedBytes == nil, !endpoint.isOpen { continue }
+                if bufferedBytes == nil, !endpoint.isOpen {
+                    continue
+                }
                 let unreadBacklog = endpoint.unreadBacklog ?? 0
                 let reason: CLIProcessRunnerTestHooks.RetirementReason? = if process.drain.isCancelled {
                     .cancelled
@@ -1092,7 +1102,9 @@ final class CLIProcessRunner {
         until deadline: DispatchTime,
         drain: DrainControl?
     ) async -> Bool {
-        if hasFinished(group) { return true }
+        if hasFinished(group) {
+            return true
+        }
         let finished = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             let resumption = GroupWaitResumption(continuation)
             group.notify(queue: .global()) { resumption.resume(finished: true) }

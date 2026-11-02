@@ -222,8 +222,8 @@ final class PathSearchIndexRecoveryTests: XCTestCase {
                 .map(entry)
         )
         var index = WorkspaceSearchRootPathIndex(identity: identity, rootPath: root.standardizedFullPath, entries: entries)
-        /// Each patch is one overlay payload, shaped as the shard's patch builder reports it: a same-path
-        /// replacement removes the old ID and inserts the new one.
+        // Each patch is one overlay payload, shaped as the shard's patch builder reports it: a same-path
+        // replacement removes the old ID and inserts the new one.
         func patch(removing removedPaths: [String] = [], inserting insertedPaths: [String] = []) throws {
             let removed = try removedPaths.map { path in
                 try XCTUnwrap(entries.first { $0.standardizedRelativePath == path }, path)

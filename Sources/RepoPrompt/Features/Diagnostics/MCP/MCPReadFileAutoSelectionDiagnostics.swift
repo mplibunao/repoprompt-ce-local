@@ -47,14 +47,30 @@ struct MCPReadFileAutoSelectionDiagnosticEvent: Equatable, CustomStringConvertib
             "worker_active=\(workerActive)",
             "pending_work=\(pendingWork)"
         ]
-        if let workspaceID { fields.append("workspace_id=\(workspaceID.uuidString)") }
-        if let routeScope { fields.append("route=\(routeScope)") }
-        if let bindingGeneration { fields.append("binding_generation=\(bindingGeneration)") }
-        if let target { fields.append("target=\(target)") }
-        if let previousAcceptedHighWater { fields.append("previous_accepted_high_water=\(previousAcceptedHighWater)") }
-        if let waiterID { fields.append("waiter_id=\(waiterID.uuidString)") }
-        if let workerID { fields.append("worker_id=\(workerID.uuidString)") }
-        if let requiredMirrorTicket { fields.append("required_mirror_ticket=\(requiredMirrorTicket)") }
+        if let workspaceID {
+            fields.append("workspace_id=\(workspaceID.uuidString)")
+        }
+        if let routeScope {
+            fields.append("route=\(routeScope)")
+        }
+        if let bindingGeneration {
+            fields.append("binding_generation=\(bindingGeneration)")
+        }
+        if let target {
+            fields.append("target=\(target)")
+        }
+        if let previousAcceptedHighWater {
+            fields.append("previous_accepted_high_water=\(previousAcceptedHighWater)")
+        }
+        if let waiterID {
+            fields.append("waiter_id=\(waiterID.uuidString)")
+        }
+        if let workerID {
+            fields.append("worker_id=\(workerID.uuidString)")
+        }
+        if let requiredMirrorTicket {
+            fields.append("required_mirror_ticket=\(requiredMirrorTicket)")
+        }
         return fields.joined(separator: " ")
     }
 }
@@ -86,8 +102,7 @@ enum MCPReadFileAutoSelectionDiagnosticTracer {
         state.lock.unlock()
         sink?(event)
 
-        guard tracingEnabled else { return }
-        guard let data = "[MCPAutoSelection] \(event)\n".data(using: .utf8) else { return }
+        guard tracingEnabled, let data = "[MCPAutoSelection] \(event)\n".data(using: .utf8) else { return }
         state.lock.lock()
         defer { state.lock.unlock() }
         BestEffortStderrWriter.write(data)

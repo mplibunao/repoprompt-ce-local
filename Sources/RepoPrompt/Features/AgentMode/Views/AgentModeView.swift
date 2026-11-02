@@ -914,11 +914,8 @@ struct AgentModeChatDetailView: View {
 
     private func handleDetachedAutoFollowManualDirection(_ direction: DetachedManualScrollDirection) {
         guard userDetachedAutoFollow,
-              !isPinnedToLiveBottom
-        else {
-            return
-        }
-        guard direction == .towardHistory else { return }
+              !isPinnedToLiveBottom,
+              direction == .towardHistory else { return }
         setCurrentAutoFollowArmingState(.disarmedAfterManualDetach)
     }
 
@@ -936,10 +933,8 @@ struct AgentModeChatDetailView: View {
         _ session: AgentTranscriptUserScrollSession,
         finalMetrics: AgentTranscriptScrollMetrics
     ) -> Bool {
-        guard !isManualDetachOverrideActive() else {
-            return false
-        }
-        guard userDetachedAutoFollow,
+        guard !isManualDetachOverrideActive(),
+              userDetachedAutoFollow,
               !isPinnedToLiveBottom,
               !isInteractionBlockerVisible,
               !isRehydrateRestoreActive,
@@ -2100,89 +2095,89 @@ struct AgentModeChatDetailView: View {
                 }
                 #if DEBUG
                 .onReceive(NotificationCenter.default.publisher(for: AgentChatStressHarness.forceDetachRequestedNotification)) { notification in
-                        guard let stressHarness,
-                              notification.object as AnyObject === stressHarness else { return }
-                        handleStressForceDetach(proxy: proxy)
-                    }
+                    guard let stressHarness,
+                          notification.object as AnyObject === stressHarness else { return }
+                    handleStressForceDetach(proxy: proxy)
+                }
                 #endif
-                    .onChange(of: currentTabID) { oldTabID, newTabID in
-                        debugLog("onChange currentTabID", details: "old=\(debugShortID(oldTabID)) new=\(debugShortID(newTabID))")
-                        #if DEBUG
-                        #endif
-                        invalidatePinnedMaintenance(.tabChanged)
-                        cancelAllScheduledScrollWork()
-                        cancelScrollResponsivenessObservations()
-                        clearPinnedTranscriptChangeSuppression()
-                        clearPinnedIdleTransitionManualDetach()
-                        clearManualDetachOverride()
-                        resetPinnedBottomRequestState()
-                        showCompressedHistory = false
-                        isTranscriptWindowExpanded = false
-                        if let oldTabID {
-                            agentModeVM.setCompressedHistoryVisibility(tabID: oldTabID, isRevealed: false)
-                            agentModeVM.setTranscriptWindowExpanded(tabID: oldTabID, isExpanded: false)
-                        }
-                        if let newTabID {
-                            agentModeVM.setCompressedHistoryVisibility(tabID: newTabID, isRevealed: false)
-                            agentModeVM.setTranscriptWindowExpanded(tabID: newTabID, isExpanded: false)
-                        }
-                        pendingCompressionRestoreStrategy = nil
-                        transcriptBlockExpansion.removeAll()
-                        transcriptBlockDefaultExpansion.removeAll()
-                        hasUserInteractedWithScroll = false
-                        isUserInteractingWithScroll = false
-                        repinGraceState = nil
-                        lastTranscriptChangePinnedMaintenanceRevision = nil
-                        _ = applyScrollMetrics(AgentTranscriptScrollMetrics())
-                        legacyIsNearBottom = false
-                        lastSeenUserMessageID = nil
-                        interruptSmoothPinnedSend(reason: "tabChange")
-                        transcriptScrollResetRevision &+= 1
-                        scrollEngine.rehydrate.coldRestoreStartedAt = nil
-                        clearLiveTranscriptViewportCaptureState(shouldResetDetachedRebaseTracking: true)
-                        applyStoredTranscriptViewportState(for: newTabID)
-                        armRehydrateRestore(for: newTabID)
-                        _ = advanceRehydrateRestoreIfNeeded(proxy: proxy)
-                        #if DEBUG
-                            assertScrollStateInvariants()
-                        #endif
+                .onChange(of: currentTabID) { oldTabID, newTabID in
+                    debugLog("onChange currentTabID", details: "old=\(debugShortID(oldTabID)) new=\(debugShortID(newTabID))")
+                    #if DEBUG
+                    #endif
+                    invalidatePinnedMaintenance(.tabChanged)
+                    cancelAllScheduledScrollWork()
+                    cancelScrollResponsivenessObservations()
+                    clearPinnedTranscriptChangeSuppression()
+                    clearPinnedIdleTransitionManualDetach()
+                    clearManualDetachOverride()
+                    resetPinnedBottomRequestState()
+                    showCompressedHistory = false
+                    isTranscriptWindowExpanded = false
+                    if let oldTabID {
+                        agentModeVM.setCompressedHistoryVisibility(tabID: oldTabID, isRevealed: false)
+                        agentModeVM.setTranscriptWindowExpanded(tabID: oldTabID, isExpanded: false)
                     }
-                    .onChange(of: restoreSignal) { oldSignal, newSignal in
-                        debugLog(
-                            "onChange restoreSignal",
-                            details: "oldTab=\(debugShortID(oldSignal.tabID)) newTab=\(debugShortID(newSignal.tabID)) oldHydrated=\(oldSignal.bindingsHydrated) newHydrated=\(newSignal.bindingsHydrated) oldRev=\(oldSignal.presentationRevision) newRev=\(newSignal.presentationRevision)"
-                        )
-                        if oldSignal.tabID == newSignal.tabID,
-                           oldSignal.presentationRevision != newSignal.presentationRevision,
-                           smoothPinnedSendState?.phase == .preservingBottomBeforeAnimation,
-                           activeStressStreamingAssistantItem != nil
-                        {
-                            markSmoothPinnedSendLayoutMutation("presentationRevisionChangedWhileStreaming")
-                        }
-                        if let remountKey = AgentTranscriptActivationRepaintRemountPolicy.remountKey(
-                            oldSignal: oldSignal,
-                            newSignal: newSignal,
-                            currentTabID: currentTabID,
-                            rehydratePhase: rehydrateRestorePhase,
-                            lastRemountKey: activationRepaintRemountKey,
-                            remountCount: activationRepaintRemountCount,
-                            layoutPassToken: rehydrateLayoutPassToken
-                        ) {
-                            remountTranscriptForActivationRepaint(key: remountKey)
-                        }
-                        _ = advanceRehydrateRestoreIfNeeded(proxy: proxy)
+                    if let newTabID {
+                        agentModeVM.setCompressedHistoryVisibility(tabID: newTabID, isRevealed: false)
+                        agentModeVM.setTranscriptWindowExpanded(tabID: newTabID, isExpanded: false)
                     }
-                    .onChange(of: rehydrateRestorePhase) { oldPhase, newPhase in
-                        debugLog("onChange rehydrateRestorePhase", details: "old=\(debugDescription(for: oldPhase)) new=\(debugDescription(for: newPhase))")
-                        guard oldPhase.isActive, !newPhase.isActive else { return }
-                        applyPendingCompressionStrategy(proxy: proxy)
+                    pendingCompressionRestoreStrategy = nil
+                    transcriptBlockExpansion.removeAll()
+                    transcriptBlockDefaultExpansion.removeAll()
+                    hasUserInteractedWithScroll = false
+                    isUserInteractingWithScroll = false
+                    repinGraceState = nil
+                    lastTranscriptChangePinnedMaintenanceRevision = nil
+                    _ = applyScrollMetrics(AgentTranscriptScrollMetrics())
+                    legacyIsNearBottom = false
+                    lastSeenUserMessageID = nil
+                    interruptSmoothPinnedSend(reason: "tabChange")
+                    transcriptScrollResetRevision &+= 1
+                    scrollEngine.rehydrate.coldRestoreStartedAt = nil
+                    clearLiveTranscriptViewportCaptureState(shouldResetDetachedRebaseTracking: true)
+                    applyStoredTranscriptViewportState(for: newTabID)
+                    armRehydrateRestore(for: newTabID)
+                    _ = advanceRehydrateRestoreIfNeeded(proxy: proxy)
+                    #if DEBUG
+                        assertScrollStateInvariants()
+                    #endif
+                }
+                .onChange(of: restoreSignal) { oldSignal, newSignal in
+                    debugLog(
+                        "onChange restoreSignal",
+                        details: "oldTab=\(debugShortID(oldSignal.tabID)) newTab=\(debugShortID(newSignal.tabID)) oldHydrated=\(oldSignal.bindingsHydrated) newHydrated=\(newSignal.bindingsHydrated) oldRev=\(oldSignal.presentationRevision) newRev=\(newSignal.presentationRevision)"
+                    )
+                    if oldSignal.tabID == newSignal.tabID,
+                       oldSignal.presentationRevision != newSignal.presentationRevision,
+                       smoothPinnedSendState?.phase == .preservingBottomBeforeAnimation,
+                       activeStressStreamingAssistantItem != nil
+                    {
+                        markSmoothPinnedSendLayoutMutation("presentationRevisionChangedWhileStreaming")
                     }
-                    .onChange(of: showCompressedHistory) { _, isRevealed in
-                        if let currentTabID {
-                            agentModeVM.setCompressedHistoryVisibility(tabID: currentTabID, isRevealed: isRevealed)
-                        }
-                        applyPendingCompressionStrategy(proxy: proxy)
+                    if let remountKey = AgentTranscriptActivationRepaintRemountPolicy.remountKey(
+                        oldSignal: oldSignal,
+                        newSignal: newSignal,
+                        currentTabID: currentTabID,
+                        rehydratePhase: rehydrateRestorePhase,
+                        lastRemountKey: activationRepaintRemountKey,
+                        remountCount: activationRepaintRemountCount,
+                        layoutPassToken: rehydrateLayoutPassToken
+                    ) {
+                        remountTranscriptForActivationRepaint(key: remountKey)
                     }
+                    _ = advanceRehydrateRestoreIfNeeded(proxy: proxy)
+                }
+                .onChange(of: rehydrateRestorePhase) { oldPhase, newPhase in
+                    debugLog("onChange rehydrateRestorePhase", details: "old=\(debugDescription(for: oldPhase)) new=\(debugDescription(for: newPhase))")
+                    guard oldPhase.isActive, !newPhase.isActive else { return }
+                    applyPendingCompressionStrategy(proxy: proxy)
+                }
+                .onChange(of: showCompressedHistory) { _, isRevealed in
+                    if let currentTabID {
+                        agentModeVM.setCompressedHistoryVisibility(tabID: currentTabID, isRevealed: isRevealed)
+                    }
+                    applyPendingCompressionStrategy(proxy: proxy)
+                }
             }
         }
     }
@@ -2297,7 +2292,9 @@ struct AgentModeChatDetailView: View {
         .accessibilityIdentifier("agentTranscript.scrollView")
         .coordinateSpace(name: "AgentTranscriptScrollSpace")
         .transaction { txn in
-            if didChatChange { txn.disablesAnimations = true }
+            if didChatChange {
+                txn.disablesAnimations = true
+            }
         }
         .onScrollGeometryChange(for: AgentTranscriptScrollMetrics.self, of: { geometry in
             scrollMetrics(from: geometry)
@@ -2316,9 +2313,7 @@ struct AgentModeChatDetailView: View {
             {
                 return
             }
-            guard let session = activeUserScrollSession else { return }
-            guard !programmaticScrollGate.isInFlight else { return }
-            guard !isInteractionBlockerVisible else { return }
+            guard let session = activeUserScrollSession, !programmaticScrollGate.isInFlight, !isInteractionBlockerVisible else { return }
             if AgentTranscriptAutoFollowRearmPolicy.shouldDetachFromLiveBottom(
                 runtime: makeScrollRuntimeState(distanceToBottom: newMetrics.distanceToBottom),
                 latestManualIntent: session.latestIntent,
@@ -2367,7 +2362,9 @@ struct AgentModeChatDetailView: View {
         .accessibilityIdentifier("agentTranscript.scrollView")
         .coordinateSpace(name: "AgentTranscriptScrollSpace")
         .transaction { txn in
-            if didChatChange { txn.disablesAnimations = true }
+            if didChatChange {
+                txn.disablesAnimations = true
+            }
         }
     }
 
@@ -2949,9 +2946,15 @@ struct AgentModeChatDetailView: View {
 
     private func collapsedSummaryStatus(for toolSummary: AgentTranscriptClusterSummary?) -> AgentTranscriptCollapsedSummaryStatus {
         guard let toolSummary else { return .neutral }
-        if toolSummary.containsFailure { return .failure }
-        if toolSummary.containsWarning { return .warning }
-        if toolSummary.containsRunningWork { return .running }
+        if toolSummary.containsFailure {
+            return .failure
+        }
+        if toolSummary.containsWarning {
+            return .warning
+        }
+        if toolSummary.containsRunningWork {
+            return .running
+        }
         return .neutral
     }
 
@@ -3554,11 +3557,10 @@ struct AgentModeChatDetailView: View {
                    !isUserInteractingWithScroll,
                    !isRehydrateRestoreActive,
                    isPinnedMaintenanceReason(settleReason),
-                   scrollMetrics.distanceToBottom > Self.scrollToBottomSuccessDistanceThreshold
+                   scrollMetrics.distanceToBottom > Self.scrollToBottomSuccessDistanceThreshold,
+                   settleReason != .bottomClearanceChange
                 {
-                    if settleReason != .bottomClearanceChange {
-                        requestPinnedLiveBottom(proxy: proxy, source: .bottomClearanceChange)
-                    }
+                    requestPinnedLiveBottom(proxy: proxy, source: .bottomClearanceChange)
                 }
                 resolvePendingBottomScrollOutcomeOnSettled(for: settleReason)
             }
@@ -3695,9 +3697,7 @@ struct AgentModeChatDetailView: View {
     }
 
     private func revealCompressedHistoryIfNeeded(userInitiated: Bool = false) {
-        guard userInitiated else { return }
-        guard canRevealCompressedHistory else { return }
-        guard !usesCompressedHistory else { return }
+        guard userInitiated, canRevealCompressedHistory, !usesCompressedHistory else { return }
         prepareCompressionTransition(targetShowCompressedHistory: true)
         showCompressedHistory = true
         if let currentTabID {
@@ -3848,9 +3848,7 @@ struct AgentModeChatDetailView: View {
             clearTrackedViewportCandidateState()
             return
         }
-        guard pendingCompressionRestoreStrategy == nil else { return }
-        guard !isRehydrateRestoreActive else { return }
-        guard isCurrentTranscriptPresentationHydrated else { return }
+        guard pendingCompressionRestoreStrategy == nil, !isRehydrateRestoreActive, isCurrentTranscriptPresentationHydrated else { return }
         viewportRegistry.replaceViewportCandidates(candidates)
         let previousTargetID = topVisibleViewportTargetID
         let previousAnchor = topVisibleViewportAnchor
@@ -4062,8 +4060,7 @@ struct AgentModeChatDetailView: View {
     }
 
     private func shouldSuppressRepinGraceDetach(newMetrics: AgentTranscriptScrollMetrics) -> Bool {
-        guard isRepinGraceActive() else { return false }
-        guard isPinnedToLiveBottom else { return false }
+        guard isRepinGraceActive(), isPinnedToLiveBottom else { return false }
         return newMetrics.distanceToBottom <= Self.repinDistanceThreshold
     }
 
@@ -4071,17 +4068,17 @@ struct AgentModeChatDetailView: View {
     private func userScrollPhase(from phase: ScrollPhase) -> AgentTranscriptUserScrollPhase {
         switch phase {
         case .idle:
-            return .idle
+            .idle
         case .tracking:
-            return .tracking
+            .tracking
         case .interacting:
-            return .interacting
+            .interacting
         case .decelerating:
-            return .decelerating
+            .decelerating
         case .animating:
-            return .animating
+            .animating
         @unknown default:
-            return .idle
+            .idle
         }
     }
 
@@ -4091,8 +4088,8 @@ struct AgentModeChatDetailView: View {
         metrics: AgentTranscriptScrollMetrics
     ) {
         _ = proxy
-        guard phase != .idle, phase != .animating else { return }
-        guard supportsAutoScroll,
+        guard phase != .idle, phase != .animating,
+              supportsAutoScroll,
               !isInteractionBlockerVisible
         else {
             return
@@ -4722,10 +4719,12 @@ struct AgentModeChatDetailView: View {
         Task { @MainActor in
             await Task.yield()
             await Task.yield()
-            guard token == rehydrateLayoutPassToken else { return }
-            guard case let .awaitingLayout(phaseTabID, phaseRevision, target) = rehydrateRestorePhase else { return }
-            guard phaseTabID == tabID, phaseRevision == presentationRevision else { return }
-            guard currentTabID == tabID else { return }
+            guard token == rehydrateLayoutPassToken,
+                  case let .awaitingLayout(phaseTabID, phaseRevision, target) = rehydrateRestorePhase,
+                  phaseTabID == tabID,
+                  phaseRevision == presentationRevision,
+                  currentTabID == tabID
+            else { return }
             guard isCurrentTranscriptPresentationHydrated else {
                 rehydrateRestorePhase = .awaitingHydration(tabID: tabID, target: target)
                 return
@@ -4778,11 +4777,7 @@ struct AgentModeChatDetailView: View {
             scheduleAwaitingLayoutRestore(for: currentTabID, presentationRevision: presentationRevision, proxy: proxy)
             return true
         case let .awaitingLayout(tabID, presentationRevision, target):
-            guard tabID == currentTabID else {
-                endRehydrateRestore(clearDidChatChange: true)
-                return false
-            }
-            guard !isUserInteractingWithScroll else {
+            guard tabID == currentTabID, !isUserInteractingWithScroll else {
                 endRehydrateRestore(clearDidChatChange: true)
                 return false
             }
@@ -4856,14 +4851,15 @@ struct AgentModeChatDetailView: View {
     }
 
     private func continueRehydrateRestoreIfNeeded(proxy: ScrollViewProxy, source: RehydrateRestoreContinuationSource) -> Bool {
-        guard source == .settled else { return false }
-        guard case let .driving(tabID, _, target) = rehydrateRestorePhase else { return false }
-        guard case .liveBottom = target else { return false }
-        guard tabID == currentTabID else { return false }
-        guard !programmaticScrollGate.isInFlight else { return false }
-        guard isCurrentTranscriptPresentationHydrated else { return false }
-        guard !isUserInteractingWithScroll else { return false }
-        guard !isNearBottom else { return false }
+        guard source == .settled,
+              case let .driving(tabID, _, target) = rehydrateRestorePhase,
+              case .liveBottom = target,
+              tabID == currentTabID,
+              !programmaticScrollGate.isInFlight,
+              isCurrentTranscriptPresentationHydrated,
+              !isUserInteractingWithScroll,
+              !isNearBottom
+        else { return false }
         let currentRevision = currentTranscriptPresentationRevision
         let retryKey = AgentTranscriptRehydrateRetryKey(
             tabID: tabID,
@@ -4890,8 +4886,7 @@ struct AgentModeChatDetailView: View {
             endRehydrateRestore(clearDidChatChange: true)
             return
         }
-        guard !programmaticScrollGate.isInFlight else { return }
-        guard isCurrentTranscriptPresentationHydrated else { return }
+        guard !programmaticScrollGate.isInFlight, isCurrentTranscriptPresentationHydrated else { return }
         guard !isUserInteractingWithScroll else {
             endRehydrateRestore(clearDidChatChange: true)
             return
@@ -5212,16 +5207,14 @@ struct AgentModeChatDetailView: View {
         newMetrics: AgentTranscriptScrollMetrics
     ) {
         guard let pendingBottomScrollOutcome,
-              pendingBottomScrollOutcome.didExecute
+              pendingBottomScrollOutcome.didExecute,
+              AgentTranscriptBottomScrollOutcomeLayoutPolicy.hasMaterialLayoutMutation(
+                  oldMetrics: oldMetrics,
+                  newMetrics: newMetrics,
+                  contentHeightThreshold: Self.bottomScrollOutcomeContentHeightMutationThreshold,
+                  viewportHeightThreshold: Self.bottomScrollOutcomeViewportHeightMutationThreshold
+              )
         else {
-            return
-        }
-        guard AgentTranscriptBottomScrollOutcomeLayoutPolicy.hasMaterialLayoutMutation(
-            oldMetrics: oldMetrics,
-            newMetrics: newMetrics,
-            contentHeightThreshold: Self.bottomScrollOutcomeContentHeightMutationThreshold,
-            viewportHeightThreshold: Self.bottomScrollOutcomeViewportHeightMutationThreshold
-        ) else {
             return
         }
         pendingBottomScrollOutcomeLastLayoutMutationAt = Date()
@@ -5276,8 +5269,7 @@ struct AgentModeChatDetailView: View {
     }
 
     private func cancelInvalidPendingBottomScrollOutcome(reason: String) {
-        guard let pendingBottomScrollOutcome else { return }
-        guard !isBottomScrollOutcomeContextValid(pendingBottomScrollOutcome.source) else { return }
+        guard let pendingBottomScrollOutcome, !isBottomScrollOutcomeContextValid(pendingBottomScrollOutcome.source) else { return }
         cancelPendingBottomScrollOutcome(reason: reason)
     }
 

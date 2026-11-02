@@ -937,9 +937,9 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                         .compactMap { block -> String? in
                             switch block {
                             case .text(text: let text, annotations: _, _meta: _):
-                                return text
+                                text
                             default:
-                                return nil
+                                nil
                             }
                         }
                         .joined(separator: "\n")

@@ -230,11 +230,11 @@ struct WorkspaceCodemapGraphCatalogCoverage: Hashable {
         }
 
         guard let terminalCount = workspaceCodemapGraphAdding(
-            terminalArtifactCount,
-            terminalExcludedCount
-        ), let contributedAndEmptyCount = workspaceCodemapGraphAdding(contributedCount, emptyCount),
-        let expectedClassifiedCount = workspaceCodemapGraphAdding(contributedAndEmptyCount, terminalCount),
-        let expectedSupportedCount = workspaceCodemapGraphAdding(expectedClassifiedCount, pendingCount)
+                  terminalArtifactCount,
+                  terminalExcludedCount
+              ), let contributedAndEmptyCount = workspaceCodemapGraphAdding(contributedCount, emptyCount),
+              let expectedClassifiedCount = workspaceCodemapGraphAdding(contributedAndEmptyCount, terminalCount),
+              let expectedSupportedCount = workspaceCodemapGraphAdding(expectedClassifiedCount, pendingCount)
         else { return .failure(.accountingOverflow) }
         guard classifiedCount == expectedClassifiedCount else {
             return .failure(.classifiedCountMismatch(

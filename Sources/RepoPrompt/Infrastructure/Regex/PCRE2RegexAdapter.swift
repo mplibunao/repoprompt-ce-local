@@ -205,9 +205,8 @@ enum RepoPromptPCRE2Adapter {
         wholeWord: Bool,
         caseInsensitive: Bool
     ) -> PCRE2ASCIIWholeWordLiteral? {
-        guard wholeWord else { return nil }
-        guard pattern.unicodeScalars.allSatisfy({ $0.value < 128 }) else { return nil }
-        guard !pattern.isEmpty,
+        guard wholeWord, pattern.unicodeScalars.allSatisfy({ $0.value < 128 }),
+              !pattern.isEmpty,
               pattern.utf8.allSatisfy({ ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) || $0 == 95 })
         else {
             return nil

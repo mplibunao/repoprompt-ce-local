@@ -273,8 +273,7 @@ final class AgentModelsSettingsViewModel: ObservableObject {
     }
 
     func setInheritanceMode(_ mode: AgentModelsInheritanceMode) {
-        guard let workspaceID else { return }
-        guard inheritanceMode != mode else { return }
+        guard let workspaceID, inheritanceMode != mode else { return }
         settingsManager.setWorkspaceAgentModelsInheritanceMode(workspaceID: workspaceID, mode: mode)
         reloadScopedState()
         refresh()
@@ -442,17 +441,16 @@ final class AgentModelsSettingsViewModel: ObservableObject {
         reloadScopedState()
         guard editingScope == expectedScope,
               let resolution = roleDefaultsResolutions.first(where: { $0.role == role }),
-              resolution.effective.isPinTarget(providerID: expectedProviderID, modelRaw: expectedModelRaw)
-        else { return }
-        guard settingsManager.setAgentModelsRoleModelParameter(
-            change,
-            roleRawValue: role.rawValue,
-            displayedSelectionID: AgentModelSelectionID(
-                agentRaw: resolution.effective.agent.rawValue,
-                modelRaw: resolution.effective.modelRaw
-            ),
-            scope: editingScope
-        ) else { return }
+              resolution.effective.isPinTarget(providerID: expectedProviderID, modelRaw: expectedModelRaw),
+              settingsManager.setAgentModelsRoleModelParameter(
+                  change,
+                  roleRawValue: role.rawValue,
+                  displayedSelectionID: AgentModelSelectionID(
+                      agentRaw: resolution.effective.agent.rawValue,
+                      modelRaw: resolution.effective.modelRaw
+                  ),
+                  scope: editingScope
+              ) else { return }
         reloadScopedState()
         // `postAgentRoleDefaultsChanged()` already refreshes; calling it here too is dead weight.
         postAgentRoleDefaultsChanged()
@@ -477,14 +475,13 @@ final class AgentModelsSettingsViewModel: ObservableObject {
         reloadScopedState()
         let displayed = selectedContextBuilderSelection
         guard editingScope == expectedScope,
-              displayed.isPinTarget(providerID: expectedProviderID, modelRaw: expectedModelRaw)
-        else { return }
-        guard settingsManager.setAgentModelsContextBuilderModelParameter(
-            change,
-            agentRaw: displayed.agent.rawValue,
-            modelRaw: displayed.modelRaw,
-            scope: editingScope
-        ) else { return }
+              displayed.isPinTarget(providerID: expectedProviderID, modelRaw: expectedModelRaw),
+              settingsManager.setAgentModelsContextBuilderModelParameter(
+                  change,
+                  agentRaw: displayed.agent.rawValue,
+                  modelRaw: displayed.modelRaw,
+                  scope: editingScope
+              ) else { return }
         reloadScopedState()
         refresh()
         postShouldRefresh(reason: "agent_models.context_builder_model_parameter")
@@ -519,8 +516,7 @@ final class AgentModelsSettingsViewModel: ObservableObject {
     // MARK: - Bulk Apply
 
     func applyAllRecommendations(includePresetExposure: Bool = false) {
-        guard showsRecommendationActions else { return }
-        guard workspaceID != nil else { return }
+        guard showsRecommendationActions, workspaceID != nil else { return }
         isApplyingAll = true
 
         // Resolve every recommendation up front, then apply them to the live base inside one

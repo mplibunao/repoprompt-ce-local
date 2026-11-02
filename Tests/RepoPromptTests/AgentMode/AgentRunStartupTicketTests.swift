@@ -581,7 +581,9 @@ import XCTest
             var dispatches = 0
             fixture.viewModel.test_afterMCPDispatchSubmission = {
                 dispatches += 1
-                if dispatches == 1 { await bookkeepingGate.wait() }
+                if dispatches == 1 {
+                    await bookkeepingGate.wait()
+                }
             }
             let viewModel = fixture.viewModel
             let sessionID = fixture.sessionID
@@ -738,7 +740,9 @@ import XCTest
             var publications = 0
             fixture.viewModel.test_beforeTerminalPublication = {
                 publications += 1
-                if publications == 1 { await publicationGate.wait() }
+                if publications == 1 {
+                    await publicationGate.wait()
+                }
             }
             let headTurnID = try XCTUnwrap(claude.sentTurnIDs.first)
             await runtime.emit(.turnCompleted(turnID: headTurnID, status: .completed))
@@ -800,7 +804,9 @@ import XCTest
             var publications = 0
             fixture.viewModel.test_beforeTerminalPublication = {
                 publications += 1
-                if publications == 1 { await publicationGate.wait() }
+                if publications == 1 {
+                    await publicationGate.wait()
+                }
             }
             let runtime = try XCTUnwrap(claude.runtimes.last)
             let headTurnID = try XCTUnwrap(claude.sentTurnIDs.first)
@@ -1374,7 +1380,9 @@ import XCTest
             _ condition: @MainActor () -> Bool
         ) async throws {
             struct ConditionTimeout: Error {}
-            if await startupTestWaitBounded(seconds: seconds, until: condition) { return }
+            if await startupTestWaitBounded(seconds: seconds, until: condition) {
+                return
+            }
             XCTFail("Timed out waiting for condition", file: file, line: line)
             throw ConditionTimeout()
         }

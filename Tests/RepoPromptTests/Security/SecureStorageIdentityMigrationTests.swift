@@ -673,12 +673,16 @@ private final class TestIdentityMigrationStateStore: SecureStorageIdentityMigrat
     }
 
     func load() throws -> SecureStorageIdentityMigrationManifest? {
-        if let loadError { throw loadError }
+        if let loadError {
+            throw loadError
+        }
         return manifest
     }
 
     func create(_ manifest: SecureStorageIdentityMigrationManifest) throws {
-        if let createError { throw createError }
+        if let createError {
+            throw createError
+        }
         if saveFailuresRemaining > 0 {
             saveFailuresRemaining -= 1
             throw TestStateError.failed
@@ -738,7 +742,9 @@ private final class MigrationTestBackend: SecureKeyValueStorageBackend, @uncheck
     func save(_ value: String, for key: String, accessMode: KeychainAccessMode) throws {
         try withLock {
             calls.append(Call(operation: .save, key: key, accessMode: accessMode))
-            if let error = saveErrors[key] { throw error }
+            if let error = saveErrors[key] {
+                throw error
+            }
             values[key] = value
         }
     }
@@ -746,7 +752,9 @@ private final class MigrationTestBackend: SecureKeyValueStorageBackend, @uncheck
     func create(_ value: String, for key: String, accessMode: KeychainAccessMode) throws {
         try withLock {
             calls.append(Call(operation: .create, key: key, accessMode: accessMode))
-            if let error = createErrors[key] { throw error }
+            if let error = createErrors[key] {
+                throw error
+            }
             guard values[key] == nil else { throw KeychainService.KeychainError.duplicateItem }
             values[key] = value
         }
@@ -755,7 +763,9 @@ private final class MigrationTestBackend: SecureKeyValueStorageBackend, @uncheck
     func get(for key: String, accessMode: KeychainAccessMode) throws -> String {
         try withLock {
             calls.append(Call(operation: .get, key: key, accessMode: accessMode))
-            if let error = getErrors[key] { throw error }
+            if let error = getErrors[key] {
+                throw error
+            }
             guard let value = values[key] else { throw KeychainService.KeychainError.itemNotFound }
             return value
         }
@@ -764,7 +774,9 @@ private final class MigrationTestBackend: SecureKeyValueStorageBackend, @uncheck
     func delete(for key: String, accessMode: KeychainAccessMode) throws {
         try withLock {
             calls.append(Call(operation: .delete, key: key, accessMode: accessMode))
-            if let error = deleteErrors[key] { throw error }
+            if let error = deleteErrors[key] {
+                throw error
+            }
             values.removeValue(forKey: key)
         }
     }

@@ -84,7 +84,9 @@ struct PersistentHashMap<Key: Hashable, Value> {
         }
         previous = Self.insert(into: &root!, key: key, value: value, hash: hash, shift: 0, copies: &copies)
         copiedEntryCount += copies
-        if previous == nil { count += 1 }
+        if previous == nil {
+            count += 1
+        }
         return previous
     }
 
@@ -97,7 +99,9 @@ struct PersistentHashMap<Key: Hashable, Value> {
         Self.remove(from: &root!, key: key, hash: hash, shift: 0, copies: &copies)
         copiedEntryCount += copies
         count -= 1
-        if count == 0 { root = nil }
+        if count == 0 {
+            root = nil
+        }
         return previous
     }
 
@@ -229,7 +233,9 @@ struct PersistentHashMap<Key: Hashable, Value> {
         ensureUnique(&node, copies: &copies)
         if node.isCollision {
             if let index = node.entries.firstIndex(where: {
-                if case let .pair(existingKey, _, _) = $0 { return existingKey == key }
+                if case let .pair(existingKey, _, _) = $0 {
+                    return existingKey == key
+                }
                 return false
             }) {
                 node.entries.remove(at: index)
@@ -320,7 +326,9 @@ extension PersistentHashMap: ExpressibleByDictionaryLiteral {
 extension PersistentHashMap: Equatable where Value: Equatable {
     static func == (lhs: Self, rhs: Self) -> Bool {
         guard lhs.count == rhs.count else { return false }
-        if lhs.root === rhs.root { return true }
+        if lhs.root === rhs.root {
+            return true
+        }
         return lhs.allSatisfy { rhs[$0.key] == $0.value }
     }
 }

@@ -186,8 +186,7 @@ struct CodexHookTrustService {
     }
 
     private static func isUnsupportedMethodError(_ error: Error) -> Bool {
-        guard let requestError = error as? RequestError else { return false }
-        guard case .unsupportedMethod = requestError else { return false }
+        guard let requestError = error as? RequestError, case .unsupportedMethod = requestError else { return false }
         return true
     }
 }

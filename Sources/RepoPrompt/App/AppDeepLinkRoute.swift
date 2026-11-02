@@ -65,13 +65,9 @@ struct AgentSessionDeepLinkRoute: Equatable {
     }
 
     static func parse(notificationUserInfo userInfo: [AnyHashable: Any]) -> AgentSessionDeepLinkRoute? {
-        guard stringValue(for: AppDeepLinkRouteUserInfoKey.routeKind, in: userInfo) == AppDeepLinkRouteUserInfoValue.agentSessionKind else {
-            return nil
-        }
-        guard intValue(for: AppDeepLinkRouteUserInfoKey.routeVersion, in: userInfo) == AppDeepLinkRouteUserInfoValue.currentRouteVersion else {
-            return nil
-        }
-        guard let workspaceID = uuidValue(for: AppDeepLinkRouteUserInfoKey.workspaceID, in: userInfo),
+        guard stringValue(for: AppDeepLinkRouteUserInfoKey.routeKind, in: userInfo) == AppDeepLinkRouteUserInfoValue.agentSessionKind,
+              intValue(for: AppDeepLinkRouteUserInfoKey.routeVersion, in: userInfo) == AppDeepLinkRouteUserInfoValue.currentRouteVersion,
+              let workspaceID = uuidValue(for: AppDeepLinkRouteUserInfoKey.workspaceID, in: userInfo),
               let tabID = uuidValue(for: AppDeepLinkRouteUserInfoKey.tabID, in: userInfo)
         else {
             return nil
@@ -99,12 +95,8 @@ struct AgentSessionDeepLinkRoute: Equatable {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               AppDeepLinkURLScheme.isSupported(components.scheme),
               components.host?.lowercased() == "agent",
-              components.path == "/session"
-        else {
-            return nil
-        }
-
-        guard let workspaceID = uuidQueryItem(AppDeepLinkRouteQueryItem.workspaceID, in: components),
+              components.path == "/session",
+              let workspaceID = uuidQueryItem(AppDeepLinkRouteQueryItem.workspaceID, in: components),
               let tabID = uuidQueryItem(AppDeepLinkRouteQueryItem.tabID, in: components)
         else {
             return nil

@@ -514,7 +514,9 @@ final class CursorACPParameterBindingTests: XCTestCase {
             "ACP_RESET_TRIGGER": trigger
         ]
         environment["ACP_RESET_EFFORT"] = resetEffort
-        if resetModel { environment["ACP_RESET_MODEL"] = "model-b" }
+        if resetModel {
+            environment["ACP_RESET_MODEL"] = "model-b"
+        }
         let fixture = try makeFixture(shape: "modern", extraEnvironment: environment, providerID: .cursor, resumeSessionID: fallback ? "missing-session" : nil)
         _ = try await fixture.controller.bootstrap()
         if reused {
@@ -546,9 +548,13 @@ final class CursorACPParameterBindingTests: XCTestCase {
         )
         do {
             try await fixture.controller.prompt(AgentMessage(userMessage: "Configured turn"), request: request)
-            if shouldReject { XCTFail("Prompt must reject a configuration changed by a later mutation") }
+            if shouldReject {
+                XCTFail("Prompt must reject a configuration changed by a later mutation")
+            }
         } catch {
-            if !shouldReject { throw error }
+            if !shouldReject {
+                throw error
+            }
             XCTAssertTrue(error.localizedDescription.contains("before prompt"), error.localizedDescription)
         }
         await fixture.controller.shutdown()

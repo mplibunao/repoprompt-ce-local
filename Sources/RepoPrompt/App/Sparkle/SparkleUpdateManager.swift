@@ -55,8 +55,8 @@ final class SparkleUpdaterManager: ObservableObject {
     }
 
     private static func canonicalizeFeedURL(_ raw: String) -> CanonicalURL? {
-        guard let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
-        guard let scheme = url.scheme?.lowercased(),
+        guard let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(),
               let host = url.host?.lowercased() else { return nil }
 
         // Normalize trailing slash

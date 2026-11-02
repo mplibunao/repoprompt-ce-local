@@ -420,10 +420,7 @@ actor ACPAgentSessionController {
             // Grok full access is a launch flag and "default" sends no model RPC, so a live
             // process can never move between permission profiles or back to the provider
             // default: those transitions must build a fresh controller.
-            guard runRequest.autoApproveAllToolPermissions == request.autoApproveAllToolPermissions else {
-                return false
-            }
-            guard normalizedModelString(runRequest.modelString) == normalizedModelString(request.modelString) else {
+            guard runRequest.autoApproveAllToolPermissions == request.autoApproveAllToolPermissions, normalizedModelString(runRequest.modelString) == normalizedModelString(request.modelString) else {
                 return false
             }
             return true
@@ -861,7 +858,7 @@ actor ACPAgentSessionController {
                       hasOk,
                       let confirmedModel = modelOutcome?["Ok"] as? String,
                       confirmedModel.trimmingCharacters(in: .whitespacesAndNewlines)
-                      .caseInsensitiveCompare(selectionRequest.expectedConfirmationModelRaw) == .orderedSame
+                          .caseInsensitiveCompare(selectionRequest.expectedConfirmationModelRaw) == .orderedSame
                 else {
                     // Ambiguous post-send outcome (missing/malformed/mixed/mismatched ack):
                     // the server may or may not have applied anything, and neither the
@@ -965,10 +962,7 @@ actor ACPAgentSessionController {
     }
 
     private func discoverSessionModelParametersSerialized(_ modelRaw: String) async throws -> ACPDiscoveredSessionModels {
-        guard let sessionID else {
-            throw ControllerError.invalidState(expected: "sessionOpen", actual: state)
-        }
-        guard state == .sessionOpen else {
+        guard let sessionID, state == .sessionOpen else {
             throw ControllerError.invalidState(expected: "sessionOpen", actual: state)
         }
         guard provider.supportsParameterizedModelPicker else {
@@ -1065,10 +1059,7 @@ actor ACPAgentSessionController {
     private func applySessionModelParameterSelectionsSerialized(
         _ selections: [ACPModelParameterSelection]
     ) async throws -> ACPModelParameterApplicationReport {
-        guard let sessionID else {
-            throw ControllerError.invalidState(expected: "sessionOpen or promptRunning", actual: state)
-        }
-        guard state == .sessionOpen || state == .promptRunning else {
+        guard let sessionID, state == .sessionOpen || state == .promptRunning else {
             throw ControllerError.invalidState(expected: "sessionOpen or promptRunning", actual: state)
         }
         guard provider.supportsParameterizedModelPicker else {
@@ -2163,13 +2154,13 @@ actor ACPAgentSessionController {
         }
         for selection in ACPModelParameterSelection.normalized(request.modelParameterSelections) {
             guard selection.identity == ACPModelParameterIdentity(
-                providerID: provider.providerID,
-                baseModelRaw: currentModel,
-                kind: selection.kind
-            ),
-                let definition = parameterSet.definition(kind: selection.kind),
-                let choice = definition.choice(matching: selection.valueRaw),
-                definition.currentValueRaw == choice.rawValue
+                      providerID: provider.providerID,
+                      baseModelRaw: currentModel,
+                      kind: selection.kind
+                  ),
+                  let definition = parameterSet.definition(kind: selection.kind),
+                  let choice = definition.choice(matching: selection.valueRaw),
+                  definition.currentValueRaw == choice.rawValue
             else {
                 throw ControllerError.requestFailed(
                     "\(selection.kind.rawValue.capitalized) selection is no longer current before prompt submission. Retry the requested configuration."
@@ -2346,8 +2337,8 @@ actor ACPAgentSessionController {
 
     private static func redactedLaunchJSONArgument(_ argument: String) -> String? {
         let trimmed = argument.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("[") else { return nil }
-        guard let data = trimmed.data(using: .utf8),
+        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("["),
+              let data = trimmed.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data),
               let sanitizedData = try? JSONSerialization.data(
                   withJSONObject: sanitizedLaunchJSONValue(json),

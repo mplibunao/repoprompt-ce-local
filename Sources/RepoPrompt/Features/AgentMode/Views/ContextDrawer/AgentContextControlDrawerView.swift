@@ -84,7 +84,9 @@ struct AgentContextControlDrawerView: View {
 
     private var fileCodemapCountReadiness: AgentContextFileCodemapCountReadiness {
         let identity = exportContext.modelRequestIdentity
-        if hasPendingSwitchKeyChange { return unknownFileCodemapCountReadiness }
+        if hasPendingSwitchKeyChange {
+            return unknownFileCodemapCountReadiness
+        }
         if selectedFilesBlankingIdentity == identity {
             return modelCoordinator.displayedFileCodemapCountReadiness(for: identity) ?? unknownFileCodemapCountReadiness
         }
@@ -299,9 +301,7 @@ struct AgentContextControlDrawerView: View {
     }
 
     private func updateSwitchBlankingTargetIfNeeded() {
-        guard isPresented else { return }
-        guard isSwitchBlankingSelectedFiles else { return }
-        guard !hasPendingSwitchKeyChange else { return }
+        guard isPresented, isSwitchBlankingSelectedFiles, !hasPendingSwitchKeyChange else { return }
         let request = exportContext.makeModelRequest(flushPendingUI: false)
         let shouldRefreshTarget = selectedFilesBlankingIdentity != request.identity
         selectedFilesBlankingIdentity = request.identity
@@ -314,8 +314,7 @@ struct AgentContextControlDrawerView: View {
     }
 
     private func updateTokenBlankingSelectionIfNeeded() {
-        guard isPresented else { return }
-        guard tokenBlankingSelection != nil else { return }
+        guard isPresented, tokenBlankingSelection != nil else { return }
         captureTokenBlankingSelection()
         clearCompletedTokenBlankingIfNeeded()
     }
@@ -328,8 +327,7 @@ struct AgentContextControlDrawerView: View {
         currentIdentity: AgentSelectedFilesModelIdentity? = nil
     ) {
         let identity = currentIdentity ?? exportContext.modelRequestIdentity
-        guard selectedFilesBlankingIdentity == identity else { return }
-        guard modelCoordinator.completedModelMatches(identity) else { return }
+        guard selectedFilesBlankingIdentity == identity, modelCoordinator.completedModelMatches(identity) else { return }
         selectedFilesBlankingIdentity = nil
     }
 

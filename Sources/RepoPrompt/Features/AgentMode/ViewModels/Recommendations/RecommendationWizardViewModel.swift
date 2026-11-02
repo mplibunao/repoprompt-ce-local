@@ -146,8 +146,7 @@ final class RecommendationWizardViewModel: ObservableObject {
 
     /// Whether to show a badge on the toolbar button.
     var shouldShowBadge: Bool {
-        guard let wsID = workspaceManager?.activeWorkspaceID else { return false }
-        guard hasActiveRecommendations else { return false }
+        guard let wsID = workspaceManager?.activeWorkspaceID, hasActiveRecommendations else { return false }
         return !engine.hasCompletedRecently(workspaceID: wsID)
     }
 
@@ -697,8 +696,7 @@ final class RecommendationWizardViewModel: ObservableObject {
 
     /// Apply the current step's recommendation and advance to next step.
     func applyCurrentStep() {
-        guard let identity = validatedActionIdentity() else { return }
-        guard let step = currentStep else { return }
+        guard let identity = validatedActionIdentity(), let step = currentStep else { return }
         var applied = RecommendationSet()
 
         switch step {
@@ -752,8 +750,7 @@ final class RecommendationWizardViewModel: ObservableObject {
 
     /// Mute the current step's recommendation and advance to next step.
     func muteCurrentStep() {
-        guard let identity = validatedActionIdentity() else { return }
-        guard let step = currentStep else { return }
+        guard let identity = validatedActionIdentity(), let step = currentStep else { return }
 
         let kind: RecommendationKind? = switch step {
         case .chatModel: .chatModel

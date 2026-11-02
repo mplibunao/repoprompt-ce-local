@@ -86,8 +86,7 @@ final class AgentWorkspaceSessionIndexStore: ObservableObject {
 
     @Published private(set) var sessionListCacheReady: Bool = false {
         didSet {
-            guard sessionListCacheReady != oldValue else { return }
-            guard !suppressDelegateNotifications else { return }
+            guard sessionListCacheReady != oldValue, !suppressDelegateNotifications else { return }
             delegate?.sessionIndexStore(self, didChangeStateWithReason: .sessionList)
         }
     }

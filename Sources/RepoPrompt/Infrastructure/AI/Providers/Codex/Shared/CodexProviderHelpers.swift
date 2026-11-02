@@ -181,11 +181,7 @@ enum CodexProviderHelpers {
         // - "Error: invalid transport in \"mcp_servers.Server Name\""
         // - "Error: invalid transport in mcp_servers.ServerName"
         let transportPattern = #"invalid transport(?:\s+in)?[\s\S]*?['"`]?mcp_servers\.([^'"`\r\n]+)"#
-        guard let transportRegex = try? NSRegularExpression(pattern: transportPattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
-            return nil
-        }
-
-        guard let match = transportRegex.firstMatch(in: stderr, range: range), match.numberOfRanges >= 2 else {
+        guard let transportRegex = try? NSRegularExpression(pattern: transportPattern, options: [.caseInsensitive, .dotMatchesLineSeparators]), let match = transportRegex.firstMatch(in: stderr, range: range), match.numberOfRanges >= 2 else {
             return nil
         }
 
@@ -198,8 +194,7 @@ enum CodexProviderHelpers {
     /// Returns a fallback model when Codex reports that a GPT-5.3 Codex model is unavailable.
     /// Maps reasoning tiers from gpt-5.3-codex-* to gpt-5.2-codex-* for a single retry.
     static func codexFallbackModelIfNeeded(attemptedModel: String?, errorDetail: String) -> String? {
-        guard let attemptedModel, attemptedModel != "default" else { return nil }
-        guard attemptedModel.hasPrefix("gpt-5.3-codex") else { return nil }
+        guard let attemptedModel, attemptedModel != "default", attemptedModel.hasPrefix("gpt-5.3-codex") else { return nil }
 
         let lowerDetail = errorDetail.lowercased()
         let indicatesMissingModel = lowerDetail.contains("model_not_found") ||
@@ -252,11 +247,15 @@ enum CodexProviderHelpers {
     }
 
     private static func shouldInsertAssistantSentenceBreak(existingText: String, delta: String) -> Bool {
-        guard !existingText.isEmpty, !delta.isEmpty else { return false }
-        guard !isInsideFencedCodeBlock(existingText) else { return false }
-        guard !isInsideInlineCodeSpan(existingText) else { return false }
-        guard let lastCharacter = existingText.last, lastCharacter == "." else { return false }
-        guard let previousCharacter = existingText.dropLast().last, previousCharacter.isLowercase else { return false }
+        guard !existingText.isEmpty,
+              !delta.isEmpty,
+              !isInsideFencedCodeBlock(existingText),
+              !isInsideInlineCodeSpan(existingText),
+              let lastCharacter = existingText.last,
+              lastCharacter == ".",
+              let previousCharacter = existingText.dropLast().last,
+              previousCharacter.isLowercase
+        else { return false }
         return startsWithSentenceLikeWord(delta)
     }
 

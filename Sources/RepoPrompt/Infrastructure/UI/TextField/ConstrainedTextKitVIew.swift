@@ -92,7 +92,9 @@ struct ConstrainedTextKitView: NSViewRepresentable {
     static func lineCount(in text: String) -> Int {
         guard !text.isEmpty else { return 1 } // an empty string is one blank line
         return text.reduce(into: 1) { count, ch in // start at 1, add 1 per "\n"
-            if ch == "\n" { count += 1 }
+            if ch == "\n" {
+                count += 1
+            }
         }
     }
 
@@ -279,7 +281,9 @@ struct ConstrainedTextKitView: NSViewRepresentable {
 
         // Refresh text if external binding changed
         if tv.string != text {
-            if tv.hasMarkedText() { return }
+            if tv.hasMarkedText() {
+                return
+            }
 
             context.coordinator.performExternalReplacement(in: tv) {
                 tv.string = text

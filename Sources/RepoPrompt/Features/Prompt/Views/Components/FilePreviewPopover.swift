@@ -154,7 +154,9 @@ struct FilePreviewPopover: View {
 
             // Load the full content first
             let fullContent = await file.latestContent ?? "Error loading file content"
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                return
+            }
 
             // Decide whether to show slices or full content
             let shouldShowSlices = showSlicesOnly && fileSlices != nil && !(fileSlices?.isEmpty ?? true)

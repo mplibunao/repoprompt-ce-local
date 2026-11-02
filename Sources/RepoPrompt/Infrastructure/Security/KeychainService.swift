@@ -380,7 +380,9 @@ final class TrustedApplicationsKeychainAttributeProvider: KeychainItemCreationAt
     func attributesForNewItem() throws -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
-        if let cachedAttributes { return cachedAttributes }
+        if let cachedAttributes {
+            return cachedAttributes
+        }
 
         var trustedApplications: [SecTrustedApplication] = []
         trustedApplications.reserveCapacity(applications.count)

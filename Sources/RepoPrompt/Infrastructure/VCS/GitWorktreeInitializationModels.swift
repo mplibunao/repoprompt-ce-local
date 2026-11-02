@@ -366,16 +366,20 @@ struct GitWorktreeCreationReceipt: Equatable, @unchecked Sendable {
     ) -> WorkspaceRootSeedFallbackReason? {
         guard nowUptimeNanoseconds <= expiresAtUptimeNanoseconds else { return .expiredReceipt }
         guard witnessCoverage.provesCreationInterval else {
-            if witnessCoverage.overflowed { return .witnessOverflow }
-            if witnessCoverage.hadDrop { return .witnessDrop }
+            if witnessCoverage.overflowed {
+                return .witnessOverflow
+            }
+            if witnessCoverage.hadDrop {
+                return .witnessDrop
+            }
             return .witnessGap
         }
         guard destinationIsAppManaged else { return .unsupportedDestination }
         guard includeCopyWasComplete,
               !includeCopyHadFailures
         else { return .includeCopyFailure }
-        guard parentCompatibilityKey.searchABI == .current else { return .compatibilityMismatch }
-        guard parentCompatibilityKey.treeOID == parentAuthorityBefore.treeOID,
+        guard parentCompatibilityKey.searchABI == .current,
+              parentCompatibilityKey.treeOID == parentAuthorityBefore.treeOID,
               targetAuthorityAfter.treeOID == resolvedBaseTreeOID,
               parentCompatibilityKey.repositoryNamespace == targetAuthorityAfter.repositoryNamespace,
               parentCompatibilityKey.repositoryRelativeRootPrefix == repositoryRelativeRootPrefix,

@@ -417,7 +417,9 @@ import XCTest
             deadline: TimeInterval,
             wakeSignal: DispatchSemaphore
         ) throws -> MarkerWaitOutcome {
-            if FileManager.default.fileExists(atPath: markerURL.path) { return .observed }
+            if FileManager.default.fileExists(atPath: markerURL.path) {
+                return .observed
+            }
             let directoryURL = markerURL.deletingLastPathComponent()
             let descriptor = Darwin.open(directoryURL.path, O_EVTONLY)
             guard descriptor >= 0 else {
@@ -438,7 +440,9 @@ import XCTest
             source.resume()
             defer { source.cancel() }
 
-            if FileManager.default.fileExists(atPath: markerURL.path) { return .observed }
+            if FileManager.default.fileExists(atPath: markerURL.path) {
+                return .observed
+            }
             guard wakeSignal.wait(timeout: .now() + deadline) == .success else {
                 return FileManager.default.fileExists(atPath: markerURL.path) ? .observed : .deadlineExpired
             }
@@ -461,7 +465,9 @@ import XCTest
         }
 
         private func terminateAndReap(_ process: Process, completion: DispatchSemaphore) -> Bool {
-            if process.isRunning { _ = Darwin.kill(process.processIdentifier, SIGKILL) }
+            if process.isRunning {
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            }
             return completion.wait(timeout: .now() + 5) == .success && !process.isRunning
         }
 

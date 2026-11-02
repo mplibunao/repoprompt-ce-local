@@ -224,8 +224,12 @@ struct WorkspaceCodemapAutomaticSelectionResult: Equatable {
         guard !roots.isEmpty else { return .unavailable([.emptySources]) }
         let issues = roots.flatMap(\.issues).sorted(by: automaticSelectionIssuePrecedes)
         let hasTargets = roots.contains { !$0.targets.isEmpty }
-        if roots.allSatisfy({ $0.status == .ok }) { return .ok }
-        if hasTargets { return .partial(issues) }
+        if roots.allSatisfy({ $0.status == .ok }) {
+            return .ok
+        }
+        if hasTargets {
+            return .partial(issues)
+        }
         if roots.contains(where: { $0.status == .pending || $0.status == .partial }) {
             return .pending(issues)
         }
@@ -270,7 +274,9 @@ func workspaceCodemapRootEpochPrecedes(
     _ lhs: WorkspaceCodemapRootEpoch,
     _ rhs: WorkspaceCodemapRootEpoch
 ) -> Bool {
-    if lhs.rootID != rhs.rootID { return lhs.rootID.uuidString < rhs.rootID.uuidString }
+    if lhs.rootID != rhs.rootID {
+        return lhs.rootID.uuidString < rhs.rootID.uuidString
+    }
     return lhs.rootLifetimeID.uuidString < rhs.rootLifetimeID.uuidString
 }
 

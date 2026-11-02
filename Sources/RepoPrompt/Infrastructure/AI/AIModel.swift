@@ -44,10 +44,14 @@ enum ModelPickerStringOrdering {
     ) -> ComparisonResult {
         let count = min(lhs.count, rhs.count)
         for index in 0 ..< count {
-            if lhs[index] == rhs[index] { continue }
+            if lhs[index] == rhs[index] {
+                continue
+            }
             return lhs[index] < rhs[index] ? .orderedAscending : .orderedDescending
         }
-        if lhs.count == rhs.count { return .orderedSame }
+        if lhs.count == rhs.count {
+            return .orderedSame
+        }
         return lhs.count < rhs.count ? .orderedAscending : .orderedDescending
     }
 }
@@ -536,19 +540,25 @@ public enum AIModel: Equatable, Hashable {
 
     /// Returns the service tier override if this is a tier variant, nil otherwise
     var openAIServiceTierOverride: String? {
-        if case let .openAIServiceTierVariant(_, tier) = self { return tier }
+        if case let .openAIServiceTierVariant(_, tier) = self {
+            return tier
+        }
         return nil
     }
 
     /// Returns the base model (unwraps tier variant if applicable)
     var openAIServiceTierBase: AIModel {
-        if case let .openAIServiceTierVariant(base, _) = self { return base }
+        if case let .openAIServiceTierVariant(base, _) = self {
+            return base
+        }
         return self
     }
 
     /// Returns true if this is a service tier variant
     var isOpenAIServiceTierVariant: Bool {
-        if case .openAIServiceTierVariant = self { return true }
+        if case .openAIServiceTierVariant = self {
+            return true
+        }
         return false
     }
 
@@ -618,15 +628,33 @@ public enum AIModel: Equatable, Hashable {
         if case let .openAIServiceTierVariant(base, _) = self {
             return "\(base.displayName) (\(openAITierDisplayName))"
         }
-        if case let .openrouterCustom(name) = self { return "oRouter/\(name)" }
-        if case let .openaiCustom(n) = self { return "\(n)" }
-        if case let .openaiCustomResponses(n) = self { return "\(n)" }
-        if case let .openaiCustomReasoning(n, effort) = self { return "\(n) \(effort.displayName)" }
-        if case let .claudeCodeModel(specifier) = self { return ClaudeCodeAIModelCatalog.displayName(for: specifier) }
-        if case let .anthropicCustom(n) = self { return "\(n)" }
-        if case let .geminiCustom(n) = self { return "\(n)" }
-        if case let .deepseekCustom(n) = self { return "\(n)" }
-        if case let .fireworksCustom(n) = self { return "\(n)" }
+        if case let .openrouterCustom(name) = self {
+            return "oRouter/\(name)"
+        }
+        if case let .openaiCustom(n) = self {
+            return "\(n)"
+        }
+        if case let .openaiCustomResponses(n) = self {
+            return "\(n)"
+        }
+        if case let .openaiCustomReasoning(n, effort) = self {
+            return "\(n) \(effort.displayName)"
+        }
+        if case let .claudeCodeModel(specifier) = self {
+            return ClaudeCodeAIModelCatalog.displayName(for: specifier)
+        }
+        if case let .anthropicCustom(n) = self {
+            return "\(n)"
+        }
+        if case let .geminiCustom(n) = self {
+            return "\(n)"
+        }
+        if case let .deepseekCustom(n) = self {
+            return "\(n)"
+        }
+        if case let .fireworksCustom(n) = self {
+            return "\(n)"
+        }
         if case let .azureCustom(n) = self {
             if let info = Self.modelData[self] {
                 return info.displayName
@@ -638,9 +666,15 @@ public enum AIModel: Equatable, Hashable {
             let baseName = Self.azureVariantBaseName(from: n)
             return "azure/\(baseName)"
         }
-        if case let .grokCustom(n) = self { return "Grok/\(n)" } // <-- Handle Grok custom model displayName
-        if case let .groqCustom(n) = self { return "Groq/\(n)" } // <-- Handle Groq custom model displayName
-        if case let .zaiCustom(n) = self { return "Z.AI/\(n)" }
+        if case let .grokCustom(n) = self {
+            return "Grok/\(n)"
+        }
+        if case let .groqCustom(n) = self {
+            return "Groq/\(n)"
+        }
+        if case let .zaiCustom(n) = self {
+            return "Z.AI/\(n)"
+        }
         if case let .codexCustom(n) = self {
             if let label = CodexDynamicModelStore.displayName(forModelID: n) {
                 return "CLI·\(label)"
@@ -670,7 +704,9 @@ public enum AIModel: Equatable, Hashable {
         if case let .grokBuildCustom(n) = self {
             return ACPAIModelCatalog.grokBuildModelOption(for: n)?.displayName ?? n
         }
-        if case let .customProviderUser(name) = self { return "Custom/\(name)" }
+        if case let .customProviderUser(name) = self {
+            return "Custom/\(name)"
+        }
         if case .ollama = self {
             return "local/" + modelName
         }
@@ -731,20 +767,48 @@ public enum AIModel: Equatable, Hashable {
         case .customProviderUser: return .customProvider
         // or, if you prefer the old modelGroups approach:
         default:
-            if Self.modelGroups[ProviderIndex.openAI].contains(self) { return .openAI }
-            if Self.modelGroups[ProviderIndex.anthropic].contains(self) { return .anthropic }
-            if Self.modelGroups[ProviderIndex.gemini].contains(self) { return .gemini }
-            if Self.modelGroups[ProviderIndex.openRouter].contains(self) { return .openRouter }
-            if Self.modelGroups[ProviderIndex.deepseek].contains(self) { return .deepseek }
-            if Self.modelGroups[ProviderIndex.fireworks].contains(self) { return .fireworks }
-            if Self.modelGroups[ProviderIndex.grok].contains(self) { return .grok } // <-- Add Grok to providerType check
-            if Self.modelGroups[ProviderIndex.groq].contains(self) { return .groq } // <-- Add Groq to providerType check
-            if Self.modelGroups[ProviderIndex.zAI].contains(self) { return .zAI }
-            if Self.modelGroups[ProviderIndex.claudeCode].contains(self) { return .claudeCode } // <-- Add Claude Code to providerType check
-            if Self.modelGroups[ProviderIndex.codex].contains(self) { return .codex }
-            if Self.modelGroups[ProviderIndex.openCode].contains(self) { return .openCode }
-            if Self.modelGroups[ProviderIndex.cursor].contains(self) { return .cursor }
-            if Self.modelGroups[ProviderIndex.grokBuild].contains(self) { return .grokBuild }
+            if Self.modelGroups[ProviderIndex.openAI].contains(self) {
+                return .openAI
+            }
+            if Self.modelGroups[ProviderIndex.anthropic].contains(self) {
+                return .anthropic
+            }
+            if Self.modelGroups[ProviderIndex.gemini].contains(self) {
+                return .gemini
+            }
+            if Self.modelGroups[ProviderIndex.openRouter].contains(self) {
+                return .openRouter
+            }
+            if Self.modelGroups[ProviderIndex.deepseek].contains(self) {
+                return .deepseek
+            }
+            if Self.modelGroups[ProviderIndex.fireworks].contains(self) {
+                return .fireworks
+            }
+            if Self.modelGroups[ProviderIndex.grok].contains(self) {
+                return .grok
+            }
+            if Self.modelGroups[ProviderIndex.groq].contains(self) {
+                return .groq
+            }
+            if Self.modelGroups[ProviderIndex.zAI].contains(self) {
+                return .zAI
+            }
+            if Self.modelGroups[ProviderIndex.claudeCode].contains(self) {
+                return .claudeCode
+            }
+            if Self.modelGroups[ProviderIndex.codex].contains(self) {
+                return .codex
+            }
+            if Self.modelGroups[ProviderIndex.openCode].contains(self) {
+                return .openCode
+            }
+            if Self.modelGroups[ProviderIndex.cursor].contains(self) {
+                return .cursor
+            }
+            if Self.modelGroups[ProviderIndex.grokBuild].contains(self) {
+                return .grokBuild
+            }
             // fallback
             return .azure
         }
@@ -1061,7 +1125,9 @@ public enum AIModel: Equatable, Hashable {
             .gpt5CodexMed,
             .gpt5CodexHigh,
             .gpt5CodexXHigh
-        ].contains(self) { return true }
+        ].contains(self) {
+            return true
+        }
 
         if case .openaiCustomResponses = self {
             return true
@@ -1131,7 +1197,9 @@ public enum AIModel: Equatable, Hashable {
             guard let match = currentlyAvailableModels.first(where: { $0 == candidate }) else { continue }
             switch desiredFormat {
             case .diff:
-                if match.isModelCapableOfDiff { return match }
+                if match.isModelCapableOfDiff {
+                    return match
+                }
             case .whole, .none:
                 return match
             }
@@ -1140,13 +1208,17 @@ public enum AIModel: Equatable, Hashable {
         //    e.g. custom provider or openrouterCustom not in the arrays
         //    Skip service tier variants to prevent accidental selection of explicit tiers
         for possible in currentlyAvailableModels {
-            if possible.isOpenAIServiceTierVariant { continue }
+            if possible.isOpenAIServiceTierVariant {
+                continue
+            }
             if !priorities.contains(possible) {
                 // This means it's "unlisted."
                 // Check if it meets the diff requirement if needed:
                 switch desiredFormat {
                 case .diff:
-                    if possible.isModelCapableOfDiff { return possible }
+                    if possible.isModelCapableOfDiff {
+                        return possible
+                    }
                 case .whole, .none:
                     return possible
                 }
@@ -1749,8 +1821,12 @@ public enum AIModel: Equatable, Hashable {
                 models: sortedModels
             )
         }.sorted { lhs, rhs in
-            if codexBaseModelPrecedes(lhs.baseModelID, rhs.baseModelID) { return true }
-            if codexBaseModelPrecedes(rhs.baseModelID, lhs.baseModelID) { return false }
+            if codexBaseModelPrecedes(lhs.baseModelID, rhs.baseModelID) {
+                return true
+            }
+            if codexBaseModelPrecedes(rhs.baseModelID, lhs.baseModelID) {
+                return false
+            }
             return ModelPickerStringOrdering.precedes(lhs.displayName, rhs.displayName)
         }
     }
@@ -1911,7 +1987,9 @@ public enum AIModel: Equatable, Hashable {
         for index in 0 ..< maxCount {
             let leftValue = index < lhs.count ? lhs[index] : -1
             let rightValue = index < rhs.count ? rhs[index] : -1
-            if leftValue == rightValue { continue }
+            if leftValue == rightValue {
+                continue
+            }
             return leftValue < rightValue ? .orderedAscending : .orderedDescending
         }
 
@@ -2010,10 +2088,18 @@ public enum AIModel: Equatable, Hashable {
 
     private static func formatCodexLabelToken(_ value: String) -> String {
         let lower = value.lowercased()
-        if lower == "gpt" { return "GPT" }
-        if lower == "codex" { return "Codex" }
-        if lower == "xhigh" { return "XHigh" }
-        if isVersionToken(value) { return value }
+        if lower == "gpt" {
+            return "GPT"
+        }
+        if lower == "codex" {
+            return "Codex"
+        }
+        if lower == "xhigh" {
+            return "XHigh"
+        }
+        if isVersionToken(value) {
+            return value
+        }
         return lower.capitalized
     }
 

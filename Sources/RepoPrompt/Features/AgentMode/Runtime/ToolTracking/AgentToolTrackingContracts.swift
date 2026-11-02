@@ -154,9 +154,7 @@ enum AgentToolTrackingSupport {
         toolName: String,
         invocationID: UUID?
     ) -> Bool {
-        guard session.selectedAgent.usesClaudeNativeRuntime else { return false }
-        guard invocationID == nil else { return false }
-        guard let toolName = AgentToolNamePolicy.accepted(toolName) else { return false }
+        guard session.selectedAgent.usesClaudeNativeRuntime, invocationID == nil, let toolName = AgentToolNamePolicy.accepted(toolName) else { return false }
         return toolName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "read"
     }
 

@@ -212,7 +212,9 @@ struct AgentSidebarSelectionState: Equatable {
         guard nextSelection != selectedIdentities || nextAnchor != anchor else { return }
         selectedIdentities = nextSelection
         anchor = nextSelection.isEmpty ? nil : nextAnchor
-        if nextSelection.isEmpty, inFlightAction == nil { self.workspaceID = nil }
+        if nextSelection.isEmpty, inFlightAction == nil {
+            self.workspaceID = nil
+        }
         revision &+= 1
     }
 }

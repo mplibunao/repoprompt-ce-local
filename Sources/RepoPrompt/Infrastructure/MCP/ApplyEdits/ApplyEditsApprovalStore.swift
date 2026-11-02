@@ -290,8 +290,7 @@ actor ApplyEditsApprovalStore: Sendable {
         id: UUID,
         finishContinuation: Bool
     ) {
-        guard var scopedSubscriptions = subscriptions[scope] else { return }
-        guard let continuation = scopedSubscriptions.removeValue(forKey: id) else { return }
+        guard var scopedSubscriptions = subscriptions[scope], let continuation = scopedSubscriptions.removeValue(forKey: id) else { return }
         if scopedSubscriptions.isEmpty {
             subscriptions.removeValue(forKey: scope)
         } else {

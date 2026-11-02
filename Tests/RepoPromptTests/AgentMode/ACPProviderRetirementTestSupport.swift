@@ -54,9 +54,15 @@ final class StartupTestACPPeer: @unchecked Sendable {
             "ACP_STORE_DIR": storeURL.path,
             "ACP_LOAD_SESSION": loadSession ? "1" : "0"
         ]
-        if failLoad { environment["ACP_FAIL_LOAD"] = "1" }
-        if failNew { environment["ACP_FAIL_NEW"] = "1" }
-        if let runtimeSessionID { environment["ACP_RUNTIME_SESSION_ID"] = runtimeSessionID }
+        if failLoad {
+            environment["ACP_FAIL_LOAD"] = "1"
+        }
+        if failNew {
+            environment["ACP_FAIL_NEW"] = "1"
+        }
+        if let runtimeSessionID {
+            environment["ACP_RUNTIME_SESSION_ID"] = runtimeSessionID
+        }
         return StartupTestACPProvider(providerID: providerID, commandPath: scriptURL.path, environment: environment)
     }
 

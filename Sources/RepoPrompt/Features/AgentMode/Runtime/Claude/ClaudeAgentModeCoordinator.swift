@@ -34,7 +34,9 @@ final class ClaudeAgentModeCoordinator {
         }
 
         var allowsFreshStartRecovery: Bool {
-            if case .runAttempt = self { return true }
+            if case .runAttempt = self {
+                return true
+            }
             return false
         }
 
@@ -828,11 +830,11 @@ final class ClaudeAgentModeCoordinator {
         invalidateControllerRetirement(for: session)
         let runID = session.runID
         guard let detached = detachClaudeController(
-            expectedController,
-            from: session,
-            removeToolTracking: true
-        ),
-            let transfer = beginClaudeResumeTransferIfNeeded(for: session, oldController: detached)
+                  expectedController,
+                  from: session,
+                  removeToolTracking: true
+              ),
+              let transfer = beginClaudeResumeTransferIfNeeded(for: session, oldController: detached)
         else {
             return nil
         }
@@ -929,8 +931,8 @@ final class ClaudeAgentModeCoordinator {
         let systemPromptOverride = agentModeSystemPromptOverride(for: session)
         let effortLevel = currentClaudeEffortLevel(for: session)
 
-        /// Starts `controller`, resuming `sessionID` unless it is nil. Throws `superseded` when the
-        /// intent or the controller is no longer the session's once the start returns.
+        // Starts `controller`, resuming `sessionID` unless it is nil. Throws `superseded` when the
+        // intent or the controller is no longer the session's once the start returns.
         func start(
             _ controller: any NativeAgentRuntimeControlling,
             resuming sessionID: String?
@@ -957,10 +959,10 @@ final class ClaudeAgentModeCoordinator {
             return try result.get()
         }
 
-        /// Shuts down the session's `failed` controller and attaches a new one with the same
-        /// launch settings. A replacement is still the same canonical run attempt: it reuses the
-        /// attempt's process identity, and the previous provider identity stays until a start
-        /// succeeds. The tab's MCP tool tracking is keyed by that run ID, so it stays running.
+        // Shuts down the session's `failed` controller and attaches a new one with the same
+        // launch settings. A replacement is still the same canonical run attempt: it reuses the
+        // attempt's process identity, and the previous provider identity stays until a start
+        // succeeds. The tab's MCP tool tracking is keyed by that run ID, so it stays running.
         func replace(
             _ failed: any NativeAgentRuntimeControlling
         ) async throws -> any NativeAgentRuntimeControlling {
@@ -1621,10 +1623,7 @@ final class ClaudeAgentModeCoordinator {
                 controller,
                 from: session,
                 removeToolTracking: true
-            ) else {
-                return
-            }
-            guard await retireClaudeController(
+            ), await retireClaudeController(
                 detached,
                 for: session,
                 captureProviderSessionID: true

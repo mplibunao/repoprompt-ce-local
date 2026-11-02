@@ -452,9 +452,15 @@ struct MCPOracleToolService {
         func bracketedModes(_ supportedModes: ToolResultDTOs.SupportedModesInfo?) -> String {
             let modes = supportedModes ?? ToolResultDTOs.SupportedModesInfo(chat: true, plan: true, review: true)
             var items: [String] = []
-            if modes.chat { items.append("Chat") }
-            if modes.plan { items.append("Plan") }
-            if modes.review { items.append("Review") }
+            if modes.chat {
+                items.append("Chat")
+            }
+            if modes.plan {
+                items.append("Plan")
+            }
+            if modes.review {
+                items.append("Review")
+            }
             return "[\(items.joined(separator: ", "))]"
         }
 
@@ -654,8 +660,7 @@ struct MCPOracleToolService {
         owner: AgentOracleOwner,
         direct: OracleViewModel.OracleSendPackagingContext
     ) async throws -> OracleViewModel.OracleSendPackagingContext {
-        guard mode == "review" else { return direct }
-        guard let delegated = try await resolveDelegatedReviewPackaging(
+        guard mode == "review", let delegated = try await resolveDelegatedReviewPackaging(
             conversationTabID,
             conversationWorkspaceID,
             owner.agentSessionID,

@@ -1786,18 +1786,18 @@ class WorkspaceFilesViewModel: ObservableObject {
             }
             let registrationGeneration = sliceRebaseRegistrationGenerationByFullPath[fullPath, default: 0]
             guard await isHiddenSessionSliceRebaseCurrent(
-                request,
-                taskID: taskID,
-                registrationGeneration: registrationGeneration
-            ), let sourceSnapshot = sliceRebaseSourceSnapshotByFullPath[fullPath],
-            let loadedSnapshot = await stableSliceRebaseSnapshot(
-                rootID: request.rootID,
-                relativePath: request.relativePath
-            ), await isHiddenSessionSliceRebaseCurrent(
-                request,
-                taskID: taskID,
-                registrationGeneration: registrationGeneration
-            )
+                      request,
+                      taskID: taskID,
+                      registrationGeneration: registrationGeneration
+                  ), let sourceSnapshot = sliceRebaseSourceSnapshotByFullPath[fullPath],
+                  let loadedSnapshot = await stableSliceRebaseSnapshot(
+                      rootID: request.rootID,
+                      relativePath: request.relativePath
+                  ), await isHiddenSessionSliceRebaseCurrent(
+                      request,
+                      taskID: taskID,
+                      registrationGeneration: registrationGeneration
+                  )
             else { return }
 
             var currentTargets: [HiddenSessionSliceRebaseTarget] = []
@@ -1991,9 +1991,8 @@ class WorkspaceFilesViewModel: ObservableObject {
               tab.activeAgentSessionID == target.agentSessionID,
               let ranges = StoredSelectionPathNormalization.standardizedSlices(tab.selection.slices)[target.logicalFullPath],
               !ranges.isEmpty,
-              case let .hydrated(bindings) = sessionWorktreeBindingState(for: target.agentSessionID)
-        else { return nil }
-        guard AgentWorkspaceLookupContextSource.worktreeBindingFingerprint(bindings) == target.bindingFingerprint,
+              case let .hydrated(bindings) = sessionWorktreeBindingState(for: target.agentSessionID),
+              AgentWorkspaceLookupContextSource.worktreeBindingFingerprint(bindings) == target.bindingFingerprint,
               Set(bindings.map {
                   StandardizedPath.absolute(($0.worktreeRootPath as NSString).expandingTildeInPath)
               }) == target.physicalRootPaths,
@@ -2137,13 +2136,13 @@ class WorkspaceFilesViewModel: ObservableObject {
         }
 
         guard let lookup = await workspaceFileContextStore.appliedIndexRecordLookup(
-            rootID: event.rootID,
-            fileIDs: missingFileIDs,
-            folderIDs: missingFolderIDs
-        ),
-            lookup.root.id == event.rootID,
-            lookup.root.standardizedFullPath == rootKey,
-            lookup.generation >= event.generation
+                  rootID: event.rootID,
+                  fileIDs: missingFileIDs,
+                  folderIDs: missingFolderIDs
+              ),
+              lookup.root.id == event.rootID,
+              lookup.root.standardizedFullPath == rootKey,
+              lookup.generation >= event.generation
         else {
             return .requiresCanonicalResync
         }
@@ -2384,7 +2383,9 @@ class WorkspaceFilesViewModel: ObservableObject {
         let sortedFolders = event.upsertedFolders.sorted { lhs, rhs in
             let lhsDepth = lhs.standardizedRelativePath.split(separator: "/").count
             let rhsDepth = rhs.standardizedRelativePath.split(separator: "/").count
-            if lhsDepth != rhsDepth { return lhsDepth < rhsDepth }
+            if lhsDepth != rhsDepth {
+                return lhsDepth < rhsDepth
+            }
             return lhs.standardizedRelativePath < rhs.standardizedRelativePath
         }
         for folder in sortedFolders where folder.rootID == event.rootID && !folder.standardizedRelativePath.isEmpty {
@@ -2429,7 +2430,9 @@ class WorkspaceFilesViewModel: ObservableObject {
             removeFileFromParentChildrenArray(fileVM)
             fileHierarchyIndex.removeFile(forKey: fullPath, expectedRootKey: rootKey)
             topologyChanged = true
-            if let formerParent { dirtyFolders[formerParent.id] = formerParent }
+            if let formerParent {
+                dirtyFolders[formerParent.id] = formerParent
+            }
         }
 
         var removedFolderRelativePaths = Set(event.removedFolderPaths.map(StandardizedPath.relative))
@@ -2545,7 +2548,9 @@ class WorkspaceFilesViewModel: ObservableObject {
         #endif
         let file = fileHierarchyIndex.filesByID[id]
         #if DEBUG
-            if file == nil { appliedIndexProjectionDirectIDLookupMissCount += 1 }
+            if file == nil {
+                appliedIndexProjectionDirectIDLookupMissCount += 1
+            }
         #endif
         return file
     }
@@ -2557,7 +2562,9 @@ class WorkspaceFilesViewModel: ObservableObject {
         #endif
         let folder = fileHierarchyIndex.foldersByID[id]
         #if DEBUG
-            if folder == nil { appliedIndexProjectionDirectIDLookupMissCount += 1 }
+            if folder == nil {
+                appliedIndexProjectionDirectIDLookupMissCount += 1
+            }
         #endif
         return folder
     }
@@ -2649,7 +2656,9 @@ class WorkspaceFilesViewModel: ObservableObject {
         for path in expandedFolderPaths {
             if let root = rootFolders.first(where: { path.hasPrefix($0.standardizedFullPath) }) {
                 var rel = String(path.dropFirst(root.standardizedFullPath.count))
-                if rel.hasPrefix("/") { rel.removeFirst() }
+                if rel.hasPrefix("/") {
+                    rel.removeFirst()
+                }
                 results.append(rel)
             }
         }
@@ -2678,10 +2687,8 @@ class WorkspaceFilesViewModel: ObservableObject {
                     if inserted, !isApplyingExpansionState {
                         workspaceManager?.markWorkspaceDirty()
                     }
-                } else if expandedFolderPaths.remove(folder.standardizedFullPath) != nil {
-                    if !isApplyingExpansionState {
-                        workspaceManager?.markWorkspaceDirty()
-                    }
+                } else if expandedFolderPaths.remove(folder.standardizedFullPath) != nil, !isApplyingExpansionState {
+                    workspaceManager?.markWorkspaceDirty()
                 }
             }
         }
@@ -2829,10 +2836,8 @@ class WorkspaceFilesViewModel: ObservableObject {
                 }
                 let end = min(index + chunkSize, expandList.count)
                 for path in expandList[index ..< end] {
-                    if let folder = foldersByFullPath[path] {
-                        if expandParentChain(of: folder) {
-                            didChange = true
-                        }
+                    if let folder = foldersByFullPath[path], expandParentChain(of: folder) {
+                        didChange = true
                     }
                 }
                 index = end
@@ -3307,7 +3312,9 @@ class WorkspaceFilesViewModel: ObservableObject {
         do {
             try await workspaceFileContextStore.startWatchingRoot(id: rootRecord.id)
         } catch {
-            if error is CancellationError { throw error }
+            if error is CancellationError {
+                throw error
+            }
             deferredWatcherStartError = error
         }
         guard workspaceFileContextRootsByRootKey[rootKey]?.id == rootRecord.id else { return }
@@ -4682,7 +4689,9 @@ class WorkspaceFilesViewModel: ObservableObject {
         if let parent = fileHierarchyIndex.foldersByFullPath[parentFull] {
             let isRoot = rootFolders.contains { $0.id == parent.id }
             let isLinked = (parent.parent != nil) || isRoot
-            if !isLinked { createMissingParentFolder(parentPath: parentRel, under: root) }
+            if !isLinked {
+                createMissingParentFolder(parentPath: parentRel, under: root)
+            }
 
             guard canAttachFolder(folderVM, to: parent) else {
                 logInvalidFolderAttach(child: folderVM, parent: parent, root: root, reason: "invalid-parent-attachment")
@@ -4711,10 +4720,14 @@ class WorkspaceFilesViewModel: ObservableObject {
     /// ─────────────────────────────────────────────────────────────
     @MainActor
     private func canAttachFolder(_ child: FolderViewModel, to parent: FolderViewModel) -> Bool {
-        if child.id == parent.id { return false }
+        if child.id == parent.id {
+            return false
+        }
         let parentPath = parent.standardizedFullPath
         let childPath = child.standardizedFullPath
-        if childPath == parentPath { return false }
+        if childPath == parentPath {
+            return false
+        }
         let prefix = parentPath.hasSuffix("/") ? parentPath : parentPath + "/"
         return childPath.hasPrefix(prefix)
     }
@@ -4974,22 +4987,14 @@ class WorkspaceFilesViewModel: ObservableObject {
     private func materializeFileViewModel(
         record: WorkspaceFileRecord
     ) async -> FileViewModel? {
-        guard !Task.isCancelled else { return nil }
-        guard let currentRecord = await workspaceFileContextStore.file(
+        guard !Task.isCancelled, let currentRecord = await workspaceFileContextStore.file(
             rootID: record.rootID,
             relativePath: record.standardizedRelativePath
-        ) else {
-            return nil
-        }
-
-        guard let rootRecord = workspaceFileContextRootsByRootKey.values.first(where: { $0.id == currentRecord.rootID }) else {
+        ), let rootRecord = workspaceFileContextRootsByRootKey.values.first(where: { $0.id == currentRecord.rootID }) else {
             return nil
         }
         let rootKey = rootKey(forPath: rootRecord.standardizedFullPath)
-        guard workspaceFileContextRootsByRootKey[rootKey]?.id == currentRecord.rootID else {
-            return nil
-        }
-        guard let rootFolder = rootFolders.first(where: { $0.id == currentRecord.rootID || $0.standardizedFullPath == rootKey }) else {
+        guard workspaceFileContextRootsByRootKey[rootKey]?.id == currentRecord.rootID, let rootFolder = rootFolders.first(where: { $0.id == currentRecord.rootID || $0.standardizedFullPath == rootKey }) else {
             return nil
         }
 
@@ -5000,15 +5005,12 @@ class WorkspaceFilesViewModel: ObservableObject {
         )
         guard !Task.isCancelled,
               workspaceFileContextRootsByRootKey[rootKey]?.id == currentRecord.rootID,
-              rootFolders.contains(where: { $0.id == rootFolder.id })
+              rootFolders.contains(where: { $0.id == rootFolder.id }),
+              let outcome = await handleNewFile(
+                  record: currentRecord,
+                  onRootFolder: rootFolder
+              )
         else {
-            return nil
-        }
-
-        guard let outcome = await handleNewFile(
-            record: currentRecord,
-            onRootFolder: rootFolder
-        ) else {
             return nil
         }
         guard workspaceFileContextRootsByRootKey[rootKey]?.id == currentRecord.rootID,
@@ -6039,8 +6041,7 @@ class WorkspaceFilesViewModel: ObservableObject {
                 break
             }
 
-            guard isWindowFocused || aggressive else { return }
-            guard await workspaceFileContextStore.hasDeferredReplayPendingWork() || aggressive else { return }
+            guard isWindowFocused || aggressive, await workspaceFileContextStore.hasDeferredReplayPendingWork() || aggressive else { return }
 
             // Start a new replay
             let runID = UUID()
@@ -6629,8 +6630,7 @@ class WorkspaceFilesViewModel: ObservableObject {
         workspaceSaveDebounceTask?.cancel()
         workspaceSaveDebounceTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delayNanoseconds)
-            guard let self else { return }
-            guard !Task.isCancelled else { return }
+            guard let self, !Task.isCancelled else { return }
             workspaceManager?.pollAndSaveState(source: .workspaceFilesDebouncedSelectionSave)
             workspaceSaveDebounceTask = nil
         }
@@ -7256,7 +7256,9 @@ class WorkspaceFilesViewModel: ObservableObject {
     private func folderForFullPathCaseInsensitive(_ path: String) -> FolderViewModel? {
         let std = (path as NSString).standardizingPath
         // 1) fast exact hit
-        if let exact = fileHierarchyIndex.foldersByFullPath[std] { return exact }
+        if let exact = fileHierarchyIndex.foldersByFullPath[std] {
+            return exact
+        }
         // 2) fallback O(n) ‑ single pass, case‑folded compare
         let lower = std.lowercased()
         return fileHierarchyIndex
@@ -7337,10 +7339,11 @@ class WorkspaceFilesViewModel: ObservableObject {
         for normalizedUserPath: String,
         preflight: CreatePathPreflight.Result
     ) -> FileCreationResult? {
-        guard !preflight.isAbsolute else { return nil }
-        guard case let .uniqueRoot(root, alias) = preflight.aliasCheck else { return nil }
-        guard let rootVM = visibleRootFolders.first(where: { $0.id == root.id }) else { return nil }
-        guard rootHasRealSubfolder(named: alias, under: rootVM) else { return nil }
+        guard !preflight.isAbsolute,
+              case let .uniqueRoot(root, alias) = preflight.aliasCheck,
+              let rootVM = visibleRootFolders.first(where: { $0.id == root.id }),
+              rootHasRealSubfolder(named: alias, under: rootVM)
+        else { return nil }
         let literalBaseAbsolutePath = StandardizedPath.join(
             standardizedRoot: rootVM.standardizedFullPath,
             standardizedRelativePath: StandardizedPath.relative(alias)
@@ -7464,7 +7467,9 @@ class WorkspaceFilesViewModel: ObservableObject {
         var stack: [FolderViewModel] = [folder]
         while let current = stack.popLast() {
             guard visitedFolderIDs.insert(current.id).inserted else { continue }
-            if current.relativePath == relativePath { return current }
+            if current.relativePath == relativePath {
+                return current
+            }
             for child in current.children {
                 if case let .folder(sub) = child {
                     stack.append(sub)
@@ -7592,12 +7597,7 @@ class WorkspaceFilesViewModel: ObservableObject {
         requiresAbsoluteForToolDelete: Bool = false
     ) async throws -> (rootPath: String, correctedPath: String) {
         let normalizedPath = normalizeUserInputPath(userPath)
-        guard !requiresAbsoluteForToolDelete || normalizedPath.hasPrefix("/") else {
-            throw FileManagerError.fileSystemServiceNotFoundWithContext(
-                deletePathRejectionMessage(for: userPath, normalizedPath: normalizedPath)
-            )
-        }
-        guard let location = await pathLocation(normalizedPath, exactMatchOnly: true) else {
+        guard !requiresAbsoluteForToolDelete || normalizedPath.hasPrefix("/"), let location = await pathLocation(normalizedPath, exactMatchOnly: true) else {
             throw FileManagerError.fileSystemServiceNotFoundWithContext(
                 deletePathRejectionMessage(for: userPath, normalizedPath: normalizedPath)
             )
@@ -7938,16 +7938,14 @@ class WorkspaceFilesViewModel: ObservableObject {
         guard !trimmed.isEmpty else { return nil }
 
         // If we have a root identifier and a relative path, try to construct the absolute path first
-        if let rootID = rootIdentifier, !trimmed.hasPrefix("/") {
-            if let root = rootFolders.first(where: { $0.id == rootID }) {
-                // Construct absolute path for this specific root
-                let absolutePath = (root.fullPath as NSString).appendingPathComponent(trimmed)
+        if let rootID = rootIdentifier, !trimmed.hasPrefix("/"), let root = rootFolders.first(where: { $0.id == rootID }) {
+            // Construct absolute path for this specific root
+            let absolutePath = (root.fullPath as NSString).appendingPathComponent(trimmed)
 
-                // Try finding with the absolute path first (more efficient)
-                let results = await findFiles(atPaths: [absolutePath], profile: .mcpRead)
-                if let fileVM = results[absolutePath] {
-                    return fileVM
-                }
+            // Try finding with the absolute path first (more efficient)
+            let results = await findFiles(atPaths: [absolutePath], profile: .mcpRead)
+            if let fileVM = results[absolutePath] {
+                return fileVM
             }
         }
 
@@ -8113,10 +8111,14 @@ class WorkspaceFilesViewModel: ObservableObject {
             let bKey = canonical(b.fullPath)
             let aFound = indexByCanonical[aKey] != nil
             let bFound = indexByCanonical[bKey] != nil
-            if aFound != bFound { return aFound }
+            if aFound != bFound {
+                return aFound
+            }
             let ai = indexByCanonical[aKey] ?? Int.max
             let bi = indexByCanonical[bKey] ?? Int.max
-            if ai != bi { return ai < bi }
+            if ai != bi {
+                return ai < bi
+            }
             let ao = originalIndex[aKey] ?? Int.max
             let bo = originalIndex[bKey] ?? Int.max
             return ao < bo
@@ -8287,7 +8289,9 @@ class WorkspaceFilesViewModel: ObservableObject {
             return rootFolders.filter { !gitDataRootIDs.contains($0.id) }
         case let .sessionBoundWorkspace(canonicalRootPaths, physicalRootPaths):
             return rootFolders.filter { root in
-                if physicalRootPaths.contains(root.standardizedFullPath) { return true }
+                if physicalRootPaths.contains(root.standardizedFullPath) {
+                    return true
+                }
                 return visibleRootFolders.contains(where: { $0.id == root.id })
                     && canonicalRootPaths.contains(root.standardizedFullPath)
             }
@@ -8653,11 +8657,17 @@ class WorkspaceFilesViewModel: ObservableObject {
             ))
             switch kind {
             case .file:
-                if findFileByFullPath(abs) != nil { return nil }
+                if findFileByFullPath(abs) != nil {
+                    return nil
+                }
             case .folder:
-                if findFolderByFullPath(abs) != nil { return nil }
+                if findFolderByFullPath(abs) != nil {
+                    return nil
+                }
             case .either:
-                if findFileByFullPath(abs) != nil || findFolderByFullPath(abs) != nil { return nil }
+                if findFileByFullPath(abs) != nil || findFolderByFullPath(abs) != nil {
+                    return nil
+                }
             }
         case .notAliasPrefixed:
             break
@@ -8752,9 +8762,9 @@ class WorkspaceFilesViewModel: ObservableObject {
     ) throws -> String? {
         switch resolveVisibleAliasPrefixedAbsolutePathResolution(userPath, requireRemainder: requireRemainder) {
         case .notAliasPrefixed:
-            return nil
+            nil
         case let .resolved(abs):
-            return abs
+            abs
         case let .ambiguous(alias, matchingRoots):
             let matchingRootsRefs = matchingRoots.compactMap { label in
                 visibleWorkspaceRoots().first(where: { $0.renderedLabel == label })
@@ -8781,7 +8791,9 @@ class WorkspaceFilesViewModel: ObservableObject {
             guard let folderSoFar = currentFolder else { break }
             if let childFolder = folderSoFar.children
                 .compactMap({ item -> FolderViewModel? in
-                    if case let .folder(f) = item { return f }
+                    if case let .folder(f) = item {
+                        return f
+                    }
                     return nil
                 })
                 .first(where: { $0.name == component })
@@ -8881,9 +8893,7 @@ class WorkspaceFilesViewModel: ObservableObject {
         let normalizedRoot = StandardizedPath.absolute(rootPath)
         let normalizedOld = StandardizedPath.relative(oldRelativePath)
         let normalizedNew = StandardizedPath.relative(newRelativePath)
-        guard normalizedOld != normalizedNew else { return }
-
-        guard currentSlicesByRoot[normalizedRoot]?[normalizedOld] != nil else { return }
+        guard normalizedOld != normalizedNew, currentSlicesByRoot[normalizedRoot]?[normalizedOld] != nil else { return }
 
         do {
             let postAddition = try await selectionSliceCoordinator.moveSliceState(
@@ -9932,9 +9942,7 @@ class WorkspaceFilesViewModel: ObservableObject {
         var result: [String: [SliceAnchor]] = [:]
         for (relativePath, ranges) in mergedRangesByPath {
             let normalized = SliceRangeMath.normalize(ranges)
-            guard !normalized.isEmpty else { continue }
-            guard let file = fileByPath[relativePath] else { continue }
-            guard let content = await sliceAnchorContent(for: file) else { continue }
+            guard !normalized.isEmpty, let file = fileByPath[relativePath], let content = await sliceAnchorContent(for: file) else { continue }
 
             let anchors = await Task.detached(priority: .utility) {
                 SliceRebaseEngine.buildAnchors(content: content, ranges: normalized)
@@ -10363,8 +10371,7 @@ class WorkspaceFilesViewModel: ObservableObject {
 
     @MainActor
     private func flushDeferredSelectionSliceSnapshotRebuildIfNeeded(reason: String) {
-        guard sliceSnapshotRebuildDeferralDepth == 0 else { return }
-        guard sliceSnapshotRebuildPending else { return }
+        guard sliceSnapshotRebuildDeferralDepth == 0, sliceSnapshotRebuildPending else { return }
         #if DEBUG
             let pendingReasons = sliceSnapshotRebuildPendingReasons
             sliceSnapshotRebuildPendingReasons.removeAll()
@@ -10934,7 +10941,9 @@ extension WorkspaceFilesViewModel {
         // Fast-exit if nothing changes (preserves @Published churn)
         let idsUnchanged = (newIDs == selectedFileIDs)
         let filesUnchanged: Bool = {
-            if newFiles.count != selectedFiles.count { return false }
+            if newFiles.count != selectedFiles.count {
+                return false
+            }
             // Compare by stable identity (UUID)
             let lhs = newFiles.map(\.id)
             let rhs = selectedFiles.map(\.id)
@@ -10954,11 +10963,9 @@ extension WorkspaceFilesViewModel {
 
         // Only clear auto-codemap files automatically when auto mode is ON.
         // In manual mode, keep codemap files even if selection becomes empty.
-        if newFiles.isEmpty {
-            if codemapAutoEnabled {
-                invalidateAutomaticCodemapSelection()
-                resetAutoCodemapFiles([])
-            }
+        if newFiles.isEmpty, codemapAutoEnabled {
+            invalidateAutomaticCodemapSelection()
+            resetAutoCodemapFiles([])
             // Do not flip codemapAutoEnabled here; explicit flows (clearSelection, tools) decide that.
         }
 
@@ -11038,10 +11045,8 @@ extension WorkspaceFilesViewModel {
             if newIDs.insert(file.id).inserted {
                 newFiles.append(file)
             }
-        } else {
-            if newIDs.remove(file.id) != nil {
-                newFiles.removeAll { $0.id == file.id }
-            }
+        } else if newIDs.remove(file.id) != nil {
+            newFiles.removeAll { $0.id == file.id }
         }
 
         commitSelectionState(newFiles, newIDs)
@@ -11063,7 +11068,9 @@ extension WorkspaceFilesViewModel {
     @MainActor
     private func flushPendingSelectionChanges() {
         // Fast-exit ─ nothing queued
-        if pendingSelectionAdds.isEmpty, pendingSelectionRemoves.isEmpty { return }
+        if pendingSelectionAdds.isEmpty, pendingSelectionRemoves.isEmpty {
+            return
+        }
 
         // Start from the current snapshot
         var newArray = selectedFiles
@@ -11338,7 +11345,9 @@ extension WorkspaceFilesViewModel {
     ) -> Bool {
         result.status == .partial && result.roots.contains { root in
             root.issues.contains { issue in
-                if case .targetDemandPending = issue { return true }
+                if case .targetDemandPending = issue {
+                    return true
+                }
                 return false
             }
         }
@@ -11595,7 +11604,9 @@ extension WorkspaceFilesViewModel {
 
     @MainActor
     private func applySelectionSnapshot(paths: [String], allowEmpty: Bool) async {
-        if paths.isEmpty && !allowEmpty { return }
+        if paths.isEmpty && !allowEmpty {
+            return
+        }
         let foundFiles = await findFiles(atPaths: paths)
         let targetFiles = Array(foundFiles.values)
         let targetIDs = Set(targetFiles.map(\.id))
@@ -11891,7 +11902,6 @@ extension WorkspaceFilesViewModel {
         return visibleRootFolders.contains { $0.name == rootAlias }
     }
 
-    @MainActor
     func findFolder(atPath path: String) -> FolderViewModel? {
         let normalized = normalizeUserInputPath(path)
         let standardized = (normalized as NSString).standardizingPath
@@ -11903,7 +11913,6 @@ extension WorkspaceFilesViewModel {
         }
     }
 
-    @MainActor
     func materializeFileForUserInput(
         _ userPath: String,
         profile: PathLocateProfile = .mcpRead,
@@ -11921,7 +11930,6 @@ extension WorkspaceFilesViewModel {
         return hits[trimmed]
     }
 
-    @MainActor
     func resolveFileForUserInput(
         _ userPath: String,
         profile: PathLocateProfile = .mcpRead,
@@ -11934,7 +11942,6 @@ extension WorkspaceFilesViewModel {
         )
     }
 
-    @MainActor
     func resolveReadableFileForUserInput(
         _ userPath: String,
         profile: PathLocateProfile = .mcpRead,
@@ -11960,11 +11967,9 @@ extension WorkspaceFilesViewModel {
         return resolveAlwaysReadableExternalFile(atAbsolutePath: trimmed).map { .external($0) }
     }
 
-    @MainActor
     func resolveAlwaysReadableExternalFolderDisplayPath(_ userPath: String) -> String? {
         let normalized = normalizeUserInputPath(userPath).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalized.hasPrefix("/") else { return nil }
-        guard isAlwaysReadableExternalPath(normalized) else { return nil }
+        guard normalized.hasPrefix("/"), isAlwaysReadableExternalPath(normalized) else { return nil }
 
         let absolutePath = normalizedAlwaysReadableAbsolutePath(for: normalized)
         guard isAlwaysReadableExternalPath(absolutePath) else { return nil }
@@ -11978,7 +11983,6 @@ extension WorkspaceFilesViewModel {
         )
     }
 
-    @MainActor
     func displayPath(forExternalPath userPath: String) -> String {
         AgentSupportDirectoryCatalog.displayPath(
             for: normalizeUserInputPath(userPath),
@@ -11986,7 +11990,6 @@ extension WorkspaceFilesViewModel {
         )
     }
 
-    @MainActor
     func isAlwaysReadableExternalPath(_ userPath: String) -> Bool {
         let normalized = normalizeUserInputPath(userPath).trimmingCharacters(in: .whitespacesAndNewlines)
         guard normalized.hasPrefix("/") else { return false }
@@ -12016,7 +12019,6 @@ extension WorkspaceFilesViewModel {
         }.value
     }
 
-    @MainActor
     private func resolveAlwaysReadableExternalFile(atAbsolutePath path: String) -> ExternalReadableFile? {
         guard isAlwaysReadableExternalPath(path) else { return nil }
         let absolutePath = normalizedAlwaysReadableAbsolutePath(for: path)
@@ -12034,7 +12036,6 @@ extension WorkspaceFilesViewModel {
         )
     }
 
-    @MainActor
     private func normalizedAlwaysReadableAbsolutePath(for path: String) -> String {
         let normalized = AgentSupportDirectoryCatalog.normalizedPath(for: path)
         if FileManager.default.fileExists(atPath: normalized) {
@@ -12045,7 +12046,6 @@ extension WorkspaceFilesViewModel {
         return normalized
     }
 
-    @MainActor
     func openFileForMarkdownLink(_ target: MarkdownFileLinkTarget) async -> Bool {
         if let file = await resolveFileForMarkdownLink(target) {
             return await file.openInDefaultApp(using: defaultApplicationOpener)
@@ -12058,7 +12058,6 @@ extension WorkspaceFilesViewModel {
         return await defaultApplicationOpener.open(fileURL)
     }
 
-    @MainActor
     private func resolveFileForMarkdownLink(_ target: MarkdownFileLinkTarget) async -> FileViewModel? {
         let normalizedPath = normalizeUserInputPath(target.normalizedPath)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -12085,7 +12084,6 @@ extension WorkspaceFilesViewModel {
         return await searchFallbackCandidates(for: normalizedPath).first
     }
 
-    @MainActor
     private func resolveSelectedFileFirst(_ normalizedPath: String) -> FileViewModel? {
         let standardizedPath = (normalizedPath as NSString).standardizingPath
 
@@ -12111,7 +12109,6 @@ extension WorkspaceFilesViewModel {
         return basenameMatches.count == 1 ? basenameMatches[0] : nil
     }
 
-    @MainActor
     private func ensureMarkdownPathSearchIndex() async {
         let generation = currentHierarchyGenerationSignature()
         guard markdownPathSearchGeneration != generation || markdownPathSearchIndex == nil else {
@@ -12140,7 +12137,6 @@ extension WorkspaceFilesViewModel {
         markdownPathSearchGeneration = generation
     }
 
-    @MainActor
     private func searchFallbackCandidates(for normalizedPath: String) async -> [FileViewModel] {
         await ensureMarkdownPathSearchIndex()
         guard let markdownPathSearchIndex else { return [] }
@@ -12197,7 +12193,6 @@ extension WorkspaceFilesViewModel {
             .map(\.file)
     }
 
-    @MainActor
     func resolveFolderForUserInput(
         _ userPath: String,
         rootScope: LookupRootScope = .visibleWorkspace
@@ -12205,7 +12200,6 @@ extension WorkspaceFilesViewModel {
         resolveFolderInput(userPath, rootScope: rootScope).folder
     }
 
-    @MainActor
     private func resolveFolderInput(
         _ path: String,
         rootScope: LookupRootScope = .visibleWorkspace
@@ -12284,7 +12278,6 @@ extension WorkspaceFilesViewModel {
         return (nil, nil, nil)
     }
 
-    @MainActor
     func resolveFilesForFolderInput(
         _ path: String,
         rootScope: LookupRootScope = .visibleWorkspace
@@ -12312,12 +12305,12 @@ extension WorkspaceFilesViewModel {
         }
 
         if let loc = await pathLocation(
-            cleaned,
-            exactMatchOnly: false,
-            profile: .mcpSelection,
-            rootScopeOverride: rootScope
-        ),
-            let folder = resolveFolder(at: loc)
+               cleaned,
+               exactMatchOnly: false,
+               profile: .mcpSelection,
+               rootScopeOverride: rootScope
+           ),
+           let folder = resolveFolder(at: loc)
         {
             return FolderInputResolution(
                 files: getFilesRecursively(under: folder),
@@ -12330,7 +12323,6 @@ extension WorkspaceFilesViewModel {
         return FolderInputResolution(files: [], handled: false, displayPath: nil, issue: .unresolved(input: path))
     }
 
-    @MainActor
     func applyCodemapOnlySelection(paths: [String]) async {
         guard !paths.isEmpty else { return }
 
@@ -12406,7 +12398,6 @@ extension WorkspaceFilesViewModel {
     /// folder’s **.repo_ignore** file, creating it when necessary.
     /// The operation is carried out by the workspace file context store;
     /// the UI layer never touches the file-system directly.
-    @MainActor
     func ignorePath(fullPath: String, isDirectory: Bool) async {
         let standardizedFullPath = StandardizedPath.absolute(fullPath)
 
@@ -12441,7 +12432,9 @@ extension WorkspaceFilesViewModel {
                     .components(separatedBy: .newlines)
                     .contains { $0.trimmingCharacters(in: .whitespaces) == finalLine }
 
-                if alreadyPresent { return } // nothing to do
+                if alreadyPresent {
+                    return
+                }
 
                 let needsNL = existing.isEmpty ? "" :
                     (existing.hasSuffix("\n") ? "" : "\n")
@@ -12464,7 +12457,6 @@ extension WorkspaceFilesViewModel {
         }
     }
 
-    @MainActor
     private func registerSliceRebaseTask(
         fullPath: String,
         operation: @escaping @MainActor (UUID) async -> Void
@@ -12507,7 +12499,6 @@ extension WorkspaceFilesViewModel {
         sliceRebaseTasksByFullPath[fullPath] = task
     }
 
-    @MainActor
     private func trustworthySliceRebaseSourceSnapshot(for file: FileViewModel) async -> SliceRebaseSourceSnapshot? {
         let snapshot = await file.cachedContentSnapshot()
         guard snapshot.isFresh, let content = snapshot.content else { return nil }
@@ -12517,7 +12508,6 @@ extension WorkspaceFilesViewModel {
         )
     }
 
-    @MainActor
     private func scheduleSliceRebaseForModifiedFile(
         _ file: FileViewModel,
         relativePath: String,
@@ -12617,7 +12607,6 @@ extension WorkspaceFilesViewModel {
 
     /// Waits for pending slice-rebase tasks that affect currently selected files.
     /// Used by selection/reporting paths so line-range metadata reflects post-edit rebases.
-    @MainActor
     func waitForPendingSliceRebasesAffectingSelection() async {
         let selectedFullPaths = Set(selectedFiles.map(\.standardizedFullPath))
         await waitForPendingSliceRebases(affectingFullPaths: selectedFullPaths)
@@ -12625,7 +12614,6 @@ extension WorkspaceFilesViewModel {
 
     /// Waits for currently pending slice-rebase work, then captures the exact path set whose
     /// quiescence must be revalidated before authoritative selection verification completes.
-    @MainActor
     func waitForPendingSliceRebasesAndCaptureFence(
         affectingCandidatePaths candidatePaths: [String]
     ) async -> WorkspaceSliceRebaseFence {
@@ -12642,7 +12630,6 @@ extension WorkspaceFilesViewModel {
         )
     }
 
-    @MainActor
     func isSliceRebaseFenceCurrent(_ fence: WorkspaceSliceRebaseFence) -> Bool {
         guard fence.unresolvedCandidatePaths.isEmpty else { return false }
         return fence.registrationGenerationsByFullPath.allSatisfy { fullPath, capturedGeneration in
@@ -12651,7 +12638,6 @@ extension WorkspaceFilesViewModel {
         }
     }
 
-    @MainActor
     private func waitForAppliedIndexConsumers(
         affectingCandidatePaths candidatePaths: [String]
     ) async -> Set<String> {
@@ -12683,13 +12669,14 @@ extension WorkspaceFilesViewModel {
         }
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         while ContinuousClock.now < deadline {
-            if required.allSatisfy({ isCaughtUp($0.state) }) { return [] }
+            if required.allSatisfy({ isCaughtUp($0.state) }) {
+                return []
+            }
             try? await Task.sleep(for: .milliseconds(10))
         }
         return Set(required.compactMap { isCaughtUp($0.state) ? nil : $0.fullPath })
     }
 
-    @MainActor
     private func waitForPendingSliceRebases(affectingFullPaths fullPaths: Set<String>) async {
         guard !fullPaths.isEmpty else { return }
         for _ in 0 ..< 3 {
@@ -12705,7 +12692,6 @@ extension WorkspaceFilesViewModel {
         }
     }
 
-    @MainActor
     private func normalizedFullPathsForSliceRebaseWait(
         from candidatePaths: [String]
     ) -> (fullPaths: Set<String>, unresolved: Set<String>) {
@@ -12735,7 +12721,6 @@ extension WorkspaceFilesViewModel {
         return (fullPaths, unresolved)
     }
 
-    @MainActor
     private func shouldScheduleSliceRebase(for file: FileViewModel, fullPath: String) -> Bool {
         if hasLikelySlicesForFile(file) {
             return true
@@ -12749,7 +12734,6 @@ extension WorkspaceFilesViewModel {
         return true
     }
 
-    @MainActor
     private func scopesForSliceRebase(workspaceID: UUID) -> [PartitionScope] {
         var scopes: [PartitionScope] = []
 
@@ -12770,7 +12754,6 @@ extension WorkspaceFilesViewModel {
         return deduped
     }
 
-    @MainActor
     private func hasLikelySlicesForFile(_ file: FileViewModel) -> Bool {
         let rootKey = file.standardizedRootFolderPath
         let relKey = file.standardizedRelativePath
@@ -12793,7 +12776,6 @@ extension WorkspaceFilesViewModel {
         return false
     }
 
-    @MainActor
     private func hasAnySlicesForFile(_ file: FileViewModel) async -> Bool {
         if hasLikelySlicesForFile(file) {
             return true
@@ -12814,7 +12796,6 @@ extension WorkspaceFilesViewModel {
         return false
     }
 
-    @MainActor
     private func rebaseSlicesForModifiedFile(
         _ file: FileViewModel,
         relativePath: String,
@@ -12977,7 +12958,9 @@ extension WorkspaceFilesViewModel {
             let normalizedRanges = SliceRangeMath.normalize(result.rebased)
             let nextAnchors: [SliceAnchor]? = {
                 guard !normalizedRanges.isEmpty else { return nil }
-                if Task.isCancelled { return stored.anchors }
+                if Task.isCancelled {
+                    return stored.anchors
+                }
                 return SliceRebaseEngine.buildAnchors(content: newText, ranges: normalizedRanges)
             }()
             return (normalizedRanges, nextAnchors, false)
@@ -13008,7 +12991,6 @@ extension WorkspaceFilesViewModel {
         return true
     }
 
-    @MainActor
     private func beginSliceRebaseCommit(
         workspaceID: UUID,
         rootID: UUID,
@@ -13054,7 +13036,6 @@ extension WorkspaceFilesViewModel {
         await commitTask.value
     }
 
-    @MainActor
     private func commitSliceRebase(
         workspaceID: UUID,
         rootID: UUID,
@@ -13218,7 +13199,6 @@ extension WorkspaceFilesViewModel {
             }
     }
 
-    @MainActor
     private func syncFileSystemPreferencesFromGlobalSettings() {
         let settings = GlobalSettingsStore.shared.fileSystemSettingsSnapshot()
         respectRepoIgnore = settings.respectRepoIgnore
@@ -13236,8 +13216,8 @@ extension WorkspaceFilesViewModel {
                 Task { @MainActor in
                     // Workspace must match
                     guard let wsAny = note.userInfo?[PartitionStore.notifWorkspaceIDKey],
-                          let ws = wsAny as? UUID else { return }
-                    guard ws == self.currentWorkspaceID else { return }
+                          let ws = wsAny as? UUID,
+                          ws == self.currentWorkspaceID else { return }
                     self.partitionSliceSaveRevision &+= 1
 
                     // Ignore our own writes to avoid redundant reload churn in this VM.
@@ -13265,29 +13245,24 @@ extension WorkspaceFilesViewModel {
     }
 
     #if DEBUG
-        @MainActor
         func _testHasAnySlicesForFile(_ file: FileViewModel) async -> Bool {
             await hasAnySlicesForFile(file)
         }
 
-        @MainActor
         func _testShouldScheduleSliceRebase(_ file: FileViewModel) -> Bool {
             let fullPath = file.standardizedFullPath
             return shouldScheduleSliceRebase(for: file, fullPath: fullPath)
         }
 
-        @MainActor
         func _testMarkKnownNoSlices(_ file: FileViewModel) {
             let fullPath = file.standardizedFullPath
             noSlicesKnownRevisionByFullPath[fullPath] = partitionSliceSaveRevision
         }
 
-        @MainActor
         func _testBumpPartitionSliceSaveRevision() {
             partitionSliceSaveRevision &+= 1
         }
 
-        @MainActor
         func _testLoadSlicesForScope(
             rootPath: String,
             scope: PartitionScope,
@@ -13299,7 +13274,6 @@ extension WorkspaceFilesViewModel {
             )[StandardizedPath.relative(relativePath)]
         }
 
-        @MainActor
         func _testPersistSlicesForScope(
             rootPath: String,
             scope: PartitionScope,

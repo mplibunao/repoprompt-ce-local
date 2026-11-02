@@ -755,7 +755,9 @@ class OracleViewModel: ObservableObject {
             else { return nil }
             return stableScopedSession(loaded)
         }
-        if targetUUID != nil, !initialIdentityMatches.isEmpty { return nil }
+        if targetUUID != nil, !initialIdentityMatches.isEmpty {
+            return nil
+        }
 
         let persistedLookup: ChatSessionLookupResult
         do {
@@ -777,7 +779,9 @@ class OracleViewModel: ObservableObject {
         case .ambiguous:
             return nil
         }
-        if let persisted, !matchesRequestedTab(persisted) { return nil }
+        if let persisted, !matchesRequestedTab(persisted) {
+            return nil
+        }
 
         let refreshedIdentityMatches = sessions.filter(matchesIdentity)
         let refreshedScopedMatches = refreshedIdentityMatches.filter(matchesRequestedTab)
@@ -794,7 +798,9 @@ class OracleViewModel: ObservableObject {
             else { return nil }
             return stableScopedSession(loaded)
         }
-        if targetUUID != nil, !refreshedIdentityMatches.isEmpty { return nil }
+        if targetUUID != nil, !refreshedIdentityMatches.isEmpty {
+            return nil
+        }
         guard let persisted else { return nil }
 
         sessions.append(persisted)
@@ -879,9 +885,15 @@ class OracleViewModel: ObservableObject {
 
     @MainActor
     private func ensureSessionStorage(_ sessionID: UUID) {
-        if messageStore[sessionID] == nil { messageStore[sessionID] = [] }
-        if runStateBySession[sessionID] == nil { runStateBySession[sessionID] = SessionRunState() }
-        if nextSequenceIndexBySession[sessionID] == nil { nextSequenceIndexBySession[sessionID] = 0 }
+        if messageStore[sessionID] == nil {
+            messageStore[sessionID] = []
+        }
+        if runStateBySession[sessionID] == nil {
+            runStateBySession[sessionID] = SessionRunState()
+        }
+        if nextSequenceIndexBySession[sessionID] == nil {
+            nextSequenceIndexBySession[sessionID] = 0
+        }
     }
 
     @MainActor
@@ -899,8 +911,7 @@ class OracleViewModel: ObservableObject {
 
     @MainActor
     private func sessionNeedsMessageLoad(_ session: ChatSession) -> Bool {
-        guard !session.isListStub else { return true }
-        guard let storedMessages = messageStore[session.id] else { return true }
+        guard !session.isListStub, let storedMessages = messageStore[session.id] else { return true }
         return storedMessages.isEmpty && session.effectiveMessageCount > 0
     }
 
@@ -1944,8 +1955,7 @@ class OracleViewModel: ObservableObject {
     @MainActor
     private func handleActiveComposeTabChanged(tabID: UUID?) async {
         refreshSessionLists()
-        guard !isSwitchingTabsForSession else { return }
-        guard tabID != nil else { return }
+        guard !isSwitchingTabsForSession, tabID != nil else { return }
         _ = await ensureActiveSessionForCurrentTab(createIfMissing: true)
     }
 
@@ -2541,11 +2551,7 @@ class OracleViewModel: ObservableObject {
 
     @MainActor
     func switchToSession(_ id: UUID, setActiveForTab: Bool = true) async {
-        guard currentSessionID != id else {
-            return
-        }
-
-        guard let existingSession = sessions.first(where: { $0.id == id }) else { return }
+        guard currentSessionID != id, let existingSession = sessions.first(where: { $0.id == id }) else { return }
 
         sessionSwitchGeneration += 1
         let switchGeneration = sessionSwitchGeneration
@@ -2560,10 +2566,8 @@ class OracleViewModel: ObservableObject {
         // created right after a workspace switch.
         if skipAutosaveCurrentSessionOnce {
             skipAutosaveCurrentSessionOnce = false // consume the ticket
-        } else {
-            if let currentSessionID, !isSessionStreaming(currentSessionID) {
-                autosaveChatHistory(for: currentSessionID)
-            }
+        } else if let currentSessionID, !isSessionStreaming(currentSessionID) {
+            autosaveChatHistory(for: currentSessionID)
         }
 
         let targetTabID = await ensureTabForSession(existingSession)
@@ -2584,8 +2588,7 @@ class OracleViewModel: ObservableObject {
         let shouldPreload = sessionNeedsMessageLoad(existingSession)
         let resolvedSession: ChatSession
         if shouldPreload {
-            guard let loadedSession = await ensureSessionLoadedForBackground(existingSession) else { return }
-            guard sessionSwitchGeneration == switchGeneration else { return }
+            guard let loadedSession = await ensureSessionLoadedForBackground(existingSession), sessionSwitchGeneration == switchGeneration else { return }
             resolvedSession = loadedSession
         } else {
             resolvedSession = sessions.first(where: { $0.id == id }) ?? existingSession
@@ -2923,8 +2926,7 @@ class OracleViewModel: ObservableObject {
         // ------------------------------------------------------------------
         // 0️⃣  Preconditions
         // ------------------------------------------------------------------
-        guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
-        guard let liveMessages = messageStore[sessionID] ?? (sessionID == currentSessionID ? messages : nil) else {
+        guard let session = sessions.first(where: { $0.id == sessionID }), let liveMessages = messageStore[sessionID] ?? (sessionID == currentSessionID ? messages : nil) else {
             return
         }
 
@@ -3115,8 +3117,7 @@ class OracleViewModel: ObservableObject {
     /// If the message being edited is not the last user message, forks the chat.
     @MainActor
     func editAndResendMessage(messageId: UUID, newContent: String) async {
-        guard !newContent.isEmpty else { return }
-        guard let session = currentSession else { return }
+        guard !newContent.isEmpty, let session = currentSession else { return }
         let liveMessages = messageStore[session.id] ?? messages
 
         // Find the message to edit
@@ -3804,8 +3805,7 @@ class OracleViewModel: ObservableObject {
 
     @MainActor
     func resendLastMessage() {
-        guard let sessionID = currentSessionID, !isSessionStreaming(sessionID) else { return }
-        guard let lastUserMessageIndex = messages.lastIndex(where: { $0.isUser }) else { return }
+        guard let sessionID = currentSessionID, !isSessionStreaming(sessionID), let lastUserMessageIndex = messages.lastIndex(where: { $0.isUser }) else { return }
 
         let lastUserContent = messages[lastUserMessageIndex].content
         let removedIds = messages[lastUserMessageIndex ..< messages.endIndex].map(\.id)
@@ -3822,7 +3822,9 @@ class OracleViewModel: ObservableObject {
 
     @MainActor
     func clearChat() async {
-        if messages.isEmpty { return }
+        if messages.isEmpty {
+            return
+        }
         if let sessionID = currentSessionID {
             await cancelAIResponse(in: sessionID, skipPartialParseAndSave: true)
         }
@@ -3980,9 +3982,7 @@ class OracleViewModel: ObservableObject {
     @MainActor
     private func renameComposeTabIfDefault(tabID: UUID, sessionName: String) {
         let trimmed = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        guard let tab = workspaceManager.composeTab(with: tabID) else { return }
-        guard isDefaultComposeTabName(tab.name) else { return }
+        guard !trimmed.isEmpty, let tab = workspaceManager.composeTab(with: tabID), isDefaultComposeTabName(tab.name) else { return }
         if tab.name != trimmed {
             promptViewModel.renameComposeTab(tabID, to: trimmed)
         }
@@ -4009,7 +4009,7 @@ class OracleViewModel: ObservableObject {
         if let extractedName = ChatNameExtractor
             .extractAndRemove(from: &mutableContent)?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-            !extractedName.isEmpty
+           !extractedName.isEmpty
         {
             await MainActor.run {
                 if let idx = sessions.firstIndex(where: { $0.id == sessionID }) {

@@ -805,20 +805,19 @@ private struct MessageBubbleContent: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
+    @ViewBuilder
     private var reasoningButtonIfNeeded: some View {
-        // Always render container to prevent layout shifts.
-        Group {
-            if shouldShowReasoningButton {
-                let binding = viewModel.bindingForReasoningContent(of: message.id)
-                ReasoningButton(
-                    reasoningContent: binding,
-                    isStreaming: isStreamingWithEmptyContent,
-                    externalUpdateTick: viewModel.reasoningUpdateTick
-                )
-            } else {
-                Color.clear
-                    .frame(width: 0, height: 0)
-            }
+        // Render a zero-size Color.clear placeholder when the reasoning button is hidden to prevent layout shifts.
+        if shouldShowReasoningButton {
+            let binding = viewModel.bindingForReasoningContent(of: message.id)
+            ReasoningButton(
+                reasoningContent: binding,
+                isStreaming: isStreamingWithEmptyContent,
+                externalUpdateTick: viewModel.reasoningUpdateTick
+            )
+        } else {
+            Color.clear
+                .frame(width: 0, height: 0)
         }
     }
 

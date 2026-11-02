@@ -111,10 +111,8 @@ class ContentViewModel: ObservableObject {
                 rootRoute = .workspaceEntry
                 workspaceEntryTab = .workspaces
             }
-        } else {
-            if rootRoute == .workspaceEntry {
-                rootRoute = .main
-            }
+        } else if rootRoute == .workspaceEntry {
+            rootRoute = .main
         }
     }
 

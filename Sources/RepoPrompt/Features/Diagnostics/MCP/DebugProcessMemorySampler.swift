@@ -298,7 +298,9 @@
             let intervalNanoseconds = UInt64(intervalMS) * 1_000_000
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: intervalNanoseconds)
-                if Task.isCancelled { break }
+                if Task.isCancelled {
+                    break
+                }
                 recordPeriodicSample(sessionID: sessionID)
             }
         }
@@ -566,8 +568,7 @@
 
         private static func captureSnapshot() -> DebugProcessMemorySnapshot? {
             let nowMS = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000.0
-            guard let residentBytes = captureResidentBytes() else { return nil }
-            guard let cpuUsage = captureCPUUsage() else { return nil }
+            guard let residentBytes = captureResidentBytes(), let cpuUsage = captureCPUUsage() else { return nil }
             return DebugProcessMemorySnapshot(
                 timestampMS: nowMS,
                 residentBytes: residentBytes,

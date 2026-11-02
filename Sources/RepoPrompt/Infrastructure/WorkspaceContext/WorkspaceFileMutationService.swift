@@ -293,8 +293,8 @@ struct WorkspaceFileMutationService {
     ) -> FileCreationResult? {
         guard standardizedInput.hasPrefix("/"),
               let root = roots
-              .filter({ StandardizedPath.isDescendant(standardizedInput, of: $0.standardizedFullPath) })
-              .max(by: { $0.standardizedFullPath.count < $1.standardizedFullPath.count })
+                  .filter({ StandardizedPath.isDescendant(standardizedInput, of: $0.standardizedFullPath) })
+                  .max(by: { $0.standardizedFullPath.count < $1.standardizedFullPath.count })
         else { return nil }
 
         let suffix: Substring = if root.standardizedFullPath == "/" {
@@ -321,8 +321,7 @@ struct WorkspaceFileMutationService {
         rootScope: WorkspaceLookupRootScope
     ) async -> WorkspaceFolderRecord? {
         let trimmed = userPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard await store.exactPathResolutionIssue(for: trimmed, kind: .folder, rootScope: rootScope) == nil else { return nil }
+        guard !trimmed.isEmpty, await store.exactPathResolutionIssue(for: trimmed, kind: .folder, rootScope: rootScope) == nil else { return nil }
         return await store.lookupPath(
             WorkspacePathLookupRequest(userPath: trimmed, profile: .moveSourceExact, rootScope: rootScope)
         )?.folder
@@ -333,8 +332,7 @@ struct WorkspaceFileMutationService {
         preflight: CreatePathPreflight.Result,
         rootScope: WorkspaceLookupRootScope
     ) async -> FileCreationResult? {
-        guard !preflight.isAbsolute else { return nil }
-        guard case let .uniqueRoot(root, alias) = preflight.aliasCheck else { return nil }
+        guard !preflight.isAbsolute, case let .uniqueRoot(root, alias) = preflight.aliasCheck else { return nil }
         let aliasRelativePath = StandardizedPath.relative(alias)
         guard await store.folder(rootID: root.id, relativePath: aliasRelativePath) != nil else { return nil }
 

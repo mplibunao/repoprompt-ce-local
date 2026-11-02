@@ -59,7 +59,9 @@ struct ModelPresetsSettingsView: View {
         Binding(
             get: { presetsManager.persistenceErrorMessage != nil },
             set: { isPresented in
-                if !isPresented { presetsManager.clearPersistenceError() }
+                if !isPresented {
+                    presetsManager.clearPersistenceError()
+                }
             }
         )
     }

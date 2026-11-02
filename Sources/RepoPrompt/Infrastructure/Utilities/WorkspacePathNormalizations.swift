@@ -25,7 +25,9 @@ enum StoredSelectionPathNormalization {
         slices.keys.sorted {
             let lhs = standardizedPath($0) ?? $0
             let rhs = standardizedPath($1) ?? $1
-            if lhs != rhs { return lhs.utf8.lexicographicallyPrecedes(rhs.utf8) }
+            if lhs != rhs {
+                return lhs.utf8.lexicographicallyPrecedes(rhs.utf8)
+            }
             return $0.utf8.lexicographicallyPrecedes($1.utf8)
         }
     }
@@ -162,8 +164,7 @@ enum GitDiffPathNormalization {
         results.reserveCapacity(absolutePaths.count)
         for abs in absolutePaths {
             let standardizedAbs = normalizedAbsolutePath(abs)
-            guard StandardizedPath.isDescendant(standardizedAbs, of: standardizedRoot) else { continue }
-            guard standardizedAbs != standardizedRoot else { continue }
+            guard StandardizedPath.isDescendant(standardizedAbs, of: standardizedRoot), standardizedAbs != standardizedRoot else { continue }
             let suffix: Substring = if standardizedRoot == "/" {
                 standardizedAbs.dropFirst()
             } else {

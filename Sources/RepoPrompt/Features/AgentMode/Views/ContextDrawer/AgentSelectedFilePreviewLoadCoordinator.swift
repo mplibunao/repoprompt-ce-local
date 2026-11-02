@@ -54,7 +54,9 @@ final class AgentSelectedFilePreviewLoadCoordinator: ObservableObject {
 
     func displayText(for row: AgentContextExportRow) -> String {
         guard activePreviewRowID == row.id else { return "No preview content available" }
-        if isLoadingPreview { return "Loading preview…" }
+        if isLoadingPreview {
+            return "Loading preview…"
+        }
         return previewText ?? "No preview content available"
     }
 

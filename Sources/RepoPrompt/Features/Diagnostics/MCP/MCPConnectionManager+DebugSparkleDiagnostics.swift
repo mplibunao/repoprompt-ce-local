@@ -270,19 +270,19 @@ import MCP
         private func debugCachePolicyName(_ policy: URLRequest.CachePolicy) -> String {
             switch policy {
             case .useProtocolCachePolicy:
-                return "useProtocolCachePolicy"
+                "useProtocolCachePolicy"
             case .reloadIgnoringLocalCacheData:
-                return "reloadIgnoringLocalCacheData"
+                "reloadIgnoringLocalCacheData"
             case .reloadIgnoringLocalAndRemoteCacheData:
-                return "reloadIgnoringLocalAndRemoteCacheData"
+                "reloadIgnoringLocalAndRemoteCacheData"
             case .returnCacheDataElseLoad:
-                return "returnCacheDataElseLoad"
+                "returnCacheDataElseLoad"
             case .returnCacheDataDontLoad:
-                return "returnCacheDataDontLoad"
+                "returnCacheDataDontLoad"
             case .reloadRevalidatingCacheData:
-                return "reloadRevalidatingCacheData"
+                "reloadRevalidatingCacheData"
             @unknown default:
-                return "unknown"
+                "unknown"
             }
         }
 

@@ -26,7 +26,9 @@ final class CLIProcessRunnerPipeLifecycleTests: XCTestCase {
             config.testHooks = CLIProcessRunnerTestHooks(
                 beforeOutputReaderStarts: { channel in gate.park(channel) },
                 onDrainEvent: { event in
-                    if event == .started { gate.open(by: .drainStarted) }
+                    if event == .started {
+                        gate.open(by: .drainStarted)
+                    }
                 }
             )
             let script = """
@@ -72,7 +74,9 @@ final class CLIProcessRunnerPipeLifecycleTests: XCTestCase {
         // stdout stays unread until a check has seen its unread bytes and kept the pipe open.
         config.testHooks = CLIProcessRunnerTestHooks(
             beforeOutputReaderStarts: { channel in
-                if channel == .stdout { gate.park(channel) }
+                if channel == .stdout {
+                    gate.park(channel)
+                }
             },
             onDrainEvent: { event in
                 events.withValue { $0.append(event) }
@@ -137,7 +141,9 @@ final class CLIProcessRunnerPipeLifecycleTests: XCTestCase {
             // unread releases the reader at the retirement, so the test fails at once.
             config.testHooks = CLIProcessRunnerTestHooks(
                 beforeOutputReaderStarts: { channel in
-                    if channel == .stdout { gate.park(channel) }
+                    if channel == .stdout {
+                        gate.park(channel)
+                    }
                 },
                 onDrainEvent: { event in
                     events.withValue { $0.append(event) }
@@ -175,7 +181,11 @@ final class CLIProcessRunnerPipeLifecycleTests: XCTestCase {
             XCTAssertNotNil(holder.pid, "\(label): the root child never recorded its holder")
             XCTAssertTrue(holderAlive, "\(label): the result waited for the escaped holder to exit")
             let firstHold = recorded.lazy.compactMap { event -> Int? in
-                if case let .heldForBacklog(.stdout, unreadBacklog) = event { unreadBacklog } else { nil }
+                if case let .heldForBacklog(.stdout, unreadBacklog) = event {
+                    unreadBacklog
+                } else {
+                    nil
+                }
             }.first
             XCTAssertGreaterThanOrEqual(firstHold ?? 0, payload.count, "\(label): \(recorded)")
             let stdoutChecks = recorded.filter { $0.channel == .stdout }
@@ -455,7 +465,9 @@ private extension CLIProcessRunnerPipeLifecycleTests {
             let stream = try await runner.runStreaming(args: args, stdin: nil, outputMode: .none, timeout: timeout)
             for try await event in stream {
                 output.withValue {
-                    if $0.terminationCount > 0 { $0.eventsAfterTermination += 1 }
+                    if $0.terminationCount > 0 {
+                        $0.eventsAfterTermination += 1
+                    }
                     switch event {
                     case let .stdout(chunk):
                         $0.stdout.append(chunk)
@@ -476,7 +488,9 @@ private extension CLIProcessRunnerPipeLifecycleTests {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         while clock.now < deadline {
-            if condition() { return true }
+            if condition() {
+                return true
+            }
             try? await clock.sleep(for: .milliseconds(5))
         }
         return condition()
@@ -485,11 +499,19 @@ private extension CLIProcessRunnerPipeLifecycleTests {
 
 private extension CLIProcessRunnerTestHooks.DrainEvent {
     var channel: CLIProcessRunnerTestHooks.OutputChannel? {
-        if case let .checked(channel, _, _, _) = self { channel } else { nil }
+        if case let .checked(channel, _, _, _) = self {
+            channel
+        } else {
+            nil
+        }
     }
 
     var retirementReason: CLIProcessRunnerTestHooks.RetirementReason? {
-        if case let .checked(_, _, true, reason) = self { reason } else { nil }
+        if case let .checked(_, _, true, reason) = self {
+            reason
+        } else {
+            nil
+        }
     }
 }
 
@@ -511,7 +533,9 @@ private struct Holder {
     }
 
     func terminate() {
-        if let pid { kill(pid, SIGKILL) }
+        if let pid {
+            kill(pid, SIGKILL)
+        }
     }
 }
 
@@ -550,7 +574,9 @@ private final class ReaderGate: @unchecked Sendable {
 
     func open(by opener: Opener) {
         condition.withLock {
-            if firstOpener == nil { firstOpener = opener }
+            if firstOpener == nil {
+                firstOpener = opener
+            }
             condition.broadcast()
         }
     }

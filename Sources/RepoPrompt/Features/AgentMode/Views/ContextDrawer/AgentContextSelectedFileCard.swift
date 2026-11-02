@@ -39,8 +39,12 @@ struct AgentContextSelectedFileCardMetricRowPresentation: Equatable {
 
     static func percentText(for metrics: AgentContextExportRow.Metrics.Known) -> String {
         let percentage = metrics.tokenPercentage
-        if percentage <= 0 { return "0%" }
-        if percentage < 0.01 { return "<1%" }
+        if percentage <= 0 {
+            return "0%"
+        }
+        if percentage < 0.01 {
+            return "<1%"
+        }
         return "\(Int((percentage * 100).rounded()))%"
     }
 
@@ -453,7 +457,9 @@ private struct AgentContextFileActionButton: View {
 
     private var foregroundColor: Color {
         guard !isDisabled else { return .secondary.opacity(0.35) }
-        if isButtonHovered { return hoverColor }
+        if isButtonHovered {
+            return hoverColor
+        }
         return .secondary.opacity(rowIsHovered ? 1 : 0.55)
     }
 
@@ -501,7 +507,9 @@ private struct AgentContextFileActionMenu: View {
     @State private var isButtonHovered = false
 
     private var foregroundColor: Color {
-        if isButtonHovered { return .primary }
+        if isButtonHovered {
+            return .primary
+        }
         return .secondary.opacity(rowIsHovered ? 1 : 0.55)
     }
 

@@ -97,11 +97,9 @@ enum ToolJSON {
     ) -> String? {
         cache.projection(String.self, variant: "preferredJSON|env:\(requireEnvelope)", primary: json) {
             guard let data = data(from: json),
-                  let root = try? JSONSerialization.jsonObject(with: data)
+                  let root = try? JSONSerialization.jsonObject(with: data),
+                  let preferred = preferredStructuredValue(in: root)
             else {
-                return requireEnvelope ? nil : json?.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            guard let preferred = preferredStructuredValue(in: root) else {
                 return requireEnvelope ? nil : json?.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             return canonicalJSONString(from: preferred)

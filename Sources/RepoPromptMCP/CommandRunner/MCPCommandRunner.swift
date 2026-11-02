@@ -477,8 +477,7 @@ actor MCPCommandRunner {
     // MARK: - Raw JSON detection (avoid breaking JSON with prefixes)
 
     private static func isRawJSONResult(_ result: CallTool.Result) -> Bool {
-        guard result.content.count == 1 else { return false }
-        guard case let .text(text, _, _) = result.content[0] else { return false }
+        guard result.content.count == 1, case let .text(text, _, _) = result.content[0] else { return false }
         return isJSONText(text)
     }
 
@@ -512,9 +511,15 @@ actor MCPCommandRunner {
 
         // Settings summary
         var flags: [String] = []
-        if settings.prettyJSON { flags.append("pretty") }
-        if settings.colors { flags.append("colors") }
-        if settings.verbose { flags.append("verbose") }
+        if settings.prettyJSON {
+            flags.append("pretty")
+        }
+        if settings.colors {
+            flags.append("colors")
+        }
+        if settings.verbose {
+            flags.append("verbose")
+        }
         await output("  Settings:   \(flags.joined(separator: ", "))", isError: false)
 
         await output("──────────────", isError: false)

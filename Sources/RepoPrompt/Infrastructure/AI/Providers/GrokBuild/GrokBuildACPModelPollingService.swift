@@ -140,7 +140,9 @@ actor GrokBuildACPModelPollingService {
     }
 
     func latestSnapshot() async -> Snapshot? {
-        if let latest { return latest }
+        if let latest {
+            return latest
+        }
         return await registrySnapshotAfterWarmingStore()
     }
 
@@ -235,8 +237,7 @@ actor GrokBuildACPModelPollingService {
     }
 
     private func startPollingIfNeeded() {
-        guard !isShutdown else { return }
-        guard pollingTask == nil else { return }
+        guard !isShutdown, pollingTask == nil else { return }
         pollingTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {

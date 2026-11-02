@@ -527,7 +527,11 @@ actor AgentContextFileBrowseService {
         )
         guard case let .available(snapshot) = access else { return [] }
         try Task.checkCancellation()
-        let selectedRootID: UUID? = if case let .root(rootID) = scope { rootID } else { nil }
+        let selectedRootID: UUID? = if case let .root(rootID) = scope {
+            rootID
+        } else {
+            nil
+        }
         let key = SearchIndexKey(
             rootScope: lookupContext.rootScope,
             catalogGeneration: snapshot.generation,
@@ -626,13 +630,17 @@ actor AgentContextFileBrowseService {
             ))
         }
         ranked.sort { lhs, rhs in
-            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            if lhs.score != rhs.score {
+                return lhs.score > rhs.score
+            }
             if lhs.file.projectedDisplayPath.count != rhs.file.projectedDisplayPath.count {
                 return lhs.file.projectedDisplayPath.count < rhs.file.projectedDisplayPath.count
             }
             let lhsLower = lhs.file.projectedDisplayPath.lowercased()
             let rhsLower = rhs.file.projectedDisplayPath.lowercased()
-            if lhsLower != rhsLower { return lhsLower < rhsLower }
+            if lhsLower != rhsLower {
+                return lhsLower < rhsLower
+            }
             return lhs.record.standardizedFullPath < rhs.record.standardizedFullPath
         }
         return ranked
@@ -646,7 +654,9 @@ actor AgentContextFileBrowseService {
         var orderedRootIDs: [UUID] = []
         var matchesByRootID: [UUID: [AgentContextFileBrowseSearchMatch]] = [:]
         for item in ranked where rootsByID[item.file.rootID] != nil {
-            if matchesByRootID[item.file.rootID] == nil { orderedRootIDs.append(item.file.rootID) }
+            if matchesByRootID[item.file.rootID] == nil {
+                orderedRootIDs.append(item.file.rootID)
+            }
             matchesByRootID[item.file.rootID, default: []].append(
                 AgentContextFileBrowseSearchMatch(file: item.file, score: item.score)
             )
@@ -833,7 +843,9 @@ actor AgentContextFileBrowseService {
     private static func sortFolders(_ folders: [WorkspaceFolderRecord]) -> [WorkspaceFolderRecord] {
         folders.sorted {
             let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
-            if comparison != .orderedSame { return comparison == .orderedAscending }
+            if comparison != .orderedSame {
+                return comparison == .orderedAscending
+            }
             return $0.standardizedRelativePath < $1.standardizedRelativePath
         }
     }
@@ -841,7 +853,9 @@ actor AgentContextFileBrowseService {
     private static func sortFiles(_ files: [WorkspaceFileRecord]) -> [WorkspaceFileRecord] {
         files.sorted {
             let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
-            if comparison != .orderedSame { return comparison == .orderedAscending }
+            if comparison != .orderedSame {
+                return comparison == .orderedAscending
+            }
             return $0.standardizedRelativePath < $1.standardizedRelativePath
         }
     }

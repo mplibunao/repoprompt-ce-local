@@ -149,7 +149,9 @@ private actor MCPConnectionStopRace {
     }
 
     func wait() async -> MCPConnectionStopRaceOutcome {
-        if let outcome { return outcome }
+        if let outcome {
+            return outcome
+        }
         return await withCheckedContinuation { continuation in
             waiters.append(continuation)
         }
@@ -1914,13 +1916,13 @@ actor ServerNetworkManager {
         sessionToken: String
     ) -> BootstrapReplacementCredit? {
         guard let predecessorConnectionID = currentBootstrapReplacementConnectionID(
-            forSessionToken: sessionToken
-        ),
-            let predecessor = connections[predecessorConnectionID],
-            !predecessor.isFilesystemBacked,
-            let predecessorLifecycleGeneration = connectionLifecycleGenerationByID[predecessorConnectionID],
-            isCurrentLifecycle(predecessorLifecycleGeneration),
-            capabilityTokenByConnection[predecessorConnectionID] == sessionToken
+                  forSessionToken: sessionToken
+              ),
+              let predecessor = connections[predecessorConnectionID],
+              !predecessor.isFilesystemBacked,
+              let predecessorLifecycleGeneration = connectionLifecycleGenerationByID[predecessorConnectionID],
+              isCurrentLifecycle(predecessorLifecycleGeneration),
+              capabilityTokenByConnection[predecessorConnectionID] == sessionToken
         else { return nil }
         return BootstrapReplacementCredit(
             sessionToken: sessionToken,
@@ -2395,8 +2397,8 @@ actor ServerNetworkManager {
     ) -> ConnectionDashboardActiveToolScope? {
         if let assignedWindowID,
            let assignedScope = scopesByWindow[assignedWindowID]?.values
-           .filter({ $0.connectionID == connectionID })
-           .max(by: { $0.sequence < $1.sequence })
+               .filter({ $0.connectionID == connectionID })
+               .max(by: { $0.sequence < $1.sequence })
         {
             return ConnectionDashboardActiveToolScope(
                 windowID: assignedWindowID,
@@ -2646,8 +2648,7 @@ actor ServerNetworkManager {
     }
 
     private func clearPersistedWindowAffinity(for connectionID: UUID) {
-        guard let clientID = clientIdentifier(forConnection: connectionID) else { return }
-        guard let sessionKey = connections[connectionID]?.capabilityToken ?? capabilityTokenByConnection[connectionID] else {
+        guard let clientID = clientIdentifier(forConnection: connectionID), let sessionKey = connections[connectionID]?.capabilityToken ?? capabilityTokenByConnection[connectionID] else {
             return
         }
 
@@ -2872,14 +2873,12 @@ actor ServerNetworkManager {
                 connectionLog("\(reason): missing connection-time window count for \(connectionID); treating as multi-window")
             }
         }
-        if connectedDuringSingleWindow || !multiWindowEffective {
-            if let firstWindow = await WindowStatesManager.shared.firstMCPEnabledWindow() {
-                let windowID = firstWindow.windowID
-                setConnectionWindowMapping(connectionID, windowID: windowID)
-                let bindReason = connectedDuringSingleWindow ? "single-window-at-connect" : "single-window-mode"
-                connectionLog("\(reason): auto-bound connection \(connectionID) to window \(windowID) (\(bindReason))")
-                return windowID
-            }
+        if connectedDuringSingleWindow || !multiWindowEffective, let firstWindow = await WindowStatesManager.shared.firstMCPEnabledWindow() {
+            let windowID = firstWindow.windowID
+            setConnectionWindowMapping(connectionID, windowID: windowID)
+            let bindReason = connectedDuringSingleWindow ? "single-window-at-connect" : "single-window-mode"
+            connectionLog("\(reason): auto-bound connection \(connectionID) to window \(windowID) (\(bindReason))")
+            return windowID
         }
 
         // Multi-window ambiguous - caller must handle
@@ -3193,15 +3192,15 @@ actor ServerNetworkManager {
         // fencing; because it has no pending application, one bounded full double-sample
         // retry is sufficient and no newer commit can begin ahead of this fence turn.
         if lateCommittedRunRouteCandidate(
-            runID: runID,
-            windowID: windowID,
-            tabID: tabID
-        ) != nil,
-            await isRunRouteAuthoritativelyCommitted(
-                runID: runID,
-                windowID: windowID,
-                tabID: tabID
-            )
+               runID: runID,
+               windowID: windowID,
+               tabID: tabID
+           ) != nil,
+           await isRunRouteAuthoritativelyCommitted(
+               runID: runID,
+               windowID: windowID,
+               tabID: tabID
+           )
         {
             #if DEBUG
                 debugRecordRunRoutingEvent(
@@ -4144,9 +4143,8 @@ actor ServerNetworkManager {
         guard isCurrentLifecycle(expectedLifecycleGeneration) else { return nil }
         for (id, _) in connections {
             guard !connectionsBeingRemoved.contains(id),
-                  connectionLifecycleGenerationByID[id] == expectedLifecycleGeneration
-            else { continue }
-            guard !excluding.contains(id) else { continue }
+                  connectionLifecycleGenerationByID[id] == expectedLifecycleGeneration,
+                  !excluding.contains(id) else { continue }
 
             if let nameFilter = clientName {
                 // Prefer authoritative admission mapping
@@ -4537,16 +4535,15 @@ actor ServerNetworkManager {
                 ))
                 continue
             }
-            if connectingTimeout > 0, state == .connecting {
-                if let createdAt = connectionStats[id]?.createdAt,
-                   now.timeIntervalSince(createdAt) > connectingTimeout
-                {
-                    log.warning("Pruning connection \(id) stuck in connecting for \(Int(now.timeIntervalSince(createdAt)))s")
-                    toRemove.append((
-                        id,
-                        MCPConnectionCloseContext(reason: "maintenance_prune_connect_timeout", initiator: .app)
-                    ))
-                }
+            if connectingTimeout > 0, state == .connecting,
+               let createdAt = connectionStats[id]?.createdAt,
+               now.timeIntervalSince(createdAt) > connectingTimeout
+            {
+                log.warning("Pruning connection \(id) stuck in connecting for \(Int(now.timeIntervalSince(createdAt)))s")
+                toRemove.append((
+                    id,
+                    MCPConnectionCloseContext(reason: "maintenance_prune_connect_timeout", initiator: .app)
+                ))
             }
         }
 
@@ -4563,21 +4560,18 @@ actor ServerNetworkManager {
         if let expectedLifecycleGeneration {
             guard isCurrentLifecycle(expectedLifecycleGeneration) else { return }
         }
-        guard pressureEvictIdleSeconds > 0 else { return }
-        guard effectiveGlobalAdmissionLoad() >= maxGlobalConnections else { return }
-        guard let victim = await oldestPressureEvictionCandidate() else { return }
+        guard pressureEvictIdleSeconds > 0, effectiveGlobalAdmissionLoad() >= maxGlobalConnections, let victim = await oldestPressureEvictionCandidate() else { return }
         if let expectedLifecycleGeneration {
             guard isCurrentLifecycle(expectedLifecycleGeneration) else { return }
         }
         guard isCurrentEvictionCandidate(victim),
               !isCreditedBootstrapPredecessor(victim),
-              let closedLimiters = callLimiters[victim.id]
-        else { return }
-        guard await closeConnectionCallLanesIfIdleForEviction(
-            victim.id,
-            expectedConnectionIdentity: victim.connectionIdentity,
-            expectedLimiters: closedLimiters
-        ) else { return }
+              let closedLimiters = callLimiters[victim.id],
+              await closeConnectionCallLanesIfIdleForEviction(
+                  victim.id,
+                  expectedConnectionIdentity: victim.connectionIdentity,
+                  expectedLimiters: closedLimiters
+              ) else { return }
         guard isCurrentEvictionCandidate(victim),
               callLimiters[victim.id] === closedLimiters
         else {
@@ -4633,8 +4627,7 @@ actor ServerNetworkManager {
         guard isCurrentLifecycle(healthCheckLifecycleGeneration) else { return }
         // Listener retention and recovery are lifecycle concerns, not tool-exposure concerns.
         // Ordinary setEnabled(false) keeps sockets alive and must still self-heal the listener.
-        guard !bootstrapStartInProgress else { return }
-        guard !bootstrapRestartInProgress else { return }
+        guard !bootstrapStartInProgress, !bootstrapRestartInProgress else { return }
 
         let now = bootstrapLifecycleTiming.monotonicNow()
         if !force, now - lastBootstrapHealthCheckAt < bootstrapHealthCheckInterval {
@@ -4692,8 +4685,7 @@ actor ServerNetworkManager {
         delay: TimeInterval = 0,
         lifecycleGeneration expectedLifecycleGeneration: UInt64
     ) {
-        guard isCurrentLifecycle(expectedLifecycleGeneration) else { return }
-        guard !bootstrapRestartInProgress else { return }
+        guard isCurrentLifecycle(expectedLifecycleGeneration), !bootstrapRestartInProgress else { return }
 
         let now = bootstrapLifecycleTiming.monotonicNow()
         guard now - lastBootstrapRestartAt >= bootstrapRestartMinInterval else { return }
@@ -4805,8 +4797,7 @@ actor ServerNetworkManager {
         #if DEBUG
             print("[MCPStartup] startBootstrapSocketServer entered running=\(isRunningState) enabled=\(isEnabledState) inProgress=\(bootstrapStartInProgress) generation=\(expectedLifecycleGeneration)")
         #endif
-        guard isCurrentLifecycle(expectedLifecycleGeneration) else { return }
-        guard !bootstrapStartInProgress else { return }
+        guard isCurrentLifecycle(expectedLifecycleGeneration), !bootstrapStartInProgress else { return }
         // Never overwrite a ready listener or startup candidate that another lifecycle is
         // still tearing down. Identity-fenced teardown schedules the current replacement.
         guard bootstrapSocketServer == nil, bootstrapStartingSocketServer == nil else { return }
@@ -5246,15 +5237,15 @@ actor ServerNetworkManager {
         let committedPredecessorRemoval: CommittedConnectionRemoval?
         if let replacementCredit = committingReservation.replacementCredit {
             guard isValidBootstrapReplacementCredit(
-                replacementCredit,
-                reservationConnectionID: connectionID,
-                reservationLifecycleGeneration: admissionLifecycleGeneration
-            ),
-                let committedRemoval = commitConnectionRemoval(
-                    connectionID: replacementCredit.predecessorConnectionID,
-                    expectedIdentity: replacementCredit.predecessorConnectionIdentity,
-                    expectedLifecycleGeneration: replacementCredit.predecessorLifecycleGeneration
-                )
+                      replacementCredit,
+                      reservationConnectionID: connectionID,
+                      reservationLifecycleGeneration: admissionLifecycleGeneration
+                  ),
+                  let committedRemoval = commitConnectionRemoval(
+                      connectionID: replacementCredit.predecessorConnectionID,
+                      expectedIdentity: replacementCredit.predecessorConnectionIdentity,
+                      expectedLifecycleGeneration: replacementCredit.predecessorLifecycleGeneration
+                  )
             else {
                 await abandonPendingBootstrapCommit(
                     connectionID: connectionID,
@@ -6371,7 +6362,9 @@ actor ServerNetworkManager {
         }
         // Fallback scan in case mapping got out of sync.
         for (id, mgr) in connections {
-            if mgr.isFilesystemBacked || connectionsBeingRemoved.contains(id) { continue }
+            if mgr.isFilesystemBacked || connectionsBeingRemoved.contains(id) {
+                continue
+            }
             let stored = capabilityTokenByConnection[id] ?? mgr.capabilityToken
             if stored == token {
                 bindSessionToken(token, to: id)
@@ -6960,8 +6953,11 @@ actor ServerNetworkManager {
         if let clientID = clientIDByConnection[id] {
             var set = activeConnectionsByClient[clientID] ?? []
             set.remove(id)
-            if set.isEmpty { activeConnectionsByClient.removeValue(forKey: clientID) }
-            else { activeConnectionsByClient[clientID] = set }
+            if set.isEmpty {
+                activeConnectionsByClient.removeValue(forKey: clientID)
+            } else {
+                activeConnectionsByClient[clientID] = set
+            }
             clientIDByConnection.removeValue(forKey: id)
         }
         // Clean up routing metadata before any bounded drain wait so the disconnected
@@ -7197,7 +7193,9 @@ actor ServerNetworkManager {
             if !shouldAdvertiseCanonicalBindingParams {
                 required.removeAll { value in
                     guard let stringValue = value.stringValue else { return false }
-                    if stringValue == "context_id" { return !shouldKeepContextID }
+                    if stringValue == "context_id" {
+                        return !shouldKeepContextID
+                    }
                     return stringValue == "working_dirs"
                 }
             }
@@ -7251,7 +7249,9 @@ actor ServerNetworkManager {
         args: [String: Value]
     ) -> [String: Value] {
         // Priority 1: explicit window_id in args -> keep unchanged
-        if args["window_id"] != nil { return args }
+        if args["window_id"] != nil {
+            return args
+        }
 
         // Priority 2: _windowID routing + schema has window_id -> inject
         guard let windowID = routingWindowID,
@@ -7735,7 +7735,9 @@ actor ServerNetworkManager {
             guard var queue = pendingPoliciesByClient[key] else { continue }
             for index in queue.indices {
                 guard queue[index].runID == runID else { continue }
-                if let windowID, queue[index].windowID != windowID { continue }
+                if let windowID, queue[index].windowID != windowID {
+                    continue
+                }
                 matchedCount += 1
                 if !queue[index].requiresExpectedAgentPID {
                     queue[index].requiresExpectedAgentPID = true
@@ -7780,7 +7782,9 @@ actor ServerNetworkManager {
             guard let queue = pendingPoliciesByClient[key] else { continue }
             for policy in queue {
                 guard policy.runID == runID else { continue }
-                if let windowID, policy.windowID != windowID { continue }
+                if let windowID, policy.windowID != windowID {
+                    continue
+                }
                 guard policy.prunesOnlyAfterSettlement || now.timeIntervalSince(policy.createdAt) <= policy.ttl
                 else { continue }
                 guard soleMatch == nil else { return false }
@@ -8744,13 +8748,15 @@ actor ServerNetworkManager {
                 repeat {
                     let snapshot = await dashboardSnapshot()
                     found = snapshot.connections.first { entry in
-                        guard !excludeConnectionIDs.contains(entry.id) else { return false }
-                        guard MCPClientIdentity.matches(entry.clientName, clientName) else { return false }
-                        guard debugSessionFingerprint(forToken: entry.sessionKey) == fingerprint else { return false }
-                        if requireReady, entry.state != .ready { return false }
+                        guard !excludeConnectionIDs.contains(entry.id), MCPClientIdentity.matches(entry.clientName, clientName), debugSessionFingerprint(forToken: entry.sessionKey) == fingerprint else { return false }
+                        if requireReady, entry.state != .ready {
+                            return false
+                        }
                         return true
                     }
-                    if found != nil { break }
+                    if found != nil {
+                        break
+                    }
                     try? await Task.sleep(for: .milliseconds(pollMS))
                 } while Date() < deadline
 
@@ -9317,11 +9323,10 @@ actor ServerNetworkManager {
             ) -> Bool {
                 guard Set(lhs.keys) == Set(rhs.keys) else { return false }
                 for clientID in lhs.keys {
-                    guard let leftSessions = lhs[clientID], let rightSessions = rhs[clientID] else { return false }
-                    guard Set(leftSessions.keys) == Set(rightSessions.keys) else { return false }
+                    guard let leftSessions = lhs[clientID], let rightSessions = rhs[clientID], Set(leftSessions.keys) == Set(rightSessions.keys) else { return false }
                     for sessionToken in leftSessions.keys {
-                        guard let left = leftSessions[sessionToken], let right = rightSessions[sessionToken] else { return false }
-                        guard left.windowID == right.windowID,
+                        guard let left = leftSessions[sessionToken], let right = rightSessions[sessionToken],
+                              left.windowID == right.windowID,
                               left.runID == right.runID,
                               left.purpose == right.purpose,
                               left.lastSeenAt == right.lastSeenAt
@@ -10081,7 +10086,9 @@ actor ServerNetworkManager {
                 }
             }
             .sorted { lhs, rhs in
-                if lhs.sequence != rhs.sequence { return lhs.sequence < rhs.sequence }
+                if lhs.sequence != rhs.sequence {
+                    return lhs.sequence < rhs.sequence
+                }
                 return lhs.scopeID.uuidString < rhs.scopeID.uuidString
             }
         }
@@ -10655,11 +10662,11 @@ actor ServerNetworkManager {
         // and leaves that policy untouched for the helper it was armed for, so a concurrently
         // running session's reconnect is neither held nor refused by another run's startup.
         if let tokenAffinity = preferredLiveRunAffinity(
-            for: clientName,
-            sessionKey: connections[connectionID]?.capabilityToken ?? capabilityTokenByConnection[connectionID]
-        ),
-            hasPIDGatedPendingPolicy(for: clientName),
-            oldestPendingPolicyEntry(for: clientName, where: { $0.runID == tokenAffinity.runID }) == nil
+               for: clientName,
+               sessionKey: connections[connectionID]?.capabilityToken ?? capabilityTokenByConnection[connectionID]
+           ),
+           hasPIDGatedPendingPolicy(for: clientName),
+           oldestPendingPolicyEntry(for: clientName, where: { $0.runID == tokenAffinity.runID }) == nil
         {
             mcpPolicyLog(
                 "routing session token past another run's pending policy client=\(clientName) connection=\(connectionID) runID=\(tokenAffinity.runID.uuidString)"
@@ -10678,9 +10685,9 @@ actor ServerNetworkManager {
         }
 
         if let reservedEntry = oldestPendingPolicyEntry(for: clientName, where: {
-            $0.reservationConnectionID == nil && $0.requiresExpectedAgentPID
-        }),
-            oldestPIDGatedPendingPolicyEntry(for: clientName, matching: clientPid ?? -1) == nil
+               $0.reservationConnectionID == nil && $0.requiresExpectedAgentPID
+           }),
+           oldestPIDGatedPendingPolicyEntry(for: clientName, matching: clientPid ?? -1) == nil
         {
             let runID = reservedEntry.policy.runID
             let ancestorDescription = clientPid.map { pidAncestorChainDescription(from: pid_t($0)) } ?? "nil"
@@ -10966,16 +10973,16 @@ actor ServerNetworkManager {
         #endif
 
         guard isPendingPolicyApplicationOwner(
-            pendingPolicyApplicationID,
-            connectionID: connectionID,
-            runID: policy.runID,
-            routingAuthorityGeneration: routingAuthorityGeneration
-        ),
-            isPendingPolicyApplicationCurrent(
-                connectionID: connectionID,
-                clientName: clientName,
-                expectedLifecycleGeneration: expectedLifecycleGeneration
-            )
+                  pendingPolicyApplicationID,
+                  connectionID: connectionID,
+                  runID: policy.runID,
+                  routingAuthorityGeneration: routingAuthorityGeneration
+              ),
+              isPendingPolicyApplicationCurrent(
+                  connectionID: connectionID,
+                  clientName: clientName,
+                  expectedLifecycleGeneration: expectedLifecycleGeneration
+              )
         else {
             if policy.oneShot {
                 _ = rollbackOneShotPendingPolicyReservation(
@@ -11377,10 +11384,7 @@ actor ServerNetworkManager {
                 routed: Bool,
                 replacementToken: MCPServerViewModel.PendingPolicyRunIDMappingToken?
             )? in
-            guard let windowState = WindowStatesManager.shared.window(withID: windowID) else {
-                return nil
-            }
-            guard let resolved = windowState.workspaceManager.resolveComposeTabRoutingSnapshot(
+            guard let windowState = WindowStatesManager.shared.window(withID: windowID), let resolved = windowState.workspaceManager.resolveComposeTabRoutingSnapshot(
                 for: tabID,
                 captureActiveUIState: false
             ) else {
@@ -11937,7 +11941,7 @@ actor ServerNetworkManager {
             }()
             let callAdmissionDeadline = promptExportExecutionEnvelope?.admissionDeadline
                 ?? windowExclusiveAdmissionDeadline
-            /// `stage` names the segment that ran since the previous check, where the budget ran out.
+            // `stage` names the segment that ran since the previous check, where the budget ran out.
             @Sendable func admissionTimeoutResultIfExpired(
                 stage: CallAdmissionStage,
                 windowID: Int? = nil
@@ -13566,7 +13570,7 @@ actor ServerNetworkManager {
                                           let authorization =
                                           Self.currentToolDispatchAuthorization
                                               ?? promptExportPublicationAuthorityObservation?.snapshot(),
-                                              await self.isCurrentToolDispatchAuthorization(authorization)
+                                          await self.isCurrentToolDispatchAuthorization(authorization)
                                     else {
                                         throw PromptExportPublicationAuthorityLost()
                                     }
@@ -14516,8 +14520,12 @@ actor ServerNetworkManager {
                     )
                 }
             }.sorted { lhs, rhs in
-                if lhs.sequence != rhs.sequence { return lhs.sequence > rhs.sequence }
-                if lhs.windowID != rhs.windowID { return lhs.windowID < rhs.windowID }
+                if lhs.sequence != rhs.sequence {
+                    return lhs.sequence > rhs.sequence
+                }
+                if lhs.windowID != rhs.windowID {
+                    return lhs.windowID < rhs.windowID
+                }
                 return lhs.toolName < rhs.toolName
             }
 
@@ -14734,8 +14742,7 @@ actor ServerNetworkManager {
 
     /// Returns the verified peer PID for a bootstrap socket connection, if available.
     func peerPID(for connectionID: UUID) async -> Int? {
-        guard let connection = connections[connectionID] else { return nil }
-        guard let bootstrap = connection as? BootstrapSocketConnectionManager else { return nil }
+        guard let connection = connections[connectionID], let bootstrap = connection as? BootstrapSocketConnectionManager else { return nil }
         return await bootstrap.peerPID()
     }
 
@@ -14770,9 +14777,9 @@ actor ServerNetworkManager {
         blocks.compactMap { block -> String? in
             switch block {
             case .text(text: let text, annotations: _, _meta: _):
-                return text
+                text
             default:
-                return nil
+                nil
             }
         }.joined(separator: "\n")
     }
@@ -14905,7 +14912,9 @@ actor ServerNetworkManager {
                 }
                 pruneDeadSlots(for: clientID)
                 effectiveSet = effectiveActiveConnectionIDs(for: clientID)
-                if effectiveSet.count < maxConnectionsPerClient { break }
+                if effectiveSet.count < maxConnectionsPerClient {
+                    break
+                }
 
                 let evictionResult = await evictLeastValuable(
                     for: clientID,
@@ -14915,7 +14924,9 @@ actor ServerNetworkManager {
                     return false
                 }
                 effectiveSet = effectiveActiveConnectionIDs(for: clientID)
-                if effectiveSet.count < maxConnectionsPerClient { break }
+                if effectiveSet.count < maxConnectionsPerClient {
+                    break
+                }
 
                 switch evictionResult {
                 case .evicted, .capacityChanged:
@@ -14965,8 +14976,11 @@ actor ServerNetworkManager {
         if let clientID = clientIDByConnection[connectionID] {
             var set = activeConnectionsByClient[clientID] ?? []
             set.remove(connectionID)
-            if set.isEmpty { activeConnectionsByClient.removeValue(forKey: clientID) }
-            else { activeConnectionsByClient[clientID] = set }
+            if set.isEmpty {
+                activeConnectionsByClient.removeValue(forKey: clientID)
+            } else {
+                activeConnectionsByClient[clientID] = set
+            }
             clientIDByConnection.removeValue(forKey: connectionID)
         }
     }
@@ -15182,7 +15196,9 @@ actor ServerNetworkManager {
     func recordToolCall(for connectionID: UUID, toolName: String) {
         // Hidden coordination calls should not appear in dashboards/histories.
         let canonicalToolName = MCPIntegrationHelper.canonicalRepoPromptToolName(toolName) ?? toolName
-        if canonicalToolName == "set_status" || canonicalToolName == "bind_context" { return }
+        if canonicalToolName == "set_status" || canonicalToolName == "bind_context" {
+            return
+        }
 
         // If this connection dropped out of the active sets (e.g., after transport toggles),
         // re-associate it now that we have a live tool call.
@@ -15380,18 +15396,18 @@ actor ServerNetworkManager {
                 #endif
                 try Task.checkCancellation()
                 guard isCurrentConnectionCallLimiterResolution(
-                    resolution,
-                    connectionID: connectionID
-                ),
-                    let replacementLimiters = try await attemptedLimiters.admissionRetryReplacement(
-                        admissionDeadline: admissionDeadline
-                    ),
-                    replacementLimiters !== attemptedLimiters,
-                    !Task.isCancelled,
-                    isCurrentConnectionCallLimiterResolution(
-                        resolution,
-                        connectionID: connectionID
-                    )
+                          resolution,
+                          connectionID: connectionID
+                      ),
+                      let replacementLimiters = try await attemptedLimiters.admissionRetryReplacement(
+                          admissionDeadline: admissionDeadline
+                      ),
+                      replacementLimiters !== attemptedLimiters,
+                      !Task.isCancelled,
+                      isCurrentConnectionCallLimiterResolution(
+                          resolution,
+                          connectionID: connectionID
+                      )
                 else { throw CancellationError() }
                 attemptedLimiters = replacementLimiters
             }
@@ -15599,15 +15615,24 @@ actor ServerNetworkManager {
         guard var set = activeConnectionsByClient[clientID] else { return }
         let live = Set(connections.keys)
         set = set.filter { live.contains($0) }
-        if set.isEmpty { activeConnectionsByClient.removeValue(forKey: clientID) }
-        else { activeConnectionsByClient[clientID] = set }
+        if set.isEmpty {
+            activeConnectionsByClient.removeValue(forKey: clientID)
+        } else {
+            activeConnectionsByClient[clientID] = set
+        }
     }
 
     /// Connection is evictable if it has no in-flight calls and does not own an active tool.
     private func isEvictable(_ id: UUID) async -> Bool {
-        if connectionsBeingRemoved.contains(id) { return false }
-        if let limiters = callLimiters[id], await limiters.hasInFlightCalls() { return false }
-        if hasActiveToolScopes(ownedBy: id) { return false }
+        if connectionsBeingRemoved.contains(id) {
+            return false
+        }
+        if let limiters = callLimiters[id], await limiters.hasInFlightCalls() {
+            return false
+        }
+        if hasActiveToolScopes(ownedBy: id) {
+            return false
+        }
         return true
     }
 
@@ -15778,9 +15803,15 @@ actor ServerNetworkManager {
 
     /// Sort ascending by value (least valuable first)
     private func isLessValuable(_ a: EvictionCandidate, than b: EvictionCandidate) -> Bool {
-        if a.everCalled != b.everCalled { return a.everCalled == false }
-        if a.idleSeconds != b.idleSeconds { return a.idleSeconds > b.idleSeconds }
-        if a.totalCalls != b.totalCalls { return a.totalCalls < b.totalCalls }
+        if a.everCalled != b.everCalled {
+            return a.everCalled == false
+        }
+        if a.idleSeconds != b.idleSeconds {
+            return a.idleSeconds > b.idleSeconds
+        }
+        if a.totalCalls != b.totalCalls {
+            return a.totalCalls < b.totalCalls
+        }
         return a.createdAt < b.createdAt
     }
 
@@ -15958,8 +15989,7 @@ actor ServerNetworkManager {
                 sourceListener: sourceListener,
                 lifecycleGeneration: lifecycleGeneration
             ) else { return .admissionContextInvalidated }
-            guard !isCreditedPredecessor(id) else { continue }
-            guard await isEvictable(id) else { continue }
+            guard !isCreditedPredecessor(id), await isEvictable(id) else { continue }
             guard isCurrentBootstrapAdmissionContext(
                 sourceListener: sourceListener,
                 lifecycleGeneration: lifecycleGeneration

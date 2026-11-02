@@ -322,8 +322,12 @@ enum ProcessTermination {
     /// child) fall back to `.exited(code: rawStatus)`, matching the historical
     /// normalized fallback of returning the raw status unchanged.
     static func decodeWaitStatus(_ rawStatus: Int32) -> ProcessExitStatus {
-        if waitStatusExited(rawStatus) { return .exited(code: waitStatusExitCode(rawStatus)) }
-        if waitStatusSignaled(rawStatus) { return .uncaughtSignal(signal: waitStatusSignal(rawStatus)) }
+        if waitStatusExited(rawStatus) {
+            return .exited(code: waitStatusExitCode(rawStatus))
+        }
+        if waitStatusSignaled(rawStatus) {
+            return .uncaughtSignal(signal: waitStatusSignal(rawStatus))
+        }
         return .exited(code: rawStatus)
     }
 
@@ -340,7 +344,9 @@ enum ProcessTermination {
 
     private static func processGroupExists(_ processGroupID: pid_t?) -> Bool {
         guard let processGroupID = safeProcessGroupID(processGroupID) else { return false }
-        if killpg(processGroupID, 0) == 0 { return true }
+        if killpg(processGroupID, 0) == 0 {
+            return true
+        }
         return errno == EPERM
     }
 
@@ -351,7 +357,9 @@ enum ProcessTermination {
         logger: (String) -> Void = { _ in }
     ) -> Bool {
         guard let processGroupID = safeProcessGroupID(processGroupID) else { return false }
-        if killpg(processGroupID, signal) == 0 { return true }
+        if killpg(processGroupID, signal) == 0 {
+            return true
+        }
         if errno != ESRCH {
             let message = String(cString: strerror(errno))
             logger("killpg(\(processGroupID), \(signal)) failed: \(message)")
@@ -367,13 +375,17 @@ enum ProcessTermination {
         logger: (String) -> Void = { _ in }
     ) -> Bool {
         if let processGroupID = safeProcessGroupID(processGroupID) {
-            if killpg(processGroupID, signal) == 0 { return true }
+            if killpg(processGroupID, signal) == 0 {
+                return true
+            }
             if errno != ESRCH {
                 let message = String(cString: strerror(errno))
                 logger("killpg(\(processGroupID), \(signal)) failed: \(message); falling back to pid \(pid)")
             }
         }
-        if kill(pid, signal) == 0 { return true }
+        if kill(pid, signal) == 0 {
+            return true
+        }
         if errno != ESRCH {
             let message = String(cString: strerror(errno))
             logger("kill(\(pid), \(signal)) failed: \(message)")
@@ -727,7 +739,9 @@ enum ProcessTermination {
                 }
 
                 let r = waitpid(pid, &status, WNOHANG)
-                if r == pid { return (decodeWaitStatus(status), false) }
+                if r == pid {
+                    return (decodeWaitStatus(status), false)
+                }
                 if r == 0 {
                     if ProcessInfo.processInfo.systemUptime >= deadline {
                         let timing = currentTiming()
@@ -745,8 +759,12 @@ enum ProcessTermination {
                     try? await Task.sleep(nanoseconds: currentPollNs())
                     continue
                 }
-                if r == -1, errno == EINTR { continue }
-                if r == -1, errno == ECHILD { return (decodeWaitStatus(status), false) }
+                if r == -1, errno == EINTR {
+                    continue
+                }
+                if r == -1, errno == ECHILD {
+                    return (decodeWaitStatus(status), false)
+                }
                 if r == -1 {
                     let message = String(cString: strerror(errno))
                     throw ProcessTerminationError.waitFailed(message)
@@ -770,13 +788,19 @@ enum ProcessTermination {
             }
 
             let r = waitpid(pid, &status, WNOHANG)
-            if r == pid { return (decodeWaitStatus(status), false) }
+            if r == pid {
+                return (decodeWaitStatus(status), false)
+            }
             if r == 0 {
                 try? await Task.sleep(nanoseconds: currentPollNs())
                 continue
             }
-            if r == -1, errno == EINTR { continue }
-            if r == -1, errno == ECHILD { return (decodeWaitStatus(status), false) }
+            if r == -1, errno == EINTR {
+                continue
+            }
+            if r == -1, errno == ECHILD {
+                return (decodeWaitStatus(status), false)
+            }
             if r == -1 {
                 let message = String(cString: strerror(errno))
                 throw ProcessTerminationError.waitFailed(message)

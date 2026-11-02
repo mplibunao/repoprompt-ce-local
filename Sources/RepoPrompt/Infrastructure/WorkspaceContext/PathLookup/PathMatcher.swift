@@ -11,9 +11,15 @@ enum PathMatcher {
     private static func firstAlnumLowercasedByte(_ s: some StringProtocol) -> UInt8? {
         for b in s.utf8 {
             // '0'..'9' or 'A'..'Z' or 'a'..'z'
-            if b >= 0x30, b <= 0x39 { return b }
-            if b >= 0x41, b <= 0x5A { return b &+ 32 }
-            if b >= 0x61, b <= 0x7A { return b }
+            if b >= 0x30, b <= 0x39 {
+                return b
+            }
+            if b >= 0x41, b <= 0x5A {
+                return b &+ 32
+            }
+            if b >= 0x61, b <= 0x7A {
+                return b
+            }
             // skip anything else (e.g., '_' '-')
         }
         return nil
@@ -80,8 +86,12 @@ enum PathMatcher {
         caseSensitive: Bool,
         stripSeparators: Bool
     ) -> Double {
-        if a.isEmpty && b.isEmpty { return 1.0 }
-        if a.isEmpty || b.isEmpty { return 0.0 }
+        if a.isEmpty && b.isEmpty {
+            return 1.0
+        }
+        if a.isEmpty || b.isEmpty {
+            return 0.0
+        }
 
         // Clamp internally to avoid negative maxDist math when callers pass > 1.0
         let t = min(max(threshold, 0.0), 1.0)
@@ -100,24 +110,38 @@ enum PathMatcher {
 
                     // Copy/lower/strip while validating ASCII (byte < 0x80)
                     for byte in a.utf8 {
-                        if byte >= 0x80 { return unicodeSimilarityScore(a, b, threshold: t, caseSensitive: caseSensitive, stripSeparators: stripSeparators) }
-                        if stripSeparators && (byte == 0x2D || byte == 0x5F) { continue } // '-' or '_'
+                        if byte >= 0x80 {
+                            return unicodeSimilarityScore(a, b, threshold: t, caseSensitive: caseSensitive, stripSeparators: stripSeparators)
+                        }
+                        // '-' or '_'
+                        if stripSeparators && (byte == 0x2D || byte == 0x5F) {
+                            continue
+                        }
                         aTmp[aLen] = caseSensitive ? byte : PathCharPolicy.toLowerASCII(byte)
                         aLen += 1
                     }
                     for byte in b.utf8 {
-                        if byte >= 0x80 { return unicodeSimilarityScore(a, b, threshold: t, caseSensitive: caseSensitive, stripSeparators: stripSeparators) }
-                        if stripSeparators && (byte == 0x2D || byte == 0x5F) { continue }
+                        if byte >= 0x80 {
+                            return unicodeSimilarityScore(a, b, threshold: t, caseSensitive: caseSensitive, stripSeparators: stripSeparators)
+                        }
+                        if stripSeparators && (byte == 0x2D || byte == 0x5F) {
+                            continue
+                        }
                         bTmp[bLen] = caseSensitive ? byte : PathCharPolicy.toLowerASCII(byte)
                         bLen += 1
                     }
 
                     let maxLen = max(aLen, bLen)
-                    if maxLen == 0 { return 1.0 } // both became empty after stripping
+                    if maxLen == 0 {
+                        // both became empty after stripping
+                        return 1.0
+                    }
 
                     // If threshold is 1.0, only exact matches can pass.
                     if t >= 1.0 {
-                        if aLen != bLen { return 0.0 }
+                        if aLen != bLen {
+                            return 0.0
+                        }
                         for i in 0 ..< aLen where aTmp[i] != bTmp[i] {
                             return 0.0
                         }
@@ -129,7 +153,9 @@ enum PathMatcher {
                     let bBuf = UnsafeBufferPointer(start: bTmp.baseAddress, count: bLen)
 
                     let dist = levenshteinDistanceCapped(aBuf, bBuf, maxDist: maxDist)
-                    if dist > maxDist { return 0.0 }
+                    if dist > maxDist {
+                        return 0.0
+                    }
                     return 1.0 - Double(dist) / Double(maxLen)
                 }
             }
@@ -158,24 +184,34 @@ enum PathMatcher {
         bScalars.reserveCapacity(b0.unicodeScalars.count)
 
         for sc in a0.unicodeScalars {
-            if stripSeparators, sc.value == 0x2D || sc.value == 0x5F { continue }
+            if stripSeparators, sc.value == 0x2D || sc.value == 0x5F {
+                continue
+            }
             aScalars.append(sc.value)
         }
         for sc in b0.unicodeScalars {
-            if stripSeparators, sc.value == 0x2D || sc.value == 0x5F { continue }
+            if stripSeparators, sc.value == 0x2D || sc.value == 0x5F {
+                continue
+            }
             bScalars.append(sc.value)
         }
 
         let maxLen = max(aScalars.count, bScalars.count)
-        if maxLen == 0 { return 1.0 }
-        if t >= 1.0 { return aScalars == bScalars ? 1.0 : 0.0 }
+        if maxLen == 0 {
+            return 1.0
+        }
+        if t >= 1.0 {
+            return aScalars == bScalars ? 1.0 : 0.0
+        }
 
         // Keep it bounded
         let maxDist = Int(ceil((1.0 - t) * Double(maxLen)))
         return aScalars.withUnsafeBufferPointer { aBuf in
             bScalars.withUnsafeBufferPointer { bBuf in
                 let dist = levenshteinDistanceCapped(aBuf, bBuf, maxDist: maxDist)
-                if dist > maxDist { return 0.0 }
+                if dist > maxDist {
+                    return 0.0
+                }
                 return 1.0 - Double(dist) / Double(maxLen)
             }
         }
@@ -188,13 +224,19 @@ enum PathMatcher {
         maxDist: Int
     ) -> Int {
         let big = maxDist + 1
-        if maxDist < 0 { return big }
+        if maxDist < 0 {
+            return big
+        }
 
         var a = aIn
         var b = bIn
 
-        if a.count == 0 { return b.count }
-        if b.count == 0 { return a.count }
+        if a.count == 0 {
+            return b.count
+        }
+        if b.count == 0 {
+            return a.count
+        }
 
         // Ensure a is the shorter string
         if a.count > b.count {
@@ -206,9 +248,13 @@ enum PathMatcher {
         let lenA = a.count
         let lenB = b.count
 
-        if abs(lenA - lenB) > maxDist { return big }
+        if abs(lenA - lenB) > maxDist {
+            return big
+        }
         if maxDist == 0 {
-            if lenA != lenB { return big }
+            if lenA != lenB {
+                return big
+            }
             for i in 0 ..< lenA where a[i] != b[i] {
                 return big
             }
@@ -239,7 +285,9 @@ enum PathMatcher {
                     for j in 0 ... lenB {
                         curr[j] = big
                     }
-                    if jLo == 1 { curr[0] = i }
+                    if jLo == 1 {
+                        curr[0] = i
+                    }
 
                     var rowMin = big
 
@@ -249,10 +297,14 @@ enum PathMatcher {
                         let sub = prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)
                         let v = min(ins, del, sub)
                         curr[j] = v
-                        if v < rowMin { rowMin = v }
+                        if v < rowMin {
+                            rowMin = v
+                        }
                     }
 
-                    if rowMin > maxDist { return big }
+                    if rowMin > maxDist {
+                        return big
+                    }
 
                     // swap prev/curr
                     for j in 0 ... lenB {
@@ -521,11 +573,15 @@ enum PathMatcher {
                 let orderedRoots = snapshot.rootFolders.sorted { lhs, rhs in
                     let lhsSel = rootsWithSel.contains(lhs.fullPath)
                     let rhsSel = rootsWithSel.contains(rhs.fullPath)
-                    if lhsSel != rhsSel { return lhsSel }
+                    if lhsSel != rhsSel {
+                        return lhsSel
+                    }
                     if let alias = aliasRoot {
                         let lhsAlias = lhs.fullPath == alias.fullPath
                         let rhsAlias = rhs.fullPath == alias.fullPath
-                        if lhsAlias != rhsAlias { return lhsAlias }
+                        if lhsAlias != rhsAlias {
+                            return lhsAlias
+                        }
                     }
                     return lhs.fullPath < rhs.fullPath
                 }
@@ -650,7 +706,9 @@ enum PathMatcher {
         _ fullPath: String,
         snapshot: PathMatchSnapshot
     ) -> Bool {
-        if snapshot.folder(fullPath) != nil { return true }
+        if snapshot.folder(fullPath) != nil {
+            return true
+        }
         let prefix = fullPath.hasSuffix("/") ? fullPath : fullPath + "/"
         return snapshot.foldersByFullPath.keys.contains { $0.hasPrefix(prefix) }
     }
@@ -705,8 +763,8 @@ enum PathMatcher {
             let stdURL = URL(fileURLWithPath: trimmed).standardizedFileURL
             guard
                 let root = snapshot.rootFolders
-                .filter({ isUnder(stdURL.path, root: $0.fullPath) })
-                .max(by: { $0.fullPath.count < $1.fullPath.count })
+                    .filter({ isUnder(stdURL.path, root: $0.fullPath) })
+                    .max(by: { $0.fullPath.count < $1.fullPath.count })
             else { return nil }
 
             let relative = String(
@@ -742,7 +800,10 @@ enum PathMatcher {
             func componentCount(_ relativePath: String) -> Int {
                 guard !relativePath.isEmpty else { return 0 }
                 return relativePath.utf8.reduce(into: 1) { count, byte in
-                    if byte == 47 { count += 1 } // '/'
+                    // '/'
+                    if byte == 47 {
+                        count += 1
+                    }
                 }
             }
 
@@ -758,11 +819,15 @@ enum PathMatcher {
                 let currentRel = current.relativePath
                 let candidateExact = candidateRel.caseInsensitiveCompare(pathSoFar) == .orderedSame
                 let currentExact = currentRel.caseInsensitiveCompare(pathSoFar) == .orderedSame
-                if candidateExact != currentExact { return candidateExact }
+                if candidateExact != currentExact {
+                    return candidateExact
+                }
 
                 let candidateExtraDepth = max(0, componentCount(candidateRel) - pathDepth)
                 let currentExtraDepth = max(0, componentCount(currentRel) - pathDepth)
-                if candidateExtraDepth != currentExtraDepth { return candidateExtraDepth < currentExtraDepth }
+                if candidateExtraDepth != currentExtraDepth {
+                    return candidateExtraDepth < currentExtraDepth
+                }
 
                 if candidateRel != currentRel {
                     return candidateRel.utf8.lexicographicallyPrecedes(currentRel.utf8)
@@ -823,10 +888,10 @@ enum PathMatcher {
             }
         }
 
-        /// Alias-root preference: if the first directory component matches a root alias,
-        /// constrain creation to that root and consume exactly one leading alias segment.
-        /// If the user intends a literal same-name top-level folder inside that root,
-        /// they must repeat the prefix: "RootName/RootName/...".
+        // Alias-root preference: if the first directory component matches a root alias,
+        // constrain creation to that root and consume exactly one leading alias segment.
+        // If the user intends a literal same-name top-level folder inside that root,
+        // they must repeat the prefix: "RootName/RootName/...".
         func resolveAliasCreation(for alias: FolderRecord, aliasComps: [String]) -> FileCreationResult {
             func aliasDeepestMatch(from start: Int, in root: FolderRecord, snapshot: PathMatchSnapshot) -> (folder: FolderRecord, matchedCount: Int, folderDepth: Int, relativePath: String) {
                 guard start < aliasComps.count else {
@@ -835,7 +900,9 @@ enum PathMatcher {
                 func componentCount(_ relativePath: String) -> Int {
                     guard !relativePath.isEmpty else { return 0 }
                     return relativePath.utf8.reduce(into: 1) { count, byte in
-                        if byte == 47 { count += 1 }
+                        if byte == 47 {
+                            count += 1
+                        }
                     }
                 }
                 var cur = root
@@ -1036,7 +1103,9 @@ enum PathMatcher {
                             let bestAlias = b.root.fullPath == alias.fullPath
                             if candAlias != bestAlias {
                                 if candAlias {
-                                    if Self.isLoggingEnabled { print("New best: alias-root bias") }
+                                    if Self.isLoggingEnabled {
+                                        print("New best: alias-root bias")
+                                    }
                                     best = cand
                                 }
                             } else {
@@ -1045,17 +1114,23 @@ enum PathMatcher {
                                 let bestSel = rootsWithSel.contains(b.root.fullPath)
                                 if cand.matchedDepth > 0 || b.matchedDepth > 0, candSel != bestSel {
                                     if candSel {
-                                        if Self.isLoggingEnabled { print("New best: selected-root bias (has matches)") }
+                                        if Self.isLoggingEnabled {
+                                            print("New best: selected-root bias (has matches)")
+                                        }
                                         best = cand
                                     }
                                 } else {
                                     // Existing tie-breakers
                                     if cand.matchedRelDepth < b.matchedRelDepth {
-                                        if Self.isLoggingEnabled { print("New best: shallower matched folder") }
+                                        if Self.isLoggingEnabled {
+                                            print("New best: shallower matched folder")
+                                        }
                                         best = cand
                                     } else if cand.matchedRelDepth == b.matchedRelDepth {
                                         if cand.startIdx < b.startIdx {
-                                            if Self.isLoggingEnabled { print("New best: no skip preferred (\(cand.startIdx) < \(b.startIdx))") }
+                                            if Self.isLoggingEnabled {
+                                                print("New best: no skip preferred (\(cand.startIdx) < \(b.startIdx))")
+                                            }
                                             best = cand
                                         } else if cand.startIdx == b.startIdx {
                                             // If still tied, prefer roots matching the alias candidates for the first component
@@ -1063,10 +1138,12 @@ enum PathMatcher {
                                             let bestMatches = aliasRootCandidatePaths.contains(b.root.fullPath)
 
                                             if candMatches, !bestMatches {
-                                                if Self.isLoggingEnabled { print("New best: root name matches first component") }
+                                                if Self.isLoggingEnabled {
+                                                    print("New best: root name matches first component")
+                                                }
                                                 best = cand
-                                            } else if !candMatches, !bestMatches {
-                                                if Self.isLoggingEnabled { print("Tie: keep existing best (stable root order)") }
+                                            } else if !candMatches, !bestMatches, Self.isLoggingEnabled {
+                                                print("Tie: keep existing best (stable root order)")
                                             }
                                         }
                                     }
@@ -1078,26 +1155,32 @@ enum PathMatcher {
                             let bestSel = rootsWithSel.contains(b.root.fullPath)
                             if cand.matchedDepth > 0 || b.matchedDepth > 0, candSel != bestSel {
                                 if candSel {
-                                    if Self.isLoggingEnabled { print("New best: selected-root bias (no-alias, has matches)") }
+                                    if Self.isLoggingEnabled {
+                                        print("New best: selected-root bias (no-alias, has matches)")
+                                    }
                                     best = cand
                                 }
-                            } else {
-                                if cand.matchedRelDepth < b.matchedRelDepth {
-                                    if Self.isLoggingEnabled { print("New best: shallower matched folder") }
+                            } else if cand.matchedRelDepth < b.matchedRelDepth {
+                                if Self.isLoggingEnabled {
+                                    print("New best: shallower matched folder")
+                                }
+                                best = cand
+                            } else if cand.matchedRelDepth == b.matchedRelDepth {
+                                if cand.startIdx < b.startIdx {
+                                    if Self.isLoggingEnabled {
+                                        print("New best: no skip preferred (\(cand.startIdx) < \(b.startIdx))")
+                                    }
                                     best = cand
-                                } else if cand.matchedRelDepth == b.matchedRelDepth {
-                                    if cand.startIdx < b.startIdx {
-                                        if Self.isLoggingEnabled { print("New best: no skip preferred (\(cand.startIdx) < \(b.startIdx))") }
-                                        best = cand
-                                    } else if cand.startIdx == b.startIdx {
-                                        let candMatches = aliasRootCandidatePaths.contains(cand.root.fullPath)
-                                        let bestMatches = aliasRootCandidatePaths.contains(b.root.fullPath)
-                                        if candMatches, !bestMatches {
-                                            if Self.isLoggingEnabled { print("New best: root name matches first component") }
-                                            best = cand
-                                        } else if !candMatches, !bestMatches {
-                                            if Self.isLoggingEnabled { print("Tie: keep existing best (stable root order)") }
+                                } else if cand.startIdx == b.startIdx {
+                                    let candMatches = aliasRootCandidatePaths.contains(cand.root.fullPath)
+                                    let bestMatches = aliasRootCandidatePaths.contains(b.root.fullPath)
+                                    if candMatches, !bestMatches {
+                                        if Self.isLoggingEnabled {
+                                            print("New best: root name matches first component")
                                         }
+                                        best = cand
+                                    } else if !candMatches, !bestMatches, Self.isLoggingEnabled {
+                                        print("Tie: keep existing best (stable root order)")
                                     }
                                 }
                             }
@@ -1173,24 +1256,32 @@ enum PathMatcher {
             let otherLeftover = dirComps.count - otherConsumedFromDirComps
 
             // Skip if negative leftover
-            if otherLeftover < 0 { return false }
+            if otherLeftover < 0 {
+                return false
+            }
 
             // Compare using same normalized logic
-            if otherMatch.matchedCount != winner.matchedDepth { return false }
-            if otherLeftover != winner.leftover { return false }
-            if otherMatch.folderDepth != winner.matchedRelDepth { return false }
+            if otherMatch.matchedCount != winner.matchedDepth {
+                return false
+            }
+            if otherLeftover != winner.leftover {
+                return false
+            }
+            if otherMatch.folderDepth != winner.matchedRelDepth {
+                return false
+            }
 
             // Check if it would tie on path length
             return otherRoot.fullPath.count == winner.root.fullPath.count
         }
 
-        /// ------------------------------------------------------------------
-        /// New deterministic assembly:
-        /// 1) everything that *already* exists (matchedRelPath)
-        /// 2) skipped components (except when equal to root name and folder exists)
-        /// 3) remaining unmatched components
-        /// 4) file name
-        /// ------------------------------------------------------------------
+        // ------------------------------------------------------------------
+        // New deterministic assembly:
+        // 1) everything that *already* exists (matchedRelPath)
+        // 2) skipped components (except when equal to root name and folder exists)
+        // 3) remaining unmatched components
+        // 4) file name
+        // ------------------------------------------------------------------
         func splitPath(_ str: String) -> [String] {
             str.isEmpty ? [] : str.split(separator: "/").map(String.init)
         }
@@ -1229,9 +1320,10 @@ enum PathMatcher {
                 // If the first component equals the root name, treat it as alias and drop it
                 if consumed == 0,
                    let firstCompAll = dirComps.first,
-                   firstCompAll.caseInsensitiveCompare(rootName) == .orderedSame
+                   firstCompAll.caseInsensitiveCompare(rootName) == .orderedSame,
+                   !tail.isEmpty
                 {
-                    if !tail.isEmpty { tail.removeFirst() }
+                    tail.removeFirst()
                 }
                 toCreate.append(contentsOf: tail)
             }
@@ -1280,8 +1372,7 @@ enum PathMatcher {
         let trimmed = PathCharPolicy.foldHomoglyphsIfNeeded(
             userPath.trimmingCharacters(in: .whitespacesAndNewlines)
         )
-        guard !trimmed.isEmpty else { return nil }
-        guard !trimmed.hasSuffix("/") else { return nil }
+        guard !trimmed.isEmpty, !trimmed.hasSuffix("/") else { return nil }
 
         let standardizedInput = StandardizedPath.absolute(trimmed)
         let isAbsolute = standardizedInput.hasPrefix("/")
@@ -1353,7 +1444,9 @@ enum PathMatcher {
                     }
                 }
 
-                if !found { break }
+                if !found {
+                    break
+                }
             }
 
             if matchedCount > 0 {
@@ -1440,7 +1533,9 @@ enum PathMatcher {
             for f in arr {
                 if fileMap[f.fullPath] == nil {
                     fileMap[f.fullPath] = f
-                    if fileMap.count >= maxCap { break }
+                    if fileMap.count >= maxCap {
+                        break
+                    }
                 }
             }
         }
@@ -1465,7 +1560,9 @@ enum PathMatcher {
                     fileMap.removeAll(keepingCapacity: true)
                     for f in filtered {
                         fileMap[f.fullPath] = f
-                        if fileMap.count >= maxCap { break }
+                        if fileMap.count >= maxCap {
+                            break
+                        }
                     }
                 }
             }
@@ -1494,12 +1591,18 @@ enum PathMatcher {
         // New pure‑Swift normalization and safe boundary check
         let p2 = standardizePathFast(path)
         let r2 = standardizePathFast(root)
-        if p2 == r2 { return true }
-        if r2.isEmpty { return false }
+        if p2 == r2 {
+            return true
+        }
+        if r2.isEmpty {
+            return false
+        }
 
         // Ensure we only match when r2 is a full directory prefix of p2
         if p2.hasPrefix(r2) {
-            if p2.count == r2.count { return true }
+            if p2.count == r2.count {
+                return true
+            }
             let idx = p2.index(p2.startIndex, offsetBy: r2.count)
             return p2[idx] == "/"
         }
@@ -1512,7 +1615,9 @@ enum PathMatcher {
 
     @inline(__always)
     private static func standardizePathFast(_ input: String) -> String {
-        if input.isEmpty { return "" }
+        if input.isEmpty {
+            return ""
+        }
         let isAbsolute = input.hasPrefix("/")
 
         // Collapse separators + resolve '.' and '..' segments
@@ -1521,7 +1626,9 @@ enum PathMatcher {
 
         for segSub in input.split(separator: "/", omittingEmptySubsequences: true) {
             let seg = String(segSub)
-            if seg == "." { continue }
+            if seg == "." {
+                continue
+            }
             if seg == ".." {
                 if !stack.isEmpty {
                     _ = stack.popLast()
@@ -1536,7 +1643,9 @@ enum PathMatcher {
 
         if isAbsolute {
             // Root special case
-            if stack.isEmpty { return "/" }
+            if stack.isEmpty {
+                return "/"
+            }
             return "/" + stack.joined(separator: "/")
         } else {
             return stack.joined(separator: "/")
@@ -1658,7 +1767,9 @@ enum PathMatcher {
         var seen = Set<String>()
         return variants.filter { comps, bias in
             let key = (bias?.fullPath ?? "all") + "|" + comps.joined(separator: "/")
-            if seen.contains(key) { return false }
+            if seen.contains(key) {
+                return false
+            }
             seen.insert(key)
             return true
         }
@@ -1709,17 +1820,23 @@ enum PathMatcher {
                 // First priority: selected files
                 let lhsSelected = snapshot.selectedFileFullPaths.contains(lhs.fullPath)
                 let rhsSelected = snapshot.selectedFileFullPaths.contains(rhs.fullPath)
-                if lhsSelected != rhsSelected { return lhsSelected }
+                if lhsSelected != rhsSelected {
+                    return lhsSelected
+                }
 
                 // Second priority: root contains any selected file
                 let lhsRootSelected = rootsWithSel.contains(lhs.rootFolderPath)
                 let rhsRootSelected = rootsWithSel.contains(rhs.rootFolderPath)
-                if lhsRootSelected != rhsRootSelected { return lhsRootSelected }
+                if lhsRootSelected != rhsRootSelected {
+                    return lhsRootSelected
+                }
 
                 // Third priority: depth (shallower paths)
                 let lhsDepth = lhs.relativePath.split(separator: "/").count
                 let rhsDepth = rhs.relativePath.split(separator: "/").count
-                if lhsDepth != rhsDepth { return lhsDepth < rhsDepth }
+                if lhsDepth != rhsDepth {
+                    return lhsDepth < rhsDepth
+                }
 
                 // Deterministic tie-breaker
                 return lhs.fullPath < rhs.fullPath
@@ -1742,10 +1859,15 @@ enum PathMatcher {
                 if let fc = canonFC {
                     guard let kfc = firstAlnumLowercasedByte(k), kfc == fc else { continue }
                 }
-                if abs(canon.count - k.count) > 6 { continue }
+                if abs(canon.count - k.count) > 6 {
+                    continue
+                }
                 candidates.append(contentsOf: group)
                 added += group.count
-                if added >= 12000 { break } // cap to avoid pathological growth
+                if added >= 12000 {
+                    // cap to avoid pathological growth
+                    break
+                }
             }
         }
 
@@ -1774,11 +1896,15 @@ enum PathMatcher {
         passingMatches.sort { lhs, rhs in
             let lhsSelected = snapshot.selectedFileFullPaths.contains(lhs.file.fullPath)
             let rhsSelected = snapshot.selectedFileFullPaths.contains(rhs.file.fullPath)
-            if lhsSelected != rhsSelected { return lhsSelected }
+            if lhsSelected != rhsSelected {
+                return lhsSelected
+            }
 
             let lhsRootSelected = rootsWithSel.contains(lhs.file.rootFolderPath)
             let rhsRootSelected = rootsWithSel.contains(rhs.file.rootFolderPath)
-            if lhsRootSelected != rhsRootSelected { return lhsRootSelected }
+            if lhsRootSelected != rhsRootSelected {
+                return lhsRootSelected
+            }
 
             let lhsDepth = lhs.file.relativePath.split(separator: "/").count
             let rhsDepth = rhs.file.relativePath.split(separator: "/").count
@@ -1916,7 +2042,9 @@ enum PathMatcher {
             // parent = last (n-1), filename = last
             let parentRel = userComponents.suffix(n).dropLast().joined(separator: "/")
             let fileName = userComponents.last ?? ""
-            if parentRel.isEmpty || fileName.isEmpty { continue }
+            if parentRel.isEmpty || fileName.isEmpty {
+                continue
+            }
 
             let standardizedParentRel = StandardizedPath.relative(parentRel)
             for root in snapshot.rootFolders {
@@ -1928,7 +2056,10 @@ enum PathMatcher {
                     }
                 }
             }
-            if !candidates.isEmpty { break } // prefer the shortest qualifying tail
+            if !candidates.isEmpty {
+                // prefer the shortest qualifying tail
+                break
+            }
         }
 
         if candidates.isEmpty {
@@ -1948,10 +2079,14 @@ enum PathMatcher {
         candidates.sort { lhs, rhs in
             let lSel = rootsWithSel.contains(lhs.file.rootFolderPath)
             let rSel = rootsWithSel.contains(rhs.file.rootFolderPath)
-            if lSel != rSel { return lSel }
+            if lSel != rSel {
+                return lSel
+            }
             let lDepth = lhs.file.relativePath.split(separator: "/").count
             let rDepth = rhs.file.relativePath.split(separator: "/").count
-            if lDepth != rDepth { return lDepth < rDepth }
+            if lDepth != rDepth {
+                return lDepth < rDepth
+            }
             return lhs.file.fullPath < rhs.file.fullPath
         }
         let best = candidates[0].file
@@ -1965,7 +2100,8 @@ enum PathMatcher {
         // Quick ASCII probe: if all bytes < 0x80, skip folding entirely
         var isASCII = true
         for b in str.utf8 {
-            if b >= 0x80 { isASCII = false
+            if b >= 0x80 {
+                isASCII = false
                 break
             }
         }
@@ -1976,7 +2112,9 @@ enum PathMatcher {
         out.reserveCapacity(input.utf8.count)
         for b in input.utf8 {
             if b < 0x80 {
-                if PathCharPolicy.isAllowedASCIIByte(b) { out.append(b) }
+                if PathCharPolicy.isAllowedASCIIByte(b) {
+                    out.append(b)
+                }
             } else {
                 sawNonASCII = true
             }
@@ -2132,7 +2270,9 @@ enum PathMatcher {
 
                 if lastExt.isEmpty {
                     // User omitted extension: compare against base name
-                    if lastBaseLower == itemBaseLower { return true }
+                    if lastBaseLower == itemBaseLower {
+                        return true
+                    }
 
                     // Allow truncated typing for long basenames (only if reasonably specific)
                     if lastBaseLower.count >= 5, itemBaseLower.hasPrefix(lastBaseLower) {

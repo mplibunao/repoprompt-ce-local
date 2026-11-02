@@ -1647,8 +1647,8 @@ final class CodexNativeSessionController {
     private func appendRawEventLogRecord(_ record: [String: Any]) {
         guard rawEventFileLoggingEnabled else { return }
         ensureRawEventLogFileReadyIfNeeded()
-        guard let rawEventLogFileURL else { return }
-        guard JSONSerialization.isValidJSONObject(record),
+        guard let rawEventLogFileURL,
+              JSONSerialization.isValidJSONObject(record),
               let data = try? JSONSerialization.data(withJSONObject: record, options: []),
               var line = String(data: data, encoding: .utf8)
         else {
@@ -2254,8 +2254,7 @@ final class CodexNativeSessionController {
         images: [AgentImageAttachment],
         expectedTurnID: String
     ) async throws -> CodexTurnSteerReceipt {
-        guard let threadID else { throw CodexAppServerClient.ClientError.invalidResponse }
-        guard let expectedTurnID = Self.nonEmptyString(expectedTurnID) else {
+        guard let threadID, let expectedTurnID = Self.nonEmptyString(expectedTurnID) else {
             throw CodexAppServerClient.ClientError.invalidResponse
         }
         let input = try Self.turnInput(text: text, images: images)
@@ -2319,8 +2318,7 @@ final class CodexNativeSessionController {
     }
 
     func interruptUserTurn(expectedTurnID: String) async throws -> CodexTurnInterruptReceipt {
-        guard let threadID else { throw CodexAppServerClient.ClientError.invalidResponse }
-        guard let expectedTurnID = Self.nonEmptyString(expectedTurnID) else {
+        guard let threadID, let expectedTurnID = Self.nonEmptyString(expectedTurnID) else {
             throw CodexAppServerClient.ClientError.invalidResponse
         }
         guard authoritativeLifecycleTurnID == expectedTurnID else {
@@ -3122,8 +3120,12 @@ final class CodexNativeSessionController {
         let serverRequests = serverRequestTask?.transportGeneration == transportGeneration
             ? serverRequestTask
             : nil
-        if notification != nil { notificationTask = nil }
-        if serverRequests != nil { serverRequestTask = nil }
+        if notification != nil {
+            notificationTask = nil
+        }
+        if serverRequests != nil {
+            serverRequestTask = nil
+        }
         inboundStreamTaskLock.unlock()
         notification?.task.cancel()
         serverRequests?.task.cancel()
@@ -3200,11 +3202,15 @@ final class CodexNativeSessionController {
             switch kind {
             case .notifications:
                 let ownsSlot = notificationTask?.token == ownershipToken
-                if ownsSlot { notificationTask = nil }
+                if ownsSlot {
+                    notificationTask = nil
+                }
                 return ownsSlot
             case .serverRequests:
                 let ownsSlot = serverRequestTask?.token == ownershipToken
-                if ownsSlot { serverRequestTask = nil }
+                if ownsSlot {
+                    serverRequestTask = nil
+                }
                 return ownsSlot
             }
         }
@@ -3310,8 +3316,7 @@ final class CodexNativeSessionController {
             if lifecycleState == .shuttingDown {
                 return false
             }
-            guard lifecycleState != .terminated else { return false }
-            guard !didHandleTransportEnd else { return false }
+            guard lifecycleState != .terminated, !didHandleTransportEnd else { return false }
             didHandleTransportEnd = true
             lifecycleState = .terminated
             return true
@@ -5154,10 +5159,8 @@ final class CodexNativeSessionController {
         if let activeThreadID, let explicitThreadID, explicitThreadID != activeThreadID {
             return nil
         }
-        guard let threadID = explicitThreadID ?? activeThreadID, !threadID.isEmpty else {
-            return nil
-        }
-        guard let turnID = notificationTurnID(from: params) ?? currentTurnID,
+        guard let threadID = explicitThreadID ?? activeThreadID, !threadID.isEmpty,
+              let turnID = notificationTurnID(from: params) ?? currentTurnID,
               !turnID.isEmpty,
               let itemID = notificationItemID(from: params),
               !itemID.isEmpty,
@@ -5170,10 +5173,8 @@ final class CodexNativeSessionController {
         var parsedQuestions: [AgentRequestUserInputQuestion] = []
         var seenQuestionIDs = Set<String>()
         for rawQuestion in rawQuestions {
-            guard let question = rawQuestion as? [String: Any] else {
-                return nil
-            }
-            guard let questionID = firstString(in: question, keys: ["id"]),
+            guard let question = rawQuestion as? [String: Any],
+                  let questionID = firstString(in: question, keys: ["id"]),
                   !questionID.isEmpty,
                   let header = firstString(in: question, keys: ["header"]),
                   !header.isEmpty,
@@ -5233,10 +5234,8 @@ final class CodexNativeSessionController {
         if let activeThreadID, let explicitThreadID, explicitThreadID != activeThreadID {
             return nil
         }
-        guard let threadID = explicitThreadID ?? activeThreadID, !threadID.isEmpty else {
-            return nil
-        }
-        guard let turnID = notificationTurnID(from: params) ?? currentTurnID,
+        guard let threadID = explicitThreadID ?? activeThreadID, !threadID.isEmpty,
+              let turnID = notificationTurnID(from: params) ?? currentTurnID,
               !turnID.isEmpty,
               let itemID = notificationItemID(from: params),
               !itemID.isEmpty,
@@ -5896,8 +5895,7 @@ final class CodexNativeSessionController {
     }
 
     private static func intValueFromFloatingPoint(_ value: Double) -> Int? {
-        guard value.isFinite else { return nil }
-        guard value >= Double(Int.min), value <= Double(Int.max) else { return nil }
+        guard value.isFinite, value >= Double(Int.min), value <= Double(Int.max) else { return nil }
         return Int(value)
     }
 
@@ -5935,8 +5933,7 @@ final class CodexNativeSessionController {
     }
 
     private static func int64ValueFromFloatingPoint(_ value: Double) -> Int64? {
-        guard value.isFinite else { return nil }
-        guard value >= Double(Int64.min), value <= Double(Int64.max) else { return nil }
+        guard value.isFinite, value >= Double(Int64.min), value <= Double(Int64.max) else { return nil }
         return Int64(value)
     }
 
@@ -6143,8 +6140,7 @@ final class CodexNativeSessionController {
         method: String,
         item: [String: Any]
     ) -> ToolLifecycleEvent? {
-        guard method == "item/started" || method == "item/completed" else { return nil }
-        guard let itemID = stringValue(from: item, keys: ["id", "itemId", "item_id"]), !itemID.isEmpty else {
+        guard method == "item/started" || method == "item/completed", let itemID = stringValue(from: item, keys: ["id", "itemId", "item_id"]), !itemID.isEmpty else {
             return nil
         }
         var candidate = item
@@ -6299,8 +6295,7 @@ final class CodexNativeSessionController {
     ) -> CommandExecutionRunningUpdate? {
         let normalizedToolName = normalizedExternalToolName(toolName)
         if normalizedToolName == "write_stdin" {
-            guard let sessionID = writeStdinSessionID(from: argsJSON) else { return nil }
-            guard writeStdinResultIndicatesRunning(resultJSON: resultJSON, isError: isError) else { return nil }
+            guard let sessionID = writeStdinSessionID(from: argsJSON), writeStdinResultIndicatesRunning(resultJSON: resultJSON, isError: isError) else { return nil }
             return CommandExecutionRunningUpdate(
                 invocationID: nil,
                 processID: "session:\(sessionID)",
@@ -6441,8 +6436,7 @@ final class CodexNativeSessionController {
         }
 
         func isRunningBash(_ item: AgentChatItem) -> Bool {
-            guard item.kind == .toolResult else { return false }
-            guard normalizedExternalToolName(item.toolName) == "bash" else { return false }
+            guard item.kind == .toolResult, normalizedExternalToolName(item.toolName) == "bash" else { return false }
             return metadata(item).isRunning
         }
 
@@ -6602,8 +6596,7 @@ final class CodexNativeSessionController {
         guard !trimmedPath.isEmpty else { return false }
         let candidateIndices = items.indices.filter { index in
             let item = items[index]
-            guard item.kind == .toolResult else { return false }
-            guard normalizedExternalToolName(item.toolName) == "bash" else { return false }
+            guard item.kind == .toolResult, normalizedExternalToolName(item.toolName) == "bash" else { return false }
             let processID = commandExecutionProcessID(from: item.toolResultJSON)
             let callID = commandExecutionCallID(from: item.toolResultJSON)
             guard processID != nil || callID != nil else {
@@ -6748,8 +6741,7 @@ final class CodexNativeSessionController {
         }
 
         for candidate in toolItemCandidates(from: params) {
-            guard isLikelyToolItem(candidate) else { continue }
-            guard let toolName = normalizedToolName(from: candidate) else { continue }
+            guard isLikelyToolItem(candidate), let toolName = normalizedToolName(from: candidate) else { continue }
             let typeRaw = normalizedTypeString(from: candidate)
             guard !Self.usesRawCanonicalLiveEventFamily(typeRaw: typeRaw) else { continue }
             let itemID = stringValue(from: candidate, keys: [
@@ -6987,8 +6979,7 @@ final class CodexNativeSessionController {
         let lowerMethod = method.lowercased()
         let isStarted = Self.isItemLifecycleStartedMethod(lowerMethod)
         let isCompleted = Self.isItemLifecycleCompletedMethod(lowerMethod)
-        guard isStarted || isCompleted else { return nil }
-        guard let candidate = toolItemCandidates(from: params).first(where: { Self.candidateLooksLikeFileChange($0) }) else {
+        guard isStarted || isCompleted, let candidate = toolItemCandidates(from: params).first(where: { Self.candidateLooksLikeFileChange($0) }) else {
             return nil
         }
         let itemID = stringValue(from: candidate, keys: ["id", "itemId", "item_id"])
@@ -7107,8 +7098,7 @@ final class CodexNativeSessionController {
         let changePayloads = applyPatchChangePayloads(from: candidate)
         var seenPaths: Set<String> = []
         let paths = changePayloads.compactMap { payload -> String? in
-            guard let path = payload["path"] as? String, !path.isEmpty else { return nil }
-            guard seenPaths.insert(path).inserted else { return nil }
+            guard let path = payload["path"] as? String, !path.isEmpty, seenPaths.insert(path).inserted else { return nil }
             return path
         }
         guard !paths.isEmpty || !changePayloads.isEmpty else { return nil }
@@ -7239,11 +7229,11 @@ final class CodexNativeSessionController {
 
     /// Extracts the `status` field from an apply_patch result JSON string.
     static func applyPatchStatusWord(from raw: String?) -> String? {
-        guard let object = jsonObject(from: raw) else { return nil }
-        guard let status = (object["status"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-            !status.isEmpty
+        guard let object = jsonObject(from: raw),
+              let status = (object["status"] as? String)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines)
+                  .lowercased(),
+              !status.isEmpty
         else {
             return nil
         }
@@ -7591,8 +7581,7 @@ final class CodexNativeSessionController {
         resultJSON: String?,
         isError: Bool?
     ) -> Bool {
-        guard isError != true else { return false }
-        guard let object = writeStdinResultObject(from: resultJSON) else { return false }
+        guard isError != true, let object = writeStdinResultObject(from: resultJSON) else { return false }
         if commandExecutionExitCode(from: object) != nil {
             return false
         }
@@ -7617,12 +7606,11 @@ final class CodexNativeSessionController {
 
     private static func writeStdinResultObject(from raw: String?) -> [String: Any]? {
         guard let object = jsonObject(from: raw) else { return nil }
-        if object["Ok"] != nil || object["Err"] != nil {
-            if let extracted = textFromMCPToolResult(object),
-               let extractedObject = jsonObject(from: extracted)
-            {
-                return extractedObject
-            }
+        if object["Ok"] != nil || object["Err"] != nil,
+           let extracted = textFromMCPToolResult(object),
+           let extractedObject = jsonObject(from: extracted)
+        {
+            return extractedObject
         }
         return object
     }
@@ -7839,8 +7827,7 @@ final class CodexNativeSessionController {
                 case "function_call_output":
                     guard let callID = dictString(payload, key: "call_id"), !callID.isEmpty else { continue }
                     signals.outstandingBlockingNativeToolNameByCallID.removeValue(forKey: callID)
-                    guard let output = dictString(payload, key: "output"), !output.isEmpty else { continue }
-                    guard let normalizedName = toolNameByCallID[callID] else { continue }
+                    guard let output = dictString(payload, key: "output"), !output.isEmpty, let normalizedName = toolNameByCallID[callID] else { continue }
 
                     if normalizedName == "bash" {
                         if commandExecutionResultIndicatesRunning(raw: output) {
@@ -8058,7 +8045,7 @@ final class CodexNativeSessionController {
                 if let output =
                     dictString(item, key: "aggregatedOutput")
                         ?? dictString(item, key: "aggregated_output"),
-                        !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                   !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 {
                     appendPersistedCommandOutput(
                         output,
@@ -8306,8 +8293,7 @@ final class CodexNativeSessionController {
         incoming: String,
         argsJSON: String?
     ) -> String {
-        guard var incomingObject = jsonObject(from: incoming) else { return incoming }
-        guard commandExecutionObjectIsCommandLike(incomingObject) else { return incoming }
+        guard var incomingObject = jsonObject(from: incoming), commandExecutionObjectIsCommandLike(incomingObject) else { return incoming }
 
         let incomingCommand = dictString(incomingObject, key: "command")?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -8320,7 +8306,7 @@ final class CodexNativeSessionController {
 
             if incomingCommand?.isEmpty != false,
                let existingCommand = dictString(existingObject ?? [:], key: "command")?
-               .trimmingCharacters(in: .whitespacesAndNewlines),
+                   .trimmingCharacters(in: .whitespacesAndNewlines),
                !existingCommand.isEmpty
             {
                 incomingObject["command"] = existingCommand
@@ -8342,7 +8328,7 @@ final class CodexNativeSessionController {
 
             if incomingOutput?.isEmpty != false,
                let existingOutput = CommandExecutionPayloadHelper.outputText(from: existingObject ?? [:])?
-               .trimmingCharacters(in: .whitespacesAndNewlines),
+                   .trimmingCharacters(in: .whitespacesAndNewlines),
                !existingOutput.isEmpty
             {
                 incomingObject["aggregatedOutput"] = cappedRunningOutput(sanitizeCommandOutput(existingOutput))
@@ -8394,7 +8380,9 @@ final class CodexNativeSessionController {
 
         if let string = value as? String {
             let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty { return nil }
+            if trimmed.isEmpty {
+                return nil
+            }
             if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") || trimmed.hasPrefix("\""),
                let data = trimmed.data(using: .utf8),
                let nested = try? JSONSerialization.jsonObject(with: data, options: []),
@@ -8410,7 +8398,9 @@ final class CodexNativeSessionController {
                first == "\"" || first == "'"
             {
                 let inner = String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !inner.isEmpty { return inner }
+                if !inner.isEmpty {
+                    return inner
+                }
             }
             return trimmed
         }
@@ -8468,8 +8458,7 @@ final class CodexNativeSessionController {
     ]
 
     private static func commandExecutionResultIndicatesRunning(raw: String?) -> Bool {
-        guard let object = jsonObject(from: raw) else { return false }
-        guard commandExecutionObjectIsCommandLike(object) else { return false }
+        guard let object = jsonObject(from: raw), commandExecutionObjectIsCommandLike(object) else { return false }
 
         let exitCode = commandExecutionExitCode(from: object)
         let processID = commandExecutionProcessID(from: raw)
@@ -8500,10 +8489,7 @@ final class CodexNativeSessionController {
         if appendOutput?.isEmpty == false {
             return true
         }
-        guard let object = jsonObject(from: raw) else {
-            return true
-        }
-        guard commandExecutionObjectIsCommandLike(object) else {
+        guard let object = jsonObject(from: raw), commandExecutionObjectIsCommandLike(object) else {
             return true
         }
         if object["process_id"] != nil
@@ -8709,7 +8695,9 @@ final class CodexNativeSessionController {
         for key in identifyingKeys {
             guard let value = candidate[key] as? String else { continue }
             let lowered = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if lowered.isEmpty { continue }
+            if lowered.isEmpty {
+                continue
+            }
             if lowered.hasPrefix(mcpPrefix) {
                 return true
             }
@@ -8840,7 +8828,9 @@ final class CodexNativeSessionController {
         for key in AgentWebToolPayloadKeys.resultWrapperKeys {
             guard let value = candidate[key] else { continue }
             if let array = value as? [Any] {
-                if !array.isEmpty { object[searchArrayKey(forWrapper: key)] = array }
+                if !array.isEmpty {
+                    object[searchArrayKey(forWrapper: key)] = array
+                }
                 copySearchPayloadFields(from: candidate, into: &object)
                 normalizeSearchContentArrays(in: &object)
                 return jsonString(from: object)
@@ -8947,7 +8937,9 @@ final class CodexNativeSessionController {
     }
 
     private func webReadResultIndicatesFailure(_ candidate: [String: Any]) -> Bool {
-        if boolValue(from: candidate, keys: ["isError", "is_error"]) == true { return true }
+        if boolValue(from: candidate, keys: ["isError", "is_error"]) == true {
+            return true
+        }
         if let status = stringValue(from: candidate, keys: ["status"])?.lowercased(),
            ["error", "failed", "failure"].contains(status)
         {
@@ -8957,13 +8949,19 @@ final class CodexNativeSessionController {
     }
 
     private func compactWebReadResultValue(_ value: Any) -> Any? {
-        if let text = value as? String { return compactWebText(text) }
-        if value is NSNumber { return value }
+        if let text = value as? String {
+            return compactWebText(text)
+        }
+        if value is NSNumber {
+            return value
+        }
         return nil
     }
 
     private func compactWebReadErrorValue(_ value: Any) -> Any? {
-        if let compact = compactWebReadResultValue(value) { return compact }
+        if let compact = compactWebReadResultValue(value) {
+            return compact
+        }
         guard let error = value as? [String: Any] else { return nil }
         var compactError: [String: Any] = [:]
         for key in ["message", "type", "code", "param", "status"] {
@@ -8976,7 +8974,9 @@ final class CodexNativeSessionController {
     private func isSearchWebReadOrFindPayload(_ object: [String: Any]) -> Bool {
         let rawAction = stringValue(from: object, keys: AgentWebToolPayloadKeys.operationKeys)
         let action = AgentWebToolCanonicalNames.canonicalWebActionType(rawAction) ?? rawAction?.lowercased()
-        if ["open", "open_page", "read", "fetch", "find", "find_in_page"].contains(action ?? "") { return true }
+        if ["open", "open_page", "read", "fetch", "find", "find_in_page"].contains(action ?? "") {
+            return true
+        }
         let hasTarget = stringValue(from: object, keys: AgentWebToolPayloadKeys.urlTargetKeys + AgentWebToolPayloadKeys.refTargetKeys) != nil
         let hasFind = stringValue(from: object, keys: AgentWebToolPayloadKeys.findKeys) != nil
         return hasTarget && hasFind
@@ -9036,7 +9036,9 @@ final class CodexNativeSessionController {
         if let text = value as? String {
             return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && text.count <= 500
         }
-        if value is NSNumber { return true }
+        if value is NSNumber {
+            return true
+        }
         return false
     }
 
@@ -9162,7 +9164,9 @@ final class CodexNativeSessionController {
     private func hasNonEmptyErrorSignal(in candidate: [String: Any]) -> Bool {
         for key in ["error", "errors", "error_message", "errorMessage"] {
             guard let value = candidate[key] else { continue }
-            if hasNonEmptyErrorValue(value) { return true }
+            if hasNonEmptyErrorValue(value) {
+                return true
+            }
         }
         return false
     }
@@ -9175,10 +9179,14 @@ final class CodexNativeSessionController {
             return array.contains { hasNonEmptyErrorValue($0) }
         }
         if let object = value as? [String: Any] {
-            if object.isEmpty { return false }
+            if object.isEmpty {
+                return false
+            }
             for key in ["message", "detail", "description", "code", "error", "error_message", "errorMessage"] {
                 guard let nested = object[key] else { continue }
-                if hasNonEmptyErrorValue(nested) { return true }
+                if hasNonEmptyErrorValue(nested) {
+                    return true
+                }
             }
             return object.values.contains { value in
                 if value is [String: Any] || value is [Any] {
@@ -9440,8 +9448,7 @@ enum CommandExecutionOutputSanitizer {
     )
 
     static func sanitize(_ raw: String) -> String {
-        guard !raw.isEmpty else { return raw }
-        guard requiresSanitization(raw) else { return raw }
+        guard !raw.isEmpty, requiresSanitization(raw) else { return raw }
         var text = raw.replacingOccurrences(of: "\r\n", with: "\n")
         text = stripEscapeSequences(text)
         text = applyBackspaces(text)

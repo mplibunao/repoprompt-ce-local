@@ -260,14 +260,8 @@ final class MentionCoordinator: MentionTextViewDelegate {
 
         pendingReanchorTask = Task { @MainActor [weak self] in
             await Task.yield()
-            guard let self else { return }
-            guard !Task.isCancelled else { return }
-            guard generation == reanchorGeneration else { return }
-            guard !textView.hasMarkedText() else {
-                overlay.hide()
-                return
-            }
-            guard textView.window != nil else {
+            guard let self, !Task.isCancelled, generation == reanchorGeneration else { return }
+            guard !textView.hasMarkedText(), textView.window != nil else {
                 overlay.hide()
                 return
             }

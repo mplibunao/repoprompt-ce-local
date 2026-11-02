@@ -126,7 +126,9 @@ actor AgentContextFileSizeEstimator {
     ) async -> CachedEstimate? {
         let key = Self.cacheKey(for: request)
         guard currentGenerationByRootID[key.rootID] == key.rootGeneration else { return nil }
-        if let cached = cache[key] { return cached }
+        if let cached = cache[key] {
+            return cached
+        }
         let task: Task<CachedEstimate?, Never>
         if let pending = pendingReadTasks[key] {
             task = pending

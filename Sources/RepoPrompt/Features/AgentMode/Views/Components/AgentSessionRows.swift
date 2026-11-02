@@ -184,8 +184,12 @@ struct AgentSessionRow: View {
     private var currentSelectionGesture: AgentSidebarSelectionGesture {
         var modifiers: AgentSidebarSelectionModifiers = []
         let flags = NSApp.currentEvent?.modifierFlags ?? []
-        if flags.contains(.command) { modifiers.insert(.command) }
-        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.command) {
+            modifiers.insert(.command)
+        }
+        if flags.contains(.shift) {
+            modifiers.insert(.shift)
+        }
         return AgentSidebarSelectionGesture(modifiers: modifiers)
     }
 
@@ -498,8 +502,12 @@ struct AgentSessionRow: View {
     ///   signal and trumps steady-state).
     /// - Fall back to the current run state.
     private var effectiveStatusState: AgentSessionRunState {
-        if runState == .running { return .running }
-        if let attentionRunState { return attentionRunState }
+        if runState == .running {
+            return .running
+        }
+        if let attentionRunState {
+            return attentionRunState
+        }
         return runState
     }
 
@@ -510,7 +518,9 @@ struct AgentSessionRow: View {
         // If the row is currently running we prefer to show the running arc
         // rather than a stale attention ring — attention will re-raise when
         // this run terminates.
-        if runState == .running { return false }
+        if runState == .running {
+            return false
+        }
         return AgentSessionSidebarUIStore.isAttentionEligible(attentionRunState)
     }
 
@@ -687,7 +697,9 @@ struct AgentSessionRow: View {
             // row still signals "opened by an MCP client" without needing a
             // dedicated leading rail.
             let chevronColor: Color = {
-                if isDisclosureHovered { return .accentColor }
+                if isDisclosureHovered {
+                    return .accentColor
+                }
                 return isMCPControlledRoot ? Self.mcpAccentColor : .secondary
             }()
             Button {
@@ -730,7 +742,9 @@ struct AgentSessionRow: View {
                 ? runningAccentColor
                 : Color.secondary
             let dotOpacity: Double = {
-                if isRunningRow { return 1.0 }
+                if isRunningRow {
+                    return 1.0
+                }
                 return (isHovered || isActive) ? 0.55 : 0.22
             }()
             Circle()
@@ -754,7 +768,9 @@ struct AgentSessionRow: View {
     /// is folded in. Expandable roots rely on the chevron button's own
     /// tooltip, so this stays nil there to avoid two competing bubbles.
     private var statusPlateTooltip: String? {
-        if showsDisclosureChevron { return nil }
+        if showsDisclosureChevron {
+            return nil
+        }
 
         let state = effectiveStatusState
         let stateTooltip: String? = switch state {
@@ -788,7 +804,9 @@ struct AgentSessionRow: View {
     /// non-empty label for MCP-controlled roots so VoiceOver still
     /// announces the affordance after the rail was removed.
     private var plateAccessibilityLabel: String {
-        if let tip = plateTooltip { return tip }
+        if let tip = plateTooltip {
+            return tip
+        }
         return isMCPControlledRoot ? "MCP controlled" : ""
     }
 
@@ -903,8 +921,12 @@ struct AgentStashedSessionRow: View {
     private var currentSelectionGesture: AgentSidebarSelectionGesture {
         var modifiers: AgentSidebarSelectionModifiers = []
         let flags = NSApp.currentEvent?.modifierFlags ?? []
-        if flags.contains(.command) { modifiers.insert(.command) }
-        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.command) {
+            modifiers.insert(.command)
+        }
+        if flags.contains(.shift) {
+            modifiers.insert(.shift)
+        }
         return AgentSidebarSelectionGesture(modifiers: modifiers)
     }
 

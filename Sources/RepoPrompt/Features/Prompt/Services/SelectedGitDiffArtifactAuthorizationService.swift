@@ -235,9 +235,7 @@ struct SelectedGitDiffArtifactAuthorizationService {
                 }
                 continue
             }
-            guard seenPaths.insert(path).inserted else { continue }
-
-            guard StandardizedPath.isDescendant(path, of: capability.gitDataRoot.standardizedFullPath) else {
+            guard seenPaths.insert(path).inserted, StandardizedPath.isDescendant(path, of: capability.gitDataRoot.standardizedFullPath) else {
                 continue
             }
             consumedPaths.insert(rawPath)
@@ -576,12 +574,12 @@ struct SelectedGitDiffArtifactAuthorizationService {
         }
 
         guard GitRepoRootAuthorization.isPathWithinAuthorizedRoots(
-            manifestRepoRoot,
-            roots: capability.canonicalWorkspaceRootPaths
-        ),
-            let resolved = exactResolvedRoot,
-            let layout = liveLayout,
-            !layout.isLinkedWorktree
+                  manifestRepoRoot,
+                  roots: capability.canonicalWorkspaceRootPaths
+              ),
+              let resolved = exactResolvedRoot,
+              let layout = liveLayout,
+              !layout.isLinkedWorktree
         else { return nil }
 
         if let visibleCheckout,
@@ -634,24 +632,24 @@ struct SelectedGitDiffArtifactAuthorizationService {
         store: WorkspaceFileContextStore
     ) async -> Bool {
         guard let currentRoot = await store.exactRootRef(
-            path: checkout.workspaceRoot.standardizedFullPath,
-            kind: .primaryWorkspace
-        ),
-            currentRoot == checkout.workspaceRoot,
-            GitRepoRootAuthorization.canonicalPath(currentRoot.standardizedFullPath)
-            == checkout.visibleRootPath,
-            let resolved = await vcsService.resolveRepo(
-                from: URL(fileURLWithPath: currentRoot.standardizedFullPath, isDirectory: true)
-            ),
-            resolved.backendKind == .git,
-            GitRepoRootAuthorization.canonicalPath(resolved.rootURL.path)
-            == checkout.repositoryRootPath,
-            let layout = GitRepositoryLayoutResolver.resolve(atWorkTreeRoot: resolved.rootURL),
-            GitRepoRootAuthorization.canonicalPath(layout.workTreeRoot.path)
-            == checkout.worktreeRootPath,
-            GitRepoRootAuthorization.canonicalPath(layout.commonDir.path)
-            == checkout.commonGitDirectoryPath,
-            layout.isLinkedWorktree == (checkout.kind == .linkedWorktree)
+                  path: checkout.workspaceRoot.standardizedFullPath,
+                  kind: .primaryWorkspace
+              ),
+              currentRoot == checkout.workspaceRoot,
+              GitRepoRootAuthorization.canonicalPath(currentRoot.standardizedFullPath)
+              == checkout.visibleRootPath,
+              let resolved = await vcsService.resolveRepo(
+                  from: URL(fileURLWithPath: currentRoot.standardizedFullPath, isDirectory: true)
+              ),
+              resolved.backendKind == .git,
+              GitRepoRootAuthorization.canonicalPath(resolved.rootURL.path)
+              == checkout.repositoryRootPath,
+              let layout = GitRepositoryLayoutResolver.resolve(atWorkTreeRoot: resolved.rootURL),
+              GitRepoRootAuthorization.canonicalPath(layout.workTreeRoot.path)
+              == checkout.worktreeRootPath,
+              GitRepoRootAuthorization.canonicalPath(layout.commonDir.path)
+              == checkout.commonGitDirectoryPath,
+              layout.isLinkedWorktree == (checkout.kind == .linkedWorktree)
         else { return false }
 
         let liveMainWorktreeRoot = layout.knownMainWorktreeRoot.map {

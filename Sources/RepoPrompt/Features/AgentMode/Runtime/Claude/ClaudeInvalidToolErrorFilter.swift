@@ -35,8 +35,8 @@ enum ClaudeInvalidToolErrorFilter {
         resultText: String?,
         isError: Bool?
     ) -> Bool {
-        guard isError != false else { return false }
-        guard let text = resultText?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard isError != false,
+              let text = resultText?.trimmingCharacters(in: .whitespacesAndNewlines),
               !text.isEmpty
         else {
             return false
@@ -50,8 +50,7 @@ enum ClaudeInvalidToolErrorFilter {
         // but require both the opening + closing tag plus the specific phrase
         // so ambiguous error bodies can't accidentally trip the filter).
         let lowered = text.lowercased()
-        guard lowered.contains("<tool_use_error>") else { return false }
-        guard lowered.contains("</tool_use_error>") else { return false }
+        guard lowered.contains("<tool_use_error>"), lowered.contains("</tool_use_error>") else { return false }
         return lowered.contains("no such tool available")
     }
 }

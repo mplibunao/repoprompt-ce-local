@@ -275,8 +275,12 @@ actor MCPRoutingWaiter {
 
     func waitUntilConnectionObserved(runID: UUID) async -> Bool {
         guard let state = waitersByRunID[runID] else { return false }
-        if state.firstConnectionObservation != nil { return true }
-        if state.terminalOutcome != nil { return false }
+        if state.firstConnectionObservation != nil {
+            return true
+        }
+        if state.terminalOutcome != nil {
+            return false
+        }
 
         let observerID = UUID()
         return await withTaskCancellationHandler {

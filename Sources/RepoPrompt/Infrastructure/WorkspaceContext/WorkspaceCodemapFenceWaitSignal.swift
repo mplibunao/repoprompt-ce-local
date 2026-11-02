@@ -41,7 +41,9 @@ final class WorkspaceCodemapFenceWaitSignal: @unchecked Sendable {
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 let resolved: Outcome? = lock.withLock {
-                    if let outcome { return outcome }
+                    if let outcome {
+                        return outcome
+                    }
                     self.continuation = continuation
                     return nil
                 }

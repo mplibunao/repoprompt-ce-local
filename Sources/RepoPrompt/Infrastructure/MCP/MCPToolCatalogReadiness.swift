@@ -99,11 +99,15 @@ actor MCPToolCatalogReadiness {
         var pollInterval: TimeInterval = 0.025
 
         while true {
-            if Task.isCancelled { return false }
+            if Task.isCancelled {
+                return false
+            }
             guard clock.now < deadline else { break }
 
             let isReady = await checkServicesReady(windowID: windowID)
-            if Task.isCancelled { return false }
+            if Task.isCancelled {
+                return false
+            }
             guard clock.now <= deadline else { break }
             if isReady {
                 mcpToolCatalogReadinessLog("Tool catalog ready for window \(windowID.map(String.init) ?? "nil")")

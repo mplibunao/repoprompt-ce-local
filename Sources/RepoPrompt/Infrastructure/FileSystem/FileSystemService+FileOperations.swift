@@ -922,10 +922,8 @@ extension FileSystemService {
             }
         }
 
-        if writeError == 0 {
-            if fsync(fd) != 0 {
-                writeError = errno
-            }
+        if writeError == 0, fsync(fd) != 0 {
+            writeError = errno
         }
 
         // Always attempt to close; prefer first error if any.

@@ -145,10 +145,8 @@ struct WorkspaceCodemapGraphIndexCatalogPage: Hashable {
                 return .failure(.continuationCursorMismatch)
             }
         }
-        guard request.cursor != nil || supportedCandidateCountThroughPage == UInt64(entries.count) else {
-            return .failure(.supportedCandidateCountMismatch)
-        }
-        guard supportedCandidateCountThroughPage >= UInt64(entries.count),
+        guard request.cursor != nil || supportedCandidateCountThroughPage == UInt64(entries.count),
+              supportedCandidateCountThroughPage >= UInt64(entries.count),
               projectedSupportedCandidateTotal >= supportedCandidateCountThroughPage,
               !isEnd || projectedSupportedCandidateTotal == supportedCandidateCountThroughPage
         else {

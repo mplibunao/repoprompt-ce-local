@@ -456,7 +456,9 @@ struct AgentMCPStartWorktreeCoordinator {
         targetSessionID: UUID?,
         agentModeVM: AgentModeViewModel
     ) -> Error {
-        if error is CancellationError { return error }
+        if error is CancellationError {
+            return error
+        }
         guard let targetSessionID else { return error }
         let bindings = agentModeVM.worktreeBindings(forAgentSessionID: targetSessionID)
         guard let binding = bindings.first else { return error }
@@ -780,8 +782,12 @@ struct AgentMCPStartWorktreeCoordinator {
     }
 
     private func preparationError(_ error: Error) -> Error {
-        if error is CancellationError { return error }
-        if error is MCPError { return error }
+        if error is CancellationError {
+            return error
+        }
+        if error is MCPError {
+            return error
+        }
         let message = mcpErrorRenderingText(error)
         return MCPError.invalidParams("\(operationName) worktree preparation failed: \(message)")
     }
@@ -837,10 +843,7 @@ struct AgentMCPStartWorktreeCoordinator {
         let primaryPath = GitRepoRootAuthorization.canonicalPath(primaryRoot)
         guard let primaryIndex = visibleRoots.firstIndex(where: {
             GitRepoRootAuthorization.canonicalPath($0.standardizedFullPath) == primaryPath
-        }) else {
-            return visibleRoots
-        }
-        guard primaryIndex != visibleRoots.startIndex else {
+        }), primaryIndex != visibleRoots.startIndex else {
             return visibleRoots
         }
         var ordered = visibleRoots

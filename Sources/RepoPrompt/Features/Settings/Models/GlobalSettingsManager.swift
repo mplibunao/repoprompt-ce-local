@@ -2058,8 +2058,8 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
     /// should continue using `globalContextBuilderAgentSelection()`.
     func globalContextBuilderRememberedModelRaw(for agentRaw: String) -> String? {
         let trimmedAgentRaw = agentRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard AgentProviderKind(rawValue: trimmedAgentRaw) != nil else { return nil }
-        guard let raw = globalDefaults.discoverModelsByAgent?[trimmedAgentRaw]?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard AgentProviderKind(rawValue: trimmedAgentRaw) != nil,
+              let raw = globalDefaults.discoverModelsByAgent?[trimmedAgentRaw]?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty
         else {
             return nil

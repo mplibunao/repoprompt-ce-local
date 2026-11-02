@@ -99,7 +99,7 @@ struct CodexManagedAccount: Equatable, CustomStringConvertible, CustomDebugStrin
     var isConfirmedManagedAuthentication: Bool {
         if let accountType,
            accountType.trimmingCharacters(in: .whitespacesAndNewlines)
-           .caseInsensitiveCompare("chatgpt") == .orderedSame
+               .caseInsensitiveCompare("chatgpt") == .orderedSame
         {
             return true
         }
@@ -981,10 +981,7 @@ actor CodexManagedAuthRecoveryService: CodexManagedAuthRecovering {
     }
 
     static func parseManagedAccount(from result: [String: Any]) -> CodexManagedAccount? {
-        guard boolValue(in: result, keys: ["requiresOpenaiAuth", "requires_openai_auth"]) != false else {
-            return nil
-        }
-        guard isAuthenticatedAccountReadResult(result) else { return nil }
+        guard boolValue(in: result, keys: ["requiresOpenaiAuth", "requires_openai_auth"]) != false, isAuthenticatedAccountReadResult(result) else { return nil }
         guard let account = result["account"] as? [String: Any] else {
             return CodexManagedAccount()
         }
@@ -1038,7 +1035,9 @@ actor CodexManagedAuthRecoveryService: CodexManagedAuthRecovering {
         private var waiters: [CheckedContinuation<Bool, Never>] = []
 
         func wait() async -> Bool {
-            if let result { return result }
+            if let result {
+                return result
+            }
             return await withCheckedContinuation { continuation in
                 if let result {
                     continuation.resume(returning: result)

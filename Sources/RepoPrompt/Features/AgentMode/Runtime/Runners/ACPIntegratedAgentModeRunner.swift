@@ -155,14 +155,14 @@ final class ACPIntegratedAgentModeRunner {
         ) {
             switch try await operation() {
             case .completed:
-                return .completed(assistantText: nil)
+                .completed(assistantText: nil)
             case .cancelled:
                 throw CancellationError()
             case let .failed(errorText):
                 explicitFailureText = .some(errorText)
                 throw ExplicitTerminalFailure(errorText: errorText)
             case .superseded:
-                return .superseded
+                .superseded
             }
         }
 
@@ -1032,8 +1032,8 @@ final class ACPIntegratedAgentModeRunner {
         agentKind: AgentProviderKind,
         modelString: String?
     ) throws -> String? {
-        guard agentKind == .openCode || agentKind == .cursor || agentKind == .grokBuild else { return nil }
-        guard let model = modelString?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard agentKind == .openCode || agentKind == .cursor || agentKind == .grokBuild,
+              let model = modelString?.trimmingCharacters(in: .whitespacesAndNewlines),
               !model.isEmpty,
               model.caseInsensitiveCompare(AgentModel.defaultModel.rawValue) != .orderedSame
         else {
@@ -1477,8 +1477,7 @@ final class ACPIntegratedAgentModeRunner {
         args: [String: Value]?,
         session: AgentTabSession
     ) {
-        guard AgentToolTrackingSupport.isRepoPromptTool(toolName) else { return }
-        guard !AgentToolTrackingSupport.shouldHideToolFromTranscript(toolName) else { return }
+        guard AgentToolTrackingSupport.isRepoPromptTool(toolName), !AgentToolTrackingSupport.shouldHideToolFromTranscript(toolName) else { return }
         #if DEBUG
             if MCPIntegrationHelper.normalizedRepoPromptToolName(toolName) == "agent_run" {
                 print("[ACPAgentRunToolTracking] ACP tracker call session=\(session.activeAgentSessionID?.uuidString ?? "nil") invocation=\(invocationID.uuidString) tool=\(toolName) itemCountBefore=\(session.items.count)")
@@ -1562,8 +1561,7 @@ final class ACPIntegratedAgentModeRunner {
         isError: Bool,
         session: AgentTabSession
     ) {
-        guard AgentToolTrackingSupport.isRepoPromptTool(toolName) else { return }
-        guard !AgentToolTrackingSupport.shouldHideToolFromTranscript(toolName) else { return }
+        guard AgentToolTrackingSupport.isRepoPromptTool(toolName), !AgentToolTrackingSupport.shouldHideToolFromTranscript(toolName) else { return }
         #if DEBUG
             if MCPIntegrationHelper.normalizedRepoPromptToolName(toolName) == "agent_run" {
                 print("[ACPAgentRunToolTracking] ACP tracker result session=\(session.activeAgentSessionID?.uuidString ?? "nil") invocation=\(invocationID.uuidString) tool=\(toolName) isError=\(isError) resultChars=\(resultJSON.count) itemCountBefore=\(session.items.count)")

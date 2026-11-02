@@ -85,17 +85,23 @@ enum AgentOraclePillLogic {
 
         if let activeRunID {
             let exactRunMatches = renderable.filter { matchesAgent($0) && $0.agentModeRunID == activeRunID }
-            if !exactRunMatches.isEmpty { return exactRunMatches }
+            if !exactRunMatches.isEmpty {
+                return exactRunMatches
+            }
 
             let sameAgentLegacyRunMatches = renderable.filter { matchesAgent($0) && $0.agentModeSessionID != nil && $0.agentModeRunID == nil }
-            if !sameAgentLegacyRunMatches.isEmpty { return sameAgentLegacyRunMatches }
+            if !sameAgentLegacyRunMatches.isEmpty {
+                return sameAgentLegacyRunMatches
+            }
 
             // A new process run must not hide completed Oracle results from the same agent session.
         }
 
         if let activeAgentSessionID {
             let sameAgentMatches = renderable.filter { $0.agentModeSessionID == activeAgentSessionID }
-            if !sameAgentMatches.isEmpty { return sameAgentMatches }
+            if !sameAgentMatches.isEmpty {
+                return sameAgentMatches
+            }
         }
 
         return renderable.filter(isUnownedLegacy)
@@ -453,17 +459,17 @@ struct AgentOraclePill: View {
 
         Task { @MainActor in
             guard let target = await oracleViewModel.resolveExactSessionForPopover(
-                chatID: request.chatID,
-                workspaceID: request.workspaceID,
-                tabID: request.tabID
-            ),
-                AgentOraclePillLogic.shouldPresent(
-                    session: target,
-                    for: request,
-                    currentGeneration: openRequestGeneration,
-                    currentWorkspaceID: oracleViewModel.workspaceManager.activeWorkspaceID,
-                    currentTabID: currentTabID
-                )
+                      chatID: request.chatID,
+                      workspaceID: request.workspaceID,
+                      tabID: request.tabID
+                  ),
+                  AgentOraclePillLogic.shouldPresent(
+                      session: target,
+                      for: request,
+                      currentGeneration: openRequestGeneration,
+                      currentWorkspaceID: oracleViewModel.workspaceManager.activeWorkspaceID,
+                      currentTabID: currentTabID
+                  )
             else { return }
 
             present(

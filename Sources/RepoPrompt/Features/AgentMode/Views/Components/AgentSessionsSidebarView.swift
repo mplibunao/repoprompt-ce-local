@@ -293,7 +293,9 @@ private struct BulkActionChipLabel: View {
     }
 
     private var foreground: Color {
-        if isDestructive { return .red }
+        if isDestructive {
+            return .red
+        }
         return isHovered ? Color(NSColor.labelColor) : .secondary
     }
 
@@ -744,7 +746,9 @@ struct AgentModeSessionsListView: View {
                 renderedOrder: selectionRenderIdentity.renderedOrder,
                 workspaceID: selectionRenderIdentity.workspaceID
             )
-            if snapshot.renderedSelectionOrder.isEmpty { showingBulkDeleteConfirmation = false }
+            if snapshot.renderedSelectionOrder.isEmpty {
+                showingBulkDeleteConfirmation = false
+            }
         }
     }
 
@@ -873,7 +877,9 @@ struct AgentModeSessionsListView: View {
                 }
             }
 
-            if let notice = selectionState.notice { bulkNotice(notice) }
+            if let notice = selectionState.notice {
+                bulkNotice(notice)
+            }
         }
         .padding(.horizontal, bulkBarInnerHorizontalPadding)
         .padding(.vertical, bulkBarInnerVerticalPadding)

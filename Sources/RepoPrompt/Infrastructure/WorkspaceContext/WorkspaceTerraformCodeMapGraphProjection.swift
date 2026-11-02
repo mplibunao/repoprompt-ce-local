@@ -148,7 +148,9 @@ enum WorkspaceTerraformCodeMapGraphProjection {
 
         var targetsByCall: [String: CallTarget] = [:]
         func target(of call: String) -> CallTarget {
-            if let target = targetsByCall[call] { return target }
+            if let target = targetsByCall[call] {
+                return target
+            }
             let key = TerraformCallKey(folder: folder, call: call)
             let target = callTarget(
                 key: key,
@@ -167,7 +169,7 @@ enum WorkspaceTerraformCodeMapGraphProjection {
                 evidence: "terraform " + address(folder: folder, kind: kind, names: names)
             ))
         }
-        /// `role` names the child reference, and `childAddress` renders its target in the child folder.
+        // `role` names the child reference, and `childAddress` renders its target in the child folder.
         func appendChild(
             call: String,
             role: String,

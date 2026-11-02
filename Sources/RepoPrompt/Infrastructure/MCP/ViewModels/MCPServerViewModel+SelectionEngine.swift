@@ -21,9 +21,8 @@ struct WorkspaceGitDiffArtifactSelectionService {
         for candidate in candidates where candidate.selectionDisposition == .primaryAutoSelect {
             guard let identity = StoredSelectionPathNormalization.standardizedPath(candidate.absolutePath),
                   identity.hasPrefix("/"),
-                  seenCandidates.insert(identity).inserted
-            else { continue }
-            guard selectedIdentities.insert(identity).inserted else { continue }
+                  seenCandidates.insert(identity).inserted,
+                  selectedIdentities.insert(identity).inserted else { continue }
             selectedPaths.append(identity)
             newlyAddedArtifacts.append(candidate)
         }

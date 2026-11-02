@@ -299,13 +299,7 @@ final actor ServerController: ObservableObject {
 
     /// Returns true iff the connecting process matches the app-bundled `repoprompt-mcp` executable.
     private func isBundledRepoPromptCLIConnection(connectionID: UUID) async -> Bool {
-        guard let expectedURL = Bundle.main.url(forAuxiliaryExecutable: "repoprompt-mcp") else {
-            return false
-        }
-        guard let peerPID = await networkManager.peerPID(for: connectionID) else {
-            return false
-        }
-        guard let actualPath = Self.executablePath(forPID: peerPID) else {
+        guard let expectedURL = Bundle.main.url(forAuxiliaryExecutable: "repoprompt-mcp"), let peerPID = await networkManager.peerPID(for: connectionID), let actualPath = Self.executablePath(forPID: peerPID) else {
             return false
         }
         let expected = expectedURL.resolvingSymlinksInPath().standardizedFileURL.path
@@ -321,8 +315,7 @@ final actor ServerController: ObservableObject {
     }
 
     private func addAlwaysAllowed(clientID: String) {
-        guard !Self.isRepoPromptCLIClientName(clientID) else { return }
-        guard !alwaysAllowedClients.contains(where: { MCPClientIdentity.matches($0, clientID) }) else { return }
+        guard !Self.isRepoPromptCLIClientName(clientID), !alwaysAllowedClients.contains(where: { MCPClientIdentity.matches($0, clientID) }) else { return }
         alwaysAllowedClients.insert(clientID)
         UserDefaults.standard.set(
             Array(alwaysAllowedClients),
@@ -627,9 +620,7 @@ final actor ServerController: ObservableObject {
 
     /// Starts the next queued approval request, if any.
     private func activateNextQueuedApprovalIfNeeded() async {
-        guard currentApprovalCallbacks == nil else { return }
-        guard pendingConnectionID == nil else { return }
-        guard !pendingApprovals.isEmpty else { return }
+        guard currentApprovalCallbacks == nil, pendingConnectionID == nil, !pendingApprovals.isEmpty else { return }
         let (nextClientID, approve, deny) = pendingApprovals.removeFirst()
         await beginApprovalRequest(clientID: nextClientID, approve: approve, deny: deny)
     }

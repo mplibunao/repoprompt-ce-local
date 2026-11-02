@@ -37,8 +37,7 @@ enum GitWorktreeDisplayLabelHumanizer {
         var parts = remainder.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
         guard parts.count >= 2 else { return nil }
         let shortID = parts.removeFirst()
-        guard isPlannerComponent(shortID), shortID.count == 8 else { return nil }
-        guard parts.allSatisfy({ !$0.isEmpty }) else { return nil }
+        guard isPlannerComponent(shortID), shortID.count == 8, parts.allSatisfy({ !$0.isEmpty }) else { return nil }
 
         if let suffix = parts.last, isNumericCollisionSuffix(suffix) {
             parts.removeLast()

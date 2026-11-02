@@ -19,16 +19,12 @@ enum AutoSliceSelection {
         from reply: ToolResultDTOs.ReadFileReply,
         fallbackPath: String? = nil
     ) -> ReadFileSelection? {
-        guard reply.totalLines > 0 else { return nil }
-        guard reply.firstLine > 0 else { return nil }
-        guard reply.lastLine >= reply.firstLine else { return nil }
-        guard reply.firstLine <= reply.totalLines else { return nil }
+        guard reply.totalLines > 0, reply.firstLine > 0, reply.lastLine >= reply.firstLine, reply.firstLine <= reply.totalLines else { return nil }
 
         let displayPath = reply.displayPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let fallback = fallbackPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let resolvedPath = displayPath.isEmpty ? fallback : displayPath
-        guard !resolvedPath.isEmpty else { return nil }
-        guard !isAgentsInstructionsFile(resolvedPath) else { return nil }
+        guard !resolvedPath.isEmpty, !isAgentsInstructionsFile(resolvedPath) else { return nil }
 
         if reply.firstLine == 1, reply.lastLine == reply.totalLines {
             return .full(path: resolvedPath)
@@ -46,8 +42,7 @@ enum AutoSliceSelection {
         _ selection: ReadFileSelection,
         existingFullPaths: [String]
     ) -> ReadFileSelection {
-        guard case let .slice(entry) = selection else { return selection }
-        guard let standardizedEntryPath = StoredSelectionPathNormalization.standardizedPath(entry.path) else {
+        guard case let .slice(entry) = selection, let standardizedEntryPath = StoredSelectionPathNormalization.standardizedPath(entry.path) else {
             return selection
         }
 

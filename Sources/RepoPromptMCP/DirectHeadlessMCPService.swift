@@ -466,11 +466,21 @@ actor DirectHeadlessMCPService {
         providerIdentifier: String
     ) -> MCPClientToolPolicyProfile {
         let normalized = providerIdentifier.lowercased()
-        if normalized.contains("codex") { return .agentModeCodexEngineer }
-        if normalized.contains("claude") { return .agentModeClaudeEngineer }
-        if normalized.contains("opencode") { return .agentModeOpenCodeEngineer }
-        if normalized.contains("cursor") { return .agentModeCursorEngineer }
-        if normalized.contains("grok") { return .agentModeGrokBuildEngineer }
+        if normalized.contains("codex") {
+            return .agentModeCodexEngineer
+        }
+        if normalized.contains("claude") {
+            return .agentModeClaudeEngineer
+        }
+        if normalized.contains("opencode") {
+            return .agentModeOpenCodeEngineer
+        }
+        if normalized.contains("cursor") {
+            return .agentModeCursorEngineer
+        }
+        if normalized.contains("grok") {
+            return .agentModeGrokBuildEngineer
+        }
         return .agentModeGenericEngineer
     }
 

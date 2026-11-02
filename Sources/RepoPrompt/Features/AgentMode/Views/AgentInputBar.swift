@@ -1536,15 +1536,14 @@ struct AgentComposerView: View, Equatable {
         }
     }
 
+    @ViewBuilder
     private var imageDropOutline: some View {
-        Group {
-            if isImageDropTargeted {
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(style: StrokeStyle(lineWidth: 2, dash: [8]))
-                    .foregroundColor(.accentColor)
-                    .padding(.horizontal, 2)
-                    .padding(.bottom, Self.footerHeight)
-            }
+        if isImageDropTargeted {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(style: StrokeStyle(lineWidth: 2, dash: [8]))
+                .foregroundColor(.accentColor)
+                .padding(.horizontal, 2)
+                .padding(.bottom, Self.footerHeight)
         }
     }
 
@@ -1714,10 +1713,7 @@ struct AgentComposerView: View, Equatable {
     }
 
     private func handleImagePaste(pasteboard: NSPasteboard) -> Bool {
-        guard let tabID = currentTabID else {
-            return false
-        }
-        guard imageInputAdapter.shouldConsumePasteAsImageAttachment(from: pasteboard) else {
+        guard let tabID = currentTabID, imageInputAdapter.shouldConsumePasteAsImageAttachment(from: pasteboard) else {
             return false
         }
         let prepared = imageInputAdapter.preparedImages(from: pasteboard)
@@ -1809,10 +1805,7 @@ struct AgentImageInputAdapter {
         if !preparedFileURLImages(from: pasteboard, includePlainTextReferences: false).isEmpty {
             return true
         }
-        guard let plainString = pasteboard.string(forType: .string) else {
-            return false
-        }
-        guard !fileURLs(fromPlainText: plainString).isEmpty else {
+        guard let plainString = pasteboard.string(forType: .string), !fileURLs(fromPlainText: plainString).isEmpty else {
             return false
         }
         return shouldConsumePlainTextPaste(plainString)
@@ -2104,8 +2097,7 @@ struct AgentImageInputAdapter {
                 guard let fileURL = fileURLFromPlainText(candidate) else { continue }
                 let standardizedURL = fileURL.standardizedFileURL
                 let key = standardizedURL.path
-                guard !key.isEmpty else { continue }
-                guard !seenPaths.contains(key) else { continue }
+                guard !key.isEmpty, !seenPaths.contains(key) else { continue }
                 seenPaths.insert(key)
                 results.append(standardizedURL)
             }
@@ -2155,8 +2147,7 @@ struct AgentImageInputAdapter {
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        guard !lines.isEmpty else { return false }
-        guard lines.count <= Self.maxPlainTextLineCount else { return false }
+        guard !lines.isEmpty, lines.count <= Self.maxPlainTextLineCount else { return false }
         return lines.allSatisfy { lineLooksLikeStandaloneImageReference($0) }
     }
 

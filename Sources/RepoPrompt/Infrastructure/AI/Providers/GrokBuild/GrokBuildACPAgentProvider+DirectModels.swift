@@ -49,8 +49,7 @@ extension GrokBuildACPAgentProvider: ACPDirectSessionModelProvider {
         var effortStateByModelRaw: [String: GrokBuildAdvertisedEffortState] = [:]
         var wireValuesByModelRaw: [String: [CodexReasoningEffort: String]] = [:]
         for entry in available {
-            guard let rawID = nonEmpty(entry["modelId"] as? String) else { continue }
-            guard seen.insert(rawID).inserted else { continue }
+            guard let rawID = nonEmpty(entry["modelId"] as? String), seen.insert(rawID).inserted else { continue }
             let displayName = nonEmpty(entry["name"] as? String) ?? rawID
             let description = nonEmpty(entry["description"] as? String)
 
@@ -134,7 +133,9 @@ extension GrokBuildACPAgentProvider: ACPDirectSessionModelProvider {
                     guard let otherID = nonEmpty($0["modelId"] as? String) else { return false }
                     return otherID.caseInsensitiveCompare(compound) == .orderedSame
                 }
-                if collidesWithBase { continue }
+                if collidesWithBase {
+                    continue
+                }
                 variants.append(
                     AgentModelOption(
                         rawValue: compound,

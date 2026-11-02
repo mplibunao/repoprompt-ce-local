@@ -562,7 +562,9 @@ actor HistoryInventoryScanGate {
     }
 
     private func cancelWaiter(_ id: UUID) {
-        if holderID == id { return }
+        if holderID == id {
+            return
+        }
         if let index = waiters.firstIndex(where: { $0.id == id }) {
             let waiter = waiters.remove(at: index)
             waiter.continuation.resume(throwing: CancellationError())
@@ -906,7 +908,9 @@ actor HistorySessionScanner: HistorySessionScanning {
         do {
             if let workspaceDirectoryProvider {
                 for workspaceDir in try workspaceDirectoryProvider(workspacesRoot) {
-                    if try await visit(workspaceDir) == false { break }
+                    if try await visit(workspaceDir) == false {
+                        break
+                    }
                 }
             } else if let enumerator = fileManager.enumerator(
                 at: workspacesRoot,
@@ -914,7 +918,9 @@ actor HistorySessionScanner: HistorySessionScanning {
                 options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
             ) {
                 while let workspaceDir = enumerator.nextObject() as? URL {
-                    if try await visit(workspaceDir) == false { break }
+                    if try await visit(workspaceDir) == false {
+                        break
+                    }
                 }
             } else {
                 diagnostics.append(HistoryScanDiagnostic(
@@ -963,8 +969,12 @@ actor HistorySessionScanner: HistorySessionScanning {
         guard let workspace = workspace?.trimmingCharacters(in: .whitespacesAndNewlines), !workspace.isEmpty else {
             return nil
         }
-        if let id = UUID(uuidString: workspace) { return .id(id) }
-        if workspace.lowercased().hasPrefix("workspace-") { return .directoryName(workspace) }
+        if let id = UUID(uuidString: workspace) {
+            return .id(id)
+        }
+        if workspace.lowercased().hasPrefix("workspace-") {
+            return .directoryName(workspace)
+        }
         return nil
     }
 
@@ -983,7 +993,9 @@ actor HistorySessionScanner: HistorySessionScanning {
 
         for scan in scanResults {
             // Skip workspaces whose index schema doesn't match the current version.
-            if scan.indexSchemaVersion != nil { continue }
+            if scan.indexSchemaVersion != nil {
+                continue
+            }
 
             // Workspace name filter: match against workspace name or workspace ID string
             if let workspace {
@@ -1078,7 +1090,9 @@ actor HistorySessionScanner: HistorySessionScanning {
                 .appendingPathComponent("AgentSessions", isDirectory: true)
                 .appendingPathComponent(filename)
             guard admitsProfileLocation(sessionFile), fileSignature(for: sessionFile) != nil else {
-                if inspected.isMultiple(of: 32) { await Task.yield() }
+                if inspected.isMultiple(of: 32) {
+                    await Task.yield()
+                }
                 return nil
             }
 
@@ -1673,12 +1687,12 @@ actor HistorySessionScanner: HistorySessionScanning {
             || cache.estimatedByteCount > inventoryBudget.maxIndexCacheBytes
         {
             guard let evictionKey = cache.entries.min(by: { lhs, rhs in
-                if lhs.value.accessOrdinal != rhs.value.accessOrdinal {
-                    return lhs.value.accessOrdinal < rhs.value.accessOrdinal
-                }
-                return lhs.key < rhs.key
-            })?.key,
-                let removed = cache.entries.removeValue(forKey: evictionKey)
+                      if lhs.value.accessOrdinal != rhs.value.accessOrdinal {
+                          return lhs.value.accessOrdinal < rhs.value.accessOrdinal
+                      }
+                      return lhs.key < rhs.key
+                  })?.key,
+                  let removed = cache.entries.removeValue(forKey: evictionKey)
             else { break }
             cache.estimatedByteCount = max(0, cache.estimatedByteCount - removed.estimatedByteCount)
         }
@@ -1733,9 +1747,8 @@ actor HistorySessionScanner: HistorySessionScanning {
 
     private nonisolated func schemaVersionSniff(from data: Data) -> Int? {
         guard let text = String(data: data, encoding: .utf8),
-              let keyRange = text.range(of: "\"schemaVersion\"")
-        else { return nil }
-        guard let colon = text[keyRange.upperBound...].firstIndex(of: ":") else { return nil }
+              let keyRange = text.range(of: "\"schemaVersion\""),
+              let colon = text[keyRange.upperBound...].firstIndex(of: ":") else { return nil }
         var index = text.index(after: colon)
         while index < text.endIndex, text[index].isWhitespace {
             index = text.index(after: index)

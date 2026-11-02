@@ -1448,7 +1448,9 @@ final class CursorModelParameterSelectionTests: XCTestCase {
                 if let match = registrations[baseline...].last(where: { $0.key.canonicalBaseModelRaw == canonical }) {
                     return match.id
                 }
-                if Date() >= deadline { throw RegistrationTimeout() }
+                if Date() >= deadline {
+                    throw RegistrationTimeout()
+                }
                 try await Task.sleep(nanoseconds: 5_000_000)
             }
         }
@@ -1465,7 +1467,9 @@ final class CursorModelParameterSelectionTests: XCTestCase {
             struct TerminationTimeout: Error {}
             let deadline = Date().addingTimeInterval(TimeInterval(seconds))
             while !terminatedSubscriptionIDs.contains(id) {
-                if Date() >= deadline { throw TerminationTimeout() }
+                if Date() >= deadline {
+                    throw TerminationTimeout()
+                }
                 try await Task.sleep(nanoseconds: 5_000_000)
             }
         }
@@ -1791,11 +1795,15 @@ final class CursorModelParameterSelectionTests: XCTestCase {
         struct ConditionTimeout: Error {}
         let deadline = Date().addingTimeInterval(TimeInterval(seconds))
         while Date() < deadline {
-            if condition() { return }
+            if condition() {
+                return
+            }
             await Task.yield()
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
-        if condition() { return }
+        if condition() {
+            return
+        }
         XCTFail("Timed out after \(seconds)s waiting for composer observation condition.")
         throw ConditionTimeout()
     }

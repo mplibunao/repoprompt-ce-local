@@ -24,7 +24,7 @@ struct DeviceIdentity {
 
         if let data = try? Data(contentsOf: fileURL),
            let str = String(data: data, encoding: .utf8)?
-           .trimmingCharacters(in: .whitespacesAndNewlines),
+               .trimmingCharacters(in: .whitespacesAndNewlines),
            !str.isEmpty
         {
             id = str

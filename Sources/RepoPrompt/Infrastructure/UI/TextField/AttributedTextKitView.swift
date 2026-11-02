@@ -90,7 +90,9 @@ struct AttributedTextKitView: NSViewRepresentable {
                   let textView = notification.object as? NSTextView
             else { return }
             // NEW: ignore delegate echo during programmatic updates
-            if isApplyingExternalWrite { return }
+            if isApplyingExternalWrite {
+                return
+            }
 
             let newText = textView.string
             let isEmpty = newText.isEmpty
@@ -175,7 +177,9 @@ struct AttributedTextKitView: NSViewRepresentable {
 
             // Prefer explicit kind if supplied, otherwise infer from models.
             let isFolder: Bool = {
-                if let k = kind { return k == .folder }
+                if let k = kind {
+                    return k == .folder
+                }
                 return fm.findFolderByRelativePath(path) != nil
             }()
 
@@ -185,12 +189,10 @@ struct AttributedTextKitView: NSViewRepresentable {
                 } else {
                     fm.togglePath(path) // fallback
                 }
+            } else if let fileVM = fm.findFileByRelativePath(path) {
+                fm.toggleFile(fileVM)
             } else {
-                if let fileVM = fm.findFileByRelativePath(path) {
-                    fm.toggleFile(fileVM)
-                } else {
-                    fm.togglePath(path) // fallback
-                }
+                fm.togglePath(path) // fallback
             }
         }
 
@@ -205,12 +207,7 @@ struct AttributedTextKitView: NSViewRepresentable {
             pendingLayoutTask?.cancel()
             pendingLayoutTask = Task { @MainActor in
                 await Task.yield()
-                guard !Task.isCancelled else { return }
-                guard isActive else { return }
-                guard generation == layoutGeneration else { return }
-                guard textView.window != nil else { return }
-                guard expectedIsEmpty == textView.string.isEmpty else { return }
-                guard !textView.hasMarkedText() else { return }
+                guard !Task.isCancelled, isActive, generation == layoutGeneration, textView.window != nil, expectedIsEmpty == textView.string.isEmpty, !textView.hasMarkedText() else { return }
 
                 textView.clampSelectionToCurrentString()
                 let nsLen = textView.currentStringLength()
@@ -403,7 +400,9 @@ struct AttributedTextKitView: NSViewRepresentable {
         let shouldForce = context.coordinator.lastAppliedTick != externalUpdateTick
 
         if textView.string != text {
-            if textView.hasMarkedText() { return }
+            if textView.hasMarkedText() {
+                return
+            }
             if wasFirstResponder, !shouldForce {
                 // Do not overwrite while the user is typing; delegate writes to binding.
             } else {
@@ -533,8 +532,7 @@ struct AttributedTextKitView: NSViewRepresentable {
         coordinator: Coordinator
     ) {
         // Capture weak references to avoid retaining views after they disappear
-        guard let fm = fileManager else { return }
-        guard !tv.hasMarkedText() else { return }
+        guard let fm = fileManager, !tv.hasMarkedText() else { return }
         let plainString = tv.string // immutable snapshot
         guard plainString.contains("@") else { return }
         let fullRange = NSRange(
@@ -552,7 +550,9 @@ struct AttributedTextKitView: NSViewRepresentable {
             // Background work – regex only (no AppKit calls!)
             // -----------------------------------------------
             let matches = await Self.tokenRegex.matches(in: plainString, range: fullRange)
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                return
+            }
 
             // Extract ranges & raw paths; keeps memory minimal
             var spans: [(NSRange, String)] = []
@@ -572,13 +572,10 @@ struct AttributedTextKitView: NSViewRepresentable {
                 else { return }
 
                 // If the text has changed since we computed spans, bail to avoid stale ranges.
-                guard tv.string == plainString else { return }
-                guard tv.window != nil else { return }
-                guard !tv.hasMarkedText() else { return }
-                guard
-                    let layoutManager = tv.layoutManager,
-                    let container = tv.textContainer,
-                    layoutManager.textContainers.contains(where: { $0 === container })
+                guard tv.string == plainString, tv.window != nil, !tv.hasMarkedText(),
+                      let layoutManager = tv.layoutManager,
+                      let container = tv.textContainer,
+                      layoutManager.textContainers.contains(where: { $0 === container })
                 else { return }
 
                 // Batch mutations so AppKit performs a single layout pass
@@ -594,7 +591,9 @@ struct AttributedTextKitView: NSViewRepresentable {
 
                     // Resolve kind only once per distinct path
                     let resolvedKind: MentionKind? = {
-                        if let cached = kindCache[rawPath] { return cached }
+                        if let cached = kindCache[rawPath] {
+                            return cached
+                        }
                         var kind: MentionKind? = nil
                         if fm.findFolderByRelativePath(rawPath) != nil {
                             kind = .folder

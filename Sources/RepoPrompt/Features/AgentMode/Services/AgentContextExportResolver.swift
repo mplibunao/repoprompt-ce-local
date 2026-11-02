@@ -402,8 +402,12 @@ enum AgentContextExportResolver {
     }
 
     private static func selectionNeedsResolution(_ selection: StoredSelection, codeMapUsage: CodeMapUsage) -> Bool {
-        if !selection.selectedPaths.isEmpty { return true }
-        if selection.slices.contains(where: { !$0.value.isEmpty }) { return true }
+        if !selection.selectedPaths.isEmpty {
+            return true
+        }
+        if selection.slices.contains(where: { !$0.value.isEmpty }) {
+            return true
+        }
         switch codeMapUsage {
         case .auto:
             return !selection.manualCodemapPaths.isEmpty
@@ -427,7 +431,9 @@ enum AgentContextExportResolver {
     }
 
     private static func hasExplicitFileRows(_ selection: StoredSelection) -> Bool {
-        if !selection.selectedPaths.isEmpty { return true }
+        if !selection.selectedPaths.isEmpty {
+            return true
+        }
         return selection.slices.contains { !$0.value.isEmpty }
     }
 
@@ -1054,13 +1060,11 @@ enum AgentContextExportResolver {
               source.worktreeBindings.count >= 1,
               metadataOnlyBindingsAreSafe(source.worktreeBindings),
               codeMapUsage == .none,
-              let sessionID = source.activeAgentSessionID
-        else { return nil }
-
-        guard let projection = lightweightProjection(
-            sessionID: sessionID,
-            bindings: source.worktreeBindings
-        ) else { return nil }
+              let sessionID = source.activeAgentSessionID,
+              let projection = lightweightProjection(
+                  sessionID: sessionID,
+                  bindings: source.worktreeBindings
+              ) else { return nil }
 
         let lookupContext = WorkspaceLookupContext(
             rootScope: projection.lookupRootScope,
@@ -1980,14 +1984,18 @@ enum AgentContextExportResolver {
         if lhs.metrics.tokenSortKey != rhs.metrics.tokenSortKey {
             return lhs.metrics.tokenSortKey > rhs.metrics.tokenSortKey
         }
-        if lhs.kind != rhs.kind { return lhs.kind.rawValue < rhs.kind.rawValue }
+        if lhs.kind != rhs.kind {
+            return lhs.kind.rawValue < rhs.kind.rawValue
+        }
         if lhs.displayName != rhs.displayName {
             return lhs.displayName.utf8.lexicographicallyPrecedes(rhs.displayName.utf8)
         }
         if lhs.displayPath != rhs.displayPath {
             return lhs.displayPath.utf8.lexicographicallyPrecedes(rhs.displayPath.utf8)
         }
-        if lhs.rootID != rhs.rootID { return lhs.rootID.uuidString < rhs.rootID.uuidString }
+        if lhs.rootID != rhs.rootID {
+            return lhs.rootID.uuidString < rhs.rootID.uuidString
+        }
         return lhs.id.fileID.uuidString < rhs.id.fileID.uuidString
     }
 
@@ -2039,7 +2047,9 @@ enum AgentContextExportResolver {
         if expanded.hasPrefix("/") {
             let standardized = StandardizedPath.absolute(expanded)
             guard standardized == root.standardizedFullPath || StandardizedPath.isDescendant(standardized, of: root.standardizedFullPath) else { return nil }
-            if standardized == root.standardizedFullPath { return "" }
+            if standardized == root.standardizedFullPath {
+                return ""
+            }
             return StandardizedPath.relative(String(standardized.dropFirst(root.standardizedFullPath.count + 1)))
         }
         return StandardizedPath.relative(expanded)

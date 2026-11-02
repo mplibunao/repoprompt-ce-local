@@ -69,8 +69,7 @@ struct MarkdownFileLinkTarget {
         }
 
         let parts = value.split(separator: ":", omittingEmptySubsequences: false)
-        guard parts.count >= 2 else { return nil }
-        guard let lineNumber = Int(parts[parts.count - 2]) ?? Int(parts[parts.count - 1]) else {
+        guard parts.count >= 2, let lineNumber = Int(parts[parts.count - 2]) ?? Int(parts[parts.count - 1]) else {
             return nil
         }
 

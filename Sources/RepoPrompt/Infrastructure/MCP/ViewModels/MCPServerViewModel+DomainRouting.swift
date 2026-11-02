@@ -47,7 +47,9 @@ extension MCPServerViewModel {
         activeContextID: UUID?,
         presentationRevision: UInt64
     ) async -> DomainWindowDescriptor? {
-        if let domainWindowDescriptor { return domainWindowDescriptor }
+        if let domainWindowDescriptor {
+            return domainWindowDescriptor
+        }
         scheduleDomainWindowRegistration(
             activeWorkspaceID: activeWorkspaceID,
             activeContextID: activeContextID,
@@ -88,13 +90,13 @@ extension MCPServerViewModel {
         let previousPublish = domainRoutingPublishTask
         domainRoutingPublishTask = Task { @MainActor [weak self] in
             await previousPublish?.value
-            guard let self, !self.domainRoutingWindowIsClosing else { return }
-            guard let descriptor = await ensureDomainWindowRegistered(
-                activeWorkspaceID: context.workspaceID,
-                activeContextID: context.tabID,
-                presentationRevision: presentationRevision
-            ),
-                !domainRoutingWindowIsClosing
+            guard let self, !self.domainRoutingWindowIsClosing,
+                  let descriptor = await ensureDomainWindowRegistered(
+                      activeWorkspaceID: context.workspaceID,
+                      activeContextID: context.tabID,
+                      presentationRevision: presentationRevision
+                  ),
+                  !domainRoutingWindowIsClosing
             else { return }
             let updatedDescriptor = DomainWindowDescriptor(
                 windowID: descriptor.windowID,
@@ -401,7 +403,9 @@ extension MCPServerViewModel {
                 operationID: UUID(),
                 expectedRevision: observedRoutingRevision
             )
-            if bound.disposition == .applied || bound.disposition == .unchanged { break }
+            if bound.disposition == .applied || bound.disposition == .unchanged {
+                break
+            }
             bindAttempts += 1
             guard bound.disposition == .conflict, bindAttempts < 3 else {
                 return try domainReadUnavailable(

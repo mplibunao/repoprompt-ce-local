@@ -82,7 +82,9 @@ final class WorkspaceCodemapGraphIncrementalIndexTests: XCTestCase {
                 XCTAssertEqual(map.updateValue(step, forKey: key), reference.updateValue(step, forKey: key))
             }
             XCTAssertEqual(map.count, reference.count)
-            if step.isMultiple(of: 500) { versions.append((map, reference)) }
+            if step.isMultiple(of: 500) {
+                versions.append((map, reference))
+            }
         }
         XCTAssertEqual(Dictionary(uniqueKeysWithValues: map.map { ($0.key, $0.value) }), reference)
         for key in (0 ..< 300).map(CollidingKey.init) {
@@ -1117,9 +1119,9 @@ final class WorkspaceCodemapGraphIncrementalIndexTests: XCTestCase {
         while clock.now < deadline {
             let accounting = await engine.accounting()
             if let root = accounting.graphIndexRoots.first(where: {
-                $0.rootEpoch.rootID == rootID && $0.rootEpoch != excludedRootEpoch
-            }),
-                root.phase == .complete
+                   $0.rootEpoch.rootID == rootID && $0.rootEpoch != excludedRootEpoch
+               }),
+               root.phase == .complete
             {
                 return root
             }

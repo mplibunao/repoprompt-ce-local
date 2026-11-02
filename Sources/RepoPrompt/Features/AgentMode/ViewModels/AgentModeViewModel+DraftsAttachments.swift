@@ -288,7 +288,6 @@ extension AgentModeViewModel {
         scheduleSave(for: tabID)
     }
 
-    @MainActor
     func commitPendingTaggedFile(tabID: UUID, relativePath: String, displayName: String? = nil) {
         let normalizedPath = Self.unescapeTaggedPath(relativePath)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -329,8 +328,7 @@ extension AgentModeViewModel {
 
     private func imageAttachmentFingerprint(for fileURL: URL) -> ImageAttachmentFingerprint? {
         let standardizedURL = fileURL.standardizedFileURL
-        guard standardizedURL.isFileURL else { return nil }
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: standardizedURL.path) else {
+        guard standardizedURL.isFileURL, let attributes = try? FileManager.default.attributesOfItem(atPath: standardizedURL.path) else {
             return nil
         }
         let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
@@ -347,9 +345,7 @@ extension AgentModeViewModel {
     }
 
     private func clearConsumedAttachmentFilesIfNeeded(_ attachments: [AgentImageAttachment]) {
-        guard clearConsumedAttachmentsAfterProviderConsumption else { return }
-        guard !attachments.isEmpty else { return }
-        guard let workspaceDirectory = attachmentWorkspaceDirectoryURL() else { return }
+        guard clearConsumedAttachmentsAfterProviderConsumption, !attachments.isEmpty, let workspaceDirectory = attachmentWorkspaceDirectoryURL() else { return }
         attachmentStore.clearConsumedLocalFiles(attachments, workspaceDirectory: workspaceDirectory)
     }
 
@@ -369,17 +365,20 @@ extension AgentModeViewModel {
         case .idle:
             return
         case let .reserved(storedID, attachments):
-            if let reservationID, reservationID != storedID { return }
+            if let reservationID, reservationID != storedID {
+                return
+            }
             session.attachmentTurnState = .consumed(reservationID: storedID, attachments: attachments)
         case let .consumed(storedID, _):
-            if let reservationID, reservationID != storedID { return }
+            if let reservationID, reservationID != storedID {
+                return
+            }
             return
         }
     }
 
     func stageConsumedAttachmentFilesForDeferredCleanup(_ attachments: [AgentImageAttachment], session: TabSession) {
-        guard clearConsumedAttachmentsAfterProviderConsumption else { return }
-        guard !attachments.isEmpty else { return }
+        guard clearConsumedAttachmentsAfterProviderConsumption, !attachments.isEmpty else { return }
         if session.attachmentsPendingProviderConsumptionCleanup.isEmpty {
             session.attachmentsPendingProviderConsumptionCleanup = attachments
             return
@@ -412,7 +411,9 @@ extension AgentModeViewModel {
             return
         case let .reserved(storedID, storedAttachments),
              let .consumed(storedID, storedAttachments):
-            if let reservationID, reservationID != storedID { return }
+            if let reservationID, reservationID != storedID {
+                return
+            }
             attachments = storedAttachments
         }
 

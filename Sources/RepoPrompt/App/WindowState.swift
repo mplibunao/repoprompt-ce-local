@@ -713,8 +713,7 @@ class WindowState: ObservableObject {
     }
 
     private func setFocused(_ focused: Bool) {
-        guard !shouldSuppressObservationSideEffects else { return }
-        guard isCurrentlyFocused != focused else { return }
+        guard !shouldSuppressObservationSideEffects, isCurrentlyFocused != focused else { return }
         isCurrentlyFocused = focused
         workspaceFilesViewModel.setWindowFocused(focused)
         scheduleFocusSideEffects(focused)
@@ -742,8 +741,7 @@ class WindowState: ObservableObject {
         pendingFocusSideEffectsTask = Task { [weak self] in
             guard let self else { return }
             await Task.yield()
-            guard !shouldSuppressObservationSideEffects else { return }
-            guard isCurrentlyFocused == focused else { return }
+            guard !shouldSuppressObservationSideEffects, isCurrentlyFocused == focused else { return }
             onFocusChanged?(focused)
         }
     }
@@ -895,11 +893,8 @@ class WindowState: ObservableObject {
         guard target.windowID == windowID,
               let workspace = workspaceManager.activeWorkspace,
               workspace.id == target.workspaceID,
-              workspace.composeTabs.contains(where: { $0.id == target.tabID })
-        else {
-            return false
-        }
-        guard let tab = workspace.composeTabs.first(where: { $0.id == target.tabID }),
+              workspace.composeTabs.contains(where: { $0.id == target.tabID }),
+              let tab = workspace.composeTabs.first(where: { $0.id == target.tabID }),
               tab.name == target.tabName
         else {
             return false
@@ -1253,8 +1248,7 @@ class WindowState: ObservableObject {
     }
 
     private func applyPendingRestoreEntryIfPossible() {
-        guard workspaceManager.isInitialized else { return }
-        guard let entry = pendingRestoreEntry else { return }
+        guard workspaceManager.isInitialized, let entry = pendingRestoreEntry else { return }
         pendingRestoreEntry = nil
         let completion = pendingRestoreCompletion
         pendingRestoreCompletion = nil
@@ -1474,7 +1468,7 @@ class WindowState: ObservableObject {
             let content = comps.queryItems?.first(where: { $0.name == "content" })?.value?
                 .removingPercentEncoding ?? ""
 
-            /// Optional "focus" flag still works
+            // Optional "focus" flag still works
             func flag(_ name: String) -> Bool? {
                 guard let v = comps.queryItems?.first(where: { $0.name == name })?.value else { return nil }
                 switch v.lowercased() { case "1", "true": return true
@@ -1540,14 +1534,18 @@ class WindowState: ObservableObject {
         let promptText = promptParts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         let finalPrompt = promptText.isEmpty ? nil : promptText
 
-        /// Parse focus, ephemeral, persist flags
+        // Parse focus, ephemeral, persist flags
         func boolFromQuery(_ name: String) -> Bool? {
             guard let val = comps.queryItems?.first(where: { $0.name == name })?.value else {
                 return nil
             }
             let lower = val.lowercased()
-            if lower == "true" || lower == "1" { return true }
-            if lower == "false" || lower == "0" { return false }
+            if lower == "true" || lower == "1" {
+                return true
+            }
+            if lower == "false" || lower == "0" {
+                return false
+            }
             return nil
         }
         let focusFlag = boolFromQuery("focus")
@@ -1567,16 +1565,15 @@ class WindowState: ObservableObject {
         )
 
         // If we want to focus an existing window for the same folderPath, do that
-        if focusFlag == true, let folderPath {
-            if let wsManager = windowStatesManager,
-               let existingWindow = wsManager.findWindowState(forFolderPath: folderPath),
-               existingWindow !== self
-            {
-                NSApplication.shared.activate(ignoringOtherApps: true)
-                existingWindow.focusWindowIfPossible()
-                existingWindow.enqueueCommand(command)
-                return
-            }
+        if focusFlag == true, let folderPath,
+           let wsManager = windowStatesManager,
+           let existingWindow = wsManager.findWindowState(forFolderPath: folderPath),
+           existingWindow !== self
+        {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            existingWindow.focusWindowIfPossible()
+            existingWindow.enqueueCommand(command)
+            return
         }
 
         enqueueCommand(command)
@@ -1638,21 +1635,18 @@ class WindowState: ObservableObject {
                 }
             }) {
                 // If ephemeral == true, mark existing workspace ephemeral (edge case)
-                if shouldBeEphemeral {
-                    if let index = workspaceManager.workspaces.firstIndex(where: { $0.id == existingWorkspace.id }) {
-                        workspaceManager.workspaces[index].isEphemeral = true
-                    }
+                if shouldBeEphemeral, let index = workspaceManager.workspaces.firstIndex(where: { $0.id == existingWorkspace.id }) {
+                    workspaceManager.workspaces[index].isEphemeral = true
                 }
 
                 // If focus == true, attempt to bring up an existing window
-                if command.focus == true {
-                    if let wsManager = windowStatesManager,
-                       let existingWindow = wsManager.findWindowState(showing: existingWorkspace.id)
-                    {
-                        NSApplication.shared.activate(ignoringOtherApps: true)
-                        existingWindow.focusWindowIfPossible()
-                        return
-                    }
+                if command.focus == true,
+                   let wsManager = windowStatesManager,
+                   let existingWindow = wsManager.findWindowState(showing: existingWorkspace.id)
+                {
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    existingWindow.focusWindowIfPossible()
+                    return
                 }
 
                 // Switch to the existing workspace in this window
@@ -1678,21 +1672,18 @@ class WindowState: ObservableObject {
             // Look for an existing workspace by name
             if let existing = workspaceManager.workspaces.first(where: { $0.name == workspaceName }) {
                 // If ephemeral == true, mark that workspace ephemeral
-                if shouldBeEphemeral {
-                    if let index = workspaceManager.workspaces.firstIndex(where: { $0.id == existing.id }) {
-                        workspaceManager.workspaces[index].isEphemeral = true
-                    }
+                if shouldBeEphemeral, let index = workspaceManager.workspaces.firstIndex(where: { $0.id == existing.id }) {
+                    workspaceManager.workspaces[index].isEphemeral = true
                 }
 
                 // If focus == true, attempt to bring up existing window
-                if command.focus == true {
-                    if let wsManager = windowStatesManager,
-                       let existingWindow = wsManager.findWindowState(showing: existing.id)
-                    {
-                        NSApplication.shared.activate(ignoringOtherApps: true)
-                        existingWindow.focusWindowIfPossible()
-                        return
-                    }
+                if command.focus == true,
+                   let wsManager = windowStatesManager,
+                   let existingWindow = wsManager.findWindowState(showing: existing.id)
+                {
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    existingWindow.focusWindowIfPossible()
+                    return
                 }
 
                 requestedWorkspaceSwitch = true

@@ -304,8 +304,7 @@ struct AgentHandoffPopover: View {
         }
 
         let options = config.modelOptionsProvider(agent)
-        guard !options.isEmpty else { return }
-        guard Self.option(matching: selectedModelRaw, in: options) == nil else { return }
+        guard !options.isEmpty, Self.option(matching: selectedModelRaw, in: options) == nil else { return }
 
         let fallbackModelRaw = Self.initialModelRaw(
             for: agent,
@@ -379,8 +378,7 @@ struct AgentHandoffPopover: View {
     ) -> String {
         let supportedEfforts = option?.supportedReasoningEfforts ?? []
         func acceptedRaw(_ effort: CodexReasoningEffort?) -> String? {
-            guard let effort else { return nil }
-            guard supportedEfforts.isEmpty || supportedEfforts.contains(effort) else { return nil }
+            guard let effort, supportedEfforts.isEmpty || supportedEfforts.contains(effort) else { return nil }
             return effort.rawValue
         }
 

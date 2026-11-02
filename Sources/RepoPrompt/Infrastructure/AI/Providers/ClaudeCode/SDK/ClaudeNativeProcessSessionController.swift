@@ -784,8 +784,7 @@ final actor ClaudeNativeProcessSessionController {
 
     private static func normalizedFlagSettingsModel(_ raw: String?) -> String? {
         let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return nil }
-        guard trimmed.caseInsensitiveCompare(AgentModel.defaultModel.rawValue) != .orderedSame else { return nil }
+        guard !trimmed.isEmpty, trimmed.caseInsensitiveCompare(AgentModel.defaultModel.rawValue) != .orderedSame else { return nil }
         return trimmed
     }
 
@@ -1166,8 +1165,7 @@ final actor ClaudeNativeProcessSessionController {
     }
 
     private func recoverPlaintextAssistantDeltaIfNeeded(from lineData: Data) -> Bool {
-        guard turnInFlight else { return false }
-        guard let text = Self.recoverablePlaintextAssistantFragment(from: lineData) else {
+        guard turnInFlight, let text = Self.recoverablePlaintextAssistantFragment(from: lineData) else {
             return false
         }
         writeRawEventLogRecord(kind: "protocol.decode.recoveredPlaintext", payload: [
@@ -1265,21 +1263,19 @@ final actor ClaudeNativeProcessSessionController {
                 } else if character == "\"" {
                     inString = false
                 }
-            } else {
-                if character == "\"" {
-                    inString = true
-                } else if character == "{" {
-                    depth += 1
-                } else if character == "}" {
-                    depth -= 1
-                    if depth == 0, let segmentStart = start {
-                        let segmentEnd = text.index(after: index)
-                        let segment = String(text[segmentStart ..< segmentEnd])
-                        if let segmentData = segment.data(using: .utf8), !segmentData.isEmpty {
-                            results.append(segmentData)
-                        }
-                        start = nil
+            } else if character == "\"" {
+                inString = true
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0, let segmentStart = start {
+                    let segmentEnd = text.index(after: index)
+                    let segment = String(text[segmentStart ..< segmentEnd])
+                    if let segmentData = segment.data(using: .utf8), !segmentData.isEmpty {
+                        results.append(segmentData)
                     }
+                    start = nil
                 }
             }
             index = text.index(after: index)
@@ -1615,9 +1611,7 @@ final actor ClaudeNativeProcessSessionController {
 
     /// Returns a stable canonical JSON string for a value, or nil if the value is nil/not serializable.
     private static func canonicalJSONString(from value: Any?) -> String? {
-        guard let value, !(value is NSNull) else { return nil }
-        guard JSONSerialization.isValidJSONObject(["v": value]) else { return nil }
-        guard let data = try? JSONSerialization.data(
+        guard let value, !(value is NSNull), JSONSerialization.isValidJSONObject(["v": value]), let data = try? JSONSerialization.data(
             withJSONObject: value,
             options: [.sortedKeys, .fragmentsAllowed]
         ) else { return nil }
@@ -2332,9 +2326,8 @@ final actor ClaudeNativeProcessSessionController {
     }
 
     private func appendRawEventLogRecord(_ record: [String: Any]) {
-        guard rawEventFileLoggingEnabled else { return }
-        guard let rawEventLogFileURL else { return }
-        guard JSONSerialization.isValidJSONObject(record),
+        guard rawEventFileLoggingEnabled, let rawEventLogFileURL,
+              JSONSerialization.isValidJSONObject(record),
               let data = try? JSONSerialization.data(withJSONObject: record, options: []),
               var line = String(data: data, encoding: .utf8)
         else {
@@ -2408,7 +2401,9 @@ final actor ClaudeNativeProcessSessionController {
                 "byteCount": data.count,
                 "text": text
             ]
-            if truncated { result["truncated"] = true }
+            if truncated {
+                result["truncated"] = true
+            }
             return result
         }
         return [

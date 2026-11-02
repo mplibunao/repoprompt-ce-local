@@ -1787,14 +1787,14 @@ actor CodeMapRootManifestStore {
             guard descriptor >= 0 else { continue }
             defer { Darwin.close(descriptor) }
             guard let current = try? Self.validatedFileIdentity(
-                descriptor,
-                parent: shard,
-                name: entry.digest,
-                expectedMode: Self.fileMode
-            ), current == entry.identity,
-            Self.rootParentIsCurrent(lockAnchor, rootURL: rootURL),
-            Self.layoutIsCurrent(layout, rootURL: rootURL),
-            Self.directoryIsCurrent(shard, parent: layout.manifests, name: entry.shard)
+                      descriptor,
+                      parent: shard,
+                      name: entry.digest,
+                      expectedMode: Self.fileMode
+                  ), current == entry.identity,
+                  Self.rootParentIsCurrent(lockAnchor, rootURL: rootURL),
+                  Self.layoutIsCurrent(layout, rootURL: rootURL),
+                  Self.directoryIsCurrent(shard, parent: layout.manifests, name: entry.shard)
             else { continue }
             if try Self.secureRemove(parent: shard, name: entry.digest, descriptor: descriptor) {
                 projectedCount -= 1
@@ -2111,11 +2111,11 @@ actor CodeMapRootManifestStore {
             }
             for entry in scan.observedShardEntries {
                 guard let shard = try Self.openOwnedDirectory(
-                    parent: layout.manifests,
-                    name: entry.shard,
-                    create: false
-                ), shard.identity == entry.shardIdentity,
-                try Self.fileIdentityAt(parent: shard, name: entry.name) == entry.identity
+                          parent: layout.manifests,
+                          name: entry.shard,
+                          create: false
+                      ), shard.identity == entry.shardIdentity,
+                      try Self.fileIdentityAt(parent: shard, name: entry.name) == entry.identity
                 else {
                     return false
                 }
@@ -2322,13 +2322,13 @@ actor CodeMapRootManifestStore {
                 guard descriptor >= 0 else { continue }
                 defer { Darwin.close(descriptor) }
                 guard let current = try? Self.validatedFileIdentity(
-                    descriptor,
-                    parent: layout.quarantine,
-                    name: name,
-                    expectedMode: Self.fileMode
-                ), current == identity,
-                Self.rootParentIsCurrent(lockAnchor, rootURL: rootURL),
-                Self.layoutIsCurrent(layout, rootURL: rootURL)
+                          descriptor,
+                          parent: layout.quarantine,
+                          name: name,
+                          expectedMode: Self.fileMode
+                      ), current == identity,
+                      Self.rootParentIsCurrent(lockAnchor, rootURL: rootURL),
+                      Self.layoutIsCurrent(layout, rootURL: rootURL)
                 else { continue }
                 if try Self.secureRemove(parent: layout.quarantine, name: name, descriptor: descriptor) {
                     result.removedQuarantineCount += 1

@@ -522,17 +522,17 @@ actor WorkspaceCodemapLiveOverlay {
             ),
             readyEntries.count
         ), projectedRootEntryCount <= policy.maximumEntryCountPerRoot,
-        projectedProcessEntryCount <= policy.maximumEntryCount
+              projectedProcessEntryCount <= policy.maximumEntryCount
         else {
             recordBusyDrop()
             return .busy(.entryLimit)
         }
         guard let projectedRootLeaseCount = addingChecked(
-            readyEntries.count,
-            subtractingFloor(rootLeaseCount(root), replacedEntryCount)
-        ), let projectedProcessLeaseCount = addingChecked(usage.leaseCount, readyEntries.count),
-        projectedRootLeaseCount <= policy.maximumLeaseCountPerRoot,
-        projectedProcessLeaseCount <= policy.maximumLeaseCount
+                  readyEntries.count,
+                  subtractingFloor(rootLeaseCount(root), replacedEntryCount)
+              ), let projectedProcessLeaseCount = addingChecked(usage.leaseCount, readyEntries.count),
+              projectedRootLeaseCount <= policy.maximumLeaseCountPerRoot,
+              projectedProcessLeaseCount <= policy.maximumLeaseCount
         else {
             recordBusyDrop()
             return .busy(.leaseLimit)
@@ -540,15 +540,15 @@ actor WorkspaceCodemapLiveOverlay {
         var byteCount: UInt64 = 0
         for entry in readyEntries {
             guard let nextByteCount = addingChecked(
-                byteCount,
-                entry.lease.handle.estimatedResidentByteCount
-            ), let projectedRootBytes = addingChecked(
+                      byteCount,
+                      entry.lease.handle.estimatedResidentByteCount
+                  ), let projectedRootBytes = addingChecked(
                 subtractingFloor(rootArtifactBytes(root), cleanArtifactBytes(root, paths: replacedPaths)),
                 nextByteCount
             ),
-                let projectedProcessBytes = addingChecked(usage.artifactByteCount, nextByteCount),
-                projectedRootBytes <= policy.maximumArtifactByteCountPerRoot,
-                projectedProcessBytes <= policy.maximumArtifactByteCount
+                  let projectedProcessBytes = addingChecked(usage.artifactByteCount, nextByteCount),
+                  projectedRootBytes <= policy.maximumArtifactByteCountPerRoot,
+                  projectedProcessBytes <= policy.maximumArtifactByteCount
             else {
                 recordBusyDrop()
                 return .busy(.artifactByteLimit)
@@ -575,10 +575,7 @@ actor WorkspaceCodemapLiveOverlay {
             guard records[entry.record.repositoryRelativePath] == entry.record else {
                 return .rejected(.recordMissing)
             }
-            guard entry.record.outcome == .ready || entry.record.outcome == .readyNoSymbols else {
-                return .rejected(.bindingMismatch)
-            }
-            guard let relativePath = loadedRootRelativePath(
+            guard entry.record.outcome == .ready || entry.record.outcome == .readyNoSymbols, let relativePath = loadedRootRelativePath(
                 repositoryRelativePath: entry.record.repositoryRelativePath,
                 prefix: root.registration.capability.repositoryRelativeLoadedRootPrefix
             ) else {
@@ -1462,8 +1459,12 @@ actor WorkspaceCodemapLiveOverlay {
         var changedSlots: [WorkspaceCodemapGraphSlot] = []
         var removals: [WorkspaceCodemapGraphRemoval] = []
         for (fileID, stamp) in root.changedFileIDsSinceFloor where stamp > generation {
-            if let slot = root.graphSlotsByFileID[fileID] { changedSlots.append(slot) }
-            if let removal = root.graphRemovalsByFileID[fileID] { removals.append(removal) }
+            if let slot = root.graphSlotsByFileID[fileID] {
+                changedSlots.append(slot)
+            }
+            if let removal = root.graphRemovalsByFileID[fileID] {
+                removals.append(removal)
+            }
         }
         changedSlots.sort(by: workspaceCodemapGraphSlotPrecedesForOverlay)
         removals.sort(by: workspaceCodemapGraphRemovalPrecedesForOverlay)
@@ -1539,7 +1540,9 @@ actor WorkspaceCodemapLiveOverlay {
         rootEpoch: WorkspaceCodemapRootEpoch
     ) -> WorkspaceCodemapGraphCheckpointDisposition {
         guard let root = roots[rootEpoch] else { return .revoked(.rootUnloaded) }
-        if let reason = root.graphRevocationReason { return .revoked(reason) }
+        if let reason = root.graphRevocationReason {
+            return .revoked(reason)
+        }
         guard root.authorityIsCurrent else { return .revoked(.repositoryAuthorityChanged) }
         return switch checkpointDisposition(for: rootEpoch, root: root) {
         case let .resync(checkpoint, _): .checkpoint(checkpoint)
@@ -1603,9 +1606,7 @@ actor WorkspaceCodemapLiveOverlay {
             catalogToken: catalogToken,
             slots: slots,
             projectedSupportedCandidateTotal: projectedSupportedCandidateTotal
-        ) else { return false }
-
-        guard var root = roots.removeValue(forKey: rootEpoch) else { return false }
+        ), var root = roots.removeValue(forKey: rootEpoch) else { return false }
         let publication = applyGraphIndexPublication(
             &root,
             rootEpoch: rootEpoch,
@@ -2079,7 +2080,9 @@ actor WorkspaceCodemapLiveOverlay {
         return result.sorted {
             let lhs = $0.binding.identity.standardizedRelativePath
             let rhs = $1.binding.identity.standardizedRelativePath
-            if lhs != rhs { return lhs.utf8.lexicographicallyPrecedes(rhs.utf8) }
+            if lhs != rhs {
+                return lhs.utf8.lexicographicallyPrecedes(rhs.utf8)
+            }
             return $0.binding.identity.fileID.uuidString < $1.binding.identity.fileID.uuidString
         }
     }
@@ -2538,7 +2541,9 @@ actor WorkspaceCodemapLiveOverlay {
         _ fileID: UUID,
         visibleAt generation: WorkspaceCodemapSelectionGraphContributionGeneration
     ) {
-        if let existing = root.changedFileIDsSinceFloor[fileID], existing >= generation { return }
+        if let existing = root.changedFileIDsSinceFloor[fileID], existing >= generation {
+            return
+        }
         root.changedFileIDsSinceFloor[fileID] = generation
     }
 
@@ -2651,7 +2656,9 @@ actor WorkspaceCodemapLiveOverlay {
             !root.graphReconciliationSuppressedFileIDs.contains(slot.fileID)
         {
             visits &+= 1
-            if slots.updateValue(slot, forKey: slot.fileID) != nil { collisions = true }
+            if slots.updateValue(slot, forKey: slot.fileID) != nil {
+                collisions = true
+            }
             fileIDByPath[slot.standardizedRelativePath] = slot.fileID
         }
         root.graphSlotsByFileID = slots
@@ -2687,11 +2694,15 @@ actor WorkspaceCodemapLiveOverlay {
                 var best: WorkspaceCodemapGraphSlot?
                 for slot in candidates {
                     visits &+= 1
-                    if let current = best, !Self.graphLayerSlot(slot, supersedes: current) { continue }
+                    if let current = best, !Self.graphLayerSlot(slot, supersedes: current) {
+                        continue
+                    }
                     best = slot
                 }
                 guard let best else { return }
-                if let current = winner, !Self.graphLayerSlot(best, replaces: current) { return }
+                if let current = winner, !Self.graphLayerSlot(best, replaces: current) {
+                    return
+                }
                 winner = best
             }
             merge(root.graphIndexSlotsByFileID.slots(atRelativePath: path))
@@ -3198,7 +3209,9 @@ actor WorkspaceCodemapLiveOverlay {
     private func ensureAccessOrdinalCapacity(requiredCount: Int) {
         guard requiredCount > 0, let required = UInt64(exactly: requiredCount) else { return }
         let (_, overflow) = nextAccessOrdinal.addingReportingOverflow(required)
-        if overflow { rebaseAccessOrdinals() }
+        if overflow {
+            rebaseAccessOrdinals()
+        }
     }
 
     private func rebaseAccessOrdinals() {
@@ -3246,9 +3259,15 @@ actor WorkspaceCodemapLiveOverlay {
             }
         }
         items.sort {
-            if $0.ordinal != $1.ordinal { return $0.ordinal < $1.ordinal }
-            if $0.rootEpoch != $1.rootEpoch { return rootEpochPrecedes($0.rootEpoch, $1.rootEpoch) }
-            if $0.path != $1.path { return $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
+            if $0.ordinal != $1.ordinal {
+                return $0.ordinal < $1.ordinal
+            }
+            if $0.rootEpoch != $1.rootEpoch {
+                return rootEpochPrecedes($0.rootEpoch, $1.rootEpoch)
+            }
+            if $0.path != $1.path {
+                return $0.path.utf8.lexicographicallyPrecedes($1.path.utf8)
+            }
             return ($0.fileID?.uuidString ?? "") < ($1.fileID?.uuidString ?? "")
         }
         for (offset, item) in items.enumerated() {
@@ -3413,8 +3432,7 @@ actor WorkspaceCodemapLiveOverlay {
         var total: UInt64 = 64
 
         func charge(_ byteCount: Int) -> Bool {
-            guard let bytes = UInt64(exactly: byteCount) else { return false }
-            guard let next = addingChecked(total, bytes), next <= limit else { return false }
+            guard let bytes = UInt64(exactly: byteCount), let next = addingChecked(total, bytes), next <= limit else { return false }
             total = next
             return true
         }
@@ -3467,7 +3485,9 @@ actor WorkspaceCodemapLiveOverlay {
     }
 
     private func loadedRootRelativePath(repositoryRelativePath: String, prefix: String) -> String? {
-        if prefix.isEmpty { return validatedRelativePath(repositoryRelativePath) }
+        if prefix.isEmpty {
+            return validatedRelativePath(repositoryRelativePath)
+        }
         let expectedPrefix = prefix + "/"
         guard repositoryRelativePath.hasPrefix(expectedPrefix) else { return nil }
         return validatedRelativePath(String(repositoryRelativePath.dropFirst(expectedPrefix.count)))

@@ -141,8 +141,7 @@ enum CodexIntegrationConfiguration {
     static func mcpServerEntries() -> [ServerEntry] {
         let fm = FileManager.default
         let configURL = configURL()
-        guard fm.fileExists(atPath: configURL.path) else { return [] }
-        guard let content = try? String(contentsOf: configURL, encoding: .utf8) else { return [] }
+        guard fm.fileExists(atPath: configURL.path), let content = try? String(contentsOf: configURL, encoding: .utf8) else { return [] }
         return mcpServerEntries(fromConfigContent: content)
     }
 
@@ -155,9 +154,10 @@ enum CodexIntegrationConfiguration {
         var ordered: [ServerEntry] = []
 
         for line in splitTOMLLines(content) {
-            guard let serverName = mcpServerName(fromHeaderLine: line) else { continue }
-            guard !serverName.normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            guard seenNormalizedNames.insert(serverName.normalized).inserted else { continue }
+            guard let serverName = mcpServerName(fromHeaderLine: line),
+                  !serverName.normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  seenNormalizedNames.insert(serverName.normalized).inserted
+            else { continue }
 
             let cliPath = cliPathComponent(forNormalizedServerName: serverName.normalized)
             ordered.append(ServerEntry(rawName: serverName.raw, normalizedName: serverName.normalized, cliPathComponent: cliPath))
@@ -320,8 +320,7 @@ enum CodexIntegrationConfiguration {
 
         let fm = FileManager.default
         let configURL = configURL()
-        guard fm.fileExists(atPath: configURL.path) else { return }
-        guard let content = try? String(contentsOf: configURL, encoding: .utf8) else { return }
+        guard fm.fileExists(atPath: configURL.path), let content = try? String(contentsOf: configURL, encoding: .utf8) else { return }
 
         var lines = splitTOMLLines(content)
         let blocks = blockRanges(in: lines, whereHeaderMatches: isRepoPromptMCPServerHeader)
@@ -360,8 +359,7 @@ enum CodexIntegrationConfiguration {
 
         let fm = FileManager.default
         let configURL = configURL()
-        guard fm.fileExists(atPath: configURL.path) else { return false }
-        guard let content = try? String(contentsOf: configURL, encoding: .utf8) else { return false }
+        guard fm.fileExists(atPath: configURL.path), let content = try? String(contentsOf: configURL, encoding: .utf8) else { return false }
 
         let mutation = mutatedToolTimeoutConfigContent(from: content)
         guard mutation.foundTarget else { return false }
@@ -415,7 +413,9 @@ enum CodexIntegrationConfiguration {
 
             if isTOMLHeaderLine(line) {
                 finalizeSection(before: idx)
-                if completed { break }
+                if completed {
+                    break
+                }
                 resetSectionState(at: idx, isRepoPrompt: isRepoPromptMCPServerHeader(line))
                 idx += 1
                 continue
@@ -533,8 +533,7 @@ enum CodexIntegrationConfiguration {
     }
 
     private static func mcpServerName(fromHeaderLine line: String) -> TOMLKeyComponent? {
-        guard let header = parseTOMLHeader(line), !header.isArrayTable else { return nil }
-        guard header.keyPath.count == 2, header.keyPath[0].normalized == "mcp_servers" else { return nil }
+        guard let header = parseTOMLHeader(line), !header.isArrayTable, header.keyPath.count == 2, header.keyPath[0].normalized == "mcp_servers" else { return nil }
         return header.keyPath[1]
     }
 
@@ -613,7 +612,9 @@ enum CodexIntegrationConfiguration {
             components.append(component)
             expectingComponent = false
             skipWhitespace(in: text, from: &index)
-            if index == text.endIndex { return components }
+            if index == text.endIndex {
+                return components
+            }
             guard text[index] == "." else { return nil }
             index = text.index(after: index)
             expectingComponent = true
@@ -750,11 +751,12 @@ enum CodexIntegrationConfiguration {
             radix = 10
             digitText = unsignedText
             let digitsOnly = digitText.replacingOccurrences(of: "_", with: "")
-            if digitsOnly.count > 1, digitsOnly.first == "0" { return nil }
+            if digitsOnly.count > 1, digitsOnly.first == "0" {
+                return nil
+            }
         }
 
-        guard isValidTOMLIntegerDigits(digitText, radix: radix) else { return nil }
-        guard let value = Int(digitText.replacingOccurrences(of: "_", with: ""), radix: radix) else { return nil }
+        guard isValidTOMLIntegerDigits(digitText, radix: radix), let value = Int(digitText.replacingOccurrences(of: "_", with: ""), radix: radix) else { return nil }
         return sign * value
     }
 
@@ -1234,7 +1236,9 @@ enum CodexIntegrationConfiguration {
         within blockRange: BlockRange
     ) -> [Int] {
         var indices: [Int] = []
-        if blockRange.start + 1 >= blockRange.end { return indices }
+        if blockRange.start + 1 >= blockRange.end {
+            return indices
+        }
         for idx in (blockRange.start + 1) ..< blockRange.end {
             if isKeyLine(lines[idx], singleKey: key) {
                 indices.append(idx)

@@ -130,8 +130,7 @@ enum GitWorktreeIncludeCopier {
     private static func safePathComponents(_ relativePath: String) -> [String]? {
         guard !relativePath.isEmpty, !relativePath.hasPrefix("/") else { return nil }
         let components = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        guard !components.isEmpty else { return nil }
-        guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
+        guard !components.isEmpty, components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
         return components
     }
 

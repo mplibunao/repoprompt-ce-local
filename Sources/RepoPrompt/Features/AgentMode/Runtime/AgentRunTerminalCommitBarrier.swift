@@ -392,10 +392,7 @@ final class AgentRunTerminalCommitBarrier {
         publicationResult: AgentRunTerminalPublicationResult
     ) {
         if case .accepted = publicationResult {
-            guard !consumedProviderSuccessorIDs.contains(providerSuccessor.id) else {
-                return
-            }
-            guard providerSuccessor.consumeAfterPublication(revision, publicationResult) else {
+            guard !consumedProviderSuccessorIDs.contains(providerSuccessor.id), providerSuccessor.consumeAfterPublication(revision, publicationResult) else {
                 return
             }
             consumedProviderSuccessorIDs.insert(providerSuccessor.id)

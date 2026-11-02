@@ -94,12 +94,12 @@ extension AgentModeViewModel {
         var didRestore = false
         for change in rollback.changes {
             guard currentSession.acpModelParameterSelectionRevision(
-                for: change.stagedSelection.identity
-            ) == change.selectionRevision,
-                let index = restoredSelections.firstIndex(where: {
-                    $0.identity == change.stagedSelection.identity
-                }),
-                restoredSelections[index] == change.stagedSelection
+                      for: change.stagedSelection.identity
+                  ) == change.selectionRevision,
+                  let index = restoredSelections.firstIndex(where: {
+                      $0.identity == change.stagedSelection.identity
+                  }),
+                  restoredSelections[index] == change.stagedSelection
             else {
                 continue
             }

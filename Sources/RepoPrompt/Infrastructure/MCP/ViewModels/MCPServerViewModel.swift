@@ -55,7 +55,9 @@ private actor MCPRunToolStartGate {
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func wait() async {
-        if isOpen { return }
+        if isOpen {
+            return
+        }
         await withCheckedContinuation { continuation in
             if isOpen {
                 continuation.resume()
@@ -283,10 +285,7 @@ final class MCPServerViewModel: ObservableObject {
                 throw FileToolAuthorityFailure.mismatchedProjection
             }
             if lookupContext.bindingProjection != nil {
-                guard let sessionRootLifetimeSnapshot else {
-                    throw FileToolAuthorityFailure.worktreeScopeUnavailable
-                }
-                guard await sessionRootLifetimeSnapshot.isCurrent() else {
+                guard let sessionRootLifetimeSnapshot, await sessionRootLifetimeSnapshot.isCurrent() else {
                     throw FileToolAuthorityFailure.worktreeScopeUnavailable
                 }
             }
@@ -321,7 +320,9 @@ final class MCPServerViewModel: ObservableObject {
                         operationError = error
                     }
                 }
-                if let operationError { throw operationError }
+                if let operationError {
+                    throw operationError
+                }
                 return performed
             } else {
                 try operation()
@@ -2948,11 +2949,7 @@ final class MCPServerViewModel: ObservableObject {
             connectionID: connectionID,
             metadata: metadata,
             managerWindowID: managerWindowID
-        ) else {
-            return nil
-        }
-
-        guard let managerRunID = await manager.runIDForConnection(connectionID) else {
+        ), let managerRunID = await manager.runIDForConnection(connectionID) else {
             return nil
         }
 
@@ -3821,8 +3818,7 @@ final class MCPServerViewModel: ObservableObject {
                 guard !Task.isCancelled, self.dashboardTaskID == taskID else { return }
                 self.dashboardSubscriptionID = subscriptionID
             }
-            guard !Task.isCancelled else { return }
-            guard await MainActor.run(body: { self.dashboardTaskID == taskID && self.shouldObserveDashboardUpdates }) else { return }
+            guard !Task.isCancelled, await MainActor.run(body: { self.dashboardTaskID == taskID && self.shouldObserveDashboardUpdates }) else { return }
 
             let initialSnap = await service.dashboardSnapshot()
             await MainActor.run {
@@ -4863,7 +4859,9 @@ final class MCPServerViewModel: ObservableObject {
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             if let file = await store.lookupFiles(atPaths: [trimmed], profile: .mcpSelection, rootScope: .visibleWorkspace)[trimmed] {
-                if seen.insert(file.standardizedFullPath).inserted { resolved.append(file.standardizedFullPath) }
+                if seen.insert(file.standardizedFullPath).inserted {
+                    resolved.append(file.standardizedFullPath)
+                }
                 continue
             }
             let folderResolution = await store.expandFolderInputToFiles(trimmed, rootScope: .visibleWorkspace, profile: .mcpSelection)
@@ -5229,14 +5227,18 @@ final class MCPServerViewModel: ObservableObject {
         ) -> [DebugReadFileAutoSelectionTarget] {
             tabContextByConnectionID.compactMap { connectionID, context in
                 guard context.windowID == windowID else { return nil }
-                if let targetConnectionID, connectionID != targetConnectionID { return nil }
+                if let targetConnectionID, connectionID != targetConnectionID {
+                    return nil
+                }
                 if targetConnectionID == nil {
                     guard let agentSessionID, let tabID,
                           context.activeAgentSessionID == agentSessionID,
                           context.tabID == tabID
                     else { return nil }
                 }
-                if let expectedRunID, context.runID != expectedRunID { return nil }
+                if let expectedRunID, context.runID != expectedRunID {
+                    return nil
+                }
                 if let runID = context.runID,
                    connectionIDByRunID[runID] != connectionID || connectionIDToRunID[connectionID] != runID
                 {
@@ -5741,7 +5743,9 @@ final class MCPServerViewModel: ObservableObject {
 
         let metadata = RequestMetadata(
             connectionID: {
-                if case let .bound(connectionID, _) = key.route { return connectionID }
+                if case let .bound(connectionID, _) = key.route {
+                    return connectionID
+                }
                 return nil
             }(),
             clientName: nil,
@@ -5770,7 +5774,9 @@ final class MCPServerViewModel: ObservableObject {
         // attempt revalidates path quiescence, the canonical base, and the full persisted result so
         // no still-running task can certify or overwrite a stale canonical selection.
         for attempt in 0 ..< 3 {
-            if attempt > 0 { await Task.yield() }
+            if attempt > 0 {
+                await Task.yield()
+            }
             guard let fileManager = workspaceManager?.fileManager else { break }
             let sliceRebaseFence = await fileManager.waitForPendingSliceRebasesAndCaptureFence(
                 affectingCandidatePaths: sliceRebaseCandidates
@@ -5816,7 +5822,9 @@ final class MCPServerViewModel: ObservableObject {
                 automaticCodemapDisposition: batch.automaticCodemapDisposition,
                 publicationRevoked: { batch.hasRevokedContribution }
             ) else {
-                if batch.hasRevokedContribution { break }
+                if batch.hasRevokedContribution {
+                    break
+                }
                 continue
             }
 
@@ -6118,7 +6126,9 @@ final class MCPServerViewModel: ObservableObject {
         allRoots: [WorkspaceRootRef]
     ) -> String {
         let visible = ClientPathFormatter.displayAbsolutePath(fullPath: path, visibleRoots: visibleRoots)
-        if visible != StandardizedPath.absolute(path) { return visible }
+        if visible != StandardizedPath.absolute(path) {
+            return visible
+        }
         return ClientPathFormatter.displayAbsolutePath(fullPath: path, visibleRoots: allRoots)
     }
 
@@ -6161,7 +6171,9 @@ final class MCPServerViewModel: ObservableObject {
                 standardized == $0.standardizedFullPath
                     || StandardizedPath.isDescendant(standardized, of: $0.standardizedFullPath)
             }
-            if !under { outside.append(path) }
+            if !under {
+                outside.append(path)
+            }
         }
 
         var lines: [String] = []
@@ -6231,7 +6243,9 @@ final class MCPServerViewModel: ObservableObject {
             #if DEBUG
                 codeStructureUniqueSeedCandidatesVisitedForTesting += 1
             #endif
-            if resolved.count > maximumSeedCount { return resolved }
+            if resolved.count > maximumSeedCount {
+                return resolved
+            }
         }
 
         let dirCandidates = paths.filter { !matchedFileInputs.contains($0) }
@@ -6254,7 +6268,9 @@ final class MCPServerViewModel: ObservableObject {
             {
                 resolved.append(file)
             }
-            if folderResolution.didExceedLimit { return resolved }
+            if folderResolution.didExceedLimit {
+                return resolved
+            }
         }
 
         return resolved
@@ -6351,7 +6367,9 @@ final class MCPServerViewModel: ObservableObject {
                 lookupContext: lookupContext,
                 logicalRootDisplayNamesByRootID: logicalRootNames
             )
-            if left != right { return left.utf8.lexicographicallyPrecedes(right.utf8) }
+            if left != right {
+                return left.utf8.lexicographicallyPrecedes(right.utf8)
+            }
             return lhs.id.uuidString < rhs.id.uuidString
         }
 
@@ -6369,7 +6387,9 @@ final class MCPServerViewModel: ObservableObject {
         MCPToolExecutionHandlerPhaseContext.report(.getCodeStructureGraphRevalidation)
         let initialRevalidation = await store.revalidateCodemapStructureGraphs(aggregate)
         let renderableFileIDs = aggregate.roots.flatMap { root -> [UUID] in
-            if case .invalid? = initialRevalidation[root.rootEpoch] { return [] }
+            if case .invalid? = initialRevalidation[root.rootEpoch] {
+                return []
+            }
             return root.nodes.map(\.fileID)
         }
 
@@ -6403,7 +6423,9 @@ final class MCPServerViewModel: ObservableObject {
         let finalRevalidation = await store.revalidateCodemapStructureGraphs(aggregate)
         var revalidation = initialRevalidation
         for (rootEpoch, result) in finalRevalidation {
-            if case .invalid? = revalidation[rootEpoch] { continue }
+            if case .invalid? = revalidation[rootEpoch] {
+                continue
+            }
             revalidation[rootEpoch] = result
         }
         try Task.checkCancellation()
@@ -6457,12 +6479,20 @@ final class MCPServerViewModel: ObservableObject {
         var signatureBudgetReached = false
         if includesSignatures, let presentation {
             let orderedSignatureNodes: [WorkspaceCodemapStructureNodeResult] = orderedRoots.flatMap { root -> [WorkspaceCodemapStructureNodeResult] in
-                if case .invalid? = revalidation[root.rootEpoch] { return [] }
+                if case .invalid? = revalidation[root.rootEpoch] {
+                    return []
+                }
                 return root.nodes
             }.sorted { lhs, rhs in
-                if lhs.isSeed != rhs.isSeed { return lhs.isSeed }
-                if lhs.depth != rhs.depth { return lhs.depth < rhs.depth }
-                if lhs.path != rhs.path { return lhs.path.utf8.lexicographicallyPrecedes(rhs.path.utf8) }
+                if lhs.isSeed != rhs.isSeed {
+                    return lhs.isSeed
+                }
+                if lhs.depth != rhs.depth {
+                    return lhs.depth < rhs.depth
+                }
+                if lhs.path != rhs.path {
+                    return lhs.path.utf8.lexicographicallyPrecedes(rhs.path.utf8)
+                }
                 return lhs.fileID.uuidString < rhs.fileID.uuidString
             }
             for node in orderedSignatureNodes {
@@ -6502,7 +6532,11 @@ final class MCPServerViewModel: ObservableObject {
         var rootDTOs: [DTO.RootDTO] = []
         for root in orderedRoots {
             let graphRevalidation = revalidation[root.rootEpoch]
-            let graphInvalid = if case .invalid? = graphRevalidation { true } else { false }
+            let graphInvalid = if case .invalid? = graphRevalidation {
+                true
+            } else {
+                false
+            }
             let revalidationUpdatesPending: Bool = if case let .valid(updatesPending)? = graphRevalidation {
                 updatesPending
             } else {
@@ -6822,9 +6856,7 @@ final class MCPServerViewModel: ObservableObject {
         guard Self.shouldAttemptSelectedGitArtifactRead(
             requestedPath: requestedPath,
             translatedLookupPath: translatedLookupPath
-        ) else { return nil }
-
-        guard var resolvedContext = try? resolveTabContextSnapshot(
+        ), var resolvedContext = try? resolveTabContextSnapshot(
             from: metadata,
             toolName: MCPWindowToolName.readFile
         ) else { return nil }
@@ -6864,13 +6896,13 @@ final class MCPServerViewModel: ObservableObject {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         })
         guard let entry = authorization.entries.first(where: { entry in
-            let absolutePath = entry.file.standardizedFullPath
-            return requestedCandidates.contains(absolutePath)
-                || authorization.displayAliasesByAbsolutePath[absolutePath]
-                .map(requestedCandidates.contains) == true
-        }),
-            let content = entry.loadedContent,
-            let displayPath = authorization.displayAliasesByAbsolutePath[entry.file.standardizedFullPath]
+                  let absolutePath = entry.file.standardizedFullPath
+                  return requestedCandidates.contains(absolutePath)
+                      || authorization.displayAliasesByAbsolutePath[absolutePath]
+                      .map(requestedCandidates.contains) == true
+              }),
+              let content = entry.loadedContent,
+              let displayPath = authorization.displayAliasesByAbsolutePath[entry.file.standardizedFullPath]
         else {
             if targetsGitData {
                 throw MCPError.invalidParams(
@@ -7458,11 +7490,15 @@ final class MCPServerViewModel: ObservableObject {
             let isASCIIAlphanumeric = (48 ... 57).contains(Int(scalar.value))
                 || (97 ... 122).contains(Int(scalar.value))
             if isASCIIAlphanumeric {
-                if scalars.count >= maxLength { break }
+                if scalars.count >= maxLength {
+                    break
+                }
                 scalars.append(scalar)
                 lastWasSeparator = false
             } else if !lastWasSeparator, !scalars.isEmpty {
-                if scalars.count >= maxLength { break }
+                if scalars.count >= maxLength {
+                    break
+                }
                 scalars.append("-")
                 lastWasSeparator = true
             }
@@ -7805,7 +7841,9 @@ final class MCPServerViewModel: ObservableObject {
     private nonisolated static func parseContextAlias(_ args: [String: Value]) -> Int? {
         // Direct key "-C"
         if let alias = args["-C"] {
-            if let value = alias.intValue { return value }
+            if let value = alias.intValue {
+                return value
+            }
             if let string = alias.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
                let parsed = Int(string)
             {
@@ -7819,7 +7857,9 @@ final class MCPServerViewModel: ObservableObject {
             guard lower.hasPrefix("-c") else { continue }
 
             if lower == "-c" {
-                if let intValue = value.intValue { return intValue }
+                if let intValue = value.intValue {
+                    return intValue
+                }
                 if let string = value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
                    let parsed = Int(string)
                 {
@@ -7930,7 +7970,9 @@ final class MCPServerViewModel: ObservableObject {
         )
         var sliceSnapshot: [UUID: [LineRange]] = [:]
         for (path, ranges) in StoredSelectionPathNormalization.standardizedSlices(selection.slices) {
-            if let file = resolved[path] { sliceSnapshot[file.id] = ranges }
+            if let file = resolved[path] {
+                sliceSnapshot[file.id] = ranges
+            }
         }
         return (
             selected: selectedPaths.compactMap { resolved[$0] },

@@ -534,7 +534,7 @@ import XCTest
             let manager = fixture.window.workspaceManager
             guard let workspaceIndex = manager.workspaces.firstIndex(where: { $0.id == fixture.workspace.id }),
                   let tabIndex = manager.workspaces[workspaceIndex].composeTabs
-                  .firstIndex(where: { $0.id == fixture.contextID })
+                      .firstIndex(where: { $0.id == fixture.contextID })
             else { return XCTFail("Hinted tab must exist before it is reassigned") }
             manager.workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = UUID()
         }
@@ -625,7 +625,9 @@ import XCTest
 
         private func toolText(_ result: (content: [MCP.Tool.Content], isError: Bool?)) -> String {
             result.content.compactMap { content -> String? in
-                if case let .text(text, _, _) = content { return text }
+                if case let .text(text, _, _) = content {
+                    return text
+                }
                 return nil
             }.joined(separator: "\n")
         }

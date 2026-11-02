@@ -1,14 +1,13 @@
 import Foundation
 
+@MainActor
 extension PromptViewModel {
-    @MainActor
     private func effectiveCodeMapUsageForChatPromptEntries() -> CodeMapUsage {
         let chatPreset = currentChatPreset()
         let context = resolvedPromptContext(from: chatPreset) ?? resolvePromptContext()
         return context.codeMapUsage
     }
 
-    @MainActor
     func hasPromptSnapshotEntriesForChat() -> Bool {
         let selectionCount = fileManager.selectedFiles.count
         let codeMapUsage = effectiveCodeMapUsageForChatPromptEntries()
@@ -22,7 +21,6 @@ extension PromptViewModel {
         }
     }
 
-    @MainActor
     func promptSnapshotEntriesForChatCached() -> [PromptFileEntry] {
         let codeMapUsage = effectiveCodeMapUsageForChatPromptEntries()
         let key = ChatPromptEntriesCacheKey(
@@ -42,7 +40,6 @@ extension PromptViewModel {
         return entries
     }
 
-    @MainActor
     private func buildPromptSnapshotEntriesForCurrentChatProjection(codeMapUsage: CodeMapUsage) -> [PromptFileEntry] {
         let selectedFiles = fileManager.selectedFiles
         let selectedIDs = Set(selectedFiles.map(\.id))
@@ -90,7 +87,6 @@ extension PromptViewModel {
         return entries
     }
 
-    @MainActor
     func promptSnapshotEntriesForChat() -> [PromptFileEntry] {
         promptSnapshotEntriesForChatCached()
     }

@@ -211,7 +211,9 @@ enum MCPAskUserElicitationBridge {
 
     private static func strings(_ value: Value?) -> [String] {
         guard let value else { return [] }
-        if let string = normalizedString(value) { return [string] }
+        if let string = normalizedString(value) {
+            return [string]
+        }
         return value.arrayValue?.compactMap(normalizedString) ?? []
     }
 

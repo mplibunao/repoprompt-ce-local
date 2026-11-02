@@ -368,7 +368,9 @@ enum StoreBackedWorkspaceSearch {
             let filterTask = Task.detached(priority: .userInitiated) { [snapshots, spec = parsed.spec] in
                 filterPathIndicesResult(snapshots: snapshots, spec: spec)
             }
-            if Task.isCancelled { filterTask.cancel() }
+            if Task.isCancelled {
+                filterTask.cancel()
+            }
             let filterResult = await withTaskCancellationHandler {
                 await filterTask.value
             } onCancel: {
@@ -684,8 +686,8 @@ enum StoreBackedWorkspaceSearch {
         func appendWildcardClause(for normalized: String) {
             if normalized.hasPrefix("/"),
                let root = scopedRoots
-               .filter({ normalized == $0.standardizedFullPath || normalized.hasPrefix($0.standardizedFullPath.hasSuffix("/") ? $0.standardizedFullPath : $0.standardizedFullPath + "/") })
-               .max(by: { $0.standardizedFullPath.count < $1.standardizedFullPath.count })
+                   .filter({ normalized == $0.standardizedFullPath || normalized.hasPrefix($0.standardizedFullPath.hasSuffix("/") ? $0.standardizedFullPath : $0.standardizedFullPath + "/") })
+                   .max(by: { $0.standardizedFullPath.count < $1.standardizedFullPath.count })
             {
                 let prefix = root.standardizedFullPath.hasSuffix("/") ? root.standardizedFullPath : root.standardizedFullPath + "/"
                 let relativePattern = normalized == root.standardizedFullPath

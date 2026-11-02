@@ -167,7 +167,9 @@ final class PipeEndpoint: @unchecked Sendable {
 
     private static func openSharedDevNull() throws -> Int32 {
         try devNullLock.withLock {
-            if sharedDevNull >= 0 { return sharedDevNull }
+            if sharedDevNull >= 0 {
+                return sharedDevNull
+            }
             let descriptor = Darwin.open("/dev/null", O_RDWR | O_CLOEXEC)
             guard descriptor >= 0 else {
                 throw PipeEndpointError.devNullUnavailable(errno: errno)

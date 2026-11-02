@@ -518,21 +518,35 @@ enum ToolRawJSON {
     }
 
     static func string(_ object: [String: Any], key: String) -> String? {
-        if let value = object[key] as? String { return value }
-        if let number = object[key] as? NSNumber { return number.stringValue }
+        if let value = object[key] as? String {
+            return value
+        }
+        if let number = object[key] as? NSNumber {
+            return number.stringValue
+        }
         return nil
     }
 
     static func bool(_ object: [String: Any], key: String) -> Bool? {
-        if let value = object[key] as? Bool { return value }
-        if let number = object[key] as? NSNumber { return number.boolValue }
+        if let value = object[key] as? Bool {
+            return value
+        }
+        if let number = object[key] as? NSNumber {
+            return number.boolValue
+        }
         return nil
     }
 
     static func int(_ object: [String: Any], key: String) -> Int? {
-        if let value = object[key] as? Int { return value }
-        if let number = object[key] as? NSNumber { return number.intValue }
-        if let string = object[key] as? String { return Int(string.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        if let value = object[key] as? Int {
+            return value
+        }
+        if let number = object[key] as? NSNumber {
+            return number.intValue
+        }
+        if let string = object[key] as? String {
+            return Int(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
         return nil
     }
 }
@@ -860,17 +874,27 @@ enum BashToolResultParser {
         let isSummaryOnly = scanText.range(of: #""summary_only"\s*:\s*true"#, options: [.regularExpression, .caseInsensitive]) != nil
             || scanText.range(of: #""summaryOnly"\s*:\s*true"#, options: [.regularExpression, .caseInsensitive]) != nil
         let isRunning: Bool = {
-            if plainTextHint.isRunning { return true }
-            if AgentTranscriptToolStatusSemantics.isRunningStatusWord(statusWord) { return true }
-            if hasSuccessFlag || hasErrorText { return false }
-            if let exitCode, exitCode >= 0 { return false }
+            if plainTextHint.isRunning {
+                return true
+            }
+            if AgentTranscriptToolStatusSemantics.isRunningStatusWord(statusWord) {
+                return true
+            }
+            if hasSuccessFlag || hasErrorText {
+                return false
+            }
+            if let exitCode, exitCode >= 0 {
+                return false
+            }
             if let statusWord, AgentTranscriptToolStatusSemantics.isTerminalStatusWord(statusWord) {
                 if exitCode != nil, exitCode ?? 0 < 0, processID?.isEmpty == false, !hasDurationHint {
                     return true
                 }
                 return false
             }
-            if exitCode != nil { return false }
+            if exitCode != nil {
+                return false
+            }
             return processID?.isEmpty == false
         }()
         return Metadata(
@@ -1126,8 +1150,12 @@ enum BashToolResultParser {
         if let array = value as? [Any] {
             let parts = array
                 .compactMap { element -> String? in
-                    if let string = element as? String { return string }
-                    if let number = element as? NSNumber { return number.stringValue }
+                    if let string = element as? String {
+                        return string
+                    }
+                    if let number = element as? NSNumber {
+                        return number.stringValue
+                    }
                     return nil
                 }
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1181,15 +1209,21 @@ enum BashToolResultParser {
         ] {
             if let value = stringValue(object, key: key) {
                 let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { return value }
+                if !trimmed.isEmpty {
+                    return value
+                }
             }
         }
         return nil
     }
 
     private static func stringValue(_ object: [String: Any], key: String) -> String? {
-        if let value = object[key] as? String { return value }
-        if let number = object[key] as? NSNumber { return number.stringValue }
+        if let value = object[key] as? String {
+            return value
+        }
+        if let number = object[key] as? NSNumber {
+            return number.stringValue
+        }
         if let array = object[key] as? [Any] {
             let parts = array
                 .compactMap { $0 as? String }
@@ -1222,8 +1256,7 @@ enum BashToolResultParser {
     }
 
     private static func unquotedCommandText(_ raw: String) -> String? {
-        guard raw.count >= 2 else { return nil }
-        guard let first = raw.first, let last = raw.last, first == last, first == "\"" || first == "'" else {
+        guard raw.count >= 2, let first = raw.first, let last = raw.last, first == last, first == "\"" || first == "'" else {
             return nil
         }
         let inner = String(raw.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1252,11 +1285,11 @@ enum BashToolResultParser {
             return (true, "running", nil, nil)
         }
         if let exitCodeText = captureFirstGroup(
-            in: raw,
-            regex: plainTextExitCodeRegex,
-            group: 1
-        ),
-            let exitCode = Int(exitCodeText)
+               in: raw,
+               regex: plainTextExitCodeRegex,
+               group: 1
+           ),
+           let exitCode = Int(exitCodeText)
         {
             return (false, exitCode == 0 ? "completed" : "failed", exitCode, nil)
         }
@@ -1272,8 +1305,7 @@ enum BashToolResultParser {
         group: Int
     ) -> String? {
         let range = NSRange(text.startIndex ..< text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: range) else { return nil }
-        guard match.numberOfRanges > group else { return nil }
+        guard let match = regex.firstMatch(in: text, options: [], range: range), match.numberOfRanges > group else { return nil }
         let groupRange = match.range(at: group)
         guard groupRange.location != NSNotFound,
               let swiftRange = Range(groupRange, in: text)
@@ -1934,7 +1966,9 @@ enum AgentTranscriptSummaryTextFormatter {
         var seenTools = Set<String>()
         let uniqueTools = summary.toolNames.filter { toolName in
             let key = toolName.lowercased()
-            if seenTools.contains(key) { return false }
+            if seenTools.contains(key) {
+                return false
+            }
             seenTools.insert(key)
             return true
         }
@@ -1973,9 +2007,15 @@ enum AgentTranscriptSummaryTextFormatter {
 
     private static func collapsedStatus(for summary: AgentTranscriptClusterSummary?) -> AgentTranscriptCollapsedSummaryStatus {
         guard let summary else { return .neutral }
-        if summary.containsFailure { return .failure }
-        if summary.containsWarning { return .warning }
-        if summary.containsRunningWork { return .running }
+        if summary.containsFailure {
+            return .failure
+        }
+        if summary.containsWarning {
+            return .warning
+        }
+        if summary.containsRunningWork {
+            return .running
+        }
         return .neutral
     }
 
@@ -2801,8 +2841,8 @@ enum AgentTranscriptIO {
     private static func runningToolResultStatusWord(from raw: String?) -> String? {
         guard let object = toolResultObject(from: raw),
               let rawStatus = toolResultString(object: object, key: "status")?
-              .trimmingCharacters(in: .whitespacesAndNewlines)
-              .lowercased()
+                  .trimmingCharacters(in: .whitespacesAndNewlines)
+                  .lowercased()
         else {
             return nil
         }
@@ -3667,11 +3707,11 @@ enum AgentTranscriptIO {
             }
         }
 
-        /// --- Phase 2: Fit within budget by dropping lowest-importance items first ---
-        ///
-        /// Non-essential tiers (toolCall, supplemental, context) are dropped individually,
-        /// oldest first. Essential items are dropped in turn-groups so a user prompt is
-        /// never orphaned from its conclusion assistant (or vice versa).
+        // --- Phase 2: Fit within budget by dropping lowest-importance items first ---
+        //
+        // Non-essential tiers (toolCall, supplemental, context) are dropped individually,
+        // oldest first. Essential items are dropped in turn-groups so a user prompt is
+        // never orphaned from its conclusion assistant (or vice versa).
         func renderedOutputCount(excluding dropIndices: Set<Int>) -> Int {
             var count = 0
             var lastWasSystem = false
@@ -3710,7 +3750,9 @@ enum AgentTranscriptIO {
             for idx in nonEssentialSorted {
                 dropIndices.insert(idx)
                 currentRendered = renderedOutputCount(excluding: dropIndices)
-                if currentRendered <= maxTranscriptItems { break }
+                if currentRendered <= maxTranscriptItems {
+                    break
+                }
             }
 
             // Step 2: If still over budget, drop essential items in whole-turn groups
@@ -3721,7 +3763,9 @@ enum AgentTranscriptIO {
                 var essentialByTurn: [UUID: [Int]] = [:]
                 for idx in forkItems.indices where forkItems[idx].dropPriority == .essential {
                     guard let turnID = forkItems[idx].turnID else { continue }
-                    if essentialByTurn[turnID] == nil { turnOrder.append(turnID) }
+                    if essentialByTurn[turnID] == nil {
+                        turnOrder.append(turnID)
+                    }
                     essentialByTurn[turnID, default: []].append(idx)
                 }
                 for turnID in turnOrder {
@@ -4058,8 +4102,7 @@ enum AgentTranscriptIO {
     }
 
     private static func isSummaryOnlyToolResult(_ item: AgentChatItem) -> Bool {
-        guard item.kind == .toolResult else { return false }
-        guard let json = item.toolResultJSON ?? (item.text.isEmpty ? nil : item.text) else { return false }
+        guard item.kind == .toolResult, let json = item.toolResultJSON ?? (item.text.isEmpty ? nil : item.text) else { return false }
         return json.contains("\"summary_only\":true") || json.contains("\"summary_only\": true")
     }
 
@@ -4104,7 +4147,9 @@ enum AgentTranscriptIO {
                 let entry = entries[i]
                 if isDisplayableAssistantEntry(entry) {
                     assistantIndices.append(i)
-                    if toolBeforeSeen { hasToolBefore.insert(i) }
+                    if toolBeforeSeen {
+                        hasToolBefore.insert(i)
+                    }
                 } else if entry.isToolBoundary {
                     toolBeforeSeen = true
                 }
@@ -4116,7 +4161,9 @@ enum AgentTranscriptIO {
             for i in segment.reversed() {
                 let entry = entries[i]
                 if isDisplayableAssistantEntry(entry) {
-                    if toolAfterSeen { hasToolAfter.insert(i) }
+                    if toolAfterSeen {
+                        hasToolAfter.insert(i)
+                    }
                 } else if entry.isToolBoundary {
                     toolAfterSeen = true
                 }
@@ -4144,7 +4191,9 @@ enum AgentTranscriptIO {
 
         logHandoffDebug("filterIntermediateAssistant dropped=\(dropIndices.count) truncated=\(truncateIndices.count)")
         return entries.enumerated().compactMap { index, entry in
-            if dropIndices.contains(index) { return nil }
+            if dropIndices.contains(index) {
+                return nil
+            }
             if truncateIndices.contains(index) {
                 return truncateAssistantEntry(entry)
             }
@@ -4380,10 +4429,8 @@ enum AgentTranscriptIO {
         var object = AgentTranscriptToolNormalizer.jsonObject(from: sourceRow.toolArgsJSON)
             ?? AgentTranscriptToolNormalizer.jsonObject(from: sourceRow.toolResultJSON)
             ?? [:]
-        if let execution {
-            if !execution.keyPaths.isEmpty, object["key_paths"] == nil {
-                object["key_paths"] = Array(execution.keyPaths.prefix(4))
-            }
+        if let execution, !execution.keyPaths.isEmpty, object["key_paths"] == nil {
+            object["key_paths"] = Array(execution.keyPaths.prefix(4))
         }
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
@@ -4874,9 +4921,9 @@ enum AgentTranscriptCompactor {
             )
         case .preserveDurableFrontier:
             guard let frozenPrefixTurnCount = AgentTranscriptDurableFrontierSupport.validatedFrozenPrefixTurnCountForIncrementalReuse(
-                in: transcript
-            ),
-                frozenPrefixTurnCount > 0
+                      in: transcript
+                  ),
+                  frozenPrefixTurnCount > 0
             else {
                 return compact(
                     transcript,
@@ -5276,8 +5323,7 @@ enum AgentTranscriptCompactor {
                 }
                 for activity in activities {
                     activitiesInspected += 1
-                    guard activity.itemKind == .toolCall || activity.itemKind == .toolResult else { continue }
-                    guard !AgentTranscriptToolVisibilityPolicy.shouldSuppressActivity(activity) else { continue }
+                    guard activity.itemKind == .toolCall || activity.itemKind == .toolResult, !AgentTranscriptToolVisibilityPolicy.shouldSuppressActivity(activity) else { continue }
                     let stableExecutionID = activity.toolExecution?.stableExecutionID ?? activity.id.uuidString
                     guard seenExecutionIDs.insert(stableExecutionID).inserted else { continue }
                     countedToolExecutionCount += 1
@@ -5296,8 +5342,7 @@ enum AgentTranscriptCompactor {
         var seenExecutionIDs: Set<String> = []
         for span in turn.responseSpans {
             for activity in transcriptOrderedActivities(in: span) {
-                guard activity.itemKind == .toolCall || activity.itemKind == .toolResult else { continue }
-                guard !AgentTranscriptToolVisibilityPolicy.shouldSuppressActivity(activity) else { continue }
+                guard activity.itemKind == .toolCall || activity.itemKind == .toolResult, !AgentTranscriptToolVisibilityPolicy.shouldSuppressActivity(activity) else { continue }
                 let stableExecutionID = activity.toolExecution?.stableExecutionID ?? activity.id.uuidString
                 guard seenExecutionIDs.insert(stableExecutionID).inserted else { continue }
                 countedToolExecutionCount += 1

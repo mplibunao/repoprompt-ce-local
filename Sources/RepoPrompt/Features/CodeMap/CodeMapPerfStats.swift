@@ -465,18 +465,18 @@ enum CodeMapPerfRuntime {
     @inline(__always)
     static func activeOptions(_ options: CodeMapPerfOptions) -> CodeMapPerfOptions {
         #if DEBUG || CODEMAP_PERF
-            return options
+            options
         #else
-            return .disabled
+            .disabled
         #endif
     }
 
     @inline(__always)
     static func activeStats(_ stats: CodeMapPerformanceCollector?) -> CodeMapPerformanceCollector? {
         #if DEBUG || CODEMAP_PERF
-            return stats
+            stats
         #else
-            return nil
+            nil
         #endif
     }
 

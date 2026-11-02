@@ -106,7 +106,9 @@ final class AgentSessionSidebarUIStore: ObservableObject {
             case .archivedHeader:
                 guard kind == .delete,
                       presentationTargets.allSatisfy({ identity in
-                          if case .archived = identity { return true }
+                          if case .archived = identity {
+                              return true
+                          }
                           return false
                       })
                 else { return nil }
@@ -161,7 +163,9 @@ final class AgentSessionSidebarUIStore: ObservableObject {
         guard isCurrentBulkAction(token: token, workspaceID: workspaceID) else { return }
         var next = selectionState
         next.inFlightAction = nil
-        if next.selectedIdentities.isEmpty { next.workspaceID = nil }
+        if next.selectedIdentities.isEmpty {
+            next.workspaceID = nil
+        }
         next.notice = notice
         next.revision &+= 1
         publishSelection(next, eventName: "sessionSidebar.selection.bulkFinish")
@@ -257,7 +261,9 @@ final class AgentSessionSidebarUIStore: ObservableObject {
         markedAt: Date = Date()
     ) -> Bool {
         guard Self.isAttentionEligible(state) else { return false }
-        if snapshot.attentionRunStateByTabID[tabID] == state { return false }
+        if snapshot.attentionRunStateByTabID[tabID] == state {
+            return false
+        }
         var next = snapshot
         next.attentionRunStateByTabID[tabID] = state
         next.attentionMarkedAtByTabID[tabID] = markedAt
@@ -345,7 +351,9 @@ final class AgentSessionSidebarUIStore: ObservableObject {
             return false
         }
         next.revision &+= 1
-        if affectsRowContent { next.rowContentRevision &+= 1 }
+        if affectsRowContent {
+            next.rowContentRevision &+= 1
+        }
         snapshot = next
         #if DEBUG
             AgentModePerfDiagnostics.recordStoreUpdate(

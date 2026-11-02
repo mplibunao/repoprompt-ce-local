@@ -29,10 +29,7 @@ enum PromptPackagingService {
     }
 
     private static func titleSnippet(for tabTitle: String?) -> String? {
-        guard let raw = tabTitle?.trimmingCharacters(in: .whitespacesAndNewlines), raw.isEmpty == false else {
-            return nil
-        }
-        guard isGenericTabTitle(raw) == false else { return nil }
+        guard let raw = tabTitle?.trimmingCharacters(in: .whitespacesAndNewlines), raw.isEmpty == false, isGenericTabTitle(raw) == false else { return nil }
         let escaped = escapeXML(raw)
         return """
         <title>
@@ -230,7 +227,9 @@ enum PromptPackagingService {
         var contentBlocks: [String] = []
 
         for record in detailed {
-            if record.text.isEmpty { continue }
+            if record.text.isEmpty {
+                continue
+            }
             if record.isCodemap {
                 codemapBlocks.append(record.text)
             } else {

@@ -1,6 +1,6 @@
 import Foundation
-import XCTest
 @_spi(TestSupport) @testable import RepoPromptApp
+import XCTest
 
 final class AIModelPreferenceRegressionTests: XCTestCase {
     @MainActor

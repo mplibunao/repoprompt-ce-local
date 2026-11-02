@@ -122,8 +122,8 @@ actor WorkspaceCodemapBindingIntegrationRegistry {
     ) async -> WorkspaceCodemapManifestBindingCandidate? {
         guard let (token, catalogClient) = currentCatalogRoute(for: rootEpoch) else { return nil }
         let result = await catalogClient.resolveManifestBinding(rootEpoch, relativePath)
-        guard isCurrent(token: token) else { return nil }
-        guard let result,
+        guard isCurrent(token: token),
+              let result,
               result.identity.rootID == rootEpoch.rootID,
               result.identity.rootLifetimeID == rootEpoch.rootLifetimeID
         else { return nil }

@@ -63,8 +63,12 @@ actor DirectHeadlessGlobalBackend: DomainGlobalControlBackend {
                     "value": values[descriptor.key]?.mcpValue ?? .null,
                     "writable": .bool(true)
                 ]
-                if descriptor.optionsAvailable { item["options_available"] = .bool(true) }
-                if detailed { item["description"] = .string(descriptor.description) }
+                if descriptor.optionsAvailable {
+                    item["options_available"] = .bool(true)
+                }
+                if detailed {
+                    item["description"] = .string(descriptor.description)
+                }
                 return Value.object(item)
             }
             return try .object([
@@ -332,7 +336,9 @@ actor DirectHeadlessGlobalBackend: DomainGlobalControlBackend {
             let path = try validatedDirectory(rawPath).path
             var roots = object["repoPaths"] as? [String] ?? []
             if action == "add_folder" {
-                if !roots.contains(path) { roots.append(path) }
+                if !roots.contains(path) {
+                    roots.append(path)
+                }
             } else {
                 roots.removeAll { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path == path }
             }

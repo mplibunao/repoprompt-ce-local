@@ -427,13 +427,12 @@ struct AgentModelsSettingsProfile: Codable, Equatable {
               let resolvedAgentRaw = Self.normalizedAgentRaw(agentRaw) ?? contextBuilderAgentRaw,
               let agent = AgentProviderKind(rawValue: resolvedAgentRaw),
               let providerID = agent.acpProviderID,
-              change.targets(providerID: providerID, modelRaw: modelRaw)
-        else { return self }
-        guard let edited = Self.editedBucket(
-            contextBuilderModelParametersByAgent?[resolvedAgentRaw] ?? [],
-            eligible: contextBuilderModelParameterSelections(for: agent, modelRaw: modelRaw),
-            applying: change
-        ) else { return self }
+              change.targets(providerID: providerID, modelRaw: modelRaw),
+              let edited = Self.editedBucket(
+                  contextBuilderModelParametersByAgent?[resolvedAgentRaw] ?? [],
+                  eligible: contextBuilderModelParameterSelections(for: agent, modelRaw: modelRaw),
+                  applying: change
+              ) else { return self }
         var next = self
         if case .set = change {
             next = replacingContextBuilderModel(modelRaw, for: resolvedAgentRaw)

@@ -74,9 +74,7 @@ struct EnhancedMarkdownView: View {
             let result = compiler.attributedString(from: document)
 
             await MainActor.run {
-                guard !Task.isCancelled else { return }
-                guard text == textToParse else { return }
-                guard fontPreset.rawValue == fontPresetValue else { return }
+                guard !Task.isCancelled, text == textToParse, fontPreset.rawValue == fontPresetValue else { return }
                 attributedString = result
             }
         }
@@ -631,13 +629,19 @@ struct EnhancedCodeBlock: View {
                 copyButtonView
             }
             .onAppear {
-                if isFinalized { generateHighlightedCode() }
+                if isFinalized {
+                    generateHighlightedCode()
+                }
             }
             .onChange(of: code) { _, _ in
-                if isFinalized { generateHighlightedCode() }
+                if isFinalized {
+                    generateHighlightedCode()
+                }
             }
             .onChange(of: fontScale.preset) { _, _ in
-                if isFinalized { generateHighlightedCode() }
+                if isFinalized {
+                    generateHighlightedCode()
+                }
             }
     }
 
