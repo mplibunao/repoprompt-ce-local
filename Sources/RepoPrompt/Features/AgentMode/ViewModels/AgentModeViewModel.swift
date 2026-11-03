@@ -9332,7 +9332,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
     /// Stages a launching tab's immutable review snapshot for the exact current child activation.
     /// Source/target provenance failures are retained on the context so non-review Agent work may
-    /// continue, but a later delegated review cannot silently package the child tab instead.
+    /// continue, but a later delegated review cannot silently package the child tab instead, until
+    /// the child's own Context Builder review returns and ends the run's delegated context.
     func mcpStageAgentRunOracleReviewSource(
         _ source: AgentRunOracleReviewSource,
         targetTabID: UUID,

@@ -812,6 +812,13 @@ final class MCPServerViewModel: ObservableObject {
             contextBuilderFollowUpOverrideForTesting = override
         }
 
+        /// The production closure that every `context_builder` plan, question, or review answer passes
+        /// through. Pair it with `setContextBuilderFollowUpOverrideForTesting` to drive what happens
+        /// after a reply returns without running discovery or a model.
+        var runMCPPlanOrQuestionForTesting: MCPAppPhysicalCapabilityAdapters.RunMCPPlanOrQuestion {
+            windowToolExecutionCapabilities.runMCPPlanOrQuestion
+        }
+
         func setContextBuilderFinalReviewAuthorizationHooksForTesting(
             before: MCPAppPhysicalCapabilityAdapters.BeforeContextBuilderFinalReviewAuthorization?,
             after: MCPAppPhysicalCapabilityAdapters.DidFinalizeContextBuilderReview?
@@ -1613,37 +1620,56 @@ final class MCPServerViewModel: ObservableObject {
         runMCPPlanOrQuestion: { [weak self] contextBuilderVM, identity, agentModeSessionID, agentModeRunID, mode, prompt, selection, lookupContext, reviewGitContext, finalReviewAuthorization, progressReporter, activityReporter in
             guard let self else { throw MCPError.internalError("Window deallocated while generating context_builder response") }
             #if DEBUG
-                if let override = contextBuilderFollowUpOverrideForTesting {
-                    return try await override(
-                        contextBuilderVM,
-                        identity,
-                        agentModeSessionID,
-                        agentModeRunID,
-                        mode,
-                        prompt,
-                        selection,
-                        lookupContext,
-                        reviewGitContext,
-                        finalReviewAuthorization,
-                        progressReporter,
-                        activityReporter
-                    )
-                }
+                let override = contextBuilderFollowUpOverrideForTesting
+            #else
+                let override: MCPAppPhysicalCapabilityAdapters.RunMCPPlanOrQuestion? = nil
             #endif
-            return try await contextBuilderVM.runMCPPlanOrQuestion(
-                for: identity,
-                oracleViewModel: oracleVM,
-                agentModeSessionID: agentModeSessionID,
-                agentModeRunID: agentModeRunID,
-                mode: mode,
-                prompt: prompt,
-                selection: selection,
-                lookupContext: lookupContext,
-                reviewGitContext: reviewGitContext,
-                finalReviewAuthorization: finalReviewAuthorization,
-                progressReporter: progressReporter,
-                activityReporter: activityReporter
-            )
+            let reply: ChatSendReply = if let override {
+                try await override(
+                    contextBuilderVM,
+                    identity,
+                    agentModeSessionID,
+                    agentModeRunID,
+                    mode,
+                    prompt,
+                    selection,
+                    lookupContext,
+                    reviewGitContext,
+                    finalReviewAuthorization,
+                    progressReporter,
+                    activityReporter
+                )
+            } else {
+                try await contextBuilderVM.runMCPPlanOrQuestion(
+                    for: identity,
+                    oracleViewModel: oracleVM,
+                    agentModeSessionID: agentModeSessionID,
+                    agentModeRunID: agentModeRunID,
+                    mode: mode,
+                    prompt: prompt,
+                    selection: selection,
+                    lookupContext: lookupContext,
+                    reviewGitContext: reviewGitContext,
+                    finalReviewAuthorization: finalReviewAuthorization,
+                    progressReporter: progressReporter,
+                    activityReporter: activityReporter
+                )
+            }
+            if mode == .review, let agentModeSessionID, let agentModeRunID,
+               let agentModeViewModel = try? requireTargetWindow().agentModeViewModel
+            {
+                // A delegated review context lets a child Agent run review its launcher's files only
+                // until the child builds its own review. The run's later review-mode Oracle calls
+                // continue that review, so they package the child's own tab.
+                agentModeViewModel.mcpRemoveAgentRunOracleReviewContext(
+                    sessionID: agentModeSessionID,
+                    runID: agentModeRunID
+                )
+                logger.debug(
+                    "Context Builder review returned for agent session \(agentModeSessionID) run \(agentModeRunID); ended the run's delegated review context, if any"
+                )
+            }
+            return reply
         }
     )
 

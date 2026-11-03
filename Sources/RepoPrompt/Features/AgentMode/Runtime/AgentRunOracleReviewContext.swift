@@ -3,7 +3,8 @@ import Foundation
 /// Why an Agent-run review source cannot be used by its delegated consumer.
 ///
 /// These failures are carried with the run rather than failing an otherwise valid Agent start.
-/// A later delegated Oracle review must surface the failure instead of packaging the child tab.
+/// A later delegated Oracle review must surface the failure instead of packaging the child tab,
+/// until the child's own Context Builder review returns and ends the run's delegated context.
 enum AgentRunOracleReviewUnavailableReason: Equatable, LocalizedError {
     case sourceCaptureFailed(String)
     case targetWorkspaceMismatch
@@ -96,7 +97,7 @@ struct ResolvedAgentRunOracleReviewLaunchSource: Equatable {
 ///
 /// This value is deliberately ephemeral and has no persistence conformance. The unavailable case
 /// preserves trusted source identity so non-review Agent work may continue while later review calls
-/// fail explicitly.
+/// fail explicitly until the child's own Context Builder review returns.
 enum AgentRunOracleReviewSource: Equatable {
     struct Captured: Equatable {
         let delegationID: UUID
