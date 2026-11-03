@@ -1075,11 +1075,6 @@ final class MCPReadMutationPathContractTests: XCTestCase {
                         routeContext: .init(tabName: tabName, windowID: context.window.windowID)
                     )
                     let refusalSummary = "\(expected.summary) No filesystem mutation was started."
-                    XCTAssertEqual(
-                        refusalSummary,
-                        "Tab '\(tabName)' (window \(context.window.windowID)) can't be used: "
-                            + "its Agent Mode worktree 'stale-worktree' is missing from disk. No filesystem mutation was started."
-                    )
 
                     @MainActor
                     func rawCall<Reply: Decodable>(

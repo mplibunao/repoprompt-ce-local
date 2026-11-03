@@ -372,7 +372,8 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
     }
 
     /// Only the missing-worktree refusal, whose issues are all non-retryable `workspace_authority` failures,
-    /// prints its message whole with no generic retry line. Every other unavailable reply keeps `main`'s text.
+    /// prints its message whole with no generic retry line. Every other unavailable reply keeps the generic
+    /// "Resolve the reported issue, then retry." line and prints the first issue's message without its final period.
     func testCodeStructureDropsTheRetryLineOnlyForTheMissingWorktreeRefusal() throws {
         func issue(
             _ code: String,

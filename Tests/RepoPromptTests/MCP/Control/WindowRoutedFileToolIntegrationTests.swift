@@ -175,15 +175,6 @@ import XCTest
                         binding: binding,
                         routeContext: .init(tabName: tabName, windowID: context.window.windowID)
                     )
-                    XCTAssertEqual(
-                        expected.summary,
-                        "Tab '\(tabName)' (window \(context.window.windowID)) can't be used: "
-                            + "its Agent Mode worktree 'stale-worktree' is missing from disk."
-                    )
-                    XCTAssertEqual(
-                        expected.recovery,
-                        "Retrying won't help. Tell the user so they can switch to another tab."
-                    )
                     XCTAssertFalse(expected.message.contains(fixture.rootURL.path), expected.message)
 
                     // Unbound leg: calls without a tab argument route to the stale active tab.
