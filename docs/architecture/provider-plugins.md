@@ -218,7 +218,7 @@ The associated event/session/turn types are currently `typealias`es over the Cla
 
 RepoPrompt CE cannot impose one MCP tool-call timeout across external ACP providers; configure the provider where supported.
 
-- **OpenCode:** Timeout values are milliseconds. For a 10,000-second call, set `"timeout": 10000000` on the existing RepoPrompt MCP server entry, preserving its `type`, `command`, `environment`, and `codemode` fields. Installing the entry again from RepoPrompt resets the timeout to RepoPrompt's value.
+- **OpenCode:** RepoPrompt's MCP server entry sets `"timeout": 14400000`, which is 4 hours in milliseconds. Agent Mode and Context Builder pass that entry in the `OPENCODE_CONFIG_CONTENT` environment variable, which OpenCode applies after the global and project `opencode.json` files. Their runs use the 4-hour timeout even when the installed entry sets a different one. The installed entry's `timeout` applies only when OpenCode runs outside RepoPrompt, such as `opencode` started in a terminal. Installing the entry again from RepoPrompt resets it to 4 hours.
 - **Cursor Agent:** Current builds expose no supported ACP, CLI, environment, or configuration override that RepoPrompt CE can set to 10,000 seconds. Do not add a speculative CE timeout control; add one only if Cursor documents a supported configuration surface.
 - **Grok Build:** The session-injected RepoPrompt MCP server follows Grok's default MCP timeout. To pin one, add `tool_timeout_sec` under `[mcp_servers.RepoPromptCE]` in `~/.grok/config.toml` (Grok's per-server MCP config; seconds).
 
