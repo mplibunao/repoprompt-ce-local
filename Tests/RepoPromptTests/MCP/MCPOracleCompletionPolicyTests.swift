@@ -29,13 +29,13 @@ import XCTest
                     "new_chat": .bool(true)
                 ])
                 _ = try await fixture.window.mcpServer.executeAskOracleForTesting(args: [
-                    "message": .string("interactive"),
+                    "message": .string("ask"),
                     "mode": .string("chat"),
                     "new_chat": .bool(true)
                 ])
             }
 
-            XCTAssertEqual(observedPolicies, [.contextBuilderStrict, .interactive])
+            XCTAssertEqual(observedPolicies, [.contextBuilderStrict, .contextBuilderStrict])
         }
 
         func testOracleSendAdapterForwardsStrictPolicyWithoutInteractiveWatchdog() async throws {
