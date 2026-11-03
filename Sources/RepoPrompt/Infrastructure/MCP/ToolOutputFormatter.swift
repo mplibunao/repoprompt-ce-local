@@ -3246,7 +3246,7 @@ extension ToolOutputFormatter {
             return "requested root is unavailable"
         }
         guard let first = issues.first else { return "code structure is unavailable" }
-        return codeStructureHasOnlyNonRetryableIssues(issues)
+        return codeStructureIsWorktreeRefusal(issues)
             ? first.message.trimmingCharacters(in: .whitespacesAndNewlines)
             : codeStructureSentenceFragment(first.message)
     }
@@ -3263,15 +3263,16 @@ extension ToolOutputFormatter {
         if issues.contains(where: { $0.code == "git_root_unavailable" }) {
             return "Resolve the reported root issue, then retry."
         }
-        return codeStructureHasOnlyNonRetryableIssues(issues) ? nil : "Resolve the reported issue, then retry."
+        return codeStructureIsWorktreeRefusal(issues) ? nil : "Resolve the reported issue, then retry."
     }
 
-    /// When no issue is retryable, the first issue's message is the whole refusal: it keeps its final
-    /// period and gets no generic retry line, which would contradict a message saying retrying won't help.
-    private static func codeStructureHasOnlyNonRetryableIssues(
+    /// A missing-worktree refusal is the only non-retryable `workspace_authority` failure. Its message is
+    /// the whole reply: it keeps its final period and gets no generic retry line, which would contradict
+    /// a message saying retrying won't help. Every other unavailable reply keeps the generic text.
+    private static func codeStructureIsWorktreeRefusal(
         _ issues: [ToolResultDTOs.CodeStructureReplyDTO.IssueDTO]
     ) -> Bool {
-        !issues.isEmpty && issues.allSatisfy { !$0.retryable }
+        !issues.isEmpty && issues.allSatisfy { $0.phase == "workspace_authority" && !$0.retryable }
     }
 
     private static func codeStructureSizeAction(size: WorkspaceCodemapGraphOutputSize) -> String {

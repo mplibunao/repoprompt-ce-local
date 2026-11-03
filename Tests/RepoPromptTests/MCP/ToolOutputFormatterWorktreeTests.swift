@@ -371,11 +371,18 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
         )
     }
 
-    func testCodeStructureRefusalShowsTheRetryLineOnlyForRetryableIssues() throws {
-        func issue(_ code: String, retryable: Bool, message: String) -> ToolResultDTOs.CodeStructureReplyDTO.IssueDTO {
+    /// Only the missing-worktree refusal, whose issues are all non-retryable `workspace_authority` failures,
+    /// prints its message whole with no generic retry line. Every other unavailable reply keeps `main`'s text.
+    func testCodeStructureDropsTheRetryLineOnlyForTheMissingWorktreeRefusal() throws {
+        func issue(
+            _ code: String,
+            phase: String = "workspace_authority",
+            retryable: Bool,
+            message: String
+        ) -> ToolResultDTOs.CodeStructureReplyDTO.IssueDTO {
             .init(
                 code: code,
-                phase: "workspace_authority",
+                phase: phase,
                 path: nil,
                 retryable: retryable,
                 retryAfterMilliseconds: retryable ? 1000 : nil,
@@ -398,7 +405,8 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
             return try Self.onlyText(ToolOutputFormatter.formatCodeStructure(value: Self.value(dto)))
         }
 
-        let refusal = "Tab 'Stale' has an Agent Mode session bound to worktree 'gone', but that worktree's folder is missing. Retrying won't help."
+        let refusal = "Tab 'Stale' (window 1) can't be used: its Agent Mode worktree 'gone' is missing from disk. "
+            + "Retrying won't help. Tell the user so they can switch to another tab."
         let transient = issue("workspace_authority_unavailable", retryable: true, message: "Workspace authority unavailable.")
         XCTAssertEqual(
             try formatted([issue("worktree_scope_unavailable", retryable: false, message: refusal)]),
@@ -407,6 +415,12 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
         XCTAssertEqual(
             try formatted([transient]),
             "## Code Structure ❌ unavailable — Workspace authority unavailable\n- Resolve the reported issue, then retry."
+        )
+        // A non-retryable issue from another phase is not a worktree refusal, so it keeps the generic retry
+        // line and drops its final period.
+        XCTAssertEqual(
+            try formatted([issue("empty_seeds", phase: "seed_resolution", retryable: false, message: "No usable seed files were supplied.")]),
+            "## Code Structure ❌ unavailable — No usable seed files were supplied\n- Resolve the reported issue, then retry."
         )
         // The reply's retry hint covers every issue, so a retryable later issue keeps the retry line.
         XCTAssertEqual(
