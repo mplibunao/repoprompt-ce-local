@@ -23,6 +23,8 @@ struct MCPContextBuilderGitPublishedOutcome {
 
 enum MCPContextBuilderGitReviewPolicyError: Equatable, LocalizedError {
     case targetDeferred
+    /// The run froze no target, so only explicit calls that publish nothing are admitted.
+    case targetNotFrozen(ContextBuilderReviewTargetUnavailableReason)
     case targetUnavailable(ContextBuilderReviewTargetUnavailableReason)
     case publicationOutsideFrozenTarget
     case implicitMultiRepositoryOperation
@@ -34,7 +36,9 @@ enum MCPContextBuilderGitReviewPolicyError: Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .targetDeferred:
-            "Context Builder review target election is deferred until discovery completes and freezes its review target."
+            "Context Builder has not elected a review repository yet. \(Self.explicitInspectionGuidance)"
+        case let .targetNotFrozen(reason):
+            "\(reason.localizedDescription) \(Self.explicitInspectionGuidance)"
         case let .targetUnavailable(reason):
             reason.localizedDescription
         case .publicationOutsideFrozenTarget:
@@ -51,6 +55,9 @@ enum MCPContextBuilderGitReviewPolicyError: Equatable, LocalizedError {
             "Published Git artifact checkout did not match its requested frozen Context Builder target."
         }
     }
+
+    private static let explicitInspectionGuidance =
+        "During discovery, specify repo_root or repo_key and do not publish Git artifacts."
 }
 
 struct MCPContextBuilderGitReviewPolicy {
@@ -93,7 +100,7 @@ struct MCPContextBuilderGitReviewPolicy {
             )
         case let .unavailable(reason):
             guard hasExplicitSelector, !requestsArtifactPublication else {
-                throw MCPContextBuilderGitReviewPolicyError.targetUnavailable(reason)
+                throw MCPContextBuilderGitReviewPolicyError.targetNotFrozen(reason)
             }
             return MCPContextBuilderGitReviewAdmission(
                 target: nil,

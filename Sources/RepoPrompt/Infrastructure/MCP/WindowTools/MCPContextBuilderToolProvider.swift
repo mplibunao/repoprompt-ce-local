@@ -333,9 +333,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
 
             **Exporting**: Pass `export_response: true` (requires a `response_type` that generates a response) to write the result to a file and get back `oracle_export_path` plus `oracle_export_instruction`. To hand the export to a child agent, include `oracle_export_path` inside the `message` (or `messages`) you send on your next delegation call; your system prompt names the specific delegation tool available to you.
 
-            **Workflow**: Continue with `ask_oracle(chat_id: "<returned_id>", new_chat: false)`. Refine with `manage_selection`.
-
-            **Agent mode behavior**: If this tool is invoked during an Agent Mode run, it reuses the current agent tab instead of creating a new tab.
+            \(MCPContextBuilderDescriptions.workflow)
 
             **Timing**: 30s-5min depending on codebase size and task complexity.
             """,
@@ -343,7 +341,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
             inputSchema: .object(
                 properties: [
                     "instructions": .string(description: "Your request, ideally structured with XML tags: <task> for the main goal, <context> for background/constraints/file references, <discovery_agent-guidelines> for optional starting hints. Describe what you need — the agent finds the right files."),
-                    "response_type": .string(description: "Optional: 'plan' to generate implementation plan, 'question' to ask a question, or 'review' to generate a code review. Omit or 'clarify' to just return context.", enum: ["plan", "question", "review", "clarify"]),
+                    "response_type": .string(description: MCPContextBuilderDescriptions.responseType, enum: ["plan", "question", "review", "clarify"]),
                     "export_response": .boolean(description: "When true, export the generated response to a file and return `oracle_export_path` plus `oracle_export_instruction`. Requires a response_type that generates a response. Include `oracle_export_path` inside the `message` you send on your next delegation call; the specific delegation tool is named by your system prompt.")
                 ],
                 required: []
@@ -874,7 +872,8 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                     } else {
                         planReply = reply
                     }
-                    followUpHint = "Continue this \(modeLabel) conversation with ask_oracle(chat_id: \"\(reply.shortId)\", new_chat: false)"
+                    let followUpTool = tabResolution.agentModeRunID == nil ? "oracle_send" : "ask_oracle"
+                    followUpHint = "Continue this \(modeLabel) conversation with \(followUpTool): {\"chat_id\":\"\(reply.shortId)\",\"message\":\"<message>\"}"
                 }
 
                 await dependencies.execution.sendStageProgress(

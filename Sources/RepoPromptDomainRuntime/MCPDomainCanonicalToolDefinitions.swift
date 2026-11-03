@@ -1144,6 +1144,9 @@ package enum MCPDomainCanonicalToolDefinitions {
         if definition.name == MCPWindowToolName.manageSelection {
             return requireClosedSliceRanges(definition)
         }
+        if definition.name == MCPWindowToolName.contextBuilder {
+            return describeContextBuilderRouting(definition)
+        }
         if definition.name == MCPGlobalToolName.manageWorkspaces {
             return describeOpenInNewWindow(definition)
         }
@@ -1249,6 +1252,33 @@ package enum MCPDomainCanonicalToolDefinitions {
         )
     }
 
+    /// Replaces the Agent-only follow-up and tab-reuse lines with text that holds for every caller,
+    /// and states the review's `git` default on `response_type`.
+    private static func describeContextBuilderRouting(
+        _ definition: MCPDomainToolDefinition
+    ) -> MCPDomainToolDefinition {
+        guard case var .object(schema) = definition.inputSchema,
+              case var .object(properties)? = schema["properties"],
+              case var .object(responseType)? = properties["response_type"]
+        else {
+            return definition
+        }
+        responseType["description"] = .string(MCPContextBuilderDescriptions.responseType)
+        properties["response_type"] = .object(responseType)
+        schema["properties"] = .object(properties)
+        let agentOnlyLines = "**Workflow**: Continue with `ask_oracle(chat_id: \"<returned_id>\", new_chat: false)`. Refine with `manage_selection`.\n\n**Agent mode behavior**: If this tool is invoked during an Agent Mode run, it reuses the current agent tab instead of creating a new tab."
+        return MCPDomainToolDefinition(
+            name: definition.name,
+            description: definition.description.replacingOccurrences(
+                of: agentOnlyLines,
+                with: MCPContextBuilderDescriptions.workflow
+            ),
+            inputSchema: .object(schema),
+            annotations: definition.annotations,
+            isEnabledByDefault: definition.isEnabledByDefault
+        )
+    }
+
     /// The `open_in_new_window` property states what the flag does for each action, so the tool
     /// description's Parameters list leaves the flag out instead of repeating it.
     private static func describeOpenInNewWindow(
@@ -1299,6 +1329,13 @@ package enum MCPBindContextPropertyDescriptions {
 /// override and the app-side raw Tool registration both publish.
 package enum MCPManageWorkspacesPropertyDescriptions {
     package static let openInNewWindow = "When true: 'switch' reuses a window already showing the workspace, or opens one if none does; 'create' opens a new window. Returns window_id and sets this connection's window; existing tab bindings stay unchanged."
+}
+
+/// Single source for the `context_builder` text that the canonical schema override and the
+/// app-side raw Tool registration both publish.
+package enum MCPContextBuilderDescriptions {
+    package static let workflow = "**Workflow**: App-backed calls keep the routed tab's workspace. Continue the returned chat with `oracle_send` outside Agent Mode, or `ask_oracle` from Agent Mode. Refine with `manage_selection`."
+    package static let responseType = "Optional: 'plan' to generate implementation plan, 'question' to ask a question, or 'review' to generate a code review. Omit or 'clarify' to just return context. For review, discovery's git calls default to the repositories of the files selected when the call starts; with no files selected, they need repo_root or repo_key."
 }
 
 /// Single source for the `manage_selection` property descriptions that the canonical schema
