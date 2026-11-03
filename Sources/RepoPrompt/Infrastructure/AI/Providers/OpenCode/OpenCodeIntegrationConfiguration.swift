@@ -36,7 +36,9 @@ enum OpenCodeIntegrationConfiguration {
             "type": "local",
             "command": [configuration.command] + configuration.args,
             "environment": configuration.environmentDictionary,
-            "timeout": mcpTimeoutMilliseconds
+            "timeout": mcpTimeoutMilliseconds,
+            // OpenCode 2.x lists this server's tools directly instead of only through Code Mode; 1.x ignores the key.
+            "codemode": false
         ]
     }
 

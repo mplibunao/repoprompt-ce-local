@@ -24,6 +24,52 @@ final class OpenCodeACPLaunchResolverTests: XCTestCase {
         XCTAssertEqual(launch.expectedExecutableIdentity?.canonicalPath, launch.command)
     }
 
+    func testManagedLaunchKeepsDirectMCPConfigInOverlay() throws {
+        let workspace = try makeTemporaryDirectory()
+        let openCode = try makeExecutable(in: workspace)
+        let mcpCommand = try makeExecutable(in: makeTemporaryDirectory(), output: "RepoPrompt MCP")
+        let mcpConfiguration = RepoPromptMCPServerConfiguration(command: mcpCommand.path, args: ["--backend", "app"])
+
+        for toolProfile in [OpenCodeAgentConfig.ToolProfile.agentMode, .headless] {
+            let provider = OpenCodeACPAgentProvider(
+                config: OpenCodeAgentConfig(
+                    commandName: openCode.path,
+                    additionalPathHints: [],
+                    cleanupLegacyPersistentConfig: false,
+                    toolProfile: toolProfile
+                ),
+                repoPromptMCPConfiguration: mcpConfiguration
+            )
+
+            let launch = try provider.makeLaunchConfiguration(for: makeRunRequest(workspacePath: workspace.path))
+            let overlayJSON = try XCTUnwrap(launch.environment["OPENCODE_CONFIG_CONTENT"], "\(toolProfile)")
+            let overlay = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(overlayJSON.utf8)) as? [String: Any],
+                "\(toolProfile)"
+            )
+            let mcpEntries = try XCTUnwrap(overlay["mcp"] as? [String: Any], "\(toolProfile)")
+            let repoPromptEntry = try XCTUnwrap(
+                mcpEntries[RepoPromptMCPServerConfiguration.defaultServerName] as? [String: Any],
+                "\(toolProfile)"
+            )
+            let codemode = try XCTUnwrap(repoPromptEntry["codemode"] as? NSNumber, "\(toolProfile): codemode missing")
+            XCTAssertEqual(CFGetTypeID(codemode), CFBooleanGetTypeID(), "\(toolProfile): codemode must be a JSON Boolean")
+            XCTAssertFalse(codemode.boolValue, "\(toolProfile)")
+
+            for resumeSessionID in [nil, "existing-session"] {
+                let session = try provider.makeSessionConfiguration(
+                    for: makeRunRequest(workspacePath: workspace.path, resumeSessionID: resumeSessionID),
+                    mcpServer: mcpConfiguration
+                )
+                XCTAssertEqual(
+                    session.mcpServers,
+                    [],
+                    "\(toolProfile) \(session.mode): an ACP-provided server would replace the overlay entry"
+                )
+            }
+        }
+    }
+
     func testDefaultProfileResolvesOpenCodeFromProviderSpecificHomeBin() async throws {
         let fakeHome = try makeTemporaryDirectory()
         let minimalPath = try makeTemporaryDirectory()
@@ -175,12 +221,12 @@ final class OpenCodeACPLaunchResolverTests: XCTestCase {
         }
     }
 
-    private func makeRunRequest(workspacePath: String) -> ACPRunRequest {
+    private func makeRunRequest(workspacePath: String, resumeSessionID: String? = nil) -> ACPRunRequest {
         ACPRunRequest(
             agentKind: .openCode,
             modelString: nil,
             workspacePath: workspacePath,
-            resumeSessionID: nil,
+            resumeSessionID: resumeSessionID,
             attachments: [],
             taskLabelKind: nil
         )

@@ -218,9 +218,18 @@ The associated event/session/turn types are currently `typealias`es over the Cla
 
 RepoPrompt CE cannot impose one MCP tool-call timeout across external ACP providers; configure the provider where supported.
 
-- **OpenCode:** Timeout values are milliseconds. For a 10,000-second call, set `"timeout": 10000000` on the existing RepoPrompt MCP server entry, preserving its `type`, `command`, and `environment` fields.
+- **OpenCode:** RepoPrompt's MCP server entry sets `"timeout": 14400000`, which is 4 hours in milliseconds. Agent Mode and Context Builder pass that entry in the `OPENCODE_CONFIG_CONTENT` environment variable, which OpenCode applies after the global and project `opencode.json` files. Their runs use the 4-hour timeout even when the installed entry sets a different one. The installed entry's `timeout` applies only when OpenCode runs outside RepoPrompt, such as `opencode` started in a terminal. Installing the entry again from RepoPrompt resets it to 4 hours.
 - **Cursor Agent:** Current builds expose no supported ACP, CLI, environment, or configuration override that RepoPrompt CE can set to 10,000 seconds. Do not add a speculative CE timeout control; add one only if Cursor documents a supported configuration surface.
 - **Grok Build:** The session-injected RepoPrompt MCP server follows Grok's default MCP timeout. To pin one, add `tool_timeout_sec` under `[mcp_servers.RepoPromptCE]` in `~/.grok/config.toml` (Grok's per-server MCP config; seconds).
+
+### OpenCode provider notes
+
+OpenCode 2.x reaches MCP tools only through its built-in `execute` tool, which it calls Code Mode, unless a server's entry sets `"codemode": false`. RepoPrompt's entry, `mcp.RepoPromptCE`, sets it, so OpenCode 2.x lists RepoPrompt's tools to the model directly as `RepoPromptCE_<tool>` and leaves them out of `execute`. OpenCode 1.x ignores the field.
+
+- Agent Mode and Context Builder pass the entry to every agent run they launch, so they work without installing it. Chat, Oracle, and model polling, including the model and effort probes that Agent Mode and Context Builder start, pass a `RepoPromptCE` entry with `"enabled": false` instead. OpenCode has no RepoPrompt tools in those runs.
+- Settings → **MCP Server** → **Quick Setup** → **Install MCP…** → **OpenCode** writes the same entry to `~/.config/opencode/opencode.json`. When that file is plain JSON, the install keeps its other entries, and each other MCP server keeps its own `codemode` setting or OpenCode's default. The install can't read a file with comments or trailing commas, which OpenCode accepts, and replaces it with a file holding only `$schema` and `mcp.RepoPromptCE`. For such a file, add `"codemode": false` to the `RepoPromptCE` entry by hand instead of installing.
+- An entry installed by an earlier RepoPrompt build has no `codemode` field, so standalone OpenCode 2.x keeps RepoPrompt's tools in Code Mode. Installing again adds the field. The install replaces the whole `RepoPromptCE` entry, even when its message says "OpenCode already configured" because the entry existed, so it also resets hand edits such as a custom `timeout`. If the entry has a custom timeout, add `"codemode": false` by hand instead.
+- In a file that also keeps servers under `mcp.servers`, OpenCode 2.x's layout, the install writes `mcp.RepoPromptCE` beside `mcp.servers`, and OpenCode 2.x loads it as one more server with `codemode` intact. `opencode mcp add --global` adds its servers under `mcp.servers` and leaves the flat `mcp.RepoPromptCE` entry in place, so a later install replaces that same entry.
 
 ### Grok Build provider notes
 
