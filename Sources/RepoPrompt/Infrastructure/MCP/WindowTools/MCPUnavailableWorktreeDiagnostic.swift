@@ -67,7 +67,7 @@ struct MCPUnavailableWorktreeDiagnostic: Equatable, Sendable {
     private var subject: String {
         guard let routeContext else { return "The addressed Agent Mode session" }
         let contextID = routeContext.contextID.uuidString
-        if let tabName = Self.displayValue(routeContext.tabName) {
+        if let tabName = safeIdentity(routeContext.tabName) {
             return "Tab '\(tabName)' (context_id '\(contextID)', window \(routeContext.windowID))"
         }
         return "Context '\(contextID)' in window \(routeContext.windowID)"

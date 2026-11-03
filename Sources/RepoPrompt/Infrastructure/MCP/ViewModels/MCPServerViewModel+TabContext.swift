@@ -2227,24 +2227,7 @@ extension MCPServerViewModel {
         )
         if let frozenAuthority = routed.snapshot.frozenFileToolAuthority {
             guard let workspaceManager else { throw FileToolAuthorityFailure.unavailable }
-            var liveSourceSnapshot = routed.snapshot
-            if routed.snapshot.runID == nil,
-               let workspaceID = routed.snapshot.workspaceID,
-               let current = try? makeTabContextSnapshot(
-                   tabID: routed.snapshot.tabID,
-                   workspaceID: workspaceID,
-                   windowID: routed.snapshot.windowID,
-                   runID: nil,
-                   explicitlyBound: routed.snapshot.explicitlyBound,
-                   captureActiveUIState: false,
-                   flushActiveSelection: false
-               )
-            {
-                liveSourceSnapshot.activeAgentSessionID = current.activeAgentSessionID
-                liveSourceSnapshot.worktreeBindingState = current.activeAgentSessionID.map {
-                    agentWorktreeBindingStateProvider?($0, current.tabID) ?? .unhydrated
-                } ?? .notApplicable
-            }
+            let liveSourceSnapshot = liveFileToolSourceSnapshot(for: routed.snapshot)
             if frozenAuthority.sourceIdentity != liveSourceSnapshot.fileToolAuthoritySourceIdentity {
                 if let connectionID = metadata.connectionID,
                    var bound = tabContextByConnectionID[connectionID],
@@ -2267,6 +2250,18 @@ extension MCPServerViewModel {
                     store: promptVM.workspaceFileContextStore
                 )
             } catch let failure as FileToolAuthorityFailure {
+                // Validation suspends, so the tab's session or the connection's route can be
+                // replaced meanwhile; that reports `.superseded`, not the old session's worktree.
+                if case .unavailableWorktree = failure {
+                    let sourceReplaced = frozenAuthority.sourceIdentity
+                        != liveFileToolSourceSnapshot(for: routed.snapshot).fileToolAuthoritySourceIdentity
+                    let routeReplaced = metadata.connectionID
+                        .flatMap { tabContextByConnectionID[$0] }
+                        .map { !fileToolLookupRouteMatches($0, routed.snapshot) } ?? false
+                    if sourceReplaced || routeReplaced {
+                        throw FileToolAuthorityFailure.superseded
+                    }
+                }
                 throw failure.attachingRouteContext(from: routed.snapshot)
             }
             return frozenAuthority
@@ -2369,6 +2364,31 @@ extension MCPServerViewModel {
             }
             throw failure.attachingRouteContext(from: routed.snapshot)
         }
+    }
+
+    /// The routed snapshot with the live tab's Agent session and binding state, which is what a
+    /// frozen authority's source identity must still match.
+    @MainActor
+    private func liveFileToolSourceSnapshot(for snapshot: TabContextSnapshot) -> TabContextSnapshot {
+        var liveSourceSnapshot = snapshot
+        if snapshot.runID == nil,
+           let workspaceID = snapshot.workspaceID,
+           let current = try? makeTabContextSnapshot(
+               tabID: snapshot.tabID,
+               workspaceID: workspaceID,
+               windowID: snapshot.windowID,
+               runID: nil,
+               explicitlyBound: snapshot.explicitlyBound,
+               captureActiveUIState: false,
+               flushActiveSelection: false
+           )
+        {
+            liveSourceSnapshot.activeAgentSessionID = current.activeAgentSessionID
+            liveSourceSnapshot.worktreeBindingState = current.activeAgentSessionID.map {
+                agentWorktreeBindingStateProvider?($0, current.tabID) ?? .unhydrated
+            } ?? .notApplicable
+        }
+        return liveSourceSnapshot
     }
 
     /// Maps a lookup error to the failure a file tool reports. Only the resolver's typed

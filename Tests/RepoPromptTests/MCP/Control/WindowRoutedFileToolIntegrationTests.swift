@@ -175,10 +175,15 @@ import XCTest
                         binding: binding,
                         routeContext: .init(tabName: tabName, contextID: context.tabID, windowID: context.window.windowID)
                     )
-                    XCTAssertTrue(expected.summary.hasPrefix(
-                        "Tab '\(tabName)' (context_id '\(context.tabID.uuidString)', window \(context.window.windowID))"
-                    ))
+                    XCTAssertEqual(
+                        expected.summary,
+                        "Tab '\(tabName)' (context_id '\(context.tabID.uuidString)', window \(context.window.windowID)) "
+                            + "has an Agent Mode session bound to worktree 'stale-worktree' (worktree_id 'stale-worktree-id') "
+                            + "for root '\(context.rootURL.lastPathComponent)', but that worktree's folder is missing "
+                            + "or is not a directory. No canonical checkout was used."
+                    )
                     XCTAssertTrue(expected.recovery.hasPrefix("Retrying won't help."))
+                    XCTAssertTrue(expected.recovery.contains("{\"op\":\"list\",\"window_id\":\(context.window.windowID)}"))
                     XCTAssertFalse(expected.message.contains(fixture.rootURL.path), expected.message)
 
                     // Unbound leg: calls without a tab argument route to the stale active tab.
