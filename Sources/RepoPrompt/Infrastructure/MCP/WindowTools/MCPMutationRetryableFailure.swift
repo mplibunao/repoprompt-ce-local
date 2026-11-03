@@ -105,11 +105,7 @@ struct MCPMutationRetryableFailure: Error, Equatable {
         routedSnapshot: MCPServerViewModel.TabContextSnapshot
     ) -> MCPMutationRetryableFailure? {
         MCPUnavailableWorktreeDiagnostic.classify(bindings).map { diagnostic in
-            .unavailableWorktree(diagnostic.attachingRouteContext(.init(
-                tabName: routedSnapshot.tabName,
-                contextID: routedSnapshot.tabID,
-                windowID: routedSnapshot.windowID
-            )))
+            .unavailableWorktree(diagnostic.attachingRouteContext(from: routedSnapshot))
         }
     }
 }

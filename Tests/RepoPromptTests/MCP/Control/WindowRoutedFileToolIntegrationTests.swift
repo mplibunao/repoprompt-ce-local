@@ -193,7 +193,7 @@ import XCTest
                         _ tool: String,
                         _ arguments: [String: Any],
                         as _: Reply.Type
-                    ) async throws -> (reply: Reply, raw: String) {
+                    ) async throws -> Reply {
                         var arguments = arguments
                         arguments["_windowID"] = context.window.windowID
                         arguments["_rawJSON"] = true
@@ -202,14 +202,14 @@ import XCTest
                         XCTAssertFalse(text.contains(context.sentinel), "\(tool): \(text)")
                         XCTAssertFalse(text.contains(worktreeSentinel), "\(tool): \(text)")
                         let data = try XCTUnwrap(text.data(using: .utf8))
-                        return try (JSONDecoder().decode(Reply.self, from: data), text)
+                        return try JSONDecoder().decode(Reply.self, from: data)
                     }
 
                     let read = try await rawCall(
                         MCPWindowToolName.readFile,
                         ["path": context.fileURL.path],
                         as: ToolResultDTOs.ReadFileReply.self
-                    ).reply
+                    )
                     XCTAssertEqual(read.content, "")
                     XCTAssertEqual(read.displayPath, context.fileURL.path)
                     XCTAssertEqual(read.errorCode, "worktree_scope_unavailable")
@@ -221,7 +221,7 @@ import XCTest
                         MCPWindowToolName.search,
                         ["pattern": "Sentinel"],
                         as: ToolResultDTOs.SearchResultDTO.self
-                    ).reply
+                    )
                     XCTAssertEqual(search.totalMatches, 0)
                     XCTAssertEqual(search.errorCode, "worktree_scope_unavailable")
                     XCTAssertEqual(search.errorMessage, expected.summary)
@@ -234,7 +234,7 @@ import XCTest
                             MCPWindowToolName.getFileTree,
                             ["type": treeType],
                             as: ToolResultDTOs.FileTreeDTO.self
-                        ).reply
+                        )
                         XCTAssertEqual(tree.rootsCount, 0, treeType)
                         XCTAssertEqual(tree.tree, expected.message, treeType)
                         XCTAssertEqual(tree.note, "Bound worktree folder unavailable", treeType)
@@ -247,7 +247,7 @@ import XCTest
                         MCPWindowToolName.getCodeStructure,
                         ["paths": [context.fileURL.path]],
                         as: ToolResultDTOs.CodeStructureReplyDTO.self
-                    ).reply
+                    )
                     XCTAssertEqual(structure.status, .unavailable)
                     XCTAssertEqual(structure.files, [])
                     XCTAssertTrue(structure.roots.isEmpty)

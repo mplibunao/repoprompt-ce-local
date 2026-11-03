@@ -408,11 +408,7 @@ final class MCPServerViewModel: ObservableObject {
             guard case let .unavailableWorktree(diagnostic) = self, diagnostic.routeContext == nil else {
                 return self
             }
-            return .unavailableWorktree(diagnostic.attachingRouteContext(.init(
-                tabName: snapshot.tabName,
-                contextID: snapshot.tabID,
-                windowID: snapshot.windowID
-            )))
+            return .unavailableWorktree(diagnostic.attachingRouteContext(from: snapshot))
         }
     }
 

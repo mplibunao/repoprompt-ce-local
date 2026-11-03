@@ -37,8 +37,11 @@ struct MCPUnavailableWorktreeDiagnostic: Equatable, Sendable {
         }
     }
 
-    func attachingRouteContext(_ routeContext: RouteContext) -> MCPUnavailableWorktreeDiagnostic {
-        MCPUnavailableWorktreeDiagnostic(binding: binding, routeContext: routeContext)
+    func attachingRouteContext(from snapshot: MCPServerViewModel.TabContextSnapshot) -> MCPUnavailableWorktreeDiagnostic {
+        MCPUnavailableWorktreeDiagnostic(
+            binding: binding,
+            routeContext: RouteContext(tabName: snapshot.tabName, contextID: snapshot.tabID, windowID: snapshot.windowID)
+        )
     }
 
     /// The refusal: which tab, which worktree, and that no canonical checkout was used.
