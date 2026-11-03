@@ -371,6 +371,42 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
         )
     }
 
+    func testCodeStructureRefusalShowsTheRetryLineOnlyForRetryableIssues() throws {
+        func formatted(code: String, retryable: Bool, retryAfter: Int?, message: String) throws -> String {
+            let issue = ToolResultDTOs.CodeStructureReplyDTO.IssueDTO(
+                code: code,
+                phase: "workspace_authority",
+                path: nil,
+                retryable: retryable,
+                retryAfterMilliseconds: retryAfter,
+                attempted: nil,
+                limit: nil,
+                message: message
+            )
+            let dto = ToolResultDTOs.CodeStructureReplyDTO(
+                status: .unavailable,
+                size: .medium,
+                roots: [],
+                files: [],
+                summary: .init(seeds: 0, nodes: 0, edges: 0, files: 0, tokens: 0),
+                issues: [issue],
+                retry: .init(retryable: retryable, retryAfterMilliseconds: retryAfter),
+                worktreeScope: nil
+            )
+            return try Self.onlyText(ToolOutputFormatter.formatCodeStructure(value: Self.value(dto)))
+        }
+
+        let refusal = "Tab 'Stale' has an Agent Mode session bound to worktree 'gone', but that worktree's folder is missing. Retrying won't help."
+        XCTAssertEqual(
+            try formatted(code: "worktree_scope_unavailable", retryable: false, retryAfter: nil, message: refusal),
+            "## Code Structure ❌ unavailable — \(refusal)"
+        )
+        XCTAssertEqual(
+            try formatted(code: "workspace_authority_unavailable", retryable: true, retryAfter: 1000, message: "Workspace authority unavailable."),
+            "## Code Structure ❌ unavailable — Workspace authority unavailable\n- Resolve the reported issue, then retry."
+        )
+    }
+
     func testAgentRunApprovalGuidanceUsesCopyableCanonicalResponseCommand() throws {
         let sessionID = "11111111-1111-1111-1111-111111111111"
         let interactionID = "22222222-2222-2222-2222-222222222222"

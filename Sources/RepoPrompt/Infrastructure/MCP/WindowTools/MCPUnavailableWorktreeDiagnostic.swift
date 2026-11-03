@@ -57,7 +57,7 @@ struct MCPUnavailableWorktreeDiagnostic: Equatable, Sendable {
             selectTab = "Ask the user to select another tab"
             listArguments = "list tabs with {\"op\":\"list\"}"
         }
-        return "Retrying won't help. \(selectTab); calls without a tab argument use the window's active tab. A connection bound to this tab stays bound when the visible tab changes. If bind_context is available to you, bind another tab with {\"op\":\"bind\",\"context_id\":\"<context_id>\"}, and \(listArguments) to find its context_id."
+        return "Retrying won't help. \(selectTab); calls without a tab argument use the window's active tab. A connection bound to this tab stays bound when the visible tab changes. If bind_context is available to you, bind another tab with {\"op\":\"bind\",\"context_id\":\"<other_tab_context_id>\"}, and \(listArguments) to find its context_id."
     }
 
     var message: String {

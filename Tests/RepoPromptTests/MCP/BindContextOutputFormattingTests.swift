@@ -58,6 +58,112 @@ final class BindContextOutputFormattingTests: XCTestCase {
         }
     }
 
+    func testRefusedBindShowsFailureHeaderCodeAndMessageWhileSuccessKeepsItsOutput() throws {
+        let message = "Tab 'Stale' has an Agent Mode session bound to worktree 'gone', but that worktree's folder is missing. Retrying won't help."
+        let unbound = MCPBindContextBindingSummary(
+            bindingKind: "unbound",
+            windowID: nil,
+            contextID: nil,
+            workspaceID: nil,
+            workspaceName: nil,
+            tabName: nil,
+            repoPaths: [],
+            explicit: false,
+            runScoped: false
+        )
+        let bound = try MCPBindContextBindingSummary(
+            bindingKind: "tab_context",
+            windowID: 3,
+            contextID: fixtureID(2),
+            workspaceID: fixtureID(10),
+            workspaceName: "Discovery",
+            tabName: "Bound",
+            repoPaths: ["/tmp/rp-discovery"],
+            explicit: true,
+            runScoped: false
+        )
+        let boundLine = "- **Binding**: Tab context Bound in window 3 • workspace Discovery • explicit"
+        let cases: [(label: String, response: BindContextResponse, expected: String)] = [
+            (
+                "refused from an unbound connection",
+                BindContextResponse(
+                    binding: unbound,
+                    changed: false,
+                    error: message,
+                    errorCode: "worktree_scope_unavailable",
+                    retryable: false
+                ),
+                """
+                ## Tab Context Binding ❌
+                - **Error**: \(message)
+                - **Code**: worktree_scope_unavailable
+                - **Binding**: Unbound
+                - **Changed**: no
+                """
+            ),
+            (
+                "refused from a connection bound to another tab",
+                BindContextResponse(
+                    binding: bound,
+                    changed: false,
+                    error: message,
+                    errorCode: "worktree_scope_unavailable",
+                    retryable: false
+                ),
+                """
+                ## Tab Context Binding ❌
+                - **Error**: \(message)
+                - **Code**: worktree_scope_unavailable
+                \(boundLine)
+                - **Changed**: no
+                """
+            ),
+            (
+                "retryable refusal",
+                BindContextResponse(
+                    binding: unbound,
+                    changed: false,
+                    error: "Workspace authority unavailable.",
+                    errorCode: "workspace_authority_unavailable",
+                    retryable: true,
+                    retryAfterMilliseconds: 1000
+                ),
+                """
+                ## Tab Context Binding ⚠️
+                - **Error**: Workspace authority unavailable.
+                - **Code**: workspace_authority_unavailable
+                - **Retryable**: yes
+                - **Retry after**: 1000 ms
+                - **Binding**: Unbound
+                - **Changed**: no
+                """
+            ),
+            (
+                "successful bind",
+                BindContextResponse(binding: bound, changed: true, matchedBy: "context_id"),
+                """
+                ## Tab Context Binding ✅
+                \(boundLine)
+                - **Changed**: yes
+                - **Matched by**: context_id
+                """
+            )
+        ]
+        for testCase in cases {
+            let content = try ToolOutputFormatter.formatBindContext(
+                args: ["op": .string("bind"), "context_id": .string("ignored")],
+                value: Value(testCase.response)
+            )
+            let text = content.compactMap { item -> String? in
+                if case let .text(text, _, _) = item {
+                    return text
+                }
+                return nil
+            }.joined(separator: "\n")
+            XCTAssertEqual(text, testCase.expected, testCase.label)
+        }
+    }
+
     @MainActor
     func testDomainBindingAdvertisesCanonicalDefinitionWhileRegistrationKeepsItsFullerDescription() async throws {
         let registered = try await registeredBindContextTool()

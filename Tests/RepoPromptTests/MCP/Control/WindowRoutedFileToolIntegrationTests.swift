@@ -183,6 +183,7 @@ import XCTest
                             + "or is not a directory. No canonical checkout was used."
                     )
                     XCTAssertTrue(expected.recovery.hasPrefix("Retrying won't help."))
+                    XCTAssertTrue(expected.recovery.contains("{\"op\":\"bind\",\"context_id\":\"<other_tab_context_id>\"}"))
                     XCTAssertTrue(expected.recovery.contains("{\"op\":\"list\",\"window_id\":\(context.window.windowID)}"))
                     XCTAssertFalse(expected.message.contains(fixture.rootURL.path), expected.message)
 

@@ -1884,6 +1884,10 @@ extension ToolOutputFormatter {
         let createdWorkspace: Bool?
         let normalizedWorkingDirs: [String]?
         let note: String?
+        let error: String?
+        let errorCode: String?
+        let retryable: Bool?
+        let retryAfterMilliseconds: Int?
 
         enum CodingKeys: String, CodingKey {
             case windows
@@ -1895,6 +1899,10 @@ extension ToolOutputFormatter {
             case createdWorkspace = "created_workspace"
             case normalizedWorkingDirs = "normalized_working_dirs"
             case note
+            case error
+            case errorCode = "error_code"
+            case retryable
+            case retryAfterMilliseconds = "retry_after_ms"
         }
     }
 
@@ -1918,7 +1926,25 @@ extension ToolOutputFormatter {
         }
         let op = args["op"]?.stringValue?.lowercased() ?? "status"
         var out: [String] = []
-        out.append("## Tab Context Binding \(statusIcon(success: dto.binding.bindingKind != "unbound" || op == "list" || op == "status"))")
+        let isRefusal = dto.error != nil || dto.errorCode != nil
+        let icon = isRefusal
+            ? statusIcon(success: false, warning: dto.retryable == true)
+            : statusIcon(success: dto.binding.bindingKind != "unbound" || op == "list" || op == "status")
+        out.append("## Tab Context Binding \(icon)")
+        if isRefusal {
+            if let error = dto.error, !error.isEmpty {
+                out.append("- **Error**: \(error)")
+            }
+            if let errorCode = dto.errorCode, !errorCode.isEmpty {
+                out.append("- **Code**: \(errorCode)")
+            }
+            if dto.retryable == true {
+                out.append("- **Retryable**: yes")
+            }
+            if let retryAfterMilliseconds = dto.retryAfterMilliseconds {
+                out.append("- **Retry after**: \(retryAfterMilliseconds) ms")
+            }
+        }
         out.append("- **Binding**: \(bindingSummaryLine(dto.binding))")
 
         if let changed = dto.changed {
@@ -3054,7 +3080,9 @@ extension ToolOutputFormatter {
             if let requested = allIssues.first(where: { $0.code == "path_not_found" })?.path {
                 out.append("- Requested: `\(requested)`")
             }
-            out.append("- \(codeStructureUnavailableAction(issues: allIssues))")
+            if let action = codeStructureUnavailableAction(issues: allIssues) {
+                out.append("- \(action)")
+            }
             if dto.worktreeScope != nil {
                 out.append("- Scope: session-bound worktree. Displayed paths use logical/canonical roots; codemap scans use the bound checkout.")
             }
@@ -3217,12 +3245,17 @@ extension ToolOutputFormatter {
         if issues.contains(where: { $0.code == "git_root_unavailable" }) {
             return "requested root is unavailable"
         }
-        return issues.first.map { codeStructureSentenceFragment($0.message) } ?? "code structure is unavailable"
+        // A non-retryable issue's message is the whole refusal, so it keeps its final period.
+        return issues.first.map {
+            $0.retryable
+                ? codeStructureSentenceFragment($0.message)
+                : $0.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        } ?? "code structure is unavailable"
     }
 
     private static func codeStructureUnavailableAction(
         issues: [ToolResultDTOs.CodeStructureReplyDTO.IssueDTO]
-    ) -> String {
+    ) -> String? {
         if issues.contains(where: { $0.code == "path_not_found" }) {
             return "Check spelling with get_file_tree, then retry root-relative or root-prefixed."
         }
@@ -3232,7 +3265,8 @@ extension ToolOutputFormatter {
         if issues.contains(where: { $0.code == "git_root_unavailable" }) {
             return "Resolve the reported root issue, then retry."
         }
-        return "Resolve the reported issue, then retry."
+        // A non-retryable issue's message already says what to do; retrying would contradict it.
+        return issues.first?.retryable == false ? nil : "Resolve the reported issue, then retry."
     }
 
     private static func codeStructureSizeAction(size: WorkspaceCodemapGraphOutputSize) -> String {
