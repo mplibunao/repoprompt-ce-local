@@ -87,7 +87,7 @@ final class MCPUnavailableWorktreeDiagnosticTests: XCTestCase {
                 "every label and the worktree ID are paths",
                 "Feature tab",
                 Self.binding(worktreeName: nil, branch: nil, worktreeID: Self.worktreeRootPath),
-                "Tab 'Feature tab' (window 7) can't be used: its Agent Mode worktree \(missing)"
+                "\(tab) \(missing)"
             ),
             (
                 "control characters, quotes, and backslashes",
