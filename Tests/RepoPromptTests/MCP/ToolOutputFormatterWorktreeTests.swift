@@ -372,38 +372,46 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
     }
 
     func testCodeStructureRefusalShowsTheRetryLineOnlyForRetryableIssues() throws {
-        func formatted(code: String, retryable: Bool, retryAfter: Int?, message: String) throws -> String {
-            let issue = ToolResultDTOs.CodeStructureReplyDTO.IssueDTO(
+        func issue(_ code: String, retryable: Bool, message: String) -> ToolResultDTOs.CodeStructureReplyDTO.IssueDTO {
+            .init(
                 code: code,
                 phase: "workspace_authority",
                 path: nil,
                 retryable: retryable,
-                retryAfterMilliseconds: retryAfter,
+                retryAfterMilliseconds: retryable ? 1000 : nil,
                 attempted: nil,
                 limit: nil,
                 message: message
             )
+        }
+        func formatted(_ issues: [ToolResultDTOs.CodeStructureReplyDTO.IssueDTO]) throws -> String {
             let dto = ToolResultDTOs.CodeStructureReplyDTO(
                 status: .unavailable,
                 size: .medium,
                 roots: [],
                 files: [],
                 summary: .init(seeds: 0, nodes: 0, edges: 0, files: 0, tokens: 0),
-                issues: [issue],
-                retry: .init(retryable: retryable, retryAfterMilliseconds: retryAfter),
+                issues: issues,
+                retry: .init(retryable: issues.contains(where: \.retryable), retryAfterMilliseconds: nil),
                 worktreeScope: nil
             )
             return try Self.onlyText(ToolOutputFormatter.formatCodeStructure(value: Self.value(dto)))
         }
 
         let refusal = "Tab 'Stale' has an Agent Mode session bound to worktree 'gone', but that worktree's folder is missing. Retrying won't help."
+        let transient = issue("workspace_authority_unavailable", retryable: true, message: "Workspace authority unavailable.")
         XCTAssertEqual(
-            try formatted(code: "worktree_scope_unavailable", retryable: false, retryAfter: nil, message: refusal),
+            try formatted([issue("worktree_scope_unavailable", retryable: false, message: refusal)]),
             "## Code Structure ❌ unavailable — \(refusal)"
         )
         XCTAssertEqual(
-            try formatted(code: "workspace_authority_unavailable", retryable: true, retryAfter: 1000, message: "Workspace authority unavailable."),
+            try formatted([transient]),
             "## Code Structure ❌ unavailable — Workspace authority unavailable\n- Resolve the reported issue, then retry."
+        )
+        // The reply's retry hint covers every issue, so a retryable later issue keeps the retry line.
+        XCTAssertEqual(
+            try formatted([issue("signature_unavailable", retryable: false, message: "Signatures could not be rendered."), transient]),
+            "## Code Structure ❌ unavailable — Signatures could not be rendered\n- Resolve the reported issue, then retry."
         )
     }
 
