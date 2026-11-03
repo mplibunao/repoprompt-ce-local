@@ -7334,12 +7334,6 @@ extension PromptViewModel {
         }
     }
 
-    /// Resolve, build and place the clipboard content.
-    /// The `openApplyXMLTab` parameter is retained for existing Agent call sites but is ignored now that the Apply XML UI is removed.
-    func performCopyUsingCurrentPreset(openApplyXMLTab: Bool = true) {
-        performCopy(using: currentCopyPreset(), openApplyXMLTab: openApplyXMLTab)
-    }
-
     /// Applies the selected chat preset's mode to the current plan/chat/edit state.
     func applyChatPresetMode(using presetOverride: ChatPreset? = nil) {
         let chatPreset = presetOverride ?? currentChatPreset()

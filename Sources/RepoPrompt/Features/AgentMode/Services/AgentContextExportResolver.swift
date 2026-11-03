@@ -390,17 +390,6 @@ enum AgentContextExportResolver {
         )
     }
 
-    static func explicitSelectionFileCount(_ selection: StoredSelection) -> Int {
-        selectionSummary(for: selection).totalExplicitFileCount
-    }
-
-    static func displayFileCount(
-        resolvedModel _: AgentContextExportModel?,
-        sourceSelection: StoredSelection
-    ) -> Int {
-        selectionSummary(for: sourceSelection).totalExplicitFileCount
-    }
-
     private static func selectionNeedsResolution(_ selection: StoredSelection, codeMapUsage: CodeMapUsage) -> Bool {
         if !selection.selectedPaths.isEmpty {
             return true

@@ -22,7 +22,6 @@ class TokenCountingViewModel: ObservableObject {
     @Published private(set) var codeMapContent: String = ""
     @Published private(set) var codemapPresentation: WorkspaceCodemapUIPresentationSnapshot = .empty
     @Published private(set) var scannedLanguages: Set<LanguageType> = []
-    @Published private(set) var copyContextTotalTokens: Int = 0
     @Published private(set) var copyContextTokenCountString: String = "0.00k"
 
     /// Combined property preserving legacy behaviour
@@ -856,7 +855,6 @@ class TokenCountingViewModel: ObservableObject {
         lastPublishedCodeMapUsage = accountingCodeMapUsage
         lastPublishedFilePathDisplay = settings.filePathDisplayOption
         lastPublishedEntryMetricsSnapshot = accountingResult.entryMetricsSnapshot
-        copyContextTotalTokens = copyTotal
         copyContextTokenCountString = copyTokenString
         didComputeBaseline = true
         #if DEBUG
@@ -981,7 +979,6 @@ class TokenCountingViewModel: ObservableObject {
         let copyTokenString = String(format: "%.2fk", Double(totalWithGit) / 1000.0)
         totalTokenCount = totalWithGit
         tokenCount = copyTokenString
-        copyContextTotalTokens = totalWithGit
         copyContextTokenCountString = copyTokenString
 
         lastPromptTokens = promptTokens
