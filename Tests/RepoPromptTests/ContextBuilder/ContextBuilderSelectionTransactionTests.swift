@@ -23,6 +23,78 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
         try await assertNestedSetReusesFrozenReviewContext(name: "unavailable-review", initialResolution: .unavailable)
     }
 
+    /// Discovery `git` calls that name no repository follow the run's frozen review target when
+    /// the run's tab snapshot has one, with or without an Agent session. A run started from the
+    /// Context Builder panel has none: without an Agent session it keeps the first-root default,
+    /// and in an Agent session's tab it is refused.
+    func testImplicitGitTargetFollowsFrozenTargetAndKeepsPanelRunDefault() {
+        let frozen = ContextBuilderReviewTargetResolution.unavailable(.workspaceOrTabMismatch)
+        let rows: [(label: String, sessionID: UUID?, frozen: ContextBuilderReviewTargetResolution?, expected: ContextBuilderReviewTargetResolution?)] = [
+            ("context_builder run in a tab without an Agent session", nil, frozen, frozen),
+            ("panel run in a tab without an Agent session", nil, nil, nil),
+            ("panel run in an Agent session's tab", UUID(), nil, .unavailable(.missingFrozenTarget))
+        ]
+        for row in rows {
+            let snapshot = MCPServerViewModel.TabContextSnapshot(
+                tabID: UUID(),
+                windowID: 1,
+                workspaceID: UUID(),
+                promptText: "",
+                selection: StoredSelection(),
+                selectedMetaPromptIDs: [],
+                tabName: "Discovery",
+                runID: UUID(),
+                activeAgentSessionID: row.sessionID,
+                contextBuilderReviewTargetResolution: row.frozen,
+                explicitlyBound: false
+            )
+            let target = MCPServerViewModel.implicitContextBuilderGitTarget(
+                for: .init(snapshot: snapshot, source: .runInstall)
+            )
+            XCTAssertEqual(target, row.expected, row.label)
+        }
+    }
+
+    /// A freeze from outside Agent Mode refuses a tab whose workspace has a root that isn't
+    /// loaded, even when the tab's Agent session binds a loaded root to a worktree. The worktree
+    /// projection checks only the bound roots, so it would otherwise cover whatever roots the
+    /// visible workspace has loaded.
+    func testOutsideBoundFreezeRefusesWorkspaceWithUnloadedRoot() async throws {
+        let fixture = try await makeSelectionFixture(name: "outside-bound-unloaded-root")
+        defer { fixture.cleanup() }
+        let worktree = FileManager.default.temporaryDirectory
+            .appendingPathComponent("outside-bound-worktree-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: worktree) }
+        let unloadedRoot = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("outside-bound-unloaded-\(UUID().uuidString)", isDirectory: true)
+
+        var context = try fixture.makeContext(selection: StoredSelection())
+        context.activeAgentSessionID = UUID()
+        context.worktreeBindingState = .hydrated([AgentSessionWorktreeBinding(
+            id: "outside-bound-binding",
+            repositoryID: "outside-bound-repository",
+            repoKey: fixture.root.path,
+            logicalRootPath: fixture.root.path,
+            worktreeID: "outside-bound-worktree",
+            worktreeRootPath: worktree.path,
+            source: "test"
+        )])
+        let workspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
+        do {
+            _ = try await ContextBuilderWorkspaceContext.resolve(
+                from: context,
+                requiresParentAgentRun: false,
+                workspaceRepoPaths: [fixture.root.path, unloadedRoot.path],
+                workspaceDirectoryPath: fixture.window.workspaceManager.workspaceDirectory(for: workspace).path,
+                store: fixture.window.promptManager.workspaceFileContextStore
+            )
+            XCTFail("The freeze accepted a workspace with a root that isn't loaded")
+        } catch let error as ContextBuilderWorkspaceContextError {
+            XCTAssertEqual(error, .unavailableWorkspaceProjection)
+        }
+    }
+
     private func assertNestedSetReusesFrozenReviewContext(
         name: String,
         initialResolution: InitialReviewResolution
@@ -46,6 +118,7 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
         let workspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
         let workspaceContext = try await ContextBuilderWorkspaceContext.resolve(
             from: parentContext,
+            requiresParentAgentRun: true,
             workspaceRepoPaths: [fixture.root.path],
             workspaceDirectoryPath: fixture.window.workspaceManager.workspaceDirectory(for: workspace).path,
             store: fixture.window.promptManager.workspaceFileContextStore
@@ -62,7 +135,11 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
             return XCTFail("Unexpected initial review-target resolution")
         }
         fixture.window.mcpServer.tabContextByConnectionID[fixture.connectionID] =
-            workspaceContext.nestedDiscoveryTabContext(runID: fixture.runID)
+            workspaceContext.nestedDiscoveryTabContext(
+                runID: fixture.runID,
+                promptText: parentContext.promptText,
+                usedAgentOutputAsPrompt: parentContext.usedAgentOutputAsPrompt
+            )
         fixture.window.mcpServer.setRequestMetadataOverrideForTesting(fixture.metadata)
 
         let legacyFreezeGate = ContextBuilderTestGate()

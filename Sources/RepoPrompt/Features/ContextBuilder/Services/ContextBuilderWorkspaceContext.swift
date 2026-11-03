@@ -1,7 +1,9 @@
 import Foundation
 
 struct ContextBuilderWorkspaceContext {
-    let parentAgentSessionID: UUID
+    /// The invoking tab's Agent session. Outside Agent Mode it is the session of the tab the call
+    /// runs in, or nil when that tab has none.
+    let parentAgentSessionID: UUID?
     let frozenTabContext: MCPServerViewModel.TabContextSnapshot
     let worktreeBindings: [AgentSessionWorktreeBinding]
     let lookupContext: WorkspaceLookupContext
@@ -15,31 +17,51 @@ struct ContextBuilderWorkspaceContext {
         frozenTabContext.tabID
     }
 
+    /// Freezes the invoking tab's lookup, review Git context, and review target for one
+    /// Context Builder call. `requiresParentAgentRun` is true for Agent Mode calls, which must
+    /// come from an Agent session's run.
     static func resolve(
         from snapshot: MCPServerViewModel.TabContextSnapshot,
+        requiresParentAgentRun: Bool,
         workspaceRepoPaths: [String],
         workspaceDirectoryPath: String,
         store: WorkspaceFileContextStore,
         reviewDiagnosticSink: ContextBuilderReviewDiagnosticSink? = nil
     ) async throws -> ContextBuilderWorkspaceContext {
-        guard let parentAgentSessionID = snapshot.activeAgentSessionID else {
-            throw ContextBuilderWorkspaceContextError.missingParentAgentSession
-        }
-        guard snapshot.runID != nil else {
-            throw ContextBuilderWorkspaceContextError.missingParentAgentRun
+        let parentAgentSessionID = snapshot.activeAgentSessionID
+        if requiresParentAgentRun {
+            guard parentAgentSessionID != nil else {
+                throw ContextBuilderWorkspaceContextError.missingParentAgentSession
+            }
+            guard snapshot.runID != nil else {
+                throw ContextBuilderWorkspaceContextError.missingParentAgentRun
+            }
         }
         guard let workspaceID = snapshot.workspaceID else {
             throw ContextBuilderWorkspaceContextError.missingWorkspace
         }
-        guard case let .hydrated(bindings) = snapshot.worktreeBindingState else {
+        let bindings: [AgentSessionWorktreeBinding]
+        switch (parentAgentSessionID, snapshot.worktreeBindingState) {
+        case let (.some, .hydrated(sessionBindings)):
+            bindings = sessionBindings
+        case (nil, .notApplicable):
+            bindings = []
+        case let (nil, .hydrated(unownedBindings)) where unownedBindings.isEmpty:
+            bindings = []
+        default:
+            // Bindings with no session have no projection owner, and an unhydrated or unavailable
+            // state has no known bindings. Either would read the main checkout.
             throw ContextBuilderWorkspaceContextError.unavailableWorktreeBindingState
         }
 
-        let lookupContext: WorkspaceLookupContext
-        if bindings.isEmpty {
-            let requestedRootPaths = Set(workspaceRepoPaths.compactMap {
-                AgentWorktreeRuntimeWorkspaceResolver.standardizedWorkspacePath($0)
-            })
+        let requestedRootPaths = Set(workspaceRepoPaths.compactMap {
+            AgentWorktreeRuntimeWorkspaceResolver.standardizedWorkspacePath($0)
+        })
+        // The worktree projection below checks only the bound roots against the loaded roots.
+        // A call from outside Agent Mode can come from a tab in a workspace that isn't the visible
+        // one, so every root of the invoking workspace must be loaded. An Agent Mode run belongs
+        // to the visible workspace, and a bound run needs only its bound roots.
+        if bindings.isEmpty || !requiresParentAgentRun {
             let primaryRoots = await store.roots().filter { $0.kind == .primaryWorkspace }
             let loadedPrimaryRootPaths = Set(primaryRoots.map(\.standardizedFullPath))
             guard !requestedRootPaths.isEmpty,
@@ -47,6 +69,10 @@ struct ContextBuilderWorkspaceContext {
             else {
                 throw ContextBuilderWorkspaceContextError.unavailableWorkspaceProjection
             }
+        }
+
+        let lookupContext: WorkspaceLookupContext
+        if bindings.isEmpty {
             lookupContext = WorkspaceLookupContext(
                 rootScope: .sessionBoundWorkspace(
                     canonicalRootPaths: requestedRootPaths,
@@ -97,25 +123,13 @@ struct ContextBuilderWorkspaceContext {
             store: store
         )
 
-        let providerWorkspacePath: String
-        if let target = reviewTargetResolution.availableTarget {
-            providerWorkspacePath = target.primaryCheckout.checkoutRootPath
-        } else if !bindings.isEmpty {
-            let fallback = workspaceRepoPaths.first ?? workspaceDirectoryPath
-            guard let projected = try AgentWorktreeRuntimeWorkspaceResolver.effectiveWorkspacePath(
-                bindings: bindings,
-                fallbackWorkspacePath: fallback
-            ) else {
-                throw ContextBuilderWorkspaceContextError.missingWorkspaceRoot
-            }
-            providerWorkspacePath = projected
-        } else if workspaceRepoPaths.count == 1, let onlyRoot = workspaceRepoPaths.first {
-            providerWorkspacePath = onlyRoot
-        } else {
-            // A neutral CWD is not Git authority. Nested Agent Context Builder Git calls use the
-            // frozen selected-repository target carried in the run-scoped tab snapshot.
-            providerWorkspacePath = workspaceDirectoryPath
-        }
+        let providerWorkspacePath = try providerWorkspacePath(
+            availableTarget: reviewTargetResolution.availableTarget,
+            bindings: bindings,
+            workspaceRepoPaths: workspaceRepoPaths,
+            workspaceDirectoryPath: workspaceDirectoryPath,
+            requiresParentAgentRun: requiresParentAgentRun
+        )
 
         let context = ContextBuilderWorkspaceContext(
             parentAgentSessionID: parentAgentSessionID,
@@ -130,6 +144,52 @@ struct ContextBuilderWorkspaceContext {
         )
         try context.validateAvailability()
         return context
+    }
+
+    /// The discovery agent's working directory. It is not Git authority: discovery `git` calls
+    /// use the frozen review target carried in the run-scoped tab snapshot.
+    private static func providerWorkspacePath(
+        availableTarget: ContextBuilderReviewTarget?,
+        bindings: [AgentSessionWorktreeBinding],
+        workspaceRepoPaths: [String],
+        workspaceDirectoryPath: String,
+        requiresParentAgentRun: Bool
+    ) throws -> String {
+        if let availableTarget {
+            return availableTarget.primaryCheckout.checkoutRootPath
+        }
+        if !bindings.isEmpty {
+            let primaryRoot = workspaceRepoPaths.first
+            if requiresParentAgentRun {
+                guard let projected = try AgentWorktreeRuntimeWorkspaceResolver.effectiveWorkspacePath(
+                    bindings: bindings,
+                    fallbackWorkspacePath: primaryRoot ?? workspaceDirectoryPath
+                ) else {
+                    throw ContextBuilderWorkspaceContextError.missingWorkspaceRoot
+                }
+                return projected
+            }
+            // Outside Agent Mode no agent shell fixes the start folder, and a lone binding can be
+            // for a secondary root. Its worktree holds the bound files, where the primary-root
+            // rule would start discovery in an unrelated root.
+            if bindings.count == 1 {
+                return bindings[0].worktreeRootPath
+            }
+            if AgentWorktreeRuntimeWorkspaceResolver.primaryExecutionBinding(
+                in: bindings,
+                fallbackWorkspacePath: primaryRoot
+            ) != nil, let projected = try AgentWorktreeRuntimeWorkspaceResolver.effectiveWorkspacePath(
+                bindings: bindings,
+                fallbackWorkspacePath: primaryRoot
+            ) {
+                return projected
+            }
+            return workspaceDirectoryPath
+        }
+        if workspaceRepoPaths.count == 1, let onlyRoot = workspaceRepoPaths.first {
+            return onlyRoot
+        }
+        return workspaceDirectoryPath
     }
 
     func validateAvailability() throws {
@@ -176,14 +236,21 @@ struct ContextBuilderWorkspaceContext {
         )
     }
 
-    func nestedDiscoveryTabContext(runID: UUID) -> MCPServerViewModel.TabContextSnapshot {
+    /// The discovery run's tab snapshot. Lookup, review target, selection, and provenance come
+    /// from this frozen context. The prompt comes from the admitted call, which refreshes it after
+    /// the freeze; a refreshed prompt doesn't re-elect the review target.
+    func nestedDiscoveryTabContext(
+        runID: UUID,
+        promptText: String,
+        usedAgentOutputAsPrompt: Bool
+    ) -> MCPServerViewModel.TabContextSnapshot {
         let source = frozenTabContext
         return MCPServerViewModel.TabContextSnapshot(
             tabID: source.tabID,
             windowID: source.windowID,
             workspaceID: source.workspaceID,
-            promptText: source.promptText,
-            usedAgentOutputAsPrompt: source.usedAgentOutputAsPrompt,
+            promptText: promptText,
+            usedAgentOutputAsPrompt: usedAgentOutputAsPrompt,
             selection: source.selection,
             selectionRevision: source.selectionRevision,
             selectedMetaPromptIDs: source.selectedMetaPromptIDs,
@@ -191,7 +258,7 @@ struct ContextBuilderWorkspaceContext {
             tabName: source.tabName,
             runID: runID,
             activeAgentSessionID: parentAgentSessionID,
-            worktreeBindingState: .hydrated(worktreeBindings),
+            worktreeBindings: worktreeBindings,
             frozenLookupContext: lookupContext,
             contextBuilderFrozenReviewAuthority: frozenReviewAuthority,
             contextBuilderReviewTargetResolution: reviewTargetResolution,
@@ -220,15 +287,15 @@ enum ContextBuilderWorkspaceContextError: LocalizedError, Equatable {
         case .missingWorkspace:
             "context_builder could not freeze the invoking workspace identity."
         case .missingWorkspaceRoot:
-            "context_builder requires a project workspace root for the invoking Agent Mode run."
+            "context_builder requires a project workspace root for the invoking tab."
         case .unavailableWorkspaceProjection:
-            "The invoking Agent Mode workspace roots could not be loaded. Context Builder stopped rather than using the visible workspace."
+            "The invoking tab's workspace roots could not be loaded. Context Builder stopped rather than using the visible workspace."
         case .unavailableWorktreeBindingState:
-            "The invoking Agent Mode worktree bindings are not hydrated or are unavailable. Context Builder stopped rather than falling back to the canonical checkout."
+            "The invoking tab's worktree bindings are not hydrated or are unavailable. Context Builder stopped rather than falling back to the canonical checkout."
         case .unavailableWorktreeProjection:
-            "The invoking Agent Mode worktree bindings could not be loaded. Context Builder stopped rather than falling back to the canonical checkout."
+            "The invoking tab's worktree bindings could not be loaded. Context Builder stopped rather than falling back to the canonical checkout."
         case .unavailableProviderWorkspace:
-            "The invoking Agent Mode workspace is unavailable. Context Builder stopped rather than falling back to another checkout."
+            "The invoking tab's workspace is unavailable. Context Builder stopped rather than falling back to another checkout."
         }
     }
 }

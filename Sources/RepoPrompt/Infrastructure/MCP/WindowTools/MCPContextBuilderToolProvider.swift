@@ -391,26 +391,18 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
         guard let workspace = targetWindow.workspaceManager.workspaces.first(where: { $0.id == resolvedIdentity.workspaceID }) else {
             throw MCPError.invalidParams("The resolved Context Builder workspace is no longer available.")
         }
-        let workspaceContext = tabResolution.workspaceContext
-        let lookupContext = workspaceContext?.lookupContext ?? tabResolution.lookupContext
-        if workspaceContext == nil {
-            let scopedRoots = await dependencies.context.promptVM.workspaceFileContextStore.rootRefs(
-                scope: lookupContext.rootScope
-            )
-            let scopedPaths = Set(scopedRoots.map(\.standardizedFullPath))
-            let targetPaths = Set(workspace.repoPaths.map {
-                StandardizedPath.absolute(lookupContext.translateInputPath($0))
-            })
-            guard !targetPaths.isEmpty, targetPaths.isSubset(of: scopedPaths) else {
-                throw MCPError.invalidParams(
-                    "The resolved Context Builder workspace projection is unavailable. Reload the target workspace before retrying."
-                )
-            }
+        guard let workspaceContext = tabResolution.workspaceContext else {
+            throw MCPError.internalError("Context Builder resolved its tab without a frozen workspace context")
         }
+        let lookupContext = workspaceContext.lookupContext
+        // Agent Mode reviews authorize the final selection against the frozen review target and
+        // diff only the authorized checkouts. Other callers' reviews diff each selected file in
+        // its own checkout, so a review can follow files selected from any repository.
+        let authorizesFinalReviewSelection = tabResolution.agentModeRunID != nil
         guard let initialResultTab = targetWindow.workspaceManager.composeTab(for: resolvedIdentity) else {
             throw MCPError.internalError("Resolved Context Builder tab is unavailable in its workspace")
         }
-        try await workspaceContext?.validateReviewTargetAvailability(
+        try await workspaceContext.validateReviewTargetAvailability(
             store: dependencies.context.promptVM.workspaceFileContextStore
         )
         let contextBuilderVM = targetWindow.contextBuilderAgentViewModel
@@ -695,7 +687,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                         case let .failed(message): "failed: \(message)"
                         }
 
-                        try workspaceContext?.validateAvailability()
+                        try workspaceContext.validateAvailability()
                         let selection = resultTab.selection
                         let reply = try await dependencies.execution.buildTabSelectionReply(
                             selection,
@@ -755,7 +747,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                     resultPrompt = prompt
                     try Task.checkCancellation()
                     let finalReviewAuthorization: ContextBuilderFinalReviewAuthorization?
-                    if mode == .review, let workspaceContext {
+                    if mode == .review, authorizesFinalReviewSelection {
                         guard case .completed = snapshot.terminalDisposition,
                               let committedTab = snapshot.committedTab
                         else {
@@ -835,7 +827,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                         finalReviewAuthorization = nil
                     }
 
-                    if mode == .review, workspaceContext != nil, finalReviewAuthorization == nil {
+                    if mode == .review, authorizesFinalReviewSelection, finalReviewAuthorization == nil {
                         throw MCPError.internalError(
                             "Context Builder review final authorization was not retained"
                         )

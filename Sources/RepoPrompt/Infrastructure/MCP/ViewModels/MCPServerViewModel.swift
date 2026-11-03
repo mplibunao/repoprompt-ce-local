@@ -774,6 +774,7 @@ final class MCPServerViewModel: ObservableObject {
             ToolResultDTOs.SelectionReply
         ) -> Void)?
         private var contextBuilderBeforeLegacySelectionReviewFreezeForTesting: (@MainActor @Sendable () async -> Void)?
+        private var contextBuilderAfterTabAuthorityFreezeForTesting: (@MainActor @Sendable () async -> Void)?
         private var beforeAgentRunWaiterWakeForTesting: (@MainActor @Sendable (UUID, UUID) async -> Void)?
 
         func setOracleChatSendOverrideForTesting(_ override: MCPOracleToolService.SendChat?) {
@@ -842,6 +843,14 @@ final class MCPServerViewModel: ObservableObject {
         ) {
             contextBuilderBeforeFinalReviewAuthorizationForTesting = before
             contextBuilderDidFinalizeReviewForTesting = after
+        }
+
+        /// Runs after a `context_builder` call outside Agent Mode has frozen its tab's authority and
+        /// before the tab's source is checked again.
+        func setContextBuilderAfterTabAuthorityFreezeForTesting(
+            _ hook: (@MainActor @Sendable () async -> Void)?
+        ) {
+            contextBuilderAfterTabAuthorityFreezeForTesting = hook
         }
 
         func setContextBuilderSelectionReplyObserverForTesting(
@@ -4604,11 +4613,7 @@ final class MCPServerViewModel: ObservableObject {
         return snapshots.first(where: { $0.bindingKind == .tabContext })
     }
 
-    private func resolveContextBuilderTab(
-        args: [String: Value],
-        targetWindow: WindowState,
-        connectionID: UUID?
-    ) async throws -> (
+    private typealias FrozenContextBuilderTab = (
         identity: WorkspaceSelectionIdentity,
         nestedTabContext: TabContextSnapshot,
         agentModeSessionID: UUID?,
@@ -4617,7 +4622,13 @@ final class MCPServerViewModel: ObservableObject {
         lookupContext: WorkspaceLookupContext,
         workspaceContext: ContextBuilderWorkspaceContext?,
         reviewGitContext: FrozenPromptGitReviewContext
-    ) {
+    )
+
+    private func resolveContextBuilderTab(
+        args: [String: Value],
+        targetWindow: WindowState,
+        connectionID: UUID?
+    ) async throws -> FrozenContextBuilderTab {
         let purpose: MCPRunPurpose = if let connectionID {
             await ServerNetworkManager.shared.runPurpose(for: connectionID)
         } else {
@@ -4647,6 +4658,9 @@ final class MCPServerViewModel: ObservableObject {
             await service.currentRequestClientName()
         }
 
+        // Stage 1 chooses the invoking tab. Only here may an outside caller with no hint and no
+        // binding fall back to a fresh tab.
+        let invokingTab: (context: TabContextSnapshot, bindCaller: Bool)?
         do {
             let resolution = try targetWindow.mcpServer.resolveTabContext(
                 connectionID: connectionID,
@@ -4665,111 +4679,50 @@ final class MCPServerViewModel: ObservableObject {
             guard composeTabExists(context.tabID, in: targetWindow) else {
                 throw MCPError.invalidParams("Tab context '\(context.tabID.uuidString)' is not available in window \(targetWindow.windowID).")
             }
-            let shouldBindCaller = source == .explicitHint && purpose != .agentModeRun && connectionID != nil
-            let workspaceContext: ContextBuilderWorkspaceContext?
-            if purpose == .agentModeRun {
-                guard let workspaceID = context.workspaceID,
-                      let workspace = targetWindow.workspaceManager.workspaces.first(where: { $0.id == workspaceID })
-                else {
-                    throw MCPError.invalidParams("context_builder could not resolve the invoking Agent Mode workspace.")
-                }
-                do {
-                    workspaceContext = try await ContextBuilderWorkspaceContext.resolve(
-                        from: context,
-                        workspaceRepoPaths: workspace.repoPaths,
-                        workspaceDirectoryPath: targetWindow.workspaceManager.workspaceDirectory(for: workspace).path,
-                        store: targetWindow.promptManager.workspaceFileContextStore
-                    )
-                } catch {
-                    throw MCPError.invalidParams(error.localizedDescription)
-                }
-            } else {
-                workspaceContext = nil
-            }
-
-            let lookupContext: WorkspaceLookupContext
-            if let workspaceContext {
-                lookupContext = workspaceContext.lookupContext
-            } else if let workspaceID = context.workspaceID,
-                      workspaceID != targetWindow.workspaceManager.activeWorkspaceID
-            {
-                guard let workspace = targetWindow.workspaceManager.workspaces.first(where: { $0.id == workspaceID }) else {
-                    throw MCPError.invalidParams("The inactive Context Builder workspace is no longer available.")
-                }
-                let canonicalPaths = Set(workspace.repoPaths.map(StandardizedPath.absolute))
-                let loadedPaths = await Set(
-                    targetWindow.promptManager.workspaceFileContextStore.rootRefs(scope: .allLoaded)
-                        .map(\.standardizedFullPath)
-                )
-                guard !canonicalPaths.isEmpty, canonicalPaths.isSubset(of: loadedPaths) else {
-                    throw MCPError.invalidParams(
-                        "The resolved Context Builder workspace projection is unavailable. Reload the target workspace before retrying."
-                    )
-                }
-                lookupContext = WorkspaceLookupContext(
-                    rootScope: .sessionBoundWorkspace(
-                        canonicalRootPaths: canonicalPaths,
-                        physicalRootPaths: []
-                    ),
-                    bindingProjection: nil
-                )
-            } else {
-                lookupContext = try await targetWindow.mcpServer.resolveFileToolLookupContext(
-                    tabID: context.tabID,
-                    workspaceID: context.workspaceID
-                )
-            }
-            let reviewGitContext = if let workspaceContext {
-                workspaceContext.reviewGitContext
-            } else {
-                await targetWindow.promptManager.freezePromptGitReviewContext(
-                    workspaceID: context.workspaceID,
-                    tabID: context.tabID,
-                    sessionID: context.activeAgentSessionID,
-                    bindings: context.worktreeBindings,
-                    base: "HEAD"
-                )
-            }
-            let agentModeSessionID = purpose == .agentModeRun ? context.activeAgentSessionID : nil
-            let agentModeRunID = purpose == .agentModeRun ? context.runID : nil
-            guard let workspaceID = context.workspaceID else {
-                throw MCPError.invalidParams("context_builder resolved a tab without workspace authority.")
-            }
-            var nestedTabContext = context
-            nestedTabContext.frozenLookupContext = lookupContext
-            return (
-                WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: context.tabID),
-                nestedTabContext,
-                agentModeSessionID,
-                agentModeRunID,
-                shouldBindCaller,
-                lookupContext,
-                workspaceContext,
-                reviewGitContext
+            invokingTab = (
+                context,
+                source == .explicitHint && purpose != .agentModeRun && connectionID != nil
             )
         } catch {
             if explicitHint != nil || existingBinding != nil || purpose == .agentModeRun {
                 throw error
             }
+            invokingTab = nil
         }
 
-        // Context Builder fresh-tab fallback: non-Agent MCP calls with no explicit,
-        // bound, or exact run-scoped invoking tab context get an isolated background tab.
+        let context: TabContextSnapshot
+        let bindCaller: Bool
+        if let invokingTab {
+            context = invokingTab.context
+            bindCaller = invokingTab.bindCaller
+        } else {
+            context = try await makeFreshContextBuilderTabContext(in: targetWindow)
+            bindCaller = true
+        }
+
+        // Stage 2 freezes the chosen tab's authority. Its failures refuse the call; they never
+        // create another tab.
+        return try await freezeContextBuilderTabAuthority(
+            context,
+            purpose: purpose,
+            bindCaller: bindCaller,
+            targetWindow: targetWindow
+        )
+    }
+
+    /// Context Builder fresh-tab fallback: an outside MCP call with no explicit, bound, or exact
+    /// run-scoped invoking tab context gets an isolated background tab in the active workspace.
+    private func makeFreshContextBuilderTabContext(in targetWindow: WindowState) async throws -> TabContextSnapshot {
         guard let createdTab = await targetWindow.promptManager.createBackgroundComposeTab(
             strategy: .blank,
             name: nil
         ) else {
             throw MCPError.internalError("Failed to create compose tab.")
         }
-        let reviewGitContext = await targetWindow.promptManager.freezePromptGitReviewContext(
-            workspaceID: targetWindow.workspaceManager.activeWorkspace?.id,
-            tabID: createdTab.id,
-            base: "HEAD"
-        )
         guard let activeWorkspace = targetWindow.workspaceManager.activeWorkspace else {
             throw MCPError.invalidParams("No active workspace is available for a fresh Context Builder tab.")
         }
-        var nestedTabContext = TabContextSnapshot(
+        return TabContextSnapshot(
             tabID: createdTab.id,
             windowID: targetWindow.windowID,
             workspaceID: activeWorkspace.id,
@@ -4782,16 +4735,77 @@ final class MCPServerViewModel: ObservableObject {
             activeAgentSessionID: createdTab.activeAgentSessionID,
             explicitlyBound: true
         )
-        nestedTabContext.frozenLookupContext = .visibleWorkspace
+    }
+
+    /// Freezes the lookup, review Git context, and review target of the tab a `context_builder`
+    /// call runs in. Agent Mode identifiers stay nil outside Agent Mode.
+    private func freezeContextBuilderTabAuthority(
+        _ resolvedContext: TabContextSnapshot,
+        purpose: MCPRunPurpose,
+        bindCaller: Bool,
+        targetWindow: WindowState
+    ) async throws -> FrozenContextBuilderTab {
+        let isAgentModeRun = purpose == .agentModeRun
+        var context = resolvedContext
+        if !isAgentModeRun {
+            // A snapshot of a tab with an Agent session starts with unhydrated worktree bindings.
+            // Hydration fails when a newer session state supersedes its result.
+            guard await targetWindow.mcpServer.hydrateFileToolLookupSnapshotIfNeeded(
+                &context,
+                connectionID: nil
+            ) else {
+                throw FileToolAuthorityFailure.superseded
+            }
+        }
+        guard let workspaceID = context.workspaceID else {
+            throw MCPError.invalidParams("context_builder resolved a tab without workspace authority.")
+        }
+        guard let workspace = targetWindow.workspaceManager.workspaces.first(where: { $0.id == workspaceID }) else {
+            throw MCPError.invalidParams("context_builder could not resolve the invoking tab's workspace.")
+        }
+        let workspaceContext: ContextBuilderWorkspaceContext
+        do {
+            workspaceContext = try await ContextBuilderWorkspaceContext.resolve(
+                from: context,
+                requiresParentAgentRun: isAgentModeRun,
+                workspaceRepoPaths: workspace.repoPaths,
+                workspaceDirectoryPath: targetWindow.workspaceManager.workspaceDirectory(for: workspace).path,
+                store: targetWindow.promptManager.workspaceFileContextStore
+            )
+        } catch let error as CancellationError {
+            throw error
+        } catch {
+            throw MCPError.invalidParams(error.localizedDescription)
+        }
+        if !isAgentModeRun {
+            #if DEBUG
+                await targetWindow.mcpServer.contextBuilderAfterTabAuthorityFreezeForTesting?()
+            #endif
+            // The freeze suspends, and meanwhile the tab can gain or lose an Agent session or its
+            // worktree bindings can change. A context frozen from the old source would read the
+            // old checkout.
+            let frozenSource = AgentWorkspaceLookupContextSource(
+                activeAgentSessionID: context.activeAgentSessionID,
+                worktreeBindingState: context.worktreeBindingState
+            )
+            guard targetWindow.mcpServer.prospectiveFileToolLookupSourceIsCurrent(
+                tabID: context.tabID,
+                workspaceID: workspaceID,
+                expectedSourceIdentity: frozenSource.authorityIdentity
+            ) else {
+                throw FileToolAuthorityFailure.superseded
+            }
+        }
+        context.frozenLookupContext = workspaceContext.lookupContext
         return (
-            WorkspaceSelectionIdentity(workspaceID: activeWorkspace.id, tabID: createdTab.id),
-            nestedTabContext,
-            nil,
-            nil,
-            true,
-            .visibleWorkspace,
-            nil,
-            reviewGitContext
+            WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: context.tabID),
+            context,
+            isAgentModeRun ? context.activeAgentSessionID : nil,
+            isAgentModeRun ? context.runID : nil,
+            bindCaller,
+            workspaceContext.lookupContext,
+            workspaceContext,
+            workspaceContext.reviewGitContext
         )
     }
 
