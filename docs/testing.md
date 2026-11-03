@@ -429,7 +429,7 @@ Send a follow-up on a returned chat with the `chat_id` its result names:
 
 ```bash
 rpce-cli-debug --context-id <A_CONTEXT_ID> --raw-json \
-    -e 'call ask_oracle {"message":"<follow-up question>","chat_id":"<CHAT_ID>","new_chat":false}'
+    -e 'call oracle_send {"chat_id":"<CHAT_ID>","message":"<follow-up question>"}'
 ```
 
 | Row | Exercise | Required result |
