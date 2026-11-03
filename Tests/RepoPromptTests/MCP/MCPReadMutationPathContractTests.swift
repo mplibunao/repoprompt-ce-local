@@ -1147,6 +1147,7 @@ final class MCPReadMutationPathContractTests: XCTestCase {
                         "A refused mutation recreated the worktree path"
                     )
                     await cleanup()
+                    try await fixture.assertCleanedUp()
                 } catch {
                     await cleanup()
                     throw error

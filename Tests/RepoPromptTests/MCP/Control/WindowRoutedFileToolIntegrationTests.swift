@@ -282,6 +282,7 @@ import XCTest
                         XCTAssertEqual(failure, .unavailableWorktree(expected))
                     }
                     await cleanup()
+                    try await fixture.assertCleanedUp()
                 } catch {
                     await cleanup()
                     throw error
