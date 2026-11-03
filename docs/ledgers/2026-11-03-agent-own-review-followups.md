@@ -8,7 +8,7 @@ Make a child Agent session's `review`-mode Oracle follow-ups on its own Context 
 |------|---------|---------------|---------|
 | 1. Own review ends the run's delegated review context, with tests | done | pair · Orchestrate 1/1: own review ends delegated packaging; engineer · Review gate: own review ends delegated packaging; engineer · Refactor gate: own review ends delegated packaging | `fix(mcp): send an agent's own files on its review follow-ups` |
 | 2. Live debug-app run and smoke | done | pair · Orchestrate 2/3: own review follow-ups live debug-app run | |
-| 3. Contribution gates and pull request | pending | | |
+| 3. Contribution gates and pull request | done | orchestrator | `docs(ledgers): add the run ledger for agent review follow-ups`; `docs(ledgers): record the pull request gates for agent review follow-ups` |
 
 ## Run decisions
 
@@ -42,6 +42,11 @@ Make a child Agent session's `review`-mode Oracle follow-ups on its own Context 
 - Decision: the scenario ran a second time with a Claude Code child, because the Codex child's sandbox refused the commit in the marker step (`Operation not permitted` on the worktree's `index.lock`). Source: live-run agent's judgment.
 - Decision: the follow-up's diff is the patch the child's own review captured, not a fresh diff. The review leaves its patch file under `_git_data/` in the child's selection, and review packaging sends a selected patch instead of computing a new diff (`PromptPackagingService.resolveGitDiffResolution`). That rule predates this change. So after a round of fixes, a follow-up sees the child's current files with the first review's diff, and the marker step's fresh-diff expectation failed for that reason. The fix stays as decided, and the pull request text says what a follow-up receives. Source: orchestrator judgment; widening the fix to refresh the patch would change the decided design.
 - Not run: in-run `oracle_send`, because it isn't in an Agent Mode child's tool list.
+
+## 3. Contribution gates and pull request
+
+- Evidence: the first `pr-ready` run failed one test, `MCPWorkspaceScopedCursorModelParameterTests/testSettingsPinnedCursorEffortAndSpeedReachRoleLabelRun`, with `CancellationError()` caught at `GitViewModel.swift:495`, a few minutes after the debug app relaunched with 10 restored windows. #274 tracks that test as intermittent, and this branch doesn't touch it or the code it reaches. The rerun on the same head passed all 1,924 root tests and the other selected lanes.
+- Decision: record the occurrence as a comment on #274, as earlier runs did. Source: orchestrator judgment.
 
 ## Parked decisions
 
