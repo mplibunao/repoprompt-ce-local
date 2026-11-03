@@ -74,19 +74,42 @@ struct MCPMutationRetryableFailure: Error, Equatable {
         return .worktreeScopeHydrating()
     }
 
+    /// Refuses a mutation whose Agent session worktree scope is unavailable. A binding whose folder
+    /// is confirmed missing gets the detailed, non-retryable refusal; every other cause keeps the
+    /// generic retryable one. A usable scope returns `nil` without any extra directory check.
     @MainActor
     static func mutationScopeFailure(
         for lookupContext: WorkspaceLookupContext,
+        routedSnapshot: MCPServerViewModel.TabContextSnapshot,
         store: WorkspaceFileContextStore
     ) async -> MCPMutationRetryableFailure? {
         if lookupContext == AgentWorkspaceLookupContextResolver.failClosedLookupContext {
-            return .worktreeScopeUnavailable(missingPhysicalRootPaths: [])
+            return unavailableWorktreeFailure(
+                bindings: routedSnapshot.worktreeBindings,
+                routedSnapshot: routedSnapshot
+            ) ?? .worktreeScopeUnavailable(missingPhysicalRootPaths: [])
         }
         switch await store.rootScopeAvailability(lookupContext.rootScope) {
         case .available:
             return nil
         case let .sessionWorktreeUnavailable(missingPhysicalRootPaths):
-            return .worktreeScopeUnavailable(missingPhysicalRootPaths: missingPhysicalRootPaths)
+            let bindings = lookupContext.bindingProjection?.boundRootsForMetadata.map(\.binding)
+                ?? routedSnapshot.worktreeBindings
+            return unavailableWorktreeFailure(bindings: bindings, routedSnapshot: routedSnapshot)
+                ?? .worktreeScopeUnavailable(missingPhysicalRootPaths: missingPhysicalRootPaths)
+        }
+    }
+
+    private static func unavailableWorktreeFailure(
+        bindings: [AgentSessionWorktreeBinding],
+        routedSnapshot: MCPServerViewModel.TabContextSnapshot
+    ) -> MCPMutationRetryableFailure? {
+        MCPUnavailableWorktreeDiagnostic.classify(bindings).map { diagnostic in
+            .unavailableWorktree(diagnostic.attachingRouteContext(.init(
+                tabName: routedSnapshot.tabName,
+                contextID: routedSnapshot.tabID,
+                windowID: routedSnapshot.windowID
+            )))
         }
     }
 }

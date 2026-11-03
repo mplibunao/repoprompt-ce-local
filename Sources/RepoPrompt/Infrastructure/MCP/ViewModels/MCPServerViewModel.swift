@@ -7219,6 +7219,7 @@ final class MCPServerViewModel: ObservableObject {
         }
         if let failure = await MCPMutationRetryableFailure.mutationScopeFailure(
             for: lookupContext,
+            routedSnapshot: resolvedContext.snapshot,
             store: promptVM.workspaceFileContextStore
         ) {
             throw failure
