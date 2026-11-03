@@ -475,7 +475,7 @@ import XCTest
 
             let expected = MCPUnavailableWorktreeDiagnostic(
                 binding: binding,
-                routeContext: .init(tabName: "Context", contextID: fixture.contextID, windowID: fixture.window.windowID)
+                routeContext: .init(tabName: "Context", windowID: fixture.window.windowID)
             )
             XCTAssertEqual(stale.changed, false)
             XCTAssertEqual(stale.errorCode, "worktree_scope_unavailable")

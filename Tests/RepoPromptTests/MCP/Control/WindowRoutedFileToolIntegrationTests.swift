@@ -173,18 +173,17 @@ import XCTest
 
                     let expected = MCPUnavailableWorktreeDiagnostic(
                         binding: binding,
-                        routeContext: .init(tabName: tabName, contextID: context.tabID, windowID: context.window.windowID)
+                        routeContext: .init(tabName: tabName, windowID: context.window.windowID)
                     )
                     XCTAssertEqual(
                         expected.summary,
-                        "Tab '\(tabName)' (context_id '\(context.tabID.uuidString)', window \(context.window.windowID)) "
-                            + "has an Agent Mode session bound to worktree 'stale-worktree' (worktree_id 'stale-worktree-id') "
-                            + "for root '\(context.rootURL.lastPathComponent)', but that worktree's folder is missing "
-                            + "or is not a directory. No canonical checkout was used."
+                        "Tab '\(tabName)' (window \(context.window.windowID)) can't be used: "
+                            + "its Agent Mode worktree 'stale-worktree' is missing from disk."
                     )
-                    XCTAssertTrue(expected.recovery.hasPrefix("Retrying won't help."))
-                    XCTAssertTrue(expected.recovery.contains("{\"op\":\"bind\",\"context_id\":\"<other_tab_context_id>\"}"))
-                    XCTAssertTrue(expected.recovery.contains("{\"op\":\"list\",\"window_id\":\(context.window.windowID)}"))
+                    XCTAssertEqual(
+                        expected.recovery,
+                        "Retrying won't help. Tell the user so they can switch to another tab."
+                    )
                     XCTAssertFalse(expected.message.contains(fixture.rootURL.path), expected.message)
 
                     // Unbound leg: calls without a tab argument route to the stale active tab.
@@ -266,6 +265,13 @@ import XCTest
                     XCTAssertTrue(formattedRead.hasPrefix("## File Read ❌"), formattedRead)
                     XCTAssertTrue(formattedRead.contains(expected.message), formattedRead)
                     XCTAssertFalse(formattedRead.contains("Retryable"), formattedRead)
+
+                    // The formatted code structure prints the message whole, with no generic retry line.
+                    let formattedStructure = try await MCPWindowTestSupport.toolResultText(endpoint.callTool(
+                        name: MCPWindowToolName.getCodeStructure,
+                        arguments: ["paths": [context.fileURL.path], "_windowID": context.window.windowID]
+                    ))
+                    XCTAssertEqual(formattedStructure, "## Code Structure ❌ unavailable — \(expected.message)")
 
                     XCTAssertNil(server.tabContextByConnectionID[endpoint.connectionID])
                     XCTAssertEqual(workspaceManager.composeTab(for: tabIdentity)?.selection, selectionBefore)

@@ -1072,18 +1072,14 @@ final class MCPReadMutationPathContractTests: XCTestCase {
 
                     let expected = MCPUnavailableWorktreeDiagnostic(
                         binding: binding,
-                        routeContext: .init(tabName: tabName, contextID: context.tabID, windowID: context.window.windowID)
+                        routeContext: .init(tabName: tabName, windowID: context.window.windowID)
                     )
                     let refusalSummary = "\(expected.summary) No filesystem mutation was started."
-                    for identity in [
-                        "Tab '\(tabName)'",
-                        "context_id '\(context.tabID.uuidString)'",
-                        "window \(context.window.windowID)",
-                        "worktree 'stale-worktree'",
-                        "No filesystem mutation was started."
-                    ] {
-                        XCTAssertTrue(refusalSummary.contains(identity), "\(identity) missing from: \(refusalSummary)")
-                    }
+                    XCTAssertEqual(
+                        refusalSummary,
+                        "Tab '\(tabName)' (window \(context.window.windowID)) can't be used: "
+                            + "its Agent Mode worktree 'stale-worktree' is missing from disk. No filesystem mutation was started."
+                    )
 
                     @MainActor
                     func rawCall<Reply: Decodable>(

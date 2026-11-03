@@ -8,7 +8,6 @@ struct MCPUnavailableWorktreeDiagnostic: Equatable, Sendable {
     /// The routed tab that hit the missing worktree.
     struct RouteContext: Equatable, Sendable {
         let tabName: String
-        let contextID: UUID
         let windowID: Int
     }
 
@@ -40,62 +39,42 @@ struct MCPUnavailableWorktreeDiagnostic: Equatable, Sendable {
     func attachingRouteContext(from snapshot: MCPServerViewModel.TabContextSnapshot) -> MCPUnavailableWorktreeDiagnostic {
         MCPUnavailableWorktreeDiagnostic(
             binding: binding,
-            routeContext: RouteContext(tabName: snapshot.tabName, contextID: snapshot.tabID, windowID: snapshot.windowID)
+            routeContext: RouteContext(tabName: snapshot.tabName, windowID: snapshot.windowID)
         )
     }
 
-    /// The refusal: which tab, which worktree, and that no canonical checkout was used.
+    /// The refusal: the routed tab, when there is one, and the worktree that is missing from disk.
     var summary: String {
-        "\(subject) \(sessionVerb) bound to \(worktreePhrase)\(rootPhrase), but that worktree's folder is missing or is not a directory. No canonical checkout was used."
+        guard let routeContext else {
+            return "The Agent Mode session's worktree\(labelSuffix) is missing from disk."
+        }
+        return "\(subject(for: routeContext)) can't be used: its Agent Mode worktree\(labelSuffix) is missing from disk."
     }
 
     /// What the calling agent can do next.
     var recovery: String {
-        let selectTab: String
-        let listArguments: String
-        if let windowID = routeContext?.windowID {
-            selectTab = "Ask the user to select another tab in this window"
-            listArguments = "list this window's tabs with {\"op\":\"list\",\"window_id\":\(windowID)}"
-        } else {
-            selectTab = "Ask the user to select another tab"
-            listArguments = "list tabs with {\"op\":\"list\"}"
-        }
-        return "Retrying won't help. \(selectTab); calls without a tab argument use the window's active tab. A connection bound to this tab stays bound when the visible tab changes. If bind_context is available to you, bind another tab with {\"op\":\"bind\",\"context_id\":\"<other_tab_context_id>\"}, and \(listArguments) to find its context_id."
+        "Retrying won't help. Tell the user so they can switch to another tab."
     }
 
     var message: String {
         "\(summary) \(recovery)"
     }
 
-    private var subject: String {
-        guard let routeContext else { return "The addressed Agent Mode session" }
-        let contextID = routeContext.contextID.uuidString
+    /// The tab's name, or just its window when the name is withheld as unsafe to show.
+    private func subject(for routeContext: RouteContext) -> String {
         if let tabName = safeIdentity(routeContext.tabName) {
-            return "Tab '\(tabName)' (context_id '\(contextID)', window \(routeContext.windowID))"
+            return "Tab '\(tabName)' (window \(routeContext.windowID))"
         }
-        return "Context '\(contextID)' in window \(routeContext.windowID)"
+        return "A tab in window \(routeContext.windowID)"
     }
 
-    private var sessionVerb: String {
-        routeContext == nil ? "is" : "has an Agent Mode session"
-    }
-
-    private var worktreePhrase: String {
+    /// The worktree's quoted label with a leading space, or nothing when no safe label exists.
+    private var labelSuffix: String {
         let label = [binding.visualLabel, binding.worktreeName, binding.branch, binding.worktreeID]
             .lazy
             .compactMap(safeIdentity)
             .first
-        guard let label else { return "a worktree" }
-        guard let worktreeID = safeIdentity(binding.worktreeID), worktreeID != label else {
-            return "worktree '\(label)'"
-        }
-        return "worktree '\(label)' (worktree_id '\(worktreeID)')"
-    }
-
-    private var rootPhrase: String {
-        let rootLabel = safeIdentity(binding.logicalRootName)
-            ?? safeIdentity((binding.logicalRootPath as NSString).lastPathComponent)
-        return rootLabel.map { " for root '\($0)'" } ?? ""
+        return label.map { " '\($0)'" } ?? ""
     }
 
     /// A display value that is safe to show: non-empty after sanitizing, and not a path.

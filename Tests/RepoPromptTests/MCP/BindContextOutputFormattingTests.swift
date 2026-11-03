@@ -59,7 +59,8 @@ final class BindContextOutputFormattingTests: XCTestCase {
     }
 
     func testRefusedBindShowsFailureHeaderCodeAndMessageWhileSuccessKeepsItsOutput() throws {
-        let message = "Tab 'Stale' has an Agent Mode session bound to worktree 'gone', but that worktree's folder is missing. Retrying won't help."
+        let message = "Tab 'Stale' (window 3) can't be used: its Agent Mode worktree 'gone' is missing from disk. "
+            + "Retrying won't help. Tell the user so they can switch to another tab."
         let unbound = MCPBindContextBindingSummary(
             bindingKind: "unbound",
             windowID: nil,
