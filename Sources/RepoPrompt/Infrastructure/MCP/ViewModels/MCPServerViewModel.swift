@@ -284,8 +284,13 @@ final class MCPServerViewModel: ObservableObject {
             guard await Set(store.rootRefs(scope: .visibleWorkspace)) == canonicalRoots else {
                 throw FileToolAuthorityFailure.mismatchedProjection
             }
-            if lookupContext.bindingProjection != nil {
+            if let projection = lookupContext.bindingProjection {
                 guard let sessionRootLifetimeSnapshot, await sessionRootLifetimeSnapshot.isCurrent() else {
+                    if let diagnostic = MCPUnavailableWorktreeDiagnostic.classify(
+                        projection.boundRootsForMetadata.map(\.binding)
+                    ) {
+                        throw FileToolAuthorityFailure.unavailableWorktree(diagnostic)
+                    }
                     throw FileToolAuthorityFailure.worktreeScopeUnavailable
                 }
             }
@@ -355,8 +360,10 @@ final class MCPServerViewModel: ObservableObject {
         case superseded
         case mismatchedProjection
         case worktreeScopeUnavailable
+        /// The bound worktree's folder is confirmed missing. Retrying unchanged can't restore it.
+        case unavailableWorktree(MCPUnavailableWorktreeDiagnostic)
 
-        static let retryAfterMilliseconds = 1000
+        private static let defaultRetryAfterMilliseconds = 1000
 
         var errorCode: String {
             switch self {
@@ -364,7 +371,7 @@ final class MCPServerViewModel: ObservableObject {
             case .timedOut: "workspace_authority_timeout"
             case .superseded: "workspace_authority_superseded"
             case .mismatchedProjection: "workspace_authority_mismatch"
-            case .worktreeScopeUnavailable: "worktree_scope_unavailable"
+            case .worktreeScopeUnavailable, .unavailableWorktree: "worktree_scope_unavailable"
             }
         }
 
@@ -380,11 +387,32 @@ final class MCPServerViewModel: ObservableObject {
                 "The workspace root catalog no longer matches the loaded roots. No canonical checkout was used."
             case .worktreeScopeUnavailable:
                 "The bound worktree scope is unavailable. No canonical checkout was used."
+            case let .unavailableWorktree(diagnostic):
+                diagnostic.message
             }
         }
 
         var retryable: Bool {
-            true
+            if case .unavailableWorktree = self {
+                return false
+            }
+            return true
+        }
+
+        var retryAfterMilliseconds: Int? {
+            retryable ? Self.defaultRetryAfterMilliseconds : nil
+        }
+
+        /// Attaches the routed tab to a missing-worktree diagnostic that doesn't carry one yet.
+        func attachingRouteContext(from snapshot: TabContextSnapshot) -> FileToolAuthorityFailure {
+            guard case let .unavailableWorktree(diagnostic) = self, diagnostic.routeContext == nil else {
+                return self
+            }
+            return .unavailableWorktree(diagnostic.attachingRouteContext(.init(
+                tabName: snapshot.tabName,
+                contextID: snapshot.tabID,
+                windowID: snapshot.windowID
+            )))
         }
     }
 

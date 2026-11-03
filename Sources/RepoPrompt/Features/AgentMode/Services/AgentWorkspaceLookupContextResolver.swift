@@ -209,6 +209,8 @@ enum AgentWorkspaceLookupContextResolver {
 
         do {
             try AgentWorktreeRuntimeWorkspaceResolver.validateBindingsAvailable(bindings)
+        } catch let error as AgentWorktreeRuntimeWorkspaceError {
+            throw AgentWorkspaceLookupContextResolutionError.unavailableWorktree(error)
         } catch {
             throw AgentWorkspaceLookupContextResolutionError.unavailableProjection
         }
@@ -362,11 +364,14 @@ enum AgentWorkspaceLookupContextResolver {
 
 enum AgentWorkspaceLookupContextResolutionError: LocalizedError {
     case unavailableProjection
+    /// A bound worktree folder failed the runtime availability check. Its description matches
+    /// `.unavailableProjection` so callers that forward it as text never show the worktree path.
+    case unavailableWorktree(AgentWorktreeRuntimeWorkspaceError)
     case unknownBindingState
 
     var errorDescription: String? {
         switch self {
-        case .unavailableProjection:
+        case .unavailableProjection, .unavailableWorktree:
             "The Agent session worktree projection is unavailable. The operation stopped rather than falling back to the canonical checkout."
         case .unknownBindingState:
             "The Agent session worktree bindings are not hydrated or are unavailable. The operation stopped rather than falling back to the canonical checkout."

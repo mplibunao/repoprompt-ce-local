@@ -440,6 +440,90 @@ import XCTest
         }
 
         @MainActor
+        func testBindToDeletedWorktreePreservesPreviousBinding() async throws {
+            let root = try makeTemporaryRoot()
+            let deletedWorktree = try makeTemporaryRoot()
+            try FileManager.default.removeItem(at: deletedWorktree)
+            let healthyTabID = UUID()
+            let fixture = try await makeFixture(
+                rootPaths: [root.path],
+                activeAgentSessionID: UUID(),
+                additionalTabIDs: [healthyTabID]
+            )
+            let binding = worktreeBinding(logicalRoot: root, worktreeRoot: deletedWorktree)
+            installHydratedWorktreeBindings([binding], on: fixture.window.mcpServer)
+            let previousWindows = WindowStatesManager.shared.allWindows
+            WindowStatesManager.shared.allWindows = [fixture.window]
+            addTeardownBlock { @MainActor in
+                WindowStatesManager.shared.allWindows = previousWindows
+            }
+            try await AppGlobalMCPServiceComposition.shared.ensureRegistered()
+            let toolsEnabled = await fixture.window.mcpServer.setWindowToolsEnabled(true)
+            XCTAssertTrue(toolsEnabled)
+            addTeardownBlock { @MainActor in
+                _ = await fixture.window.mcpServer.setWindowToolsEnabled(false)
+            }
+            let connection = try await makeProductionMCPConnection()
+            addTeardownBlock { await connection.cleanup() }
+
+            let healthy = try await bindContext(healthyTabID, over: connection)
+            XCTAssertEqual(healthy.changed, true)
+            XCTAssertNil(healthy.errorCode)
+            XCTAssertEqual(healthy.binding.contextID, healthyTabID)
+
+            let stale = try await bindContext(fixture.contextID, over: connection)
+
+            let expected = MCPUnavailableWorktreeDiagnostic(
+                binding: binding,
+                routeContext: .init(tabName: "Context", contextID: fixture.contextID, windowID: fixture.window.windowID)
+            )
+            XCTAssertEqual(stale.changed, false)
+            XCTAssertEqual(stale.errorCode, "worktree_scope_unavailable")
+            XCTAssertEqual(stale.error, expected.message)
+            XCTAssertEqual(stale.retryable, false)
+            XCTAssertNil(stale.retryAfterMilliseconds)
+            XCTAssertEqual(stale.binding, healthy.binding)
+            XCTAssertEqual(
+                fixture.window.mcpServer.connectionBindingSnapshot(forConnection: connection.connectionID).tabID,
+                healthyTabID
+            )
+        }
+
+        /// A lifetime check can fail while the worktree folder still exists, for example when the
+        /// store no longer owns the session root. That isn't a missing folder, so it stays generic.
+        @MainActor
+        func testExistingDirectoryWithRevokedWorktreeAuthorityKeepsGenericFailure() async throws {
+            let root = try makeTemporaryRoot()
+            let worktreeRoot = try makeTemporaryRoot()
+            let sessionID = UUID()
+            let fixture = try await makeFixture(rootPaths: [root.path], activeAgentSessionID: sessionID)
+            installHydratedWorktreeBindings(
+                [worktreeBinding(logicalRoot: root, worktreeRoot: worktreeRoot)],
+                on: fixture.window.mcpServer
+            )
+            let store = fixture.window.promptManager.workspaceFileContextStore
+            let materializer = WorkspaceRootBindingProjectionMaterializer(store: store)
+            addTeardownBlock { await materializer.release(sessionID: sessionID) }
+            let authority = try await fixture.window.mcpServer.resolveFileToolAuthority(
+                tabID: fixture.contextID,
+                workspaceID: fixture.workspace.id
+            )
+            XCTAssertNotNil(authority.lookupContext.bindingProjection)
+
+            await materializer.release(sessionID: sessionID)
+
+            do {
+                try await authority.validate(workspaceManager: fixture.window.workspaceManager, store: store)
+                XCTFail("Revoked session-root ownership must invalidate captured authority")
+            } catch let failure as MCPServerViewModel.FileToolAuthorityFailure {
+                XCTAssertEqual(failure, .worktreeScopeUnavailable)
+                XCTAssertTrue(failure.retryable)
+                XCTAssertEqual(failure.retryAfterMilliseconds, 1000)
+            }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: worktreeRoot.path))
+        }
+
+        @MainActor
         func testGenuinelyRootlessBindProducesExplicitEmptyAuthority() async throws {
             let fixture = try await makeFixture(rootPaths: [])
             let authority = try await fixture.window.mcpServer.resolveFileToolAuthority(
@@ -493,6 +577,52 @@ import XCTest
                 args: args,
                 failure: .timedOut
             )
+        }
+
+        @MainActor
+        private func bindContext(
+            _ contextID: UUID,
+            over connection: ProductionMCPConnection
+        ) async throws -> BindContextResponse {
+            let result = try await connection.client.callTool(name: "bind_context", arguments: [
+                "op": .string("bind"),
+                "context_id": .string(contextID.uuidString),
+                "_rawJSON": .bool(true)
+            ])
+            XCTAssertNotEqual(result.isError, true, toolText(result))
+            let data = try XCTUnwrap(toolText(result).data(using: .utf8))
+            return try JSONDecoder().decode(BindContextResponse.self, from: data)
+        }
+
+        private func worktreeBinding(logicalRoot: URL, worktreeRoot: URL) -> AgentSessionWorktreeBinding {
+            AgentSessionWorktreeBinding(
+                id: "bind-authority-binding",
+                repositoryID: "bind-authority-repo",
+                repoKey: logicalRoot.path,
+                logicalRootPath: logicalRoot.path,
+                logicalRootName: "bind-authority-root",
+                worktreeID: "bind-authority-worktree",
+                worktreeRootPath: worktreeRoot.path,
+                worktreeName: "stale-worktree",
+                branch: "bugfix/stale-worktree",
+                source: "test"
+            )
+        }
+
+        /// Reports the tab's agent session as already hydrated with `bindings`.
+        @MainActor
+        private func installHydratedWorktreeBindings(
+            _ bindings: [AgentSessionWorktreeBinding],
+            on server: MCPServerViewModel
+        ) {
+            let previousProvider = server.agentWorktreeBindingStateProvider
+            let previousResolver = server.agentWorktreeBindingStateResolver
+            server.agentWorktreeBindingStateProvider = { _, _ in .hydrated(bindings) }
+            server.agentWorktreeBindingStateResolver = { _, _ in .hydrated(bindings) }
+            addTeardownBlock { @MainActor in
+                server.agentWorktreeBindingStateProvider = previousProvider
+                server.agentWorktreeBindingStateResolver = previousResolver
+            }
         }
 
         /// Reports the tab's agent-session worktree binding as unhydrated until the resolver runs,

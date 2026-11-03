@@ -4,10 +4,20 @@ struct MCPMutationRetryableFailure: Error, Equatable {
     let errorCode: String
     let errorMessage: String
     let retryable: Bool
-    let retryAfterMilliseconds: Int
+    let retryAfterMilliseconds: Int?
     let suggestion: String
 
     static let retryDelayMilliseconds = 1000
+
+    static func unavailableWorktree(_ diagnostic: MCPUnavailableWorktreeDiagnostic) -> MCPMutationRetryableFailure {
+        MCPMutationRetryableFailure(
+            errorCode: "worktree_scope_unavailable",
+            errorMessage: "\(diagnostic.summary) No filesystem mutation was started.",
+            retryable: false,
+            retryAfterMilliseconds: nil,
+            suggestion: diagnostic.recovery
+        )
+    }
 
     static func worktreeScopeUnavailable(missingPhysicalRootPaths: [String]) -> MCPMutationRetryableFailure {
         let message: String

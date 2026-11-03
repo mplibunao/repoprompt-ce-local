@@ -2062,7 +2062,7 @@ final class WindowRoutingService: Service {
             error: failure.localizedDescription,
             errorCode: failure.errorCode,
             retryable: failure.retryable,
-            retryAfterMilliseconds: MCPServerViewModel.FileToolAuthorityFailure.retryAfterMilliseconds
+            retryAfterMilliseconds: failure.retryAfterMilliseconds
         )
     }
 
