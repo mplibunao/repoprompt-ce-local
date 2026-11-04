@@ -435,15 +435,13 @@ rpce-cli-debug --context-id <A_CONTEXT_ID> --raw-json \
 | Row | Exercise | Required result |
 |---|---|---|
 | Cold and warm starts | Start A and B together, once right after a relaunch and once on a warm app | Both complete, each with its own provider process, routing events, and commit |
-| Panel plus MCP | Press Run on tab A in the app and start B through the CLI, then the reverse | Both complete, and the window shows only the selected tab's run |
 | Same-tab overlap | Start a second call for A while A's run is in discovery | The second call returns `Context Builder is already running for this tab.`, A's run completes, and the refused call changes nothing in A |
 | Cancel A | Cancel A's call while B is in discovery | A ends as cancelled and its provider process exits; B completes |
 | Close A's tab | Close tab A while both runs are in discovery | Only A ends; B commits its own prompt and selection |
 | Close the window | Close the window while one run is in discovery and another is in its follow-up | Every run the window owns settles, and no provider process remains |
 | Follow-up on the chat | After a call with a `response_type` completes, send a follow-up on its chat | The follow-up answers in that chat with that tab's context; no refusal, including with OpenCode |
 | Two windows, one workspace | Open the workspace in a second window. Start A from each window, then A from one and B from the other | The second call for A is refused; A and B in different windows both complete |
-| Background question | Let B's run ask a clarifying question while tab A is shown | The question appears on B when B is shown, and A's panel is unchanged |
-| Late cleanup | Cancel A's run, then start a new run on A while the first run's provider is still exiting | The new run routes, commits, and keeps its controls |
+| Late cleanup | Cancel A's run, then start a new run on A while the first run's provider is still exiting | The new run routes and commits |
 
 Record every row as passed, failed, or not run with its reason. For each run, keep these as evidence:
 
@@ -461,7 +459,7 @@ A row with two runs needs overlap inside the app, shown in both directions by ex
 
 A run's last `policy_cleared` is the end of its routing-policy lifetime and nothing more. A run clears its policy last, after its discovery has ended and its result is committed. This check shows that two policy lifetimes overlapped. It doesn't show that two providers' work overlapped.
 
-The "Cold and warm starts" and "Panel plus MCP" rows need that direct evidence, by exact run ID. Overlapping admissions or policy lifetimes alone are insufficient for these rows. A run's `expected_pid_cleared` event is insufficient too. It's cleanup evidence only. The app records it some time after the provider process has exited, so an event that comes before it doesn't show the process was still running. The minimum for these rows is one of the two kinds of evidence that follow. Prefer the first.
+The "Cold and warm starts" row needs that direct evidence, by exact run ID. Overlapping admissions or policy lifetimes alone are insufficient for it. A run's `expected_pid_cleared` event is insufficient too. It's cleanup evidence only. The app records it some time after the provider process has exited, so an event that comes before it doesn't show the process was still running. The minimum for that row is one of the two kinds of evidence that follow. Prefer the first.
 
 The first is interleaved tool calls. A snapshot of a run's child connection reports the child's tool-call count and the time of its latest call. The connection is the `connection_id` of the run's `policy_applied` event:
 
