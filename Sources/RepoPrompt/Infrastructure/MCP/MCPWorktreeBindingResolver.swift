@@ -112,8 +112,8 @@ extension MCPWorktreeBindingResolver {
 
     /// The loaded Git root a worktree-scoped tab binds. Only Git roots count, because worktrees
     /// are listed only for Git repositories. Without a token, exactly one loaded Git root must
-    /// exist, and a token must name exactly one loaded root: a tab has no primary root, so load
-    /// order never settles a choice.
+    /// exist. A token must be the name or absolute path of exactly one loaded Git root; it takes no
+    /// tree specifier, because a tab has no primary root and load order never settles a choice.
     func selectTabScopeRoot(
         repoRootToken: String?,
         loadedRoots: [WorkspaceRootRef]
@@ -126,53 +126,12 @@ extension MCPWorktreeBindingResolver {
             guard candidates.count == 1 else { throw MCPCreateTabWorktreeError.severalGitRoots }
             return firstCandidate
         }
-        if let match = try Self.uniqueGitRoot(
-            named: Self.explicitLogicalRoots(for: token, in: loadedRoots),
-            among: candidates
-        ) {
-            return match
-        }
-        // The root rules apply to the text before a tree specifier: `/repo/A@main` names the loaded
-        // root `/repo/A`, and `@branch:feature/x` names no root. In a token such as `shared@main`,
-        // the generic resolver would take the first loaded root named `shared`, so the prefix must
-        // name one loaded Git root, and the token resolves against that root alone.
-        let form = GitRepoTargetResolver.worktreeSelectorForm(token)
-        let namedRoot = try form.repositoryPrefix.flatMap {
-            try Self.uniqueGitRoot(named: Self.explicitLogicalRoots(for: $0, in: loadedRoots), among: candidates)
-        }
-        let rootPart = form.hasTreeSpecifier ? form.repositoryPrefix ?? "" : token
-        // A path that isn't exactly a loaded root names a folder inside one or another checkout.
-        guard namedRoot != nil || !Self.looksLikePath(rootPart) else {
+        let namedRoots = Self.explicitLogicalRoots(for: token, in: loadedRoots)
+        guard namedRoots.count == 1,
+              let match = candidates.first(where: { $0.logicalRoot == namedRoots[0] })
+        else {
             throw MCPCreateTabWorktreeError.rootNotUnique
         }
-        // A token that starts with a tree specifier applies it to a default repository, which
-        // only a single loaded Git root can supply.
-        guard !token.hasPrefix("@") || candidates.count == 1 else {
-            throw MCPCreateTabWorktreeError.severalGitRoots
-        }
-        let repositories = namedRoot.map { [$0.repo] } ?? candidates.reduce(into: []) { repositories, candidate in
-            if !repositories.contains(where: { Self.samePath($0.rootPath, candidate.repo.rootPath) }) {
-                repositories.append(candidate.repo)
-            }
-        }
-        let repo: GitRepoDescriptor
-        do {
-            repo = try await gitTargetResolver.resolveRepoRootToken(
-                token,
-                allRepos: repositories,
-                visibleRoots: namedRoot.map { [$0.logicalRoot] } ?? loadedRoots,
-                defaultRepo: (namedRoot ?? firstCandidate).repo
-            )
-        } catch let error as GitRepoTargetResolverError {
-            throw MCPError.invalidParams(error.message)
-        }
-        // Other loaded roots can sit in the named root's repository, so when the token resolves to
-        // that repository, the named root is the answer.
-        if let namedRoot, Self.samePath(repo.rootPath, namedRoot.repo.rootPath) {
-            return namedRoot
-        }
-        let matches = candidates.filter { Self.samePath($0.repo.rootPath, repo.rootPath) }
-        guard matches.count == 1, let match = matches.first else { throw MCPCreateTabWorktreeError.rootNotUnique }
         return match
     }
 
@@ -270,23 +229,6 @@ extension MCPWorktreeBindingResolver {
               let repoLayout = GitRepositoryLayoutResolver.resolve(atWorkTreeRoot: repo.rootURL)
         else { return false }
         return !Self.samePath(selectedLayout.commonDir.path, repoLayout.commonDir.path)
-    }
-
-    /// The loaded Git root that `named` lists alone, or `nil` when it lists none. Several roots, or
-    /// a root that isn't a loaded Git root, are refused.
-    private static func uniqueGitRoot(
-        named roots: [WorkspaceRootRef],
-        among candidates: [RootRepository]
-    ) throws -> RootRepository? {
-        guard !roots.isEmpty else { return nil }
-        guard roots.count == 1, let match = candidates.first(where: { $0.logicalRoot == roots[0] }) else {
-            throw MCPCreateTabWorktreeError.rootNotUnique
-        }
-        return match
-    }
-
-    private static func looksLikePath(_ token: String) -> Bool {
-        token.contains("/") || token.hasPrefix("~") || token.hasPrefix(".")
     }
 
     private static func samePath(_ lhs: String, _ rhs: String) -> Bool {
@@ -395,7 +337,7 @@ enum MCPCreateTabWorktreeError {
         "No Git repository is available in the loaded workspace roots. Load the intended project workspace before creating a worktree-scoped tab."
     )
     static let rootNotUnique = MCPError.invalidParams(
-        "worktree_repo_root must resolve to exactly one loaded root in this workspace."
+        "worktree_repo_root must be the name or absolute path of exactly one loaded Git root in this workspace."
     )
     static let ownCheckout = MCPError.invalidParams(
         "The selected worktree is the loaded root's own checkout. Omit the worktree arguments to create an ordinary tab."

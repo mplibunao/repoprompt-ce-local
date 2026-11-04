@@ -291,30 +291,21 @@ struct GitRepoTargetResolver {
 
     // MARK: - Specifier parsing and application
 
-    /// What a worktree selector names before it is resolved: the repository prefix before its tree
-    /// specifier, as `repo` in `repo@main`, and whether it names the selected repository's own
-    /// checkout (`@current`, or `@wt` / `@worktree` without a branch).
+    /// What a worktree selector names before it is resolved: whether a repository prefix comes
+    /// before its tree specifier, as in `repo@main`, and whether it names the selected
+    /// repository's own checkout (`@current`, or `@wt` / `@worktree` without a branch).
     struct WorktreeSelectorForm: Equatable {
-        let hasTreeSpecifier: Bool
-        /// The trimmed text before a recognized tree specifier, or `nil` when it's empty or the
-        /// selector has no specifier.
-        let repositoryPrefix: String?
+        let hasRepositoryPrefix: Bool
         let namesOwnCheckout: Bool
-
-        var hasRepositoryPrefix: Bool {
-            repositoryPrefix != nil
-        }
     }
 
     static func worktreeSelectorForm(_ selector: String) -> WorktreeSelectorForm {
         let (base, specifier) = parseRepoTreeSpecifier(selector)
         guard let specifier else {
-            return WorktreeSelectorForm(hasTreeSpecifier: false, repositoryPrefix: nil, namesOwnCheckout: false)
+            return WorktreeSelectorForm(hasRepositoryPrefix: false, namesOwnCheckout: false)
         }
-        let prefix = base.trimmingCharacters(in: .whitespacesAndNewlines)
         return WorktreeSelectorForm(
-            hasTreeSpecifier: true,
-            repositoryPrefix: prefix.isEmpty ? nil : prefix,
+            hasRepositoryPrefix: !base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             namesOwnCheckout: specifier == .current || specifier == .worktree(branch: nil)
         )
     }

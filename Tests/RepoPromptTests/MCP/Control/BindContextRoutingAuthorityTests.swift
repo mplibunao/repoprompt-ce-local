@@ -329,10 +329,9 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
         /// A `create_tab` call with an invalid worktree selection is refused with its reason and
         /// creates no tab, so the caller's binding and the visible tab stay as they were. The
         /// workspace loads six Git roots, each named after its folder: `repo-a` and `repo-b`; two
-        /// roots named `shared` in separate repositories, each with a `feature` worktree, so a
-        /// refusal there can't come from a missing worktree; and `left` and `right`, folders of one
-        /// repository. A fork of a tab whose saved scope can't load is kept, but the caller isn't
-        /// bound to it and the refusal names it.
+        /// roots named `shared` in separate repositories; and `trunk` with its linked worktree
+        /// `trunk-linked`. A fork of a tab whose saved scope can't load is kept, but the caller
+        /// isn't bound to it and the refusal names it.
         @MainActor
         func testCreateTabRejectsInvalidWorktreeSelectionWithoutChangingContext() async throws {
             let git = try ReviewGitRepositoryFixture(name: "create-tab-worktree-selection")
@@ -342,17 +341,14 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
             let sharedNameRoots = try ["first/shared", "second/shared"].map {
                 try git.makeRepository(named: $0, files: ["S.swift": "// S"])
             }
-            for (index, sharedRoot) in sharedNameRoots.enumerated() {
-                let worktreeRoot = git.sandbox.appendingPathComponent("shared-\(index)-feature", isDirectory: true)
-                _ = try git.runGit(["worktree", "add", "-b", "feature", worktreeRoot.path], at: sharedRoot)
-            }
-            let pair = try git.makeRepository(named: "pair", files: ["left/L.swift": "// L", "right/R.swift": "// R"])
-            let sameRepositoryRoots = ["left", "right"].map { pair.appendingPathComponent($0, isDirectory: true) }
+            let trunk = try git.makeRepository(named: "trunk", files: ["T.swift": "// T"])
+            let trunkLinked = git.sandbox.appendingPathComponent("trunk-linked", isDirectory: true)
+            _ = try git.runGit(["worktree", "add", "-b", "linked", trunkLinked.path], at: trunk)
             let contextID = UUID()
             let unloadableScopeTabID = UUID()
             let workspace = WorkspaceModel(
                 name: "Worktree Selection",
-                repoPaths: [repoA.path, repoB.path] + (sharedNameRoots + sameRepositoryRoots).map(\.path),
+                repoPaths: [repoA.path, repoB.path] + (sharedNameRoots + [trunk, trunkLinked]).map(\.path),
                 composeTabs: [
                     ComposeTabState(id: contextID, name: "Context"),
                     ComposeTabState(id: unloadableScopeTabID, name: "Unloadable", worktreeScope: .unavailable)
@@ -385,22 +381,12 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
                 (
                     "a root name two loaded roots share",
                     ["worktree": .string("feature"), "worktree_repo_root": .string("shared")],
-                    "worktree_repo_root must resolve to exactly one loaded root"
+                    "worktree_repo_root must be the name or absolute path of exactly one loaded Git root"
                 ),
                 (
-                    "a shared root name with a tree specifier",
-                    ["worktree": .string("feature"), "worktree_repo_root": .string("shared@main")],
-                    "worktree_repo_root must resolve to exactly one loaded root"
-                ),
-                (
-                    "a tree specifier on a root that shares its repository",
-                    ["worktree": .string(repoB.path), "worktree_repo_root": .string("left@main")],
-                    "does not belong to the repository of root 'left'"
-                ),
-                (
-                    "a tree specifier on a root's absolute path",
-                    ["worktree": .string(repoB.path), "worktree_repo_root": .string("\(sameRepositoryRoots[0].path)@main")],
-                    "does not belong to the repository of root 'left'"
+                    "a tree specifier on a linked worktree root whose main checkout is loaded",
+                    ["worktree": .string("linked"), "worktree_repo_root": .string("trunk-linked@main")],
+                    "worktree_repo_root must be the name or absolute path of exactly one loaded Git root"
                 ),
                 (
                     "a selector passed as worktree_id",
