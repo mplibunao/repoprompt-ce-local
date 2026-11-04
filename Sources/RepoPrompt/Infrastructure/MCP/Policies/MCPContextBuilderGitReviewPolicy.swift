@@ -36,7 +36,7 @@ enum MCPContextBuilderGitReviewPolicyError: Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .targetDeferred:
-            "Context Builder has not elected a review repository yet. \(Self.explicitInspectionGuidance)"
+            "Context Builder chooses the review repository when discovery finishes. \(Self.explicitInspectionGuidance)"
         case let .targetNotFrozen(reason):
             "\(reason.localizedDescription) \(Self.explicitInspectionGuidance)"
         case let .targetUnavailable(reason):
@@ -57,7 +57,7 @@ enum MCPContextBuilderGitReviewPolicyError: Equatable, LocalizedError {
     }
 
     private static let explicitInspectionGuidance =
-        "During discovery, specify repo_root or repo_key and do not publish Git artifacts."
+        "Pass repo_root or repo_key, and omit artifacts."
 }
 
 struct MCPContextBuilderGitReviewPolicy {

@@ -17,7 +17,7 @@ enum ContextBuilderReviewTargetUnavailableReason: Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingFrozenTarget:
-            "The Context Builder discovery run is missing its frozen review repository target. Start a new context_builder call in the intended tab; no fallback repository was used."
+            "The Context Builder discovery run is missing its frozen review repository target. No fallback repository was used."
         case .emptySelection:
             "Context Builder review requires at least one selected file or authorized Git artifact."
         case let .unresolvedSelection(count):

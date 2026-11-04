@@ -1147,6 +1147,9 @@ package enum MCPDomainCanonicalToolDefinitions {
         if definition.name == MCPWindowToolName.contextBuilder {
             return describeContextBuilderRouting(definition)
         }
+        if definition.name == MCPWindowToolName.git {
+            return describeGitFrozenTargetDefault(definition)
+        }
         if definition.name == MCPGlobalToolName.manageWorkspaces {
             return describeOpenInNewWindow(definition)
         }
@@ -1279,6 +1282,35 @@ package enum MCPDomainCanonicalToolDefinitions {
         )
     }
 
+    /// The base `git` text says only nested Agent Mode runs use a frozen review target. Every
+    /// Context Builder discovery run started through MCP freezes one, so the default lines name those.
+    private static func describeGitFrozenTargetDefault(
+        _ definition: MCPDomainToolDefinition
+    ) -> MCPDomainToolDefinition {
+        let agentOnlyRuns = "nested Agent Context Builder runs"
+        let discoveryRuns = "Context Builder discovery runs started through MCP"
+        var schema = definition.inputSchema
+        if case var .object(schemaObject) = schema,
+           case var .object(properties)? = schemaObject["properties"],
+           case var .object(repoRoot)? = properties["repo_root"],
+           case let .string(repoRootDescription)? = repoRoot["description"]
+        {
+            repoRoot["description"] = .string(
+                repoRootDescription.replacingOccurrences(of: agentOnlyRuns, with: discoveryRuns)
+            )
+            properties["repo_root"] = .object(repoRoot)
+            schemaObject["properties"] = .object(properties)
+            schema = .object(schemaObject)
+        }
+        return MCPDomainToolDefinition(
+            name: definition.name,
+            description: definition.description.replacingOccurrences(of: agentOnlyRuns, with: discoveryRuns),
+            inputSchema: schema,
+            annotations: definition.annotations,
+            isEnabledByDefault: definition.isEnabledByDefault
+        )
+    }
+
     /// The `open_in_new_window` property states what the flag does for each action, so the tool
     /// description's Parameters list leaves the flag out instead of repeating it.
     private static func describeOpenInNewWindow(
@@ -1334,8 +1366,8 @@ package enum MCPManageWorkspacesPropertyDescriptions {
 /// Single source for the `context_builder` text that the canonical schema override and the
 /// app-side raw Tool registration both publish.
 package enum MCPContextBuilderDescriptions {
-    package static let workflow = "**Workflow**: App-backed calls keep the routed tab's workspace. Continue the returned chat with `oracle_send` outside Agent Mode, or `ask_oracle` from Agent Mode. Refine with `manage_selection`."
-    package static let responseType = "Optional: 'plan' to generate implementation plan, 'question' to ask a question, or 'review' to generate a code review. Omit or 'clarify' to just return context. For review, discovery's git calls default to the repositories of the files selected when the call starts; with no files selected, they need repo_root or repo_key."
+    package static let workflow = "**Workflow**: Runs in the tab this connection is bound to. An unbound connection gets a new tab and is bound to it; an Agent Mode run uses its own tab. Refine with `manage_selection`."
+    package static let responseType = "Optional: 'plan' to generate implementation plan, 'question' to ask a question, or 'review' to generate a code review. Omit or 'clarify' to just return context. For review, select the files under review first: discovery's git calls default to their repositories."
 }
 
 /// Single source for the `manage_selection` property descriptions that the canonical schema

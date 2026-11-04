@@ -289,7 +289,7 @@ enum ContextBuilderWorkspaceContextError: LocalizedError, Equatable {
         case .missingWorkspaceRoot:
             "context_builder requires a project workspace root for the invoking tab."
         case .unavailableWorkspaceProjection:
-            "The invoking tab's workspace roots could not be loaded. Context Builder stopped rather than using the visible workspace."
+            "The invoking tab's workspace roots could not be loaded. Context Builder stopped rather than using the visible workspace. Reload that workspace, then retry."
         case .unavailableWorktreeBindingState:
             "The invoking tab's worktree bindings are not hydrated or are unavailable. Context Builder stopped rather than falling back to the canonical checkout."
         case .unavailableWorktreeProjection:
