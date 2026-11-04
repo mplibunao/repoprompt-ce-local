@@ -764,7 +764,9 @@ import XCTest
         /// its own uncommitted line. A review, a plan, and a question each run in a new scoped tab:
         /// discovery's implicit `git` defaults to the worktree checkout, the request sent to the
         /// provider packages the worktree's file, and the review's diff comes from the worktree.
-        /// The visible tab doesn't change, and no Agent session or workspace is created.
+        /// The visible tab doesn't change, and no Agent session or workspace is created. After the
+        /// user switches tabs, an `oracle_send` follow-up on the review's chat from a new connection
+        /// packages the worktree's file and diff again.
         func testScopedBackgroundTabFeedsContextBuilderAndOracleFollowup() async throws {
             let worktreeContentMarker = "SCOPED_TAB_WORKTREE_CONTENT"
             let worktreeUncommittedMarker = "SCOPED_TAB_WORKTREE_UNCOMMITTED"
@@ -787,8 +789,14 @@ import XCTest
                 let chatStorage = fixture.rootURL.appendingPathComponent("scoped-tab-chats", isDirectory: true)
                 try FileManager.default.createDirectory(at: chatStorage, withIntermediateDirectories: true)
                 await ChatDataService.test_setWorkspaceRootOverride(chatStorage)
+                let previousShowModelPresets = GlobalSettingsStore.shared.mcpShowModelPresets()
+                var follower: PersistentMCPTestEndpoint?
                 @MainActor
-                func restoreChatStorage() async {
+                func restoreSharedState() async {
+                    if let follower {
+                        await Self.cleanupEndpoint(follower, manager: fixture.networkManager)
+                    }
+                    GlobalSettingsStore.shared.setMCPShowModelPresets(previousShowModelPresets, commit: false)
                     await context.window.oracleViewModel.drainTrackedAutosaves(for: context.workspaceID)
                     await ChatDataService.test_setWorkspaceRootOverride(nil)
                 }
@@ -811,6 +819,14 @@ import XCTest
                     let repositories = try await roots.descriptors()
                     let resolvedWorktree = await VCSService.shared.resolveRepo(from: worktreeRoot)
                     let worktreeRepository = try GitRepoDescriptor(rootURL: XCTUnwrap(resolvedWorktree).rootURL)
+                    func packagedText(_ request: AIMessage) -> String {
+                        ([request.systemPrompt, request.fileTree, request.gitDiff ?? ""]
+                            + request.metaPrompts
+                            + request.fileBlocks
+                            + request.conversationMessages.map(\.content))
+                            .joined(separator: "\n")
+                    }
+                    var reviewChat: (chatID: String, tabID: UUID)?
 
                     for responseType in ["review", "plan", "question"] {
                         let created = try await endpoint.callTool(
@@ -833,11 +849,15 @@ import XCTest
                         let frozenContexts = try Self.captureFrozenDiscoveryContexts(provider, server: server)
                         requests.requests.removeAll()
 
-                        try await Self.callContextBuilder(
+                        let built = try await Self.callContextBuilder(
                             endpoint,
                             instructions: "Check the change.",
                             responseType: responseType
                         )
+                        if responseType == "review" {
+                            let review = try Self.toolResultObject(built)["review"] as? [String: Any]
+                            reviewChat = try (XCTUnwrap(review?["chat_id"] as? String, built.rawJSON), tabID)
+                        }
 
                         let frozen = try XCTUnwrap(frozenContexts.values.first, responseType)
                         XCTAssertEqual(frozen.tabID, tabID, responseType)
@@ -859,13 +879,9 @@ import XCTest
 
                         XCTAssertEqual(requests.requests.count, 1, responseType)
                         let request = try XCTUnwrap(requests.requests.first, responseType)
-                        let packagedText = ([request.systemPrompt, request.fileTree, request.gitDiff ?? ""]
-                            + request.metaPrompts
-                            + request.fileBlocks
-                            + request.conversationMessages.map(\.content))
-                            .joined(separator: "\n")
-                        XCTAssertTrue(packagedText.contains(worktreeContentMarker), "\(responseType): \(packagedText)")
-                        XCTAssertFalse(packagedText.contains(ReviewGitRoots.uncommittedMarkerB), "\(responseType): \(packagedText)")
+                        let text = packagedText(request)
+                        XCTAssertTrue(text.contains(worktreeContentMarker), "\(responseType): \(text)")
+                        XCTAssertFalse(text.contains(ReviewGitRoots.uncommittedMarkerB), "\(responseType): \(text)")
                         if responseType == "review" {
                             let gitDiff = try XCTUnwrap(request.gitDiff, responseType)
                             XCTAssertTrue(gitDiff.contains(worktreeUncommittedMarker), gitDiff)
@@ -880,11 +896,156 @@ import XCTest
                     }
                     XCTAssertEqual(manager.workspaces.map(\.id), workspaceIDs)
                     XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, visibleTabID)
+
+                    let chat = try XCTUnwrap(reviewChat)
+                    let switchedTabID = UUID()
+                    try Self.appendBackgroundTab(switchedTabID, to: context)
+                    await context.window.promptManager.switchComposeTab(switchedTabID)
+                    GlobalSettingsStore.shared.setMCPShowModelPresets(false, commit: false)
+                    context.window.promptManager.planningModelName = AIModel.openaiCustom(name: "scoped-tab-test").rawValue
+                    let newConnection = try await PersistentMCPTestEndpoint.make(
+                        label: "scoped-tab-follow-up",
+                        networkManager: fixture.networkManager
+                    )
+                    follower = newConnection
+                    requests.requests.removeAll()
+
+                    let followUp = try await newConnection.callTool(
+                        name: MCPWindowToolName.oracleSend,
+                        arguments: [
+                            "chat_id": chat.chatID,
+                            "message": "Check the change again.",
+                            "mode": "review",
+                            "_windowID": context.window.windowID
+                        ],
+                        timeoutSeconds: 30
+                    )
+
+                    XCTAssertFalse(followUp.rawJSON.contains("\"isError\":true"), followUp.rawJSON)
+                    XCTAssertEqual(server.tabContextByConnectionID[newConnection.connectionID]?.tabID, chat.tabID)
+                    XCTAssertEqual(requests.requests.count, 1)
+                    let followUpRequest = try XCTUnwrap(requests.requests.first)
+                    let followUpText = packagedText(followUpRequest)
+                    XCTAssertTrue(followUpText.contains(worktreeContentMarker), followUpText)
+                    XCTAssertFalse(followUpText.contains(ReviewGitRoots.uncommittedMarkerB), followUpText)
+                    let followUpDiff = try XCTUnwrap(followUpRequest.gitDiff)
+                    XCTAssertTrue(followUpDiff.contains(worktreeUncommittedMarker), followUpDiff)
+                    XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, switchedTabID)
                 } catch {
-                    await restoreChatStorage()
+                    await restoreSharedState()
                     throw error
                 }
-                await restoreChatStorage()
+                await restoreSharedState()
+            }
+        }
+
+        /// An `oracle_send` follow-up on a chat whose tab was closed is refused before anything is
+        /// packaged or sent. The caller stays bound to its own tab, that tab's selection doesn't
+        /// change, and the chat isn't moved to the caller's tab. The refusal's advice, `new_chat`,
+        /// then starts a new chat in the caller's tab, with or without the old `chat_id`.
+        func testOracleFollowupRefusesWhenChatTabIsGone() async throws {
+            try await withLeasedFixture { fixture, endpoint in
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let server = context.window.mcpServer
+                let chatTabID = UUID()
+                let callerTabID = UUID()
+                let chatStorage = fixture.rootURL.appendingPathComponent("gone-tab-chats", isDirectory: true)
+                try FileManager.default.createDirectory(at: chatStorage, withIntermediateDirectories: true)
+                await ChatDataService.test_setWorkspaceRootOverride(chatStorage)
+                let previousShowModelPresets = GlobalSettingsStore.shared.mcpShowModelPresets()
+                GlobalSettingsStore.shared.setMCPShowModelPresets(false, commit: false)
+                @MainActor
+                func restoreSharedState() async {
+                    GlobalSettingsStore.shared.setMCPShowModelPresets(previousShowModelPresets, commit: false)
+                    await context.window.oracleViewModel.drainTrackedAutosaves(for: context.workspaceID)
+                    await ChatDataService.test_setWorkspaceRootOverride(nil)
+                }
+
+                do {
+                    try Self.appendBackgroundTab(chatTabID, to: context)
+                    try Self.appendBackgroundTab(callerTabID, to: context)
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                    let requests = ReviewRequestReceipts()
+                    server.setOraclePostPackagingTransportOverrideForTesting { message, _ in
+                        requests.requests.append(message)
+                        return (UUID(), Self.completedOracleStream("Answered."))
+                    }
+                    context.window.apiSettingsViewModel.isOpenAIKeyValid = true
+                    context.window.promptManager.planningModelName = AIModel.openaiCustom(name: "gone-tab-test").rawValue
+
+                    try await Self.bindTab(chatTabID, endpoint: endpoint, context: context)
+                    let started = try await endpoint.callTool(
+                        name: MCPWindowToolName.oracleSend,
+                        arguments: ["message": "Start.", "new_chat": true, "_rawJSON": true],
+                        timeoutSeconds: 30
+                    )
+                    let chatID = try XCTUnwrap(Self.toolResultObject(started)["chat_id"] as? String, started.rawJSON)
+                    let chat = try XCTUnwrap(context.window.oracleViewModel.resolveSession(id: chatID))
+                    XCTAssertEqual(chat.composeTabID, chatTabID)
+                    XCTAssertEqual(requests.requests.count, 1)
+
+                    await context.window.promptManager.closeComposeTab(chatTabID)
+                    XCTAssertNil(manager.composeTab(with: chatTabID))
+                    await Self.seedSelection([context.fileURL], tabID: callerTabID, context: context)
+                    try await Self.bindTab(callerTabID, endpoint: endpoint, context: context)
+                    let callerSelection = manager.composeTab(with: callerTabID)?.selection
+                    let visibleTabID = manager.workspace(withID: context.workspaceID)?.activeComposeTabID
+                    requests.requests.removeAll()
+
+                    let followUp = try await endpoint.callTool(
+                        name: MCPWindowToolName.oracleSend,
+                        arguments: ["chat_id": chatID, "message": "Follow up."],
+                        timeoutSeconds: 30
+                    )
+
+                    XCTAssertTrue(followUp.rawJSON.contains("\"isError\":true"), followUp.rawJSON)
+                    let refusal = try Self.toolResultText(followUp)
+                    XCTAssertTrue(refusal.contains(MCPServerViewModel.oracleChatTabGoneMessage(chatID: chatID)), refusal)
+                    XCTAssertEqual(requests.requests.count, 0)
+                    XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.tabID, callerTabID)
+                    XCTAssertEqual(manager.composeTab(with: callerTabID)?.selection, callerSelection)
+                    XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, visibleTabID)
+                    XCTAssertEqual(context.window.oracleViewModel.resolveSession(id: chatID)?.composeTabID, chatTabID)
+
+                    let newChatCalls: [(label: String, arguments: [String: Any])] = [
+                        ("advised arguments", ["message": "Start over.", "new_chat": true]),
+                        ("with the old chat_id", ["chat_id": chatID, "message": "Start over.", "new_chat": true])
+                    ]
+                    for call in newChatCalls {
+                        requests.requests.removeAll()
+                        var arguments = call.arguments
+                        arguments["_rawJSON"] = true
+                        let started = try await endpoint.callTool(
+                            name: MCPWindowToolName.oracleSend,
+                            arguments: arguments,
+                            timeoutSeconds: 30
+                        )
+
+                        XCTAssertFalse(started.rawJSON.contains("\"isError\":true"), "\(call.label): \(started.rawJSON)")
+                        let newChatID = try XCTUnwrap(
+                            Self.toolResultObject(started)["chat_id"] as? String,
+                            "\(call.label): \(started.rawJSON)"
+                        )
+                        XCTAssertNotEqual(newChatID, chatID, call.label)
+                        XCTAssertEqual(
+                            context.window.oracleViewModel.resolveSession(id: newChatID)?.composeTabID,
+                            callerTabID,
+                            call.label
+                        )
+                        XCTAssertEqual(requests.requests.count, 1, call.label)
+                        XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.tabID, callerTabID, call.label)
+                        XCTAssertEqual(
+                            context.window.oracleViewModel.resolveSession(id: chatID)?.composeTabID,
+                            chatTabID,
+                            call.label
+                        )
+                    }
+                } catch {
+                    await restoreSharedState()
+                    throw error
+                }
+                await restoreSharedState()
             }
         }
 
@@ -4892,13 +5053,15 @@ import XCTest
             }
         }
 
+        /// Calls `context_builder` and returns its raw JSON result.
+        @discardableResult
         private static func callContextBuilder(
             _ endpoint: PersistentMCPTestEndpoint,
             instructions: String,
             responseType: String = "clarify",
             contextID: UUID? = nil
-        ) async throws {
-            var arguments: [String: Any] = ["instructions": instructions, "response_type": responseType]
+        ) async throws -> PersistentMCPTestRPCResponse {
+            var arguments: [String: Any] = ["instructions": instructions, "response_type": responseType, "_rawJSON": true]
             if let contextID {
                 arguments["context_id"] = contextID.uuidString
             }
@@ -4908,6 +5071,7 @@ import XCTest
                 timeoutSeconds: 30
             )
             XCTAssertFalse(response.rawJSON.contains("\"isError\":true"), response.rawJSON)
+            return response
         }
 
         /// Two Git repositories loaded after context A's own root, which isn't a Git repository, so

@@ -400,6 +400,9 @@ extension MCPServerViewModel {
         let tabID: UUID
         let workspaceID: UUID?
         let windowID: Int?
+        /// The tab came from a call that named only a window: it is whichever tab that window showed
+        /// when the call arrived, not a tab the caller chose.
+        var isFromWindowRoute = false
     }
 
     enum TabContextResolution {
@@ -1278,8 +1281,9 @@ extension MCPServerViewModel {
     }
 
     /// Rebinds connection to target tab if currently bound to a different tab.
-    /// Used by oracle_send when continuing a chat that lives on a different tab.
-    /// - Returns: true if rebinding occurred, false if already on correct tab or target invalid
+    /// Used by oracle_send when continuing a chat that lives on a different tab, after it has
+    /// checked that the tab is still open. A target tab that isn't in the target workspace throws.
+    /// - Returns: true if rebinding occurred, false if already on the target tab
     @MainActor
     @discardableResult
     func rebindToTabIfNeeded(
@@ -1293,12 +1297,6 @@ extension MCPServerViewModel {
 
         // Already bound to the target tab
         if currentBoundTabID == targetTabID {
-            return false
-        }
-
-        // Verify target tab exists before rebinding
-        guard workspaceManager?.composeTab(with: targetTabID) != nil else {
-            tabContextLog("rebindToTabIfNeeded skipped - target tab \(targetTabID) not found")
             return false
         }
 
@@ -3442,6 +3440,15 @@ extension MCPServerViewModel {
             "Retry the tool call once. If it fails again, tell the user the RepoPrompt connection failed and ask them to restart this Agent Mode run."
     }
 
+    /// Whether a hint names a different context than the one this connection is bound to. A window
+    /// route's tab never conflicts: the dispatcher passes no such tab for a binding that existed when
+    /// the call arrived, and a binding made during the call, by a run handover or by oracle_send's
+    /// move to its chat's tab, replaces the shown tab the caller never chose. An explicit
+    /// `context_id` or `_tabID` must match.
+    private static func hint(_ hint: TabContextHint, conflictsWith context: TabContextSnapshot) -> Bool {
+        !hint.isFromWindowRoute && !self.hint(hint, matches: context)
+    }
+
     private static func hint(_ hint: TabContextHint, matches context: TabContextSnapshot) -> Bool {
         guard hint.tabID == context.tabID else { return false }
         if let workspaceID = hint.workspaceID, context.workspaceID != workspaceID {
@@ -3532,7 +3539,7 @@ extension MCPServerViewModel {
                 providedWindowID: resolvedWindowID,
                 bound: bound
             ) {
-                if let explicitHint, !Self.hint(explicitHint, matches: bound) {
+                if let explicitHint, Self.hint(explicitHint, conflictsWith: bound) {
                     var conflicts: [String] = []
                     if explicitHint.tabID != bound.tabID {
                         conflicts.append("context_id hint=\(explicitHint.tabID), bound=\(bound.tabID)")
@@ -3578,7 +3585,7 @@ extension MCPServerViewModel {
                providedWindowID: resolvedWindowID
            )
         {
-            if let explicitHint, !Self.hint(explicitHint, matches: handedOver) {
+            if let explicitHint, Self.hint(explicitHint, conflictsWith: handedOver) {
                 throw MCPError.invalidParams("Explicit tab context hint for \(toolName) conflicts with the active run-scoped tab context. Hint tab: \(explicitHint.tabID); run tab: \(handedOver.tabID).")
             }
             return .tabContextSnapshot(handedOver, source: .runHandover)

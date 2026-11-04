@@ -904,8 +904,12 @@ final class MCPServerViewModel: ObservableObject {
                 }
                 return try OracleViewModel.OracleSendPackagingContext(delegated: context)
             },
-            rebindChatSessionIfNeeded: { [self] metadata, chatIDString in
-                try rebindOracleChatSessionIfNeeded(metadata: metadata, chatIDString: chatIDString)
+            rebindChatSessionIfNeeded: { [self] metadata, chatIDString, startsNewChat in
+                try rebindOracleChatSessionIfNeeded(
+                    metadata: metadata,
+                    chatIDString: chatIDString,
+                    startsNewChat: startsNewChat
+                )
             },
             resolveTabIDForAgentMode: { [self] args, connectionID in
                 try await resolveTabIDForAgentMode(args: args, connectionID: connectionID)
@@ -4332,14 +4336,35 @@ final class MCPServerViewModel: ObservableObject {
         windowToolCatalogService
     }
 
+    /// The refusal for an `oracle_send` follow-up whose chat's tab was closed or stashed.
+    static func oracleChatTabGoneMessage(chatID: String) -> String {
+        "Chat '\(chatID)' can't continue: its tab was closed or stashed. The follow-up was not sent. "
+            + "Start a new chat in the tab you want with {\"message\":\"<message>\",\"new_chat\":true}."
+    }
+
+    /// Moves the connection to the tab of the chat named by `oracle_send`'s `chat_id`. A follow-up
+    /// whose chat's tab is no longer open is refused rather than continued in the connection's
+    /// current tab; a stashed tab counts as gone. A call with `new_chat` doesn't continue the chat,
+    /// so a gone tab only skips the move and the new chat starts in the current tab.
     private func rebindOracleChatSessionIfNeeded(
         metadata: RequestMetadata,
-        chatIDString: String
+        chatIDString: String,
+        startsNewChat: Bool
     ) throws {
+        guard let workspaceManager,
+              let session = oracleVM.resolveSession(id: chatIDString),
+              let sessionTabID = session.composeTabID
+        else {
+            return
+        }
+        guard workspaceManager.composeTab(with: sessionTabID) != nil else {
+            if startsNewChat {
+                return
+            }
+            throw MCPError.invalidParams(Self.oracleChatTabGoneMessage(chatID: chatIDString))
+        }
         guard let connectionID = metadata.connectionID,
               let windowID = metadata.windowID,
-              let session = oracleVM.resolveSession(id: chatIDString),
-              let sessionTabID = session.composeTabID,
               let sessionWorkspaceID = session.workspaceID
         else {
             return

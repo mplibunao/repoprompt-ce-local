@@ -1000,12 +1000,20 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             }
         }
 
-        /// The window's active tab holds an Agent session bound to a worktree whose folder was
-        /// deleted. `apply_edits` and `file_actions` refuse before writing, name the tab and the
-        /// worktree, and report `retryable: false` with no delay, because retrying cannot restore the
-        /// folder. Neither tool falls back to the canonical checkout or recreates the worktree path.
+        /// The window's active tab is bound to a worktree whose folder was deleted, through its Agent
+        /// session or through the tab's own worktree scope. `apply_edits` and `file_actions` refuse
+        /// before writing, name the tab and the worktree, and report `retryable: false` with no delay,
+        /// because retrying cannot restore the folder. Neither tool falls back to the canonical
+        /// checkout or recreates the worktree path.
         @MainActor
         func testMutationToolsRejectDeletedWorktreeBeforeWriting() async throws {
+            for owner in MissingWorktreeOwner.allCases {
+                try await assertMutationToolsRejectDeletedWorktree(ownedBy: owner)
+            }
+        }
+
+        @MainActor
+        private func assertMutationToolsRejectDeletedWorktree(ownedBy owner: MissingWorktreeOwner) async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
                     lease: lease,
@@ -1015,13 +1023,14 @@ final class MCPReadMutationPathContractTests: XCTestCase {
                 let server = context.window.mcpServer
                 let store = context.window.workspaceFileContextStore
                 let sessionID = UUID()
+                let projectionOwnerID = owner == .tab ? context.tabID : sessionID
                 let previousProvider = server.agentWorktreeBindingStateProvider
                 let previousResolver = server.agentWorktreeBindingStateResolver
                 @MainActor
                 func cleanup() async {
                     server.agentWorktreeBindingStateProvider = previousProvider
                     server.agentWorktreeBindingStateResolver = previousResolver
-                    await WorkspaceRootBindingProjectionMaterializer(store: store).release(sessionID: sessionID)
+                    await WorkspaceRootBindingProjectionMaterializer(store: store).release(sessionID: projectionOwnerID)
                     _ = await server.setWindowToolsEnabled(false)
                     await fixture.cleanup()
                 }
@@ -1057,14 +1066,19 @@ final class MCPReadMutationPathContractTests: XCTestCase {
                         branch: "bugfix/stale-worktree",
                         source: "test"
                     )
-                    server.agentWorktreeBindingStateProvider = { _, _ in .hydrated([binding]) }
-                    server.agentWorktreeBindingStateResolver = { _, _ in .hydrated([binding]) }
                     let workspaceManager = context.window.workspaceManager
                     let workspaceIndex = try XCTUnwrap(workspaceManager.workspaces.firstIndex { $0.id == context.workspaceID })
                     let tabIndex = try XCTUnwrap(
                         workspaceManager.workspaces[workspaceIndex].composeTabs.firstIndex { $0.id == context.tabID }
                     )
-                    workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = sessionID
+                    switch owner {
+                    case .agentSession:
+                        server.agentWorktreeBindingStateProvider = { _, _ in .hydrated([binding]) }
+                        server.agentWorktreeBindingStateResolver = { _, _ in .hydrated([binding]) }
+                        workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = sessionID
+                    case .tab:
+                        workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].worktreeScope = .bound([binding])
+                    }
                     let tabName = workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].name
                     let canonicalBytes = try Data(contentsOf: context.fileURL)
 
@@ -1102,8 +1116,8 @@ final class MCPReadMutationPathContractTests: XCTestCase {
                     )
                     XCTAssertEqual(edit.reply.status, "failed")
                     XCTAssertEqual(edit.reply.editsApplied, 0)
-                    XCTAssertEqual(edit.reply.errorCode, "worktree_scope_unavailable")
-                    XCTAssertEqual(edit.reply.errorMessage, refusalSummary)
+                    XCTAssertEqual(edit.reply.errorCode, "worktree_scope_unavailable", "\(owner)")
+                    XCTAssertEqual(edit.reply.errorMessage, refusalSummary, "\(owner)")
                     XCTAssertEqual(edit.reply.suggestion, expected.recovery)
                     XCTAssertEqual(edit.reply.retryable, false)
                     XCTAssertNil(edit.reply.retryAfterMilliseconds)
@@ -1121,8 +1135,8 @@ final class MCPReadMutationPathContractTests: XCTestCase {
                         as: ToolResultDTOs.FileActionReply.self
                     )
                     XCTAssertEqual(action.reply.status, "failed")
-                    XCTAssertEqual(action.reply.errorCode, "worktree_scope_unavailable")
-                    XCTAssertEqual(action.reply.errorMessage, refusalSummary)
+                    XCTAssertEqual(action.reply.errorCode, "worktree_scope_unavailable", "\(owner)")
+                    XCTAssertEqual(action.reply.errorMessage, refusalSummary, "\(owner)")
                     XCTAssertEqual(action.reply.suggestion, expected.recovery)
                     XCTAssertEqual(action.reply.retryable, false)
                     XCTAssertNil(action.reply.retryAfterMilliseconds)
@@ -1132,10 +1146,10 @@ final class MCPReadMutationPathContractTests: XCTestCase {
                     for text in [edit.reply.errorMessage, edit.reply.suggestion, action.reply.errorMessage, action.reply.suggestion] {
                         XCTAssertFalse(text?.contains(fixture.rootURL.path) ?? true, "The refusal printed an absolute path: \(text ?? "nil")")
                     }
-                    XCTAssertEqual(try Data(contentsOf: context.fileURL), canonicalBytes)
+                    XCTAssertEqual(try Data(contentsOf: context.fileURL), canonicalBytes, "\(owner)")
                     XCTAssertFalse(
                         FileManager.default.fileExists(atPath: worktreeRoot.path),
-                        "A refused mutation recreated the worktree path"
+                        "\(owner): a refused mutation recreated the worktree path"
                     )
                     await cleanup()
                     try await fixture.assertCleanedUp()

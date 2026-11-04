@@ -34,7 +34,7 @@ struct MCPOracleToolService {
     let requireCurrentTabContext: (String) async throws -> TabContextSnapshot
     let stabilizedVirtualContext: StabilizedVirtualContext
     let resolveDelegatedReviewPackaging: ResolveDelegatedReviewPackaging
-    let rebindChatSessionIfNeeded: (_ metadata: RequestMetadata, _ chatIDString: String) throws -> Void
+    let rebindChatSessionIfNeeded: (_ metadata: RequestMetadata, _ chatIDString: String, _ startsNewChat: Bool) throws -> Void
     let resolveTabIDForAgentMode: (_ args: [String: Value], _ connectionID: UUID?) async throws -> UUID
     let requireTargetWindow: () throws -> WindowState
     let rawExplicitTabID: (_ args: [String: Value]) -> String?
@@ -302,7 +302,7 @@ struct MCPOracleToolService {
            let chatIDString = args["chat_id"]?.stringValue,
            !chatIDString.isEmpty
         {
-            try rebindChatSessionIfNeeded(metadata, chatIDString)
+            try rebindChatSessionIfNeeded(metadata, chatIDString, args["new_chat"]?.boolValue ?? false)
         }
 
         let context = try await requireCurrentTabContext(oracleSendToolName)
@@ -575,12 +575,7 @@ struct MCPOracleToolService {
             )
             return authority.lookupContext
         }
-        return try await requiredOracleLookupContext(
-            source: AgentWorkspaceLookupContextSource(
-                activeAgentSessionID: context.activeAgentSessionID,
-                worktreeBindingState: context.worktreeBindingState
-            )
-        )
+        return try await requiredOracleLookupContext(source: context.fileToolLookupSource)
     }
 
     private func oraclePackagingLookupContext(owner: AgentOracleOwner) async throws -> WorkspaceLookupContext {
@@ -620,7 +615,7 @@ struct MCPOracleToolService {
         let reviewGitContext = await promptVM.freezePromptGitReviewContext(
             workspaceID: stabilizedContext.workspaceID,
             tabID: stabilizedContext.tabID,
-            sessionID: owner.agentSessionID,
+            sessionID: owner.agentSessionID ?? stabilizedContext.activeAgentSessionID,
             bindings: owner.worktreeBindingState.bindings ?? stabilizedContext.worktreeBindings,
             base: "HEAD"
         )

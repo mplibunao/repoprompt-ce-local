@@ -439,19 +439,32 @@ import XCTest
             _ = await switchTask.value
         }
 
+        /// Binding to a tab whose worktree folder is gone, through its Agent session or through the
+        /// tab's own worktree scope, refuses with the missing-worktree refusal and keeps the
+        /// connection's previous binding.
         @MainActor
         func testBindToDeletedWorktreePreservesPreviousBinding() async throws {
+            for owner in MissingWorktreeOwner.allCases {
+                try await assertBindToDeletedWorktreePreservesPreviousBinding(ownedBy: owner)
+            }
+        }
+
+        @MainActor
+        private func assertBindToDeletedWorktreePreservesPreviousBinding(ownedBy owner: MissingWorktreeOwner) async throws {
             let root = try makeTemporaryRoot()
             let deletedWorktree = try makeTemporaryRoot()
             try FileManager.default.removeItem(at: deletedWorktree)
             let healthyTabID = UUID()
+            let binding = worktreeBinding(logicalRoot: root, worktreeRoot: deletedWorktree)
             let fixture = try await makeFixture(
                 rootPaths: [root.path],
-                activeAgentSessionID: UUID(),
+                activeAgentSessionID: owner == .agentSession ? UUID() : nil,
+                worktreeScope: owner == .tab ? .bound([binding]) : nil,
                 additionalTabIDs: [healthyTabID]
             )
-            let binding = worktreeBinding(logicalRoot: root, worktreeRoot: deletedWorktree)
-            installHydratedWorktreeBindings([binding], on: fixture.window.mcpServer)
+            if owner == .agentSession {
+                installHydratedWorktreeBindings([binding], on: fixture.window.mcpServer)
+            }
             let previousWindows = WindowStatesManager.shared.allWindows
             WindowStatesManager.shared.allWindows = [fixture.window]
             addTeardownBlock { @MainActor in
@@ -477,15 +490,16 @@ import XCTest
                 binding: binding,
                 routeContext: .init(tabName: "Context", windowID: fixture.window.windowID)
             )
-            XCTAssertEqual(stale.changed, false)
-            XCTAssertEqual(stale.errorCode, "worktree_scope_unavailable")
-            XCTAssertEqual(stale.error, expected.message)
-            XCTAssertEqual(stale.retryable, false)
-            XCTAssertNil(stale.retryAfterMilliseconds)
-            XCTAssertEqual(stale.binding, healthy.binding)
+            XCTAssertEqual(stale.changed, false, "\(owner)")
+            XCTAssertEqual(stale.errorCode, "worktree_scope_unavailable", "\(owner)")
+            XCTAssertEqual(stale.error, expected.message, "\(owner)")
+            XCTAssertEqual(stale.retryable, false, "\(owner)")
+            XCTAssertNil(stale.retryAfterMilliseconds, "\(owner)")
+            XCTAssertEqual(stale.binding, healthy.binding, "\(owner)")
             XCTAssertEqual(
                 fixture.window.mcpServer.connectionBindingSnapshot(forConnection: connection.connectionID).tabID,
-                healthyTabID
+                healthyTabID,
+                "\(owner)"
             )
         }
 
@@ -1011,6 +1025,7 @@ import XCTest
         private func makeFixture(
             rootPaths: [String],
             activeAgentSessionID: UUID? = nil,
+            worktreeScope: ComposeTabWorktreeScope? = nil,
             additionalTabIDs: [UUID] = []
         ) async throws -> Fixture {
             let contextID = UUID()
@@ -1021,7 +1036,8 @@ import XCTest
                     composeTabs: [ComposeTabState(
                         id: contextID,
                         name: "Context",
-                        activeAgentSessionID: activeAgentSessionID
+                        activeAgentSessionID: activeAgentSessionID,
+                        worktreeScope: worktreeScope
                     )] + additionalTabIDs.map { ComposeTabState(id: $0, name: "Other") },
                     activeComposeTabID: contextID
                 ),
