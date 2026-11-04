@@ -120,7 +120,7 @@ final class MCPOracleToolProvider: MCPAppToolProviding {
                         enum: ["chat", "plan", "review"]
                     ),
                     "chat_id": .string(
-                        description: "Continue a specific chat in the current tab or current context"
+                        description: MCPOracleSendPropertyDescriptions.chatID
                     ),
                     "new_chat": .boolean(
                         description: "Start a new chat session (default: false; discouraged)"

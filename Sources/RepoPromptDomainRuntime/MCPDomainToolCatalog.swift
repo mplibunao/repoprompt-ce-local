@@ -41,6 +41,32 @@ package enum MCPWindowToolName {
     }
 }
 
+/// The worktree argument names of `agent_run` start and `manage_workspaces` `create_tab`.
+/// `create_tab` accepts only the existing-worktree arguments and refuses every other name here
+/// rather than ignoring it, in the app and in standalone headless.
+package enum MCPWorktreeArgumentName {
+    /// Every worktree argument name; `agent_run` start accepts all of them.
+    package static let all: Set<String> = [
+        "worktree",
+        "worktree_id",
+        "worktree_create",
+        "worktree_repo_root",
+        "worktree_branch",
+        "worktree_base_ref",
+        "worktree_path",
+        "worktree_label",
+        "worktree_color",
+        "allow_external_worktree_path",
+        "inherit_worktree"
+    ]
+
+    /// The arguments `create_tab` accepts to scope a new tab to an existing worktree.
+    package static let createTabAccepted: Set<String> = ["worktree", "worktree_id", "worktree_repo_root"]
+
+    /// The worktree arguments `create_tab` refuses.
+    package static let createTabRefused = all.subtracting(createTabAccepted)
+}
+
 package enum MCPDomainToolScopeKind: String, CaseIterable, Sendable {
     case application
     case window

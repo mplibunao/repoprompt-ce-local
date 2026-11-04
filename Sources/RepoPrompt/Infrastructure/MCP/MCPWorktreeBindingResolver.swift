@@ -244,15 +244,15 @@ extension MCPWorktreeBindingResolver {
 /// The worktree arguments of a `manage_workspaces` `create_tab` call, checked before any window,
 /// tab, or connection binding changes.
 struct MCPCreateTabWorktreeRequest: Equatable {
-    static let argumentKeys: Set<String> = ["worktree", "worktree_id", "worktree_repo_root"]
-
     /// The existing-worktree selector; a `worktree_id` arrives as `@id:<id>`.
     let selector: String
     let repoRoot: String?
 
     /// Refuses the worktree arguments on any action other than `create_tab`.
     static func rejectArguments(_ args: [String: Value], forAction action: String) throws {
-        guard action != "create_tab", argumentKeys.contains(where: { args[$0] != nil }) else { return }
+        guard action != "create_tab",
+              MCPWorktreeArgumentName.createTabAccepted.contains(where: { args[$0] != nil })
+        else { return }
         throw MCPCreateTabWorktreeError.wrongAction
     }
 
@@ -271,8 +271,7 @@ struct MCPCreateTabWorktreeRequest: Equatable {
         if mode == "fork", worktree != nil || worktreeID != nil {
             throw MCPCreateTabWorktreeError.selectorWithFork
         }
-        let unsupported = AgentMCPStartWorktreeCoordinator.Request.argumentKeys
-            .subtracting(argumentKeys)
+        let unsupported = MCPWorktreeArgumentName.createTabRefused
             .filter { args[$0] != nil }
             .sorted()
         if !unsupported.isEmpty {

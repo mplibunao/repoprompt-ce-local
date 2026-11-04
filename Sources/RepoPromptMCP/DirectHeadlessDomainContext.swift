@@ -104,6 +104,13 @@ actor DirectHeadlessDomainContext {
         return try await snapshot(identity: handle.context, sessionID: sessionID)
     }
 
+    /// Whether a saved compose tab carries a worktree scope, in any state, including one the app
+    /// couldn't read.
+    nonisolated static func hasWorktreeScope(_ contextObject: [String: Any]) -> Bool {
+        guard let scope = contextObject["worktreeScope"] else { return false }
+        return !(scope is NSNull)
+    }
+
     func snapshot(identity: DomainContextIdentity, sessionID: UUID? = nil) async throws -> Snapshot {
         guard let workspace = await runtime.contextStore.workspaceSnapshot(identity.workspaceID) else {
             throw Error.workspaceUnavailable
@@ -114,7 +121,7 @@ actor DirectHeadlessDomainContext {
         let contextObject = try Self.contextObject(from: workspace, contextID: identity.contextID)
         // Headless has no worktree projections. A saved scoped tab would read the main checkout,
         // so every bind and every file, Oracle, or Agent authority taken from it is refused here.
-        if let scope = contextObject["worktreeScope"], !(scope is NSNull) {
+        if Self.hasWorktreeScope(contextObject) {
             throw Error.worktreeScopedContext
         }
         let canonicalRoots = try workspace.document.metadata.repoPaths.map { raw -> URL in

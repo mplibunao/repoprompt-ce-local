@@ -1890,7 +1890,7 @@ final class WindowRoutingService: Service {
 
         guard createIfMissing else {
             throw MCPError.invalidParams(
-                "No existing workspace exactly matches working_dirs [\(normalizedWorkingDirs.joined(separator: ", "))] and no workspace repo_paths superset contains those roots. Exact matching uses the full workspace repo_paths set (order-insensitive); superset fallback uses root-set membership only, not descendant paths. Retry with create_if_missing=true to create one."
+                "No existing workspace exactly matches working_dirs [\(normalizedWorkingDirs.joined(separator: ", "))] and no workspace repo_paths superset contains those roots. Matching uses root-set membership, not descendant paths or linked-worktree relationships. For a worktree of a loaded root, bind that workspace and create a tab with manage_workspaces {\"action\":\"create_tab\",\"worktree\":\"<worktree_selector>\",\"worktree_repo_root\":\"<loaded_root_name_or_path>\"}. Use create_if_missing=true only when you intend to create a separate workspace."
             )
         }
 
@@ -2529,7 +2529,7 @@ final class WindowRoutingService: Service {
                 - `bind_context.list` returns per-window routing state: windows, active tabs, context_ids, and current binding
                 - When the same workspace is open in multiple windows, compose tabs are shared — use `bind_context` to discover per-window context_ids
 
-                create_tab defaults to bind=true and focus=false so automation can create isolated background tabs without stealing UI focus.
+                \(MCPManageWorkspacesPropertyDescriptions.createTabDefaults) \(MCPManageWorkspacesPropertyDescriptions.worktreeScopeBackend)
 
                 IMPORTANT: The 'focus' parameter switches the visible tab in the UI, which can be disruptive to the user's workflow. Only set focus=true when the user explicitly requests to see or switch to a specific tab. For background operations, omit focus or set it to false. The 'close_tab' action refuses to close the last remaining tab, the active visible tab unless allow_active=true, or any tab with a live bound run.
                 """,
@@ -2540,9 +2540,12 @@ final class WindowRoutingService: Service {
                         "name": .string(description: "Name for new workspace (required for 'create'; optional for 'create_tab')"),
                         "folder_path": .string(description: "Absolute folder path (required for 'add_folder', 'remove_folder'; optional for 'create' to initialize with a root folder)"),
                         "tab": .string(description: "Compose tab UUID or name (required for 'select_tab'; optional for 'close_tab')"),
-                        "mode": .string(description: "For 'create_tab': creation mode ('blank' or 'fork')"),
+                        "mode": .string(description: MCPManageWorkspacesPropertyDescriptions.mode),
                         "source_tab": .string(description: "For 'create_tab' with mode='fork': source compose tab UUID or name"),
                         "bind": .boolean(description: "For 'create_tab': if true, bind this MCP connection to the new tab (default true)"),
+                        "worktree": .string(description: MCPManageWorkspacesPropertyDescriptions.worktree),
+                        "worktree_id": .string(description: MCPManageWorkspacesPropertyDescriptions.worktreeID),
+                        "worktree_repo_root": .string(description: MCPManageWorkspacesPropertyDescriptions.worktreeRepoRoot),
                         "window_id": .integer(description: "Optional window ID; defaults to selected or only window"),
                         "focus": .boolean(description: "For 'select_tab' or 'create_tab': if true, also switches the UI to show the tab"),
                         "allow_active": .boolean(description: "For 'close_tab': allow closing the currently active visible tab"),

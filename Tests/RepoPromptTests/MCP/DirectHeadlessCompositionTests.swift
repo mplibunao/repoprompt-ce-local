@@ -127,8 +127,9 @@ final class DirectHeadlessCompositionTests: XCTestCase {
     }
 
     /// Headless has no worktree projections, so a saved tab with a worktree scope is refused
-    /// before it is bound or read; reading it would serve the main checkout. The connection keeps
-    /// its previous context, and the scoped tab can still be listed and closed.
+    /// before it is bound or read, and `create_tab` refuses a worktree selector or a scoped fork
+    /// source before it writes the workspace; each would serve the main checkout. The connection
+    /// keeps its previous context, and the scoped tab can still be listed and closed.
     func testWorktreeScopedContextsAreRejectedWithoutScopeChanges() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("rp-headless-scoped-tab-\(UUID().uuidString)", isDirectory: true)
@@ -226,6 +227,33 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         } catch {
             assertScopedRefusal(error)
         }
+        func savedDocument() async -> Data? {
+            await runtime.workspaceStore.snapshot().workspaces
+                .first { $0.document.workspaceID == workspaceID }?.document.documentBytes
+        }
+        let documentBefore = await savedDocument()
+        let refusedCreations: [[String: Value]] = [
+            ["worktree": .string("feature")],
+            ["worktree": .null],
+            ["worktree_id": .string("headless-scoped-worktree")],
+            ["worktree_repo_root": .string(repoPath)],
+            ["worktree_create": .bool(true)],
+            ["mode": .string("fork"), "source_tab": .string(scopedID.uuidString)]
+        ]
+        for refused in refusedCreations {
+            let arguments = refused.merging([
+                "action": .string("create_tab"),
+                "workspace": .string(workspaceID.uuidString)
+            ]) { current, _ in current }
+            do {
+                _ = try await global.manageWorkspaceLifecycle(request(arguments))
+                XCTFail("headless create_tab accepted \(refused)")
+            } catch {
+                assertScopedRefusal(error)
+            }
+        }
+        let documentAfter = await savedDocument()
+        XCTAssertEqual(documentAfter, documentBefore)
         let bindingAfter = try await runtime.standaloneScopeCoordinator.snapshot(scopeID: scopeID).binding
         XCTAssertEqual(bindingAfter, bindingBefore)
         let ordinarySnapshot = try await context.snapshot(identity: ordinary)

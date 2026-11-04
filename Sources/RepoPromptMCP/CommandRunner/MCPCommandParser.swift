@@ -8,6 +8,7 @@
 
 import Foundation
 import MCP
+import RepoPromptDomainRuntime
 
 // MARK: - Command Types
 
@@ -1376,6 +1377,19 @@ enum MCPCommandParser {
                    let windowID = Int(windowIDStr)
                 {
                     args["window_id"] = UncheckedSendableValue(windowID)
+                }
+                // Every known worktree flag goes through as given, so create_tab refuses a
+                // conflicting selector or an unsupported creation flag instead of the CLI dropping
+                // it. An unknown one, such as a misspelling, would be ignored and create an
+                // unscoped tab, so it is refused here.
+                for (flag, value) in flags.named.sorted(by: { $0.key < $1.key }) where flag.contains("worktree") {
+                    let argument = flag.replacingOccurrences(of: "-", with: "_")
+                    guard MCPWorktreeArgumentName.all.contains(argument) else {
+                        throw CommandParseError.invalidArgument(
+                            "Unknown tabs create flag '--\(flag)'. Worktree flags: --worktree, --worktree-id, --worktree-repo-root."
+                        )
+                    }
+                    args[argument] = UncheckedSendableValue(value)
                 }
                 return .aliasCall(toolName: "manage_workspaces", args: args)
             case "close":

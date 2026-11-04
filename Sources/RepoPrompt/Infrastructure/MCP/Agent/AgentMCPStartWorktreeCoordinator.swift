@@ -18,19 +18,7 @@ struct AgentMCPStartWorktreeCoordinator {
             case create
         }
 
-        static let argumentKeys: Set<String> = [
-            "worktree",
-            "worktree_id",
-            "worktree_create",
-            "worktree_repo_root",
-            "worktree_branch",
-            "worktree_base_ref",
-            "worktree_path",
-            "worktree_label",
-            "worktree_color",
-            "allow_external_worktree_path",
-            "inherit_worktree"
-        ]
+        static let argumentKeys = MCPWorktreeArgumentName.all
 
         let mode: Mode
         let repoRoot: String?

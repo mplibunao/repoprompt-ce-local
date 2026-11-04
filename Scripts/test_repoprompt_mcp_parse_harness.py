@@ -68,6 +68,33 @@ def run(binary: Path) -> None:
     require_equal(json_call.get("toolName"), "manage_worktree", "JSON toolName")
     require_equal(json_call.get("jsonPayload"), '{"op":"list"}', "JSON payload")
 
+    # create_tab, not the CLI, refuses conflicting selectors and creation flags, so all reach it.
+    scoped_tab = parse_command(
+        binary,
+        "tabs create Review --worktree feature --worktree_id wt-1 --worktree-repo-root repo --worktree-create",
+    )
+    require_equal(scoped_tab.get("success"), True, "tabs create success")
+    require_equal(scoped_tab.get("command"), "aliasCall", "tabs create command")
+    require_equal(scoped_tab.get("toolName"), "manage_workspaces", "tabs create toolName")
+    require_equal(
+        scoped_tab.get("args"),
+        {
+            "action": "create_tab",
+            "name": "Review",
+            "worktree": "feature",
+            "worktree_id": "wt-1",
+            "worktree_repo_root": "repo",
+            "worktree_create": "true",
+        },
+        "tabs create worktree args",
+    )
+
+    # A misspelled worktree flag would be ignored and create an unscoped tab, so parsing refuses it.
+    misspelled = parse_command(binary, "tabs create Review --worktree-selector feature")
+    require_equal(misspelled.get("success"), False, "misspelled worktree flag success")
+    if "--worktree-selector" not in str(misspelled.get("error")):
+        raise HarnessError(f"misspelled worktree flag error does not name the flag: {misspelled!r}")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)

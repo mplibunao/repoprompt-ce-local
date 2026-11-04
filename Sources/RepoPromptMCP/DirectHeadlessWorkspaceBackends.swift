@@ -177,6 +177,11 @@ actor DirectHeadlessGlobalBackend: DomainGlobalControlBackend {
         if args["window_id"] != nil || args["open_in_new_window"]?.boolValue == true {
             throw MCPError.invalidParams("window selectors and new-window presentation are unavailable with --backend headless")
         }
+        // Headless has no worktree projections, so any worktree argument, even null, is refused
+        // rather than ignored, which would create a tab that reads the main checkout.
+        if MCPWorktreeArgumentName.all.contains(where: { args[$0] != nil }) {
+            throw DirectHeadlessDomainContext.Error.worktreeScopedContext
+        }
         let action = args["action"]?.stringValue ?? "list"
         switch action {
         case "list":
@@ -351,6 +356,10 @@ actor DirectHeadlessGlobalBackend: DomainGlobalControlBackend {
             if mode == "fork" {
                 guard let source = resolveContext(args["source_tab"]?.stringValue, in: tabs) else {
                     throw MCPError.invalidParams("create_tab mode=fork requires an unambiguous source_tab")
+                }
+                // A fork copies the source's scope, which headless could not honor.
+                if DirectHeadlessDomainContext.hasWorktreeScope(source) {
+                    throw DirectHeadlessDomainContext.Error.worktreeScopedContext
                 }
                 tab = source
             } else if mode == "blank" {
