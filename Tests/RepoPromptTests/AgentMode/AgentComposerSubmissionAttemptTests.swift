@@ -70,6 +70,57 @@ final class AgentComposerSubmissionAttemptTests: XCTestCase {
         XCTAssertNil(sourceSession.activeComposerSubmitAttempt)
     }
 
+    /// A first send from a worktree-scoped tab returns the attachment refusal without opening an
+    /// Agent tab or submitting a turn, and keeps the draft and the tab's scope.
+    func testWorktreeScopedTabFirstSendRefusesWithoutCreatingAgentTab() async throws {
+        let window = try await makeWindow()
+
+        let viewModel = window.agentModeViewModel
+        let manager = window.workspaceManager
+        let workspace = try XCTUnwrap(manager.activeWorkspace)
+        let sourceTabID = try XCTUnwrap(workspace.activeComposeTabID)
+        let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == workspace.id })
+        let tabIndex = try XCTUnwrap(
+            manager.workspaces[workspaceIndex].composeTabs.firstIndex { $0.id == sourceTabID }
+        )
+        manager.workspaces[workspaceIndex].composeTabs[tabIndex].worktreeScope = .unavailable
+        let sourceSession = viewModel.session(for: sourceTabID)
+        viewModel.test_setWorkspaceSwitchInFlight(false)
+        let draft = "Start an agent on this worktree"
+        viewModel.storeDraftText(for: sourceTabID, draft)
+
+        let target = try XCTUnwrap(viewModel.makeComposerSubmitTarget(tabID: sourceTabID, session: sourceSession))
+        XCTAssertEqual(target.route, .createAgentSessionFromSourceTab)
+        viewModel.test_submitUserTurnResultOverride = { _, _, _ in
+            XCTFail("A scoped tab must not submit a turn.")
+            return .submitted
+        }
+        defer { viewModel.test_submitUserTurnResultOverride = nil }
+        var createdTabCount = 0
+
+        let result = await viewModel.submitUserTurnCreatingSessionIfNeeded(
+            text: draft,
+            target: target,
+            createAndActivateSessionTab: {
+                createdTabCount += 1
+                return await viewModel.createAndActivateSessionTab()
+            }
+        )
+
+        XCTAssertEqual(
+            result,
+            .blocked(message: ComposeTabWorktreeScopeError.agentAttachmentRefused.localizedDescription)
+        )
+        XCTAssertEqual(createdTabCount, 0)
+        let stored = try XCTUnwrap(manager.workspace(withID: workspace.id))
+        XCTAssertEqual(stored.composeTabs.map(\.id), workspace.composeTabs.map(\.id))
+        let storedTab = try XCTUnwrap(stored.composeTabs.first { $0.id == sourceTabID })
+        XCTAssertEqual(storedTab.worktreeScope, .unavailable)
+        XCTAssertNil(storedTab.activeAgentSessionID)
+        XCTAssertEqual(viewModel.retrieveDraftText(for: sourceTabID), draft)
+        XCTAssertNil(sourceSession.activeComposerSubmitAttempt)
+    }
+
     func testLatchSuppressesRapidSameTabCallbacksButAllowsAnotherTab() throws {
         var latch = AgentComposerSubmissionLatch()
         let firstSession = AgentModeViewModel.TabSession(tabID: UUID())

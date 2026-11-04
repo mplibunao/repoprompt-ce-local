@@ -16015,6 +16015,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
             return result
         case .createAgentSessionFromSourceTab:
+            // A new Agent tab doesn't inherit the source tab's worktree scope. Refuse a scoped
+            // tab here, before any tab, session, or provider exists.
+            do {
+                try workspaceManager?.requireAgentSessionAttachmentAllowed(tabID: target.tabID)
+            } catch {
+                return .blocked(message: error.localizedDescription)
+            }
             let sourceSession = claimedSourceSession
             let sourceSnapshot = FirstSendSourceSnapshot(
                 session: sourceSession,
