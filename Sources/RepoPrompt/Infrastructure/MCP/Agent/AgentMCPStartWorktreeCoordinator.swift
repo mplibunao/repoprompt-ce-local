@@ -58,11 +58,6 @@ struct AgentMCPStartWorktreeCoordinator {
         let logicalRoot: WorkspaceRootRef
     }
 
-    private struct RepositoryCandidate {
-        let repo: GitRepoDescriptor
-        let logicalRoot: WorkspaceRootRef
-    }
-
     let operationName: String
     let vcsService: VCSService
     let gitTargetResolver: GitRepoTargetResolver
@@ -261,18 +256,20 @@ struct AgentMCPStartWorktreeCoordinator {
                     agentModeVM: agentModeVM
                 )
                 let identity = try persistVisualIdentity(for: worktree, request: request)
-                let rootPrefix = try repositoryRelativeRootPrefix(
+                let rootPrefix = try MCPWorktreeBindingResolver.repositoryRelativeRootPrefix(
                     logicalRoot: context.logicalRoot,
                     repositoryRoot: context.repo.rootURL
                 )
-                let binding = makeBinding(
+                let binding = MCPWorktreeBindingResolver.makeBinding(
                     worktree: worktree,
                     logicalRoot: context.logicalRoot,
                     repositoryRelativeRootPrefix: rootPrefix,
-                    visualIdentity: identity,
+                    visualLabel: identity.label,
+                    visualColorHex: identity.colorHex,
                     replacing: agentModeVM.worktreeBindings(forAgentSessionID: targetSessionID).first {
                         standardizedPath($0.logicalRootPath) == standardizedPath(context.logicalRoot.standardizedFullPath)
-                    }
+                    },
+                    source: operationName
                 )
                 #if DEBUG
                     if WorktreeStartupBenchmarkDiagnostics.currentPendingStart != nil {
@@ -529,16 +526,11 @@ struct AgentMCPStartWorktreeCoordinator {
             primaryRoot: expectedWorkspace.repoPaths.first,
             visibleRoots: visibleRoots
         )
-        var candidates: [RepositoryCandidate] = []
         var seen = Set<String>()
-        for root in discoveryRoots {
-            if let resolved = await vcsService.resolveRepo(from: URL(fileURLWithPath: root.standardizedFullPath)) {
-                let descriptor = GitRepoDescriptor(rootURL: resolved.rootURL)
-                if seen.insert(descriptor.rootPath.lowercased()).inserted {
-                    candidates.append(RepositoryCandidate(repo: descriptor, logicalRoot: root))
-                }
-            }
-        }
+        let candidates = await MCPWorktreeBindingResolver(
+            vcsService: vcsService,
+            gitTargetResolver: gitTargetResolver
+        ).rootRepositories(discoveryRoots).filter { seen.insert($0.repo.rootPath.lowercased()).inserted }
         guard let defaultCandidate = candidates.first else {
             throw MCPError.invalidParams("No Git repository found in loaded roots for \(operationName) worktree binding.")
         }
@@ -546,9 +538,7 @@ struct AgentMCPStartWorktreeCoordinator {
         let repo: GitRepoDescriptor
         var explicitLogicalRoot: WorkspaceRootRef?
         if let rawRepoRoot = request.repoRoot {
-            if !rawRepoRoot.hasPrefix("@") {
-                explicitLogicalRoot = explicitLogicalRootRef(for: rawRepoRoot, visibleRoots: visibleRoots)
-            }
+            explicitLogicalRoot = MCPWorktreeBindingResolver.explicitLogicalRoot(for: rawRepoRoot, in: visibleRoots)
             do {
                 repo = try await gitTargetResolver.resolveRepoRootToken(
                     rawRepoRoot,
@@ -671,7 +661,7 @@ struct AgentMCPStartWorktreeCoordinator {
                 correlationID: startupContext.correlationID,
                 logicalRootPath: context.logicalRoot.standardizedFullPath,
                 expectedOwnerBindingGeneration: expectedOwnerBindingGeneration,
-                repositoryRelativeRootPrefix: repositoryRelativeRootPrefix(
+                repositoryRelativeRootPrefix: MCPWorktreeBindingResolver.repositoryRelativeRootPrefix(
                     logicalRoot: context.logicalRoot,
                     repositoryRoot: context.repo.rootURL
                 ),
@@ -719,21 +709,6 @@ struct AgentMCPStartWorktreeCoordinator {
         return result
     }
 
-    private func repositoryRelativeRootPrefix(
-        logicalRoot: WorkspaceRootRef,
-        repositoryRoot: URL
-    ) throws -> GitRepositoryRelativeRootPrefix {
-        let rootPath = StandardizedPath.absolute(logicalRoot.standardizedFullPath)
-        let repositoryPath = StandardizedPath.absolute(repositoryRoot.path)
-        guard rootPath == repositoryPath || rootPath.hasPrefix(repositoryPath + "/") else {
-            throw MCPError.invalidParams("The logical root is outside the selected Git repository.")
-        }
-        let relative = rootPath == repositoryPath
-            ? ""
-            : String(rootPath.dropFirst(repositoryPath.count + 1))
-        return try GitRepositoryRelativeRootPrefix(relative)
-    }
-
     private func persistVisualIdentity(
         for worktree: GitWorktreeDescriptor,
         request: Request
@@ -749,36 +724,6 @@ struct AgentMCPStartWorktreeCoordinator {
         } catch let error as GlobalSettingsStore.WorktreeVisualIdentityError {
             throw MCPError.invalidParams("Invalid worktree visual identity: \(error)")
         }
-    }
-
-    private func makeBinding(
-        worktree: GitWorktreeDescriptor,
-        logicalRoot: WorkspaceRootRef,
-        repositoryRelativeRootPrefix: GitRepositoryRelativeRootPrefix,
-        visualIdentity: WorktreeVisualIdentity,
-        replacing previous: AgentSessionWorktreeBinding?
-    ) -> AgentSessionWorktreeBinding {
-        let physicalRootPath = repositoryRelativeRootPrefix.value.isEmpty
-            ? worktree.path
-            : URL(fileURLWithPath: worktree.path, isDirectory: true)
-            .appendingPathComponent(repositoryRelativeRootPrefix.value, isDirectory: true)
-            .standardizedFileURL.path
-        return AgentSessionWorktreeBinding(
-            id: previous?.id ?? UUID().uuidString,
-            repositoryID: worktree.repository.repositoryID,
-            repoKey: worktree.repository.repoKey,
-            logicalRootPath: logicalRoot.standardizedFullPath,
-            logicalRootName: logicalRoot.name,
-            worktreeID: worktree.worktreeID,
-            worktreeRootPath: physicalRootPath,
-            worktreeName: worktree.name,
-            branch: worktree.branch,
-            head: worktree.head,
-            visualLabel: visualIdentity.label,
-            visualColorHex: visualIdentity.colorHex,
-            boundAt: previous?.worktreeID == worktree.worktreeID ? previous?.boundAt ?? Date() : Date(),
-            source: operationName
-        )
     }
 
     private func preparationError(_ error: Error) -> Error {
@@ -816,19 +761,6 @@ struct AgentMCPStartWorktreeCoordinator {
             return first
         }
         throw MCPError.invalidParams("No visible workspace root is available for \(operationName) worktree binding.")
-    }
-
-    private func explicitLogicalRootRef(
-        for rawRepoRoot: String,
-        visibleRoots: [WorkspaceRootRef]
-    ) -> WorkspaceRootRef? {
-        let canonical = standardizedPath((rawRepoRoot as NSString).expandingTildeInPath)
-        let lowered = rawRepoRoot.lowercased()
-        return visibleRoots.first { root in
-            root.name.lowercased() == lowered
-                || standardizedPath(root.standardizedFullPath) == canonical
-                || standardizedPath(root.fullPath) == canonical
-        }
     }
 
     /// Provider startup treats the declared workspace root as primary even when file-root load order differs.

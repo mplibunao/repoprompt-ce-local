@@ -6566,6 +6566,17 @@ class WorkspaceManagerViewModel: ObservableObject {
         composedOrStashedTab(withID: tabID, inWorkspaceID: workspaceID)?.worktreeScope
     }
 
+    /// The compose tabs that own a worktree scope, in every workspace or only in workspaces other
+    /// than the active one.
+    @MainActor
+    func worktreeScopedComposeTabIDs(includingActiveWorkspace: Bool) -> Set<UUID> {
+        Set(workspaces.lazy
+            .filter { includingActiveWorkspace || $0.id != self.activeWorkspaceID }
+            .flatMap(\.composeTabs)
+            .filter { $0.worktreeScope != nil }
+            .map(\.id))
+    }
+
     /// Refuses to start an Agent session on a compose or stashed tab that owns a worktree scope,
     /// before any Agent association is published or a provider starts. A tab that isn't found
     /// passes; the attachment's own checks report it.

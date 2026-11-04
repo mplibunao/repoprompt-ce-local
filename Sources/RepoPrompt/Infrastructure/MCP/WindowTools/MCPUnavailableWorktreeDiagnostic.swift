@@ -95,7 +95,7 @@ struct MCPUnavailableWorktreeDiagnostic: Equatable, Sendable {
 
     /// Replaces line breaks and control characters with spaces, escapes quotes and backslashes,
     /// and trims the result. Returns `nil` when nothing is left.
-    private static func displayValue(_ value: String) -> String? {
+    static func displayValue(_ value: String) -> String? {
         var output = String.UnicodeScalarView()
         for scalar in value.unicodeScalars {
             if CharacterSet.controlCharacters.contains(scalar) || CharacterSet.newlines.contains(scalar) {

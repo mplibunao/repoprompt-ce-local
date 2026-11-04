@@ -701,6 +701,134 @@ import XCTest
             }
         }
 
+        /// A fork of a worktree-scoped tab owns its own projection of the same worktree. Closing the
+        /// source releases the source's ownership of the worktree root, and a lookup for the source
+        /// still in flight at the close can't install it again. The fork's authority, captured
+        /// before the close, still validates, and the fork keeps reading the worktree.
+        @MainActor
+        func testClosingScopedTabRevokesItsAuthorityWithoutRevokingFork() async throws {
+            let root = try makeTemporaryRoot()
+            let worktreeRoot = try makeTemporaryRoot()
+            let sentinelPath = root.appendingPathComponent("fork-sentinel.txt").path
+            let mainSentinel = "fork-scope-main-checkout"
+            let worktreeSentinel = "fork-scope-worktree"
+            try mainSentinel.write(toFile: sentinelPath, atomically: true, encoding: .utf8)
+            try worktreeSentinel.write(
+                to: worktreeRoot.appendingPathComponent("fork-sentinel.txt"),
+                atomically: true,
+                encoding: .utf8
+            )
+            let binding = worktreeBinding(logicalRoot: root, worktreeRoot: worktreeRoot)
+            let sourceTabID = UUID()
+            let visibleTabID = UUID()
+            let fixture = try await makeFixture(
+                workspace: WorkspaceModel(
+                    name: "Authority",
+                    repoPaths: [root.path],
+                    composeTabs: [
+                        ComposeTabState(id: visibleTabID, name: "Visible"),
+                        ComposeTabState(id: sourceTabID, name: "Scoped", worktreeScope: .bound([binding]))
+                    ],
+                    activeComposeTabID: visibleTabID
+                ),
+                contextID: sourceTabID
+            )
+            let previousWindows = WindowStatesManager.shared.allWindows
+            WindowStatesManager.shared.allWindows = [fixture.window]
+            addTeardownBlock { @MainActor in
+                WindowStatesManager.shared.allWindows = previousWindows
+            }
+            let server = fixture.window.mcpServer
+            let manager = fixture.window.workspaceManager
+            let store = fixture.window.promptManager.workspaceFileContextStore
+            try await AppGlobalMCPServiceComposition.shared.ensureRegistered()
+            let toolsEnabled = await server.setWindowToolsEnabled(true)
+            XCTAssertTrue(toolsEnabled)
+            addTeardownBlock { @MainActor in
+                _ = await server.setWindowToolsEnabled(false)
+            }
+            let connection = try await makeProductionMCPConnection()
+            addTeardownBlock { await connection.cleanup() }
+
+            let forked = try await connection.client.callTool(name: "manage_workspaces", arguments: [
+                "action": .string("create_tab"),
+                "mode": .string("fork"),
+                "source_tab": .string(sourceTabID.uuidString),
+                "bind": .bool(false)
+            ])
+            XCTAssertNotEqual(forked.isError, true, toolText(forked))
+            let forkTab = try XCTUnwrap(manager.activeWorkspace?.composeTabs.first {
+                $0.id != visibleTabID && $0.id != sourceTabID
+            })
+            addTeardownBlock {
+                await WorkspaceRootBindingProjectionMaterializer(store: store).release(sessionID: forkTab.id)
+            }
+            XCTAssertEqual(forkTab.worktreeScope, .bound([binding]))
+            XCTAssertNil(forkTab.activeAgentSessionID)
+
+            let sourceAuthority = try await server.resolveFileToolAuthority(
+                tabID: sourceTabID,
+                workspaceID: fixture.workspace.id
+            )
+            XCTAssertEqual(sourceAuthority.lookupContext.bindingProjection?.sessionID, sourceTabID)
+            let forkAuthority = try await server.resolveFileToolAuthority(
+                tabID: forkTab.id,
+                workspaceID: fixture.workspace.id
+            )
+            XCTAssertEqual(forkAuthority.lookupContext.bindingProjection?.sessionID, forkTab.id)
+            let gate = RootHydrationSuspensionGate()
+            try server.bindTabForConnection(
+                connectionID: fixture.connectionID,
+                clientName: nil,
+                tabID: sourceTabID,
+                workspaceID: fixture.workspace.id,
+                windowID: fixture.window.windowID
+            )
+            server.setBeforeFileToolLookupContextResolutionForTesting { await gate.hold() }
+            addTeardownBlock { @MainActor in
+                server.setBeforeFileToolLookupContextResolutionForTesting(nil)
+                await gate.release()
+            }
+            let lateLookup = Task { @MainActor in
+                try await server.requiredFileToolLookupContext(from: self.metadata(for: fixture))
+            }
+            await gate.waitUntilHeld()
+
+            let closed = try await connection.client.callTool(name: "manage_workspaces", arguments: [
+                "action": .string("close_tab"),
+                "tab": .string(sourceTabID.uuidString)
+            ])
+            XCTAssertNotEqual(closed.isError, true, toolText(closed))
+            XCTAssertNil(manager.composeTab(with: sourceTabID))
+
+            func sourceOwnedRoots() async -> [WorkspaceRootRecord]? {
+                await store.installedSessionWorktreeRoots(
+                    ownerID: sourceTabID,
+                    bindingFingerprint: AgentWorkspaceLookupContextSource.worktreeBindingFingerprint([binding]),
+                    physicalRootPaths: [worktreeRoot.path]
+                )
+            }
+            let rootsAfterClose = await sourceOwnedRoots()
+            XCTAssertNil(rootsAfterClose, "Closing the scoped tab must release its worktree root")
+            await gate.release()
+            let lateResult = await lateLookup.result
+            if case .success = lateResult {
+                XCTFail("A lookup for the closed tab must not complete")
+            }
+            let rootsAfterLateLookup = await sourceOwnedRoots()
+            XCTAssertNil(rootsAfterLateLookup, "A late lookup reinstalled the closed tab's worktree root")
+            do {
+                try await forkAuthority.validate(workspaceManager: manager, store: store)
+            } catch {
+                XCTFail("Closing the source revoked the fork's authority: \(error)")
+            }
+
+            let forkRead = try await readFile(sentinelPath, contextID: forkTab.id, over: connection)
+            XCTAssertNil(forkRead.errorCode, forkRead.errorMessage ?? "")
+            XCTAssertTrue(forkRead.content.contains(worktreeSentinel), forkRead.content)
+            XCTAssertFalse(forkRead.content.contains(mainSentinel), forkRead.content)
+        }
+
         @MainActor
         func testGenuinelyRootlessBindProducesExplicitEmptyAuthority() async throws {
             let fixture = try await makeFixture(rootPaths: [])

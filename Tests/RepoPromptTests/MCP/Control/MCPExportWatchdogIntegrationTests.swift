@@ -759,6 +759,135 @@ import XCTest
             }
         }
 
+        /// Context Builder calls in a tab that `create_tab` scoped to a worktree read that worktree.
+        /// Repository B has a linked worktree whose B.swift differs from the main checkout's and has
+        /// its own uncommitted line. A review, a plan, and a question each run in a new scoped tab:
+        /// discovery's implicit `git` defaults to the worktree checkout, the request sent to the
+        /// provider packages the worktree's file, and the review's diff comes from the worktree.
+        /// The visible tab doesn't change, and no Agent session or workspace is created.
+        func testScopedBackgroundTabFeedsContextBuilderAndOracleFollowup() async throws {
+            let worktreeContentMarker = "SCOPED_TAB_WORKTREE_CONTENT"
+            let worktreeUncommittedMarker = "SCOPED_TAB_WORKTREE_UNCOMMITTED"
+            let provider = ContextBuilderRoutedReplyProvider(reply: "scoped-tab-discovery")
+            try await withReviewGitRoots(provider) { fixture, endpoint, roots in
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let server = context.window.mcpServer
+                let worktreeRoot = roots.repositories.sandbox
+                    .appendingPathComponent("repository-b-scoped", isDirectory: true)
+                try roots.repositories.runGit(
+                    ["worktree", "add", "-b", "scoped-review", worktreeRoot.path],
+                    at: roots.rootB
+                )
+                try roots.repositories.write(
+                    "// repository B worktree \(worktreeContentMarker)\n// \(worktreeUncommittedMarker)\n",
+                    to: "B.swift",
+                    at: worktreeRoot
+                )
+                let chatStorage = fixture.rootURL.appendingPathComponent("scoped-tab-chats", isDirectory: true)
+                try FileManager.default.createDirectory(at: chatStorage, withIntermediateDirectories: true)
+                await ChatDataService.test_setWorkspaceRootOverride(chatStorage)
+                @MainActor
+                func restoreChatStorage() async {
+                    await context.window.oracleViewModel.drainTrackedAutosaves(for: context.workspaceID)
+                    await ChatDataService.test_setWorkspaceRootOverride(nil)
+                }
+
+                do {
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint)
+                    let requests = ReviewRequestReceipts()
+                    server.setOraclePostPackagingTransportOverrideForTesting { message, _ in
+                        requests.requests.append(message)
+                        return (UUID(), Self.completedOracleStream("Answered."))
+                    }
+                    context.window.apiSettingsViewModel.isOpenAIKeyValid = true
+                    Self.prepareSyntheticContextBuilderRun(
+                        context,
+                        receipts: ContextBuilderCommitReceipts(),
+                        followUpModel: .openaiCustom(name: "scoped-tab-test")
+                    )
+                    let workspaceIDs = manager.workspaces.map(\.id)
+                    let visibleTabID = manager.workspace(withID: context.workspaceID)?.activeComposeTabID
+                    let repositories = try await roots.descriptors()
+                    let resolvedWorktree = await VCSService.shared.resolveRepo(from: worktreeRoot)
+                    let worktreeRepository = try GitRepoDescriptor(rootURL: XCTUnwrap(resolvedWorktree).rootURL)
+
+                    for responseType in ["review", "plan", "question"] {
+                        let created = try await endpoint.callTool(
+                            name: "manage_workspaces",
+                            arguments: [
+                                "action": "create_tab",
+                                "worktree": "scoped-review",
+                                "worktree_repo_root": roots.rootB.path,
+                                "window_id": context.window.windowID,
+                                "_rawJSON": true
+                            ]
+                        )
+                        let summaries = try Self.toolResultObject(created)["tabs"] as? [[String: Any]]
+                        let tabID = try XCTUnwrap(
+                            (summaries?.first?["id"] as? String).flatMap(UUID.init(uuidString:)),
+                            "\(responseType): \(created.rawJSON)"
+                        )
+                        XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.tabID, tabID, responseType)
+                        await Self.seedSelection([roots.fileB], tabID: tabID, context: context)
+                        let frozenContexts = try Self.captureFrozenDiscoveryContexts(provider, server: server)
+                        requests.requests.removeAll()
+
+                        try await Self.callContextBuilder(
+                            endpoint,
+                            instructions: "Check the change.",
+                            responseType: responseType
+                        )
+
+                        let frozen = try XCTUnwrap(frozenContexts.values.first, responseType)
+                        XCTAssertEqual(frozen.tabID, tabID, responseType)
+                        let resolution = try XCTUnwrap(
+                            MCPServerViewModel.implicitContextBuilderGitTarget(
+                                for: .init(snapshot: frozen, source: .runInstall)
+                            ),
+                            responseType
+                        )
+                        let admission = try await MCPContextBuilderGitReviewPolicy().admit(
+                            resolution: resolution,
+                            hasExplicitSelector: false,
+                            requestsArtifactPublication: false,
+                            operation: .status,
+                            allRepositories: [repositories.a, repositories.b, worktreeRepository],
+                            store: context.window.workspaceFileContextStore
+                        )
+                        XCTAssertEqual(admission.implicitRepositories, [worktreeRepository], responseType)
+
+                        XCTAssertEqual(requests.requests.count, 1, responseType)
+                        let request = try XCTUnwrap(requests.requests.first, responseType)
+                        let packagedText = ([request.systemPrompt, request.fileTree, request.gitDiff ?? ""]
+                            + request.metaPrompts
+                            + request.fileBlocks
+                            + request.conversationMessages.map(\.content))
+                            .joined(separator: "\n")
+                        XCTAssertTrue(packagedText.contains(worktreeContentMarker), "\(responseType): \(packagedText)")
+                        XCTAssertFalse(packagedText.contains(ReviewGitRoots.uncommittedMarkerB), "\(responseType): \(packagedText)")
+                        if responseType == "review" {
+                            let gitDiff = try XCTUnwrap(request.gitDiff, responseType)
+                            XCTAssertTrue(gitDiff.contains(worktreeUncommittedMarker), gitDiff)
+                        }
+                        let tab = try XCTUnwrap(manager.composeTab(with: tabID), responseType)
+                        XCTAssertNil(tab.activeAgentSessionID, responseType)
+                        XCTAssertEqual(
+                            tab.worktreeScope?.bindingState.bindings?.map(\.source),
+                            [MCPWorktreeBindingResolver.tabScopeBindingSource],
+                            responseType
+                        )
+                    }
+                    XCTAssertEqual(manager.workspaces.map(\.id), workspaceIDs)
+                    XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.activeComposeTabID, visibleTabID)
+                } catch {
+                    await restoreChatStorage()
+                    throw error
+                }
+                await restoreChatStorage()
+            }
+        }
+
         func testPromptAndWorkspaceSnapshotUseUnstoredEditorText() async throws {
             try await withLeasedFixture { fixture, endpoint in
                 let context = fixture.contextA
