@@ -2198,6 +2198,62 @@ import XCTest
             XCTAssertEqual(fixture.prompt.activeComposeTabID, fixture.workspaceA.activeComposeTabID)
         }
 
+        /// A tab with its own worktree scope never gains an Agent session. Composed and stashed
+        /// scoped tabs refuse a session, stay unchanged, and fail the explicit-start check with
+        /// the attachment error; an ordinary tab in the same workspace still accepts a session.
+        func testWorktreeScopedTabRefusesAgentSessionAttachment() async throws {
+            let binding = AgentSessionWorktreeBinding(
+                id: "scoped-tab-binding",
+                repositoryID: "scoped-tab-repo",
+                repoKey: "/tmp/scoped-tab-root",
+                logicalRootPath: "/tmp/scoped-tab-root",
+                worktreeID: "scoped-tab-worktree",
+                worktreeRootPath: "/tmp/scoped-tab-worktree",
+                source: "test"
+            )
+            let scoped = ComposeTabState(name: "Scoped", worktreeScope: .bound([binding]))
+            let stashedScoped = ComposeTabState(name: "Stashed scoped", worktreeScope: .unavailable)
+            let ordinary = ComposeTabState(name: "Ordinary")
+            let workspace = WorkspaceModel(
+                name: "Scoped tab attachment",
+                repoPaths: ["/tmp/scoped-tab-root"],
+                composeTabs: [scoped, ordinary],
+                activeComposeTabID: ordinary.id,
+                stashedTabs: [StashedTab(tab: stashedScoped)]
+            )
+            let (manager, _) = makeManager(client: nil)
+            await manager.awaitInitialized()
+            manager.workspaces = [workspace]
+
+            for tab in [scoped, stashedScoped] {
+                XCTAssertFalse(manager.compareAndSetActiveAgentSessionID(
+                    expected: nil,
+                    replacement: UUID(),
+                    forTabID: tab.id,
+                    inWorkspaceID: workspace.id
+                ), tab.name)
+                XCTAssertThrowsError(
+                    try manager.requireAgentSessionAttachmentAllowed(tabID: tab.id, workspaceID: workspace.id),
+                    tab.name
+                ) { error in
+                    XCTAssertEqual(error as? ComposeTabWorktreeScopeError, .agentAttachmentRefused)
+                }
+            }
+            let stored = try XCTUnwrap(manager.workspace(withID: workspace.id))
+            XCTAssertEqual(stored.composeTabs.first { $0.id == scoped.id }, scoped)
+            XCTAssertEqual(stored.stashedTabs.map(\.tab), [stashedScoped])
+
+            let sessionID = UUID()
+            XCTAssertNoThrow(try manager.requireAgentSessionAttachmentAllowed(tabID: ordinary.id))
+            XCTAssertTrue(manager.compareAndSetActiveAgentSessionID(
+                expected: nil,
+                replacement: sessionID,
+                forTabID: ordinary.id,
+                inWorkspaceID: workspace.id
+            ))
+            XCTAssertEqual(manager.activeAgentSessionID(forTabID: ordinary.id), sessionID)
+        }
+
         func testCancelledExplicitTabBindingRecoversExactlyAndPreservesAcceptedSuccessor() async throws {
             let fixture = try await makeFixture()
             fixture.manager.activeWorkspace = fixture.workspaceA

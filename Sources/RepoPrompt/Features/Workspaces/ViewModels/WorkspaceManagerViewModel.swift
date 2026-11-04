@@ -6541,17 +6541,39 @@ class WorkspaceManagerViewModel: ObservableObject {
         }
     }
 
+    /// The composed or stashed tab with `tabID`, searching each workspace's composed tabs before
+    /// its stashed ones.
     @MainActor
-    func activeAgentSessionID(forTabID tabID: UUID, inWorkspaceID workspaceID: UUID? = nil) -> UUID? {
+    private func composedOrStashedTab(withID tabID: UUID, inWorkspaceID workspaceID: UUID?) -> ComposeTabState? {
         for workspace in workspaces where workspaceID == nil || workspace.id == workspaceID {
             if let tab = workspace.composeTabs.first(where: { $0.id == tabID }) {
-                return tab.activeAgentSessionID
+                return tab
             }
             if let stashed = workspace.stashedTabs.first(where: { $0.tab.id == tabID }) {
-                return stashed.tab.activeAgentSessionID
+                return stashed.tab
             }
         }
         return nil
+    }
+
+    @MainActor
+    func activeAgentSessionID(forTabID tabID: UUID, inWorkspaceID workspaceID: UUID? = nil) -> UUID? {
+        composedOrStashedTab(withID: tabID, inWorkspaceID: workspaceID)?.activeAgentSessionID
+    }
+
+    @MainActor
+    func worktreeScope(forTabID tabID: UUID, inWorkspaceID workspaceID: UUID? = nil) -> ComposeTabWorktreeScope? {
+        composedOrStashedTab(withID: tabID, inWorkspaceID: workspaceID)?.worktreeScope
+    }
+
+    /// Refuses to start an Agent session on a compose or stashed tab that owns a worktree scope,
+    /// before any Agent association is published or a provider starts. A tab that isn't found
+    /// passes; the attachment's own checks report it.
+    @MainActor
+    func requireAgentSessionAttachmentAllowed(tabID: UUID, workspaceID: UUID? = nil) throws {
+        guard worktreeScope(forTabID: tabID, inWorkspaceID: workspaceID) == nil else {
+            throw ComposeTabWorktreeScopeError.agentAttachmentRefused
+        }
     }
 
     @MainActor
@@ -6613,6 +6635,8 @@ class WorkspaceManagerViewModel: ObservableObject {
         )
     }
 
+    /// Replaces a tab's Agent session when it still equals `expected`. A tab with a worktree
+    /// scope refuses a non-nil replacement, so it never holds both owners.
     @MainActor
     @discardableResult
     func compareAndSetActiveAgentSessionID(
@@ -6623,7 +6647,9 @@ class WorkspaceManagerViewModel: ObservableObject {
     ) -> Bool {
         for workspaceIndex in workspaces.indices where workspaceID == nil || workspaces[workspaceIndex].id == workspaceID {
             if let tabIndex = workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == tabID }) {
-                guard workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID == expectedSessionID else { return false }
+                guard workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID == expectedSessionID,
+                      sessionID == nil || workspaces[workspaceIndex].composeTabs[tabIndex].worktreeScope == nil
+                else { return false }
                 workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = sessionID
                 workspaces[workspaceIndex].composeTabs[tabIndex].lastModified = Date()
                 workspaces[workspaceIndex].dateModified = Date()
@@ -6632,7 +6658,9 @@ class WorkspaceManagerViewModel: ObservableObject {
             }
 
             if let stashedIndex = workspaces[workspaceIndex].stashedTabs.firstIndex(where: { $0.tab.id == tabID }) {
-                guard workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.activeAgentSessionID == expectedSessionID else { return false }
+                guard workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.activeAgentSessionID == expectedSessionID,
+                      sessionID == nil || workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.worktreeScope == nil
+                else { return false }
                 workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.activeAgentSessionID = sessionID
                 workspaces[workspaceIndex].stashedTabs[stashedIndex].tab.lastModified = Date()
                 workspaces[workspaceIndex].dateModified = Date()

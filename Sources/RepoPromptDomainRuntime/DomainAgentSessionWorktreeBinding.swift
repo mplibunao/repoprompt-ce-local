@@ -1,6 +1,7 @@
 import Foundation
 
-/// Persisted binding from a workspace logical root to a Git worktree for one agent session.
+/// Persisted binding from a workspace logical root to a Git worktree, owned by one agent session
+/// or by one compose tab that has a worktree scope instead of a session.
 ///
 /// This value is the profile-scoped durable identity consumed by runtime path projection,
 /// working-directory resolution, and standalone worktree operations.

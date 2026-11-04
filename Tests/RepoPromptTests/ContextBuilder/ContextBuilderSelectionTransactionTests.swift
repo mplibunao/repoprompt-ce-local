@@ -29,14 +29,16 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
     /// and in an Agent session's tab it is refused.
     func testImplicitGitTargetFollowsFrozenTargetAndKeepsPanelRunDefault() {
         let frozen = ContextBuilderReviewTargetResolution.unavailable(.workspaceOrTabMismatch)
-        let rows: [(label: String, sessionID: UUID?, frozen: ContextBuilderReviewTargetResolution?, expected: ContextBuilderReviewTargetResolution?)] = [
-            ("context_builder run in a tab without an Agent session", nil, frozen, frozen),
-            ("panel run in a tab without an Agent session", nil, nil, nil),
-            ("panel run in an Agent session's tab", UUID(), nil, .unavailable(.missingFrozenTarget))
+        let rows: [(label: String, sessionID: UUID?, tabOwned: Bool, frozen: ContextBuilderReviewTargetResolution?, expected: ContextBuilderReviewTargetResolution?)] = [
+            ("context_builder run in a tab without an Agent session", nil, false, frozen, frozen),
+            ("panel run in a tab without an Agent session", nil, false, nil, nil),
+            ("panel run in an Agent session's tab", UUID(), false, nil, .unavailable(.missingFrozenTarget)),
+            ("panel run in a tab with its own worktree scope", nil, true, nil, .unavailable(.missingFrozenTarget))
         ]
         for row in rows {
+            let tabID = UUID()
             let snapshot = MCPServerViewModel.TabContextSnapshot(
-                tabID: UUID(),
+                tabID: tabID,
                 windowID: 1,
                 workspaceID: UUID(),
                 promptText: "",
@@ -45,6 +47,7 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
                 tabName: "Discovery",
                 runID: UUID(),
                 activeAgentSessionID: row.sessionID,
+                worktreeOwnerID: row.tabOwned ? tabID : nil,
                 contextBuilderReviewTargetResolution: row.frozen,
                 explicitlyBound: false
             )
@@ -70,16 +73,18 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
             .appendingPathComponent("outside-bound-unloaded-\(UUID().uuidString)", isDirectory: true)
 
         var context = try fixture.makeContext(selection: StoredSelection())
-        context.activeAgentSessionID = UUID()
-        context.worktreeBindingState = .hydrated([AgentSessionWorktreeBinding(
-            id: "outside-bound-binding",
-            repositoryID: "outside-bound-repository",
-            repoKey: fixture.root.path,
-            logicalRootPath: fixture.root.path,
-            worktreeID: "outside-bound-worktree",
-            worktreeRootPath: worktree.path,
-            source: "test"
-        )])
+        context.applyFileToolLookupSource(AgentWorkspaceLookupContextSource(
+            activeAgentSessionID: UUID(),
+            worktreeBindingState: .hydrated([AgentSessionWorktreeBinding(
+                id: "outside-bound-binding",
+                repositoryID: "outside-bound-repository",
+                repoKey: fixture.root.path,
+                logicalRootPath: fixture.root.path,
+                worktreeID: "outside-bound-worktree",
+                worktreeRootPath: worktree.path,
+                source: "test"
+            )])
+        ))
         let workspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
         do {
             _ = try await ContextBuilderWorkspaceContext.resolve(
@@ -113,8 +118,10 @@ final class ContextBuilderNestedSelectionFrozenReviewTests: XCTestCase {
         try await fixture.seedCanonical(source)
 
         var parentContext = try fixture.makeContext(selection: source)
-        parentContext.activeAgentSessionID = UUID()
-        parentContext.worktreeBindingState = .hydrated([])
+        parentContext.applyFileToolLookupSource(AgentWorkspaceLookupContextSource(
+            activeAgentSessionID: UUID(),
+            worktreeBindingState: .hydrated([])
+        ))
         let workspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
         let workspaceContext = try await ContextBuilderWorkspaceContext.resolve(
             from: parentContext,

@@ -523,6 +523,184 @@ import XCTest
             XCTAssertTrue(FileManager.default.fileExists(atPath: worktreeRoot.path))
         }
 
+        /// A worktree scope saved with its tab restores in a new window, so reads through the tab
+        /// come from the worktree with no projection left from before the save. A saved scope that
+        /// doesn't decode keeps that tab and its siblings, and the tab's reads are refused rather
+        /// than served from the main checkout.
+        @MainActor
+        func testRestoredTabScopePreservesCheckoutAuthority() async throws {
+            let root = try makeTemporaryRoot()
+            let worktreeRoot = try makeTemporaryRoot()
+            let sentinelPath = root.appendingPathComponent("scope-sentinel.txt").path
+            let mainSentinel = "restored-scope-main-checkout"
+            let worktreeSentinel = "restored-scope-worktree"
+            try mainSentinel.write(toFile: sentinelPath, atomically: true, encoding: .utf8)
+            try worktreeSentinel.write(
+                to: worktreeRoot.appendingPathComponent("scope-sentinel.txt"),
+                atomically: true,
+                encoding: .utf8
+            )
+            let scopedTabID = UUID()
+            let malformedTabID = UUID()
+            let siblingTabID = UUID()
+            let binding = worktreeBinding(logicalRoot: root, worktreeRoot: worktreeRoot)
+            let savedBytes = try JSONEncoder().encode(WorkspaceModel(
+                name: "Authority",
+                repoPaths: [root.path],
+                composeTabs: [
+                    ComposeTabState(id: scopedTabID, name: "Scoped", worktreeScope: .bound([binding])),
+                    ComposeTabState(id: malformedTabID, name: "Malformed", worktreeScope: .bound([binding])),
+                    ComposeTabState(id: siblingTabID, name: "Sibling")
+                ],
+                activeComposeTabID: siblingTabID
+            ))
+            // A saved scope with an empty binding list is malformed.
+            var document = try XCTUnwrap(JSONSerialization.jsonObject(with: savedBytes) as? [String: Any])
+            var savedTabs = try XCTUnwrap(document["composeTabs"] as? [[String: Any]])
+            savedTabs[1]["worktreeScope"] = ["state": "bound", "bindings": [Any]()]
+            document["composeTabs"] = savedTabs
+            let restored = try JSONDecoder().decode(
+                WorkspaceModel.self,
+                from: JSONSerialization.data(withJSONObject: document)
+            )
+            XCTAssertEqual(restored.composeTabs.map(\.id), [scopedTabID, malformedTabID, siblingTabID])
+            XCTAssertEqual(restored.composeTabs[1].worktreeScope, .unavailable)
+
+            let fixture = try await makeFixture(workspace: restored, contextID: scopedTabID)
+            let previousWindows = WindowStatesManager.shared.allWindows
+            WindowStatesManager.shared.allWindows = [fixture.window]
+            addTeardownBlock { @MainActor in
+                WindowStatesManager.shared.allWindows = previousWindows
+            }
+            let store = fixture.window.promptManager.workspaceFileContextStore
+            addTeardownBlock {
+                await WorkspaceRootBindingProjectionMaterializer(store: store).release(sessionID: scopedTabID)
+            }
+            try await AppGlobalMCPServiceComposition.shared.ensureRegistered()
+            let toolsEnabled = await fixture.window.mcpServer.setWindowToolsEnabled(true)
+            XCTAssertTrue(toolsEnabled)
+            addTeardownBlock { @MainActor in
+                _ = await fixture.window.mcpServer.setWindowToolsEnabled(false)
+            }
+            let connection = try await makeProductionMCPConnection()
+            addTeardownBlock { await connection.cleanup() }
+
+            let refused = try await readFile(sentinelPath, contextID: malformedTabID, over: connection)
+            XCTAssertEqual(refused.errorCode, "workspace_authority_unavailable")
+            XCTAssertFalse(refused.content.contains(mainSentinel), refused.content)
+
+            let bound = try await bindContext(scopedTabID, over: connection)
+            XCTAssertNil(bound.errorCode, bound.error ?? "")
+            let read = try await readFile(sentinelPath, over: connection)
+            XCTAssertNil(read.errorCode, read.errorMessage ?? "")
+            XCTAssertTrue(read.content.contains(worktreeSentinel), read.content)
+            XCTAssertFalse(read.content.contains(mainSentinel), read.content)
+        }
+
+        /// An Agent review launched from a tab with its own worktree scope freezes that scope as
+        /// its packaging source: the frozen lookup reads the worktree under the tab's ownership,
+        /// the source carries the scope's bindings, and no Agent session is recorded as provenance.
+        @MainActor
+        func testScopedTabReviewLaunchSourceFreezesTabWorktree() async throws {
+            let root = try makeTemporaryRoot()
+            let worktreeRoot = try makeTemporaryRoot()
+            let binding = worktreeBinding(logicalRoot: root, worktreeRoot: worktreeRoot)
+            let scopedTabID = UUID()
+            let fixture = try await makeFixture(
+                workspace: WorkspaceModel(
+                    name: "Authority",
+                    repoPaths: [root.path],
+                    composeTabs: [ComposeTabState(id: scopedTabID, name: "Scoped", worktreeScope: .bound([binding]))],
+                    activeComposeTabID: scopedTabID
+                ),
+                contextID: scopedTabID
+            )
+            let store = fixture.window.promptManager.workspaceFileContextStore
+            addTeardownBlock {
+                await WorkspaceRootBindingProjectionMaterializer(store: store).release(sessionID: scopedTabID)
+            }
+            let launch = AgentRunOracleReviewLaunchSnapshot(
+                route: .explicitTabContext,
+                windowID: fixture.window.windowID,
+                workspaceID: fixture.workspace.id,
+                tabID: scopedTabID,
+                selectionRevision: fixture.window.workspaceManager.selectionRevisionForMCP(
+                    workspaceID: fixture.workspace.id,
+                    tabID: scopedTabID
+                ),
+                promptText: "",
+                selection: StoredSelection(),
+                sourceAgentSessionID: nil,
+                routedRunID: nil
+            )
+
+            let source = await fixture.window.mcpServer.testCaptureAgentRunOracleReviewSource(
+                snapshot: launch,
+                targetWindow: fixture.window
+            )
+
+            guard case let .captured(captured) = source else {
+                return XCTFail("Expected a captured review source, got \(source)")
+            }
+            let physicalPath = captured.lookupContext.translateInputPath(
+                root.appendingPathComponent("review-source.swift").path
+            )
+            XCTAssertEqual(
+                URL(fileURLWithPath: physicalPath).resolvingSymlinksInPath().deletingLastPathComponent().path,
+                worktreeRoot.resolvingSymlinksInPath().path
+            )
+            XCTAssertEqual(captured.lookupContext.bindingProjection?.sessionID, scopedTabID)
+            XCTAssertEqual(captured.sourceWorktreeBindings, [binding])
+            XCTAssertNil(captured.sourceAgentSessionID)
+        }
+
+        /// The logical file tree can't show a path that exists only in a tab's worktree, so when a
+        /// worktree-scoped tab is the visible tab, an MCP snapshot keeps the tab's stored selection
+        /// instead of capturing and flushing the file tree's. That holds for an unreadable scope too.
+        @MainActor
+        func testVisibleScopedTabSnapshotKeepsStoredWorktreeSelection() async throws {
+            let root = try makeTemporaryRoot()
+            let worktreeRoot = try makeTemporaryRoot()
+            try "worktree".write(
+                to: worktreeRoot.appendingPathComponent("worktree-only.swift"),
+                atomically: true,
+                encoding: .utf8
+            )
+            let storedSelection = StoredSelection(
+                selectedPaths: [root.appendingPathComponent("worktree-only.swift").path]
+            )
+            let binding = worktreeBinding(logicalRoot: root, worktreeRoot: worktreeRoot)
+            for scope: ComposeTabWorktreeScope in [.bound([binding]), .unavailable] {
+                let scopedTabID = UUID()
+                let fixture = try await makeFixture(
+                    workspace: WorkspaceModel(
+                        name: "Authority",
+                        repoPaths: [root.path],
+                        composeTabs: [ComposeTabState(
+                            id: scopedTabID,
+                            name: "Scoped",
+                            worktreeScope: scope,
+                            selection: storedSelection
+                        )],
+                        activeComposeTabID: scopedTabID
+                    ),
+                    contextID: scopedTabID
+                )
+
+                let snapshot = try fixture.window.mcpServer.makeTabContextSnapshot(
+                    tabID: scopedTabID,
+                    workspaceID: fixture.workspace.id,
+                    windowID: fixture.window.windowID,
+                    runID: nil,
+                    explicitlyBound: true,
+                    captureActiveUIState: true,
+                    flushActiveSelection: true
+                )
+
+                XCTAssertEqual(snapshot.selection, storedSelection, "\(scope)")
+            }
+        }
+
         @MainActor
         func testGenuinelyRootlessBindProducesExplicitEmptyAuthority() async throws {
             let fixture = try await makeFixture(rootPaths: [])
@@ -592,6 +770,22 @@ import XCTest
             XCTAssertNotEqual(result.isError, true, toolText(result))
             let data = try XCTUnwrap(toolText(result).data(using: .utf8))
             return try JSONDecoder().decode(BindContextResponse.self, from: data)
+        }
+
+        /// Reads `path` through the connection's binding, or through `contextID` as a one-shot hint.
+        @MainActor
+        private func readFile(
+            _ path: String,
+            contextID: UUID? = nil,
+            over connection: ProductionMCPConnection
+        ) async throws -> ToolResultDTOs.ReadFileReply {
+            var arguments: [String: Value] = ["path": .string(path), "_rawJSON": .bool(true)]
+            if let contextID {
+                arguments["context_id"] = .string(contextID.uuidString)
+            }
+            let result = try await connection.client.callTool(name: MCPWindowToolName.readFile, arguments: arguments)
+            let data = try XCTUnwrap(toolText(result).data(using: .utf8))
+            return try JSONDecoder().decode(ToolResultDTOs.ReadFileReply.self, from: data)
         }
 
         private func worktreeBinding(logicalRoot: URL, worktreeRoot: URL) -> AgentSessionWorktreeBinding {
@@ -691,22 +885,30 @@ import XCTest
             activeAgentSessionID: UUID? = nil,
             additionalTabIDs: [UUID] = []
         ) async throws -> Fixture {
+            let contextID = UUID()
+            return try await makeFixture(
+                workspace: WorkspaceModel(
+                    name: "Authority",
+                    repoPaths: rootPaths,
+                    composeTabs: [ComposeTabState(
+                        id: contextID,
+                        name: "Context",
+                        activeAgentSessionID: activeAgentSessionID
+                    )] + additionalTabIDs.map { ComposeTabState(id: $0, name: "Other") },
+                    activeComposeTabID: contextID
+                ),
+                contextID: contextID
+            )
+        }
+
+        /// Opens `workspace` in a new window, which has its own store and no projections.
+        @MainActor
+        private func makeFixture(workspace: WorkspaceModel, contextID: UUID) async throws -> Fixture {
             let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
             GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
             defer { GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false) }
             let window = WindowState()
             await window.workspaceManager.awaitInitialized()
-            let contextID = UUID()
-            let workspace = WorkspaceModel(
-                name: "Authority",
-                repoPaths: rootPaths,
-                composeTabs: [ComposeTabState(
-                    id: contextID,
-                    name: "Context",
-                    activeAgentSessionID: activeAgentSessionID
-                )] + additionalTabIDs.map { ComposeTabState(id: $0, name: "Other") },
-                activeComposeTabID: contextID
-            )
             window.workspaceManager.workspaces = [workspace]
             let result = await window.workspaceManager.switchWorkspace(
                 to: workspace,

@@ -9045,6 +9045,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         intendedSessionID: UUID,
         expectedWorkspaceID: UUID
     ) async throws -> UUID {
+        do {
+            try workspaceManager?.requireAgentSessionAttachmentAllowed(
+                tabID: session.tabID,
+                workspaceID: expectedWorkspaceID
+            )
+        } catch {
+            throw MCPError.invalidParams(error.localizedDescription)
+        }
         if let existingSessionID = session.activeAgentSessionID {
             return existingSessionID
         }
@@ -18775,6 +18783,19 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             startupTicket.markPreparing()
         }
         let hadPersistentBinding = session.persistentSessionBindingIdentity != nil
+        do {
+            try workspaceManager?.requireAgentSessionAttachmentAllowed(tabID: tabID)
+        } catch {
+            let message = error.localizedDescription
+            await settleStartRejectedBeforeProvider(
+                session: session,
+                startupTicket: startupTicket,
+                submissionID: submissionID,
+                message: message,
+                attachments: attachments
+            )
+            return .failed(message: message)
+        }
         guard ensureSessionBoundToTab(session) != nil else {
             let message = "The tab could not be bound to an agent session."
             await settleStartRejectedBeforeProvider(

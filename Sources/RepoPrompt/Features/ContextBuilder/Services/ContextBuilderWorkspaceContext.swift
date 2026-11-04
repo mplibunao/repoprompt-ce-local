@@ -4,6 +4,9 @@ struct ContextBuilderWorkspaceContext {
     /// The invoking tab's Agent session. Outside Agent Mode it is the session of the tab the call
     /// runs in, or nil when that tab has none.
     let parentAgentSessionID: UUID?
+    /// The invoking tab's worktree projection owner: its Agent session, or the tab itself when it
+    /// has its own worktree scope.
+    let worktreeOwnerID: UUID?
     let frozenTabContext: MCPServerViewModel.TabContextSnapshot
     let worktreeBindings: [AgentSessionWorktreeBinding]
     let lookupContext: WorkspaceLookupContext
@@ -40,17 +43,12 @@ struct ContextBuilderWorkspaceContext {
         guard let workspaceID = snapshot.workspaceID else {
             throw ContextBuilderWorkspaceContextError.missingWorkspace
         }
+        let lookupSource = snapshot.fileToolLookupSource
+        let worktreeOwnerID = lookupSource.worktreeOwnerID
         let bindings: [AgentSessionWorktreeBinding]
-        switch (parentAgentSessionID, snapshot.worktreeBindingState) {
-        case let (.some, .hydrated(sessionBindings)):
-            bindings = sessionBindings
-        case (nil, .notApplicable):
-            bindings = []
-        case let (nil, .hydrated(unownedBindings)) where unownedBindings.isEmpty:
-            bindings = []
-        default:
-            // Bindings with no session have no projection owner, and an unhydrated or unavailable
-            // state has no known bindings. Either would read the main checkout.
+        do {
+            bindings = try lookupSource.validatedWorktreeBindings()
+        } catch {
             throw ContextBuilderWorkspaceContextError.unavailableWorktreeBindingState
         }
 
@@ -83,10 +81,7 @@ struct ContextBuilderWorkspaceContext {
         } else {
             do {
                 lookupContext = try await AgentWorkspaceLookupContextResolver.requiredLookupContext(
-                    source: AgentWorkspaceLookupContextSource(
-                        activeAgentSessionID: parentAgentSessionID,
-                        worktreeBindingState: .hydrated(bindings)
-                    ),
+                    source: lookupSource,
                     store: store
                 )
             } catch {
@@ -133,6 +128,7 @@ struct ContextBuilderWorkspaceContext {
 
         let context = ContextBuilderWorkspaceContext(
             parentAgentSessionID: parentAgentSessionID,
+            worktreeOwnerID: worktreeOwnerID,
             frozenTabContext: snapshot,
             worktreeBindings: bindings,
             lookupContext: lookupContext,
@@ -258,6 +254,7 @@ struct ContextBuilderWorkspaceContext {
             tabName: source.tabName,
             runID: runID,
             activeAgentSessionID: parentAgentSessionID,
+            worktreeOwnerID: worktreeOwnerID,
             worktreeBindings: worktreeBindings,
             frozenLookupContext: lookupContext,
             contextBuilderFrozenReviewAuthority: frozenReviewAuthority,

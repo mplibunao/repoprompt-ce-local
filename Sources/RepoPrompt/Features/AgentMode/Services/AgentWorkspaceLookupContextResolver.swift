@@ -13,15 +13,33 @@ enum AgentSessionWorktreeBindingState: Equatable {
 }
 
 struct AgentWorkspaceLookupContextSource: Equatable {
+    /// The tab's Agent session, for provenance. It never holds a tab ID.
     let activeAgentSessionID: UUID?
+    /// The UUID the worktree projection is registered under: the Agent session's ID, or the
+    /// compose tab's ID for a tab-owned worktree scope. Without an owner, lookup is canonical.
+    let worktreeOwnerID: UUID?
     let worktreeBindingState: AgentSessionWorktreeBindingState
 
     init(
         activeAgentSessionID: UUID?,
+        worktreeOwnerID: UUID?,
         worktreeBindingState: AgentSessionWorktreeBindingState
     ) {
         self.activeAgentSessionID = activeAgentSessionID
+        self.worktreeOwnerID = worktreeOwnerID
         self.worktreeBindingState = worktreeBindingState
+    }
+
+    /// An Agent-owned source: the session, if any, owns the projection.
+    init(
+        activeAgentSessionID: UUID?,
+        worktreeBindingState: AgentSessionWorktreeBindingState
+    ) {
+        self.init(
+            activeAgentSessionID: activeAgentSessionID,
+            worktreeOwnerID: activeAgentSessionID,
+            worktreeBindingState: worktreeBindingState
+        )
     }
 
     init(
@@ -41,13 +59,40 @@ struct AgentWorkspaceLookupContextSource: Equatable {
     var identity: AgentWorkspaceLookupContextIdentity {
         AgentWorkspaceLookupContextIdentity(
             activeAgentSessionID: activeAgentSessionID,
+            worktreeOwnerID: worktreeOwnerID,
             worktreeBindingFingerprint: Self.worktreeBindingFingerprint(worktreeBindingState)
         )
     }
 
-    /// Canonical routed contexts have authority without an Agent binding identity.
+    /// Canonical routed contexts have authority without a worktree owner identity.
     var authorityIdentity: AgentWorkspaceLookupContextIdentity? {
-        activeAgentSessionID == nil ? nil : identity
+        worktreeOwnerID == nil ? nil : identity
+    }
+
+    /// True when the compose tab, not an Agent session, owns the projection.
+    var isTabOwned: Bool {
+        worktreeOwnerID != nil && worktreeOwnerID != activeAgentSessionID
+    }
+
+    /// The bindings an authoritative lookup may use. Empty means canonical lookup, which a source
+    /// with no owner or an Agent session with no bindings allows. Bindings without an owner and a
+    /// tab scope without bindings have no projection to read; an unhydrated or unavailable state
+    /// has no known bindings.
+    func validatedWorktreeBindings() throws -> [AgentSessionWorktreeBinding] {
+        switch (worktreeOwnerID, worktreeBindingState) {
+        case (nil, .notApplicable):
+            return []
+        case let (nil, .hydrated(bindings)):
+            guard bindings.isEmpty else { throw AgentWorkspaceLookupContextResolutionError.unavailableProjection }
+            return []
+        case let (.some, .hydrated(bindings)):
+            guard !bindings.isEmpty || !isTabOwned else {
+                throw AgentWorkspaceLookupContextResolutionError.unavailableProjection
+            }
+            return bindings
+        case (_, .notApplicable), (_, .unhydrated), (_, .unavailable):
+            throw AgentWorkspaceLookupContextResolutionError.unknownBindingState
+        }
     }
 
     static func worktreeBindingFingerprint(_ bindings: [AgentSessionWorktreeBinding]) -> String {
@@ -83,6 +128,7 @@ struct AgentWorkspaceLookupContextSource: Equatable {
 
 struct AgentWorkspaceLookupContextIdentity: Hashable {
     let activeAgentSessionID: UUID?
+    let worktreeOwnerID: UUID?
     let worktreeBindingFingerprint: String
 }
 
@@ -158,19 +204,8 @@ enum AgentWorkspaceLookupContextResolver {
         guard await Set(store.rootRefs(scope: .visibleWorkspace)) == capturedCanonicalRoots else {
             throw AgentWorkspaceLookupContextResolutionError.unavailableProjection
         }
-        guard let sessionID = source.activeAgentSessionID else {
-            return WorkspaceLookupContext(
-                rootScope: .validatedSessionBoundWorkspace(
-                    canonicalRoots: capturedCanonicalRoots,
-                    physicalRoots: []
-                ),
-                bindingProjection: nil
-            )
-        }
-        guard case let .hydrated(bindings) = source.worktreeBindingState else {
-            throw AgentWorkspaceLookupContextResolutionError.unknownBindingState
-        }
-        guard !bindings.isEmpty else {
+        let bindings = try source.validatedWorktreeBindings()
+        guard !bindings.isEmpty, let ownerID = source.worktreeOwnerID else {
             return WorkspaceLookupContext(
                 rootScope: .validatedSessionBoundWorkspace(
                     canonicalRoots: capturedCanonicalRoots,
@@ -228,7 +263,7 @@ enum AgentWorkspaceLookupContextResolver {
         }
 
         guard let projection = await WorkspaceRootBindingProjectionMaterializer(store: store).materialize(
-                  sessionID: sessionID,
+                  sessionID: ownerID,
                   bindings: bindings,
                   visibleRoots: visibleRoots
               ),
@@ -256,11 +291,11 @@ enum AgentWorkspaceLookupContextResolver {
         store: WorkspaceFileContextStore
     ) async -> Bool {
         guard !Task.isCancelled,
-              let sessionID = source.activeAgentSessionID,
+              let ownerID = source.worktreeOwnerID,
               case let .hydrated(bindings) = source.worktreeBindingState,
               !bindings.isEmpty,
               let projection = lookupContext.bindingProjection,
-              projection.sessionID == sessionID,
+              projection.sessionID == ownerID,
               projection.isFullyMaterialized,
               lookupContext.rootScope == projection.lookupRootScope,
               AgentWorkspaceLookupContextSource.worktreeBindingFingerprint(bindings)
@@ -316,12 +351,13 @@ enum AgentWorkspaceLookupContextResolver {
         let startMS = AgentSelectedFilesDiagnostics.timestampMSIfEnabled()
         var fields: [String: String] = [
             "activeAgentSessionID": AgentSelectedFilesDiagnostics.shortID(source.activeAgentSessionID),
+            "worktreeOwnerID": AgentSelectedFilesDiagnostics.shortID(source.worktreeOwnerID),
             "bindingState": String(describing: source.worktreeBindingState),
             "bindingCount": String(source.worktreeBindings.count),
             "bindingFingerprint": String(source.identity.worktreeBindingFingerprint.prefix(16))
         ]
         AgentSelectedFilesDiagnostics.event("lookupResolver.lookupContext.start", fields: fields)
-        guard let sessionID = source.activeAgentSessionID,
+        guard let ownerID = source.worktreeOwnerID,
               case let .hydrated(bindings) = source.worktreeBindingState,
               !bindings.isEmpty
         else {
@@ -343,7 +379,7 @@ enum AgentWorkspaceLookupContextResolver {
         }
 
         guard let projection = await WorkspaceRootBindingProjectionMaterializer(store: store).materialize(
-                  sessionID: sessionID,
+                  sessionID: ownerID,
                   bindings: bindings
               ),
               !projection.isEmpty
