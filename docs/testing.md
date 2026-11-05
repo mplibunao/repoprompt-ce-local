@@ -435,15 +435,13 @@ rpce-cli-debug --context-id <A_CONTEXT_ID> --raw-json \
 | Row | Exercise | Required result |
 |---|---|---|
 | Cold and warm starts | Start A and B together, once right after a relaunch and once on a warm app | Both complete, each with its own provider process, routing events, and commit |
-| Panel plus MCP | Press Run on tab A in the app and start B through the CLI, then the reverse | Both complete, and the window shows only the selected tab's run |
 | Same-tab overlap | Start a second call for A while A's run is in discovery | The second call returns `Context Builder is already running for this tab.`, A's run completes, and the refused call changes nothing in A |
 | Cancel A | Cancel A's call while B is in discovery | A ends as cancelled and its provider process exits; B completes |
 | Close A's tab | Close tab A while both runs are in discovery | Only A ends; B commits its own prompt and selection |
 | Close the window | Close the window while one run is in discovery and another is in its follow-up | Every run the window owns settles, and no provider process remains |
 | Follow-up on the chat | After a call with a `response_type` completes, send a follow-up on its chat | The follow-up answers in that chat with that tab's context; no refusal, including with OpenCode |
 | Two windows, one workspace | Open the workspace in a second window. Start A from each window, then A from one and B from the other | The second call for A is refused; A and B in different windows both complete |
-| Background question | Let B's run ask a clarifying question while tab A is shown | The question appears on B when B is shown, and A's panel is unchanged |
-| Late cleanup | Cancel A's run, then start a new run on A while the first run's provider is still exiting | The new run routes, commits, and keeps its controls |
+| Late cleanup | Cancel A's run, then start a new run on A while the first run's provider is still exiting | The new run routes and commits |
 
 Record every row as passed, failed, or not run with its reason. For each run, keep these as evidence:
 
@@ -461,7 +459,7 @@ A row with two runs needs overlap inside the app, shown in both directions by ex
 
 A run's last `policy_cleared` is the end of its routing-policy lifetime and nothing more. A run clears its policy last, after its discovery has ended and its result is committed. This check shows that two policy lifetimes overlapped. It doesn't show that two providers' work overlapped.
 
-The "Cold and warm starts" and "Panel plus MCP" rows need that direct evidence, by exact run ID. Overlapping admissions or policy lifetimes alone are insufficient for these rows. A run's `expected_pid_cleared` event is insufficient too. It's cleanup evidence only. The app records it some time after the provider process has exited, so an event that comes before it doesn't show the process was still running. The minimum for these rows is one of the two kinds of evidence that follow. Prefer the first.
+The "Cold and warm starts" row needs that direct evidence, by exact run ID. Overlapping admissions or policy lifetimes alone are insufficient for it. A run's `expected_pid_cleared` event is insufficient too. It's cleanup evidence only. The app records it some time after the provider process has exited, so an event that comes before it doesn't show the process was still running. The minimum for that row is one of the two kinds of evidence that follow. Prefer the first.
 
 The first is interleaved tool calls. A snapshot of a run's child connection reports the child's tool-call count and the time of its latest call. The connection is the `connection_id` of the run's `policy_applied` event:
 
@@ -490,6 +488,42 @@ A snapshot that reports `missing` was taken after its connection ended and is no
 Two CLI processes that were alive together don't show overlap. A row without that overlap, with ambiguous or unsupported evidence, or with cleanup that can't be attributed to one run, is incomplete, never a pass. A unit-test pass doesn't stand in for it.
 
 Two CLI invocations are two caller connections, so these rows don't cover one caller connection that rebinds between two calls. No automated test covers that case. A caller-side timeout is a safety bound for a failed row, not the app's routing limit, and ending a CLI process doesn't prove its provider stopped. Reconcile exact run IDs and provider process IDs from the diagnostics afterward, and never end processes by name. Keep raw results, progress output, the build identity, and the app's process ID and start time privately, and never record capability tokens.
+
+## Live worktree-scoped tab validation
+
+A worktree-scoped tab is a compose tab created by `manage_workspaces` `create_tab` with a worktree selector. It reads one loaded Git root through an existing linked worktree of that root, and it has no Agent session. Run these steps before merging a change to the `create_tab` worktree arguments, to how file tools, `context_builder`, or `oracle_send` follow-ups find a tab's worktree, or to the release of a tab's worktree on close or workspace switch.
+
+Deterministic coverage comes first:
+
+```bash
+make dev-test FILTER=BindContextFileAuthorityTests
+make dev-test FILTER=BindContextRoutingAuthorityTests
+make dev-test FILTER=MCPExportWatchdogIntegrationTests
+make dev-test FILTER=DirectHeadlessCompositionTests
+```
+
+Then drive the debug app through `rpce-cli-debug` as [Debug CLI and live MCP smoke](#debug-cli-and-live-mcp-smoke) describes. Use a throwaway workspace with two Git roots. Give the second root a linked worktree whose files differ from its main checkout, a file that exists only in the worktree, and an uncommitted change with a unique diff marker. The worktree is never a root of the workspace. Create the scoped tab from an outside connection:
+
+```bash
+rpce-cli-debug -w <WINDOW_ID> -e 'tabs create --worktree <BRANCH> --worktree-repo-root <SECOND_ROOT_NAME>'
+```
+
+| Step | Exercise | Required result |
+|---|---|---|
+| Advertised text | Fetch `tools/list` | The `manage_workspaces`, `context_builder`, and `oracle_send` entries equal the canonical snapshot |
+| Create | Create the scoped tab, then list workspaces, roots, Agent sessions, and the visible tab | Only a new tab exists; `read_file` on it returns the worktree-only file, which an ordinary tab can't read |
+| Refused selectors | Pass `@current`, the root's own checkout by `@main`, path, or branch, `worktree` with `worktree_id`, and a `worktree_repo_root` that isn't a loaded root | Each call states its reason and doesn't create a tab |
+| Review | Run a `context_builder` review on the tab with a worktree file selected, then with nothing selected | Discovery's `git` reads the worktree and the review includes the worktree's diff marker; with nothing selected, implicit `git` gets the deferred-target text and the review still packages |
+| Follow-up | From a new connection, with another tab visible, send `oracle_send` on the review's `chat_id` | The follow-up runs in the chat's tab and reads worktree content |
+| Closed tab's chat | Close a scoped tab, then send `oracle_send` on its chat without `new_chat` | Refused with text that offers `new_chat`; nothing is sent |
+| Relaunch | Relaunch the debug app, then repeat a scoped read and a follow-up | Both still read the worktree |
+| Fork | Fork the scoped tab, then close the source | The fork keeps the scope and keeps reading the worktree |
+| Missing worktree | Delete the worktree folder from outside the app | Reads, `context_builder`, and `oracle_send` on the tab fail with `worktree_scope_unavailable`; nothing reads the main checkout |
+| Agent attachment | In the app, send a message from the scoped tab's Agent composer | The send is refused with the text that says to start the Agent in a separate tab bound to the worktree; no tab or session is created and the draft stays |
+| Window close | With the workspace open in two windows, close one while it runs Context Builder on the scoped tab | The window's runs settle, and the scoped tab in the other window still reads the worktree |
+| Standalone headless | Pass any worktree argument to `manage_workspaces` through `--backend headless` | Refused, changing nothing |
+
+Then run the [Context Builder cross-tab rows](#context-builder-cross-tab-rows) with tab A scoped and tab B an ordinary tab on the same root. A must answer from the worktree and B from the main checkout in every row. Record every step as passed, failed, or not run with its reason.
 
 ## Live large-workspace worktree-startup diagnostic
 

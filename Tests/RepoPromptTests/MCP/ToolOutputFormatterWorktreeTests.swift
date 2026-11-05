@@ -406,7 +406,7 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
             return try Self.onlyText(ToolOutputFormatter.formatCodeStructure(value: Self.value(dto)))
         }
 
-        let refusal = "Tab 'Stale' (window 1) can't be used: its Agent Mode worktree 'gone' is missing from disk. "
+        let refusal = "Tab 'Stale' (window 1) can't be used: its worktree 'gone' is missing from disk. "
             + "Retrying won't help. Tell the user so they can switch to another tab."
         let transient = issue("workspace_authority_unavailable", retryable: true, message: "Workspace authority unavailable.")
         XCTAssertEqual(

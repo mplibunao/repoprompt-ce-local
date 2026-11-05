@@ -248,18 +248,31 @@ extension MCPServerViewModel {
         var runID: UUID?
         /// Active persisted Agent session bound to this tab, if any.
         var activeAgentSessionID: UUID?
-        /// Hydration-aware worktree binding state for the active Agent session at snapshot time.
+        /// The worktree projection's owner: the Agent session, or this tab for a tab-owned scope.
+        var worktreeOwnerID: UUID?
+        /// Hydration-aware worktree binding state for the projection owner at snapshot time.
         var worktreeBindingState: AgentSessionWorktreeBindingState
         var worktreeBindings: [AgentSessionWorktreeBinding] {
             get { worktreeBindingState.bindings ?? [] }
             set { worktreeBindingState = .hydrated(newValue) }
         }
 
-        var fileToolAuthoritySourceIdentity: AgentWorkspaceLookupContextIdentity? {
+        var fileToolLookupSource: AgentWorkspaceLookupContextSource {
             AgentWorkspaceLookupContextSource(
                 activeAgentSessionID: activeAgentSessionID,
+                worktreeOwnerID: worktreeOwnerID,
                 worktreeBindingState: worktreeBindingState
-            ).authorityIdentity
+            )
+        }
+
+        mutating func applyFileToolLookupSource(_ source: AgentWorkspaceLookupContextSource) {
+            activeAgentSessionID = source.activeAgentSessionID
+            worktreeOwnerID = source.worktreeOwnerID
+            worktreeBindingState = source.worktreeBindingState
+        }
+
+        var fileToolAuthoritySourceIdentity: AgentWorkspaceLookupContextIdentity? {
+            fileToolLookupSource.authorityIdentity
         }
 
         /// Process-lifetime catalog, lookup, and worktree-lifetime authority inherited by nested tools.
@@ -298,6 +311,7 @@ extension MCPServerViewModel {
             tabName: String,
             runID: UUID?,
             activeAgentSessionID: UUID? = nil,
+            worktreeOwnerID: UUID? = nil,
             worktreeBindings: [AgentSessionWorktreeBinding] = [],
             worktreeBindingState: AgentSessionWorktreeBindingState? = nil,
             frozenLookupContext: WorkspaceLookupContext? = nil,
@@ -319,8 +333,11 @@ extension MCPServerViewModel {
             self.tabName = tabName
             self.runID = runID
             self.activeAgentSessionID = activeAgentSessionID
+            // Without an explicit owner, the Agent session owns the projection.
+            let resolvedOwnerID = worktreeOwnerID ?? activeAgentSessionID
+            self.worktreeOwnerID = resolvedOwnerID
             self.worktreeBindingState = worktreeBindingState
-                ?? (activeAgentSessionID == nil ? .notApplicable : .hydrated(worktreeBindings))
+                ?? (resolvedOwnerID == nil ? .notApplicable : .hydrated(worktreeBindings))
             fallbackFrozenLookupContext = frozenLookupContext
             self.frozenFileToolAuthority = frozenFileToolAuthority
             self.contextBuilderFrozenReviewAuthority = contextBuilderFrozenReviewAuthority
@@ -383,6 +400,9 @@ extension MCPServerViewModel {
         let tabID: UUID
         let workspaceID: UUID?
         let windowID: Int?
+        /// The tab came from a call that named only a window: it is whichever tab that window showed
+        /// when the call arrived, not a tab the caller chose.
+        var isFromWindowRoute = false
     }
 
     enum TabContextResolution {
@@ -786,17 +806,9 @@ extension MCPServerViewModel {
                     let promptChanged = bound.promptText != snapshot.promptText
                     let metaChanged = bound.selectedMetaPromptIDs != snapshot.selectedMetaPromptIDs
                     let nameChanged = bound.tabName != snapshot.name
-                    let incomingBindingState = snapshot.activeAgentSessionID.map {
-                        self.agentWorktreeBindingStateProvider?($0, snapshot.id) ?? .unhydrated
-                    } ?? .notApplicable
+                    let incomingSource = self.fileToolLookupSource(forComposeTab: snapshot)
                     let sourceChanged = bound.runID == nil
-                        && AgentWorkspaceLookupContextSource(
-                            activeAgentSessionID: bound.activeAgentSessionID,
-                            worktreeBindingState: bound.worktreeBindingState
-                        ).identity != AgentWorkspaceLookupContextSource(
-                            activeAgentSessionID: snapshot.activeAgentSessionID,
-                            worktreeBindingState: incomingBindingState
-                        ).identity
+                        && bound.fileToolLookupSource.identity != incomingSource.identity
                     if selectionChanged || promptChanged || metaChanged || nameChanged || sourceChanged {
                         bound.selection = incomingSelection
                         if let workspaceID = bound.workspaceID {
@@ -812,8 +824,7 @@ extension MCPServerViewModel {
                             self.replaceFileToolBindingSource(
                                 connectionID: connectionID,
                                 context: &bound,
-                                activeAgentSessionID: snapshot.activeAgentSessionID,
-                                worktreeBindingState: incomingBindingState
+                                source: incomingSource
                             )
                         }
                         self.tabContextByConnectionID[connectionID] = bound
@@ -1023,6 +1034,58 @@ extension MCPServerViewModel {
         case runMappingRejected(UUID)
     }
 
+    /// The worktree projection owner a compose tab yields: the tab itself when it has a worktree
+    /// scope, otherwise its Agent session.
+    static func fileToolLookupOwnerID(for tab: ComposeTabState) -> UUID? {
+        tab.worktreeScope == nil ? tab.activeAgentSessionID : tab.id
+    }
+
+    /// The file-tool lookup source a compose tab yields, which every tab snapshot and freshness
+    /// check derives from. A tab with neither a session nor a scope has no owner. An Agent session
+    /// owns its projection with the session's binding state. A scope makes the tab the owner with
+    /// the scope's bindings. A tab restored with both fails closed as `.unavailable`.
+    @MainActor
+    func fileToolLookupSource(forComposeTab tab: ComposeTabState) -> AgentWorkspaceLookupContextSource {
+        let bindingState: AgentSessionWorktreeBindingState = if let scope = tab.worktreeScope {
+            tab.activeAgentSessionID == nil ? scope.bindingState : .unavailable
+        } else if let sessionID = tab.activeAgentSessionID {
+            agentWorktreeBindingStateProvider?(sessionID, tab.id) ?? .unhydrated
+        } else {
+            .notApplicable
+        }
+        return AgentWorkspaceLookupContextSource(
+            activeAgentSessionID: tab.activeAgentSessionID,
+            worktreeOwnerID: Self.fileToolLookupOwnerID(for: tab),
+            worktreeBindingState: bindingState
+        )
+    }
+
+    /// Whether a tab's stored selection must not be replaced by the canonical UI selection. The
+    /// logical file tree can't represent worktree-only paths, so capturing or flushing the UI
+    /// selection would drop them. Any saved worktree scope keeps the stored selection, an
+    /// unreadable one included; an Agent session keeps it while its bindings are non-empty.
+    @MainActor
+    func preservesStoredWorktreeSelection(
+        tabID: UUID,
+        activeAgentSessionID: UUID?,
+        worktreeScope: ComposeTabWorktreeScope?
+    ) -> Bool {
+        if worktreeScope != nil {
+            return true
+        }
+        guard let activeAgentSessionID else { return false }
+        return agentWorktreeBindingStateProvider?(activeAgentSessionID, tabID).bindings?.isEmpty == false
+    }
+
+    @MainActor
+    func preservesStoredWorktreeSelection(for tab: ComposeTabState) -> Bool {
+        preservesStoredWorktreeSelection(
+            tabID: tab.id,
+            activeAgentSessionID: tab.activeAgentSessionID,
+            worktreeScope: tab.worktreeScope
+        )
+    }
+
     @MainActor
     func makeTabContextSnapshot(
         tabID: UUID,
@@ -1051,10 +1114,7 @@ extension MCPServerViewModel {
         }
 
         let storedSnapshot = stored.snapshot
-        let storedWorktreeBindingState = storedSnapshot.activeAgentSessionID.map {
-            agentWorktreeBindingStateProvider?($0, storedSnapshot.id) ?? .unhydrated
-        } ?? .notApplicable
-        let preserveStoredSelection = storedWorktreeBindingState.bindings?.isEmpty == false
+        let preserveStoredSelection = preservesStoredWorktreeSelection(for: storedSnapshot)
         let captured = manager.collectMCPTabContextComposeSnapshot(
             tabID: tabID,
             workspaceID: stored.workspaceID,
@@ -1067,24 +1127,11 @@ extension MCPServerViewModel {
         if preserveStoredSelection {
             snapshot.selection = storedSnapshot.selection
         }
-        return TabContextSnapshot(
-            tabID: snapshot.id,
-            windowID: windowID,
+        return tabContextSnapshot(
+            for: snapshot,
             workspaceID: captured.workspaceID,
-            promptText: snapshot.promptText,
-            selection: snapshot.selection,
-            selectionRevision: manager.selectionRevisionForMCP(
-                workspaceID: captured.workspaceID,
-                tabID: snapshot.id
-            ),
-            selectedMetaPromptIDs: snapshot.selectedMetaPromptIDs,
-            selectedContextBuilderPromptIDs: snapshot.contextBuilder.selectedContextBuilderPromptIDs,
-            tabName: snapshot.name,
+            windowID: windowID,
             runID: runID,
-            activeAgentSessionID: snapshot.activeAgentSessionID,
-            worktreeBindingState: snapshot.activeAgentSessionID.map {
-                agentWorktreeBindingStateProvider?($0, snapshot.id) ?? .unhydrated
-            } ?? .notApplicable,
             explicitlyBound: explicitlyBound
         )
     }
@@ -1108,45 +1155,51 @@ extension MCPServerViewModel {
             })?.id ?? workspaceManager?.activeWorkspace?.id
         }()
 
+        let preserveStoredSelection = preservesStoredWorktreeSelection(for: composeSnapshot)
+        var snapshot = composeSnapshot
+        var workspaceID = resolvedWorkspaceID
         if captureActiveUIState,
            let resolvedWorkspaceID,
            let captured = workspaceManager?.collectMCPTabContextComposeSnapshot(
                tabID: composeSnapshot.id,
                workspaceID: resolvedWorkspaceID,
                captureActiveUIState: true,
-               flushPendingUISelection: flushActiveSelection
+               flushPendingUISelection: flushActiveSelection && !preserveStoredSelection
            )
         {
-            let snapshot = captured.snapshot
-            return TabContextSnapshot(
-                tabID: snapshot.id,
-                windowID: windowID,
-                workspaceID: captured.workspaceID,
-                promptText: snapshot.promptText,
-                selection: snapshot.selection,
-                selectionRevision: workspaceManager?.selectionRevisionForMCP(
-                    workspaceID: captured.workspaceID,
-                    tabID: snapshot.id
-                ) ?? 0,
-                selectedMetaPromptIDs: snapshot.selectedMetaPromptIDs,
-                selectedContextBuilderPromptIDs: snapshot.contextBuilder.selectedContextBuilderPromptIDs,
-                tabName: snapshot.name,
-                runID: runID,
-                activeAgentSessionID: snapshot.activeAgentSessionID,
-                worktreeBindingState: snapshot.activeAgentSessionID.map {
-                    agentWorktreeBindingStateProvider?($0, snapshot.id) ?? .unhydrated
-                } ?? .notApplicable,
-                explicitlyBound: explicitlyBound
-            )
+            snapshot = captured.snapshot
+            if preserveStoredSelection {
+                snapshot.selection = composeSnapshot.selection
+            }
+            workspaceID = captured.workspaceID
         }
+        return tabContextSnapshot(
+            for: snapshot,
+            workspaceID: workspaceID,
+            windowID: windowID,
+            runID: runID,
+            explicitlyBound: explicitlyBound
+        )
+    }
 
+    /// Converts an already-captured compose tab into a routing snapshot with the tab's effective
+    /// lookup source. Without a workspace the selection revision is 0.
+    @MainActor
+    private func tabContextSnapshot(
+        for composeSnapshot: ComposeTabState,
+        workspaceID: UUID?,
+        windowID: Int,
+        runID: UUID?,
+        explicitlyBound: Bool
+    ) -> TabContextSnapshot {
+        let source = fileToolLookupSource(forComposeTab: composeSnapshot)
         return TabContextSnapshot(
             tabID: composeSnapshot.id,
             windowID: windowID,
-            workspaceID: resolvedWorkspaceID,
+            workspaceID: workspaceID,
             promptText: composeSnapshot.promptText,
             selection: composeSnapshot.selection,
-            selectionRevision: resolvedWorkspaceID.map {
+            selectionRevision: workspaceID.map {
                 workspaceManager?.selectionRevisionForMCP(
                     workspaceID: $0,
                     tabID: composeSnapshot.id
@@ -1156,10 +1209,9 @@ extension MCPServerViewModel {
             selectedContextBuilderPromptIDs: composeSnapshot.contextBuilder.selectedContextBuilderPromptIDs,
             tabName: composeSnapshot.name,
             runID: runID,
-            activeAgentSessionID: composeSnapshot.activeAgentSessionID,
-            worktreeBindingState: composeSnapshot.activeAgentSessionID.map {
-                agentWorktreeBindingStateProvider?($0, composeSnapshot.id) ?? .unhydrated
-            } ?? .notApplicable,
+            activeAgentSessionID: source.activeAgentSessionID,
+            worktreeOwnerID: source.worktreeOwnerID,
+            worktreeBindingState: source.worktreeBindingState,
             explicitlyBound: explicitlyBound
         )
     }
@@ -1229,8 +1281,9 @@ extension MCPServerViewModel {
     }
 
     /// Rebinds connection to target tab if currently bound to a different tab.
-    /// Used by oracle_send when continuing a chat that lives on a different tab.
-    /// - Returns: true if rebinding occurred, false if already on correct tab or target invalid
+    /// Used by oracle_send when continuing a chat that lives on a different tab, after it has
+    /// checked that the tab is still open. A target tab that isn't in the target workspace throws.
+    /// - Returns: true if rebinding occurred, false if already on the target tab
     @MainActor
     @discardableResult
     func rebindToTabIfNeeded(
@@ -1244,12 +1297,6 @@ extension MCPServerViewModel {
 
         // Already bound to the target tab
         if currentBoundTabID == targetTabID {
-            return false
-        }
-
-        // Verify target tab exists before rebinding
-        guard workspaceManager?.composeTab(with: targetTabID) != nil else {
-            tabContextLog("rebindToTabIfNeeded skipped - target tab \(targetTabID) not found")
             return false
         }
 
@@ -1678,8 +1725,7 @@ extension MCPServerViewModel {
         var merged = latest
         merged.selection = context.selection
         merged.selectedContextBuilderPromptIDs = context.selectedContextBuilderPromptIDs
-        merged.activeAgentSessionID = context.activeAgentSessionID
-        merged.worktreeBindingState = context.worktreeBindingState
+        merged.applyFileToolLookupSource(context.fileToolLookupSource)
         merged.frozenLookupContext = context.frozenLookupContext
         merged.frozenFileToolAuthority = context.frozenFileToolAuthority
         merged.contextBuilderFrozenReviewAuthority = context.contextBuilderFrozenReviewAuthority
@@ -2147,7 +2193,7 @@ extension MCPServerViewModel {
         workspaceID: UUID,
         expectedSourceIdentity: AgentWorkspaceLookupContextIdentity?
     ) -> Bool {
-        guard var snapshot = try? makeTabContextSnapshot(
+        guard let snapshot = try? makeTabContextSnapshot(
             tabID: tabID,
             workspaceID: workspaceID,
             windowID: windowID,
@@ -2157,17 +2203,8 @@ extension MCPServerViewModel {
             flushActiveSelection: false
         ) else { return false }
 
-        if let sessionID = snapshot.activeAgentSessionID {
-            snapshot.worktreeBindingState = agentWorktreeBindingStateProvider?(sessionID, snapshot.tabID) ?? .unhydrated
-        } else {
-            snapshot.worktreeBindingState = .notApplicable
-        }
-        let source = AgentWorkspaceLookupContextSource(
-            activeAgentSessionID: snapshot.activeAgentSessionID,
-            worktreeBindingState: snapshot.worktreeBindingState
-        )
         return fileToolLookupSnapshotIsCurrent(snapshot, connectionID: nil)
-            && source.authorityIdentity == expectedSourceIdentity
+            && snapshot.fileToolAuthoritySourceIdentity == expectedSourceIdentity
     }
 
     @MainActor
@@ -2236,8 +2273,7 @@ extension MCPServerViewModel {
                     replaceFileToolBindingSource(
                         connectionID: connectionID,
                         context: &bound,
-                        activeAgentSessionID: liveSourceSnapshot.activeAgentSessionID,
-                        worktreeBindingState: liveSourceSnapshot.worktreeBindingState
+                        source: liveSourceSnapshot.fileToolLookupSource
                     )
                     tabContextByConnectionID[connectionID] = bound
                 }
@@ -2279,10 +2315,7 @@ extension MCPServerViewModel {
         else {
             throw FileToolAuthorityFailure.unavailable
         }
-        let authoritySource = AgentWorkspaceLookupContextSource(
-            activeAgentSessionID: authoritySnapshot.activeAgentSessionID,
-            worktreeBindingState: authoritySnapshot.worktreeBindingState
-        )
+        let authoritySource = authoritySnapshot.fileToolLookupSource
         let capturedRoute = ResolvedTabContextSnapshot(
             snapshot: authoritySnapshot,
             source: routed.source
@@ -2366,8 +2399,8 @@ extension MCPServerViewModel {
         }
     }
 
-    /// The routed snapshot with the live tab's Agent session and binding state, which is what a
-    /// frozen authority's source identity must still match.
+    /// The routed snapshot with the live tab's lookup source, which is what a frozen authority's
+    /// source identity must still match.
     @MainActor
     private func liveFileToolSourceSnapshot(for snapshot: TabContextSnapshot) -> TabContextSnapshot {
         var liveSourceSnapshot = snapshot
@@ -2383,10 +2416,7 @@ extension MCPServerViewModel {
                flushActiveSelection: false
            )
         {
-            liveSourceSnapshot.activeAgentSessionID = current.activeAgentSessionID
-            liveSourceSnapshot.worktreeBindingState = current.activeAgentSessionID.map {
-                agentWorktreeBindingStateProvider?($0, current.tabID) ?? .unhydrated
-            } ?? .notApplicable
+            liveSourceSnapshot.applyFileToolLookupSource(current.fileToolLookupSource)
         }
         return liveSourceSnapshot
     }
@@ -2445,11 +2475,9 @@ extension MCPServerViewModel {
                    for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: snapshot.tabID)
                ),
                liveTab.activeAgentSessionID != snapshot.activeAgentSessionID
+               || Self.fileToolLookupOwnerID(for: liveTab) != snapshot.worktreeOwnerID
             {
-                snapshot.activeAgentSessionID = liveTab.activeAgentSessionID
-                snapshot.worktreeBindingState = liveTab.activeAgentSessionID.map {
-                    agentWorktreeBindingStateProvider?($0, snapshot.tabID) ?? .unhydrated
-                } ?? .notApplicable
+                snapshot.applyFileToolLookupSource(fileToolLookupSource(forComposeTab: liveTab))
                 if let connectionID = metadata.connectionID,
                    var bound = tabContextByConnectionID[connectionID],
                    fileToolLookupRouteMatches(bound, snapshot)
@@ -2457,8 +2485,7 @@ extension MCPServerViewModel {
                     replaceFileToolBindingSource(
                         connectionID: connectionID,
                         context: &bound,
-                        activeAgentSessionID: snapshot.activeAgentSessionID,
-                        worktreeBindingState: snapshot.worktreeBindingState
+                        source: snapshot.fileToolLookupSource
                     )
                     tabContextByConnectionID[connectionID] = bound
                 }
@@ -2476,14 +2503,11 @@ extension MCPServerViewModel {
                var bound = tabContextByConnectionID[connectionID],
                fileToolLookupRouteMatches(bound, snapshot)
             {
-                if bound.activeAgentSessionID != snapshot.activeAgentSessionID
-                    || bound.worktreeBindingState != snapshot.worktreeBindingState
-                {
+                if bound.fileToolLookupSource != snapshot.fileToolLookupSource {
                     replaceFileToolBindingSource(
                         connectionID: connectionID,
                         context: &bound,
-                        activeAgentSessionID: snapshot.activeAgentSessionID,
-                        worktreeBindingState: snapshot.worktreeBindingState
+                        source: snapshot.fileToolLookupSource
                     )
                 }
                 tabContextByConnectionID[connectionID] = bound
@@ -2501,14 +2525,11 @@ extension MCPServerViewModel {
             return frozenAuthority.lookupContext
         }
 
-        let source = AgentWorkspaceLookupContextSource(
-            activeAgentSessionID: resolved.snapshot.activeAgentSessionID,
-            worktreeBindingState: resolved.snapshot.worktreeBindingState
-        )
+        let source = resolved.snapshot.fileToolLookupSource
         guard let connectionID = metadata.connectionID,
               let boundSnapshot = tabContextByConnectionID[connectionID],
               fileToolLookupSnapshotMatches(boundSnapshot, resolved.snapshot),
-              source.activeAgentSessionID != nil,
+              source.worktreeOwnerID != nil,
               !source.worktreeBindings.isEmpty
         else {
             let lookupContext = try await authoritativeFileToolLookupContext(
@@ -2810,39 +2831,38 @@ extension MCPServerViewModel {
         pending?.task.cancel()
     }
 
+    /// Replaces a bound context's lookup source. A change of Agent session, projection owner, or
+    /// binding fingerprint drops the frozen authority, the lookup cache, the pending lookup, and
+    /// the read auto-selection generation.
     @MainActor
     private func replaceFileToolBindingSource(
         connectionID: UUID,
         context: inout TabContextSnapshot,
-        activeAgentSessionID: UUID?,
-        worktreeBindingState: AgentSessionWorktreeBindingState
+        source: AgentWorkspaceLookupContextSource
     ) {
-        let currentIdentity = AgentWorkspaceLookupContextSource(
-            activeAgentSessionID: context.activeAgentSessionID,
-            worktreeBindingState: context.worktreeBindingState
-        ).identity
-        let replacementIdentity = AgentWorkspaceLookupContextSource(
-            activeAgentSessionID: activeAgentSessionID,
-            worktreeBindingState: worktreeBindingState
-        ).identity
-        guard currentIdentity != replacementIdentity else { return }
+        guard context.fileToolLookupSource.identity != source.identity else { return }
 
         invalidateReadFileAutoSelection(connectionID: connectionID, context: context)
         context.frozenFileToolAuthority = nil
-        context.activeAgentSessionID = activeAgentSessionID
-        context.worktreeBindingState = worktreeBindingState
+        context.applyFileToolLookupSource(source)
         activateReadFileAutoSelection(&context)
         fileToolLookupContextCacheByConnectionID.removeValue(forKey: connectionID)
         supersedePendingFileToolLookupContextResolution(connectionID: connectionID)
     }
 
+    /// Hydrates an Agent session's binding state. A tab-owned scope already carries its bindings
+    /// and never asks the session provider, and a snapshot with neither owner is `.notApplicable`.
     @MainActor
     func hydrateFileToolLookupSnapshotIfNeeded(
         _ snapshot: inout TabContextSnapshot,
         connectionID: UUID?
     ) async -> Bool {
-        guard let sessionID = snapshot.activeAgentSessionID else {
-            snapshot.worktreeBindingState = .notApplicable
+        guard let sessionID = snapshot.activeAgentSessionID,
+              !snapshot.fileToolLookupSource.isTabOwned
+        else {
+            if snapshot.worktreeOwnerID == nil {
+                snapshot.worktreeBindingState = .notApplicable
+            }
             return true
         }
         if snapshot.runID == nil,
@@ -2967,8 +2987,9 @@ extension MCPServerViewModel {
            let workspaceID = snapshot.workspaceID
         {
             guard let liveTab = workspaceManager?.composeTab(
-                for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: snapshot.tabID)
-            ), liveTab.activeAgentSessionID == snapshot.activeAgentSessionID
+                      for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: snapshot.tabID)
+                  ), liveTab.activeAgentSessionID == snapshot.activeAgentSessionID,
+                  Self.fileToolLookupOwnerID(for: liveTab) == snapshot.worktreeOwnerID
             else { return false }
         }
         guard let connectionID else { return true }
@@ -2998,6 +3019,7 @@ extension MCPServerViewModel {
     ) -> Bool {
         fileToolLookupRouteMatches(lhs, rhs)
             && lhs.activeAgentSessionID == rhs.activeAgentSessionID
+            && lhs.worktreeOwnerID == rhs.worktreeOwnerID
     }
 
     @MainActor
@@ -3005,12 +3027,18 @@ extension MCPServerViewModel {
         _ source: AgentWorkspaceLookupContextSource,
         for snapshot: TabContextSnapshot
     ) -> Bool {
-        guard let sessionID = source.activeAgentSessionID else { return true }
+        guard source.worktreeOwnerID != nil else { return true }
         if snapshot.runID != nil {
-            return AgentWorkspaceLookupContextSource(
-                activeAgentSessionID: sessionID,
-                worktreeBindingState: snapshot.worktreeBindingState
-            ).identity == source.identity
+            return snapshot.fileToolLookupSource.identity == source.identity
+        }
+        guard let sessionID = source.activeAgentSessionID, !source.isTabOwned else {
+            // A tab-owned scope is current while the live tab still yields the same source.
+            guard let workspaceID = snapshot.workspaceID,
+                  let liveTab = workspaceManager?.composeTab(
+                      for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: snapshot.tabID)
+                  )
+            else { return false }
+            return fileToolLookupSource(forComposeTab: liveTab).identity == source.identity
         }
         guard let agentWorktreeBindingStateProvider else { return true }
         let currentState = agentWorktreeBindingStateProvider(sessionID, snapshot.tabID)
@@ -3176,8 +3204,9 @@ extension MCPServerViewModel {
 
     /// The review target that a discovery run's exact tab snapshot imposes on `git` calls that
     /// name no repository. Runs started through `context_builder` always carry a frozen target.
-    /// Runs started from the Context Builder panel carry none: in a tab without an Agent session
-    /// they keep the first-root default (`nil`), and in an Agent session's tab they are refused.
+    /// Runs started from the Context Builder panel carry none: in a tab without a worktree owner
+    /// they keep the first-root default (`nil`), and in an Agent session's tab or a tab with its
+    /// own worktree scope they are refused.
     static func implicitContextBuilderGitTarget(
         for resolved: ResolvedTabContextSnapshot
     ) -> ContextBuilderReviewTargetResolution? {
@@ -3185,7 +3214,7 @@ extension MCPServerViewModel {
         if let resolution = resolved.snapshot.contextBuilderReviewTargetResolution {
             return resolution
         }
-        return resolved.snapshot.activeAgentSessionID == nil ? nil : .unavailable(.missingFrozenTarget)
+        return resolved.snapshot.worktreeOwnerID == nil ? nil : .unavailable(.missingFrozenTarget)
     }
 
     static func contextBuilderReviewGitContext(
@@ -3411,6 +3440,15 @@ extension MCPServerViewModel {
             "Retry the tool call once. If it fails again, tell the user the RepoPrompt connection failed and ask them to restart this Agent Mode run."
     }
 
+    /// Whether a hint names a different context than the one this connection is bound to. A window
+    /// route's tab never conflicts: the dispatcher passes no such tab for a binding that existed when
+    /// the call arrived, and a binding made during the call, by a run handover or by oracle_send's
+    /// move to its chat's tab, replaces the shown tab the caller never chose. An explicit
+    /// `context_id` or `_tabID` must match.
+    private static func hint(_ hint: TabContextHint, conflictsWith context: TabContextSnapshot) -> Bool {
+        !hint.isFromWindowRoute && !self.hint(hint, matches: context)
+    }
+
     private static func hint(_ hint: TabContextHint, matches context: TabContextSnapshot) -> Bool {
         guard hint.tabID == context.tabID else { return false }
         if let workspaceID = hint.workspaceID, context.workspaceID != workspaceID {
@@ -3501,7 +3539,7 @@ extension MCPServerViewModel {
                 providedWindowID: resolvedWindowID,
                 bound: bound
             ) {
-                if let explicitHint, !Self.hint(explicitHint, matches: bound) {
+                if let explicitHint, Self.hint(explicitHint, conflictsWith: bound) {
                     var conflicts: [String] = []
                     if explicitHint.tabID != bound.tabID {
                         conflicts.append("context_id hint=\(explicitHint.tabID), bound=\(bound.tabID)")
@@ -3547,7 +3585,7 @@ extension MCPServerViewModel {
                providedWindowID: resolvedWindowID
            )
         {
-            if let explicitHint, !Self.hint(explicitHint, matches: handedOver) {
+            if let explicitHint, Self.hint(explicitHint, conflictsWith: handedOver) {
                 throw MCPError.invalidParams("Explicit tab context hint for \(toolName) conflicts with the active run-scoped tab context. Hint tab: \(explicitHint.tabID); run tab: \(handedOver.tabID).")
             }
             return .tabContextSnapshot(handedOver, source: .runHandover)
@@ -3878,8 +3916,7 @@ extension MCPServerViewModel {
                 && latest.windowID == expected.windowID
                 && latest.workspaceID == expected.workspaceID
                 && latest.runID == expected.runID
-                && latest.activeAgentSessionID == expected.activeAgentSessionID
-                && latest.worktreeBindingState == expected.worktreeBindingState
+                && latest.fileToolLookupSource == expected.fileToolLookupSource
                 && latest.selectionRevision == currentSelectionRevision
         }
 
@@ -3887,6 +3924,7 @@ extension MCPServerViewModel {
             ?? manager.activeWorkspace?.composeTabs.first?.id
         return activeTabID == expected.tabID
             && tab.activeAgentSessionID == expected.activeAgentSessionID
+            && Self.fileToolLookupOwnerID(for: tab) == expected.worktreeOwnerID
     }
 
     @MainActor
@@ -3973,8 +4011,7 @@ extension MCPServerViewModel {
                   latest.windowID == context.windowID,
                   latest.workspaceID == context.workspaceID,
                   latest.runID == context.runID,
-                  latest.activeAgentSessionID == context.activeAgentSessionID,
-                  latest.worktreeBindingState == context.worktreeBindingState
+                  latest.fileToolLookupSource == context.fileToolLookupSource
             else {
                 return .conflict(reason: "tab routing or checkout binding changed")
             }

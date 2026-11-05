@@ -911,8 +911,12 @@ final class MCPServerViewModel: ObservableObject {
                 }
                 return try OracleViewModel.OracleSendPackagingContext(delegated: context)
             },
-            rebindChatSessionIfNeeded: { [self] metadata, chatIDString in
-                try rebindOracleChatSessionIfNeeded(metadata: metadata, chatIDString: chatIDString)
+            rebindChatSessionIfNeeded: { [self] metadata, chatIDString, startsNewChat in
+                try rebindOracleChatSessionIfNeeded(
+                    metadata: metadata,
+                    chatIDString: chatIDString,
+                    startsNewChat: startsNewChat
+                )
             },
             resolveTabIDForAgentMode: { [self] args, connectionID in
                 try await resolveTabIDForAgentMode(args: args, connectionID: connectionID)
@@ -1075,8 +1079,13 @@ final class MCPServerViewModel: ObservableObject {
 
         let sourceSessionID = snapshot.sourceAgentSessionID
         let sourceSession: AgentModeViewModel.TabSession?
-        let bindingState: AgentSessionWorktreeBindingState
-        if let sourceSessionID {
+        let lookupSource: AgentWorkspaceLookupContextSource
+        let tabSource = fileToolLookupSource(forComposeTab: initial.snapshot)
+        if tabSource.isTabOwned {
+            // The tab's own worktree scope supplies its bindings; there is no session to hydrate.
+            sourceSession = nil
+            lookupSource = tabSource
+        } else if let sourceSessionID {
             let hydrated = await targetWindow.agentModeViewModel.ensureSessionReady(tabID: sourceTabID)
             guard hydrated.activeAgentSessionID == sourceSessionID,
                   snapshot.routedRunID == nil || hydrated.runID == snapshot.routedRunID
@@ -1087,22 +1096,33 @@ final class MCPServerViewModel: ObservableObject {
                 )
             }
             sourceSession = hydrated
-            bindingState = targetWindow.agentModeViewModel.worktreeBindingState(
-                forAgentSessionID: sourceSessionID,
-                tabID: sourceTabID
+            lookupSource = AgentWorkspaceLookupContextSource(
+                activeAgentSessionID: sourceSessionID,
+                worktreeBindingState: targetWindow.agentModeViewModel.worktreeBindingState(
+                    forAgentSessionID: sourceSessionID,
+                    tabID: sourceTabID
+                )
             )
         } else {
             sourceSession = nil
-            bindingState = .notApplicable
+            lookupSource = AgentWorkspaceLookupContextSource(
+                activeAgentSessionID: nil,
+                worktreeBindingState: .notApplicable
+            )
         }
 
+        let bindingState = lookupSource.worktreeBindingState
         guard bindingState != .unhydrated, bindingState != .unavailable else {
             return unavailable(
-                "The launching Agent session's worktree bindings were unavailable.",
+                lookupSource.isTabOwned
+                    ? "The launching tab's worktree scope was unavailable."
+                    : "The launching Agent session's worktree bindings were unavailable.",
                 sourceSession?.runID
             )
         }
-        let bindings = bindingState.bindings ?? []
+        let bindings = lookupSource.worktreeBindings
+        // A tab-owned scope is not Agent provenance, so its frozen artifacts carry no session.
+        let provenanceSessionID = lookupSource.isTabOwned ? nil : sourceSessionID
         let sourceRunID = sourceSession?.runID
         guard initial.snapshot.activeAgentSessionID == sourceSessionID else {
             return unavailable(
@@ -1127,20 +1147,19 @@ final class MCPServerViewModel: ObservableObject {
 
         do {
             let lookupContext = try await AgentWorkspaceLookupContextResolver.requiredLookupContext(
-                source: AgentWorkspaceLookupContextSource(
-                    activeAgentSessionID: sourceSessionID,
-                    worktreeBindingState: bindingState
-                ),
+                source: lookupSource,
                 store: targetWindow.promptManager.workspaceFileContextStore
             )
             let reviewGitContext = await targetWindow.promptManager.freezePromptGitReviewContext(
                 workspaceID: snapshot.workspaceID,
                 tabID: sourceTabID,
-                sessionID: sourceSessionID,
+                sessionID: provenanceSessionID,
                 bindings: bindings,
                 base: "HEAD"
             )
-            let currentBindingState: AgentSessionWorktreeBindingState = if let sourceSessionID {
+            let currentBindingState: AgentSessionWorktreeBindingState = if lookupSource.isTabOwned {
+                bindingState
+            } else if let sourceSessionID {
                 targetWindow.agentModeViewModel.worktreeBindingState(
                     forAgentSessionID: sourceSessionID,
                     tabID: sourceTabID
@@ -1171,11 +1190,21 @@ final class MCPServerViewModel: ObservableObject {
                     sourceRunID
                 )
             }
-            guard currentBindingState == bindingState else {
+            guard currentBindingState == bindingState,
+                  Self.fileToolLookupOwnerID(for: latest.snapshot) == lookupSource.worktreeOwnerID
+            else {
                 return unavailable(
                     "The launching Agent worktree binding changed while its frozen review capability was being created.",
                     sourceRunID
                 )
+            }
+            if lookupSource.isTabOwned {
+                guard fileToolLookupSource(forComposeTab: latest.snapshot) == lookupSource else {
+                    return unavailable(
+                        "The launching tab's worktree scope changed while its frozen review capability was being created.",
+                        sourceRunID
+                    )
+                }
             }
             let latestSelectionRevision = manager.selectionRevisionForMCP(
                 workspaceID: snapshot.workspaceID,
@@ -1199,7 +1228,7 @@ final class MCPServerViewModel: ObservableObject {
                 selection: snapshot.selection,
                 lookupContext: lookupContext,
                 reviewGitContext: reviewGitContext,
-                sourceAgentSessionID: sourceSessionID,
+                sourceAgentSessionID: provenanceSessionID,
                 sourceAgentRunID: sourceRunID,
                 sourceWorktreeBindings: bindings
             ))
@@ -2344,18 +2373,22 @@ final class MCPServerViewModel: ObservableObject {
             await readFileAutoSelectionMirrorGateForTesting?()
         #endif
         if let workspaceID = key.workspaceID,
-           let sessionID = workspaceManager?.activeAgentSessionID(
-               forTabID: key.tabID,
-               inWorkspaceID: workspaceID
-           ),
-           agentWorktreeBindingStateProvider?(sessionID, key.tabID).bindings?.isEmpty == false
+           let workspaceManager,
+           preservesStoredWorktreeSelection(
+               tabID: key.tabID,
+               activeAgentSessionID: workspaceManager.activeAgentSessionID(
+                   forTabID: key.tabID,
+                   inWorkspaceID: workspaceID
+               ),
+               worktreeScope: workspaceManager.worktreeScope(forTabID: key.tabID, inWorkspaceID: workspaceID)
+           )
         {
             // Worktree-only paths cannot be represented by the logical base file tree. Refresh
             // only the header presentation from canonical storage; do not route through file UI.
-            if let selection = workspaceManager?.composeTab(
+            if let selection = workspaceManager.composeTab(
                 for: WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: key.tabID)
             )?.selection {
-                workspaceManager?.updateComposeTabSelectionPresentation(selection, forTabID: key.tabID)
+                workspaceManager.updateComposeTabSelectionPresentation(selection, forTabID: key.tabID)
             }
             return .converged
         }
@@ -4329,14 +4362,35 @@ final class MCPServerViewModel: ObservableObject {
         windowToolCatalogService
     }
 
+    /// The refusal for an `oracle_send` follow-up whose chat's tab was closed or stashed.
+    static func oracleChatTabGoneMessage(chatID: String) -> String {
+        "Chat '\(chatID)' can't continue: its tab was closed or stashed. The follow-up was not sent. "
+            + "Start a new chat in the tab you want with {\"message\":\"<message>\",\"new_chat\":true}."
+    }
+
+    /// Moves the connection to the tab of the chat named by `oracle_send`'s `chat_id`. A follow-up
+    /// whose chat's tab is no longer open is refused rather than continued in the connection's
+    /// current tab; a stashed tab counts as gone. A call with `new_chat` doesn't continue the chat,
+    /// so a gone tab only skips the move and the new chat starts in the current tab.
     private func rebindOracleChatSessionIfNeeded(
         metadata: RequestMetadata,
-        chatIDString: String
+        chatIDString: String,
+        startsNewChat: Bool
     ) throws {
+        guard let workspaceManager,
+              let session = oracleVM.resolveSession(id: chatIDString),
+              let sessionTabID = session.composeTabID
+        else {
+            return
+        }
+        guard workspaceManager.composeTab(with: sessionTabID) != nil else {
+            if startsNewChat {
+                return
+            }
+            throw MCPError.invalidParams(Self.oracleChatTabGoneMessage(chatID: chatIDString))
+        }
         guard let connectionID = metadata.connectionID,
               let windowID = metadata.windowID,
-              let session = oracleVM.resolveSession(id: chatIDString),
-              let sessionTabID = session.composeTabID,
               let sessionWorkspaceID = session.workspaceID
         else {
             return
@@ -4810,14 +4864,10 @@ final class MCPServerViewModel: ObservableObject {
             // The freeze suspends, and meanwhile the tab can gain or lose an Agent session or its
             // worktree bindings can change. A context frozen from the old source would read the
             // old checkout.
-            let frozenSource = AgentWorkspaceLookupContextSource(
-                activeAgentSessionID: context.activeAgentSessionID,
-                worktreeBindingState: context.worktreeBindingState
-            )
             guard targetWindow.mcpServer.prospectiveFileToolLookupSourceIsCurrent(
                 tabID: context.tabID,
                 workspaceID: workspaceID,
-                expectedSourceIdentity: frozenSource.authorityIdentity
+                expectedSourceIdentity: context.fileToolAuthoritySourceIdentity
             ) else {
                 throw FileToolAuthorityFailure.superseded
             }

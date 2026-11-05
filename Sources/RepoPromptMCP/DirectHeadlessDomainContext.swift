@@ -18,6 +18,7 @@ actor DirectHeadlessDomainContext {
         case invalidWorkspaceDocument
         case stateConflict(String)
         case pathOutsideWorkspace(String)
+        case worktreeScopedContext
 
         var errorDescription: String? {
             switch self {
@@ -28,6 +29,8 @@ actor DirectHeadlessDomainContext {
             case .invalidWorkspaceDocument: "Workspace document is invalid"
             case let .stateConflict(reason): "Workspace state conflict: \(reason)"
             case let .pathOutsideWorkspace(path): "Path is outside the bound workspace roots: \(path)"
+            case .worktreeScopedContext:
+                "Tab-owned worktree scope requires the app backend. Standalone headless cannot create or use a worktree-scoped tab; no scope or binding was changed."
             }
         }
     }
@@ -101,12 +104,25 @@ actor DirectHeadlessDomainContext {
         return try await snapshot(identity: handle.context, sessionID: sessionID)
     }
 
+    /// Whether a saved compose tab carries a worktree scope, in any state, including one the app
+    /// couldn't read.
+    nonisolated static func hasWorktreeScope(_ contextObject: [String: Any]) -> Bool {
+        guard let scope = contextObject["worktreeScope"] else { return false }
+        return !(scope is NSNull)
+    }
+
     func snapshot(identity: DomainContextIdentity, sessionID: UUID? = nil) async throws -> Snapshot {
         guard let workspace = await runtime.contextStore.workspaceSnapshot(identity.workspaceID) else {
             throw Error.workspaceUnavailable
         }
         guard let context = workspace.contexts.first(where: { $0.metadata.identity == identity }) else {
             throw Error.contextUnavailable
+        }
+        let contextObject = try Self.contextObject(from: workspace, contextID: identity.contextID)
+        // Headless has no worktree projections. A saved scoped tab would read the main checkout,
+        // so every bind and every file, Oracle, or Agent authority taken from it is refused here.
+        if Self.hasWorktreeScope(contextObject) {
+            throw Error.worktreeScopedContext
         }
         let canonicalRoots = try workspace.document.metadata.repoPaths.map { raw -> URL in
             let url = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
@@ -129,7 +145,6 @@ actor DirectHeadlessDomainContext {
                 throw DomainStandaloneScopeError.invalidWorkingDirectory(mapping.physicalRoot.path)
             }
         }
-        let contextObject = try Self.contextObject(from: workspace, contextID: identity.contextID)
         let prompt = contextObject["prompt"] as? String ?? ""
         let selection = contextObject["selectedPaths"] as? [String]
             ?? contextObject["selection"] as? [String]

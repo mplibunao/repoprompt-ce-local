@@ -121,10 +121,7 @@ extension MCPServerViewModel {
             }
         }
         return await AgentWorkspaceLookupContextResolver.authoritativeLookupContextOrFailClosed(
-            source: AgentWorkspaceLookupContextSource(
-                activeAgentSessionID: context.activeAgentSessionID,
-                worktreeBindingState: context.worktreeBindingState
-            ),
+            source: context.fileToolLookupSource,
             store: promptVM.workspaceFileContextStore
         )
     }

@@ -154,4 +154,11 @@ import XCTest
             return object
         }
     }
+
+    /// Who owns the worktree binding a missing-folder test deletes: the tab's Agent session, or the
+    /// tab itself through its worktree scope.
+    enum MissingWorktreeOwner: String, CaseIterable {
+        case agentSession = "Agent session"
+        case tab = "tab scope"
+    }
 #endif

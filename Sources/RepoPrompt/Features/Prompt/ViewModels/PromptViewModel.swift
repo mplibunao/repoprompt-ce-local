@@ -2703,9 +2703,13 @@ class PromptViewModel: ObservableObject {
         }
     }
 
+    /// Runs after removed tabs leave the projection. `worktreeScopedTabIDs` names the removed tabs
+    /// that own a worktree scope; their projections are released last, after routing, tasks, and
+    /// Agent cleanup are done, because a scoped tab has no Agent session whose cleanup does it.
     @MainActor
     private func runPostProjectionComposeTabCleanup(
         _ tabIDs: Set<UUID>,
+        worktreeScopedTabIDs: Set<UUID>,
         reason: ComposeTabRemovalReason,
         workspaceID: UUID
     ) async -> [ComposeTabPostRemovalIssue] {
@@ -2715,6 +2719,7 @@ class PromptViewModel: ObservableObject {
         await notifyComposeTabsWillClose(tabIDs, reason: reason)
         await cleanupMCPStateForClosingTabs(tabIDs)
         let issues = await notifyComposeTabsDidRemove(tabIDs, reason: reason, workspaceID: workspaceID)
+        await releaseTabWorktreeScopes(worktreeScopedTabIDs, keepingActiveWorkspaceTabs: true)
         #if DEBUG
             for tabID in tabIDs {
                 AgentModePerfDiagnostics.markSidebarDeleteFullCleanupComplete(
@@ -2725,6 +2730,23 @@ class PromptViewModel: ObservableObject {
             }
         #endif
         return issues
+    }
+
+    /// Releases this window's worktree projections owned by the tabs in `tabIDs`. With
+    /// `keepingActiveWorkspaceTabs`, a tab that is open in the active workspace again by the time
+    /// its turn comes keeps its projection. Saved scopes don't change, and the next lookup
+    /// rematerializes a projection that is still needed.
+    @MainActor
+    func releaseTabWorktreeScopes(_ tabIDs: Set<UUID>, keepingActiveWorkspaceTabs: Bool) async {
+        let materializer = WorkspaceRootBindingProjectionMaterializer(store: workspaceFileContextStore)
+        for tabID in tabIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+            if keepingActiveWorkspaceTabs,
+               workspaceManager?.activeWorkspace?.composeTabs.contains(where: { $0.id == tabID }) == true
+            {
+                continue
+            }
+            await materializer.release(sessionID: tabID)
+        }
     }
 
     @MainActor
@@ -3015,10 +3037,21 @@ class PromptViewModel: ObservableObject {
     /// Create a fork-duplicate tab in the background (without switching to it).
     /// Copies all compose tab state (selection, prompt, expansions, overrides, etc.)
     /// but clears agent and chat session bindings so the forked tab gets fresh sessions.
-    /// - Parameter sourceTabID: The specific tab to duplicate. Avoids racing with active-tab changes.
+    /// - Parameters:
+    ///   - sourceTabID: The specific tab to duplicate. Avoids racing with active-tab changes.
+    ///   - expectedWorkspaceID: When given, no tab is created unless it is still the active
+    ///     workspace. A source missing from that workspace still yields a blank tab.
     @MainActor
-    func createBackgroundForkComposeTab(sourceTabID: UUID, named name: String? = nil) async -> ComposeTabState? {
-        await createBackgroundComposeTab(strategy: .forkDuplicate(sourceTabID: sourceTabID), name: name)
+    func createBackgroundForkComposeTab(
+        sourceTabID: UUID,
+        named name: String? = nil,
+        expectedWorkspaceID: UUID? = nil
+    ) async -> ComposeTabState? {
+        await createBackgroundComposeTab(
+            strategy: .forkDuplicate(sourceTabID: sourceTabID),
+            name: name,
+            expectedWorkspaceID: expectedWorkspaceID
+        )
     }
 
     /// Ensure a tab is active; if the tab does not exist, create a new one with the provided strategy.
@@ -3060,19 +3093,30 @@ class PromptViewModel: ObservableObject {
     /// Create a new compose tab in the background without switching to it.
     /// Used by MCP flows to create a tab silently.
     /// Returns the new tab state if successful, nil otherwise.
+    /// - Parameters:
+    ///   - worktreeScope: The scope the new tab owns. It is stored before the tab is published, and
+    ///     a tab that would also hold an Agent session isn't created.
+    ///   - expectedWorkspaceID: When given, no tab is created unless it is still the active workspace.
     @MainActor
     func createBackgroundComposeTab(
         strategy: ComposeTabCreationStrategy = .duplicateCurrent,
-        name: String? = nil
+        name: String? = nil,
+        worktreeScope: ComposeTabWorktreeScope? = nil,
+        expectedWorkspaceID: UUID? = nil
     ) async -> ComposeTabState? {
         guard
             let manager = workspaceManager,
             let workspace = manager.activeWorkspace,
+            expectedWorkspaceID == nil || workspace.id == expectedWorkspaceID,
             let index = manager.workspaces.firstIndex(where: { $0.id == workspace.id })
         else { return nil }
 
         flushAndSnapshotSourceTabIfNeeded(for: strategy, in: manager, workspaceIndex: index)
-        guard let newTab = makeComposeTab(for: strategy, explicitName: name, workspaceIndex: index, manager: manager) else { return nil }
+        guard var newTab = makeComposeTab(for: strategy, explicitName: name, workspaceIndex: index, manager: manager) else { return nil }
+        if let worktreeScope {
+            guard newTab.activeAgentSessionID == nil else { return nil }
+            newTab.worktreeScope = worktreeScope
+        }
 
         // Append but do NOT change activeComposeTabID
         manager.workspaces[index].composeTabs.append(newTab)
@@ -4218,6 +4262,9 @@ class PromptViewModel: ObservableObject {
             return report
         }
         report.removedComposeTabIDs.formUnion(tabsBeingClosed)
+        let worktreeScopedTabIDs = Set(tabsBeforeClose.lazy.filter {
+            tabsBeingClosed.contains($0.id) && $0.worktreeScope != nil
+        }.map(\.id))
 
         dirtyTabIDs.subtract(resolvedIDs)
 
@@ -4241,6 +4288,7 @@ class PromptViewModel: ObservableObject {
             manager.pollAndSaveState()
             await report.cleanupIssues.append(contentsOf: runPostProjectionComposeTabCleanup(
                 tabsBeingClosed,
+                worktreeScopedTabIDs: worktreeScopedTabIDs,
                 reason: reason,
                 workspaceID: workspace.id
             ))
@@ -4298,6 +4346,7 @@ class PromptViewModel: ObservableObject {
         manager.pollAndSaveState()
         await report.cleanupIssues.append(contentsOf: runPostProjectionComposeTabCleanup(
             tabsBeingClosed,
+            worktreeScopedTabIDs: worktreeScopedTabIDs,
             reason: reason,
             workspaceID: workspace.id
         ))
@@ -4660,6 +4709,7 @@ class PromptViewModel: ObservableObject {
         report.removedStashedTabIDs.formUnion(stashedTabsToDelete.map(\.id))
         await report.cleanupIssues.append(contentsOf: runPostProjectionComposeTabCleanup(
             tabIDs,
+            worktreeScopedTabIDs: Set(stashedTabsToDelete.lazy.filter { $0.tab.worktreeScope != nil }.map(\.tab.id)),
             reason: .deleteStashed,
             workspaceID: workspace.id
         ))

@@ -326,6 +326,125 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
             XCTAssertEqual(other.workspaceManager.activeWorkspaceID, unrelated.id)
         }
 
+        /// A `create_tab` call with an invalid worktree selection is refused with its reason and
+        /// creates no tab, so the caller's binding and the visible tab stay as they were. The
+        /// workspace loads six Git roots, each named after its folder: `repo-a` and `repo-b`; two
+        /// roots named `shared` in separate repositories; and `trunk` with its linked worktree
+        /// `trunk-linked`. A fork of a tab whose saved scope can't load is kept, but the caller
+        /// isn't bound to it and the refusal names it.
+        @MainActor
+        func testCreateTabRejectsInvalidWorktreeSelectionWithoutChangingContext() async throws {
+            let git = try ReviewGitRepositoryFixture(name: "create-tab-worktree-selection")
+            addTeardownBlock { git.cleanup() }
+            let repoA = try git.makeRepository(named: "repo-a", files: ["A.swift": "// A"])
+            let repoB = try git.makeRepository(named: "repo-b", files: ["B.swift": "// B"])
+            let sharedNameRoots = try ["first/shared", "second/shared"].map {
+                try git.makeRepository(named: $0, files: ["S.swift": "// S"])
+            }
+            let trunk = try git.makeRepository(named: "trunk", files: ["T.swift": "// T"])
+            let trunkLinked = git.sandbox.appendingPathComponent("trunk-linked", isDirectory: true)
+            _ = try git.runGit(["worktree", "add", "-b", "linked", trunkLinked.path], at: trunk)
+            let contextID = UUID()
+            let unloadableScopeTabID = UUID()
+            let workspace = WorkspaceModel(
+                name: "Worktree Selection",
+                repoPaths: [repoA.path, repoB.path] + (sharedNameRoots + [trunk, trunkLinked]).map(\.path),
+                composeTabs: [
+                    ComposeTabState(id: contextID, name: "Context"),
+                    ComposeTabState(id: unloadableScopeTabID, name: "Unloadable", worktreeScope: .unavailable)
+                ],
+                activeComposeTabID: contextID
+            )
+            let target = try await makeRegisteredWindows(activeWorkspaces: [workspace])[0]
+            let connection = try await makeProductionMCPConnection()
+            addTeardownBlock { await connection.cleanup() }
+            _ = try await bindContextResponse(connection, [
+                "op": .string("bind"),
+                "context_id": .string(contextID.uuidString)
+            ])
+            let bindingBefore = target.mcpServer.connectionBindingSnapshot(forConnection: connection.connectionID)
+            let tabIDsBefore = target.workspaceManager.activeWorkspace?.composeTabs.map(\.id)
+            XCTAssertEqual(bindingBefore.tabID, contextID)
+
+            let rootA = Value.string(repoA.path)
+            let rows: [(label: String, arguments: [String: Value], refusal: String)] = [
+                (
+                    "conflicting selectors",
+                    ["worktree": .string("feature"), "worktree_id": .string("wt_feature"), "worktree_repo_root": rootA],
+                    "worktree and worktree_id are mutually exclusive"
+                ),
+                (
+                    "several Git roots and no worktree_repo_root",
+                    ["worktree": .string("feature")],
+                    "requires worktree_repo_root when more than one loaded Git root is available"
+                ),
+                (
+                    "a root name two loaded roots share",
+                    ["worktree": .string("feature"), "worktree_repo_root": .string("shared")],
+                    "worktree_repo_root must be the name or absolute path of exactly one loaded Git root"
+                ),
+                (
+                    "a tree specifier on a linked worktree root whose main checkout is loaded",
+                    ["worktree": .string("linked"), "worktree_repo_root": .string("trunk-linked@main")],
+                    "worktree_repo_root must be the name or absolute path of exactly one loaded Git root"
+                ),
+                (
+                    "a selector passed as worktree_id",
+                    ["worktree_id": .string("@branch:feature"), "worktree_repo_root": .string(sharedNameRoots[0].path)],
+                    "worktree_id must be a worktree ID, not a selector"
+                ),
+                (
+                    "a checkout of another repository",
+                    ["worktree": .string(repoB.path), "worktree_repo_root": rootA],
+                    "does not belong to the repository of root 'repo-a'"
+                ),
+                (
+                    "a selector with fork",
+                    ["mode": .string("fork"), "worktree": .string("feature"), "worktree_repo_root": rootA],
+                    "inherits its source tab's worktree scope"
+                ),
+                (
+                    "@current",
+                    ["worktree": .string("@current"), "worktree_repo_root": rootA],
+                    "can't scope a tab with @current or @wt"
+                ),
+                (
+                    "a selector that resolves to the loaded root",
+                    ["worktree": .string("@main"), "worktree_repo_root": rootA],
+                    "is the loaded root's own checkout"
+                )
+            ]
+            for row in rows {
+                var arguments = row.arguments
+                arguments["action"] = .string("create_tab")
+                let result = await callTool(connection, name: "manage_workspaces", arguments: arguments)
+                XCTAssertTrue(result.isError, "\(row.label): \(result.text)")
+                XCTAssertTrue(result.text.contains(row.refusal), "\(row.label): \(result.text)")
+                XCTAssertEqual(target.workspaceManager.activeWorkspace?.composeTabs.map(\.id), tabIDsBefore, row.label)
+                let bindingAfter = target.mcpServer.connectionBindingSnapshot(forConnection: connection.connectionID)
+                XCTAssertEqual(bindingAfter.tabID, bindingBefore.tabID, row.label)
+                XCTAssertEqual(bindingAfter.workspaceID, bindingBefore.workspaceID, row.label)
+            }
+
+            let forked = await callTool(connection, name: "manage_workspaces", arguments: [
+                "action": .string("create_tab"),
+                "mode": .string("fork"),
+                "source_tab": .string(unloadableScopeTabID.uuidString)
+            ])
+            let fork = try XCTUnwrap(target.workspaceManager.activeWorkspace?.composeTabs.first {
+                !(tabIDsBefore ?? []).contains($0.id)
+            })
+            XCTAssertTrue(forked.isError, forked.text)
+            XCTAssertTrue(
+                forked.text.contains("(context_id '\(fork.id.uuidString)') was created, but its worktree scope could not be loaded"),
+                forked.text
+            )
+            XCTAssertEqual(fork.worktreeScope, .unavailable)
+            let bindingAfterFork = target.mcpServer.connectionBindingSnapshot(forConnection: connection.connectionID)
+            XCTAssertEqual(bindingAfterFork.tabID, bindingBefore.tabID)
+            XCTAssertEqual(target.workspaceManager.activeWorkspace?.activeComposeTabID, contextID)
+        }
+
         @MainActor
         func testWindowBindCapturesActiveTabOnceAndWindowSelectsContextIDMatch() async throws {
             let roots = try makeTemporaryRoots(count: 3)

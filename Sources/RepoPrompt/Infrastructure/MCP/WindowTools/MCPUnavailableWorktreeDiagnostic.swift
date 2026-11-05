@@ -1,6 +1,7 @@
 import Foundation
 
-/// A refusal for an Agent session worktree binding whose folder is confirmed missing.
+/// A refusal for a worktree binding, an Agent session's or a tab's own, whose folder is confirmed
+/// missing.
 ///
 /// It lives for one tool call and renders the error text an agent reads. It holds the binding so
 /// tests can compare identity, but the text it renders never contains an absolute path.
@@ -46,9 +47,9 @@ struct MCPUnavailableWorktreeDiagnostic: Equatable, Sendable {
     /// The refusal: the routed tab, when there is one, and the worktree that is missing from disk.
     var summary: String {
         guard let routeContext else {
-            return "The Agent Mode session's worktree\(labelSuffix) is missing from disk."
+            return "The addressed context's worktree\(labelSuffix) is missing from disk."
         }
-        return "\(subject(for: routeContext)) can't be used: its Agent Mode worktree\(labelSuffix) is missing from disk."
+        return "\(subject(for: routeContext)) can't be used: its worktree\(labelSuffix) is missing from disk."
     }
 
     /// What the calling agent can do next.
@@ -95,7 +96,7 @@ struct MCPUnavailableWorktreeDiagnostic: Equatable, Sendable {
 
     /// Replaces line breaks and control characters with spaces, escapes quotes and backslashes,
     /// and trims the result. Returns `nil` when nothing is left.
-    private static func displayValue(_ value: String) -> String? {
+    static func displayValue(_ value: String) -> String? {
         var output = String.UnicodeScalarView()
         for scalar in value.unicodeScalars {
             if CharacterSet.controlCharacters.contains(scalar) || CharacterSet.newlines.contains(scalar) {

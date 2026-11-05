@@ -12062,7 +12062,8 @@ actor ServerNetworkManager {
                                 dispatchTabContextHint = MCPServerViewModel.TabContextHint(
                                     tabID: logicalBinding.logicalContext.tabID,
                                     workspaceID: logicalBinding.logicalContext.workspaceID,
-                                    windowID: logicalBinding.windowID
+                                    windowID: logicalBinding.windowID,
+                                    isFromWindowRoute: tabCameFromWindowRoute
                                 )
                             }
                             preResolvedWindowID = logicalBinding.windowID

@@ -63,7 +63,7 @@ struct GitRepoTargetResolver {
         visibleRoots: [WorkspaceRootRef],
         defaultRepo: GitRepoDescriptor
     ) async throws -> GitRepoDescriptor {
-        let (baseToken, specifier) = parseRepoTreeSpecifier(token)
+        let (baseToken, specifier) = Self.parseRepoTreeSpecifier(token)
         let trimmed = baseToken.trimmingCharacters(in: .whitespacesAndNewlines)
         let baseRepo = try await resolveBaseRepo(
             trimmed,
@@ -162,7 +162,7 @@ struct GitRepoTargetResolver {
         allRepos: [GitRepoDescriptor]
     ) async throws -> GitWorktreeDescriptor {
         let selector = rawSelector?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "@current"
-        let (_, specifier) = parseRepoTreeSpecifier(selector)
+        let (_, specifier) = Self.parseRepoTreeSpecifier(selector)
         let candidateRepos = candidateRepos(allRepos: allRepos, defaultRepo: repo)
 
         switch specifier {
@@ -291,6 +291,25 @@ struct GitRepoTargetResolver {
 
     // MARK: - Specifier parsing and application
 
+    /// What a worktree selector names before it is resolved: whether a repository prefix comes
+    /// before its tree specifier, as in `repo@main`, and whether it names the selected
+    /// repository's own checkout (`@current`, or `@wt` / `@worktree` without a branch).
+    struct WorktreeSelectorForm: Equatable {
+        let hasRepositoryPrefix: Bool
+        let namesOwnCheckout: Bool
+    }
+
+    static func worktreeSelectorForm(_ selector: String) -> WorktreeSelectorForm {
+        let (base, specifier) = parseRepoTreeSpecifier(selector)
+        guard let specifier else {
+            return WorktreeSelectorForm(hasRepositoryPrefix: false, namesOwnCheckout: false)
+        }
+        return WorktreeSelectorForm(
+            hasRepositoryPrefix: !base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            namesOwnCheckout: specifier == .current || specifier == .worktree(branch: nil)
+        )
+    }
+
     private enum RepoTreeSpecifier: Equatable {
         case worktree(branch: String?)
         case main(branch: String?)
@@ -299,7 +318,7 @@ struct GitRepoTargetResolver {
         case branch(String)
     }
 
-    private func parseRepoTreeSpecifier(_ token: String) -> (base: String, specifier: RepoTreeSpecifier?) {
+    private static func parseRepoTreeSpecifier(_ token: String) -> (base: String, specifier: RepoTreeSpecifier?) {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let atIndex = trimmed.lastIndex(of: "@") else {
             return (trimmed, nil)

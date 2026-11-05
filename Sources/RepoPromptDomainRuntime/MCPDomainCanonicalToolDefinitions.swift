@@ -1150,8 +1150,11 @@ package enum MCPDomainCanonicalToolDefinitions {
         if definition.name == MCPWindowToolName.git {
             return describeGitFrozenTargetDefault(definition)
         }
+        if definition.name == MCPWindowToolName.oracleSend {
+            return describeOracleSendChatID(definition)
+        }
         if definition.name == MCPGlobalToolName.manageWorkspaces {
-            return describeOpenInNewWindow(definition)
+            return describeManageWorkspaces(definition)
         }
         guard definition.name == MCPGlobalToolName.bindContext,
               case var .object(schema) = definition.inputSchema,
@@ -1311,27 +1314,70 @@ package enum MCPDomainCanonicalToolDefinitions {
         )
     }
 
-    /// The `open_in_new_window` property states what the flag does for each action, so the tool
-    /// description's Parameters list leaves the flag out instead of repeating it.
-    private static func describeOpenInNewWindow(
+    /// Describes `manage_workspaces` from the shared property texts. The `open_in_new_window`
+    /// property states what the flag does for each action, so the description's Parameters list
+    /// leaves the flag out. `create_tab` gains its worktree arguments and the fork's scope
+    /// inheritance, and the description states once, beside the `create_tab` defaults, that only
+    /// the app backend supports scoped tabs. Each part applies only when its property exists.
+    private static func describeManageWorkspaces(
+        _ definition: MCPDomainToolDefinition
+    ) -> MCPDomainToolDefinition {
+        guard case var .object(schema) = definition.inputSchema,
+              case var .object(properties)? = schema["properties"]
+        else {
+            return definition
+        }
+        var description = definition.description
+        if case var .object(openInNewWindow)? = properties["open_in_new_window"] {
+            openInNewWindow["description"] = .string(MCPManageWorkspacesPropertyDescriptions.openInNewWindow)
+            properties["open_in_new_window"] = .object(openInNewWindow)
+            description = description
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.hasPrefix("- open_in_new_window:") }
+                .joined(separator: "\n")
+        }
+        if case var .object(mode)? = properties["mode"] {
+            mode["description"] = .string(MCPManageWorkspacesPropertyDescriptions.mode)
+            properties["mode"] = .object(mode)
+            for (key, propertyDescription) in [
+                ("worktree", MCPManageWorkspacesPropertyDescriptions.worktree),
+                ("worktree_id", MCPManageWorkspacesPropertyDescriptions.worktreeID),
+                ("worktree_repo_root", MCPManageWorkspacesPropertyDescriptions.worktreeRepoRoot)
+            ] {
+                properties[key] = .object(["type": .string("string"), "description": .string(propertyDescription)])
+            }
+            let createTabDefaults = MCPManageWorkspacesPropertyDescriptions.createTabDefaults
+            description = description.replacingOccurrences(
+                of: createTabDefaults,
+                with: createTabDefaults + " " + MCPManageWorkspacesPropertyDescriptions.worktreeScopeBackend
+            )
+        }
+        schema["properties"] = .object(properties)
+        return MCPDomainToolDefinition(
+            name: definition.name,
+            description: description,
+            inputSchema: .object(schema),
+            annotations: definition.annotations,
+            isEnabledByDefault: definition.isEnabledByDefault
+        )
+    }
+
+    /// A follow-up runs in the chat's own tab, and the connection stays bound there.
+    private static func describeOracleSendChatID(
         _ definition: MCPDomainToolDefinition
     ) -> MCPDomainToolDefinition {
         guard case var .object(schema) = definition.inputSchema,
               case var .object(properties)? = schema["properties"],
-              case var .object(openInNewWindow)? = properties["open_in_new_window"]
+              case var .object(chatID)? = properties["chat_id"]
         else {
             return definition
         }
-        openInNewWindow["description"] = .string(MCPManageWorkspacesPropertyDescriptions.openInNewWindow)
-        properties["open_in_new_window"] = .object(openInNewWindow)
+        chatID["description"] = .string(MCPOracleSendPropertyDescriptions.chatID)
+        properties["chat_id"] = .object(chatID)
         schema["properties"] = .object(properties)
-        let description = definition.description
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.hasPrefix("- open_in_new_window:") }
-            .joined(separator: "\n")
         return MCPDomainToolDefinition(
             name: definition.name,
-            description: description,
+            description: definition.description,
             inputSchema: .object(schema),
             annotations: definition.annotations,
             isEnabledByDefault: definition.isEnabledByDefault
@@ -1361,12 +1407,25 @@ package enum MCPBindContextPropertyDescriptions {
 /// override and the app-side raw Tool registration both publish.
 package enum MCPManageWorkspacesPropertyDescriptions {
     package static let openInNewWindow = "When true: 'switch' reuses a window already showing the workspace, or opens one if none does; 'create' opens a new window. Returns window_id and sets this connection's window; existing tab bindings stay unchanged."
+    package static let mode = "For 'create_tab': blank starts with empty context; fork copies the source context and its worktree scope."
+    package static let worktree = "For 'create_tab': existing worktree selector: @main, @id:<id>, @branch:<branch>, branch or worktree name, or absolute worktree path. Scopes the new tab's file tools, Context Builder, and Oracle follow-ups without creating an Agent session or workspace."
+    package static let worktreeID = "For 'create_tab': existing worktree ID, as an alternative to worktree."
+    package static let worktreeRepoRoot = "For 'create_tab': name or absolute path of the loaded Git root to scope. Required when several loaded Git roots are available."
+    /// The tool-description sentence the backend sentence follows.
+    package static let createTabDefaults = "create_tab defaults to bind=true and focus=false so automation can create isolated background tabs without stealing UI focus."
+    package static let worktreeScopeBackend = "Worktree-scoped tabs require the app backend; standalone headless rejects worktree selectors and use of saved scoped tabs."
+}
+
+/// Single source for the `oracle_send` property descriptions that the canonical schema override
+/// and the app-side raw Tool registration both publish.
+package enum MCPOracleSendPropertyDescriptions {
+    package static let chatID = "Continue a specific chat. App-backed: the follow-up uses the chat's tab and binds this connection to it."
 }
 
 /// Single source for the `context_builder` text that the canonical schema override and the
 /// app-side raw Tool registration both publish.
 package enum MCPContextBuilderDescriptions {
-    package static let workflow = "**Workflow**: Runs in the tab this connection is bound to. An unbound connection gets a new tab and is bound to it; an Agent Mode run uses its own tab. Refine with `manage_selection`."
+    package static let workflow = "**Workflow**: Runs in the tab this connection is bound to, in that tab's worktree if it has one. An unbound connection gets a new tab and is bound to it; an Agent Mode run uses its own tab. To target a worktree without an Agent session, first create a tab scoped to it with `manage_workspaces` `create_tab`. Refine with `manage_selection`."
     package static let responseType = "Optional: 'plan' to generate implementation plan, 'question' to ask a question, or 'review' to generate a code review. Omit or 'clarify' to just return context. For review, select the files under review first: discovery's git calls default to their repositories."
 }
 

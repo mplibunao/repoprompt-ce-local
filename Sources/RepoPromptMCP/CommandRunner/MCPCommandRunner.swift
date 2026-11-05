@@ -671,6 +671,15 @@ actor MCPCommandRunner {
             workspace delete <name> --include-hidden  Delete hidden workspace by name
             workspace delete <name> --close-window  Delete workspace and close its window
           tabs create|close               manage_workspaces create_tab / close_tab lifecycle
+            tabs create [name]            Background tab: binds this connection, UI focus unchanged
+                                          (--bind false or --focus to change)
+            tabs create [name] --source-tab <tab>
+                                          Fork a tab; the fork keeps its worktree scope
+            tabs create [name] --worktree <selector> [--worktree-repo-root <root>]
+            tabs create [name] --worktree-id <id> [--worktree-repo-root <root>]
+                                          Scope the new tab to an existing worktree (app backend only)
+                                          <selector>: @main, @branch:<branch>, branch or worktree name, or path
+                                          <root>: name or path of the loaded Git root; needed with several
 
         Agent Control:
           agent_run                       Control Agent Mode runs

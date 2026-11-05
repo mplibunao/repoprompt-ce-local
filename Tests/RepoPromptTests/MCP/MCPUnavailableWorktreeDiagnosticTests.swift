@@ -12,8 +12,8 @@ final class MCPUnavailableWorktreeDiagnosticTests: XCTestCase {
     /// name, then the branch, then the worktree ID. Displayed values have control characters replaced and
     /// quotes and backslashes escaped.
     func testRefusalOmitsPathValuedNamesAndEscapesDisplayedValues() {
-        let tab = "Tab 'Feature tab' (window 7) can't be used: its Agent Mode worktree"
-        let windowOnly = "A tab in window 7 can't be used: its Agent Mode worktree"
+        let tab = "Tab 'Feature tab' (window 7) can't be used: its worktree"
+        let windowOnly = "A tab in window 7 can't be used: its worktree"
         let missing = "is missing from disk."
 
         let rows: [(label: String, tabName: String, binding: AgentSessionWorktreeBinding, expected: String)] = [
@@ -94,7 +94,7 @@ final class MCPUnavailableWorktreeDiagnosticTests: XCTestCase {
                 "Bob's \"tab\"\tnew\nline\u{1B}\\end",
                 Self.binding(visualLabel: "it's \"wt\"\r\\x"),
                 "Tab 'Bob\\'s \\\"tab\\\" new line \\\\end' (window 7) can't be used: "
-                    + "its Agent Mode worktree 'it\\'s \\\"wt\\\" \\\\x' \(missing)"
+                    + "its worktree 'it\\'s \\\"wt\\\" \\\\x' \(missing)"
             )
         ]
 
@@ -118,19 +118,19 @@ final class MCPUnavailableWorktreeDiagnosticTests: XCTestCase {
         )
         XCTAssertEqual(
             routed.summary,
-            "Tab 'rpce-332 stale worktree' (window 9) can't be used: its Agent Mode worktree 'rpce-332' is missing from disk."
+            "Tab 'rpce-332 stale worktree' (window 9) can't be used: its worktree 'rpce-332' is missing from disk."
         )
         XCTAssertEqual(routed.recovery, Self.recovery)
         XCTAssertEqual(routed.message, "\(routed.summary) \(Self.recovery)")
 
         let unrouted = MCPUnavailableWorktreeDiagnostic(binding: binding)
-        XCTAssertEqual(unrouted.summary, "The Agent Mode session's worktree 'rpce-332' is missing from disk.")
+        XCTAssertEqual(unrouted.summary, "The addressed context's worktree 'rpce-332' is missing from disk.")
         XCTAssertEqual(unrouted.message, "\(unrouted.summary) \(Self.recovery)")
 
         let unlabeled = MCPUnavailableWorktreeDiagnostic(
             binding: Self.binding(worktreeName: nil, branch: nil, worktreeID: Self.worktreeRootPath)
         )
-        XCTAssertEqual(unlabeled.summary, "The Agent Mode session's worktree is missing from disk.")
+        XCTAssertEqual(unlabeled.summary, "The addressed context's worktree is missing from disk.")
     }
 
     private static func binding(

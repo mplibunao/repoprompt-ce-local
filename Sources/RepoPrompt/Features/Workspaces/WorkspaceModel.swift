@@ -291,6 +291,76 @@ struct StashedTab: Codable, Identifiable, Equatable {
     }
 }
 
+/// Worktree bindings that a compose tab owns itself, for a tab with no Agent session. The tab's
+/// ID owns the worktree projection, and the bindings don't change after the tab is created.
+enum ComposeTabWorktreeScope: Codable, Equatable {
+    /// Non-empty bindings owned by the tab.
+    case bound([AgentSessionWorktreeBinding])
+    /// A saved scope that couldn't be read. The tab must not fall back to the main checkout.
+    case unavailable
+
+    /// The binding state a lookup uses. An empty binding list is unreadable, not unscoped.
+    var bindingState: AgentSessionWorktreeBindingState {
+        guard case let .bound(bindings) = self, !bindings.isEmpty else { return .unavailable }
+        return .hydrated(bindings)
+    }
+
+    /// Decodes the scope saved under `key`. A missing or `null` value is no scope. Any other value
+    /// that doesn't decode is `.unavailable`, so it neither becomes an ordinary tab nor throws
+    /// into the enclosing tab-array decoder, which would discard every tab in the workspace.
+    static func decodeSaved<Key: CodingKey>(
+        from container: KeyedDecodingContainer<Key>,
+        forKey key: Key
+    ) -> ComposeTabWorktreeScope? {
+        guard container.contains(key), (try? container.decodeNil(forKey: key)) != true else { return nil }
+        return (try? container.decode(ComposeTabWorktreeScope.self, forKey: key)) ?? .unavailable
+    }
+
+    init(from decoder: Decoder) throws {
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self),
+              let state = try? container.decode(String.self, forKey: .state)
+        else {
+            self = .unavailable
+            return
+        }
+        if state == "bound",
+           let bindings = try? container.decode([AgentSessionWorktreeBinding].self, forKey: .bindings),
+           !bindings.isEmpty
+        {
+            self = .bound(bindings)
+        } else {
+            self = .unavailable
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .bound(bindings):
+            try container.encode("bound", forKey: .state)
+            try container.encode(bindings, forKey: .bindings)
+        case .unavailable:
+            try container.encode("unavailable", forKey: .state)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case bindings
+    }
+}
+
+enum ComposeTabWorktreeScopeError: LocalizedError, Equatable {
+    case agentAttachmentRefused
+
+    var errorDescription: String? {
+        switch self {
+        case .agentAttachmentRefused:
+            "This tab has a tab-owned worktree scope and can't start an Agent session; its scope was not changed. Start the Agent in a separate tab bound to this worktree: agent_run with worktree for the primary root, or for another root create a session, bind it with manage_worktree, then steer it."
+        }
+    }
+}
+
 /// A single Compose tab (auto-saved working state)
 struct ComposeTabState: Codable, Identifiable, Equatable {
     var id: UUID
@@ -299,6 +369,9 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
     var isPinned: Bool
     var activeChatSessionID: UUID?
     var activeAgentSessionID: UUID?
+    /// The tab's own worktree bindings. A tab holds an Agent session or a scope, not both; a
+    /// restored tab with both refuses worktree-scoped work.
+    var worktreeScope: ComposeTabWorktreeScope?
 
     var selection: StoredSelection
     var expandedFolders: [String]
@@ -317,6 +390,7 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         isPinned: Bool = false,
         activeChatSessionID: UUID? = nil,
         activeAgentSessionID: UUID? = nil,
+        worktreeScope: ComposeTabWorktreeScope? = nil,
         selection: StoredSelection = .init(),
         expandedFolders: [String] = [],
         promptText: String = "",
@@ -331,6 +405,7 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         self.isPinned = isPinned
         self.activeChatSessionID = activeChatSessionID
         self.activeAgentSessionID = activeAgentSessionID
+        self.worktreeScope = worktreeScope
         self.selection = selection
         self.expandedFolders = expandedFolders
         self.promptText = promptText
@@ -348,6 +423,7 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         activeChatSessionID = try c.decodeIfPresent(UUID.self, forKey: .activeChatSessionID)
         activeAgentSessionID = try c.decodeIfPresent(UUID.self, forKey: .activeAgentSessionID)
+        worktreeScope = ComposeTabWorktreeScope.decodeSaved(from: c, forKey: .worktreeScope)
         selection = (try? c.decodeIfPresent(StoredSelection.self, forKey: .selection)) ?? .init()
         expandedFolders = try c.decodeIfPresent([String].self, forKey: .expandedFolders) ?? []
         promptText = try c.decodeIfPresent(String.self, forKey: .promptText) ?? ""
@@ -365,6 +441,7 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         try c.encode(isPinned, forKey: .isPinned)
         try c.encodeIfPresent(activeChatSessionID, forKey: .activeChatSessionID)
         try c.encodeIfPresent(activeAgentSessionID, forKey: .activeAgentSessionID)
+        try c.encodeIfPresent(worktreeScope, forKey: .worktreeScope)
         try c.encode(selection, forKey: .selection)
         try c.encode(expandedFolders, forKey: .expandedFolders)
         try c.encode(promptText, forKey: .promptText)
@@ -381,6 +458,7 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         case isPinned
         case activeChatSessionID
         case activeAgentSessionID
+        case worktreeScope
         case selection
         case expandedFolders
         case promptText

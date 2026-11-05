@@ -75,10 +75,17 @@ import XCTest
             }
         }
 
-        /// The window's active tab holds an Agent session bound to a worktree whose folder was
-        /// deleted. Reads refuse with the tab and worktree identity instead of a generic authority
-        /// failure, and never fall back to the canonical checkout.
+        /// The window's active tab is bound to a worktree whose folder was deleted, through its Agent
+        /// session or through the tab's own worktree scope. Reads refuse with the tab and worktree
+        /// identity instead of a generic authority failure, and never fall back to the canonical
+        /// checkout.
         func testFileReadsReportDeletedWorktreeWithoutCanonicalFallback() async throws {
+            for owner in MissingWorktreeOwner.allCases {
+                try await assertFileReadsReportDeletedWorktree(ownedBy: owner)
+            }
+        }
+
+        private func assertFileReadsReportDeletedWorktree(ownedBy owner: MissingWorktreeOwner) async throws {
             try await MCPSharedServerTestLease.shared.withLease { lease in
                 let fixture = try await PersistentMCPTestFixture.make(
                     lease: lease,
@@ -88,6 +95,7 @@ import XCTest
                 let server = context.window.mcpServer
                 let store = context.window.workspaceFileContextStore
                 let sessionID = UUID()
+                let projectionOwnerID = owner == .tab ? context.tabID : sessionID
                 let boundConnectionID = UUID()
                 let previousProvider = server.agentWorktreeBindingStateProvider
                 let previousResolver = server.agentWorktreeBindingStateResolver
@@ -101,7 +109,7 @@ import XCTest
                     )
                     server.agentWorktreeBindingStateProvider = previousProvider
                     server.agentWorktreeBindingStateResolver = previousResolver
-                    await WorkspaceRootBindingProjectionMaterializer(store: store).release(sessionID: sessionID)
+                    await WorkspaceRootBindingProjectionMaterializer(store: store).release(sessionID: projectionOwnerID)
                     _ = await server.setWindowToolsEnabled(false)
                     await fixture.cleanup()
                 }
@@ -134,14 +142,19 @@ import XCTest
                         branch: "bugfix/stale-worktree",
                         source: "test"
                     )
-                    server.agentWorktreeBindingStateProvider = { _, _ in .hydrated([binding]) }
-                    server.agentWorktreeBindingStateResolver = { _, _ in .hydrated([binding]) }
                     let workspaceManager = context.window.workspaceManager
                     let workspaceIndex = try XCTUnwrap(workspaceManager.workspaces.firstIndex { $0.id == context.workspaceID })
                     let tabIndex = try XCTUnwrap(
                         workspaceManager.workspaces[workspaceIndex].composeTabs.firstIndex { $0.id == context.tabID }
                     )
-                    workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = sessionID
+                    switch owner {
+                    case .agentSession:
+                        server.agentWorktreeBindingStateProvider = { _, _ in .hydrated([binding]) }
+                        server.agentWorktreeBindingStateResolver = { _, _ in .hydrated([binding]) }
+                        workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = sessionID
+                    case .tab:
+                        workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].worktreeScope = .bound([binding])
+                    }
                     let tabName = workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].name
                     let tabIdentity = WorkspaceSelectionIdentity(workspaceID: context.workspaceID, tabID: context.tabID)
                     let selectionBefore = workspaceManager.composeTab(for: tabIdentity)?.selection
@@ -151,8 +164,8 @@ import XCTest
                         name: MCPWindowToolName.readFile,
                         arguments: ["path": context.fileURL.path, "_windowID": context.window.windowID]
                     ))
-                    XCTAssertTrue(healthyRead.contains(worktreeSentinel), healthyRead)
-                    XCTAssertFalse(healthyRead.contains(context.sentinel), healthyRead)
+                    XCTAssertTrue(healthyRead.contains(worktreeSentinel), "\(owner): \(healthyRead)")
+                    XCTAssertFalse(healthyRead.contains(context.sentinel), "\(owner): \(healthyRead)")
 
                     // A connection bound while the folder exists holds frozen authority for the tab.
                     let authority = try await server.resolveFileToolAuthority(
@@ -202,8 +215,8 @@ import XCTest
                     )
                     XCTAssertEqual(read.content, "")
                     XCTAssertEqual(read.displayPath, context.fileURL.path)
-                    XCTAssertEqual(read.errorCode, "worktree_scope_unavailable")
-                    XCTAssertEqual(read.errorMessage, expected.message)
+                    XCTAssertEqual(read.errorCode, "worktree_scope_unavailable", "\(owner)")
+                    XCTAssertEqual(read.errorMessage, expected.message, "\(owner)")
                     XCTAssertEqual(read.retryable, false)
                     XCTAssertNil(read.retryAfterMilliseconds)
 
@@ -276,7 +289,7 @@ import XCTest
                         ))
                         XCTFail("Frozen authority for a deleted worktree must not resolve")
                     } catch let failure as MCPServerViewModel.FileToolAuthorityFailure {
-                        XCTAssertEqual(failure, .unavailableWorktree(expected))
+                        XCTAssertEqual(failure, .unavailableWorktree(expected), "\(owner)")
                     }
                     await cleanup()
                     try await fixture.assertCleanedUp()

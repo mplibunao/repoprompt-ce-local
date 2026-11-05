@@ -126,6 +126,154 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         _ = await runtime.shutdown()
     }
 
+    /// Headless has no worktree projections, so a saved tab with a worktree scope is refused
+    /// before it is bound or read, and `create_tab` refuses a worktree selector or a scoped fork
+    /// source before it writes the workspace; each would serve the main checkout. The connection
+    /// keeps its previous context, and the scoped tab can still be listed and closed.
+    func testWorktreeScopedContextsAreRejectedWithoutScopeChanges() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rp-headless-scoped-tab-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        let repoPath = repo.standardizedFileURL.resolvingSymlinksInPath().path
+        let runtime = MCPDomainRuntime(configuration: DomainRuntimeConfiguration(
+            mode: .standalone,
+            profileIdentifier: "test",
+            storageDirectory: root.appendingPathComponent("Runtime", isDirectory: true),
+            eventDirectory: root.appendingPathComponent("Events", isDirectory: true),
+            temporaryDirectory: root.appendingPathComponent("Temporary", isDirectory: true)
+        ))
+        try await runtime.start()
+        let scopeID = DomainStandaloneScopeID()
+        _ = try await runtime.standaloneScopeCoordinator.register(
+            scopeID: scopeID,
+            connectionID: UUID(),
+            workingDirectories: []
+        )
+        let context = DirectHeadlessDomainContext(runtime: runtime, scopeID: scopeID)
+        let global = DirectHeadlessGlobalBackend(runtime: runtime, scopeID: scopeID, context: context)
+
+        let workspaceID = UUID()
+        let ordinaryID = UUID()
+        let scopedID = UUID()
+        let binding = AgentSessionWorktreeBinding(
+            id: "headless-scoped-binding",
+            repositoryID: "headless-scoped-repo",
+            repoKey: repoPath,
+            logicalRootPath: repoPath,
+            worktreeID: "headless-scoped-worktree",
+            worktreeRootPath: root.appendingPathComponent("worktree", isDirectory: true).path,
+            source: "manage_workspaces.create_tab"
+        )
+        let savedScope: [String: Any] = try [
+            "state": "bound",
+            "bindings": [JSONSerialization.jsonObject(with: JSONEncoder().encode(binding))]
+        ]
+        let document = try DomainWorkspaceDocument.decode(
+            documentBytes: JSONSerialization.data(withJSONObject: [
+                "id": workspaceID.uuidString,
+                "schemaVersion": 1,
+                "name": "Scoped headless",
+                "repoPaths": [repoPath],
+                "activeComposeTabID": ordinaryID.uuidString,
+                "composeTabs": [
+                    ["id": ordinaryID.uuidString, "name": "Ordinary", "prompt": "", "selectedPaths": []],
+                    [
+                        "id": scopedID.uuidString,
+                        "name": "Scoped",
+                        "prompt": "",
+                        "selectedPaths": [],
+                        "worktreeScope": savedScope
+                    ]
+                ]
+            ] as [String: Any], options: [.sortedKeys]),
+            fileURL: runtime.configuration.workspaceStorageDirectory
+                .appendingPathComponent("\(workspaceID.uuidString).json", isDirectory: false)
+        )
+        let created = await runtime.workspaceStore.execute(DomainWorkspaceCommandEnvelope(
+            operationID: UUID(),
+            expectedCatalogRevision: runtime.workspaceStore.snapshot().catalogRevision,
+            origin: .standalone,
+            command: .createWorkspace(document)
+        ))
+        XCTAssertEqual(created.disposition, .applied)
+
+        func request(_ arguments: [String: Value]) throws -> DomainPhysicalToolRequest {
+            try DomainPhysicalToolRequest(argumentsJSON: JSONEncoder().encode(arguments), securityContext: nil)
+        }
+        func assertScopedRefusal(_ error: Error, file: StaticString = #filePath, line: UInt = #line) {
+            guard case .worktreeScopedContext = error as? DirectHeadlessDomainContext.Error else {
+                return XCTFail("Expected the worktree-scope refusal, got \(error)", file: file, line: line)
+            }
+        }
+        let ordinary = DomainContextIdentity(workspaceID: workspaceID, contextID: ordinaryID)
+        let scoped = DomainContextIdentity(workspaceID: workspaceID, contextID: scopedID)
+        _ = try await global.routeContext(request(["op": .string("bind"), "context_id": .string(ordinaryID.uuidString)]))
+        let bindingBefore = try await runtime.standaloneScopeCoordinator.snapshot(scopeID: scopeID).binding
+
+        do {
+            _ = try await global.routeContext(request([
+                "op": .string("bind"),
+                "context_id": .string(scopedID.uuidString)
+            ]))
+            XCTFail("headless bound a worktree-scoped tab")
+        } catch {
+            assertScopedRefusal(error)
+        }
+        do {
+            _ = try await context.snapshot(identity: scoped)
+            XCTFail("headless took file authority from a worktree-scoped tab")
+        } catch {
+            assertScopedRefusal(error)
+        }
+        func savedDocument() async -> Data? {
+            await runtime.workspaceStore.snapshot().workspaces
+                .first { $0.document.workspaceID == workspaceID }?.document.documentBytes
+        }
+        let documentBefore = await savedDocument()
+        let refusedCreations: [[String: Value]] = [
+            ["worktree": .string("feature")],
+            ["worktree": .null],
+            ["worktree_id": .string("headless-scoped-worktree")],
+            ["worktree_repo_root": .string(repoPath)],
+            ["worktree_create": .bool(true)],
+            ["mode": .string("fork"), "source_tab": .string(scopedID.uuidString)]
+        ]
+        for refused in refusedCreations {
+            let arguments = refused.merging([
+                "action": .string("create_tab"),
+                "workspace": .string(workspaceID.uuidString)
+            ]) { current, _ in current }
+            do {
+                _ = try await global.manageWorkspaceLifecycle(request(arguments))
+                XCTFail("headless create_tab accepted \(refused)")
+            } catch {
+                assertScopedRefusal(error)
+            }
+        }
+        let documentAfter = await savedDocument()
+        XCTAssertEqual(documentAfter, documentBefore)
+        let bindingAfter = try await runtime.standaloneScopeCoordinator.snapshot(scopeID: scopeID).binding
+        XCTAssertEqual(bindingAfter, bindingBefore)
+        let ordinarySnapshot = try await context.snapshot(identity: ordinary)
+        XCTAssertEqual(ordinarySnapshot.roots.map(\.path), [repoPath])
+
+        let listed = try await global.manageWorkspaceLifecycle(request(["action": .string("list")]))
+        XCTAssertTrue(String(decoding: listed.json, as: UTF8.self).contains(scopedID.uuidString))
+        _ = try await global.manageWorkspaceLifecycle(request([
+            "action": .string("close_tab"),
+            "workspace": .string(workspaceID.uuidString),
+            "tab": .string(scopedID.uuidString)
+        ]))
+        let remaining = await runtime.workspaceStore.snapshot().workspaces
+            .first { $0.document.workspaceID == workspaceID }?
+            .contexts.map(\.metadata.identity.contextID)
+        XCTAssertEqual(remaining, [ordinaryID])
+
+        _ = await runtime.shutdown()
+    }
+
     func testCanonicalAgentSchemasAdvertiseCursorModelParameterInputs() throws {
         for toolName in ["agent_run", "agent_manage"] {
             let definition = try XCTUnwrap(MCPDomainCanonicalToolDefinitions.definition(named: toolName))

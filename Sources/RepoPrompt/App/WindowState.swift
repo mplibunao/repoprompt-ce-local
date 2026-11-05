@@ -490,6 +490,18 @@ class WindowState: ObservableObject {
             guard let self else { return }
             promptManager.syncSettingsFromSettingsManager()
 
+            // Tabs in the workspaces this window left keep their saved worktree scopes; only this
+            // window's projections for them are released. Agent Mode releases its sessions' own.
+            let leftScopedTabIDs = workspaceManager.worktreeScopedComposeTabIDs(includingActiveWorkspace: false)
+            if !leftScopedTabIDs.isEmpty {
+                Task { @MainActor [weak self] in
+                    await self?.promptManager.releaseTabWorktreeScopes(
+                        leftScopedTabIDs,
+                        keepingActiveWorkspaceTabs: true
+                    )
+                }
+            }
+
             // Validate workspace skills for workspace root folders (if previously installed)
             let roots = workspace.map(WorkspaceManagerViewModel.loadableRepoPaths(for:)) ?? []
             Task.detached(priority: .utility) {
@@ -1789,6 +1801,13 @@ class WindowState: ObservableObject {
 
         // Stop the local MCP server
         await mcpServer.stopServer()
+
+        // With no run or MCP lookup left, release the projections of worktree-scoped tabs, which
+        // have no Agent session to release them. Their saved scopes stay.
+        await promptManager.releaseTabWorktreeScopes(
+            workspaceManager.worktreeScopedComposeTabIDs(includingActiveWorkspace: true),
+            keepingActiveWorkspaceTabs: false
+        )
 
         // Cancel any ongoing AI query
         aiQueriesService.cancelQuery()

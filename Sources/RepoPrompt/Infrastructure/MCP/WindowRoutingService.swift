@@ -1890,7 +1890,7 @@ final class WindowRoutingService: Service {
 
         guard createIfMissing else {
             throw MCPError.invalidParams(
-                "No existing workspace exactly matches working_dirs [\(normalizedWorkingDirs.joined(separator: ", "))] and no workspace repo_paths superset contains those roots. Exact matching uses the full workspace repo_paths set (order-insensitive); superset fallback uses root-set membership only, not descendant paths. Retry with create_if_missing=true to create one."
+                "No existing workspace exactly matches working_dirs [\(normalizedWorkingDirs.joined(separator: ", "))] and no workspace repo_paths superset contains those roots. Matching uses root-set membership, not descendant paths or linked-worktree relationships. For a worktree of a loaded root, bind that workspace and create a tab with manage_workspaces {\"action\":\"create_tab\",\"worktree\":\"<worktree_selector>\",\"worktree_repo_root\":\"<loaded_root_name_or_path>\"}. Use create_if_missing=true only when you intend to create a separate workspace."
             )
         }
 
@@ -2211,6 +2211,47 @@ final class WindowRoutingService: Service {
         )
     }
 
+    /// The scope a `create_tab` worktree request gives the new tab, resolved within one loaded Git
+    /// root of the window's active workspace before any tab exists.
+    private func resolveCreateTabWorktreeScope(
+        _ request: MCPCreateTabWorktreeRequest,
+        in window: WindowState,
+        workspaceID: UUID
+    ) async throws -> ComposeTabWorktreeScope {
+        let store = window.promptManager.workspaceFileContextStore
+        let loadedRoots = await store.rootRefs(scope: .visibleWorkspace)
+        guard window.workspaceManager.activeWorkspace?.id == workspaceID else {
+            throw MCPCreateTabWorktreeError.authorityChanged
+        }
+        let resolver = MCPWorktreeBindingResolver(vcsService: .shared, gitTargetResolver: GitRepoTargetResolver())
+        let root = try await resolver.selectTabScopeRoot(repoRootToken: request.repoRoot, loadedRoots: loadedRoots)
+        guard let binding = try await resolver.resolveExistingBinding(selector: request.selector, root: root) else {
+            throw MCPCreateTabWorktreeError.ownCheckout
+        }
+        let currentRoot = await store.exactRootRef(path: root.logicalRoot.standardizedFullPath, kind: .primaryWorkspace)
+        guard currentRoot == root.logicalRoot, window.workspaceManager.activeWorkspace?.id == workspaceID else {
+            throw MCPCreateTabWorktreeError.authorityChanged
+        }
+        return .bound([binding])
+    }
+
+    /// The new scoped tab's file authority. A tab whose worktree doesn't load stays, unbound and
+    /// unfocused, and the refusal names it.
+    private func resolveCreatedScopedTabAuthority(
+        _ tab: ComposeTabState,
+        workspaceID: UUID,
+        in window: WindowState
+    ) async throws -> MCPServerViewModel.FrozenFileToolAuthority {
+        do {
+            return try await window.mcpServer.resolveFileToolAuthority(tabID: tab.id, workspaceID: workspaceID)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            throw MCPCreateTabWorktreeError.partialCreation(tabName: tab.name, contextID: tab.id)
+        }
+    }
+
     private func listBindContextWindows(
         filterWindowID: Int?,
         currentWindowID: Int?,
@@ -2488,7 +2529,7 @@ final class WindowRoutingService: Service {
                 - `bind_context.list` returns per-window routing state: windows, active tabs, context_ids, and current binding
                 - When the same workspace is open in multiple windows, compose tabs are shared — use `bind_context` to discover per-window context_ids
 
-                create_tab defaults to bind=true and focus=false so automation can create isolated background tabs without stealing UI focus.
+                \(MCPManageWorkspacesPropertyDescriptions.createTabDefaults) \(MCPManageWorkspacesPropertyDescriptions.worktreeScopeBackend)
 
                 IMPORTANT: The 'focus' parameter switches the visible tab in the UI, which can be disruptive to the user's workflow. Only set focus=true when the user explicitly requests to see or switch to a specific tab. For background operations, omit focus or set it to false. The 'close_tab' action refuses to close the last remaining tab, the active visible tab unless allow_active=true, or any tab with a live bound run.
                 """,
@@ -2499,9 +2540,12 @@ final class WindowRoutingService: Service {
                         "name": .string(description: "Name for new workspace (required for 'create'; optional for 'create_tab')"),
                         "folder_path": .string(description: "Absolute folder path (required for 'add_folder', 'remove_folder'; optional for 'create' to initialize with a root folder)"),
                         "tab": .string(description: "Compose tab UUID or name (required for 'select_tab'; optional for 'close_tab')"),
-                        "mode": .string(description: "For 'create_tab': creation mode ('blank' or 'fork')"),
+                        "mode": .string(description: MCPManageWorkspacesPropertyDescriptions.mode),
                         "source_tab": .string(description: "For 'create_tab' with mode='fork': source compose tab UUID or name"),
                         "bind": .boolean(description: "For 'create_tab': if true, bind this MCP connection to the new tab (default true)"),
+                        "worktree": .string(description: MCPManageWorkspacesPropertyDescriptions.worktree),
+                        "worktree_id": .string(description: MCPManageWorkspacesPropertyDescriptions.worktreeID),
+                        "worktree_repo_root": .string(description: MCPManageWorkspacesPropertyDescriptions.worktreeRepoRoot),
                         "window_id": .integer(description: "Optional window ID; defaults to selected or only window"),
                         "focus": .boolean(description: "For 'select_tab' or 'create_tab': if true, also switches the UI to show the tab"),
                         "allow_active": .boolean(description: "For 'close_tab': allow closing the currently active visible tab"),
@@ -2521,6 +2565,7 @@ final class WindowRoutingService: Service {
                 guard let action = args["action"]?.stringValue?.lowercased() else {
                     throw MCPError.invalidParams("Missing or invalid 'action' parameter")
                 }
+                try MCPCreateTabWorktreeRequest.rejectArguments(args, forAction: action)
 
                 let routingService = self
                 switch action {
@@ -3355,10 +3400,11 @@ final class WindowRoutingService: Service {
                     return ManageWorkspacesResponse(action: "select_tab", workspaces: nil, status: "ok")
 
                 case "create_tab":
+                    let mode = args["mode"]?.stringValue?.lowercased() ?? "blank"
+                    let worktreeRequest = try MCPCreateTabWorktreeRequest.parse(args, mode: mode)
                     let targetWindow = try await routingService.resolveTargetWindow(windowID: args["window_id"]?.intValue)
                     let connectionID = await routingService.networkMgr.currentConnectionUUID()
                     let clientName = await routingService.networkMgr.currentClientIdentifier()
-                    let mode = args["mode"]?.stringValue?.lowercased() ?? "blank"
                     let shouldBind = args["bind"]?.boolValue ?? true
                     let shouldFocus = args["focus"]?.boolValue ?? false
                     let requestedName = args["name"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3377,10 +3423,28 @@ final class WindowRoutingService: Service {
                         throw MCPError.invalidParams("No active workspace loaded in this window. Use manage_workspaces action='list' to see available workspaces, then action='switch' to load one.")
                     }
 
+                    let worktreeScope: ComposeTabWorktreeScope? = if let worktreeRequest {
+                        try await routingService.resolveCreateTabWorktreeScope(
+                            worktreeRequest,
+                            in: targetWindow,
+                            workspaceID: workspace.id
+                        )
+                    } else {
+                        nil
+                    }
+
                     let newTab: ComposeTabState
                     switch mode {
                     case "blank":
-                        guard let created = await targetWindow.promptManager.createBackgroundComposeTab(strategy: .blank, name: requestedName) else {
+                        guard let created = await targetWindow.promptManager.createBackgroundComposeTab(
+                            strategy: .blank,
+                            name: requestedName,
+                            worktreeScope: worktreeScope,
+                            expectedWorkspaceID: worktreeScope == nil ? nil : workspace.id
+                        ) else {
+                            if worktreeScope != nil {
+                                throw MCPCreateTabWorktreeError.authorityChanged
+                            }
                             throw MCPError.internalError("Failed to create compose tab")
                         }
                         newTab = created
@@ -3398,7 +3462,17 @@ final class WindowRoutingService: Service {
                         } else {
                             throw MCPError.invalidParams("create_tab mode='fork' requires a source tab or an active/bound tab")
                         }
-                        guard let created = await targetWindow.promptManager.createBackgroundForkComposeTab(sourceTabID: sourceTab.id, named: requestedName) else {
+                        // The source was read from this workspace. If another workspace is active
+                        // now, the source isn't there and the fork would become an unscoped blank tab.
+                        let expectedWorkspaceID = sourceTab.worktreeScope == nil ? nil : workspace.id
+                        guard let created = await targetWindow.promptManager.createBackgroundForkComposeTab(
+                            sourceTabID: sourceTab.id,
+                            named: requestedName,
+                            expectedWorkspaceID: expectedWorkspaceID
+                        ) else {
+                            if expectedWorkspaceID != nil {
+                                throw MCPCreateTabWorktreeError.authorityChanged
+                            }
                             throw MCPError.internalError("Failed to fork compose tab")
                         }
                         newTab = created
@@ -3406,9 +3480,40 @@ final class WindowRoutingService: Service {
                         throw MCPError.invalidParams("Unsupported create_tab mode '\(mode)'. Use 'blank' or 'fork'.")
                     }
 
+                    // A scoped tab, whether its scope was chosen here or inherited by a fork, loads
+                    // its worktree before the caller is bound to it or sees it.
+                    let scopedAuthority: MCPServerViewModel.FrozenFileToolAuthority? = if newTab.worktreeScope != nil {
+                        try await routingService.resolveCreatedScopedTabAuthority(
+                            newTab,
+                            workspaceID: workspace.id,
+                            in: targetWindow
+                        )
+                    } else {
+                        nil
+                    }
+
                     try await routingService.networkMgr.setActiveWindowForCurrentConnection(targetWindow.windowID)
 
-                    if shouldBind, let connectionID {
+                    if let scopedAuthority, shouldBind || shouldFocus {
+                        let isCurrent = try await targetWindow.mcpServer.performIfFileToolAuthorityIsCurrent(
+                            scopedAuthority,
+                            tabID: newTab.id,
+                            workspaceID: workspace.id
+                        ) {
+                            guard shouldBind, let connectionID else { return }
+                            try targetWindow.mcpServer.bindTabForConnection(
+                                connectionID: connectionID,
+                                clientName: clientName,
+                                tabID: newTab.id,
+                                workspaceID: workspace.id,
+                                windowID: targetWindow.windowID,
+                                frozenFileToolAuthority: scopedAuthority
+                            )
+                        }
+                        guard isCurrent else {
+                            throw MCPCreateTabWorktreeError.partialCreation(tabName: newTab.name, contextID: newTab.id)
+                        }
+                    } else if shouldBind, let connectionID {
                         try await MainActor.run {
                             try targetWindow.mcpServer.bindTabForConnection(
                                 connectionID: connectionID,
