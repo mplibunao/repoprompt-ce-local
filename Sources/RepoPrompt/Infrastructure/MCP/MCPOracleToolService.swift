@@ -245,7 +245,7 @@ struct MCPOracleToolService {
             "waiting",
             "Waiting for Oracle response..."
         ) {
-            try await sendChat(capturedChatArgs, promptVM, tabContext, .interactive)
+            try await sendChat(capturedChatArgs, promptVM, tabContext, .contextBuilderStrict)
         }
 
         if exportResponse {
