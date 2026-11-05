@@ -362,7 +362,7 @@ import XCTest
     private struct UnexpectedTransportSubmission: Error {}
 
     @MainActor
-    private struct MCPOracleCompletionPolicyFixture {
+    struct MCPOracleCompletionPolicyFixture {
         let window: WindowState
         let root: URL
         let storageRoot: URL
