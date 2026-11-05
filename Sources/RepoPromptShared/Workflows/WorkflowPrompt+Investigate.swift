@@ -62,6 +62,7 @@ This workflow is read-only. Output lands in the investigation report; no source 
 3. **Curate the selection between \(chatLabel) calls** — the pair's reads aren't visible in your selection; add files it surfaced, bias toward inclusion
 4. **Direct tool calls are for follow-up** — reserve your own `read_file` / `file_search` / `git` for user-supplied leads, verifying agent findings, and grabbing final line-number evidence
 5. **Don't duplicate in-flight work** — while agents are running, don't re-run their investigation or spin up overlapping fleets
+6. **Use the user's chat rules** — if the `unslop` skill is installed, load its chat part before your first message to the user, and follow it for the rest of the run.
 \(workspaceVerificationBlock(variant: variant, heading: "### Phase 0", beforeAction: "investigation", nextStep: "Phase 1"))
 ### Phase 1: Initial Assessment & Triage (Agent — you)
 

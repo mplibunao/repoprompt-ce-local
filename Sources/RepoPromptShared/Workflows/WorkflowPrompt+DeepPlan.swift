@@ -99,6 +99,8 @@ This workflow is delegation-heavy. Explore agents map seams and pull external re
 - **Consolidation must be lossless.** Consolidation is lossless when the same facts, decisions, rationale, constraints, and verification stay equally easy to find; never generalize accurate detail merely for brevity.
 - **Reference, don't reproduce.** Point to `file:line` and external links. Don't paste full source files, raw transcripts, or tool dumps into the plan.
 - **Ground every question in something you found.** Ask the user only for decisions, each with your recommended answer, worded so "yes" accepts it. Generic interview questions waste the user's time; at most four per checkpoint.
+- **Orient the user at each checkpoint.** The user may be answering several planning sessions at once. Open each checkpoint with a line labelled **Problem:** that states, in one sentence, the problem this plan solves. At the first checkpoint that asks about the design, follow it with the background, as item 1 of **Walking the User Through a Draft** describes. Later checkpoints keep to that one line, and replies within a checkpoint build on what was already said instead of repeating it.
+- **Use the user's chat rules.** If the `unslop` skill is installed, load its chat part before your first message to the user, and follow it for the rest of the run.
 - **Honor the involvement promise.** Once the user has picked **Up front** or **Mid-flow**, every downstream \(checkpointAsk) is a checkpoint they asked for. \(oneTimesOut), **halt** — don't proceed with assumed answers and silently break the promise. Resume from the same prompt when the user replies. (Phase 1 itself is exempt: a timeout on one of its questions means "no signal yet," and that question's documented default applies.) \(skipSignal) is always an explicit user choice and falls back to documented defaults.
 \(workspaceVerificationBlock(variant: variant, heading: "## Phase 0", beforeAction: "interview question", nextStep: "Phase 1"))
 ## Phase 1: User Involvement Decision (REQUIRED — first interactive action)
@@ -354,11 +356,12 @@ The Phase 6 critique checks correctness, completeness, and preservation against 
 
 ### Walking the User Through a Draft
 
-Phase 4.5 and Phase 5 both use this list. In plain language, with enough context to follow without having read the plan, cover:
+Phase 4.5, Phase 5, and the final hand-off in Phase 7.5 use this list. Write in plain language for a reader new to this codebase and to the plan, and check each claim against the code before you state it. Cover, in this order:
 
-1. The proposed approach, in a paragraph.
-2. Each important choice and its tradeoff, with the alternative the draft rejected.
-3. The over-engineering check: for every piece of machinery the draft proposes (abstractions, packages, harnesses, tests, process steps), keep, simplify, or defer, with the user need it serves and the simplest design that meets it. Name anything overbuilt or unnecessary.
+1. The problem, opening with the **Problem:** line: what goes wrong today and for whom, and the background needed to follow the rest: the parts of the system involved and the terms you will use.
+2. The proposed approach, in a paragraph.
+3. The decisions the draft already makes, labelled as decided rather than offered as options. For each one: what it means in practice, its tradeoff, and the alternative it passes over.
+4. The over-engineering check: for every piece of machinery the draft proposes (abstractions, packages, harnesses, tests, process steps), what it does, what breaks without it, and whether to keep, simplify, or defer it, with the simplest design that meets the need. Name anything overbuilt or unnecessary.
 
 ### Phase 4.5: Walk the User Through the Draft (route 4B; interactive modes only)
 
@@ -439,7 +442,7 @@ rpce-cli -w <window_id> -e 'call file_actions {"action":"delete","path":"<absolu
 ```
 """))
 
-Surface the plan now with a plain-language explanation of the outcome (the approach, the important choices and their tradeoffs, and what was trimmed and why). If the user walked through the draft in Phase 4.5 or Phase 5, explain what changed since then instead. Give the explanation before any open question. If the user picked **Hands-off**, also offer interactive refinement: *"Plan is at `<path>`. Want me to revise any section, expand scope, or trim anything?"* Treat each round as a focused edit pass on the file, not a re-plan.
+Surface the plan now. If the user walked through the draft in Phase 4.5 or Phase 5, open with the **Problem:** line and explain what changed since then. Otherwise walk them through the final plan as **Walking the User Through a Draft** describes, and add what was trimmed and why. Give the explanation before any open question. If the user picked **Hands-off**, also offer interactive refinement: *"Plan is at `<path>`. Want me to revise any section, expand scope, or trim anything?"* Treat each round as a focused edit pass on the file, not a re-plan.
 
 For **all** modes, report:
 
