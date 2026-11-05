@@ -327,7 +327,7 @@ enum MCPCreateTabWorktreeError {
         "worktree_id must be a worktree ID, not a selector. Pass @main, @branch:<branch>, and other selector forms as worktree."
     )
     static let ownCheckoutSelector = MCPError.invalidParams(
-        "create_tab can't scope a tab with @current or @wt, because they name the loaded root's own checkout. Use @main, @id:<id>, @branch:<branch>, a branch or worktree name, or an absolute worktree path."
+        "create_tab can't scope a tab with @current or @wt, because they name the loaded root's own checkout. Use @branch:<branch>, @id:<id>, a branch or worktree name, or an absolute worktree path."
     )
     static let severalGitRoots = MCPError.invalidParams(
         "create_tab requires worktree_repo_root when more than one loaded Git root is available. Use an exact loaded root name or absolute root path."
