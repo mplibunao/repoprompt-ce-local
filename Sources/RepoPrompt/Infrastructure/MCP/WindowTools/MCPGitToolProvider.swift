@@ -486,8 +486,8 @@ final class MCPGitToolProvider {
         let store = GitDiffSnapshotStore()
         let vcsService = VCSService.shared
 
-        // Generic callers retain first-root compatibility. Exact Agent Context Builder Discover
-        // runs instead use the immutable selected-repository target carried by their tab snapshot.
+        // Generic callers keep the first-root default. A Context Builder discovery run whose exact
+        // tab snapshot carries a frozen review target uses that target instead.
         let metadata: MCPServerViewModel.RequestMetadata = if let appContext {
             appContext.metadata
         } else {

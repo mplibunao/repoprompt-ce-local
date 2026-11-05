@@ -4187,10 +4187,17 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Queues the run's frozen tab context for the next connection its policy admits.
     private func queueFrozenTabContext(for record: ContextBuilderRunRecord, clientName: String) {
         if let workspaceContext = record.workspaceContext {
+            // The run configuration holds the prompt admitted for this call, refreshed after the
+            // workspace context was frozen.
+            let admittedContext = record.mcpConfiguration?.nestedTabContext ?? workspaceContext.frozenTabContext
             _ = mcpServer.installFrozenTabContext(
                 clientID: nil,
                 clientName: clientName,
-                context: workspaceContext.nestedDiscoveryTabContext(runID: record.runID)
+                context: workspaceContext.nestedDiscoveryTabContext(
+                    runID: record.runID,
+                    promptText: admittedContext.promptText,
+                    usedAgentOutputAsPrompt: admittedContext.usedAgentOutputAsPrompt
+                )
             )
         } else if let configuration = record.mcpConfiguration {
             var nestedContext = configuration.nestedTabContext
@@ -4531,9 +4538,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
         if let workspaceContext {
             session.runStartContextBuilderPromptIDs = Set(workspaceContext.frozenTabContext.selectedContextBuilderPromptIDs)
-            session.runStartPromptText = workspaceContext.frozenTabContext.promptText
+            // The prompt is the one admitted for this call; selection stays with the frozen context.
+            session.runStartPromptText = mcpConfiguration?.nestedTabContext.promptText
+                ?? workspaceContext.frozenTabContext.promptText
             session.runStartSelection = workspaceContext.frozenTabContext.selection
-            debugLog("Captured run-start state from frozen Agent Mode context for tab=\(session.tabID)")
+            debugLog("Captured run-start state from frozen Context Builder workspace context for tab=\(session.tabID)")
             return
         }
 

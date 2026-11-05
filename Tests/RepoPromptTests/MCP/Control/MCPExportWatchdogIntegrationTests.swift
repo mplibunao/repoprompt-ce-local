@@ -514,6 +514,251 @@ import XCTest
             }
         }
 
+        /// A `context_builder` call from outside Agent Mode freezes the repository of the tab's
+        /// starting files as the default for discovery's `git` calls. Repository A is the first
+        /// loaded Git root and the starting file is in repository B. The second row calls with a
+        /// `context_id` hint, so the snapshot of the Agent session's tab is built fresh and reaches
+        /// the freeze with unhydrated worktree bindings.
+        func testOutsideReviewFreezesSelectedCheckoutInsteadOfFirstRoot() async throws {
+            let rows: [(label: String, inAgentSessionTab: Bool)] = [
+                ("bound caller, tab without an Agent session", false),
+                ("hinted caller, Agent session tab with unhydrated bindings", true)
+            ]
+            for row in rows {
+                let provider = ContextBuilderRoutedReplyProvider(reply: "outside-review-discovery")
+                try await withReviewGitRoots(provider) { fixture, endpoint, roots in
+                    let context = fixture.contextA
+                    let tabID = UUID()
+                    try Self.appendBackgroundTab(tabID, to: context)
+                    if row.inAgentSessionTab {
+                        try attachUnhydratedAgentSession(to: tabID, in: context)
+                    }
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                    await Self.seedSelection([roots.fileB], tabID: tabID, context: context)
+                    let frozenContexts = try Self.captureFrozenDiscoveryContexts(provider, server: context.window.mcpServer)
+                    Self.prepareSyntheticContextBuilderRun(context, receipts: ContextBuilderCommitReceipts())
+
+                    if row.inAgentSessionTab {
+                        try await Self.callContextBuilder(endpoint, instructions: "Review the change.", contextID: tabID)
+                    } else {
+                        try await Self.bindTab(tabID, endpoint: endpoint, context: context)
+                        try await Self.callContextBuilder(endpoint, instructions: "Review the change.")
+                    }
+
+                    XCTAssertEqual(frozenContexts.values.count, 1, row.label)
+                    let frozen = try XCTUnwrap(frozenContexts.values.first, row.label)
+                    XCTAssertEqual(frozen.tabID, tabID, row.label)
+                    let resolution = try XCTUnwrap(
+                        MCPServerViewModel.implicitContextBuilderGitTarget(for: .init(snapshot: frozen, source: .runInstall)),
+                        row.label
+                    )
+                    let repositories = try await roots.descriptors()
+                    let admission = try await MCPContextBuilderGitReviewPolicy().admit(
+                        resolution: resolution,
+                        hasExplicitSelector: false,
+                        requestsArtifactPublication: false,
+                        operation: .status,
+                        allRepositories: [repositories.a, repositories.b],
+                        store: context.window.workspaceFileContextStore
+                    )
+                    XCTAssertEqual(admission.implicitRepositories, [repositories.b], row.label)
+                }
+            }
+        }
+
+        /// With no files selected, a `context_builder` call from outside Agent Mode still runs, and
+        /// discovery's `git` calls must name a repository: an implicit call or an artifact
+        /// publication is refused, and an explicit inspection that publishes nothing is admitted.
+        func testDeferredOutsideReviewRequiresExplicitInspection() async throws {
+            let provider = ContextBuilderRoutedReplyProvider(reply: "deferred-review-discovery")
+            try await withLeasedFixture(contextBuilderProviderFactory: { _, _, _, _ in provider }) { fixture, endpoint in
+                let context = fixture.contextA
+                let tabID = UUID()
+                try Self.appendBackgroundTab(tabID, to: context)
+                try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                try await Self.bindTab(tabID, endpoint: endpoint, context: context)
+                let frozenContexts = try Self.captureFrozenDiscoveryContexts(provider, server: context.window.mcpServer)
+                Self.prepareSyntheticContextBuilderRun(context, receipts: ContextBuilderCommitReceipts())
+
+                try await Self.callContextBuilder(endpoint, instructions: "Review the change.")
+
+                let frozen = try XCTUnwrap(frozenContexts.values.first)
+                let resolution = try XCTUnwrap(
+                    MCPServerViewModel.implicitContextBuilderGitTarget(for: .init(snapshot: frozen, source: .runInstall))
+                )
+                guard case .deferred = resolution else {
+                    return XCTFail("Expected a deferred review target, got \(resolution)")
+                }
+                let policy = MCPContextBuilderGitReviewPolicy()
+                let store = context.window.workspaceFileContextStore
+                let refusedCalls: [(label: String, hasExplicitSelector: Bool, publishes: Bool)] = [
+                    ("implicit diff", false, false),
+                    ("explicit diff that publishes artifacts", true, true)
+                ]
+                for call in refusedCalls {
+                    do {
+                        _ = try await policy.admit(
+                            resolution: resolution,
+                            hasExplicitSelector: call.hasExplicitSelector,
+                            requestsArtifactPublication: call.publishes,
+                            operation: .diff,
+                            allRepositories: [],
+                            store: store
+                        )
+                        XCTFail("\(call.label) was admitted")
+                    } catch let error as MCPContextBuilderGitReviewPolicyError {
+                        XCTAssertEqual(error, .targetDeferred, call.label)
+                    }
+                }
+                let inspection = try await policy.admit(
+                    resolution: resolution,
+                    hasExplicitSelector: true,
+                    requestsArtifactPublication: false,
+                    operation: .diff,
+                    allRepositories: [],
+                    store: store
+                )
+                XCTAssertNil(inspection.implicitRepositories)
+                XCTAssertNil(inspection.publicationFence)
+            }
+        }
+
+        /// A review from outside Agent Mode isn't refused when discovery selects files outside the
+        /// repository it started from: the tab starts with a file from repository A and discovery
+        /// ends with a file from repository B. The review skips final repository authorization, and
+        /// the request sent to the provider carries B's uncommitted diff and nothing from A. It
+        /// runs in the caller's tab rather than a new one.
+        func testOutsideReviewWithForeignStartingSelectionStillRuns() async throws {
+            let provider = ContextBuilderRoutedReplyProvider(reply: "foreign-review-discovery")
+            try await withReviewGitRoots(provider) { fixture, endpoint, roots in
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let server = context.window.mcpServer
+                let chatStorage = fixture.rootURL.appendingPathComponent("outside-review-chats", isDirectory: true)
+                try FileManager.default.createDirectory(at: chatStorage, withIntermediateDirectories: true)
+                await ChatDataService.test_setWorkspaceRootOverride(chatStorage)
+                @MainActor
+                func restoreChatStorage() async {
+                    await context.window.oracleViewModel.drainTrackedAutosaves(for: context.workspaceID)
+                    await ChatDataService.test_setWorkspaceRootOverride(nil)
+                }
+
+                do {
+                    let tabID = UUID()
+                    try Self.appendBackgroundTab(tabID, to: context)
+                    try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                    await Self.seedSelection([roots.fileA], tabID: tabID, context: context)
+                    try await Self.bindTab(tabID, endpoint: endpoint, context: context)
+                    let frozenContexts = try Self.captureFrozenDiscoveryContexts(provider, server: server) { _ in
+                        await Self.seedSelection([roots.fileB], tabID: tabID, context: context)
+                    }
+                    let review = ReviewRequestReceipts()
+                    server.setOraclePostPackagingTransportOverrideForTesting { message, _ in
+                        review.requests.append(message)
+                        return (UUID(), Self.completedOracleStream("Reviewed."))
+                    }
+                    server.setContextBuilderFinalReviewAuthorizationHooksForTesting(
+                        before: { review.finalAuthorizationAttempts += 1 },
+                        after: nil
+                    )
+                    context.window.apiSettingsViewModel.isOpenAIKeyValid = true
+                    Self.prepareSyntheticContextBuilderRun(
+                        context,
+                        receipts: ContextBuilderCommitReceipts(),
+                        followUpModel: .openaiCustom(name: "outside-review-test")
+                    )
+                    let tabCount = manager.workspace(withID: context.workspaceID)?.composeTabs.count
+
+                    try await Self.callContextBuilder(endpoint, instructions: "Review the change.", responseType: "review")
+
+                    let frozen = try XCTUnwrap(frozenContexts.values.first)
+                    let resolution = try XCTUnwrap(
+                        MCPServerViewModel.implicitContextBuilderGitTarget(for: .init(snapshot: frozen, source: .runInstall))
+                    )
+                    let repositories = try await roots.descriptors()
+                    let startingAdmission = try await MCPContextBuilderGitReviewPolicy().admit(
+                        resolution: resolution,
+                        hasExplicitSelector: false,
+                        requestsArtifactPublication: false,
+                        operation: .status,
+                        allRepositories: [repositories.a, repositories.b],
+                        store: context.window.workspaceFileContextStore
+                    )
+                    XCTAssertEqual(startingAdmission.implicitRepositories, [repositories.a])
+
+                    XCTAssertEqual(review.requests.count, 1)
+                    let request = try XCTUnwrap(review.requests.first)
+                    let gitDiff = try XCTUnwrap(request.gitDiff)
+                    XCTAssertTrue(gitDiff.contains(ReviewGitRoots.uncommittedMarkerB), gitDiff)
+                    let packagedText = ([request.systemPrompt, request.fileTree, gitDiff]
+                        + request.metaPrompts
+                        + request.fileBlocks
+                        + request.conversationMessages.map(\.content))
+                        .joined(separator: "\n")
+                    XCTAssertFalse(packagedText.contains(ReviewGitRoots.uncommittedMarkerA), packagedText)
+                    XCTAssertEqual(review.finalAuthorizationAttempts, 0)
+                    XCTAssertEqual(manager.workspace(withID: context.workspaceID)?.composeTabs.count, tabCount)
+                    XCTAssertEqual(server.tabContextByConnectionID[endpoint.connectionID]?.tabID, tabID)
+                } catch {
+                    await restoreChatStorage()
+                    throw error
+                }
+                await restoreChatStorage()
+            }
+        }
+
+        /// A `context_builder` call from outside Agent Mode is refused as superseded when its tab's
+        /// source changes while the call is freezing the tab's authority: during worktree
+        /// hydration, or after the freeze. Discovery never starts, so it can't read the checkout
+        /// of the source the freeze started from.
+        func testOutsideFreezeRefusesTabWhoseSourceChangesDuringFreeze() async throws {
+            let provider = ContextBuilderRoutedReplyProvider(reply: "superseded-freeze-discovery")
+            try await withLeasedFixture(contextBuilderProviderFactory: { _, _, _, _ in provider }) { fixture, endpoint in
+                let context = fixture.contextA
+                let manager = context.window.workspaceManager
+                let server = context.window.mcpServer
+                let hydratingTabID = UUID()
+                let freezingTabID = UUID()
+                try Self.appendBackgroundTab(hydratingTabID, to: context)
+                try Self.appendBackgroundTab(freezingTabID, to: context)
+                try await Self.prepareProtectedExportFixture(fixture, endpoint: endpoint, bindTab: false)
+                Self.prepareSyntheticContextBuilderRun(context, receipts: ContextBuilderCommitReceipts())
+                let supersededText = try XCTUnwrap(
+                    MCPServerViewModel.FileToolAuthorityFailure.superseded.errorDescription
+                )
+                func assertCallIsSuperseded(_ row: String, contextID: UUID? = nil) async throws {
+                    var arguments: [String: Any] = ["instructions": "Review the change.", "response_type": "clarify"]
+                    if let contextID {
+                        arguments["context_id"] = contextID.uuidString
+                    }
+                    let response = try await endpoint.callTool(
+                        name: MCPWindowToolName.contextBuilder,
+                        arguments: arguments,
+                        timeoutSeconds: 30
+                    )
+                    XCTAssertTrue(response.rawJSON.contains("\"isError\":true"), "\(row): \(response.rawJSON)")
+                    XCTAssertTrue(response.rawJSON.contains(supersededText), "\(row): \(response.rawJSON)")
+                    XCTAssertEqual(provider.userMessages, [], row)
+                }
+
+                // Hydration returns bindings the tab's session no longer reports.
+                try attachUnhydratedAgentSession(to: hydratingTabID, in: context)
+                server.agentWorktreeBindingStateResolver = { _, _ in .hydrated([]) }
+                try await assertCallIsSuperseded("hydration", contextID: hydratingTabID)
+
+                try await Self.bindTab(freezingTabID, endpoint: endpoint, context: context)
+                let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == context.workspaceID })
+                let tabIndex = try XCTUnwrap(
+                    manager.workspaces[workspaceIndex].composeTabs.firstIndex { $0.id == freezingTabID }
+                )
+                server.setContextBuilderAfterTabAuthorityFreezeForTesting {
+                    manager.workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = UUID()
+                }
+                defer { server.setContextBuilderAfterTabAuthorityFreezeForTesting(nil) }
+                try await assertCallIsSuperseded("after freeze")
+            }
+        }
+
         func testPromptAndWorkspaceSnapshotUseUnstoredEditorText() async throws {
             try await withLeasedFixture { fixture, endpoint in
                 let context = fixture.contextA
@@ -4473,7 +4718,8 @@ import XCTest
         /// Models profile it writes applies only to the fixture's freshly generated workspace ID.
         private static func prepareSyntheticContextBuilderRun(
             _ context: PersistentMCPTestContext,
-            receipts: ContextBuilderCommitReceipts
+            receipts: ContextBuilderCommitReceipts,
+            followUpModel: AIModel? = nil
         ) {
             let window = context.window
             window.apiSettingsViewModel.isClaudeCodeConnected = true
@@ -4492,6 +4738,9 @@ import XCTest
                     providerEventDisposition: nil,
                     teardownCompleted: nil,
                     allowSyntheticRoutingWithoutFinalContext: true,
+                    resolveMCPFollowUpModel: followUpModel.map { model in
+                        { _ in (model: model, chatPresetID: nil, mcpControlInfo: nil) }
+                    },
                     validateContextBuilderProviders: {},
                     committedTabSnapshotCaptured: { _, snapshot in
                         receipts.values.append(snapshot)
@@ -4500,16 +4749,182 @@ import XCTest
             )
         }
 
+        /// A provider stream that delivers `text` and then completes.
+        private static func completedOracleStream(_ text: String) -> AsyncThrowingStream<ChatStreamOutput, Error> {
+            AsyncThrowingStream { continuation in
+                continuation.yield(ChatStreamOutput(text: text, reasoning: nil, tokens: ChatTokenInfo()))
+                continuation.yield(ChatStreamOutput(
+                    text: "",
+                    reasoning: nil,
+                    tokens: ChatTokenInfo(),
+                    terminalOutcome: .completed
+                ))
+                continuation.finish()
+            }
+        }
+
         private static func callContextBuilder(
             _ endpoint: PersistentMCPTestEndpoint,
-            instructions: String
+            instructions: String,
+            responseType: String = "clarify",
+            contextID: UUID? = nil
         ) async throws {
+            var arguments: [String: Any] = ["instructions": instructions, "response_type": responseType]
+            if let contextID {
+                arguments["context_id"] = contextID.uuidString
+            }
             let response = try await endpoint.callTool(
                 name: MCPWindowToolName.contextBuilder,
-                arguments: ["instructions": instructions, "response_type": "clarify"],
+                arguments: arguments,
                 timeoutSeconds: 30
             )
             XCTAssertFalse(response.rawJSON.contains("\"isError\":true"), response.rawJSON)
+        }
+
+        /// Two Git repositories loaded after context A's own root, which isn't a Git repository, so
+        /// repository A is the first loaded Git root. Each repository's file carries an uncommitted
+        /// line with its own marker.
+        private struct ReviewGitRoots {
+            static let uncommittedMarkerA = "OUTSIDE_REVIEW_UNCOMMITTED_MARKER_A"
+            static let uncommittedMarkerB = "OUTSIDE_REVIEW_UNCOMMITTED_MARKER_B"
+
+            let repositories: ReviewGitRepositoryFixture
+            let rootA: URL
+            let rootB: URL
+            let store: WorkspaceFileContextStore
+            var rootIDs: [UUID] = []
+
+            var fileA: URL {
+                rootA.appendingPathComponent("A.swift")
+            }
+
+            var fileB: URL {
+                rootB.appendingPathComponent("B.swift")
+            }
+
+            /// The repositories as the `git` tool lists them, in load order.
+            func descriptors() async throws -> (a: GitRepoDescriptor, b: GitRepoDescriptor) {
+                let resolvedA = await VCSService.shared.resolveRepo(from: rootA)
+                let resolvedB = await VCSService.shared.resolveRepo(from: rootB)
+                return try (
+                    GitRepoDescriptor(rootURL: XCTUnwrap(resolvedA).rootURL),
+                    GitRepoDescriptor(rootURL: XCTUnwrap(resolvedB).rootURL)
+                )
+            }
+
+            @MainActor
+            func release() async {
+                for rootID in rootIDs {
+                    await store.unloadRoot(id: rootID)
+                }
+                repositories.cleanup()
+            }
+        }
+
+        /// Runs `body` on a leased fixture whose context A also loads two Git repositories, with
+        /// context A's window built on `provider`. The repositories are unloaded and removed after
+        /// `body` returns or throws.
+        private func withReviewGitRoots(
+            _ provider: ContextBuilderRoutedReplyProvider,
+            _ body: @MainActor (PersistentMCPTestFixture, PersistentMCPTestEndpoint, ReviewGitRoots) async throws -> Void
+        ) async throws {
+            try await withLeasedFixture(contextBuilderProviderFactory: { _, _, _, _ in provider }) { fixture, endpoint in
+                let context = fixture.contextA
+                let repositories = try ReviewGitRepositoryFixture(name: "outside-review", parentDirectory: fixture.rootURL)
+                let rootA = try repositories.makeRepository(named: "repository-a", files: ["A.swift": "// repository A"])
+                let rootB = try repositories.makeRepository(named: "repository-b", files: ["B.swift": "// repository B"])
+                try repositories.write(
+                    "// repository A\n// \(ReviewGitRoots.uncommittedMarkerA)\n",
+                    to: "A.swift",
+                    at: rootA
+                )
+                try repositories.write(
+                    "// repository B\n// \(ReviewGitRoots.uncommittedMarkerB)\n",
+                    to: "B.swift",
+                    at: rootB
+                )
+                var roots = ReviewGitRoots(
+                    repositories: repositories,
+                    rootA: rootA,
+                    rootB: rootB,
+                    store: context.window.workspaceFileContextStore
+                )
+                do {
+                    for root in [rootA, rootB] {
+                        let record = try await WorkspaceRootLoadTestSupport.loadRootMatchingCurrentFileSystemSettings(
+                            in: context.window,
+                            path: root.path
+                        )
+                        roots.rootIDs.append(record.id)
+                    }
+                    let manager = context.window.workspaceManager
+                    let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == context.workspaceID })
+                    manager.workspaces[workspaceIndex].repoPaths.append(contentsOf: [rootA.path, rootB.path])
+                    try await body(fixture, endpoint, roots)
+                } catch {
+                    await roots.release()
+                    throw error
+                }
+                await roots.release()
+            }
+        }
+
+        /// Gives the tab an Agent session whose worktree bindings read as unhydrated until the
+        /// window's resolver hydrates them, as a persisted session's bindings do after relaunch.
+        private func attachUnhydratedAgentSession(to tabID: UUID, in context: PersistentMCPTestContext) throws {
+            let manager = context.window.workspaceManager
+            let workspaceIndex = try XCTUnwrap(manager.workspaces.firstIndex { $0.id == context.workspaceID })
+            let tabIndex = try XCTUnwrap(
+                manager.workspaces[workspaceIndex].composeTabs.firstIndex { $0.id == tabID }
+            )
+            manager.workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = UUID()
+
+            let bindingState = AgentWorktreeBindingStateBox()
+            let server = context.window.mcpServer
+            let previousProvider = server.agentWorktreeBindingStateProvider
+            let previousResolver = server.agentWorktreeBindingStateResolver
+            server.agentWorktreeBindingStateProvider = { _, _ in bindingState.value }
+            server.agentWorktreeBindingStateResolver = { _, _ in
+                bindingState.value = .hydrated([])
+                return bindingState.value
+            }
+            addTeardownBlock { @MainActor in
+                server.agentWorktreeBindingStateProvider = previousProvider
+                server.agentWorktreeBindingStateResolver = previousResolver
+            }
+        }
+
+        private static func seedSelection(
+            _ files: [URL],
+            tabID: UUID,
+            context: PersistentMCPTestContext
+        ) async {
+            _ = await context.window.selectionCoordinator.persistSelection(
+                StoredSelection(selectedPaths: files.map(\.path)),
+                for: WorkspaceSelectionIdentity(workspaceID: context.workspaceID, tabID: tabID),
+                source: .runtimeMutation,
+                mirrorToUIIfActive: false
+            )
+        }
+
+        /// Records the frozen tab context each discovery run queues for its MCP connection, read
+        /// while the synthetic agent streams, then runs `afterCapture`. The queue is a value, so
+        /// reading a copy leaves the run's context queued.
+        private static func captureFrozenDiscoveryContexts(
+            _ provider: ContextBuilderRoutedReplyProvider,
+            server: MCPServerViewModel,
+            afterCapture: (@MainActor @Sendable (UUID) async -> Void)? = nil
+        ) throws -> FrozenDiscoveryContexts {
+            let clientName = try XCTUnwrap(AgentProviderKind.claudeCode.mcpClientNameHint)
+            let captured = FrozenDiscoveryContexts()
+            provider.setDiscoveryHook { runID in
+                var pending = server.pendingRunScopedTabContexts
+                if let context = pending.popByRunID(clientName: clientName, runID: runID).context {
+                    captured.values.append(context)
+                }
+                await afterCapture?(runID)
+            }
+            return captured
         }
 
         private static func promptGetText(_ endpoint: PersistentMCPTestEndpoint) async throws -> String? {
@@ -6341,6 +6756,7 @@ import XCTest
         private let reply: String
         private let lock = NSLock()
         private var recordedUserMessages: [String] = []
+        private var discoveryHook: (@MainActor @Sendable (UUID) async -> Void)?
 
         init(reply: String) {
             self.reply = reply
@@ -6348,6 +6764,12 @@ import XCTest
 
         var userMessages: [String] {
             lock.withLock { recordedUserMessages }
+        }
+
+        /// Runs for each run after its routing is reported and before the reply streams, while the
+        /// run's discovery is in progress and before its final context is committed.
+        func setDiscoveryHook(_ hook: (@MainActor @Sendable (UUID) async -> Void)?) {
+            lock.withLock { discoveryHook = hook }
         }
 
         func streamAgentMessage(
@@ -6358,6 +6780,9 @@ import XCTest
             if let runID {
                 await MCPRoutingWaiter.notifyConnectionObserved(runID: runID)
                 await MCPRoutingWaiter.notifyRouted(runID: runID)
+                if let discoveryHook = lock.withLock({ discoveryHook }) {
+                    await discoveryHook(runID)
+                }
             }
             let reply = reply
             return AsyncThrowingStream { continuation in
@@ -6371,6 +6796,22 @@ import XCTest
 
     private final class ContextBuilderCommitReceipts {
         var values: [MCPServerViewModel.ContextBuilderCommittedTabSnapshot] = []
+    }
+
+    @MainActor
+    private final class FrozenDiscoveryContexts {
+        var values: [MCPServerViewModel.TabContextSnapshot] = []
+    }
+
+    @MainActor
+    private final class AgentWorktreeBindingStateBox {
+        var value: AgentSessionWorktreeBindingState = .unhydrated
+    }
+
+    @MainActor
+    private final class ReviewRequestReceipts {
+        var requests: [AIMessage] = []
+        var finalAuthorizationAttempts = 0
     }
 
     private enum ClientFixtureError: Error {

@@ -2837,7 +2837,7 @@ extension MCPServerViewModel {
     }
 
     @MainActor
-    private func hydrateFileToolLookupSnapshotIfNeeded(
+    func hydrateFileToolLookupSnapshotIfNeeded(
         _ snapshot: inout TabContextSnapshot,
         connectionID: UUID?
     ) async -> Bool {
@@ -3171,14 +3171,21 @@ extension MCPServerViewModel {
             from: metadata,
             toolName: "context_builder nested git target"
         )
-        guard Self.isExactRunScopedTabContext(resolved),
-              resolved.snapshot.activeAgentSessionID != nil
-        else { return nil }
-        guard resolved.snapshot.runID != nil else {
-            return .unavailable(.missingFrozenTarget)
+        return Self.implicitContextBuilderGitTarget(for: resolved)
+    }
+
+    /// The review target that a discovery run's exact tab snapshot imposes on `git` calls that
+    /// name no repository. Runs started through `context_builder` always carry a frozen target.
+    /// Runs started from the Context Builder panel carry none: in a tab without an Agent session
+    /// they keep the first-root default (`nil`), and in an Agent session's tab they are refused.
+    static func implicitContextBuilderGitTarget(
+        for resolved: ResolvedTabContextSnapshot
+    ) -> ContextBuilderReviewTargetResolution? {
+        guard isExactRunScopedTabContext(resolved) else { return nil }
+        if let resolution = resolved.snapshot.contextBuilderReviewTargetResolution {
+            return resolution
         }
-        return resolved.snapshot.contextBuilderReviewTargetResolution
-            ?? .unavailable(.missingFrozenTarget)
+        return resolved.snapshot.activeAgentSessionID == nil ? nil : .unavailable(.missingFrozenTarget)
     }
 
     static func contextBuilderReviewGitContext(

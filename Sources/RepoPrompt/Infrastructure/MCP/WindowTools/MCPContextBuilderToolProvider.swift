@@ -333,9 +333,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
 
             **Exporting**: Pass `export_response: true` (requires a `response_type` that generates a response) to write the result to a file and get back `oracle_export_path` plus `oracle_export_instruction`. To hand the export to a child agent, include `oracle_export_path` inside the `message` (or `messages`) you send on your next delegation call; your system prompt names the specific delegation tool available to you.
 
-            **Workflow**: Continue with `ask_oracle(chat_id: "<returned_id>", new_chat: false)`. Refine with `manage_selection`.
-
-            **Agent mode behavior**: If this tool is invoked during an Agent Mode run, it reuses the current agent tab instead of creating a new tab.
+            \(MCPContextBuilderDescriptions.workflow)
 
             **Timing**: 30s-5min depending on codebase size and task complexity.
             """,
@@ -343,7 +341,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
             inputSchema: .object(
                 properties: [
                     "instructions": .string(description: "Your request, ideally structured with XML tags: <task> for the main goal, <context> for background/constraints/file references, <discovery_agent-guidelines> for optional starting hints. Describe what you need — the agent finds the right files."),
-                    "response_type": .string(description: "Optional: 'plan' to generate implementation plan, 'question' to ask a question, or 'review' to generate a code review. Omit or 'clarify' to just return context.", enum: ["plan", "question", "review", "clarify"]),
+                    "response_type": .string(description: MCPContextBuilderDescriptions.responseType, enum: ["plan", "question", "review", "clarify"]),
                     "export_response": .boolean(description: "When true, export the generated response to a file and return `oracle_export_path` plus `oracle_export_instruction`. Requires a response_type that generates a response. Include `oracle_export_path` inside the `message` you send on your next delegation call; the specific delegation tool is named by your system prompt.")
                 ],
                 required: []
@@ -391,26 +389,18 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
         guard let workspace = targetWindow.workspaceManager.workspaces.first(where: { $0.id == resolvedIdentity.workspaceID }) else {
             throw MCPError.invalidParams("The resolved Context Builder workspace is no longer available.")
         }
-        let workspaceContext = tabResolution.workspaceContext
-        let lookupContext = workspaceContext?.lookupContext ?? tabResolution.lookupContext
-        if workspaceContext == nil {
-            let scopedRoots = await dependencies.context.promptVM.workspaceFileContextStore.rootRefs(
-                scope: lookupContext.rootScope
-            )
-            let scopedPaths = Set(scopedRoots.map(\.standardizedFullPath))
-            let targetPaths = Set(workspace.repoPaths.map {
-                StandardizedPath.absolute(lookupContext.translateInputPath($0))
-            })
-            guard !targetPaths.isEmpty, targetPaths.isSubset(of: scopedPaths) else {
-                throw MCPError.invalidParams(
-                    "The resolved Context Builder workspace projection is unavailable. Reload the target workspace before retrying."
-                )
-            }
+        guard let workspaceContext = tabResolution.workspaceContext else {
+            throw MCPError.internalError("Context Builder resolved its tab without a frozen workspace context")
         }
+        let lookupContext = workspaceContext.lookupContext
+        // Agent Mode reviews authorize the final selection against the frozen review target and
+        // diff only the authorized checkouts. Other callers' reviews diff each selected file in
+        // its own checkout, so a review can follow files selected from any repository.
+        let authorizesFinalReviewSelection = tabResolution.agentModeRunID != nil
         guard let initialResultTab = targetWindow.workspaceManager.composeTab(for: resolvedIdentity) else {
             throw MCPError.internalError("Resolved Context Builder tab is unavailable in its workspace")
         }
-        try await workspaceContext?.validateReviewTargetAvailability(
+        try await workspaceContext.validateReviewTargetAvailability(
             store: dependencies.context.promptVM.workspaceFileContextStore
         )
         let contextBuilderVM = targetWindow.contextBuilderAgentViewModel
@@ -695,7 +685,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                         case let .failed(message): "failed: \(message)"
                         }
 
-                        try workspaceContext?.validateAvailability()
+                        try workspaceContext.validateAvailability()
                         let selection = resultTab.selection
                         let reply = try await dependencies.execution.buildTabSelectionReply(
                             selection,
@@ -755,7 +745,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                     resultPrompt = prompt
                     try Task.checkCancellation()
                     let finalReviewAuthorization: ContextBuilderFinalReviewAuthorization?
-                    if mode == .review, let workspaceContext {
+                    if mode == .review, authorizesFinalReviewSelection {
                         guard case .completed = snapshot.terminalDisposition,
                               let committedTab = snapshot.committedTab
                         else {
@@ -835,7 +825,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                         finalReviewAuthorization = nil
                     }
 
-                    if mode == .review, workspaceContext != nil, finalReviewAuthorization == nil {
+                    if mode == .review, authorizesFinalReviewSelection, finalReviewAuthorization == nil {
                         throw MCPError.internalError(
                             "Context Builder review final authorization was not retained"
                         )
@@ -882,7 +872,8 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                     } else {
                         planReply = reply
                     }
-                    followUpHint = "Continue this \(modeLabel) conversation with ask_oracle(chat_id: \"\(reply.shortId)\", new_chat: false)"
+                    let followUpTool = tabResolution.agentModeRunID == nil ? "oracle_send" : "ask_oracle"
+                    followUpHint = "Continue this \(modeLabel) conversation with \(followUpTool): {\"chat_id\":\"\(reply.shortId)\",\"message\":\"<message>\"}"
                 }
 
                 await dependencies.execution.sendStageProgress(
