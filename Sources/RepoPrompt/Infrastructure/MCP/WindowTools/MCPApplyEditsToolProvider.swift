@@ -152,6 +152,7 @@ final class MCPApplyEditsToolProvider: MCPAppToolProviding {
             }
             if let failure = await MCPMutationRetryableFailure.mutationScopeFailure(
                 for: lookupContext,
+                routedSnapshot: resolvedContext.snapshot,
                 store: dependencies.context.promptVM.workspaceFileContextStore
             ) {
                 return Self.retryableFailureSummary(request: request, failure: failure, operationID: operationID)

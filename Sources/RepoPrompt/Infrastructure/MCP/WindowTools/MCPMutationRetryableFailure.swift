@@ -4,10 +4,20 @@ struct MCPMutationRetryableFailure: Error, Equatable {
     let errorCode: String
     let errorMessage: String
     let retryable: Bool
-    let retryAfterMilliseconds: Int
+    let retryAfterMilliseconds: Int?
     let suggestion: String
 
     static let retryDelayMilliseconds = 1000
+
+    static func unavailableWorktree(_ diagnostic: MCPUnavailableWorktreeDiagnostic) -> MCPMutationRetryableFailure {
+        MCPMutationRetryableFailure(
+            errorCode: "worktree_scope_unavailable",
+            errorMessage: "\(diagnostic.summary) No filesystem mutation was started.",
+            retryable: false,
+            retryAfterMilliseconds: nil,
+            suggestion: diagnostic.recovery
+        )
+    }
 
     static func worktreeScopeUnavailable(missingPhysicalRootPaths: [String]) -> MCPMutationRetryableFailure {
         let message: String
@@ -64,19 +74,38 @@ struct MCPMutationRetryableFailure: Error, Equatable {
         return .worktreeScopeHydrating()
     }
 
+    /// Refuses a mutation whose Agent session worktree scope is unavailable. A binding whose folder
+    /// is confirmed missing gets the detailed, non-retryable refusal; every other cause keeps the
+    /// generic retryable one. A usable scope returns `nil` without any extra directory check.
     @MainActor
     static func mutationScopeFailure(
         for lookupContext: WorkspaceLookupContext,
+        routedSnapshot: MCPServerViewModel.TabContextSnapshot,
         store: WorkspaceFileContextStore
     ) async -> MCPMutationRetryableFailure? {
         if lookupContext == AgentWorkspaceLookupContextResolver.failClosedLookupContext {
-            return .worktreeScopeUnavailable(missingPhysicalRootPaths: [])
+            return unavailableWorktreeFailure(
+                bindings: routedSnapshot.worktreeBindings,
+                routedSnapshot: routedSnapshot
+            ) ?? .worktreeScopeUnavailable(missingPhysicalRootPaths: [])
         }
         switch await store.rootScopeAvailability(lookupContext.rootScope) {
         case .available:
             return nil
         case let .sessionWorktreeUnavailable(missingPhysicalRootPaths):
-            return .worktreeScopeUnavailable(missingPhysicalRootPaths: missingPhysicalRootPaths)
+            let bindings = lookupContext.bindingProjection?.boundRootsForMetadata.map(\.binding)
+                ?? routedSnapshot.worktreeBindings
+            return unavailableWorktreeFailure(bindings: bindings, routedSnapshot: routedSnapshot)
+                ?? .worktreeScopeUnavailable(missingPhysicalRootPaths: missingPhysicalRootPaths)
+        }
+    }
+
+    private static func unavailableWorktreeFailure(
+        bindings: [AgentSessionWorktreeBinding],
+        routedSnapshot: MCPServerViewModel.TabContextSnapshot
+    ) -> MCPMutationRetryableFailure? {
+        MCPUnavailableWorktreeDiagnostic.classify(bindings).map { diagnostic in
+            .unavailableWorktree(diagnostic.attachingRouteContext(from: routedSnapshot))
         }
     }
 }

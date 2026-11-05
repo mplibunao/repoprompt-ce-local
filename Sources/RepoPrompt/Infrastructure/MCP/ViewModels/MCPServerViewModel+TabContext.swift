@@ -2227,24 +2227,7 @@ extension MCPServerViewModel {
         )
         if let frozenAuthority = routed.snapshot.frozenFileToolAuthority {
             guard let workspaceManager else { throw FileToolAuthorityFailure.unavailable }
-            var liveSourceSnapshot = routed.snapshot
-            if routed.snapshot.runID == nil,
-               let workspaceID = routed.snapshot.workspaceID,
-               let current = try? makeTabContextSnapshot(
-                   tabID: routed.snapshot.tabID,
-                   workspaceID: workspaceID,
-                   windowID: routed.snapshot.windowID,
-                   runID: nil,
-                   explicitlyBound: routed.snapshot.explicitlyBound,
-                   captureActiveUIState: false,
-                   flushActiveSelection: false
-               )
-            {
-                liveSourceSnapshot.activeAgentSessionID = current.activeAgentSessionID
-                liveSourceSnapshot.worktreeBindingState = current.activeAgentSessionID.map {
-                    agentWorktreeBindingStateProvider?($0, current.tabID) ?? .unhydrated
-                } ?? .notApplicable
-            }
+            let liveSourceSnapshot = liveFileToolSourceSnapshot(for: routed.snapshot)
             if frozenAuthority.sourceIdentity != liveSourceSnapshot.fileToolAuthoritySourceIdentity {
                 if let connectionID = metadata.connectionID,
                    var bound = tabContextByConnectionID[connectionID],
@@ -2261,10 +2244,26 @@ extension MCPServerViewModel {
                 throw FileToolAuthorityFailure.superseded
             }
             MCPToolExecutionHandlerPhaseContext.report(.fileToolAuthorityValidation)
-            try await frozenAuthority.validate(
-                workspaceManager: workspaceManager,
-                store: promptVM.workspaceFileContextStore
-            )
+            do {
+                try await frozenAuthority.validate(
+                    workspaceManager: workspaceManager,
+                    store: promptVM.workspaceFileContextStore
+                )
+            } catch let failure as FileToolAuthorityFailure {
+                // Validation suspends, so the tab's session or the connection's route can be
+                // replaced meanwhile; that reports `.superseded`, not the old session's worktree.
+                if case .unavailableWorktree = failure {
+                    let sourceReplaced = frozenAuthority.sourceIdentity
+                        != liveFileToolSourceSnapshot(for: routed.snapshot).fileToolAuthoritySourceIdentity
+                    let routeReplaced = metadata.connectionID
+                        .flatMap { tabContextByConnectionID[$0] }
+                        .map { !fileToolLookupRouteMatches($0, routed.snapshot) } ?? false
+                    if sourceReplaced || routeReplaced {
+                        throw FileToolAuthorityFailure.superseded
+                    }
+                }
+                throw failure.attachingRouteContext(from: routed.snapshot)
+            }
             return frozenAuthority
         }
         let bindingConnectionID = routed.bindingCurrencyConnectionID(from: metadata)
@@ -2346,8 +2345,16 @@ extension MCPServerViewModel {
             return frozenAuthority
         } catch is CancellationError {
             throw CancellationError()
-        } catch let error as FileToolAuthorityFailure {
-            if error == .unavailable,
+        } catch {
+            let failure = Self.fileToolAuthorityFailure(forLookupError: error)
+            // A replaced route or session can surface as a lookup-reported `.unavailable` or as
+            // the old session's missing worktree; either reports `.superseded` instead.
+            let yieldsToSupersession = switch failure {
+            case .unavailableWorktree: true
+            case .unavailable: error is FileToolAuthorityFailure
+            default: false
+            }
+            if yieldsToSupersession,
                !fileToolLookupSnapshotIsCurrent(
                    authoritySnapshot,
                    connectionID: bindingConnectionID
@@ -2355,10 +2362,48 @@ extension MCPServerViewModel {
             {
                 throw FileToolAuthorityFailure.superseded
             }
-            throw error
-        } catch {
-            throw FileToolAuthorityFailure.unavailable
+            throw failure.attachingRouteContext(from: routed.snapshot)
         }
+    }
+
+    /// The routed snapshot with the live tab's Agent session and binding state, which is what a
+    /// frozen authority's source identity must still match.
+    @MainActor
+    private func liveFileToolSourceSnapshot(for snapshot: TabContextSnapshot) -> TabContextSnapshot {
+        var liveSourceSnapshot = snapshot
+        if snapshot.runID == nil,
+           let workspaceID = snapshot.workspaceID,
+           let current = try? makeTabContextSnapshot(
+               tabID: snapshot.tabID,
+               workspaceID: workspaceID,
+               windowID: snapshot.windowID,
+               runID: nil,
+               explicitlyBound: snapshot.explicitlyBound,
+               captureActiveUIState: false,
+               flushActiveSelection: false
+           )
+        {
+            liveSourceSnapshot.activeAgentSessionID = current.activeAgentSessionID
+            liveSourceSnapshot.worktreeBindingState = current.activeAgentSessionID.map {
+                agentWorktreeBindingStateProvider?($0, current.tabID) ?? .unhydrated
+            } ?? .notApplicable
+        }
+        return liveSourceSnapshot
+    }
+
+    /// Maps a lookup error to the failure a file tool reports. Only the resolver's typed
+    /// missing-folder evidence, confirmed again by the classifier, becomes the detailed refusal;
+    /// every other error keeps the generic `.unavailable`. Callers handle cancellation first.
+    static func fileToolAuthorityFailure(forLookupError error: Error) -> FileToolAuthorityFailure {
+        if let failure = error as? FileToolAuthorityFailure {
+            return failure
+        }
+        if case let .unavailableWorktree(runtimeError) = error as? AgentWorkspaceLookupContextResolutionError,
+           let diagnostic = MCPUnavailableWorktreeDiagnostic.classify([runtimeError.binding])
+        {
+            return .unavailableWorktree(diagnostic)
+        }
+        return .unavailable
     }
 
     static func fileToolAuthorityFailure(
@@ -2586,7 +2631,7 @@ extension MCPServerViewModel {
                 } catch is CancellationError {
                     return .failure(.cancelled)
                 } catch {
-                    return .failure(.authority((error as? FileToolAuthorityFailure) ?? .unavailable))
+                    return .failure(.authority(Self.fileToolAuthorityFailure(forLookupError: error)))
                 }
             }
             pendingResolution = PendingFileToolLookupContextResolution(

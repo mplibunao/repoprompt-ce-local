@@ -371,6 +371,65 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
         )
     }
 
+    /// Only the missing-worktree refusal, whose issues are all non-retryable `workspace_authority` failures,
+    /// prints its message whole with no generic retry line. Every other unavailable reply keeps the generic
+    /// "Resolve the reported issue, then retry." line and prints the first issue's message without its final period.
+    func testCodeStructureDropsTheRetryLineOnlyForTheMissingWorktreeRefusal() throws {
+        func issue(
+            _ code: String,
+            phase: String = "workspace_authority",
+            retryable: Bool,
+            message: String
+        ) -> ToolResultDTOs.CodeStructureReplyDTO.IssueDTO {
+            .init(
+                code: code,
+                phase: phase,
+                path: nil,
+                retryable: retryable,
+                retryAfterMilliseconds: retryable ? 1000 : nil,
+                attempted: nil,
+                limit: nil,
+                message: message
+            )
+        }
+        func formatted(_ issues: [ToolResultDTOs.CodeStructureReplyDTO.IssueDTO]) throws -> String {
+            let dto = ToolResultDTOs.CodeStructureReplyDTO(
+                status: .unavailable,
+                size: .medium,
+                roots: [],
+                files: [],
+                summary: .init(seeds: 0, nodes: 0, edges: 0, files: 0, tokens: 0),
+                issues: issues,
+                retry: .init(retryable: issues.contains(where: \.retryable), retryAfterMilliseconds: nil),
+                worktreeScope: nil
+            )
+            return try Self.onlyText(ToolOutputFormatter.formatCodeStructure(value: Self.value(dto)))
+        }
+
+        let refusal = "Tab 'Stale' (window 1) can't be used: its Agent Mode worktree 'gone' is missing from disk. "
+            + "Retrying won't help. Tell the user so they can switch to another tab."
+        let transient = issue("workspace_authority_unavailable", retryable: true, message: "Workspace authority unavailable.")
+        XCTAssertEqual(
+            try formatted([issue("worktree_scope_unavailable", retryable: false, message: refusal)]),
+            "## Code Structure ❌ unavailable — \(refusal)"
+        )
+        XCTAssertEqual(
+            try formatted([transient]),
+            "## Code Structure ❌ unavailable — Workspace authority unavailable\n- Resolve the reported issue, then retry."
+        )
+        // A non-retryable issue from another phase is not a worktree refusal, so it keeps the generic retry
+        // line and drops its final period.
+        XCTAssertEqual(
+            try formatted([issue("empty_seeds", phase: "seed_resolution", retryable: false, message: "No usable seed files were supplied.")]),
+            "## Code Structure ❌ unavailable — No usable seed files were supplied\n- Resolve the reported issue, then retry."
+        )
+        // The reply's retry hint covers every issue, so a retryable later issue keeps the retry line.
+        XCTAssertEqual(
+            try formatted([issue("signature_unavailable", retryable: false, message: "Signatures could not be rendered."), transient]),
+            "## Code Structure ❌ unavailable — Signatures could not be rendered\n- Resolve the reported issue, then retry."
+        )
+    }
+
     func testAgentRunApprovalGuidanceUsesCopyableCanonicalResponseCommand() throws {
         let sessionID = "11111111-1111-1111-1111-111111111111"
         let interactionID = "22222222-2222-2222-2222-222222222222"

@@ -1000,6 +1000,152 @@ final class MCPReadMutationPathContractTests: XCTestCase {
             }
         }
 
+        /// The window's active tab holds an Agent session bound to a worktree whose folder was
+        /// deleted. `apply_edits` and `file_actions` refuse before writing, name the tab and the
+        /// worktree, and report `retryable: false` with no delay, because retrying cannot restore the
+        /// folder. Neither tool falls back to the canonical checkout or recreates the worktree path.
+        @MainActor
+        func testMutationToolsRejectDeletedWorktreeBeforeWriting() async throws {
+            try await MCPSharedServerTestLease.shared.withLease { lease in
+                let fixture = try await PersistentMCPTestFixture.make(
+                    lease: lease,
+                    domainRuntime: AppDomainRuntimeComposition.shared.runtime
+                )
+                let context = fixture.contextA
+                let server = context.window.mcpServer
+                let store = context.window.workspaceFileContextStore
+                let sessionID = UUID()
+                let previousProvider = server.agentWorktreeBindingStateProvider
+                let previousResolver = server.agentWorktreeBindingStateResolver
+                @MainActor
+                func cleanup() async {
+                    server.agentWorktreeBindingStateProvider = previousProvider
+                    server.agentWorktreeBindingStateResolver = previousResolver
+                    await WorkspaceRootBindingProjectionMaterializer(store: store).release(sessionID: sessionID)
+                    _ = await server.setWindowToolsEnabled(false)
+                    await fixture.cleanup()
+                }
+                do {
+                    try await fixture.registerDomainWorkspace(context)
+                    try await MCPWindowTestSupport.activateWorkspace(context, reason: "MCPReadMutationPathContractTests")
+                    let toolsEnabled = await server.setWindowToolsEnabled(true)
+                    XCTAssertTrue(toolsEnabled)
+                    let endpoint = try fixture.endpointA()
+
+                    let worktreeRoot = fixture.rootURL.appendingPathComponent("stale-worktree", isDirectory: true)
+                    let worktreeFile = worktreeRoot
+                        .appendingPathComponent("Sources", isDirectory: true)
+                        .appendingPathComponent(context.fileURL.lastPathComponent)
+                    try FileManager.default.createDirectory(
+                        at: worktreeFile.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try "let staleWorktreeSentinel = \"worktree-only\"\n".write(
+                        to: worktreeFile,
+                        atomically: true,
+                        encoding: .utf8
+                    )
+                    let binding = AgentSessionWorktreeBinding(
+                        id: "stale-worktree-binding",
+                        repositoryID: "stale-worktree-repo",
+                        repoKey: context.rootURL.path,
+                        logicalRootPath: context.rootURL.path,
+                        logicalRootName: context.rootURL.lastPathComponent,
+                        worktreeID: "stale-worktree-id",
+                        worktreeRootPath: worktreeRoot.path,
+                        worktreeName: "stale-worktree",
+                        branch: "bugfix/stale-worktree",
+                        source: "test"
+                    )
+                    server.agentWorktreeBindingStateProvider = { _, _ in .hydrated([binding]) }
+                    server.agentWorktreeBindingStateResolver = { _, _ in .hydrated([binding]) }
+                    let workspaceManager = context.window.workspaceManager
+                    let workspaceIndex = try XCTUnwrap(workspaceManager.workspaces.firstIndex { $0.id == context.workspaceID })
+                    let tabIndex = try XCTUnwrap(
+                        workspaceManager.workspaces[workspaceIndex].composeTabs.firstIndex { $0.id == context.tabID }
+                    )
+                    workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].activeAgentSessionID = sessionID
+                    let tabName = workspaceManager.workspaces[workspaceIndex].composeTabs[tabIndex].name
+                    let canonicalBytes = try Data(contentsOf: context.fileURL)
+
+                    try FileManager.default.removeItem(at: worktreeRoot)
+
+                    let expected = MCPUnavailableWorktreeDiagnostic(
+                        binding: binding,
+                        routeContext: .init(tabName: tabName, windowID: context.window.windowID)
+                    )
+                    let refusalSummary = "\(expected.summary) No filesystem mutation was started."
+
+                    @MainActor
+                    func rawCall<Reply: Decodable>(
+                        _ tool: String,
+                        _ arguments: [String: Any],
+                        as _: Reply.Type
+                    ) async throws -> (reply: Reply, raw: String) {
+                        var arguments = arguments
+                        arguments["_windowID"] = context.window.windowID
+                        arguments["_rawJSON"] = true
+                        let response = try await endpoint.callTool(name: tool, arguments: arguments)
+                        let text = try MCPWindowTestSupport.toolResultText(response)
+                        let data = try XCTUnwrap(text.data(using: .utf8))
+                        return try (JSONDecoder().decode(Reply.self, from: data), text)
+                    }
+
+                    let edit = try await rawCall(
+                        MCPWindowToolName.applyEdits,
+                        [
+                            "path": context.fileURL.path,
+                            "rewrite": "let overwritten = true\n",
+                            "operation_id": "stale-worktree-edit-\(UUID().uuidString)"
+                        ],
+                        as: ToolResultDTOs.EditSummary.self
+                    )
+                    XCTAssertEqual(edit.reply.status, "failed")
+                    XCTAssertEqual(edit.reply.editsApplied, 0)
+                    XCTAssertEqual(edit.reply.errorCode, "worktree_scope_unavailable")
+                    XCTAssertEqual(edit.reply.errorMessage, refusalSummary)
+                    XCTAssertEqual(edit.reply.suggestion, expected.recovery)
+                    XCTAssertEqual(edit.reply.retryable, false)
+                    XCTAssertNil(edit.reply.retryAfterMilliseconds)
+                    XCTAssertFalse(edit.raw.contains("retry_after_ms"), edit.raw)
+                    XCTAssertEqual(edit.reply.mutationState, "not_applied")
+
+                    let action = try await rawCall(
+                        MCPWindowToolName.fileActions,
+                        [
+                            "action": "create",
+                            "path": context.fileURL.path,
+                            "content": "let overwritten = true\n",
+                            "if_exists": "overwrite"
+                        ],
+                        as: ToolResultDTOs.FileActionReply.self
+                    )
+                    XCTAssertEqual(action.reply.status, "failed")
+                    XCTAssertEqual(action.reply.errorCode, "worktree_scope_unavailable")
+                    XCTAssertEqual(action.reply.errorMessage, refusalSummary)
+                    XCTAssertEqual(action.reply.suggestion, expected.recovery)
+                    XCTAssertEqual(action.reply.retryable, false)
+                    XCTAssertNil(action.reply.retryAfterMilliseconds)
+                    XCTAssertFalse(action.raw.contains("retry_after_ms"), action.raw)
+
+                    // `FileActionReply.path` echoes the caller's path, so only the refusal text is checked.
+                    for text in [edit.reply.errorMessage, edit.reply.suggestion, action.reply.errorMessage, action.reply.suggestion] {
+                        XCTAssertFalse(text?.contains(fixture.rootURL.path) ?? true, "The refusal printed an absolute path: \(text ?? "nil")")
+                    }
+                    XCTAssertEqual(try Data(contentsOf: context.fileURL), canonicalBytes)
+                    XCTAssertFalse(
+                        FileManager.default.fileExists(atPath: worktreeRoot.path),
+                        "A refused mutation recreated the worktree path"
+                    )
+                    await cleanup()
+                    try await fixture.assertCleanedUp()
+                } catch {
+                    await cleanup()
+                    throw error
+                }
+            }
+        }
+
         func testReadProviderUnresolvedQualifiedInputFailsClosedWithoutWaitingForPeer() async throws {
             let fixture = try await makeQualifiedReplayFixture(name: "UnresolvedQualifiedHeldPeer")
             let heldPeer = try await MCPPathContractHeldPeerIngress.start(

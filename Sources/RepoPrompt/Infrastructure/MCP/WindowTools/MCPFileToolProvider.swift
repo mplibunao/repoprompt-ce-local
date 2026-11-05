@@ -61,7 +61,10 @@ final class MCPFileToolProvider: MCPAppToolProviding {
         } catch is CancellationError {
             throw CancellationError()
         } catch let failure as MCPServerViewModel.FileToolAuthorityFailure {
-            return try Self.authorityFailureValue(toolName: toolName, args: args, failure: failure)
+            let routedFailure = appContext.map {
+                failure.attachingRouteContext(from: $0.resolvedTabContext.snapshot)
+            } ?? failure
+            return try Self.authorityFailureValue(toolName: toolName, args: args, failure: routedFailure)
         }
     }
 
@@ -103,7 +106,12 @@ final class MCPFileToolProvider: MCPAppToolProviding {
         failure: MCPServerViewModel.FileToolAuthorityFailure
     ) throws -> Value {
         let message = failure.localizedDescription
-        let retryAfter = MCPServerViewModel.FileToolAuthorityFailure.retryAfterMilliseconds
+        let retryAfter = failure.retryAfterMilliseconds
+        let unavailableWorktree: MCPUnavailableWorktreeDiagnostic? = if case let .unavailableWorktree(diagnostic) = failure {
+            diagnostic
+        } else {
+            nil
+        }
         switch toolName {
         case MCPWindowToolName.search:
             return try Value(ToolResultDTOs.SearchResultDTO(
@@ -115,11 +123,12 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 perFileCounts: [],
                 pathMatchLines: [],
                 contentMatchGroups: [],
-                errorMessage: message,
+                errorMessage: unavailableWorktree?.summary ?? message,
                 errorCode: failure.errorCode,
                 retryable: failure.retryable,
                 retryAfterMilliseconds: retryAfter,
-                suggestion: "Retry after workspace restoration settles or bind the intended context again."
+                suggestion: unavailableWorktree?.recovery
+                    ?? "Retry after workspace restoration settles or bind the intended context again."
             ))
         case MCPWindowToolName.readFile:
             let path = args["path"]?.stringValue ?? ""
@@ -140,7 +149,7 @@ final class MCPFileToolProvider: MCPAppToolProviding {
                 rootsCount: 0,
                 usesLegend: false,
                 tree: message,
-                note: "Workspace authority unavailable",
+                note: unavailableWorktree == nil ? "Workspace authority unavailable" : "Bound worktree folder unavailable",
                 wasTruncated: false,
                 errorMessage: message,
                 errorCode: failure.errorCode,
