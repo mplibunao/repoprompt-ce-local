@@ -8,7 +8,7 @@ The run ports upstream PR 1348 as hand-written edits. After `app_settings` clear
 |------|---------|---------------|---------|
 | 1. Resolver keeps the saved agent when its model is blank | done | engineer · Orchestrate 1/2: CB resolver keeps saved agent | `fix(context-builder): keep the saved agent when its model is cleared` |
 | 2. `app_settings` reads and writes the stored Context Builder configuration | done | pair · Orchestrate 2/2: app_settings stored CB config; engineer · Refactor: remove legacy CB selection API | `fix(app_settings): read and write the stored Context Builder selection` |
-| 3. Validation, debug-app run, and pull request | pending | | |
+| 3. Validation, debug-app run, and pull request | done | engineer · Branch review: port 1348; engineer · Review fixes: port 1348 | `refactor(settings): drop markUserDefined from settings write diagnostics`; `docs(ledgers): record validation for the upstream PR 1348 port` |
 
 ## Planning
 
@@ -44,15 +44,18 @@ The run ports upstream PR 1348 as hand-written edits. After `app_settings` clear
   - `set context_builder.agent cursor` read back `cursor`, and the implicit `options` call reported `filters.agent` `cursor` with no candidates.
   - The debug profile's original Context Builder values were restored afterwards.
 - Decision: the debug app was idle when the smoke replaced it, with no running or waiting agent sessions. It was running another worktree's build. Source: orchestrator check before the relaunch.
-- Decision: a branch-level review from the engineer template in `.agents/skills/rpce-merge-pr-batch/references/review-prompts.md` ran on the whole branch with the PR description draft. It found no blockers and no should-fix items. Fixed from its nits:
+- Decision: a branch-level review from the engineer template in `.agents/skills/rpce-merge-pr-batch/references/review-prompts.md` reviewed every commit on the branch against the PR description draft. It reported nits only, with no blockers or should-fix items. Fixed from its nits:
   - The `markUserDefined` diagnostic field that only the removed setters used.
   - A missing assertion for clearing the model with no saved agent.
   - A test that posted on the shared notification center.
   - Over-broad wording in `docs/architecture/settings-persistence.md`.
-  - The claim that `get` output carries the per-key descriptions.
+  - The claim that `get` output includes the per-key descriptions.
   - The `Upstream-Ref` line, which sat outside the commit trailer block.
 
   Rejected: splitting the unknown-agent test, whose name and grouping follow upstream and whose scenarios share one saved-agent state, and removing pin re-derivation from `persistGlobalDefaultsChange`, which this port doesn't touch. Source: branch review.
+
+- Decision: the refactor pass that `CONTRIBUTING.md` asks for is the refactor gate items 1 and 2 each went through, so no separate branch-level cleanup session ran. Source: orchestrator judgment.
+- Evidence: `pr-ready` against `main` passed at `9788f5005`: Swift lint, the root tests (2,048 tests in five bundles, no failures), and the RepoPrompt product build. The review fixes didn't change the behavior the debug-app run covered, so the run wasn't repeated.
 
 ## Parked decisions
 
