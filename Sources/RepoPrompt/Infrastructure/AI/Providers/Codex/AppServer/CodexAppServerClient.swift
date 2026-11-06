@@ -617,6 +617,15 @@ actor CodexAppServerClient {
         await clearRegisteredExpectedAgentPIDIfNeeded()
     }
 
+    /// Returns the PID registered for this run only while it is still the live transport's process.
+    func activeExpectedAgentPID(for runID: UUID) -> pid_t? {
+        guard let registeredExpectedAgentPID,
+              registeredExpectedAgentPID.runID == runID,
+              activeTransport?.process.pid == registeredExpectedAgentPID.pid
+        else { return nil }
+        return registeredExpectedAgentPID.pid
+    }
+
     private func registerExpectedAgentPIDIfNeeded(for pid: pid_t) async {
         guard !didTerminateTransport,
               let registration = expectedAgentPIDRegistration

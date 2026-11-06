@@ -124,6 +124,9 @@ enum CodexTurnInterruptError: Error, LocalizedError, Equatable {
 protocol CodexSessionControlling: AnyObject {
     var hasActiveThread: Bool { get }
     var currentSessionReference: CodexNativeSessionController.SessionRef? { get }
+    /// The Codex process whose descendants may own this controller's RepoPrompt MCP route, or nil
+    /// when the controller cannot name one.
+    func routingProcessID() async -> pid_t?
     var events: AsyncStream<CodexNativeSessionController.Event> { get }
 
     func ensureEventsStreamReady()
@@ -191,6 +194,10 @@ protocol CodexSessionControlling: AnyObject {
 
 extension CodexSessionControlling {
     var currentSessionReference: CodexNativeSessionController.SessionRef? {
+        nil
+    }
+
+    func routingProcessID() async -> pid_t? {
         nil
     }
 
@@ -870,6 +877,10 @@ final class CodexNativeSessionController {
 
     var currentSessionReference: SessionRef? {
         activeSessionReference
+    }
+
+    func routingProcessID() async -> pid_t? {
+        await client.activeExpectedAgentPID(for: runID)
     }
 
     private let inboundStreamInstallationMutex = AsyncMutex()
