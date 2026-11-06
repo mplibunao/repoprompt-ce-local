@@ -5,11 +5,13 @@ import XCTest
 #if DEBUG
     /// Polls `condition` until it holds or `seconds` elapse and reports whether it held. Every
     /// bounded wait in the startup suites goes through here, so a start that never settles fails
-    /// the test instead of hanging the suite.
+    /// the test instead of hanging the suite. The deadline is monotonic so a wall-clock change can't
+    /// stretch or cut it, and a cancelled caller stops polling instead of spinning until the deadline.
     @MainActor
     func startupTestWaitBounded(seconds: TimeInterval = 5, until condition: @MainActor () -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(seconds))
+        while clock.now < deadline, !Task.isCancelled {
             if condition() {
                 return true
             }
@@ -162,6 +164,132 @@ import XCTest
     }
 
     struct StartupTestJoinTimeout: Error {}
+
+    /// Runs `operation` as a labelled test step bounded by `seconds` and returns its result.
+    ///
+    /// An error the operation throws comes back whole inside `StartupTestStepError`, so the caller
+    /// still sees the producer's own failure rather than a timeout or a cancellation. When the
+    /// operation doesn't finish in time, the step records one failure naming `step` at the caller,
+    /// cancels the operation, and throws `StartupTestStepTimeout`. The wait never awaits the
+    /// operation itself, so an operation that ignores cancellation is left running, not joined.
+    @MainActor
+    func startupTestAwaitResult<T>(
+        _ step: String,
+        seconds: TimeInterval = 30,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ operation: @escaping @MainActor () async throws -> T
+    ) async throws -> T {
+        try await startupTestAwaitResult(
+            step,
+            seconds: seconds,
+            alsoCancelling: nil,
+            file: file,
+            line: line,
+            operation
+        )
+    }
+
+    /// Joins `task` as a labelled step bounded by `seconds`, returning its value or throwing its own
+    /// error inside `StartupTestStepError`. A timed-out join also cancels `task`.
+    @MainActor
+    func startupTestTaskResult<T>(
+        _ task: Task<T, some Error>,
+        _ step: String,
+        seconds: TimeInterval = 30,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> T {
+        try await startupTestAwaitResult(
+            step,
+            seconds: seconds,
+            alsoCancelling: { task.cancel() },
+            file: file,
+            line: line
+        ) {
+            try await task.value
+        }
+    }
+
+    /// Joins every task in `tasks`, in order, against one shared deadline, so a collection doesn't
+    /// get `seconds` per task. The first task error comes back inside `StartupTestStepError`; a
+    /// timed-out join cancels every task.
+    @MainActor
+    func startupTestTaskResults<T>(
+        _ tasks: [Task<T, some Error>],
+        _ step: String,
+        seconds: TimeInterval = 30,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> [T] {
+        try await startupTestAwaitResult(
+            step,
+            seconds: seconds,
+            alsoCancelling: { tasks.forEach { $0.cancel() } },
+            file: file,
+            line: line
+        ) {
+            var values: [T] = []
+            for task in tasks {
+                try await values.append(task.value)
+            }
+            return values
+        }
+    }
+
+    @MainActor
+    private func startupTestAwaitResult<T>(
+        _ step: String,
+        seconds: TimeInterval,
+        alsoCancelling cancelJoined: (() -> Void)?,
+        file: StaticString,
+        line: UInt,
+        _ operation: @escaping @MainActor () async throws -> T
+    ) async throws -> T {
+        var outcome: Result<T, Error>?
+        let finished = startupTestRunTracked({
+            do {
+                outcome = try await .success(operation())
+            } catch {
+                outcome = .failure(error)
+            }
+        }, in: nil, alsoCancelling: cancelJoined)
+        let didFinish = await startupTestWaitBounded(seconds: seconds) { finished.value }
+        guard didFinish, let outcome else {
+            finished.cancel()
+            // A caller cancelled while waiting stops early and gets its own CancellationError, with no
+            // timeout failure recorded.
+            try Task.checkCancellation()
+            XCTFail("Timed out after \(seconds) s: \(step)", file: file, line: line)
+            throw StartupTestStepTimeout(step: step, seconds: seconds)
+        }
+        return try outcome.mapError { StartupTestStepError(step: step, underlying: $0) }.get()
+    }
+
+    /// A bounded step that didn't finish in time. The failure is already recorded at the caller.
+    struct StartupTestStepTimeout: Error, CustomStringConvertible {
+        let step: String
+        let seconds: TimeInterval
+
+        var description: String {
+            "Timed out after \(seconds) s: \(step)"
+        }
+    }
+
+    /// The error a labelled step's own operation threw, kept whole in `underlying` so a caller can
+    /// still match the producer's failure.
+    struct StartupTestStepError: Error, CustomStringConvertible, LocalizedError {
+        let step: String
+        let underlying: any Error
+
+        var description: String {
+            "\(step) failed: \(underlying)"
+        }
+
+        var errorDescription: String? {
+            "\(step) failed: \(underlying.localizedDescription)"
+        }
+    }
 
     /// Runs `operation` against `fixture` and waits at most `seconds` for it, failing at the caller
     /// when it does not finish. An operation that times out stays tracked by the fixture, whose

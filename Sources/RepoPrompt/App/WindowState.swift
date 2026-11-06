@@ -1441,6 +1441,13 @@ class WindowState: ObservableObject {
         ) {
             domainWorkspacePresentationBridge?.setDefaultWorkspaceCreationWillBeginHandlerForTesting(handler)
         }
+
+        /// Waits for the presentation bridge's initial projection, the bridge path's half of Default
+        /// readiness, so a test can tell that path finished apart from activation. Returns at once for a
+        /// window without a domain runtime.
+        func awaitInitialDomainWorkspaceProjectionForTesting() async {
+            await domainWorkspacePresentationBridge?.awaitInitialProjection()
+        }
     #endif
 
     @MainActor

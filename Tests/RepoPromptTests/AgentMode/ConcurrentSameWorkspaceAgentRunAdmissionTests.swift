@@ -6,91 +6,143 @@ import XCTest
 #if DEBUG
     @MainActor
     final class ConcurrentSameWorkspaceAgentRunAdmissionTests: XCTestCase {
-        private var cleanupOperation: (@MainActor () async -> Void)?
+        private lazy var cleanup = AdmissionTestCleanup()
+        private var holdsSuiteGate = false
 
         override func setUp() async throws {
             try await super.setUp()
-            await AdmissionTestSuiteGate.shared.acquire()
+            try await AdmissionTestSuiteGate.shared.acquire()
+            holdsSuiteGate = true
         }
 
         override func tearDown() async throws {
-            if let cleanupOperation {
-                await cleanupOperation()
-                self.cleanupOperation = nil
+            var cleanupError: (any Error)?
+            do {
+                try await cleanup.run("per-test cleanup")
+            } catch is StartupTestStepTimeout {
+                // Already recorded, naming the cleanup step and the state it left behind.
+            } catch {
+                cleanupError = error
             }
-            await AdmissionTestSuiteGate.shared.release()
+            // XCTest keeps every test case alive until the run ends, so let go of the registry and the
+            // closed windows and runtimes it remembers; a timed-out step that still holds it keeps it.
+            cleanup = AdmissionTestCleanup()
+            // Release the suite gate however cleanup ended, so one failed teardown can't stall later tests.
+            if holdsSuiteGate {
+                holdsSuiteGate = false
+                await AdmissionTestSuiteGate.shared.release()
+            }
             try await super.tearDown()
+            if let cleanupError {
+                throw cleanupError
+            }
         }
 
-        private func trackCleanup(_ operation: @escaping @MainActor () async -> Void) {
-            precondition(cleanupOperation == nil)
-            cleanupOperation = operation
+        /// After the released persistence path is seen to finish, activation would follow within
+        /// milliseconds if its readiness join were missing; this window leaves headroom for a loaded
+        /// machine without making the suite slow.
+        private static let prematureActivationWindowSeconds: TimeInterval = 1
+
+        private enum DefaultPersistencePath: String {
+            case manager
+            case bridge
         }
 
+        /// The initial Default activation joins both Default persistence owners. Each subcase releases
+        /// one owner, waits for that owner's own sign of completion, and requires the activation to
+        /// stay absent while the other is held, so removing either join fails one subcase.
         func testInitialDefaultPersistenceCompletesBeforeActivation() async throws {
-            let (_, storageOverride, runtime) = try makeIsolatedRuntime(
-                container: makeTemporaryDirectory(named: "DefaultPersistenceOrdering"),
-                profileIdentifier: "default-persistence-ordering"
-            )
-            try await runtime.start()
+            try await assertActivationWaitsForHeldDefaultPersistence(releasing: .manager, holding: .bridge)
+            try await assertActivationWaitsForHeldDefaultPersistence(releasing: .bridge, holding: .manager)
+        }
 
-            let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
-            GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-            let window = WindowState(domainRuntime: runtime)
-            WindowStatesManager.shared.registerWindowState(window)
-            GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
-            let managerPersistenceGate = AdmissionSaveGate()
-            let bridgePersistenceGate = AdmissionSaveGate()
+        private func assertActivationWaitsForHeldDefaultPersistence(
+            releasing released: DefaultPersistencePath,
+            holding held: DefaultPersistencePath
+        ) async throws {
+            let subcase = "\(released.rawValue) released, \(held.rawValue) held"
+            let runtime = try makeIsolatedRuntime(
+                container: makeTemporaryDirectory(named: "DefaultPersistenceOrdering"),
+                profileIdentifier: "default-persistence-ordering",
+                cleanup: cleanup
+            ).runtime
+            try await cleanup.step("starting the runtime (\(subcase))") {
+                try await runtime.start()
+            }
+
+            let window = makeAdmissionWindow(runtime: runtime, cleanup: cleanup)
+            let managerPersistenceGate = makeSaveGate("manager Default persistence gate (\(subcase))")
+            let bridgePersistenceGate = makeSaveGate("bridge Default persistence gate (\(subcase))")
             window.workspaceManager.setDefaultWorkspaceCreationWillBeginHandlerForTesting { _ in
                 await managerPersistenceGate.enterFirstAndWait()
             }
             window.setDomainWorkspaceDefaultCreationWillBeginHandlerForTesting { _ in
                 await bridgePersistenceGate.enterFirstAndWait()
             }
-            trackCleanup {
-                await managerPersistenceGate.open()
-                await bridgePersistenceGate.open()
+            cleanup.onRelease {
                 window.workspaceManager.setDefaultWorkspaceCreationWillBeginHandlerForTesting(nil)
                 window.setDomainWorkspaceDefaultCreationWillBeginHandlerForTesting(nil)
-                window.beginClose()
-                await window.tearDown()
-                WindowStatesManager.shared.unregisterWindowState(window)
-                _ = await runtime.shutdown()
-                storageOverride.restore()
             }
+            let gates: [DefaultPersistencePath: AdmissionSaveGate] = [
+                .manager: managerPersistenceGate,
+                .bridge: bridgePersistenceGate
+            ]
 
-            try await waitUntil("both Default persistence paths to reach their gates") {
+            try await waitUntil("both Default persistence paths to reach their gates (\(subcase))") {
                 let managerEntered = await managerPersistenceGate.hasEntered()
                 let bridgeEntered = await bridgePersistenceGate.hasEntered()
                 return managerEntered && bridgeEntered
             }
             let systemWorkspace = try XCTUnwrap(
-                window.workspaceManager.workspaces.first(where: \.isSystemWorkspace)
+                window.workspaceManager.workspaces.first(where: \.isSystemWorkspace),
+                subcase
             )
-            XCTAssertNil(window.workspaceManager.activeWorkspace)
+            XCTAssertNil(window.workspaceManager.activeWorkspace, subcase)
             let canonicalBeforeActivation = await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id)
-            XCTAssertNil(canonicalBeforeActivation)
+            XCTAssertNil(canonicalBeforeActivation, subcase)
 
-            await managerPersistenceGate.open()
-            try await waitUntil("manager Default persistence to become canonical") {
-                await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id) != nil
+            await gates[released]?.open()
+            switch released {
+            case .manager:
+                try await waitUntil("manager Default persistence to become canonical (\(subcase))") {
+                    await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id) != nil
+                }
+            case .bridge:
+                try await cleanup.step("the bridge's initial Default projection (\(subcase))") {
+                    await window.awaitInitialDomainWorkspaceProjectionForTesting()
+                }
             }
-            XCTAssertNil(window.workspaceManager.activeWorkspace)
+            // Only the initial activation switch, which completes initialization, joins both owners.
+            // Once the bridge has projected, its projection adopts the canonical Default as the active
+            // workspace without that switch, so the active workspace counts as a sign of activation
+            // only while the bridge is held.
+            let activatedEarly = await startupTestWaitBounded(
+                seconds: Self.prematureActivationWindowSeconds
+            ) {
+                window.workspaceManager.isInitialized
+                    || (held == .bridge && window.workspaceManager.activeWorkspace != nil)
+            }
+            XCTAssertFalse(
+                activatedEarly,
+                "Default's initial activation ran while \(held.rawValue) persistence was still held (\(subcase)): "
+                    + "isInitialized=\(window.workspaceManager.isInitialized), "
+                    + "activeWorkspace=\(window.workspaceManager.activeWorkspace?.name ?? "nil")"
+            )
 
-            await bridgePersistenceGate.open()
-            await window.workspaceManager.awaitInitialized()
+            await gates[held]?.open()
+            try await cleanup.step("workspace manager initialization (\(subcase))") {
+                await window.workspaceManager.awaitInitialized()
+            }
 
-            XCTAssertEqual(window.workspaceManager.activeWorkspace?.id, systemWorkspace.id)
+            XCTAssertEqual(window.workspaceManager.activeWorkspace?.id, systemWorkspace.id, subcase)
             let canonicalAfterActivation = await runtime.workspaceStore.canonicalWorkspaceSnapshot(systemWorkspace.id)
-            let canonical = try XCTUnwrap(canonicalAfterActivation)
-            XCTAssertEqual(canonical.health, .writable)
+            let canonical = try XCTUnwrap(canonicalAfterActivation, subcase)
+            XCTAssertEqual(canonical.health, .writable, subcase)
+            try await cleanup.run("cleanup after the \(subcase) subcase")
         }
 
         func testSixOverlappingAgentRunStartsPersistUniqueIdentitiesAndDispatchProvidersExactlyOnce() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup {
-                await fixture.cleanup()
-            }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let workspaceID = fixture.workspaceID
             let initialWorkspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
             let initialTabs = initialWorkspace.composeTabs
@@ -98,8 +150,9 @@ import XCTest
             let initialActiveTabID = initialWorkspace.activeComposeTabID
             let coordinator = WorkspaceAgentAdmissionCoordinator.shared
             let coordinatorBaseline = coordinator.snapshot()
-            let saveGate = AdmissionSaveGate()
+            let saveGate = makeSaveGate("first durable admission save gate")
             let providerRecorder = AdmissionProviderRecorder(expectedCount: 6)
+            cleanup.onRelease { await providerRecorder.releaseAll() }
             fixture.window.workspaceManager.setWorkspaceSavePreparationDidFinishHandlerForTesting {
                 savedWorkspaceID,
                 _,
@@ -150,6 +203,7 @@ import XCTest
                     ])
                 }
             }
+            tasks.forEach { cleanup.onCancelAndJoin($0) }
 
             do {
                 try await waitUntil("first durable admission save to reach the gate") {
@@ -234,10 +288,7 @@ import XCTest
                 )
 
                 await providerRecorder.releaseAll()
-                var values: [Value] = []
-                for task in tasks {
-                    try await values.append(task.value)
-                }
+                let values = try await startupTestTaskResults(tasks, "the six overlapping starts")
                 let responsePairs = try values.map { value -> AdmissionIdentityPair in
                     let object = try XCTUnwrap(value.objectValue)
                     let session = try XCTUnwrap(object["session"]?.objectValue)
@@ -252,7 +303,7 @@ import XCTest
                     uniqueKeysWithValues: acceptedPairs.map { ($0, 1) }
                 ))
 
-                await fixture.closeWindowAndRuntime()
+                try await fixture.closeWindowAndRuntime()
                 try await fixture.withFreshRuntime(generation: 2) { restarted in
                     let restartedCatalog = await restarted.workspaceStore.snapshot()
                     let restartedSnapshot = await restarted.workspaceStore
@@ -274,15 +325,7 @@ import XCTest
             } catch {
                 await saveGate.open()
                 await providerRecorder.releaseAll()
-                tasks.forEach { $0.cancel() }
-                var taskErrors: [String] = []
-                for task in tasks {
-                    do {
-                        _ = try await task.value
-                    } catch {
-                        taskErrors.append(String(describing: error))
-                    }
-                }
+                let taskErrors = await cancelAndCollectErrors(tasks)
                 throw AdmissionTestError.fixtureSetup(
                     "\(error); taskErrors=\(taskErrors)"
                 )
@@ -290,17 +333,14 @@ import XCTest
         }
 
         func testSecondWindowRefreshesCanonicalAdmissionBeforePersistingItsOwnTarget() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup {
-                await fixture.cleanup()
-            }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let peer = try await fixture.makePeerWindow()
             let stalePeerWorkspace = try XCTUnwrap(
                 peer.workspaceManager.workspace(withID: fixture.workspaceID)
             )
             let coordinator = WorkspaceAgentAdmissionCoordinator.shared
             let coordinatorBaseline = coordinator.snapshot()
-            let saveGate = AdmissionSaveGate()
+            let saveGate = makeSaveGate("first window admission save gate")
             fixture.window.workspaceManager.setWorkspaceSavePreparationDidFinishHandlerForTesting {
                 workspaceID,
                 _,
@@ -344,6 +384,7 @@ import XCTest
                     "timeout": .int(0)
                 ])
             }
+            cleanup.onCancelAndJoin(firstTask)
             var secondTask: Task<Value, Error>?
             do {
                 try await waitUntil("first window admission to hold the workspace lease") {
@@ -361,6 +402,7 @@ import XCTest
                     ])
                 }
                 secondTask = queuedTask
+                cleanup.onCancelAndJoin(queuedTask)
                 try await waitUntil("peer admission to queue behind the first window") {
                     coordinator.waiterCount(for: fixture.workspaceID) == 1
                 }
@@ -369,17 +411,11 @@ import XCTest
                 XCTAssertEqual(peerProviderCountWhileQueued, 0)
 
                 await saveGate.open()
-                _ = try await firstTask.value
-                _ = try await queuedTask.value
+                _ = try await startupTestTaskResults([firstTask, queuedTask], "both windows' starts")
             } catch {
                 await saveGate.open()
-                firstTask.cancel()
-                secondTask?.cancel()
-                _ = try? await firstTask.value
-                if let secondTask {
-                    _ = try? await secondTask.value
-                }
-                throw error
+                let taskErrors = await cancelAndCollectErrors([firstTask] + [secondTask].compactMap(\.self))
+                throw AdmissionTestError.fixtureSetup("\(error); taskErrors=\(taskErrors)")
             }
 
             XCTAssertTrue(peerRefreshObserved)
@@ -413,8 +449,7 @@ import XCTest
         }
 
         func testCanonicalAdmissionRefreshReResolvesWorkspaceAfterReorder() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup { await fixture.cleanup() }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let peer = try await fixture.makePeerWindow()
             let staleWorkspace = try XCTUnwrap(peer.workspaceManager.workspace(withID: fixture.workspaceID))
             let firstRecorder = AdmissionProviderRecorder(expectedCount: 1, blockProviders: false)
@@ -431,7 +466,7 @@ import XCTest
             peer.workspaceManager.workspaces[peerIndex] = staleWorkspace
             peer.promptManager.loadComposeTabsFromWorkspace(staleWorkspace)
 
-            let gate = AdmissionHandoffGate()
+            let gate = makeHandoffGate("peer canonical-refresh gate")
             peer.workspaceManager.setAgentAdmissionCanonicalSnapshotHandlerForTesting { workspaceID in
                 let snapshot = await fixture.runtime.workspaceStore.canonicalWorkspaceSnapshot(workspaceID)
                 await gate.enterAndWait()
@@ -447,12 +482,13 @@ import XCTest
                     "timeout": .int(0)
                 ])
             }
-            await gate.waitUntilEntered()
+            cleanup.onCancelAndJoin(task)
+            try await waitUntil("the peer's start", enters: gate, producer: task)
             let target = peer.workspaceManager.workspaces.remove(at: peerIndex)
             peer.workspaceManager.workspaces.append(target)
             let unrelatedBefore = Array(peer.workspaceManager.workspaces.dropLast())
             await gate.open()
-            _ = try await task.value
+            _ = try await startupTestTaskResult(task, "the peer's start after reorder")
 
             XCTAssertEqual(Array(peer.workspaceManager.workspaces.dropLast()), unrelatedBefore)
             let refreshed = try XCTUnwrap(peer.workspaceManager.workspace(withID: fixture.workspaceID))
@@ -462,8 +498,7 @@ import XCTest
         }
 
         func testCanonicalAdmissionRefreshMergesIntoReplacementWorkspaceAfterAuthorityRead() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup { await fixture.cleanup() }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let peer = try await fixture.makePeerWindow()
             let staleWorkspace = try XCTUnwrap(peer.workspaceManager.workspace(withID: fixture.workspaceID))
             let firstRecorder = AdmissionProviderRecorder(expectedCount: 1, blockProviders: false)
@@ -480,7 +515,7 @@ import XCTest
             peer.workspaceManager.workspaces[peerIndex] = staleWorkspace
             peer.promptManager.loadComposeTabsFromWorkspace(staleWorkspace)
 
-            let gate = AdmissionHandoffGate()
+            let gate = makeHandoffGate("peer canonical-refresh gate")
             peer.workspaceManager.setAgentAdmissionCanonicalSnapshotHandlerForTesting { workspaceID in
                 let snapshot = await fixture.runtime.workspaceStore.canonicalWorkspaceSnapshot(workspaceID)
                 await gate.enterAndWait()
@@ -496,7 +531,8 @@ import XCTest
                     "timeout": .int(0)
                 ])
             }
-            await gate.waitUntilEntered()
+            cleanup.onCancelAndJoin(task)
+            try await waitUntil("the peer's start", enters: gate, producer: task)
             let replacementTab = ComposeTabState(name: "Replacement-local tab")
             var replacement = staleWorkspace
             replacement.name = "Replacement-local workspace"
@@ -504,7 +540,7 @@ import XCTest
             replacement.activeComposeTabID = replacementTab.id
             peer.workspaceManager.workspaces[peerIndex] = replacement
             await gate.open()
-            _ = try await task.value
+            _ = try await startupTestTaskResult(task, "the peer's start after replacement")
 
             let refreshed = try XCTUnwrap(peer.workspaceManager.workspace(withID: fixture.workspaceID))
             XCTAssertEqual(refreshed.name, replacement.name)
@@ -515,8 +551,7 @@ import XCTest
         }
 
         func testCanonicalAdmissionRefreshRejectsWorkspaceRemovedDuringAuthorityRead() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup { await fixture.cleanup() }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let manager = fixture.window.workspaceManager
             let canonicalBeforeValue = await fixture.runtime.workspaceStore
                 .canonicalWorkspaceSnapshot(fixture.workspaceID)
@@ -527,7 +562,7 @@ import XCTest
             )
             let coordinator = WorkspaceAgentAdmissionCoordinator.shared
             let provisionalCountBefore = coordinator.snapshot().provisionalSessionCount
-            let gate = AdmissionHandoffGate()
+            let gate = makeHandoffGate("canonical-refresh gate")
             manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting { workspaceID in
                 let snapshot = await fixture.runtime.workspaceStore.canonicalWorkspaceSnapshot(workspaceID)
                 await gate.enterAndWait()
@@ -543,14 +578,18 @@ import XCTest
                     "timeout": .int(0)
                 ])
             }
-            await gate.waitUntilEntered()
+            cleanup.onCancelAndJoin(task)
+            try await waitUntil("the start", enters: gate, producer: task)
             manager.workspaces.removeAll { $0.id == fixture.workspaceID }
             await gate.open()
             do {
-                _ = try await task.value
+                _ = try await startupTestTaskResult(task, "the start whose target was removed")
                 XCTFail("A removed target must reject before provisional publication.")
-            } catch {
-                XCTAssertTrue(error.localizedDescription.contains("disappeared"), String(describing: error))
+            } catch let error as StartupTestStepError {
+                XCTAssertTrue(
+                    error.underlying.localizedDescription.contains("disappeared"),
+                    String(describing: error.underlying)
+                )
             }
 
             let providerCount = await recorder.count()
@@ -593,13 +632,12 @@ import XCTest
         }
 
         func testCanonicalAdmissionRefreshHonorsCancellationDuringAuthorityRead() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup { await fixture.cleanup() }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let manager = fixture.window.workspaceManager
             let workspaceBefore = try XCTUnwrap(manager.workspace(withID: fixture.workspaceID))
             let coordinator = WorkspaceAgentAdmissionCoordinator.shared
             let provisionalCountBefore = coordinator.snapshot().provisionalSessionCount
-            let gate = AdmissionHandoffGate()
+            let gate = makeHandoffGate("canonical-refresh gate")
             manager.setAgentAdmissionCanonicalSnapshotHandlerForTesting { workspaceID in
                 let snapshot = await fixture.runtime.workspaceStore.canonicalWorkspaceSnapshot(workspaceID)
                 await gate.enterAndWait()
@@ -615,13 +653,15 @@ import XCTest
                     "timeout": .int(0)
                 ])
             }
-            await gate.waitUntilEntered()
+            cleanup.onCancelAndJoin(task)
+            try await waitUntil("the start", enters: gate, producer: task)
             task.cancel()
             await gate.open()
-            do {
-                _ = try await task.value
-                XCTFail("Cancellation during canonical refresh must prevent admission.")
-            } catch is CancellationError {}
+            try await assertCancelled(
+                task,
+                "the start cancelled during canonical refresh",
+                "Cancellation during canonical refresh must prevent admission."
+            )
 
             let providerCount = await recorder.count()
             XCTAssertEqual(providerCount, 0)
@@ -636,8 +676,7 @@ import XCTest
         }
 
         func testCanonicalAdmissionRefreshReconcilesStashedIdentityBeforeCreatingUniqueTab() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup { await fixture.cleanup() }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let peer = try await fixture.makePeerWindow()
             let stalePeerWorkspace = try XCTUnwrap(peer.workspaceManager.workspace(withID: fixture.workspaceID))
             let firstRecorder = AdmissionProviderRecorder(expectedCount: 1, blockProviders: false)
@@ -698,8 +737,7 @@ import XCTest
         }
 
         func testAgentRunRefusalUsesReasonSpecificRetryGuidance() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup { await fixture.cleanup() }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let manager = fixture.window.workspaceManager
             let canonicalValue = await fixture.runtime.workspaceStore
                 .canonicalWorkspaceSnapshot(fixture.workspaceID)
@@ -767,21 +805,18 @@ import XCTest
         }
 
         func testAgentRunStartDuringLaunchRestoreIsRefusedUntilTheRestoreSettles() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            let leaseHold = AdmissionSaveGate()
-            let restoreHold = AdmissionSaveGate()
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
+            let leaseHold = makeSaveGate("restore activation-lease hold")
+            let restoreHold = makeSaveGate("restore root-hydration hold")
             let window = fixture.window
             let manager = window.workspaceManager
             let windowStates = WindowStatesManager.shared
-            trackCleanup {
-                await leaseHold.open()
-                await restoreHold.open()
+            cleanup.onRelease {
                 manager.setWorkspaceActivationLeaseDidAcquireHandlerForTesting(nil)
                 manager.setWorkspaceRootHydrationWillSpawnHandlerForTesting(nil)
                 if windowStates.isRestoreSessionLoadPending {
                     windowStates.finishRestoreSessionLoadForTesting(entries: [])
                 }
-                await fixture.cleanup()
             }
             let restoredWorkspace = try XCTUnwrap(manager.activeWorkspace)
             let systemWorkspace = try XCTUnwrap(manager.workspaces.first(where: \.isSystemWorkspace))
@@ -882,7 +917,7 @@ import XCTest
         }
 
         func testStartGateRefusesWhileASwitchIsPendingOnASettledWindow() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let window = fixture.window
             let manager = window.workspaceManager
             manager.registerSwitchSessionProvider(ConfirmationRequiringSwitchSessionProvider())
@@ -891,14 +926,12 @@ import XCTest
                 guard let systemWorkspace else { return nil }
                 return await manager.requestWorkspaceSwitch(to: systemWorkspace, saveState: false)
             }
-            trackCleanup {
-                manualSwitch.cancel()
+            cleanup.onRelease {
                 if let confirmation = manager.pendingSwitchConfirmation {
                     manager.resolveSwitchConfirmation(id: confirmation.id, allow: false)
                 }
-                _ = await manualSwitch.value
-                await fixture.cleanup()
             }
+            cleanup.onCancelAndJoin(manualSwitch)
             // Agent Mode handles the fixture's own activation first, so below only the switch
             // under test refuses starts.
             try await waitUntil("Agent Mode to handle the fixture's activation") {
@@ -912,7 +945,7 @@ import XCTest
             XCTAssertThrowsError(try AgentRunMCPToolService.requireSettledWorkspaceForStart(in: window))
             let confirmation = try XCTUnwrap(manager.pendingSwitchConfirmation)
             manager.resolveSwitchConfirmation(id: confirmation.id, allow: false)
-            let declinedSwitch = await manualSwitch.value
+            let declinedSwitch = try await startupTestTaskResult(manualSwitch, "the declined manual switch")
             XCTAssertEqual(declinedSwitch?.didSwitch, false)
 
             // A switch notification Agent Mode hasn't handled. The window still has a workspace,
@@ -955,23 +988,15 @@ import XCTest
         }
 
         func testRestoreEntryStaysInFlightUntilItsRestoreFinishes() async throws {
-            let (_, storageOverride, runtime) = try makeIsolatedRuntime(
+            let runtime = try makeIsolatedRuntime(
                 container: makeTemporaryDirectory(named: "RestoreEntryInFlight"),
-                profileIdentifier: "restore-entry-in-flight"
-            )
-            try await runtime.start()
-            let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
-            GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-            let window = WindowState(domainRuntime: runtime)
-            WindowStatesManager.shared.registerWindowState(window)
-            GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
-            trackCleanup {
-                window.beginClose()
-                await window.tearDown()
-                WindowStatesManager.shared.unregisterWindowState(window)
-                _ = await runtime.shutdown()
-                storageOverride.restore()
+                profileIdentifier: "restore-entry-in-flight",
+                cleanup: cleanup
+            ).runtime
+            try await cleanup.step("starting the runtime") {
+                try await runtime.start()
             }
+            let window = makeAdmissionWindow(runtime: runtime, cleanup: cleanup)
             // A launch restore can hand a window its entry before the window's workspace manager
             // has initialized, and a later entry replaces one that hasn't been applied yet.
             guard !window.workspaceManager.isInitialized else {
@@ -985,16 +1010,19 @@ import XCTest
             XCTAssertEqual(replacedEntryCompletions, 1)
             XCTAssertTrue(window.isWorkspaceRestoreInFlight, "the replacing entry was not counted")
 
-            await window.workspaceManager.awaitInitialized()
+            try await cleanup.step("workspace manager initialization") {
+                await window.workspaceManager.awaitInitialized()
+            }
             try await waitUntil("the replacing entry's restore to finish") { restoreFinished }
             XCTAssertFalse(window.isWorkspaceRestoreInFlight, "the finished restore was still counted")
         }
 
         func testCanonicalAdmissionRefreshRejectsDuplicateTabIDWithoutMutationOrDispatch() async throws {
-            let (_, storageOverride, runtime) = try makeIsolatedRuntime(
+            let runtime = try makeIsolatedRuntime(
                 container: makeTemporaryDirectory(named: "MalformedCanonicalIdentity"),
-                profileIdentifier: "malformed-canonical-admission"
-            )
+                profileIdentifier: "malformed-canonical-admission",
+                cleanup: cleanup
+            ).runtime
             let authority = DomainWorkspaceAuthorityClient(store: runtime.workspaceStore, windowID: -882)
             // The full-window fixture runs Oracle chat-session writers and switches to the workspace,
             // which schedules saves this test never awaits, so the whole-model comparison below would
@@ -1004,12 +1032,10 @@ import XCTest
                 coordinator: WorkspaceAgentAdmissionCoordinator(),
                 domainWorkspaceAuthorityClient: authority
             ).manager
-            trackCleanup {
-                manager.prepareForWindowClose()
-                _ = await runtime.shutdown()
-                storageOverride.restore()
+            cleanup.onClose { manager.prepareForWindowClose() }
+            try await cleanup.step("starting the runtime") {
+                try await runtime.start()
             }
-            try await runtime.start()
 
             var tab = ComposeTabState(name: "Admission")
             tab.activeChatSessionID = UUID()
@@ -1078,8 +1104,7 @@ import XCTest
         }
 
         func testCanonicalAdmissionRefreshReportsLocalComposeAndStashDuplicateAsLocalState() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup { await fixture.cleanup() }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let manager = fixture.window.workspaceManager
             let canonicalValue = await fixture.runtime.workspaceStore
                 .canonicalWorkspaceSnapshot(fixture.workspaceID)
@@ -1127,8 +1152,7 @@ import XCTest
         }
 
         func testRetainedRecoveryKeepsPeerProvisionalFenceUntilRecoveryTerminates() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup { await fixture.cleanup() }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let peer = try await fixture.makePeerWindow()
             let coordinator = WorkspaceAgentAdmissionCoordinator.shared
             let baseline = coordinator.snapshot()
@@ -1136,12 +1160,19 @@ import XCTest
             let sessionID = UUID()
             let initiatingOwnerID = UUID()
             let recoveryID = UUID()
-            let gate = AdmissionHandoffGate()
+            let gate = makeHandoffGate("retained recovery gate")
             XCTAssertTrue(coordinator.reserveProvisionalSession(
                 workspaceID: workspaceID,
                 sessionID: sessionID,
                 ownerID: initiatingOwnerID
             ))
+            cleanup.onRelease {
+                coordinator.releaseProvisionalSession(
+                    workspaceID: workspaceID,
+                    sessionID: sessionID,
+                    ownerID: initiatingOwnerID
+                )
+            }
             fixture.window.workspaceManager.retainProvisionalAgentAdmissionRecovery(
                 recoveryID: recoveryID,
                 workspaceID: workspaceID,
@@ -1151,7 +1182,9 @@ import XCTest
                 await gate.enterAndWait()
                 return .complete(.localOnly)
             }
-            await gate.waitUntilEntered()
+            try await waitUntil("the retained recovery to enter \(gate.name)") {
+                await gate.hasEntered()
+            }
 
             coordinator.releaseProvisionalSession(
                 workspaceID: workspaceID,
@@ -1177,12 +1210,9 @@ import XCTest
         }
 
         func testSecondWindowCannotStartPublishedProvisionalSessionBeforeAcceptance() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup {
-                await fixture.cleanup()
-            }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let peer = try await fixture.makePeerWindow()
-            let providerGate = AdmissionHandoffGate()
+            let providerGate = makeHandoffGate("provider dispatch gate")
             let firstRecorder = AdmissionProviderRecorder(expectedCount: 1, blockProviders: false)
             var provisionalPair: AdmissionIdentityPair?
             let firstService = makeAgentRunStartService(
@@ -1201,7 +1231,8 @@ import XCTest
                     "timeout": .int(0)
                 ])
             }
-            await providerGate.waitUntilEntered()
+            cleanup.onCancelAndJoin(firstTask)
+            try await waitUntil("the first window's start", enters: providerGate, producer: firstTask)
             let pair = try XCTUnwrap(provisionalPair)
 
             let publishedSnapshotValue = await fixture.runtime.workspaceStore
@@ -1242,7 +1273,7 @@ import XCTest
             XCTAssertEqual(providerCountBeforeAcceptance, 0)
 
             await providerGate.open()
-            _ = try await firstTask.value
+            _ = try await startupTestTaskResult(firstTask, "the first window's start after acceptance")
             let firstAttemptCounts = await firstRecorder.attemptCounts()
             XCTAssertEqual(firstAttemptCounts[pair], 1)
 
@@ -1263,10 +1294,7 @@ import XCTest
         }
 
         func testAgentAdmissionsForDistinctDurableWorkspacesOverlap() async throws {
-            let fixture = try await DistinctDurableAdmissionFixture.make()
-            trackCleanup {
-                await fixture.cleanup()
-            }
+            let fixture = try await DistinctDurableAdmissionFixture.make(cleanup: cleanup)
             let first = fixture.first
             let second = fixture.second
             let initialTabsByWorkspace = try Dictionary(uniqueKeysWithValues: [first, second].map { context in
@@ -1277,9 +1305,10 @@ import XCTest
             })
             let coordinator = WorkspaceAgentAdmissionCoordinator.shared
             let baseline = coordinator.snapshot()
-            let firstGate = AdmissionSaveGate()
-            let secondGate = AdmissionSaveGate()
+            let firstGate = makeSaveGate("workspace A admission save gate")
+            let secondGate = makeSaveGate("workspace B admission save gate")
             let providerRecorder = AdmissionProviderRecorder(expectedCount: 2)
+            cleanup.onRelease { await providerRecorder.releaseAll() }
             first.window.workspaceManager.setWorkspaceSavePreparationDidFinishHandlerForTesting {
                 workspaceID,
                 _,
@@ -1326,6 +1355,8 @@ import XCTest
                     "timeout": .int(0)
                 ])
             }
+            cleanup.onCancelAndJoin(firstTask)
+            cleanup.onCancelAndJoin(secondTask)
 
             do {
                 try await waitUntil("workspace A admission save to block") {
@@ -1402,15 +1433,17 @@ import XCTest
                 }
 
                 await providerRecorder.releaseAll()
-                let firstValue = try await firstTask.value
-                let secondValue = try await secondTask.value
-                let responseIDs = Set([firstValue, secondValue].compactMap {
+                let values = try await startupTestTaskResults(
+                    [firstTask, secondTask],
+                    "both distinct-workspace starts"
+                )
+                let responseIDs = Set(values.compactMap {
                     $0.objectValue?["session_id"]?.stringValue.flatMap(UUID.init(uuidString:))
                 })
                 XCTAssertEqual(responseIDs, Set(observations.map(\.sessionID)))
                 XCTAssertEqual(coordinator.snapshot(), baseline)
 
-                await fixture.closeWindowsAndRuntime()
+                try await fixture.closeWindowsAndRuntime()
                 for context in [first, second] {
                     try await fixture.withFreshRuntime(for: context, generation: 2) { restarted in
                         let observation = try XCTUnwrap(observationsByWorkspace[context.workspaceID])
@@ -1437,16 +1470,7 @@ import XCTest
                 await firstGate.open()
                 await secondGate.open()
                 await providerRecorder.releaseAll()
-                firstTask.cancel()
-                secondTask.cancel()
-                var taskErrors: [String] = []
-                for task in [firstTask, secondTask] {
-                    do {
-                        _ = try await task.value
-                    } catch {
-                        taskErrors.append(String(describing: error))
-                    }
-                }
+                let taskErrors = await cancelAndCollectErrors([firstTask, secondTask])
                 throw AdmissionTestError.fixtureSetup(
                     "\(error); taskErrors=\(taskErrors)"
                 )
@@ -1454,10 +1478,7 @@ import XCTest
         }
 
         func testTypedAdmissionRejectionLeavesNoIdentityAcrossRestartAndDispatchesNoProvider() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup {
-                await fixture.cleanup()
-            }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let workspaceID = fixture.workspaceID
             let initialWorkspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
             let initialTabs = initialWorkspace.composeTabs
@@ -1571,7 +1592,7 @@ import XCTest
 
             fixture.window.workspaceManager.removeBeforeSaveListener(beforeSaveToken)
             fixture.window.workspaceManager.setWorkspacePersistenceOutcomeOverrideForTesting(nil)
-            await fixture.closeWindowAndRuntime()
+            try await fixture.closeWindowAndRuntime()
             try await fixture.withFreshRuntime(generation: 2) { restarted in
                 let restartedSnapshot = await restarted.workspaceStore
                     .canonicalWorkspaceSnapshot(workspaceID)
@@ -1591,10 +1612,7 @@ import XCTest
         }
 
         func testQueuedAgentRunCancellationMutatesNoDurableStateAndDispatchesNoProvider() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup {
-                await fixture.cleanup()
-            }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let workspaceID = fixture.workspaceID
             let initialWorkspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
             let initialTabs = initialWorkspace.composeTabs
@@ -1612,7 +1630,7 @@ import XCTest
                 workspaceID: workspaceID,
                 admissionID: UUID()
             )
-            defer { holder.release() }
+            cleanup.onRelease { holder.release() }
             let startTask = Task { @MainActor in
                 try await service.execute(args: [
                     "op": .string("start"),
@@ -1621,24 +1639,16 @@ import XCTest
                     "timeout": .int(0)
                 ])
             }
-            do {
-                try await waitUntil("agent_run.start to queue behind the workspace holder") {
-                    coordinator.waiterCount(for: workspaceID) == 1
-                }
-            } catch {
-                let queuePhaseError = error
-                startTask.cancel()
-                holder.release()
-                do {
-                    _ = try await startTask.value
-                } catch {}
-                throw queuePhaseError
+            cleanup.onCancelAndJoin(startTask)
+            try await waitUntil("agent_run.start to queue behind the workspace holder") {
+                coordinator.waiterCount(for: workspaceID) == 1
             }
             startTask.cancel()
-            do {
-                _ = try await startTask.value
-                XCTFail("A queued cancelled start must throw CancellationError.")
-            } catch is CancellationError {}
+            try await assertCancelled(
+                startTask,
+                "the queued start after cancellation",
+                "A queued cancelled start must throw CancellationError."
+            )
             holder.release()
 
             let providerCount = await providerRecorder.count()
@@ -1676,7 +1686,7 @@ import XCTest
                 acceptedPairs: []
             )
 
-            await fixture.closeWindowAndRuntime()
+            try await fixture.closeWindowAndRuntime()
             try await fixture.withFreshRuntime(generation: 2) { restarted in
                 let restartedSnapshot = await restarted.workspaceStore
                     .canonicalWorkspaceSnapshot(workspaceID)
@@ -1694,10 +1704,7 @@ import XCTest
         }
 
         func testUnexpectedQueuePhaseFailureCancelsAndJoinsAgentRunStartBeforeRethrowingOriginalError() async throws {
-            let fixture = try await DurableAgentAdmissionFixture.make()
-            trackCleanup {
-                await fixture.cleanup()
-            }
+            let fixture = try await DurableAgentAdmissionFixture.make(cleanup: cleanup)
             let workspaceID = fixture.workspaceID
             let initialWorkspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
             let initialTabs = initialWorkspace.composeTabs
@@ -1715,7 +1722,7 @@ import XCTest
                 workspaceID: workspaceID,
                 admissionID: UUID()
             )
-            defer { holder.release() }
+            cleanup.onRelease { holder.release() }
             let terminationProbe = AdmissionStartTaskTerminationProbe()
             let startTask = Task { @MainActor in
                 do {
@@ -1732,6 +1739,7 @@ import XCTest
                     throw error
                 }
             }
+            cleanup.onCancelAndJoin(startTask)
             let sentinelID = UUID()
 
             do {
@@ -1744,9 +1752,10 @@ import XCTest
                     let queuePhaseError = error
                     startTask.cancel()
                     holder.release()
-                    do {
-                        _ = try await startTask.value
-                    } catch {}
+                    // The cancelled start's own error is expected; only joining it matters here.
+                    try await cleanup.step("joining the start cancelled after a queue-phase failure") {
+                        _ = await startTask.result
+                    }
                     throw queuePhaseError
                 }
             } catch let AdmissionTestError.queuePhaseSentinel(observedID) {
@@ -1782,9 +1791,10 @@ import XCTest
                 workspaceID: workspaceID,
                 admissionID: holderID
             )
+            cleanup.onRelease { holder.release() }
             var queuedTasks: [Task<UUID, Error>] = []
             for (index, admissionID) in queuedIDs.enumerated() {
-                queuedTasks.append(Task {
+                let queuedTask = Task {
                     let lease = try await coordinator.acquire(
                         workspaceID: workspaceID,
                         admissionID: admissionID
@@ -1792,7 +1802,9 @@ import XCTest
                     await recorder.append(admissionID)
                     lease.release()
                     return admissionID
-                })
+                }
+                queuedTasks.append(queuedTask)
+                cleanup.onCancelAndJoin(queuedTask)
                 try await waitUntil("waiter \(index + 1) to enqueue") {
                     coordinator.waiterCount(for: workspaceID) == index + 1
                 }
@@ -1801,10 +1813,8 @@ import XCTest
             XCTAssertEqual(coordinator.activeCount(for: workspaceID), 1)
             XCTAssertTrue(holder.release())
             XCTAssertFalse(holder.release(), "Lease release must be idempotent.")
-            for (task, expectedID) in zip(queuedTasks, queuedIDs) {
-                let admittedID = try await task.value
-                XCTAssertEqual(admittedID, expectedID)
-            }
+            let admittedIDs = try await startupTestTaskResults(queuedTasks, "the five queued admissions")
+            XCTAssertEqual(admittedIDs, queuedIDs)
 
             let recordedOrder = await recorder.values()
             XCTAssertEqual(recordedOrder, queuedIDs)
@@ -1827,6 +1837,7 @@ import XCTest
                 workspaceID: workspaceID,
                 admissionID: UUID()
             )
+            cleanup.onRelease { holder.release() }
             let cancelledID = UUID()
             let cancelledTask = Task {
                 try await coordinator.acquire(
@@ -1834,15 +1845,17 @@ import XCTest
                     admissionID: cancelledID
                 )
             }
+            cleanup.onCancelAndJoin(cancelledTask)
             try await waitUntil("cancelled waiter to enqueue") {
                 coordinator.waiterCount(for: workspaceID) == 1
             }
 
             cancelledTask.cancel()
-            do {
-                _ = try await cancelledTask.value
-                XCTFail("A cancelled queued admission must not acquire a lease.")
-            } catch is CancellationError {}
+            try await assertCancelled(
+                cancelledTask,
+                "the cancelled queued admission",
+                "A cancelled queued admission must not acquire a lease."
+            )
 
             XCTAssertEqual(coordinator.waiterCount(for: workspaceID), 0)
             holder.release()
@@ -1856,12 +1869,14 @@ import XCTest
                 workspaceID: workspaceID,
                 admissionID: UUID()
             )
+            cleanup.onRelease { holder.release() }
             let waiterA = Task {
                 try await coordinator.acquire(
                     workspaceID: workspaceID,
                     admissionID: UUID()
                 )
             }
+            cleanup.onCancelAndJoin(waiterA)
             try await waitUntil("first waiter to enqueue") {
                 coordinator.waiterCount(for: workspaceID) == 1
             }
@@ -1871,15 +1886,17 @@ import XCTest
                     admissionID: UUID()
                 )
             }
+            cleanup.onCancelAndJoin(waiterB)
             try await waitUntil("both waiters to enqueue") {
                 coordinator.waiterCount(for: workspaceID) == 2
             }
 
             waiterA.cancel()
-            do {
-                _ = try await waiterA.value
-                XCTFail("The cancelled first waiter must not acquire a lease.")
-            } catch is CancellationError {}
+            try await assertCancelled(
+                waiterA,
+                "the cancelled first waiter",
+                "The cancelled first waiter must not acquire a lease."
+            )
 
             XCTAssertEqual(
                 coordinator.snapshot(),
@@ -1892,7 +1909,7 @@ import XCTest
                 )
             )
             holder.release()
-            let waiterBLease = try await waiterB.value
+            let waiterBLease = try await startupTestTaskResult(waiterB, "the second waiter's handoff")
             waiterBLease.release()
             XCTAssertEqual(
                 coordinator.snapshot(),
@@ -1913,16 +1930,14 @@ import XCTest
                 workspaceID: workspaceID,
                 admissionID: UUID()
             )
-            let handoffGate = AdmissionHandoffGate()
+            cleanup.onRelease { holder.release() }
+            let handoffGate = makeHandoffGate("post-handoff gate")
             let handedOffID = UUID()
             coordinator.setDidResumeAfterHandoffHandlerForTesting { _, admissionID in
                 guard admissionID == handedOffID else { return }
                 await handoffGate.enterAndWait()
             }
-            defer {
-                coordinator.setDidResumeAfterHandoffHandlerForTesting(nil)
-                Task { await handoffGate.open() }
-            }
+            cleanup.onRelease { coordinator.setDidResumeAfterHandoffHandlerForTesting(nil) }
 
             let handedOffTask = Task {
                 try await coordinator.acquire(
@@ -1930,18 +1945,20 @@ import XCTest
                     admissionID: handedOffID
                 )
             }
+            cleanup.onCancelAndJoin(handedOffTask)
             try await waitUntil("handoff waiter to enqueue") {
                 coordinator.waiterCount(for: workspaceID) == 1
             }
             holder.release()
-            await handoffGate.waitUntilEntered()
+            try await waitUntil("the handed-off admission", enters: handoffGate, producer: handedOffTask)
             handedOffTask.cancel()
             await handoffGate.open()
 
-            do {
-                _ = try await handedOffTask.value
-                XCTFail("Cancellation after handoff must reject the acquisition.")
-            } catch is CancellationError {}
+            try await assertCancelled(
+                handedOffTask,
+                "the admission cancelled after handoff",
+                "Cancellation after handoff must reject the acquisition."
+            )
 
             XCTAssertEqual(
                 coordinator.snapshot(),
@@ -2258,19 +2275,111 @@ import XCTest
             XCTAssertEqual(Set(actualPairs), expectedPairs, file: file, line: line)
         }
 
+        /// Polls `condition` as a bounded test step. The bound covers the whole poll, so a condition
+        /// evaluation that never returns fails the step too.
         private func waitUntil(
             _ description: String,
-            timeout: Duration = .seconds(10),
-            condition: () async -> Bool
+            file: StaticString = #filePath,
+            line: UInt = #line,
+            condition: @escaping @MainActor () async -> Bool
         ) async throws {
-            let clock = ContinuousClock()
-            let deadline = clock.now.advanced(by: timeout)
-            while await !condition() {
-                guard clock.now < deadline else {
-                    throw AdmissionTestError.timedOut(description)
+            try await cleanup.step("waiting for \(description)", file: file, line: line) {
+                while await !condition() {
+                    try Task.checkCancellation()
+                    await Task.yield()
                 }
-                await Task.yield()
             }
+        }
+
+        /// Waits for `producer` to enter `gate`. A producer that fails before entering surfaces its
+        /// own error at once, and one that succeeds without entering fails as an unexpected completion,
+        /// so an admission that failed early is reported as that failure, not as a gate never reached.
+        private func waitUntil<T, Failure: Error>(
+            _ producerName: String,
+            enters gate: AdmissionHandoffGate,
+            producer: Task<T, Failure>,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws {
+            var completion: Result<T, Failure>?
+            // Awaiting a task's result can't be cancelled, so this observer lives until the producer
+            // finishes; cleanup cancels and joins the producer.
+            Task { completion = await producer.result }
+            try await cleanup.step(
+                "waiting for \(producerName) to enter \(gate.name)",
+                file: file,
+                line: line
+            ) {
+                while await !gate.hasEntered() {
+                    switch completion {
+                    case let .failure(error)?:
+                        throw error
+                    case .success?:
+                        throw AdmissionTestError.unexpectedCompletion(
+                            "\(producerName) finished without entering \(gate.name)"
+                        )
+                    case nil:
+                        try Task.checkCancellation()
+                        await Task.yield()
+                    }
+                }
+            }
+        }
+
+        /// Joins `task`, bounded, and requires it to end in `CancellationError`. Any other error,
+        /// including a timed-out join, propagates.
+        private func assertCancelled(
+            _ task: Task<some Any, some Error>,
+            _ step: String,
+            _ message: String,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws {
+            do {
+                _ = try await startupTestTaskResult(task, step, file: file, line: line)
+                XCTFail(message, file: file, line: line)
+            } catch let error as StartupTestStepError where error.underlying is CancellationError {}
+        }
+
+        /// Cancels `tasks` and joins them, bounded, returning each one's error so a failing test can
+        /// report what its producers saw. Callers release their holds first.
+        private func cancelAndCollectErrors(
+            _ tasks: [Task<Value, Error>],
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async -> [String] {
+            tasks.forEach { $0.cancel() }
+            do {
+                return try await startupTestAwaitResult(
+                    "joining the starts cancelled after a failure",
+                    file: file,
+                    line: line
+                ) {
+                    var errors: [String] = []
+                    for task in tasks {
+                        if case let .failure(error) = await task.result {
+                            errors.append(String(describing: error))
+                        }
+                    }
+                    return errors
+                }
+            } catch {
+                return [String(describing: error)]
+            }
+        }
+
+        /// A gate opened by this test's cleanup before anything is joined, so a failed test never
+        /// leaves a production hook parked on it.
+        private func makeSaveGate(_ name: String) -> AdmissionSaveGate {
+            let gate = AdmissionSaveGate(name)
+            cleanup.onRelease { await gate.open() }
+            return gate
+        }
+
+        private func makeHandoffGate(_ name: String) -> AdmissionHandoffGate {
+            let gate = AdmissionHandoffGate(name)
+            cleanup.onRelease { await gate.open() }
+            return gate
         }
 
         private func makePersistentWorkspaceFixture(
@@ -2350,21 +2459,6 @@ import XCTest
                 workspaceInstanceNumber: nil
             )
         }
-
-        private func waitUntil(
-            _ description: String,
-            timeout: Duration = .seconds(5),
-            condition: () -> Bool
-        ) async throws {
-            let clock = ContinuousClock()
-            let deadline = clock.now.advanced(by: timeout)
-            while !condition() {
-                guard clock.now < deadline else {
-                    throw AdmissionTestError.timedOut(description)
-                }
-                await Task.yield()
-            }
-        }
     }
 
     @MainActor
@@ -2380,21 +2474,21 @@ import XCTest
     private final class DistinctDurableAdmissionFixture {
         let first: DurableAdmissionWindow
         let second: DurableAdmissionWindow
-        private let storageOverride: AdmissionWorkspaceStorageOverride
-        private var isClosed = false
-        private var isCleanedUp = false
+        private let cleanup: AdmissionTestCleanup
 
         private init(
             first: DurableAdmissionWindow,
             second: DurableAdmissionWindow,
-            storageOverride: AdmissionWorkspaceStorageOverride
+            cleanup: AdmissionTestCleanup
         ) {
             self.first = first
             self.second = second
-            self.storageOverride = storageOverride
+            self.cleanup = cleanup
         }
 
-        static func make() async throws -> DistinctDurableAdmissionFixture {
+        /// Registers each runtime, window, and the storage override with `cleanup` as soon as it
+        /// exists, so a setup step that fails or times out still leaves them to be undone.
+        static func make(cleanup: AdmissionTestCleanup) async throws -> DistinctDurableAdmissionFixture {
             let container = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "ConcurrentSameWorkspaceAgentRunAdmissionTests-Distinct-\(UUID().uuidString)",
                 isDirectory: true
@@ -2407,55 +2501,40 @@ import XCTest
                 throw error
             }
             let storageOverride = AdmissionWorkspaceStorageOverride(authorityRoot: authorityRoot)
+            cleanup.onRestore { storageOverride.restore() }
             let firstAuthorityRoot = authorityRoot.appendingPathComponent("authority-A", isDirectory: true)
             let secondAuthorityRoot = authorityRoot.appendingPathComponent("authority-B", isDirectory: true)
-            let firstRuntime = makeRuntime(authorityRoot: firstAuthorityRoot, label: "A")
-            let secondRuntime = makeRuntime(authorityRoot: secondAuthorityRoot, label: "B")
-            do {
+            let firstRuntime = makeRuntime(authorityRoot: firstAuthorityRoot, label: "A", cleanup: cleanup)
+            let secondRuntime = makeRuntime(authorityRoot: secondAuthorityRoot, label: "B", cleanup: cleanup)
+            try await cleanup.step("starting the workspace A runtime") {
                 try await firstRuntime.start()
+            }
+            try await cleanup.step("starting the workspace B runtime") {
                 try await secondRuntime.start()
-            } catch {
-                _ = await secondRuntime.shutdown()
-                _ = await firstRuntime.shutdown()
-                storageOverride.restore()
-                throw error
             }
-            let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
-            GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-            let firstWindow = WindowState(domainRuntime: firstRuntime)
-            let secondWindow = WindowState(domainRuntime: secondRuntime)
-            WindowStatesManager.shared.registerWindowState(firstWindow)
-            WindowStatesManager.shared.registerWindowState(secondWindow)
-            GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
-
-            do {
+            let firstWindow = makeAdmissionWindow(runtime: firstRuntime, cleanup: cleanup)
+            let secondWindow = makeAdmissionWindow(runtime: secondRuntime, cleanup: cleanup)
+            try await cleanup.step("workspace A window initialization") {
                 await firstWindow.workspaceManager.awaitInitialized()
-                await secondWindow.workspaceManager.awaitInitialized()
-                let first = try await makeDurableWindow(
-                    firstWindow,
-                    runtime: firstRuntime,
-                    authorityRoot: firstAuthorityRoot,
-                    label: "A"
-                )
-                let second = try await makeDurableWindow(
-                    secondWindow,
-                    runtime: secondRuntime,
-                    authorityRoot: secondAuthorityRoot,
-                    label: "B"
-                )
-                return DistinctDurableAdmissionFixture(
-                    first: first,
-                    second: second,
-                    storageOverride: storageOverride
-                )
-            } catch {
-                await close(firstWindow)
-                await close(secondWindow)
-                _ = await secondRuntime.shutdown()
-                _ = await firstRuntime.shutdown()
-                storageOverride.restore()
-                throw error
             }
+            try await cleanup.step("workspace B window initialization") {
+                await secondWindow.workspaceManager.awaitInitialized()
+            }
+            let first = try await makeDurableWindow(
+                firstWindow,
+                runtime: firstRuntime,
+                authorityRoot: firstAuthorityRoot,
+                label: "A",
+                cleanup: cleanup
+            )
+            let second = try await makeDurableWindow(
+                secondWindow,
+                runtime: secondRuntime,
+                authorityRoot: secondAuthorityRoot,
+                label: "B",
+                cleanup: cleanup
+            )
+            return DistinctDurableAdmissionFixture(first: first, second: second, cleanup: cleanup)
         }
 
         func withFreshRuntime<T>(
@@ -2475,35 +2554,24 @@ import XCTest
                 runtimeID: UUID(),
                 lifecycleGeneration: generation
             )
-            do {
-                try await restarted.start()
-                let result = try await operation(restarted)
-                _ = await restarted.shutdown()
-                return result
-            } catch {
-                _ = await restarted.shutdown()
-                throw error
+            return try await withStartedRuntime(restarted, generation: generation, cleanup: cleanup, operation)
+        }
+
+        func closeWindowsAndRuntime() async throws {
+            try await cleanup.step("closing both windows and runtimes before the restart check") {
+                await self.cleanup.close(self.second.window)
+                await self.cleanup.close(self.first.window)
+                await self.cleanup.shutDown(self.second.runtime)
+                await self.cleanup.shutDown(self.first.runtime)
             }
         }
 
-        func closeWindowsAndRuntime() async {
-            guard !isClosed else { return }
-            isClosed = true
-            await Self.close(second.window)
-            await Self.close(first.window)
-            _ = await second.runtime.shutdown()
-            _ = await first.runtime.shutdown()
-        }
-
-        func cleanup() async {
-            guard !isCleanedUp else { return }
-            isCleanedUp = true
-            await closeWindowsAndRuntime()
-            storageOverride.restore()
-        }
-
-        private static func makeRuntime(authorityRoot: URL, label: String) -> MCPDomainRuntime {
-            MCPDomainRuntime(configuration: .init(
+        private static func makeRuntime(
+            authorityRoot: URL,
+            label: String,
+            cleanup: AdmissionTestCleanup
+        ) -> MCPDomainRuntime {
+            let runtime = MCPDomainRuntime(configuration: .init(
                 mode: .app,
                 profileIdentifier: "distinct-workspace-admission",
                 storageDirectory: authorityRoot,
@@ -2511,13 +2579,16 @@ import XCTest
                 temporaryDirectory: authorityRoot.appendingPathComponent("tmp-\(label)", isDirectory: true),
                 externalReloadInterval: nil
             ))
+            cleanup.onClose { await cleanup.shutDown(runtime) }
+            return runtime
         }
 
         private static func makeDurableWindow(
             _ window: WindowState,
             runtime: MCPDomainRuntime,
             authorityRoot: URL,
-            label: String
+            label: String,
+            cleanup: AdmissionTestCleanup
         ) async throws -> DurableAdmissionWindow {
             let originalTab = ComposeTabState(name: "Distinct durable foreground \(label)")
             let workspace = WorkspaceModel(
@@ -2527,14 +2598,16 @@ import XCTest
                 activeComposeTabID: originalTab.id
             )
             let workspaceFileURL = window.workspaceManager.workspaceFileURL(for: workspace)
-            try await createCommittedWorkspace(
-                workspace,
-                authority: DomainWorkspaceAuthorityClient(
-                    store: runtime.workspaceStore,
-                    windowID: window.windowID
-                ),
-                fileURL: workspaceFileURL
-            )
+            try await cleanup.step("committing workspace \(label)") {
+                try await createCommittedWorkspace(
+                    workspace,
+                    authority: DomainWorkspaceAuthorityClient(
+                        store: runtime.workspaceStore,
+                        windowID: window.windowID
+                    ),
+                    fileURL: workspaceFileURL
+                )
+            }
             // A sibling window can publish a catalog projection while this synthetic workspace is
             // being created, so establish the local projection from the workspace just committed.
             if !window.workspaceManager.workspaces.contains(where: { $0.id == workspace.id }) {
@@ -2543,11 +2616,13 @@ import XCTest
             let storedWorkspace = try XCTUnwrap(
                 window.workspaceManager.workspaces.first { $0.id == workspace.id }
             )
-            try await activateDurableWorkspace(
-                storedWorkspace,
-                in: window,
-                reason: "distinctWorkspaceAdmissionAcceptance"
-            )
+            try await cleanup.step("activating workspace \(label)") {
+                try await activateDurableWorkspace(
+                    storedWorkspace,
+                    in: window,
+                    reason: "distinctWorkspaceAdmissionAcceptance"
+                )
+            }
             _ = try WorkspaceManagerViewModel.loadWorkspaceFromFile(
                 at: workspaceFileURL,
                 scheduleNormalizationWriteback: false
@@ -2560,73 +2635,62 @@ import XCTest
                 workspaceFileURL: workspaceFileURL
             )
         }
-
-        private static func close(_ window: WindowState) async {
-            window.beginClose()
-            await window.tearDown()
-            WindowStatesManager.shared.unregisterWindowState(window)
-        }
     }
 
     @MainActor
     private final class DurableAgentAdmissionFixture {
         let authorityRoot: URL
-        let storageOverride: AdmissionWorkspaceStorageOverride
         let runtime: MCPDomainRuntime
         let window: WindowState
         let workspaceID: UUID
         let workspaceFileURL: URL
+        private let cleanup: AdmissionTestCleanup
         private var peerWindows: [WindowState] = []
-        private var isClosed = false
-        private var isCleanedUp = false
 
         private init(
             authorityRoot: URL,
-            storageOverride: AdmissionWorkspaceStorageOverride,
             runtime: MCPDomainRuntime,
             window: WindowState,
             workspaceID: UUID,
-            workspaceFileURL: URL
+            workspaceFileURL: URL,
+            cleanup: AdmissionTestCleanup
         ) {
             self.authorityRoot = authorityRoot
-            self.storageOverride = storageOverride
             self.runtime = runtime
             self.window = window
             self.workspaceID = workspaceID
             self.workspaceFileURL = workspaceFileURL
+            self.cleanup = cleanup
         }
 
-        static func make() async throws -> DurableAgentAdmissionFixture {
+        /// Registers the runtime, the window, and the storage override with `cleanup` as soon as
+        /// each exists, so a setup step that fails or times out still leaves them to be undone.
+        static func make(cleanup: AdmissionTestCleanup) async throws -> DurableAgentAdmissionFixture {
             let container = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "ConcurrentSameWorkspaceAgentRunAdmissionTests-Durable-\(UUID().uuidString)",
                 isDirectory: true
             )
-            let (authorityRoot, storageOverride, runtime) = try makeIsolatedRuntime(
+            let (authorityRoot, runtime) = try makeIsolatedRuntime(
                 container: container,
-                profileIdentifier: "same-workspace-admission"
+                profileIdentifier: "same-workspace-admission",
+                cleanup: cleanup
             )
-            do {
+            try await cleanup.step("starting the durable fixture runtime") {
                 try await runtime.start()
-            } catch {
-                storageOverride.restore()
-                throw error
             }
-
-            let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
-            GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-            let window = WindowState(domainRuntime: runtime)
-            WindowStatesManager.shared.registerWindowState(window)
-            GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
-            do {
+            let window = makeAdmissionWindow(runtime: runtime, cleanup: cleanup)
+            try await cleanup.step("durable fixture window initialization") {
                 await window.workspaceManager.awaitInitialized()
-                let originalTab = ComposeTabState(name: "Durable foreground")
-                let workspace = WorkspaceModel(
-                    name: "Concurrent durable admission \(UUID().uuidString.prefix(8))",
-                    repoPaths: [],
-                    composeTabs: [originalTab],
-                    activeComposeTabID: originalTab.id
-                )
-                let workspaceFileURL = window.workspaceManager.workspaceFileURL(for: workspace)
+            }
+            let originalTab = ComposeTabState(name: "Durable foreground")
+            let workspace = WorkspaceModel(
+                name: "Concurrent durable admission \(UUID().uuidString.prefix(8))",
+                repoPaths: [],
+                composeTabs: [originalTab],
+                activeComposeTabID: originalTab.id
+            )
+            let workspaceFileURL = window.workspaceManager.workspaceFileURL(for: workspace)
+            try await cleanup.step("committing the durable fixture workspace") {
                 try await createCommittedWorkspace(
                     workspace,
                     authority: DomainWorkspaceAuthorityClient(
@@ -2635,43 +2699,38 @@ import XCTest
                     ),
                     fileURL: workspaceFileURL
                 )
-                // Catalog projection and fixture creation are independent publications; the test
-                // window must expose the workspace that the authority has already committed.
-                if !window.workspaceManager.workspaces.contains(where: { $0.id == workspace.id }) {
-                    window.workspaceManager.workspaces.append(workspace)
-                }
-                let storedWorkspace = try XCTUnwrap(
-                    window.workspaceManager.workspaces.first { $0.id == workspace.id }
-                )
+            }
+            // Catalog projection and fixture creation are independent publications; the test
+            // window must expose the workspace that the authority has already committed.
+            if !window.workspaceManager.workspaces.contains(where: { $0.id == workspace.id }) {
+                window.workspaceManager.workspaces.append(workspace)
+            }
+            let storedWorkspace = try XCTUnwrap(
+                window.workspaceManager.workspaces.first { $0.id == workspace.id }
+            )
+            try await cleanup.step("activating the durable fixture workspace") {
                 try await activateDurableWorkspace(
                     storedWorkspace,
                     in: window,
                     reason: "sameWorkspaceAdmissionAcceptance"
                 )
-                let canonicalSnapshot = await runtime.workspaceStore.canonicalWorkspaceSnapshot(workspace.id)
-                let canonical = try XCTUnwrap(canonicalSnapshot)
-                guard canonical.health == .writable else {
-                    throw AdmissionTestError.fixtureSetup("canonical workspace was not writable")
-                }
-                return DurableAgentAdmissionFixture(
-                    authorityRoot: authorityRoot,
-                    storageOverride: storageOverride,
-                    runtime: runtime,
-                    window: window,
-                    workspaceID: workspace.id,
-                    workspaceFileURL: workspaceFileURL
-                )
-            } catch {
-                window.beginClose()
-                await window.tearDown()
-                WindowStatesManager.shared.unregisterWindowState(window)
-                _ = await runtime.shutdown()
-                storageOverride.restore()
-                throw error
             }
+            let canonicalSnapshot = await runtime.workspaceStore.canonicalWorkspaceSnapshot(workspace.id)
+            let canonical = try XCTUnwrap(canonicalSnapshot)
+            guard canonical.health == .writable else {
+                throw AdmissionTestError.fixtureSetup("canonical workspace was not writable")
+            }
+            return DurableAgentAdmissionFixture(
+                authorityRoot: authorityRoot,
+                runtime: runtime,
+                window: window,
+                workspaceID: workspace.id,
+                workspaceFileURL: workspaceFileURL,
+                cleanup: cleanup
+            )
         }
 
-        func makeFreshRuntime(generation: UInt64) -> MCPDomainRuntime {
+        private func makeFreshRuntime(generation: UInt64) -> MCPDomainRuntime {
             MCPDomainRuntime(
                 configuration: .init(
                     mode: .app,
@@ -2687,13 +2746,11 @@ import XCTest
         }
 
         func makePeerWindow() async throws -> WindowState {
-            let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
-            GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-            let peer = WindowState(domainRuntime: runtime)
-            WindowStatesManager.shared.registerWindowState(peer)
-            GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
+            let peer = makeAdmissionWindow(runtime: runtime, cleanup: cleanup)
             peerWindows.append(peer)
-            await peer.workspaceManager.awaitInitialized()
+            try await cleanup.step("peer window initialization") {
+                await peer.workspaceManager.awaitInitialized()
+            }
 
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: .seconds(5))
@@ -2704,11 +2761,13 @@ import XCTest
                 await Task.yield()
             }
             let workspace = try XCTUnwrap(peer.workspaceManager.workspace(withID: workspaceID))
-            try await activateDurableWorkspace(
-                workspace,
-                in: peer,
-                reason: "sameWorkspacePeerAdmissionAcceptance"
-            )
+            try await cleanup.step("activating the workspace in the peer window") {
+                try await activateDurableWorkspace(
+                    workspace,
+                    in: peer,
+                    reason: "sameWorkspacePeerAdmissionAcceptance"
+                )
+            }
             return peer
         }
 
@@ -2716,57 +2775,39 @@ import XCTest
             generation: UInt64,
             operation: (MCPDomainRuntime) async throws -> T
         ) async throws -> T {
-            let restarted = makeFreshRuntime(generation: generation)
-            do {
-                try await restarted.start()
-                let result = try await operation(restarted)
-                _ = await restarted.shutdown()
-                return result
-            } catch {
-                _ = await restarted.shutdown()
-                throw error
-            }
+            try await withStartedRuntime(
+                makeFreshRuntime(generation: generation),
+                generation: generation,
+                cleanup: cleanup,
+                operation
+            )
         }
 
-        func closeWindowAndRuntime() async {
-            guard !isClosed else { return }
-            isClosed = true
-            for peer in peerWindows.reversed() {
-                peer.beginClose()
-                await peer.tearDown()
-                WindowStatesManager.shared.unregisterWindowState(peer)
+        func closeWindowAndRuntime() async throws {
+            try await cleanup.step("closing the fixture windows and runtime before the restart check") {
+                for peer in self.peerWindows.reversed() {
+                    await self.cleanup.close(peer)
+                }
+                await self.cleanup.close(self.window)
+                await self.cleanup.shutDown(self.runtime)
             }
-            peerWindows.removeAll()
-            window.beginClose()
-            await window.tearDown()
-            WindowStatesManager.shared.unregisterWindowState(window)
-            _ = await runtime.shutdown()
-        }
-
-        func cleanup() async {
-            guard !isCleanedUp else { return }
-            isCleanedUp = true
-            await closeWindowAndRuntime()
-            storageOverride.restore()
         }
     }
 
     /// Builds a runtime whose storage directory is `container/state`, without starting it, and points
-    /// workspace storage at `container/state/Workspaces`. Callers start the runtime themselves because
-    /// each registers its cleanup at a different point. Keep the returned override alive until cleanup:
-    /// its deinit restores the storage setting and deletes `container`.
+    /// workspace storage at `container/state/Workspaces`. Both are registered with `cleanup` before
+    /// anything else can fail: the runtime shuts down at cleanup, and only after that are the storage
+    /// setting restored and `container` deleted. Callers start the runtime themselves.
     @MainActor
     private func makeIsolatedRuntime(
         container: URL,
-        profileIdentifier: String
-    ) throws -> (
-        authorityRoot: URL,
-        storageOverride: AdmissionWorkspaceStorageOverride,
-        runtime: MCPDomainRuntime
-    ) {
+        profileIdentifier: String,
+        cleanup: AdmissionTestCleanup
+    ) throws -> (authorityRoot: URL, runtime: MCPDomainRuntime) {
         let authorityRoot = container.appendingPathComponent("state", isDirectory: true)
         try FileManager.default.createDirectory(at: authorityRoot, withIntermediateDirectories: true)
         let storageOverride = AdmissionWorkspaceStorageOverride(authorityRoot: authorityRoot)
+        cleanup.onRestore { storageOverride.restore() }
         let runtime = MCPDomainRuntime(configuration: .init(
             mode: .app,
             profileIdentifier: profileIdentifier,
@@ -2775,7 +2816,41 @@ import XCTest
             temporaryDirectory: authorityRoot.appendingPathComponent("tmp", isDirectory: true),
             externalReloadInterval: nil
         ))
-        return (authorityRoot, storageOverride, runtime)
+        cleanup.onClose { await cleanup.shutDown(runtime) }
+        return (authorityRoot, runtime)
+    }
+
+    /// Makes and registers a window on `runtime` without auto-starting MCP, and closes it at cleanup.
+    @MainActor
+    private func makeAdmissionWindow(runtime: MCPDomainRuntime, cleanup: AdmissionTestCleanup) -> WindowState {
+        let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
+        GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
+        let window = WindowState(domainRuntime: runtime)
+        WindowStatesManager.shared.registerWindowState(window)
+        GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
+        cleanup.onClose { await cleanup.close(window) }
+        return window
+    }
+
+    /// Starts `runtime`, runs `operation` against it, and shuts it down, bounding both lifecycle
+    /// steps. The shutdown is registered with `cleanup` first, so an operation that throws, or a step
+    /// that times out, still leaves the runtime to be shut down before storage is restored.
+    @MainActor
+    private func withStartedRuntime<T>(
+        _ runtime: MCPDomainRuntime,
+        generation: UInt64,
+        cleanup: AdmissionTestCleanup,
+        _ operation: (MCPDomainRuntime) async throws -> T
+    ) async throws -> T {
+        cleanup.onClose { await cleanup.shutDown(runtime) }
+        try await cleanup.step("starting the restarted runtime (generation \(generation))") {
+            try await runtime.start()
+        }
+        let result = try await operation(runtime)
+        try await cleanup.step("shutting down the restarted runtime (generation \(generation))") {
+            await cleanup.shutDown(runtime)
+        }
+        return result
     }
 
     @MainActor
@@ -2910,19 +2985,19 @@ import XCTest
         }
     }
 
-    private actor AdmissionProviderRecorder {
+    private actor AdmissionProviderRecorder: AdmissionParking {
         struct Observation {
             let tabID: UUID
             let sessionID: UUID
             let lifecycleIdentity: AgentSessionLifecycleAuthority.Identity?
         }
 
+        var parkedCallers = AdmissionParkedCallers()
         private let expectedCount: Int
         private let blockProviders: Bool
         private var values: [Observation] = []
         private var counts: [AdmissionIdentityPair: Int] = [:]
         private var isReleased = false
-        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
 
         init(expectedCount: Int, blockProviders: Bool = true) {
             self.expectedCount = expectedCount
@@ -2940,7 +3015,16 @@ import XCTest
             }
             values.append(observation)
             guard blockProviders, !isReleased else { return }
-            await withCheckedContinuation { releaseWaiters.append($0) }
+            switch await park(seconds: admissionHoldSeconds) {
+            case .released:
+                return
+            case .timedOut:
+                let message = "provider dispatch was held for \(admissionHoldSeconds) s without releaseAll()"
+                XCTFail(message)
+                throw AdmissionTestError.timedOut(message)
+            case .cancelled:
+                throw CancellationError()
+            }
         }
 
         func count() -> Int {
@@ -2957,26 +3041,27 @@ import XCTest
 
         func releaseAll() {
             isReleased = true
-            let waiters = releaseWaiters
-            releaseWaiters.removeAll()
-            waiters.forEach { $0.resume() }
+            parkedCallers.resumeAll(with: .released)
         }
     }
 
-    private actor AdmissionSaveGate {
+    /// Holds only the first caller to enter, until `open()` or its bound; later callers pass
+    /// straight through.
+    private actor AdmissionSaveGate: AdmissionParking {
+        let name: String
+        var parkedCallers = AdmissionParkedCallers()
         private var didEnter = false
         private var isOpen = false
-        private var entryWaiters: [CheckedContinuation<Void, Never>] = []
-        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        init(_ name: String) {
+            self.name = name
+        }
 
         func enterFirstAndWait() async {
             guard !didEnter else { return }
             didEnter = true
-            let waiters = entryWaiters
-            entryWaiters.removeAll()
-            waiters.forEach { $0.resume() }
             guard !isOpen else { return }
-            await withCheckedContinuation { releaseWaiters.append($0) }
+            await holdHook(on: name)
         }
 
         func hasEntered() -> Bool {
@@ -2985,9 +3070,7 @@ import XCTest
 
         func open() {
             isOpen = true
-            let waiters = releaseWaiters
-            releaseWaiters.removeAll()
-            waiters.forEach { $0.resume() }
+            parkedCallers.resumeAll(with: .released)
         }
     }
 
@@ -3011,6 +3094,7 @@ import XCTest
         case queuePhaseSentinel(UUID)
         case timedOut(String)
         case fixtureSetup(String)
+        case unexpectedCompletion(String)
         case duplicateProviderDispatch(AdmissionIdentityPair)
         case excessProviderDispatch(Int)
     }
@@ -3039,58 +3123,296 @@ import XCTest
         }
     }
 
-    private actor AdmissionHandoffGate {
+    /// Holds every caller that enters until `open()` or its bound, and records that one entered.
+    /// Opening records no entry; a caller that enters after `open()` records one and passes through.
+    private actor AdmissionHandoffGate: AdmissionParking {
+        let name: String
+        var parkedCallers = AdmissionParkedCallers()
         private var entered = false
         private var isOpen = false
-        private var entryWaiters: [CheckedContinuation<Void, Never>] = []
-        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        init(_ name: String) {
+            self.name = name
+        }
 
         func enterAndWait() async {
             entered = true
-            let pendingEntryWaiters = entryWaiters
-            entryWaiters.removeAll()
-            pendingEntryWaiters.forEach { $0.resume() }
             guard !isOpen else { return }
-            await withCheckedContinuation { continuation in
-                releaseWaiters.append(continuation)
-            }
+            await holdHook(on: name)
         }
 
-        func waitUntilEntered() async {
-            guard !entered else { return }
-            await withCheckedContinuation { continuation in
-                entryWaiters.append(continuation)
-            }
+        func hasEntered() -> Bool {
+            entered
         }
 
         func open() {
             isOpen = true
-            let pendingReleaseWaiters = releaseWaiters
-            releaseWaiters.removeAll()
-            pendingReleaseWaiters.forEach { $0.resume() }
+            parkedCallers.resumeAll(with: .released)
         }
     }
 
-    private actor AdmissionTestSuiteGate {
+    /// Serializes the suite's tests within one process, in arrival order.
+    private actor AdmissionTestSuiteGate: AdmissionParking {
         static let shared = AdmissionTestSuiteGate()
 
+        var parkedCallers = AdmissionParkedCallers()
         private var isHeld = false
-        private var waiters: [CheckedContinuation<Void, Never>] = []
 
-        func acquire() async {
+        /// A timed-out or cancelled acquirer leaves the queue without the gate, so its test's
+        /// `tearDown` has nothing to release.
+        func acquire() async throws {
             guard isHeld else {
                 isHeld = true
                 return
             }
-            await withCheckedContinuation { waiters.append($0) }
+            switch await park(seconds: admissionSuiteGateSeconds) {
+            case .released:
+                return
+            case .timedOut:
+                throw AdmissionTestError.timedOut(
+                    "acquiring the admission suite gate: an earlier test held it for \(admissionSuiteGateSeconds) s"
+                )
+            case .cancelled:
+                throw CancellationError()
+            }
         }
 
+        /// Hands the gate to the earliest waiter, or frees it when nobody waits.
         func release() {
-            guard !waiters.isEmpty else {
+            if !parkedCallers.resumeFirst(with: .released) {
                 isHeld = false
-                return
             }
-            waiters.removeFirst().resume()
+        }
+    }
+
+    /// Failure guards that bound a hang, set far above the suite's observed run time.
+    private let admissionHoldSeconds: TimeInterval = 30
+    private let admissionSuiteGateSeconds: TimeInterval = 60
+    private let admissionCleanupSeconds: TimeInterval = 30
+
+    /// How a caller parked on an admission gate was let go.
+    private enum AdmissionParkOutcome: Sendable {
+        case released
+        case timedOut
+        case cancelled
+    }
+
+    /// The callers parked on one admission gate, in arrival order. A caller is removed before it is
+    /// resumed, so whichever of release, its timeout, or its cancellation reaches it first wins and
+    /// the others find nothing to resume.
+    private struct AdmissionParkedCallers {
+        private struct Caller {
+            let id: UUID
+            let continuation: CheckedContinuation<AdmissionParkOutcome, Never>
+            let timeout: Task<Void, Never>
+        }
+
+        private var callers: [Caller] = []
+
+        mutating func add(
+            id: UUID,
+            continuation: CheckedContinuation<AdmissionParkOutcome, Never>,
+            timeout: Task<Void, Never>
+        ) {
+            callers.append(Caller(id: id, continuation: continuation, timeout: timeout))
+        }
+
+        mutating func resume(_ id: UUID, with outcome: AdmissionParkOutcome) {
+            guard let index = callers.firstIndex(where: { $0.id == id }) else { return }
+            Self.resume(callers.remove(at: index), with: outcome)
+        }
+
+        /// Resumes the earliest caller and reports whether there was one.
+        mutating func resumeFirst(with outcome: AdmissionParkOutcome) -> Bool {
+            guard !callers.isEmpty else { return false }
+            Self.resume(callers.removeFirst(), with: outcome)
+            return true
+        }
+
+        mutating func resumeAll(with outcome: AdmissionParkOutcome) {
+            let resumed = callers
+            callers.removeAll()
+            resumed.forEach { Self.resume($0, with: outcome) }
+        }
+
+        private static func resume(_ caller: Caller, with outcome: AdmissionParkOutcome) {
+            caller.timeout.cancel()
+            caller.continuation.resume(returning: outcome)
+        }
+    }
+
+    /// An actor whose callers park in `parkedCallers`. Keeping the bookkeeping inside each gate's
+    /// own isolation is what lets a gate check its state and park a caller without an `open()`
+    /// slipping in between.
+    private protocol AdmissionParking: Actor {
+        var parkedCallers: AdmissionParkedCallers { get set }
+    }
+
+    extension AdmissionParking {
+        /// Parks the caller until it is released, `seconds` pass, or its task is cancelled. A caller
+        /// already cancelled when it arrives doesn't park.
+        func park(seconds: TimeInterval) async -> AdmissionParkOutcome {
+            let id = UUID()
+            return await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    guard !Task.isCancelled else {
+                        continuation.resume(returning: .cancelled)
+                        return
+                    }
+                    let timeout = Task {
+                        do {
+                            try await Task.sleep(for: .seconds(seconds))
+                        } catch {
+                            return
+                        }
+                        self.resumeParked(id, with: .timedOut)
+                    }
+                    parkedCallers.add(id: id, continuation: continuation, timeout: timeout)
+                }
+            } onCancel: {
+                Task { await self.resumeParked(id, with: .cancelled) }
+            }
+        }
+
+        func resumeParked(_ id: UUID, with outcome: AdmissionParkOutcome) {
+            parkedCallers.resume(id, with: outcome)
+        }
+
+        /// Holds a production hook, which can't throw, until the gate opens. A timeout records a
+        /// failure naming the gate and then lets the hook go, so the held work and the test's cleanup
+        /// can finish; the recorded failure keeps that release from passing as an `open()`.
+        func holdHook(on gateName: String) async {
+            if await park(seconds: admissionHoldSeconds) == .timedOut {
+                XCTFail("\(gateName) held its caller for \(admissionHoldSeconds) s without being opened")
+            }
+        }
+    }
+
+    /// What one test must undo, in the order that keeps cleanup bounded and safe. Holds are released
+    /// first so parked work can finish. Test tasks and steps are then cancelled; within one bound, test
+    /// tasks are joined, windows and runtimes closed newest first, and any step still running joined
+    /// last, since closing is often what lets a stuck setup step finish. Storage overrides are restored
+    /// last, and only when that bound was met: restoring the global storage setting under a runtime
+    /// that may still be writing would send its writes somewhere else.
+    @MainActor
+    private final class AdmissionTestCleanup {
+        /// Restores skipped after a cleanup timeout, kept for the rest of the process so the storage
+        /// override's deinit can't restore under a runtime that may still be writing.
+        private static var restoresLeftInPlace: [@MainActor () -> Void] = []
+
+        private var releases: [@MainActor () async -> Void] = []
+        private var cancellations: [() -> Void] = []
+        private var joins: [@MainActor () async -> Void] = []
+        private var closes: [@MainActor () async -> Void] = []
+        private var restores: [@MainActor () -> Void] = []
+        private var stepJoins: [@MainActor () async -> Void] = []
+        /// Each window close or runtime shutdown, kept with its owner for as long as the registry
+        /// lives: a step that timed out and resumes later still finds its close done, and a newer
+        /// object can't reuse an identifier here.
+        private var finishing: [ObjectIdentifier: (owner: AnyObject, task: Task<Void, Never>)] = [:]
+
+        /// Undoes a hold, such as opening a gate or removing a hook, before anything is joined.
+        func onRelease(_ release: @escaping @MainActor () async -> Void) {
+            releases.append(release)
+        }
+
+        func onCancelAndJoin(_ task: Task<some Any, some Error>) {
+            cancellations.append { task.cancel() }
+            joins.append { _ = await task.result }
+        }
+
+        func onClose(_ close: @escaping @MainActor () async -> Void) {
+            closes.append(close)
+        }
+
+        func onRestore(_ restore: @escaping @MainActor () -> Void) {
+            restores.append(restore)
+        }
+
+        /// Runs `operation` as a labelled test step bounded like `startupTestAwaitResult`, in a task
+        /// that stays registered here: a step that timed out may still be writing, so cleanup has to
+        /// cancel and join it before any storage override is restored.
+        func step<T: Sendable>(
+            _ name: String,
+            file: StaticString = #filePath,
+            line: UInt = #line,
+            _ operation: @escaping @MainActor () async throws -> T
+        ) async throws -> T {
+            let task = Task { @MainActor in try await operation() }
+            cancellations.append { task.cancel() }
+            stepJoins.append { _ = await task.result }
+            return try await startupTestTaskResult(task, name, file: file, line: line)
+        }
+
+        /// Closes and unregisters `window` once. A later call waits for that same close, so a close
+        /// that a timed-out test step left running still has to finish before storage is restored.
+        func close(_ window: WindowState) async {
+            await once(for: window) {
+                window.beginClose()
+                await window.tearDown()
+                WindowStatesManager.shared.unregisterWindowState(window)
+            }
+        }
+
+        /// Shuts `runtime` down once; a later call waits for that same shutdown.
+        func shutDown(_ runtime: MCPDomainRuntime) async {
+            await once(for: runtime) {
+                _ = await runtime.shutdown()
+            }
+        }
+
+        private func once(for owner: AnyObject, _ operation: @escaping @MainActor () async -> Void) async {
+            let key = ObjectIdentifier(owner)
+            let task = finishing[key]?.task ?? Task { await operation() }
+            finishing[key] = (owner, task)
+            await task.value
+        }
+
+        /// Runs and forgets everything registered so far, so a test can also clean up between
+        /// subcases.
+        func run(_ step: String, file: StaticString = #filePath, line: UInt = #line) async throws {
+            let releases = releases
+            let cancellations = cancellations
+            let joins = joins
+            let closes = closes
+            let restores = restores
+            let stepJoins = stepJoins
+            self.releases = []
+            self.cancellations = []
+            self.joins = []
+            self.closes = []
+            self.restores = []
+            self.stepJoins = []
+
+            for release in releases {
+                await release()
+            }
+            cancellations.forEach { $0() }
+            do {
+                try await startupTestAwaitResult(
+                    "\(step): joining test tasks, closing windows and runtimes, and joining unfinished steps "
+                        + "(the storage override and any window not yet closed are left in place)",
+                    seconds: admissionCleanupSeconds,
+                    file: file,
+                    line: line
+                ) {
+                    for join in joins {
+                        await join()
+                    }
+                    for close in closes.reversed() {
+                        await close()
+                    }
+                    for join in stepJoins {
+                        await join()
+                    }
+                }
+            } catch {
+                Self.restoresLeftInPlace.append(contentsOf: restores)
+                throw error
+            }
+            for restore in restores.reversed() {
+                restore()
+            }
         }
     }
 #endif
