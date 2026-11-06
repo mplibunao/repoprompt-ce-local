@@ -330,7 +330,7 @@ final class AutoRecommendationEngineScopedSettingsTests: XCTestCase {
         )
         XCTAssertTrue(fixture.store.hasUserSetGlobalContextBuilderAgentDefaults)
 
-        let clear = try await AppSettingsMCPService(store: fixture.store).handleForTesting([
+        let clear = try await AppSettingsMCPService(store: fixture.store, notificationCenter: NotificationCenter()).handleForTesting([
             "op": .string("set"),
             "key": .string("context_builder.model"),
             "value": .null
@@ -365,7 +365,7 @@ final class AutoRecommendationEngineScopedSettingsTests: XCTestCase {
             XCTAssertEqual(profile.contextBuilderAgentRaw, claudeRaw, phase)
             XCTAssertNil(profile.contextBuilderModelsByAgent?[claudeRaw], "\(phase): the synthesized default must not be saved")
             XCTAssertTrue(store.hasUserSetGlobalContextBuilderAgentDefaults, phase)
-            let get = try await AppSettingsMCPService(store: store).handleForTesting([
+            let get = try await AppSettingsMCPService(store: store, notificationCenter: NotificationCenter()).handleForTesting([
                 "op": .string("get"),
                 "keys": .array([.string("context_builder.model")])
             ])

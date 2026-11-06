@@ -555,6 +555,29 @@ final class AppSettingsMCPServiceAgentModeSettingsTests: XCTestCase {
             XCTAssertEqual(profile.contextBuilderModelsByAgent?[claudeRaw], "sonnet")
             XCTAssertTrue(store.hasUserSetGlobalContextBuilderAgentDefaults)
         }
+
+        // With no saved agent, clearing the model clears Claude's slot, saves no agent, and marks the choice user-set.
+        try await withContextBuilderSettings { store, service, _, _ in
+            store.setGlobalAgentModelsProfile(
+                AgentModelsSettingsProfile(
+                    contextBuilderAgentRaw: nil,
+                    contextBuilderModelsByAgent: [claudeRaw: "sonnet"]
+                ),
+                contextBuilderWriteIntent: .automaticSeed
+            )
+            XCTAssertFalse(store.hasUserSetGlobalContextBuilderAgentDefaults)
+            let clear = try await service.handleForTesting([
+                "op": .string("set"),
+                "key": .string("context_builder.model"),
+                "value": .null
+            ])
+            XCTAssertEqual(clear.objectValue?["changed"]?.boolValue, true)
+            XCTAssertEqual(clear.objectValue?["applied"]?.boolValue, true)
+            let profile = store.globalAgentModelsProfile()
+            XCTAssertNil(profile.contextBuilderModelsByAgent?[claudeRaw])
+            XCTAssertNil(profile.contextBuilderAgentRaw)
+            XCTAssertTrue(store.hasUserSetGlobalContextBuilderAgentDefaults)
+        }
     }
 
     /// A known agent that is unavailable stays the stored choice through both writers, and model

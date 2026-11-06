@@ -29,11 +29,30 @@ The run ports upstream PR 1348 as hand-written edits. After `app_settings` clear
 ## 2. Stored Context Builder selection in `app_settings`
 
 - Decision: `context_builder.agent` reads the saved agent ID, or `claudeCode` when none is saved, and `allowed_values` still lists every `AgentProviderKind`. `context_builder.model` reads `null` for an unknown saved agent and otherwise the model slot of the saved agent (`claudeCode` when none is saved). Both writers edit the global Agent Models profile and save it with `.userInitiated`. A non-null model write with no saved agent or an unknown one also saves `claudeCode`. The implicit `options` agent is the model writer's target. Source: approved plan.
-- Decision: the per-key descriptions say the selection is stored independent of provider availability and give the unknown-agent read, clear, and write rules. They appear only in `app_settings` `list` and `get` output, so the `tools/list` entry and the canonical snapshot don't change. Source: approved plan, reworded by the coding agent and its review.
+- Decision: the per-key descriptions say the selection is stored independent of provider availability and give the unknown-agent read, clear, and write rules. They appear only in `app_settings` `list` output, so the `tools/list` entry and the canonical snapshot don't change. Source: approved plan, reworded by the coding agent and its review.
 - Decision: the legacy `GlobalSettingsStore` Context Builder selection API is removed: `persistedGlobalContextBuilderAgentSelection()`, `globalContextBuilderAgentSelection()`, `globalContextBuilderRememberedModelRaw(for:)`, both `setGlobalContextBuilderAgentSelection` overloads, the matching `SettingsManaging` requirements, and the `WindowSettingsManager` forwarders. Once the `app_settings` writers moved to the profile API, a search of `Sources`, `Tests`, `Packages`, and `Scripts` showed callers only inside that family, and its writers still normalized against provider availability. The approved plan kept this API by default; the refactor review changed that, because removal is compile-checked and leaves one write path. Source: refactor review.
 - Decision: the new tests, their fixture, the reader's unknown-agent guard, and the description facts stay as written. Source: refactor review.
 - Correction to the plan: an unknown saved agent ID read as `claudeCode`. `normalizeSelection` maps an agent that doesn't parse to `.claudeCode`, where the plan had said `codexExec`. Only a known, unavailable agent moved to the first selectable agent. The defect and the fix are the same. Source: the coding agent's red-first run.
 - Evidence: red first, `make dev-test FILTER=RepoPromptTests.AppSettingsMCPServiceAgentModeSettingsTests` failed both new tests on the old service. The unknown-agent test saw `claudeCode`/`haiku` on read, a `set model null` that wiped the unknown ID, and agent and model sets skipped as unchanged. The Cursor test saw `set agent cursor` store `codexExec` and a Cursor model written to the Codex slot. After the change and the API removal, that suite passed 11 of 11, `AutoRecommendationEngineScopedSettingsTests` 10 of 10, and `GlobalSettingsPersistenceSafetyTests` 11 of 11. `make dev-swift-build PRODUCT=RepoPrompt`, `make dev-format`, and `make dev-lint` passed. The correctness review found one wording issue in a description, which was fixed. Its follow-up and the follow-up refactor review found nothing left to change.
+
+## 3. Validation, debug-app run, and pull request
+
+- Evidence: `make dev-smoke-launch` built the debug app from the branch's second commit and passed its smoke flow, with Codex CLI and Claude Code both available. The build recorded the commit as `139af15f8`, which became `7f5e9d3c1` after a commit-message fix with the same tree. Through `rpce-cli-debug`, starting from `claudeCode` with a saved `sonnet`:
+  - `set context_builder.model null` returned `changed` and `applied` true, and `get` returned `claudeCode` and `null`. A second clear returned both flags false.
+  - A bounded `context_builder` run then reported agent `claudeCode` and model `opus`, Claude's catalog default, and `get` still returned a `null` model.
+  - After a debug-only stop and `launch-existing`, `get` still returned `claudeCode` and `null`.
+  - `set context_builder.agent cursor` read back `cursor`, and the implicit `options` call reported `filters.agent` `cursor` with no candidates.
+  - The debug profile's original Context Builder values were restored afterwards.
+- Decision: the debug app was idle when the smoke replaced it, with no running or waiting agent sessions. It was running another worktree's build. Source: orchestrator check before the relaunch.
+- Decision: a branch-level review from the engineer template in `.agents/skills/rpce-merge-pr-batch/references/review-prompts.md` ran on the whole branch with the PR description draft. It found no blockers and no should-fix items. Fixed from its nits:
+  - The `markUserDefined` diagnostic field that only the removed setters used.
+  - A missing assertion for clearing the model with no saved agent.
+  - A test that posted on the shared notification center.
+  - Over-broad wording in `docs/architecture/settings-persistence.md`.
+  - The claim that `get` output carries the per-key descriptions.
+  - The `Upstream-Ref` line, which sat outside the commit trailer block.
+
+  Rejected: splitting the unknown-agent test, whose name and grouping follow upstream and whose scenarios share one saved-agent state, and removing pin re-derivation from `persistGlobalDefaultsChange`, which this port doesn't touch. Source: branch review.
 
 ## Parked decisions
 

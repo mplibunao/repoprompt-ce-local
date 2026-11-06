@@ -315,7 +315,6 @@ struct GlobalSettingsWriteDiagnostic: Equatable {
     let oldValue: String?
     let newValue: String?
     let commit: Bool
-    let markUserDefined: Bool?
     let reason: String
     let caller: String
 }
@@ -406,7 +405,6 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
         oldValue: String?,
         newValue: String?,
         commit: Bool,
-        markUserDefined: Bool? = nil,
         reason: String?,
         fileID: StaticString,
         line: UInt,
@@ -420,7 +418,6 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
             oldValue: oldValue,
             newValue: newValue,
             commit: commit,
-            markUserDefined: markUserDefined,
             reason: trimmedReason?.isEmpty == false ? trimmedReason! : fallbackReason,
             caller: "\(fileID):\(line) \(function)"
         )

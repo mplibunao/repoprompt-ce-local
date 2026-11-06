@@ -349,7 +349,7 @@ The MCP `app_settings` surface remains global for model-related keys such as:
 
 Those keys write the global backing fields. Workspace-specific Agent Models overrides are not exposed through `app_settings`; they are selected by the active RepoPrompt workspace/window and resolved by runtime services.
 
-`context_builder.agent` and `context_builder.model` read and write the stored global Context Builder selection, independent of provider availability, so reads return a saved agent ID unchanged even when this build doesn't recognize it. Clearing `context_builder.model` removes only the saved agent's model, and at runtime that agent, when available, runs its catalog default without saving it. Availability checks and executable fallback belong to [runtime resolution](#effective-runtime-resolution).
+`context_builder.agent` and `context_builder.model` read and write the stored global Context Builder selection, independent of provider availability, so reads return a saved agent ID unchanged even when this build doesn't recognize it. Clearing `context_builder.model` removes only a known saved agent's own model slot, and at runtime that agent, when available, runs its catalog default without saving it. With an unknown saved agent, clearing is a no-op. Availability checks and executable fallback belong to [runtime resolution](#effective-runtime-resolution).
 
 ## Non-goals and migration notes
 
