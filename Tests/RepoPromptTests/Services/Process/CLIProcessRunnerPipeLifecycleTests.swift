@@ -43,7 +43,8 @@ final class CLIProcessRunnerPipeLifecycleTests: XCTestCase {
                 runner: CLIProcessRunner(config: config),
                 args: ["-c", script, "sh", directory.path],
                 timeout: 30,
-                into: output
+                into: output,
+                observesStdout: true
             )
             deadlockBound.cancel()
             let result = output.withValue { $0 }
@@ -53,6 +54,13 @@ final class CLIProcessRunnerPipeLifecycleTests: XCTestCase {
             XCTAssertEqual(result.stdout, expectedStdout, "issue 157 [\(label)]: stdout written before exit was lost")
             XCTAssertEqual(result.stderr, expectedStderr, "issue 157 [\(label)]: stderr written before exit was lost")
             XCTAssertEqual(result.status, 0, label)
+            if entryPoint == .run {
+                XCTAssertEqual(
+                    result.observedStdout,
+                    expectedStdout,
+                    "\(label): the stdout observer missed output read after the child exited"
+                )
+            }
             if entryPoint == .runStreaming {
                 XCTAssertEqual(result.terminationCount, 1, label)
                 XCTAssertEqual(result.eventsAfterTermination, 0, "\(label): output arrived after .terminated")
@@ -349,6 +357,49 @@ final class CLIProcessRunnerPipeLifecycleTests: XCTestCase {
         try await consumer.value
         XCTAssertEqual(output.withValue { $0.status }, 0)
     }
+
+    @MainActor
+    func testRunObservesStdoutBeforeExitWithoutChangingCapturedOutput() async throws {
+        let directory = try makeTestDirectory()
+        let releaseFile = directory.appendingPathComponent("release")
+        addTeardownBlock { FileManager.default.createFile(atPath: releaseFile.path, contents: nil) }
+        // The child polls for the release file itself and gives up after about 30 s, so a failed
+        // test never leaves it running.
+        let script = """
+        printf ready
+        printf diagnostic >&2
+        i=0
+        while [ ! -e "$1" ] && [ "$i" -lt 600 ]; do sleep 0.05; i=$((i + 1)); done
+        printf ' answer\\n'
+        """
+        let output = Locked(RunOutput())
+        let runner = CLIProcessRunner(config: Self.configuration(command: "/bin/sh", workingDirectory: directory))
+        let run = Task {
+            try await Self.collect(
+                .run,
+                runner: runner,
+                args: ["-c", script, "sh", releaseFile.path],
+                timeout: 60,
+                into: output,
+                observesStdout: true
+            )
+        }
+
+        let prefix = Data("ready".utf8)
+        let observedBeforeExit = await Self.waitUntil(timeout: .seconds(5)) {
+            output.withValue { $0.observedStdout.count >= prefix.count }
+        }
+        XCTAssertTrue(observedBeforeExit, "the stdout observer saw nothing before the child exited")
+        XCTAssertEqual(output.withValue { $0.observedStdout }, prefix)
+
+        FileManager.default.createFile(atPath: releaseFile.path, contents: nil)
+        try await run.value
+        let result = output.withValue { $0 }
+        XCTAssertEqual(result.stdout, Data("ready answer\n".utf8))
+        XCTAssertEqual(result.observedStdout, result.stdout, "the observed bytes differ from the captured stdout")
+        XCTAssertEqual(result.stderr, Data("diagnostic".utf8))
+        XCTAssertEqual(result.status, 0)
+    }
 }
 
 private extension CLIProcessRunnerPipeLifecycleTests {
@@ -367,6 +418,8 @@ private extension CLIProcessRunnerPipeLifecycleTests {
     struct RunOutput {
         var stdout = Data()
         var stderr = Data()
+        /// The bytes `.run` passed to its stdout observer, when the collection asked for them.
+        var observedStdout = Data()
         var status: Int32?
         var timedOut: Bool?
         var terminationCount = 0
@@ -445,16 +498,30 @@ private extension CLIProcessRunnerPipeLifecycleTests {
         )
     }
 
+    /// With `observesStdout`, `.run` records its stdout observer's bytes in `observedStdout`.
+    /// `runStreaming` has no observer and ignores it.
     static func collect(
         _ entryPoint: EntryPoint,
         runner: CLIProcessRunner,
         args: [String],
         timeout: TimeInterval?,
-        into output: Locked<RunOutput>
+        into output: Locked<RunOutput>,
+        observesStdout: Bool = false
     ) async throws {
         switch entryPoint {
         case .run:
-            let result = try await runner.run(args: args, stdin: nil, outputMode: .none, timeout: timeout)
+            let onStdoutChunk: (@Sendable (Data) -> Void)? = if observesStdout {
+                { chunk in output.withValue { $0.observedStdout.append(chunk) } }
+            } else {
+                nil
+            }
+            let result = try await runner.run(
+                args: args,
+                stdin: nil,
+                outputMode: .none,
+                timeout: timeout,
+                onStdoutChunk: onStdoutChunk
+            )
             output.withValue {
                 $0.stdout = result.stdout
                 $0.stderr = result.stderr
