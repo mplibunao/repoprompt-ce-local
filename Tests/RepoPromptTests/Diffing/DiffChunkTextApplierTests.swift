@@ -22,6 +22,23 @@ final class DiffChunkTextApplierTests: XCTestCase {
                 "a\nb\ninserted\nc\nD"
             ),
             (
+                "insertion keeps its line when a later replacement starts at the same original line",
+                [
+                    DiffChunk(
+                        lines: [DiffLine(content: "+inserted")],
+                        startLine: 2
+                    ),
+                    DiffChunk(
+                        lines: [
+                            DiffLine(content: "-c"),
+                            DiffLine(content: "+C")
+                        ],
+                        startLine: 2
+                    )
+                ],
+                "a\nb\ninserted\nC\nd"
+            ),
+            (
                 "deletion shifts later replacement backward",
                 [
                     DiffChunk(

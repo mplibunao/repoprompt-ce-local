@@ -154,6 +154,52 @@ final class ApplyEditsCoreRecoveryTests: XCTestCase {
         XCTAssertEqual(outcomes[1], EditOutcome(index: 1, status: "success", error: nil))
     }
 
+    /// Batch fallback with no unique literal match. A repeat of a replace-all's search starts
+    /// scanning after the replace-all's last chunk, so it keeps unrelated lines and reports accurate outcomes.
+    func testBatchRepeatSearchStartsAfterReplaceAllLastChunk() async throws {
+        try await assertBatchCases([
+            BatchCase(
+                name: "replace-all removal, then a sibling on the removed lines",
+                original: "FOO\nFOO\ntail\n",
+                edits: [Self.edit("foo", "", all: true), Self.edit("foo", "baz")],
+                expectedText: "tail\n",
+                expectedStatus: .partial,
+                expectedApplied: 1,
+                expectedOutcomes: [Self.outcome(0), Self.outcome(1, failure: Self.notFound)]
+            )
+        ])
+    }
+
+    /// Batch fallback with no unique literal match. Chunks that start on the same line must keep
+    /// unrelated lines and report accurate outcomes.
+    func testBatchDiffFallbackKeepsLinesBesideSameLineChunks() async throws {
+        let block = "A\nb\nc\nd\n"
+
+        try await assertBatchCases([
+            BatchCase(
+                name: "one replace-all over adjacent blocks",
+                original: block + block,
+                edits: [Self.edit("a\nb\nc\nd", "A2\nb\nc\nd\nY", all: true)],
+                expectedText: "A2\nb\nc\nd\nY\nA2\nb\nc\nd\nY\n",
+                expectedStatus: .success,
+                expectedApplied: 1,
+                expectedOutcomes: [Self.outcome(0)]
+            ),
+            BatchCase(
+                name: "repeated multi-line search, first edit inserts a line",
+                original: block + block,
+                edits: [
+                    Self.edit("A\nb\nc\nd", "A2\nb\nc\nd\nY"),
+                    Self.edit("A\nb\nc\nd", "A3\nb\nc\nd")
+                ],
+                expectedText: "A2\nb\nc\nd\nY\nA3\nb\nc\nd\n",
+                expectedStatus: .success,
+                expectedApplied: 2,
+                expectedOutcomes: [Self.outcome(0), Self.outcome(1)]
+            )
+        ])
+    }
+
     // MARK: - Fallback must never drop text outside the search span
 
     private static let longPrefix = "| id | " + String(repeating: "a", count: 160)
