@@ -53,15 +53,10 @@ struct ProviderTransportActivityThrottle {
 enum ProviderPendingCompletionStream {
     typealias ReportActivity = @Sendable () -> Void
 
-    /// `minimumActivityInterval` exists for tests; providers keep the default.
     static func make(
-        minimumActivityInterval: Duration = ProviderTransportActivity.receivedBytesMinimumInterval,
         complete: @escaping @Sendable (_ reportActivity: @escaping ReportActivity) async throws -> AICompletionResult
     ) -> AsyncThrowingStream<AIStreamResult, Error> {
-        let iterator = PendingCompletionIterator(
-            minimumActivityInterval: minimumActivityInterval,
-            complete: complete
-        )
+        let iterator = PendingCompletionIterator(complete: complete)
         // `AsyncThrowingStream(unfolding:)` never calls this closure for a consumer that is
         // already cancelled, so the iterator also starts nothing for it.
         return AsyncThrowingStream(unfolding: { try await iterator.next() })
@@ -82,12 +77,10 @@ private final class PendingCompletionIterator: @unchecked Sendable {
         case finished
     }
 
-    private let minimumActivityInterval: Duration
     private let complete: Complete
     private var state = State.notStarted
 
-    init(minimumActivityInterval: Duration, complete: @escaping Complete) {
-        self.minimumActivityInterval = minimumActivityInterval
+    init(complete: @escaping Complete) {
         self.complete = complete
     }
 
@@ -139,10 +132,7 @@ private final class PendingCompletionIterator: @unchecked Sendable {
 
     private func start() -> (Events.AsyncIterator, Task<Void, Never>) {
         let (events, continuation) = Events.makeStream()
-        let output = PendingCompletionOutput(
-            continuation: continuation,
-            minimumActivityInterval: minimumActivityInterval
-        )
+        let output = PendingCompletionOutput(continuation: continuation)
         let complete = complete
         let producer = Task {
             do {
@@ -163,15 +153,11 @@ private final class PendingCompletionIterator: @unchecked Sendable {
 private final class PendingCompletionOutput: @unchecked Sendable {
     private let lock = NSLock()
     private let continuation: AsyncThrowingStream<AIStreamResult, Error>.Continuation
-    private var throttle: ProviderTransportActivityThrottle
+    private var throttle = ProviderTransportActivityThrottle()
     private var activityOpen = true
 
-    init(
-        continuation: AsyncThrowingStream<AIStreamResult, Error>.Continuation,
-        minimumActivityInterval: Duration
-    ) {
+    init(continuation: AsyncThrowingStream<AIStreamResult, Error>.Continuation) {
         self.continuation = continuation
-        throttle = ProviderTransportActivityThrottle(minimumInterval: minimumActivityInterval)
     }
 
     func reportActivity() {

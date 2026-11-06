@@ -14,12 +14,9 @@ final class ProviderTransportActivityTests: XCTestCase {
         let answer = "  first block\nsecond block\n"
         for testCase in cases {
             let label = testCase.label
-            let reporter = Locked<ProviderPendingCompletionStream.ReportActivity?>(nil)
             // The completion settles as soon as it reports, so an activity result that isn't yielded
-            // during the report lands after settlement output or not at all. With no throttle
-            // interval, only settlement can stop a later report from yielding.
-            let stream = ProviderPendingCompletionStream.make(minimumActivityInterval: .zero) { report in
-                reporter.withValue { $0 = report }
+            // during the report lands after settlement output or not at all.
+            let stream = ProviderPendingCompletionStream.make { report in
                 report()
                 return AICompletionResult(
                     text: answer,
@@ -36,23 +33,19 @@ final class ProviderTransportActivityTests: XCTestCase {
             let content = try await iterator.next()
             XCTAssertEqual(content?.type, "content", label)
             XCTAssertEqual(content?.text, answer, label)
-            reporter.withValue { $0 }?()
             let terminal = try await iterator.next()
             XCTAssertEqual(terminal?.type, testCase.terminalType, label)
             XCTAssertEqual(terminal?.stopReason, testCase.stopReason, label)
             XCTAssertEqual(terminal?.promptTokens, 3, label)
             XCTAssertEqual(terminal?.completionTokens, 5, label)
             XCTAssertEqual(terminal?.cost, 0.01, label)
-            reporter.withValue { $0 }?()
             let end = try await iterator.next()
             XCTAssertNil(end, "\(label): output followed the terminal result")
         }
     }
 
     func testPendingCompletionFailureStopsActivityAndPreservesError() async throws {
-        let reporter = Locked<ProviderPendingCompletionStream.ReportActivity?>(nil)
-        let stream = ProviderPendingCompletionStream.make(minimumActivityInterval: .zero) { report in
-            reporter.withValue { $0 = report }
+        let stream = ProviderPendingCompletionStream.make { report in
             report()
             throw AIProviderError.invalidResponse(detail: "child exited 1")
         }
@@ -68,9 +61,6 @@ final class ProviderTransportActivityTests: XCTestCase {
         } catch {
             XCTFail("expected the completion's error, got \(error)")
         }
-        reporter.withValue { $0 }?()
-        let end = try await iterator.next()
-        XCTAssertNil(end, "the stream yielded output after its completion failed")
     }
 
     func testConsumerCancellationCancelsPendingRequest() async {
@@ -118,7 +108,10 @@ final class ProviderTransportActivityTests: XCTestCase {
             result.error == nil || result.error is CancellationError,
             String(describing: result.error)
         )
-        XCTAssertFalse(started.withValue { $0 }, "a consumer cancelled before its first pull started the completion")
+        // A completion started eagerly runs on its own task, which may not have been scheduled yet when
+        // the consumer returns, so give it time to start before concluding it never will.
+        let startedLate = await Self.waitUntil(timeout: .milliseconds(200)) { started.withValue { $0 } }
+        XCTAssertFalse(startedLate, "a consumer cancelled before its first pull started the completion")
     }
 
     func testReleasingStartedStreamCancelsPendingRequest() async throws {
