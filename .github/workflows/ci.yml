@@ -166,7 +166,7 @@ jobs:
 
       - name: Install pinned Codex CLI
         if: needs.changes.outputs.markdown_only != 'true'
-        run: npm install --global @openai/codex@0.159.0
+        run: npm install --global @openai/codex@0.164.0
 
       - name: Validate Codex app-server schema contract
         if: needs.changes.outputs.markdown_only != 'true'

@@ -464,11 +464,11 @@ package.
 
 ## Bundled Codex artifact
 
-Debug and release packaging include the complete official OpenAI Codex 0.159.0 standalone
+Debug and release packaging include the complete official OpenAI Codex 0.164.0 standalone
 package. The authority is the repository-owned
 [`Vendor/Codex/manifest.json`](../Vendor/Codex/manifest.json), which pins the official
-[`rust-v0.159.0` release](https://github.com/openai/codex/releases/tag/rust-v0.159.0), the
-official [`codex-package_SHA256SUMS`](https://github.com/openai/codex/releases/download/rust-v0.159.0/codex-package_SHA256SUMS),
+[`rust-v0.164.0` release](https://github.com/openai/codex/releases/tag/rust-v0.164.0), the
+official [`codex-package_SHA256SUMS`](https://github.com/openai/codex/releases/download/rust-v0.164.0/codex-package_SHA256SUMS),
 both macOS package assets, their complete extracted layouts, file hashes, architectures, and
 primary executable signing identities. The upstream release publishes SHA-256 sums but does
 not document a public GPG, minisign, or SLSA verification procedure, so acquisition requires
@@ -524,7 +524,7 @@ The bundled package is RepoPrompt's default Codex runtime authority; runtime sel
 falls through to the user's shell `PATH`. Advanced users may set one explicit absolute external
 override with `REPOPROMPT_CODEX_EXECUTABLE`. RepoPrompt rejects overrides older than 0.149.0,
 the external admission minimum, which stays deliberately below the exact bundled and
-schema-gate pin at 0.159.0 because no outgoing request needs the newer version.
+schema-gate pin at 0.164.0 because no outgoing request needs the newer version.
 [`docs/architecture/codex-app-server-schema-gate.md`](architecture/codex-app-server-schema-gate.md)
 owns the per-rotation schema findings behind both numbers and the limits of what admission at
 the floor proves. Bundled and external runtimes both use RepoPrompt-owned `CODEX_HOME`
@@ -540,12 +540,13 @@ preserves other TOML, applies repeated updates idempotently, and stops with an a
 conflict instead of guessing when the code-mode policy is ambiguous, uses dotted or inline
 definitions that would redefine the owned table/keys, or uses `non_prefixed_mcp_tool_names`.
 
-The standalone package also contains the upstream Zsh executable at
-`codex-resources/zsh/bin/zsh`. Its exact Zsh 5.9 licence is included as
-[`ThirdPartyLicenses/codex/ZSH-LICENCE`](../ThirdPartyLicenses/codex/ZSH-LICENCE) and is
-covered by the packaged legal inventory checksum contract. The voice runtime's packaged
-notice, source manifest, and licences are copied as the `VOICE-*` files in
-[`ThirdPartyLicenses/codex/`](../ThirdPartyLicenses/codex/) under the same contract.
+The 0.164.0 standalone packages no longer contain bundled Zsh: Codex 0.163.0 dropped its
+patched Zsh and runs shell commands through its standard shell executor. The reviewed
+0.164.0 rotation removed Zsh's three layout entries, its Mach-O and release-signing entry, and
+its licence. Any later layout drift that nobody has reviewed still fails the candidate tool.
+The voice runtime's packaged notice, source manifest, and licences are copied as the `VOICE-*`
+files in [`ThirdPartyLicenses/codex/`](../ThirdPartyLicenses/codex/) and are covered by the
+packaged legal inventory checksum contract.
 
 To diagnose acquisition independently of a build, run:
 
@@ -553,7 +554,7 @@ To diagnose acquisition independently of a build, run:
 python3 Scripts/codex_runtime_artifact.py acquire --arch all
 python3 Scripts/codex_runtime_artifact.py verify \
   --arch aarch64-apple-darwin \
-  --package .build/codex-runtime/0.159.0/aarch64-apple-darwin
+  --package .build/codex-runtime/0.164.0/aarch64-apple-darwin
 python3 Scripts/codex_runtime_artifact.py stage-bundle \
   --arch all \
   --cache-root .build/codex-runtime \
@@ -596,18 +597,25 @@ uses the same artifact verifier as packaging to reject extracted-layout, Mach-O
 inventory/architecture, normalized-payload, and OpenAI signing-identity drift. The official
 output directory contains a proposed `candidate-manifest.json`, `candidate-provenance.json`,
 sanitized `release-metadata.json`, the upstream checksum file, self-checksums, and a
-deterministic `candidate-report.md`. The live 0.159.0 pin remains authoritative until a
+deterministic `candidate-report.md`. The live 0.164.0 pin remains authoritative until a
 complete rotation change is reviewed and deliberately applied.
 
-The known-good rollback for the 0.159.0 rotation is the previously bundled Codex 0.156.1
-(`rust-v0.156.1`; manifest SHA-256
+The tool has no way to accept layout drift, and it refuses a candidate that isn't newer than
+the pinned version. When a new release removes package entries, review the removal, delete
+those entries from `Vendor/Codex/manifest.json` while its `version` is still the current pin,
+and then run the official candidate against that manifest. The 0.164.0 rotation removed Zsh this
+way: the first candidate run failed on exactly Zsh's three missing paths, and the rerun
+against the adjusted manifest passed.
+
+The known-good rollback for the 0.164.0 rotation is the previously bundled Codex 0.159.0
+(`rust-v0.159.0`; manifest SHA-256
+`e4f0751ca1be87f05920b76fd867d349759dc468e4e4e2f0db8e321be8197246`, arm64 package archive
+SHA-256 `7748d07d7921a67b91d015e9d0f43177c675977e67f955b2f8fb96dc880dd5d7`, x86_64 package
+archive SHA-256 `ab64d30288454124c7c15abd81672a9dfda7e3e723d76c4cfa6c0aba4b439017`). The
+older verified fallback is Codex 0.156.1 (`rust-v0.156.1`; manifest SHA-256
 `ac9160b972a8d2c816e1496e1368220fffea939d836d40f2af043b4e240e2d53`, arm64 package archive
 SHA-256 `fea42f9625091f011e38f059da974d52e57ba31831648bb1c7f0b1a385fde547`, x86_64 package
-archive SHA-256 `618dbcd55419fa041871f777a14b107ceb3fe2d339ef81e21e6ab5374420dc71`). The
-older verified fallback is Codex 0.153.4 (`rust-v0.153.4`; manifest SHA-256
-`3205371fce2b00104b875dad11a3f178f8d8c2f4d220e3dae970908053659f7f`, arm64 package archive
-SHA-256 `35438da1fbf7a6db7ddb3bcec84448fa6015ba188461472a97d9d1da7d9c4353`, x86_64 package
-archive SHA-256 `3ee638d7155c856ef31f3f4a85cb2195de1939962d3924c935b24f0514564a3d`). Roll back by
+archive SHA-256 `618dbcd55419fa041871f777a14b107ceb3fe2d339ef81e21e6ab5374420dc71`). Roll back by
 reverting the complete rotation change and rebuilding from the restored manifest rather than
 mixing old and new authority files. A source revert does not undo saved model selections that
 only the newer runtime advertises, or any state the newer runtime wrote under the
