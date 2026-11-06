@@ -795,6 +795,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     #if DEBUG
         private var test_currentTabIDOverride: UUID?
         private var test_activeWorkspaceIDForSessionIndexOverride: UUID?
+        private var test_persistenceWorkspace: WorkspaceModel?
         private var test_allowsScheduledDerivedTranscriptRefreshWithoutPromptManager = false
         private var test_persistentBindingResolutionSnapshotBuildCount = 0
         var test_sidebarSessionRowsBuildCount = 0
@@ -878,6 +879,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         func test_setAgentSessionSaver(_ saver: @escaping AgentSessionSaver) {
             bypassesAgentSessionPersistenceSuppressionForTesting = true
             agentSessionSaver = saver
+        }
+
+        func test_setPersistenceWorkspace(_ workspace: WorkspaceModel?) {
+            test_persistenceWorkspace = workspace
         }
 
         func test_setAgentSessionsDeleter(_ deleter: @escaping AgentSessionsDeleter) {
@@ -15314,9 +15319,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         _ token: SessionSaveCommitToken,
         requireWorkspaceMatch: Bool = true
     ) -> Bool {
-        if requireWorkspaceMatch,
-           workspaceManager?.activeWorkspace?.id != token.workspaceID
-        {
+        let activeWorkspaceID = workspaceManager?.activeWorkspace?.id
+        #if DEBUG
+            let workspaceIDForSave = activeWorkspaceID ?? test_persistenceWorkspace?.id
+        #else
+            let workspaceIDForSave = activeWorkspaceID
+        #endif
+        if requireWorkspaceMatch, workspaceIDForSave != token.workspaceID {
             return false
         }
         guard let session = sessions[token.tabID],
@@ -15426,7 +15435,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             #endif
             return .notRequired
         }
-        guard let workspace = workspaceManager?.activeWorkspace else {
+        let activeWorkspace = workspaceManager?.activeWorkspace
+        #if DEBUG
+            let workspace = activeWorkspace ?? test_persistenceWorkspace
+        #else
+            let workspace = activeWorkspace
+        #endif
+        guard let workspace else {
             return .failed(.init(operation: .save, tabID: tabID, message: "Active workspace is unavailable."))
         }
 
