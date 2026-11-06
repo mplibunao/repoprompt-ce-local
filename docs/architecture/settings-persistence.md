@@ -278,7 +278,7 @@ The global Agent Models profile is not a separate JSON blob. It is projected fro
 
 Use `GlobalSettingsStore.globalAgentModelsProfile()` and `setGlobalAgentModelsProfile(_:contextBuilderWriteIntent:)` for whole-profile reads/writes. The write intent distinguishes user-owned Context Builder changes from automatic seeding while allowing unrelated model changes to preserve the existing ownership marker. User-driven Context Builder edits and workspace-to-global copies mark the selection as user-defined; automatic seeding stores an explicit unmarked state and never demotes an established user choice.
 
-Legacy global Context Builder setters and global backing-field writers for planning, Built-in Chat, sync, MCP role overrides, and role-label discovery filtering post `.agentModelsSettingsDidChange(scope: .global)` after an actual value change because they mutate fields used by the global Agent Models profile.
+Global Agent Models profile writes publish the updated state and post `.agentModelsSettingsDidChange(scope: .global)` after attempting persistence. Direct global setters for planning, Built-in Chat, sync, and role-label discovery filtering post the same notification when their profile values change.
 
 ### Workspace profiles
 
@@ -348,6 +348,8 @@ The MCP `app_settings` surface remains global for model-related keys such as:
 - `context_builder.model`
 
 Those keys write the global backing fields. Workspace-specific Agent Models overrides are not exposed through `app_settings`; they are selected by the active RepoPrompt workspace/window and resolved by runtime services.
+
+`context_builder.agent` and `context_builder.model` read and write the stored global Context Builder selection, independent of provider availability, so reads return a saved agent ID unchanged even when this build doesn't recognize it. Clearing `context_builder.model` removes only the saved agent's model, and at runtime that agent, when available, runs its catalog default without saving it. Availability checks and executable fallback belong to [runtime resolution](#effective-runtime-resolution).
 
 ## Non-goals and migration notes
 

@@ -753,48 +753,55 @@ private enum AppSettingsMCPRegistry {
         ),
 
         // Context Builder agent/model selection only. Behavioral controls remain
-        // globally owned by the app Settings and panel UI.
+        // globally owned by the app Settings and panel UI. Both keys read and write the
+        // stored global selection; provider availability and catalog fallback apply at runtime.
         stringEnumSetting(
             key: "context_builder.agent",
             group: "context_builder",
-            description: "CLI agent used by the Context Builder MCP tool.",
+            description: "CLI agent saved for the Context Builder MCP tool, independent of provider availability. Reads may return an unknown saved ID outside allowed_values, which lists accepted writes.",
             allowedValues: AgentProviderKind.allCases.map(\.rawValue),
-            read: { .string($0.globalContextBuilderAgentSelection().agentRaw ?? AgentProviderKind.claudeCode.rawValue) },
+            read: { .string($0.globalAgentModelsProfile().contextBuilderAgentRaw ?? AgentProviderKind.claudeCode.rawValue) },
             write: { store, value in
                 let agentRaw = try requiredString(from: value)
                 let kind = AgentProviderKind(rawValue: agentRaw) ?? .claudeCode
-                let rememberedModelRaw = store.globalContextBuilderRememberedModelRaw(for: kind.rawValue)
-                let modelRaw = rememberedModelRaw ?? AgentModelCatalog.defaultModelRaw(for: kind)
-                store.setGlobalContextBuilderAgentSelection(
-                    agentRaw: kind.rawValue,
-                    modelRaw: modelRaw,
-                    markUserDefined: true,
-                    reason: "app_settings.context_builder.agent"
-                )
+                var profile = store.globalAgentModelsProfile()
+                profile.contextBuilderAgentRaw = kind.rawValue
+                if profile.contextBuilderModelsByAgent?[kind.rawValue] == nil {
+                    profile = profile.replacingContextBuilderModel(
+                        AgentModelCatalog.defaultModelRaw(for: kind),
+                        for: kind.rawValue
+                    )
+                }
+                store.setGlobalAgentModelsProfile(profile, contextBuilderWriteIntent: .userInitiated)
             },
             afterWrite: postRecommendationsDidApply
         ),
         optionalModelRawSetting(
             key: "context_builder.model",
             group: "context_builder",
-            description: "Model raw identifier used by the Context Builder MCP tool.",
+            description: "Model raw identifier saved for the Context Builder agent. Setting null clears it, and an available saved agent then runs its catalog default. With no saved agent or an unknown one, a non-null value that differs from the current read also saves agent claudeCode. With an unknown agent, reads return null and setting null is a no-op.",
             read: { store in
-                let agentRaw = store.globalContextBuilderAgentSelection().agentRaw
-                return stringOrNull(agentRaw.flatMap { store.globalContextBuilderRememberedModelRaw(for: $0) })
+                let profile = store.globalAgentModelsProfile()
+                guard !hasUnusableSavedContextBuilderAgent(in: profile) else { return .null }
+                return stringOrNull(profile.contextBuilderModelsByAgent?[contextBuilderAgent(in: profile).rawValue])
             },
             write: { store, value in
-                let currentAgentRaw = store.globalContextBuilderAgentSelection().agentRaw ?? AgentProviderKind.claudeCode.rawValue
-                try store.setGlobalContextBuilderAgentSelection(
-                    agentRaw: currentAgentRaw,
-                    modelRaw: optionalString(from: value),
-                    markUserDefined: true,
-                    reason: "app_settings.context_builder.model"
+                var profile = store.globalAgentModelsProfile()
+                let agent = contextBuilderAgent(in: profile)
+                let modelRaw = try optionalString(from: value)
+                if modelRaw != nil, profile.contextBuilderAgentRaw != agent.rawValue {
+                    // Runtime restoration uses a saved model only alongside a saved agent it can parse.
+                    profile.contextBuilderAgentRaw = agent.rawValue
+                }
+                store.setGlobalAgentModelsProfile(
+                    profile.replacingContextBuilderModel(modelRaw, for: agent.rawValue),
+                    contextBuilderWriteIntent: .userInitiated
                 )
             },
             afterWrite: postRecommendationsDidApply,
             candidateProvider: agentModelRawCandidates,
             defaultOptionsAgent: { store in
-                store.globalContextBuilderAgentSelection().agentRaw.flatMap(AgentProviderKind.init(rawValue:))
+                contextBuilderAgent(in: store.globalAgentModelsProfile())
             }
         ),
 
@@ -1526,6 +1533,19 @@ private enum AppSettingsMCPRegistry {
             truncated: truncated,
             notes: notes
         )
+    }
+
+    /// The agent whose slot the Context Builder model key reads and writes: the saved agent when it
+    /// parses, otherwise `claudeCode`. Provider availability is deliberately ignored.
+    private static func contextBuilderAgent(in profile: AgentModelsSettingsProfile) -> AgentProviderKind {
+        profile.contextBuilderAgentRaw.flatMap(AgentProviderKind.init(rawValue:)) ?? .claudeCode
+    }
+
+    /// True when the saved Context Builder agent ID matches no `AgentProviderKind`, as with an ID
+    /// written by a newer build. A known agent whose provider is unavailable is usable.
+    private static func hasUnusableSavedContextBuilderAgent(in profile: AgentModelsSettingsProfile) -> Bool {
+        guard let agentRaw = profile.contextBuilderAgentRaw else { return false }
+        return AgentProviderKind(rawValue: agentRaw) == nil
     }
 
     /// Returns model-raw candidates for string-typed Context Builder settings using the shared
