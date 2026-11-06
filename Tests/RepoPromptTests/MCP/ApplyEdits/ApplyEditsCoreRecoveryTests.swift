@@ -730,6 +730,19 @@ final class ApplyEditsCoreRecoveryTests: XCTestCase {
                 ]
             ),
             BatchCase(
+                name: "a refused edit leaves its search's repeat cursor in place",
+                original: "HEAD\nB\nC\nB\nC\n",
+                edits: [Self.edit("head\nb", "HEAD\nB2"), Self.edit("b\nc", "Y\nC"), Self.edit("b\nc", "Z\nC")],
+                expectedText: "HEAD\nB2\nC\nB\nC\n",
+                expectedStatus: .partial,
+                expectedApplied: 1,
+                expectedOutcomes: [
+                    Self.outcome(0),
+                    Self.outcome(1, failure: Self.overlapRefused),
+                    Self.outcome(2, failure: Self.overlapRefused)
+                ]
+            ),
+            BatchCase(
                 name: "an edit whose removed span contains an earlier insertion point is refused",
                 original: "B\nC\ntail\n",
                 edits: [Self.edit("c", "Y\nC"), Self.edit("b\nc", "")],
