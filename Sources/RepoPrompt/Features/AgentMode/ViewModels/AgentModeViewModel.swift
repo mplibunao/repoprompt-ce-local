@@ -620,6 +620,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     let clearConsumedAttachmentsAfterProviderConsumption: Bool
     let applyEditsApprovalStore: ApplyEditsApprovalStore
     private lazy var runService: AgentModeRunService = makeRunService()
+    #if DEBUG
+        private(set) var testRunServiceWasMaterialized = false
+    #endif
     private let sessionLifecycleAuthority = AgentSessionLifecycleAuthority()
     /// The clock `agent_manage stop_session` waits on for a released process.
     private(set) var providerRetirementClock: AgentProviderIdleClock = .continuous
@@ -2924,7 +2927,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         return false
     }
 
+    func ensureRunServiceMaterializedForRunStart() {
+        _ = runService
+    }
+
     private func makeRunService() -> AgentModeRunService {
+        #if DEBUG
+            testRunServiceWasMaterialized = true
+        #endif
         let dependencies = AgentModeRunService.Dependencies(
             windowID: windowID,
             headlessProviderFactory: headlessProviderFactory,

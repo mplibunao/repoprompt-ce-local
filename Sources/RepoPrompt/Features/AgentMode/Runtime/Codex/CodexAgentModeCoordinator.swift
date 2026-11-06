@@ -2623,7 +2623,11 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             session.codexNeedsReconnect = true
         }
         let controller: any CodexSessionControlling
-        switch await ensureCodexNativeSession(session: session, allowResumeTimeoutFallback: false) {
+        switch await ensureCodexNativeSession(
+            session: session,
+            allowMissingRolloutFallback: false,
+            allowResumeTimeoutFallback: false
+        ) {
         case let .ready(ready):
             controller = ready.controller
         case let .failed(failure):
@@ -2665,6 +2669,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             viewModel?.setAgentRunActive(session.tabID, isActive: false)
             // A compaction that never started is not a run, so the previous run's result stands.
             session.runState = runStateBeforeCompaction
+            updateCodexStallWatchdogState(for: session)
             setRunningStatus(nil, source: nil, session: session)
             viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
             viewModel?.scheduleSave(for: session.tabID)
@@ -2837,9 +2842,14 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
 
     /// Returns the attempt the compaction runs under.
     private func beginCodexCompaction(_ session: AgentTabSession) -> AgentRunOwnership {
+        viewModel?.ensureRunServiceMaterializedForRunStart()
         let ownership = session.activeRunOwnership ?? session.beginRunAttempt(source: "codex.compaction")
         session.codexPendingTurnKind = .compact
         session.runState = .running
+        let now = Date()
+        session.codexLastEventAt = now
+        recordCodexWatchdogProgress(for: session, at: now)
+        updateCodexStallWatchdogState(for: session)
         setRunningStatus("Compacting context…", source: .transport, session: session, urgent: true)
         viewModel?.setAgentRunActive(session.tabID, isActive: true)
         viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)

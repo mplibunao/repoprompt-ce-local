@@ -938,6 +938,9 @@ import XCTest
         private(set) var shutdownCount = 0
         /// How many thread snapshots were read, as the stall watchdog's probe reads them.
         private(set) var snapshotReadCount = 0
+        var snapshotLatestTurnStatus: CodexNativeSessionController.TurnStatus?
+        /// How many times the test requested thread compaction.
+        private(set) var compactCallCount = 0
         /// The resume target of each start, `nil` for a fresh thread.
         private(set) var startOrResumeTargets: [CodexNativeSessionController.SessionRef?] = []
         var startupHook: ((CodexNativeSessionController.SessionRef?) async throws -> Void)?
@@ -1066,7 +1069,7 @@ import XCTest
                 runtimeStatus: .idle,
                 currentTurnID: nil,
                 activeTurnIDs: [],
-                latestTurnStatus: nil
+                latestTurnStatus: snapshotLatestTurnStatus
             )
         }
 
@@ -1113,6 +1116,7 @@ import XCTest
         }
 
         func compactThread() async throws {
+            compactCallCount += 1
             if let compactHold {
                 await compactHold.wait()
             }

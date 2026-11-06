@@ -129,6 +129,39 @@ import XCTest
             XCTAssertEqual(fixture.viewModel.mcpSnapshot(sessionID: fixture.sessionID)?.status, .completed)
         }
 
+        func testColdCompactionWithoutEventsCompletesThroughTheWatchdog() async throws {
+            let fixture = makeFixture(
+                codexStallWatchdogPollIntervalNanos: 10_000_000,
+                codexStallWatchdogProbeThreshold: 0.05,
+                codexStallWatchdogRecoveryThreshold: 0.1
+            )
+            fixture.session.codexConversationID = "startup-ticket-test"
+            fixture.session.codexNeedsReconnect = true
+            fixture.controller.snapshotLatestTurnStatus = .completed
+            let recorder = StartupTestPublicationRecorder()
+            recorder.install(on: fixture.viewModel)
+            _ = try await fixture.activateMCPControl(startPending: false)
+
+            XCTAssertFalse(fixture.viewModel.testRunServiceWasMaterialized)
+            XCTAssertEqual(
+                fixture.viewModel.submitUserTurn(text: "/compact", tabID: fixture.tabID),
+                .submittedControlPlaneCommand
+            )
+
+            try await eventually(seconds: 5) { recorder.revisions.count == 1 }
+
+            XCTAssertTrue(fixture.viewModel.testRunServiceWasMaterialized)
+            XCTAssertEqual(fixture.session.runState, .completed)
+            XCTAssertNil(fixture.session.codexPendingTurnKind)
+            XCTAssertEqual(recorder.revisions.count, 1)
+            XCTAssertEqual(recorder.revisions.first?.terminalState, .completed)
+            XCTAssertEqual(fixture.controller.startOrResumeCount, 2)
+            XCTAssertGreaterThanOrEqual(fixture.controller.snapshotReadCount, 2)
+            XCTAssertEqual(fixture.controller.compactCallCount, 1)
+            XCTAssertTrue(fixture.controller.startUserTurnTexts.isEmpty)
+            XCTAssertTrue(fixture.session.items.allSatisfy { $0.kind != .user })
+        }
+
         /// A compaction request that fails after the compaction was cancelled leaves the committed
         /// cancellation as the session's result, live and stored.
         func testCompactionFailureAfterCancellationKeepsTheCancellation() async throws {
@@ -970,7 +1003,10 @@ import XCTest
         private func makeFixture(
             gatedReadinessCalls: Set<Int> = [],
             selectedAgent: AgentProviderKind = .codexExec,
-            claudeController: StartupTestClaudeController? = nil
+            claudeController: StartupTestClaudeController? = nil,
+            codexStallWatchdogPollIntervalNanos: UInt64? = nil,
+            codexStallWatchdogProbeThreshold: TimeInterval? = nil,
+            codexStallWatchdogRecoveryThreshold: TimeInterval? = nil
         ) -> Fixture {
             let readiness = StartupTestGatedReadiness(gatedCalls: gatedReadinessCalls)
             let controller = StartupTestCodexController(gatesStartup: false)
@@ -981,7 +1017,10 @@ import XCTest
                 claudeControllerFactory: claudeController.map { claude in
                     { _, _, _, _ in claude }
                 },
-                mcpServerReadinessRequirement: { try await readiness.require() }
+                mcpServerReadinessRequirement: { try await readiness.require() },
+                testCodexStallWatchdogPollIntervalNanos: codexStallWatchdogPollIntervalNanos,
+                testCodexStallWatchdogProbeThreshold: codexStallWatchdogProbeThreshold,
+                testCodexStallWatchdogRecoveryThreshold: codexStallWatchdogRecoveryThreshold
             )
             let session = startupTestCodexSession()
             session.selectedAgent = selectedAgent
