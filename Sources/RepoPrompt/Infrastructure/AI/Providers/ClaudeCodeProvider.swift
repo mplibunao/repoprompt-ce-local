@@ -170,6 +170,10 @@ final class ClaudeCodeProvider: AIProvider {
         if options.timeout == nil {
             options.timeout = defaultRequestTimeout
         }
+        // stream-json emits one event per content block; the single-JSON output keeps only the final
+        // block's text, which drops the earlier blocks of a reply continued after max_tokens. The CLI
+        // requires --verbose with -p and stream-json.
+        options.verbose = true
         let args = options.toTokens()
 
         var attempt = 0
@@ -181,7 +185,7 @@ final class ClaudeCodeProvider: AIProvider {
                 result = try await runner.run(
                     args: args,
                     stdin: prompt,
-                    outputMode: .auto(.json),
+                    outputMode: .auto(.streamJson),
                     timeout: options.timeout,
                     additionalEnvironment: options.additionalEnvironment,
                     additionalRemovedKeys: options.removedEnvironmentKeys
@@ -195,13 +199,13 @@ final class ClaudeCodeProvider: AIProvider {
                     throw AIProviderError.invalidResponse(detail: "Claude CLI returned no output")
                 }
                 do {
-                    return try parseCompletionPayload(result.stdout)
+                    return try Self.parseStreamJSONCompletionPayload(result.stdout)
                 } catch {
                     throw AIProviderError.apiError(source: error)
                 }
             }
 
-            if let humanMessage = extractCLIErrorDetail(fromStdout: result.stdout) {
+            if let humanMessage = extractCLIErrorDetail(fromStdout: result.stdout, isStreamJSON: true) {
                 // Check for credit balance error and provide helpful guidance
                 let lowerMessage = humanMessage.lowercased()
                 if lowerMessage.contains("credit balance") || lowerMessage.contains("balance too low") || lowerMessage.contains("api balance") {
@@ -385,11 +389,11 @@ final class ClaudeCodeProvider: AIProvider {
         }
         let json = try JSONSerialization.jsonObject(with: data)
         if let dict = json as? [String: Any] {
-            return parseCompletionDictionary(dict)
+            return Self.parseCompletionDictionary(dict)
         } else if let array = json as? [Any] {
             for element in array.reversed() {
                 if let dict = element as? [String: Any] {
-                    let completion = parseCompletionDictionary(dict)
+                    let completion = Self.parseCompletionDictionary(dict)
                     if !completion.text.isEmpty {
                         return completion
                     }
@@ -401,7 +405,7 @@ final class ClaudeCodeProvider: AIProvider {
         }
     }
 
-    private func parseCompletionDictionary(_ dict: [String: Any]) -> AICompletionResult {
+    private static func parseCompletionDictionary(_ dict: [String: Any]) -> AICompletionResult {
         let usageDict = dict["usage"] as? [String: Any]
         let usage = parseUsage(usageDict)
         let text = extractString(dict["result"]) ?? extractString(dict["content"]) ?? ""
@@ -414,7 +418,7 @@ final class ClaudeCodeProvider: AIProvider {
         )
     }
 
-    private func extractString(_ value: Any?) -> String? {
+    private static func extractString(_ value: Any?) -> String? {
         switch value {
         case let string as String:
             return string
@@ -430,7 +434,7 @@ final class ClaudeCodeProvider: AIProvider {
         }
     }
 
-    private func parseUsage(_ value: [String: Any]?) -> TokenUsage? {
+    private static func parseUsage(_ value: [String: Any]?) -> TokenUsage? {
         guard let value else { return nil }
         let input = numberToInt(value["input_tokens"]) ?? numberToInt(value["inputTokens"])
         let output = numberToInt(value["output_tokens"]) ?? numberToInt(value["outputTokens"])
@@ -440,7 +444,7 @@ final class ClaudeCodeProvider: AIProvider {
         return nil
     }
 
-    private func numberToInt(_ value: Any?) -> Int? {
+    private static func numberToInt(_ value: Any?) -> Int? {
         switch value {
         case let int as Int:
             int
@@ -451,6 +455,152 @@ final class ClaudeCodeProvider: AIProvider {
         default:
             nil
         }
+    }
+
+    // MARK: - Stream-json completion codec
+
+    private enum StreamJSONScanMode {
+        /// Completion parsing: the first malformed line ends the scan.
+        case strict
+        /// Failure-detail extraction: malformed lines are skipped and the last plain-text line is kept.
+        case lenient
+    }
+
+    private struct StreamJSONScan {
+        var answerText = ""
+        var terminal: [String: Any]?
+        var sawEvent = false
+        var malformedLine: Int?
+        var lastPlainLine: String?
+    }
+
+    /// Parses the stdout of a `-p --verbose --output-format stream-json` run into one completion.
+    ///
+    /// The answer is the text of every top-level `assistant` event, in order. The terminal event supplies
+    /// usage and cost, and its `result` text only when no assistant text arrived. Output that cannot be
+    /// certified complete (a malformed or truncated JSON line, no terminal event, an error terminal)
+    /// throws instead of returning a partial answer.
+    static func parseStreamJSONCompletionPayload(_ data: Data) throws -> AICompletionResult {
+        let scan = scanStreamJSON(data, mode: .strict)
+        if let line = scan.malformedLine {
+            throw AIProviderError.invalidResponse(detail: "Claude CLI returned malformed stream JSON (line \(line))")
+        }
+        guard let terminal = scan.terminal else {
+            throw AIProviderError.invalidResponse(
+                detail: scan.sawEvent
+                    ? "Claude CLI returned stream JSON without completion payload"
+                    : "Claude CLI returned no stream JSON events"
+            )
+        }
+        if indicatesStreamJSONError(terminal) {
+            throw AIProviderError.invalidResponse(
+                detail: streamJSONErrorText(in: terminal) ?? "Claude CLI returned an error"
+            )
+        }
+        let completion = parseCompletionDictionary(terminal)
+        return AICompletionResult(
+            text: scan.answerText.isEmpty ? completion.text : scan.answerText,
+            promptTokens: completion.promptTokens,
+            completionTokens: completion.completionTokens,
+            cost: completion.cost
+        )
+    }
+
+    /// The error text of a failed stream-json run: the terminal event's error, or the last plain-text
+    /// line when the CLI exited before emitting a terminal event (a launch diagnostic, a crash message).
+    /// Returns nil when neither exists, so the caller falls back to stderr and exit-status handling.
+    static func extractStreamJSONErrorDetail(from data: Data) -> String? {
+        guard !data.isEmpty else { return nil }
+        let scan = scanStreamJSON(data, mode: .lenient)
+        if let terminal = scan.terminal {
+            return indicatesStreamJSONError(terminal) ? streamJSONErrorText(in: terminal) : nil
+        }
+        return scan.lastPlainLine
+    }
+
+    private static func scanStreamJSON(_ data: Data, mode: StreamJSONScanMode) -> StreamJSONScan {
+        var scan = StreamJSONScan()
+        for (index, rawLine) in data.split(separator: 0x0A, omittingEmptySubsequences: false).enumerated() {
+            let line = rawLine.drop { $0 == 0x20 || $0 == 0x09 || $0 == 0x0D }
+            guard let first = line.first else { continue }
+            // Anything that doesn't open a JSON object is a CLI diagnostic such as `[SandboxDebug] ...`.
+            guard first == 0x7B else {
+                if mode == .lenient,
+                   let text = String(data: line, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !text.isEmpty, !text.hasPrefix("{"), !text.hasPrefix("[")
+                {
+                    scan.lastPlainLine = text
+                }
+                continue
+            }
+            // Token-delta lines are decoded too, so a truncated final line fails the run instead of
+            // being skipped.
+            guard let event = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else {
+                if mode == .strict {
+                    scan.malformedLine = index + 1
+                    return scan
+                }
+                continue
+            }
+            scan.sawEvent = true
+            switch (event["type"] as? String)?.lowercased() {
+            case "result", "error":
+                scan.terminal = event
+            case "assistant":
+                scan.answerText += topLevelAssistantText(in: event)
+            default:
+                break
+            }
+        }
+        return scan
+    }
+
+    /// Text blocks of an assistant event. Subagent events (a non-null `parent_tool_use_id`) are not part
+    /// of the reply, and thinking and tool-use blocks are not answer text.
+    private static func topLevelAssistantText(in event: [String: Any]) -> String {
+        if let parent = event["parent_tool_use_id"], !(parent is NSNull) {
+            return ""
+        }
+        guard let message = event["message"] as? [String: Any],
+              let content = message["content"] as? [Any]
+        else { return "" }
+        var text = ""
+        for case let block as [String: Any] in content where (block["type"] as? String) == "text" {
+            if let blockText = block["text"] as? String {
+                text += blockText
+            }
+        }
+        return text
+    }
+
+    private static func indicatesStreamJSONError(_ event: [String: Any]) -> Bool {
+        let type = (event["type"] as? String)?.lowercased()
+        let subtype = (event["subtype"] as? String)?.lowercased()
+        let isError = (event["is_error"] as? Bool) == true
+        let hasErrors = (event["errors"] as? [Any])?.isEmpty == false
+        return type == "error" || isError || subtype?.contains("error") == true || hasErrors
+    }
+
+    private static func streamJSONErrorText(in event: [String: Any]) -> String? {
+        for entry in event["errors"] as? [Any] ?? [] {
+            let object = entry as? [String: Any]
+            if let text = usableText(object?["message"]) ?? usableText(object?["error"]) ?? usableText(entry) {
+                return text
+            }
+        }
+        for key in ["error", "message", "result"] {
+            if let text = usableText(event[key]) {
+                return text
+            }
+        }
+        return nil
+    }
+
+    private static func usableText(_ value: Any?) -> String? {
+        guard let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return nil
+        }
+        return text
     }
 
     func testCompatibleBackendConnection(
@@ -597,9 +747,13 @@ final class ClaudeCodeProvider: AIProvider {
     }
 
     /// Attempts to decode a human-readable error exposed by the Claude CLI when it exits non-zero.
-    /// Returns nil if stdout is empty or decoding fails.
-    private func extractCLIErrorDetail(fromStdout data: Data) -> String? {
+    /// Returns nil if stdout is empty or decoding fails. `isStreamJSON` selects the stream-json scanner
+    /// for runs that used `--output-format stream-json`.
+    private func extractCLIErrorDetail(fromStdout data: Data, isStreamJSON: Bool = false) -> String? {
         guard !data.isEmpty else { return nil }
+        if isStreamJSON {
+            return Self.extractStreamJSONErrorDetail(from: data)
+        }
 
         // First pass: look for structured JSON errors
         if let message = try? decoder.decode(ClaudeResultMessage.self, from: data),
