@@ -6,6 +6,34 @@ final class ApplyEditsCoreRecoveryTests: XCTestCase {
     private let engine = ApplyEditsEngine.default
     private let builder = ApplyEditsRequestBuilder()
 
+    func testNoChangeReceiptUsesExplicitStatusInDecodedAndFallbackResults() throws {
+        let outcomes: Value = .array([
+            .object(["index": .int(0), "status": .string("success")]),
+            .object(["index": .int(1), "status": .string("failed"), "error": .string("Search text not found")])
+        ])
+        // A string-valued `total_lines_changed` doesn't decode as `EditSummary`, so the second
+        // fixture renders through the raw-object branch with its outcomes intact.
+        for extra: [String: Value] in [[:], ["total_lines_changed": .string("0")]] {
+            var object: [String: Value] = [
+                "status": .string("no_change"),
+                "edits_requested": .int(2),
+                "edits_applied": .int(0),
+                "results": outcomes
+            ]
+            object.merge(extra) { _, new in new }
+            let blocks = ToolOutputFormatter.formatApplyEdits(value: .object(object), emitResources: false)
+            guard case let .text(text, _, _) = try XCTUnwrap(blocks.first) else {
+                return XCTFail("Expected text receipt")
+            }
+            XCTAssertTrue(text.contains("## Apply Edits ℹ️"), text)
+            XCTAssertTrue(text.contains("- **Result**: No net change"), text)
+            XCTAssertTrue(text.contains("- Edit 1: matched (no net change)"), text)
+            XCTAssertTrue(text.contains("- Edit 2: failed – Search text not found"), text)
+            XCTAssertFalse(text.contains("✅"), text)
+            XCTAssertFalse(text.contains("❌"), text)
+        }
+    }
+
     func testRewriteUpdatesTextAndVerboseDiff() async throws {
         let request = ApplyEditsRequest(
             path: "file.swift",
@@ -741,7 +769,7 @@ final class ApplyEditsCoreRecoveryTests: XCTestCase {
                 request: ApplyEditsRequest(path: "file.swift", mode: mode, verbose: true),
                 to: original
             )
-            XCTAssertEqual(result.status, .success, "\(mode)")
+            XCTAssertEqual(result.status, .noChange, "\(mode)")
             XCTAssertEqual(result.editsApplied, 0, "\(mode)")
             XCTAssertEqual(result.updatedText, original, "\(mode)")
             XCTAssertTrue(result.diffChunks.isEmpty, "\(mode)")
