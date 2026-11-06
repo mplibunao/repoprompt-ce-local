@@ -345,6 +345,49 @@ actor CodexAppServerClient {
         let processFamilyCleanupWasCompleted: Bool
     }
 
+    /// Recognizes Codex's rollout-path lookup diagnostic, `failed to resolve rollout path <absolute
+    /// path>: file does not exist`, the only missing-file error that names the saved thread's own
+    /// rollout. Other missing-file errors can describe configuration or workspace files. With
+    /// `expectedRolloutPath` the reported path must match it after standardization (case kept, no
+    /// symlink resolution); without one, any absolute path matches, because a saved reference with
+    /// only a thread ID names no rollout to compare.
+    static func isMissingRolloutPathResolutionMessage(
+        _ message: String,
+        expectedRolloutPath: String? = nil
+    ) -> Bool {
+        guard let reportedPath = missingRolloutPathResolutionPath(message) else { return false }
+        guard let expectedRolloutPath else { return true }
+        return URL(fileURLWithPath: reportedPath).standardizedFileURL.path
+            == URL(fileURLWithPath: expectedRolloutPath).standardizedFileURL.path
+    }
+
+    /// The reported path, in its original case, or `nil` when the message has any other shape:
+    /// another reason, a leading word, trailing explanation, or a relative path.
+    private static func missingRolloutPathResolutionPath(_ message: String) -> String? {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed.lowercased()
+        let prefix = "failed to resolve rollout path"
+        guard normalized.hasPrefix(prefix) else { return nil }
+        let detail = trimmed.dropFirst(prefix.count)
+        guard detail.first == " " || detail.first == ":" else { return nil }
+        let reason = "file does not exist"
+        let suffix = normalized.hasSuffix("\(reason).") ? "\(reason)." : reason
+        guard normalized.hasSuffix(suffix) else { return nil }
+        var reportedPath = String(detail.dropLast(suffix.count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard reportedPath.hasSuffix(":") else { return nil }
+        reportedPath.removeLast()
+        reportedPath = reportedPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if reportedPath.hasPrefix(":") {
+            reportedPath.removeFirst()
+        }
+        reportedPath = reportedPath
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "'\"`"))
+        guard reportedPath.hasPrefix("/") else { return nil }
+        return reportedPath
+    }
+
     static func isTimeoutError(_ error: Error) -> Bool {
         if let clientError = error as? ClientError,
            case let .requestFailed(failure) = clientError
@@ -572,6 +615,15 @@ actor CodexAppServerClient {
     func clearExpectedAgentPIDRegistration() async {
         expectedAgentPIDRegistration = nil
         await clearRegisteredExpectedAgentPIDIfNeeded()
+    }
+
+    /// Returns the PID registered for this run only while it is still the live transport's process.
+    func activeExpectedAgentPID(for runID: UUID) -> pid_t? {
+        guard let registeredExpectedAgentPID,
+              registeredExpectedAgentPID.runID == runID,
+              activeTransport?.process.pid == registeredExpectedAgentPID.pid
+        else { return nil }
+        return registeredExpectedAgentPID.pid
     }
 
     private func registerExpectedAgentPIDIfNeeded(for pid: pid_t) async {

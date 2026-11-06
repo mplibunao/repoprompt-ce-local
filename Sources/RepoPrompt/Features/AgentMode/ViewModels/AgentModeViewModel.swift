@@ -620,6 +620,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     let clearConsumedAttachmentsAfterProviderConsumption: Bool
     let applyEditsApprovalStore: ApplyEditsApprovalStore
     private lazy var runService: AgentModeRunService = makeRunService()
+    #if DEBUG
+        private(set) var testRunServiceWasMaterialized = false
+    #endif
     private let sessionLifecycleAuthority = AgentSessionLifecycleAuthority()
     /// The clock `agent_manage stop_session` waits on for a released process.
     private(set) var providerRetirementClock: AgentProviderIdleClock = .continuous
@@ -795,6 +798,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     #if DEBUG
         private var test_currentTabIDOverride: UUID?
         private var test_activeWorkspaceIDForSessionIndexOverride: UUID?
+        private var test_persistenceWorkspace: WorkspaceModel?
         private var test_allowsScheduledDerivedTranscriptRefreshWithoutPromptManager = false
         private var test_persistentBindingResolutionSnapshotBuildCount = 0
         var test_sidebarSessionRowsBuildCount = 0
@@ -878,6 +882,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         func test_setAgentSessionSaver(_ saver: @escaping AgentSessionSaver) {
             bypassesAgentSessionPersistenceSuppressionForTesting = true
             agentSessionSaver = saver
+        }
+
+        func test_setPersistenceWorkspace(_ workspace: WorkspaceModel?) {
+            test_persistenceWorkspace = workspace
         }
 
         func test_setAgentSessionsDeleter(_ deleter: @escaping AgentSessionsDeleter) {
@@ -2486,6 +2494,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             testCodexActiveAgentRunWaitQuery: CodexAgentRunWaitQuery? = nil,
             testCodexActiveAgentRunWaitDrain: CodexAgentRunWaitDrain? = nil,
             testCodexLeaseRoutingTimeoutMs: Int? = nil,
+            testCodexRouteOwnerValidator: @escaping CodexAgentModeCoordinator.CodexRouteOwnerValidator = { _, _, _, _ in true },
             testCodexIdleShutdownDelayNanos: UInt64? = nil,
             testCodexStallWatchdogPollIntervalNanos: UInt64? = nil,
             testCodexStallWatchdogProbeThreshold: TimeInterval? = nil,
@@ -2559,6 +2568,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 runtimeWorkspacePathsProvider: codexRuntimeWorkspacePathsProvider,
                 codexControllerFactory: codexControllerFactory,
                 connectionPolicyInstaller: connectionPolicyInstaller,
+                routeOwnerValidator: testCodexRouteOwnerValidator,
                 shouldManageCodexTooling: shouldManageCodexTooling,
                 codexCapabilitiesForLaunch: testCodexCapabilitiesForLaunch,
                 authRecovery: testCodexManagedAuthRecovery ?? CodexManagedAuthRecoveryService.shared,
@@ -2917,7 +2927,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         return false
     }
 
+    func ensureRunServiceMaterializedForRunStart() {
+        _ = runService
+    }
+
     private func makeRunService() -> AgentModeRunService {
+        #if DEBUG
+            testRunServiceWasMaterialized = true
+        #endif
         let dependencies = AgentModeRunService.Dependencies(
             windowID: windowID,
             headlessProviderFactory: headlessProviderFactory,
@@ -15312,9 +15329,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         _ token: SessionSaveCommitToken,
         requireWorkspaceMatch: Bool = true
     ) -> Bool {
-        if requireWorkspaceMatch,
-           workspaceManager?.activeWorkspace?.id != token.workspaceID
-        {
+        let activeWorkspaceID = workspaceManager?.activeWorkspace?.id
+        #if DEBUG
+            let workspaceIDForSave = activeWorkspaceID ?? test_persistenceWorkspace?.id
+        #else
+            let workspaceIDForSave = activeWorkspaceID
+        #endif
+        if requireWorkspaceMatch, workspaceIDForSave != token.workspaceID {
             return false
         }
         guard let session = sessions[token.tabID],
@@ -15424,7 +15445,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             #endif
             return .notRequired
         }
-        guard let workspace = workspaceManager?.activeWorkspace else {
+        let activeWorkspace = workspaceManager?.activeWorkspace
+        #if DEBUG
+            let workspace = activeWorkspace ?? test_persistenceWorkspace
+        #else
+            let workspace = activeWorkspace
+        #endif
+        guard let workspace else {
             return .failed(.init(operation: .save, tabID: tabID, message: "Active workspace is unavailable."))
         }
 

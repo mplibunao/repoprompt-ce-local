@@ -248,10 +248,18 @@ import XCTest
         private(set) var events: [Event] = []
         /// When set, every controller's `shutdown()` waits for it.
         var shutdownHold: StartupTestHeldGate?
+        /// The `scriptedStarts` of each controller made from now on, in creation order.
+        var scriptedStartsByController: [[StartupTestCodexController.ScriptedStart]] = []
 
-        func makeController(runID: UUID) -> StartupTestCodexController {
+        func makeController(
+            runID: UUID,
+            using controller: StartupTestCodexController? = nil
+        ) -> StartupTestCodexController {
             let index = controllers.count
-            let controller = StartupTestCodexController(gatesStartup: false)
+            let controller = controller ?? StartupTestCodexController(gatesStartup: false)
+            if !scriptedStartsByController.isEmpty {
+                controller.scriptedStarts = scriptedStartsByController.removeFirst()
+            }
             controller.shutdownHold = { [weak self] in self?.shutdownHold }
             controller.onShutdownFinished = { [weak self] in
                 self?.events.append(.shutdownFinished(controller: index))
@@ -907,11 +915,32 @@ import XCTest
     /// startup (which stands in for native start plus routing) until the test releases it, or
     /// failing it with `startupError` or with what `startupHook` throws for the start's resume
     /// target; `compactError` fails a compaction request, after `compactHold` releases it when one
-    /// is set.
+    /// is set. `scriptedStarts` answers starts in call order the way the app-server does.
     @MainActor
     final class StartupTestCodexController: @preconcurrency CodexSessionControlling {
+        /// How the app-server answers one `startOrResume` call.
+        enum ScriptedStart {
+            /// `thread/resume` times out.
+            case resumeTimeout
+            /// `thread/resume` fails because Codex cannot find the rollout at `rolloutPath`.
+            case missingRollout(rolloutPath: String)
+            /// The thread named `threadID` starts or resumes.
+            case succeed(threadID: String)
+        }
+
         private(set) var hasActiveThread = false
+        private(set) var currentSessionReference: CodexNativeSessionController.SessionRef?
         private(set) var startOrResumeCount = 0
+        /// Answers to later starts, used up in order once `startupHook`, the startup gate, and
+        /// `startupError` have passed; with none left a start succeeds as `startup-ticket-test`.
+        var scriptedStarts: [ScriptedStart] = []
+        /// How many times `shutdown()` began.
+        private(set) var shutdownCount = 0
+        /// How many thread snapshots were read, as the stall watchdog's probe reads them.
+        private(set) var snapshotReadCount = 0
+        var snapshotLatestTurnStatus: CodexNativeSessionController.TurnStatus?
+        /// How many times the test requested thread compaction.
+        private(set) var compactCallCount = 0
         /// The resume target of each start, `nil` for a fresh thread.
         private(set) var startOrResumeTargets: [CodexNativeSessionController.SessionRef?] = []
         var startupHook: ((CodexNativeSessionController.SessionRef?) async throws -> Void)?
@@ -995,20 +1024,44 @@ import XCTest
             if let startupError {
                 throw startupError
             }
-            hasActiveThread = true
-            return CodexNativeSessionController.SessionRef(
-                conversationID: "startup-ticket-test",
+            var threadID = "startup-ticket-test"
+            if !scriptedStarts.isEmpty {
+                switch scriptedStarts.removeFirst() {
+                case .resumeTimeout:
+                    throw CodexAppServerClient.ClientError.requestFailed(.init(
+                        method: "thread/resume",
+                        code: nil,
+                        message: "Request timed out after 120.0s",
+                        data: nil
+                    ))
+                case let .missingRollout(rolloutPath):
+                    throw CodexAppServerClient.ClientError.requestFailed(.init(
+                        method: "thread/resume",
+                        code: -32600,
+                        message: "failed to resolve rollout path \(rolloutPath): file does not exist",
+                        data: nil
+                    ))
+                case let .succeed(scriptedThreadID):
+                    threadID = scriptedThreadID
+                }
+            }
+            let reference = CodexNativeSessionController.SessionRef(
+                conversationID: threadID,
                 rolloutPath: nil,
                 model: model,
                 reasoningEffort: reasoningEffort
             )
+            hasActiveThread = true
+            currentSessionReference = reference
+            return reference
         }
 
         func readThreadSnapshot(
             includeTurns _: Bool,
             timeout _: TimeInterval?
         ) async throws -> CodexNativeSessionController.ThreadSnapshot {
-            CodexNativeSessionController.ThreadSnapshot(
+            snapshotReadCount += 1
+            return CodexNativeSessionController.ThreadSnapshot(
                 conversationID: "startup-ticket-test",
                 rolloutPath: nil,
                 model: nil,
@@ -1016,7 +1069,7 @@ import XCTest
                 runtimeStatus: .idle,
                 currentTurnID: nil,
                 activeTurnIDs: [],
-                latestTurnStatus: nil
+                latestTurnStatus: snapshotLatestTurnStatus
             )
         }
 
@@ -1063,6 +1116,7 @@ import XCTest
         }
 
         func compactThread() async throws {
+            compactCallCount += 1
             if let compactHold {
                 await compactHold.wait()
             }
@@ -1103,6 +1157,7 @@ import XCTest
         func cancelCurrentTurn() async {}
 
         func shutdown() async {
+            shutdownCount += 1
             if let hold = shutdownHold() {
                 await hold.wait()
             }
