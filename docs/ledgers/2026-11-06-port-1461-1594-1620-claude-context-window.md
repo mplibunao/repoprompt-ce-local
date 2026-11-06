@@ -9,7 +9,7 @@ Re-implement upstream PRs 1461, 1594 and 1620 on `main` as hand-written edits, s
 | 1. Port upstream PR 1461: compaction fence and pending state | done | pair · Orchestrate 1/4; engineer · refactor | `fix(agent-mode): clear stale Claude context occupancy after compaction` |
 | 2. Port upstream PR 1594: unknown windows stay unknown; auto-compact cap | done | pair · Orchestrate 2/4 | `fix(agent-mode): keep unknown Claude context windows unknown` |
 | 3. Port upstream PR 1620: model capacity separate from the cap | done | pair · Orchestrate 3/4; engineer · refactor | `fix(agent-mode): separate Claude model capacity from the auto-compact cap` |
-| 4. Debug-app validation, review, refactor, `pr-ready`, pull request | pending | | |
+| 4. Debug-app validation, review, refactor, `pr-ready`, pull request | done | Codex · independent review | `docs(ledgers): record the Claude context window port run` |
 
 ## Run-wide decisions
 
@@ -58,6 +58,7 @@ Re-implement upstream PRs 1461, 1594 and 1620 on `main` as hand-written edits, s
 - Evidence: `compact_boundary` also carries `post_tokens` (7,001 and 6,685 in these runs), well below the next measured occupancy, which supports waiting for a real reading instead of using it.
 - Deferred: the auto-compact cap wasn't checked live; it needs `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the debug app's Claude launch environment without changing user-global configuration. Tests cover it. The compact ring's own tooltip, nested under the pill's tooltip as upstream has it, wasn't checked.
 - Decision: the independent whole-branch review (Codex GPT-6.1 Sol High, from the repository's engineer review template) found two issues, both left as known limitations in the pull request. (1) A model switch during a run keys the old model's reported capacity to the new selection, because capacity is recorded against `selectedModelRaw` when the result arrives; readings above the old capacity are rejected until the next result corrects it. (2) Switching provider after a compaction clears pending only in memory; the saved fence brings it back on reopen until a turn measures occupancy. Upstream has both. (1) shares a root with the slot-mapping limitation in item 3 (capacity attributed to the current selection instead of the model that reported it), so both go to one follow-up; fixing (2) would add persisted state for a display difference. Source: orchestrator judgment.
+- Evidence: `pr-ready` against `main` at `403c210a8` passed at `2540f7fc4`: Swift lint, root tests (2,061 tests in five bundles, no failures), provider tests (13, no failures), and the RepoPrompt product build. The first run failed only `MCPWorkspaceScopedCursorModelParameterTests/testSettingsPinnedCursorEffortAndSpeedReachRoleLabelRun` with `CancellationError()`, the intermittent failure tracked in #274; the suite passed 24/24 on a focused rerun and the second full run passed.
 - Decision: the per-item review and refactor loops serve as the pull request's independent review and refactor pass (`CONTRIBUTING.md`, step 4), with the whole-branch review above added because each item's correctness review was started by its own implementer. Source: orchestrator judgment.
 
 ## Run notes
