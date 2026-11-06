@@ -139,25 +139,32 @@ final class ClaudeCodeProvider: AIProvider {
         self.maxRetries = resolvedRetries
     }
 
+    /// The reply arrives whole when the CLI exits. Until then the stream reports the child's stdout
+    /// receipts as transport activity, which renews a Context Builder follow-up's inactivity budget
+    /// while a long reply is generated.
     func streamMessage(_ aiMessage: AIMessage, model: AIModel, maxTokens: Int? = nil) async throws -> AsyncThrowingStream<AIStreamResult, Error> {
-        let completion = try await completeMessage(aiMessage, model: model, maxTokens: maxTokens)
-        return AsyncThrowingStream { continuation in
-            continuation.yield(AIStreamResult(type: "content", text: completion.text))
-            continuation.yield(
-                AIStreamResult(
-                    type: "message_stop",
-                    text: nil,
-                    reasoning: nil,
-                    promptTokens: completion.promptTokens,
-                    completionTokens: completion.completionTokens,
-                    cost: completion.cost
-                )
-            )
-            continuation.finish()
+        ProviderPendingCompletionStream.make { reportActivity in
+            try await self.completeMessage(aiMessage, model: model, maxTokens: maxTokens, reportActivity: reportActivity)
         }
     }
 
     func completeMessage(_ aiMessage: AIMessage, model: AIModel, maxTokens: Int? = nil) async throws -> AICompletionResult {
+        try await completeMessage(aiMessage, model: model, maxTokens: maxTokens, reportActivity: nil)
+    }
+
+    /// `reportActivity` runs for each stdout chunk of each attempt's child, and at no other time:
+    /// waiting for the runner, preparing the launch, and backing off before a retry prove nothing
+    /// about a running child.
+    ///
+    /// Cancellation ends the request without stopping a child that is already running, so a
+    /// cancelled request's output is neither parsed nor retried.
+    private func completeMessage(
+        _ aiMessage: AIMessage,
+        model: AIModel,
+        maxTokens _: Int?,
+        reportActivity: ProviderPendingCompletionStream.ReportActivity?
+    ) async throws -> AICompletionResult {
+        try Task.checkCancellation()
         let nativePromptMode = ClaudeAgentToolPreferences.agentModePromptDelivery()
         let basePrompt = buildPrompt(from: aiMessage)
         let prompt = nativePromptMode.sendsRepoPromptAsUserMessage
@@ -165,6 +172,7 @@ final class ClaudeCodeProvider: AIProvider {
             : basePrompt
         let emptyConfigLease = try await configService.prepareEmptyLaunchConfig()
         defer { emptyConfigLease.release() }
+        try Task.checkCancellation()
         var options = try await makeOptions(for: aiMessage, model: model, emptyConfigURL: emptyConfigLease.url)
         options.systemPromptOverride = nativePromptMode.nativeSystemPromptOverride(instructions: aiMessage.systemPrompt)
         if options.timeout == nil {
@@ -174,12 +182,17 @@ final class ClaudeCodeProvider: AIProvider {
         // block's text, which drops the earlier blocks of a reply continued after max_tokens. The CLI
         // requires --verbose with -p and stream-json.
         options.verbose = true
-        let args = options.toTokens()
+        // Without partial messages the CLI prints nothing while it generates a text block, so stdout
+        // can stay silent for longer than the inactivity budget. The codec validates their lines and
+        // takes no answer text from them.
+        let args = options.toTokens() + ["--include-partial-messages"]
+        let onStdoutChunk: (@Sendable (Data) -> Void)? = reportActivity.map { report in { @Sendable _ in report() } }
 
         var attempt = 0
         var delay = initialBackoff
 
         while true {
+            try Task.checkCancellation()
             let result: CLIProcessRunner.Result
             do {
                 result = try await runner.run(
@@ -188,13 +201,17 @@ final class ClaudeCodeProvider: AIProvider {
                     outputMode: .auto(.streamJson),
                     timeout: options.timeout,
                     additionalEnvironment: options.additionalEnvironment,
-                    additionalRemovedKeys: options.removedEnvironmentKeys
+                    additionalRemovedKeys: options.removedEnvironmentKeys,
+                    onStdoutChunk: onStdoutChunk
                 )
             } catch {
                 throw mapProcessError(error)
             }
+            try Task.checkCancellation()
 
-            if result.status == 0 {
+            // The runner terminates a child that outlives its timeout, and the child can still exit
+            // zero with a partial transcript.
+            if result.status == 0, !result.timedOut {
                 guard !result.stdout.isEmpty else {
                     throw AIProviderError.invalidResponse(detail: "Claude CLI returned no output")
                 }
@@ -221,7 +238,7 @@ final class ClaudeCodeProvider: AIProvider {
             if canRetry, attempt < maxRetries {
                 let jitter = Double.random(in: 0.8 ... 1.2)
                 let sleepSeconds = min(delay, maxBackoff) * jitter
-                try? await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
+                try await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
                 delay = min(delay * 2, maxBackoff)
                 attempt += 1
                 continue
@@ -284,6 +301,9 @@ final class ClaudeCodeProvider: AIProvider {
     }
 
     private func mapProcessError(_ error: Error) -> Error {
+        if error is CancellationError {
+            return error
+        }
         if let runnerError = error as? CLIProcessRunnerError {
             switch runnerError {
             case let .commandNotFound(command):

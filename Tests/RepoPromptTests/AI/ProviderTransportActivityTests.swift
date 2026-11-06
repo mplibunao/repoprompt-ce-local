@@ -153,6 +153,52 @@ final class ProviderTransportActivityTests: XCTestCase {
         XCTAssertFalse(throttle.shouldEmit(at: origin.advanced(by: .milliseconds(9999))))
         XCTAssertTrue(throttle.shouldEmit(at: origin.advanced(by: .seconds(10))))
     }
+
+    func testCustomOpenAIKeepaliveReportsActivityBeforeContent() async throws {
+        let host = "keepalive-\(UUID().uuidString.lowercased()).invalid"
+        let answerGate = GatedKeepaliveSSEURLProtocol.register(host: host)
+        addTeardownBlock { GatedKeepaliveSSEURLProtocol.unregister(host: host) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GatedKeepaliveSSEURLProtocol.self]
+        let provider = CustomOpenAIProvider(
+            baseURL: "https://\(host)/v1",
+            apiKey: "key",
+            defaultModel: "keepalive-model",
+            streamingHttpClient: DefaultHTTPClient(configuration: configuration)
+        )
+        let stream = try await provider.streamMessage(
+            AIMessage(systemPrompt: "system", userMessage: "question"),
+            model: .customProvider(name: "keepalive", provider: "keepalive", model: "keepalive-model"),
+            maxTokens: nil
+        )
+        let received = Locked<[AIStreamResult]>([])
+        let end = Locked<(ended: Bool, error: Error?)>((false, nil))
+        let consumer = Task {
+            var failure: Error?
+            do {
+                for try await event in stream {
+                    received.withValue { $0.append(event) }
+                }
+            } catch {
+                failure = error
+            }
+            end.withValue { $0 = (true, failure) }
+        }
+        addTeardownBlock { consumer.cancel() }
+
+        // Only the keepalive comment has arrived, so it alone must produce the activity.
+        let reported = await Self.waitUntil { received.withValue { !$0.isEmpty } }
+        XCTAssertTrue(reported, "the keepalive comment didn't report activity")
+        XCTAssertEqual(received.withValue { $0.map(\.type) }, [AIStreamResult.transportActivityType])
+
+        answerGate.open()
+        let ended = await Self.waitUntil { end.withValue { $0.ended } }
+        XCTAssertTrue(ended, "the stream didn't end after the answer arrived")
+        XCTAssertNil(end.withValue { $0.error })
+        let answer = received.withValue { $0 }.filter { $0.type != AIStreamResult.transportActivityType }
+        XCTAssertEqual(answer.map(\.type), ["content", "message_stop"])
+        XCTAssertEqual(answer.first?.text, "answer")
+    }
 }
 
 private extension ProviderTransportActivityTests {
@@ -234,6 +280,114 @@ private final class ControlledCompletion: @unchecked Sendable {
             return self.continuation
         }
         continuation?.resume(throwing: CancellationError())
+    }
+}
+
+/// Serves a streaming chat completion in two parts: a keepalive comment as soon as loading starts,
+/// then the answer once the test opens the gate registered for the request's host.
+private final class GatedKeepaliveSSEURLProtocol: URLProtocol {
+    private static let keepalive = Data(": keep-alive\n\n".utf8)
+    private static let answer = Data("""
+    data: {"choices":[{"delta":{"content":"answer"},"index":0,"finish_reason":null}]}
+
+    data: [DONE]
+
+    """.utf8)
+    private static let gates = Locked<[String: AnswerGate]>([:])
+
+    private var gate: AnswerGate?
+    /// Set and read only on the loading thread, where `stopLoading` and `deliverAnswer` both run.
+    private var stopped = false
+
+    static func register(host: String) -> AnswerGate {
+        let gate = AnswerGate()
+        gates.withValue { $0[host] = gate }
+        return gate
+    }
+
+    static func unregister(host: String) {
+        gates.withValue { $0.removeValue(forKey: host) }?.cancel()
+    }
+
+    override class func canInit(with _: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let url = request.url,
+              let gate = url.host.flatMap({ host in Self.gates.withValue { $0[host] } }),
+              let response = HTTPURLResponse(
+                  url: url,
+                  statusCode: 200,
+                  httpVersion: "HTTP/1.1",
+                  headerFields: ["Content-Type": "text/event-stream"]
+              )
+        else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        self.gate = gate
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.keepalive)
+        // The loading system expects client calls on the thread, and in the run-loop mode, that
+        // started loading.
+        let thread = Thread.current
+        let modes = [RunLoop.current.currentMode?.rawValue ?? RunLoop.Mode.default.rawValue]
+        gate.whenOpen { [weak self] in
+            guard let self else { return }
+            perform(#selector(deliverAnswer), on: thread, with: nil, waitUntilDone: false, modes: modes)
+        }
+    }
+
+    override func stopLoading() {
+        stopped = true
+        gate?.cancel()
+    }
+
+    @objc private func deliverAnswer() {
+        // A delivery the gate released before the stop can still arrive after it.
+        guard !stopped else { return }
+        client?.urlProtocol(self, didLoad: Self.answer)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    /// Holds one response's answer until the test opens it.
+    final class AnswerGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isOpen = false
+        private var delivery: (() -> Void)?
+
+        func open() {
+            let delivery = lock.withLock { () -> (() -> Void)? in
+                isOpen = true
+                defer { self.delivery = nil }
+                return self.delivery
+            }
+            delivery?()
+        }
+
+        /// Runs `delivery` when the gate opens, or at once when it is already open.
+        func whenOpen(_ delivery: @escaping () -> Void) {
+            let deliverNow = lock.withLock { () -> Bool in
+                if isOpen {
+                    return true
+                }
+                self.delivery = delivery
+                return false
+            }
+            if deliverNow {
+                delivery()
+            }
+        }
+
+        /// Drops a delivery the gate hasn't released.
+        func cancel() {
+            lock.withLock { delivery = nil }
+        }
     }
 }
 
