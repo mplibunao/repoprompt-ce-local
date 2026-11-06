@@ -76,21 +76,27 @@ extension AgentModeViewModel {
         // Only trust exact stream-derived context snapshots (contextUsedTokens).
         // Do NOT fall back to promptTokens — those are billed-turn aggregates that
         // include internal tool sub-steps and cause inflated context estimates.
-        let latestContextUsed = usage.reversed().compactMap { turn -> Int? in
+        // A compaction fence ends the scan: occupancy recorded before it describes
+        // the old context, so usage stays pending until a later row measures it.
+        for turn in usage.reversed() {
+            if turn.contextCompacted {
+                return AgentContextUsage(
+                    modelContextWindow: modelContextWindow,
+                    lastTotalTokens: nil,
+                    totalTotalTokens: nil,
+                    awaitingPostCompactionUsage: true
+                )
+            }
             if let contextUsed = turn.contextUsedTokens,
                contextUsed > 0,
                contextUsed <= maxContextTokens
             {
-                return contextUsed
+                return AgentContextUsage(
+                    modelContextWindow: modelContextWindow,
+                    lastTotalTokens: contextUsed,
+                    totalTotalTokens: contextUsed
+                )
             }
-            return nil
-        }.first
-        if let latestContextUsed {
-            return AgentContextUsage(
-                modelContextWindow: modelContextWindow,
-                lastTotalTokens: latestContextUsed,
-                totalTotalTokens: latestContextUsed
-            )
         }
         guard modelContextWindow != nil else { return nil }
         return AgentContextUsage(

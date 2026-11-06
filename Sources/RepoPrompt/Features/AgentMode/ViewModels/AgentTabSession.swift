@@ -572,7 +572,18 @@ final class AgentTabSession: ObservableObject {
     }
 
     // Settings (per-tab)
-    var selectedAgent: AgentProviderKind = .claudeCode
+
+    var selectedAgent: AgentProviderKind = .claudeCode {
+        didSet {
+            // Pending Claude occupancy belongs to the old provider, not the shared usage object.
+            // Window and counts stay; only the pending marker is cleared.
+            guard selectedAgent != oldValue,
+                  codexContextUsage?.awaitingPostCompactionUsage != nil
+            else { return }
+            codexContextUsage?.awaitingPostCompactionUsage = nil
+        }
+    }
+
     var selectedModelRaw: String = AgentModel.defaultModel.rawValue
     var selectedReasoningEffortRaw: String?
     private var acpModelParameterSelectionRevisionByIdentity: [ACPModelParameterIdentity: UInt64] = [:]
