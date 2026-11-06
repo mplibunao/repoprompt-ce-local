@@ -7,14 +7,17 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence, TextIO
@@ -23,6 +26,15 @@ XCTEST_BUNDLE_GLOB = "*.xctest"
 XCTEST_HELPER_RELATIVE_PATH = Path("libexec/swift/pm/swiftpm-xctest-helper")
 SWIFT_TESTING_IMPORT = re.compile(r"import\s+(?:\w+\s+)?Testing\b", re.MULTILINE)
 TEST_SANDBOX_ENV_KEY = "REPOPROMPT_TEST_SANDBOX_ROOT"
+# The slowest recent hosted suite took about a minute. This bound is more than five times that,
+# so a suite still running at it is treated as hung, and it stays below the job's own timeout,
+# which would end the whole job without naming the suite.
+SUITE_TIMEOUT_SECONDS = 360.0
+# How long to wait for the group to empty after each of TERM and KILL.
+TERMINATION_GRACE_SECONDS = 5.0
+# Matches the conductor's XCTest stall watchdog, so both backstops report a hang the same way.
+SUITE_TIMEOUT_EXIT_STATUS = 70
+PROCESS_GROUP_POLL_SECONDS = 0.05
 CommandExecutor = Callable[[Sequence[str], Path | None, Mapping[str, str]], int]
 BundleTestLister = Callable[[Path, Mapping[str, str]], list[str] | None]
 
@@ -281,6 +293,84 @@ def execute_command(
     except OSError as error:
         print(f"Unable to launch {command[0]}: {error}", file=sys.stderr)
         return 127
+
+
+def process_group_is_gone(process: subprocess.Popen) -> bool:
+    # Reaping the leader first matters: an unreaped zombie leader still counts as a member.
+    process.poll()
+    try:
+        os.killpg(process.pid, 0)
+    except OSError as error:
+        # macOS reports a leader that exited since the poll as EPERM; the next poll reaps it.
+        return error.errno == errno.ESRCH
+    return False
+
+
+def terminate_process_group(process: subprocess.Popen, grace_seconds: float) -> None:
+    """Send the group TERM, then KILL, waiting for the whole group to empty after each.
+
+    Waiting on the leader alone would stop too early: XCTest descendants can outlive it or
+    ignore TERM, and the job would then hang on the leftovers instead of on the suite.
+    """
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, signum)
+        except (ProcessLookupError, PermissionError):
+            # EPERM can mean only an unreaped zombie leader is left; the check below decides.
+            pass
+        deadline = time.monotonic() + grace_seconds
+        while not process_group_is_gone(process):
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(PROCESS_GROUP_POLL_SECONDS)
+        else:
+            return
+    print(
+        f"Process group {process.pid} still has members after SIGKILL",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def execute_supervised_command(
+    command: Sequence[str],
+    cwd: Path | None,
+    environment: Mapping[str, str],
+) -> int:
+    """Run one suite like `execute_command`, but terminate it if it outlives the suite timeout.
+
+    The suite gets its own process group so the timeout reaches the processes it started, not
+    just the one launched here. Output stays inherited, so XCTest progress streams to the log
+    as before and the last line above the timeout notice names the stuck test. The timeout
+    returns a status instead of raising, so the caller's loop still closes its log group and
+    reports the failing suite.
+    """
+    try:
+        process = subprocess.Popen(
+            list(command),
+            cwd=cwd,
+            env=dict(environment),
+            start_new_session=True,
+        )
+    except OSError as error:
+        print(f"Unable to launch {command[0]}: {error}", file=sys.stderr)
+        return 127
+    try:
+        return process.wait(timeout=SUITE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        print(
+            f"Suite timed out after {SUITE_TIMEOUT_SECONDS:g} s; "
+            f"terminating its process group: {shlex.join(command)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        terminate_process_group(process, TERMINATION_GRACE_SECONDS)
+        return SUITE_TIMEOUT_EXIT_STATUS
+    except BaseException:
+        # `subprocess.run` kills its child when the runner is interrupted; the separate session
+        # also hides the runner's terminal signals from the suite, so nothing else would.
+        terminate_process_group(process, TERMINATION_GRACE_SECONDS)
+        raise
 
 
 def package_uses_swift_testing(root: Path) -> bool:
@@ -566,7 +656,7 @@ def run_selected_suites(
     cwd: Path | None,
     bundle_selection: BundleSelection,
     sandbox_root: Path,
-    executor: CommandExecutor = execute_command,
+    executor: CommandExecutor = execute_supervised_command,
     output: TextIO = sys.stdout,
 ) -> int:
     for suite in suites:
