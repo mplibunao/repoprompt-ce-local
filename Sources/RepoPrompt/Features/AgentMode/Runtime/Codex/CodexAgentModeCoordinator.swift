@@ -5640,6 +5640,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
 
         pendingTurn.retryAttempted = true
         session.codexPendingAuthRetryTurn = pendingTurn
+        let ownershipBeforeRefresh = session.activeRunOwnership
         setRunningStatus("Refreshing Codex authentication…", source: .reconnect, session: session, urgent: true)
         viewModel?.requestUIRefresh(tabID: session.tabID, urgent: true)
 
@@ -5681,9 +5682,22 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             allowResumeTimeoutFallback: false
         )
         switch readiness {
-        case .cancelled, .superseded, .startupInProgress:
-            // Cancellation, supersession, and a startup that holds the claim own the run's result;
-            // recovery adds no failure.
+        case .cancelled, .superseded:
+            // Cancellation and supersession own the run's result; recovery adds no failure.
+            return true
+        case .startupInProgress:
+            // Another startup took the claim while the refresh was suspended. Its controller isn't
+            // published, so the pending turn can't be replayed onto it; fail the run visibly rather
+            // than report the turn handled. A run that was replaced during the refresh is left alone.
+            await finalizeCodexRun(
+                session,
+                turnStatus: .failed,
+                reason: "managed-auth-recovery-startup-in-progress",
+                errorMessage: Self.managedAuthReplayBlockedByStartupMessage,
+                notifyOnCompleted: false,
+                deleteDeferredFilesWhenFailureHasNoInFlight: true,
+                expectedOwnership: ownershipBeforeRefresh
+            )
             return true
         case .ready, .failed:
             break
@@ -7332,6 +7346,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
 
     private static let startupInProgressSendMessage =
         "Codex did not send because thread routing is still being confirmed."
+
+    private static let managedAuthReplayBlockedByStartupMessage =
+        "Codex authentication was refreshed, but the message was not resent because another Codex startup was still confirming thread routing. Send it again."
 
     @discardableResult
     func sendCodexNativeMessage(

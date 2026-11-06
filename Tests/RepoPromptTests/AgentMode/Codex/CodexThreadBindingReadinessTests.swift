@@ -516,7 +516,8 @@ import XCTest
                 ("thread/resume naming another rollout", saved, "thread/resume", -32600, missing(otherPath), false),
                 ("thread/resume naming a path differing only in case", mixedCase, "thread/resume", -32600, missing("/tmp/casesensitive.jsonl"), false),
                 ("another request naming the saved rollout", saved, "config/read", -32600, missing(savedPath), false),
-                ("thread/resume rejected for its parameters", saved, "thread/resume", -32602, missing(savedPath), false)
+                ("thread/resume rejected for its parameters", saved, "thread/resume", -32602, missing(savedPath), false),
+                ("thread/resume rejected as an unknown method", saved, "thread/resume", -32601, missing(savedPath), false)
             ]
             for testCase in typedCases {
                 XCTAssertEqual(

@@ -372,6 +372,97 @@ import XCTest
             }
         }
 
+        /// A recovered auth retry that loses the startup claim fails visibly instead of treating
+        /// the pending turn as handled or publishing the competing start's thread.
+        func testManagedAuthRetryFailsWhenCompetingStartupClaimsBeforeReplay() async throws {
+            let refreshGate = StartupTestHeldGate()
+            let authRecovery = CountingAuthRecovery(gate: refreshGate)
+            let controllers = StartupTestCodexControllerRecorder()
+            controllers.scriptedStartsByController = [
+                [],
+                [.succeed(threadID: "competing-start-thread")]
+            ]
+            let message = "auth retry turn"
+            let replayBlockedMessage = "Codex authentication was refreshed, but the message was not resent because another Codex startup was still confirming thread routing. Send it again."
+
+            try await withRoutingFixture(
+                routesOnPolicyInstall: false,
+                routingTimeoutMs: 60000,
+                controllers: controllers,
+                authRecovery: authRecovery
+            ) { fixture in
+                fixture.cleanup.heldGates.append(refreshGate)
+                let first = try fixture.submit(message)
+                let runID = try await awaitRoutingWait(fixture)
+                await MCPRoutingWaiter.notifyRouted(runID: runID)
+                try await startupTestJoin(first.task)
+
+                XCTAssertEqual(controllers.controllers.flatMap(\.startUserTurnTexts), [message])
+                XCTAssertEqual(fixture.session.codexPendingAuthRetryTurn?.text, message)
+                await MCPRoutingWaiter.cleanup(runID: runID)
+
+                let coordinator = fixture.viewModel.test_codexCoordinator
+                let authIssue = CodexNativeSessionController.ServerRequestIssue(
+                    requestID: .int(2),
+                    method: "account/chatgptAuthTokens/refresh",
+                    kind: .authTokensRefreshFailed,
+                    message: "token refresh failed"
+                )
+                let recovery = Task {
+                    await coordinator.test_handleCodexNativeEvent(
+                        .serverRequestIssue(authIssue),
+                        session: fixture.session,
+                        sourceController: fixture.controller
+                    )
+                }
+                fixture.cleanup.join(recovery)
+                try await startupTestEventually { refreshGate.isWaiting }
+                XCTAssertEqual(authRecovery.refreshCount, 1)
+
+                // A reconnecting caller takes the startup claim and holds it at route confirmation.
+                fixture.session.codexNeedsReconnect = true
+                let competingStart = Task {
+                    await coordinator.ensureCodexNativeSession(session: fixture.session)
+                }
+                fixture.cleanup.join(competingStart)
+                try await startupTestEventually {
+                    controllers.controllers.count == 2
+                        && coordinator.test_hasPendingCodexStart(for: fixture.session)
+                }
+                let competingRunID = try XCTUnwrap(fixture.policies.runIDs.last)
+                _ = try await awaitRoutingWait(fixture, runID: competingRunID)
+
+                XCTAssertEqual(fixture.session.codexConversationID, "startup-ticket-test")
+                XCTAssertEqual(controllers.controllers[1].startUserTurnTexts, [])
+
+                refreshGate.release()
+                guard await startupTestJoinBounded(
+                    recovery,
+                    "managed-auth recovery did not settle while the competing startup held its claim"
+                ) else { return }
+
+                XCTAssertEqual(fixture.session.runState, .failed)
+                XCTAssertEqual(fixture.errorTexts, [replayBlockedMessage])
+                XCTAssertEqual(controllers.controllers.flatMap(\.startUserTurnTexts), [message])
+                XCTAssertEqual(
+                    fixture.session.codexConversationID,
+                    "startup-ticket-test",
+                    "managed-auth recovery published the competing startup's thread"
+                )
+
+                await MCPRoutingWaiter.notifyFailed(runID: competingRunID)
+                guard await startupTestJoinBounded(
+                    competingStart,
+                    "the competing startup did not finish after its routing gate was released"
+                ) else { return }
+
+                XCTAssertEqual(fixture.session.runState, .failed)
+                XCTAssertEqual(fixture.errorTexts, [replayBlockedMessage])
+                XCTAssertEqual(fixture.session.codexConversationID, "startup-ticket-test")
+                XCTAssertNotEqual(fixture.session.codexConversationID, "competing-start-thread")
+            }
+        }
+
         /// A warm readiness check that resumes while a replacement start is still waiting for routing
         /// must not report the replacement controller as ready.
         func testWarmReadinessDoesNotAdoptReplacementWhileItsRouteIsPending() async throws {
@@ -568,8 +659,14 @@ import XCTest
         }
 
         private final class CountingAuthRecovery: CodexManagedAuthRecovering, @unchecked Sendable {
+            let gate: StartupTestHeldGate?
             private let lock = NSLock()
             private var refreshes = 0
+
+            @MainActor
+            init(gate: StartupTestHeldGate? = nil) {
+                self.gate = gate
+            }
 
             var refreshCount: Int {
                 lock.withLock { refreshes }
@@ -577,6 +674,7 @@ import XCTest
 
             func refreshManagedAccount() async -> CodexManagedAuthRefreshResult {
                 lock.withLock { refreshes += 1 }
+                await gate?.wait()
                 return .recovered(account: nil)
             }
 
