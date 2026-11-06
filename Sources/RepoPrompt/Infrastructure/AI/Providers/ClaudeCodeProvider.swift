@@ -144,12 +144,12 @@ final class ClaudeCodeProvider: AIProvider {
     /// while a long reply is generated.
     func streamMessage(_ aiMessage: AIMessage, model: AIModel, maxTokens: Int? = nil) async throws -> AsyncThrowingStream<AIStreamResult, Error> {
         ProviderPendingCompletionStream.make { reportActivity in
-            try await self.completeMessage(aiMessage, model: model, maxTokens: maxTokens, reportActivity: reportActivity)
+            try await self.completeMessage(aiMessage, model: model, reportActivity: reportActivity)
         }
     }
 
     func completeMessage(_ aiMessage: AIMessage, model: AIModel, maxTokens: Int? = nil) async throws -> AICompletionResult {
-        try await completeMessage(aiMessage, model: model, maxTokens: maxTokens, reportActivity: nil)
+        try await completeMessage(aiMessage, model: model, reportActivity: nil)
     }
 
     /// `reportActivity` runs for each stdout chunk of each attempt's child, and at no other time:
@@ -161,7 +161,6 @@ final class ClaudeCodeProvider: AIProvider {
     private func completeMessage(
         _ aiMessage: AIMessage,
         model: AIModel,
-        maxTokens _: Int?,
         reportActivity: ProviderPendingCompletionStream.ReportActivity?
     ) async throws -> AICompletionResult {
         try Task.checkCancellation()
@@ -222,7 +221,7 @@ final class ClaudeCodeProvider: AIProvider {
                 }
             }
 
-            if let humanMessage = extractCLIErrorDetail(fromStdout: result.stdout, isStreamJSON: true) {
+            if let humanMessage = Self.extractStreamJSONErrorDetail(from: result.stdout) {
                 // Check for credit balance error and provide helpful guidance
                 let lowerMessage = humanMessage.lowercased()
                 if lowerMessage.contains("credit balance") || lowerMessage.contains("balance too low") || lowerMessage.contains("api balance") {
@@ -767,13 +766,9 @@ final class ClaudeCodeProvider: AIProvider {
     }
 
     /// Attempts to decode a human-readable error exposed by the Claude CLI when it exits non-zero.
-    /// Returns nil if stdout is empty or decoding fails. `isStreamJSON` selects the stream-json scanner
-    /// for runs that used `--output-format stream-json`.
-    private func extractCLIErrorDetail(fromStdout data: Data, isStreamJSON: Bool = false) -> String? {
+    /// Returns nil if stdout is empty or decoding fails.
+    private func extractCLIErrorDetail(fromStdout data: Data) -> String? {
         guard !data.isEmpty else { return nil }
-        if isStreamJSON {
-            return Self.extractStreamJSONErrorDetail(from: data)
-        }
 
         // First pass: look for structured JSON errors
         if let message = try? decoder.decode(ClaudeResultMessage.self, from: data),

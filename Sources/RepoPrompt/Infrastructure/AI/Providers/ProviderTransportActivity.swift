@@ -52,10 +52,9 @@ struct ProviderTransportActivityThrottle {
 /// stream may end without an error. Only one task may consume the stream.
 enum ProviderPendingCompletionStream {
     typealias ReportActivity = @Sendable () -> Void
+    typealias Complete = @Sendable (_ reportActivity: @escaping ReportActivity) async throws -> AICompletionResult
 
-    static func make(
-        complete: @escaping @Sendable (_ reportActivity: @escaping ReportActivity) async throws -> AICompletionResult
-    ) -> AsyncThrowingStream<AIStreamResult, Error> {
+    static func make(complete: @escaping Complete) -> AsyncThrowingStream<AIStreamResult, Error> {
         let iterator = PendingCompletionIterator(complete: complete)
         // `AsyncThrowingStream(unfolding:)` never calls this closure for a consumer that is
         // already cancelled, so the iterator also starts nothing for it.
@@ -67,9 +66,7 @@ enum ProviderPendingCompletionStream {
 /// `next()`, one call at a time.
 private final class PendingCompletionIterator: @unchecked Sendable {
     typealias Events = AsyncThrowingStream<AIStreamResult, Error>
-    typealias Complete = @Sendable (
-        _ reportActivity: @escaping ProviderPendingCompletionStream.ReportActivity
-    ) async throws -> AICompletionResult
+    typealias Complete = ProviderPendingCompletionStream.Complete
 
     private enum State {
         case notStarted
