@@ -540,10 +540,12 @@ preserves other TOML, applies repeated updates idempotently, and stops with an a
 conflict instead of guessing when the code-mode policy is ambiguous, uses dotted or inline
 definitions that would redefine the owned table/keys, or uses `non_prefixed_mcp_tool_names`.
 
-The 0.164.0 standalone packages no longer contain bundled Zsh: Codex 0.163.0 dropped its
-patched Zsh and runs shell commands through its standard shell executor. The reviewed
-0.164.0 rotation removed Zsh's three layout entries, its Mach-O and release-signing entry, and
-its licence. Any later layout drift that nobody has reviewed still fails the candidate tool.
+The 0.164.0 standalone packages no longer contain bundled Zsh. As the
+[Codex 0.163.0 release notes](https://github.com/openai/codex/releases/tag/rust-v0.163.0) say,
+Codex stopped bundling its patched Zsh and runs shell commands through its standard shell
+executor. The reviewed 0.164.0 rotation removed Zsh's three layout entries, its Mach-O and
+release-signing entry, and its licence. Any later layout drift that nobody has reviewed still
+fails the candidate tool.
 The voice runtime's packaged notice, source manifest, and licences are copied as the `VOICE-*`
 files in [`ThirdPartyLicenses/codex/`](../ThirdPartyLicenses/codex/) and are covered by the
 packaged legal inventory checksum contract.
@@ -602,7 +604,8 @@ complete rotation change is reviewed and deliberately applied.
 
 The tool has no way to accept layout drift, and it refuses a candidate that isn't newer than
 the pinned version. When a new release removes package entries, review the removal, delete
-those entries from `Vendor/Codex/manifest.json` while its `version` is still the current pin,
+those tree entries from `Vendor/Codex/manifest.json` while its `version` is still the current
+pin, along with the `machOFiles` and `releaseSigningEntitlements` entries of any removed Mach-O,
 and then run the official candidate against that manifest. The 0.164.0 rotation removed Zsh this
 way: the first candidate run failed on exactly Zsh's three missing paths, and the rerun
 against the adjusted manifest passed.
