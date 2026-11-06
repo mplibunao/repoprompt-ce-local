@@ -572,8 +572,37 @@ final class AgentTabSession: ObservableObject {
     }
 
     // Settings (per-tab)
-    var selectedAgent: AgentProviderKind = .claudeCode
-    var selectedModelRaw: String = AgentModel.defaultModel.rawValue
+
+    var selectedAgent: AgentProviderKind = .claudeCode {
+        didSet {
+            guard selectedAgent != oldValue else { return }
+            // Pending Claude occupancy belongs to the old provider, not the shared usage object.
+            // Window and counts stay; only the pending marker is cleared.
+            if codexContextUsage?.awaitingPostCompactionUsage != nil {
+                codexContextUsage?.awaitingPostCompactionUsage = nil
+            }
+            // The cap came from the previous provider's process; the next process reports its own.
+            claudeAutoCompactWindowTokens = nil
+            reconcileContextWindowAfterIdentityChange()
+        }
+    }
+
+    var selectedModelRaw: String = AgentModel.defaultModel.rawValue {
+        didSet {
+            // A different model can have a different window. The cap stays: a model switch can
+            // happen inside the same process.
+            guard selectedModelRaw != oldValue else { return }
+            reconcileContextWindowAfterIdentityChange()
+        }
+    }
+
+    /// The effective window belongs to a provider and model, so a switch recomputes it at once
+    /// rather than leaving the previous identity's window in place until the next usage event.
+    private func reconcileContextWindowAfterIdentityChange() {
+        guard ClaudeContextUsageEstimator.estimatesUsage(for: selectedAgent) else { return }
+        ClaudeContextUsageEstimator.reconcileContextWindow(session: self, createsUsage: false)
+    }
+
     var selectedReasoningEffortRaw: String?
     private var acpModelParameterSelectionRevisionByIdentity: [ACPModelParameterIdentity: UInt64] = [:]
     private var nextACPModelParameterSelectionRevision: UInt64 = 0
@@ -694,6 +723,43 @@ final class AgentTabSession: ObservableObject {
     var codexReasoningEffort: String?
     @Published var codexContextUsage: AgentContextUsage? = nil
     @Published var contextUsageSnapshot: ContextUsageSnapshot? = nil
+    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from the running Claude-native process's launch
+    /// environment, as reported by its runtime init. Not persisted: each launch reports it again.
+    /// Cleared when the provider changes, the conversation resets or a conversation is hydrated,
+    /// because it describes one process. A model switch keeps it.
+    var claudeAutoCompactWindowTokens: Int?
+
+    /// The model's own context capacity as the provider last reported it, before any auto-compact
+    /// cap. Persisted with the provider and model it describes.
+    var contextWindowCapacity: AgentContextWindowCapacity?
+
+    /// The stored capacity, only while the provider and base model it was reported for stay selected.
+    var identityValidContextWindowCapacity: Int? {
+        guard let contextWindowCapacity,
+              contextWindowCapacity.tokens > 0,
+              contextWindowCapacity.agentRaw == selectedAgent.rawValue,
+              contextWindowCapacity.modelRaw == AgentContextWindowCapacity.modelKey(forRaw: selectedModelRaw)
+        else { return nil }
+        return contextWindowCapacity.tokens
+    }
+
+    func recordContextWindowCapacity(_ tokens: Int) {
+        guard tokens > 0 else { return }
+        let next = AgentContextWindowCapacity(
+            tokens: tokens,
+            agentRaw: selectedAgent.rawValue,
+            modelRaw: AgentContextWindowCapacity.modelKey(forRaw: selectedModelRaw)
+        )
+        guard contextWindowCapacity != next else { return }
+        contextWindowCapacity = next
+        isDirty = true
+    }
+
+    /// The auto-compact window, only while a Claude-native provider is selected.
+    var activeClaudeAutoCompactWindowTokens: Int? {
+        selectedAgent.usesClaudeNativeRuntime ? claudeAutoCompactWindowTokens : nil
+    }
+
     var contextCompactedAt: Date?
     var codexNeedsReconnect: Bool = false
     var codexNativeStartupDisposition: AgentModeViewModel.CodexNativeStartupDisposition?

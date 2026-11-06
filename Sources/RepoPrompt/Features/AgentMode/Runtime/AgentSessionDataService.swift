@@ -206,6 +206,14 @@ actor AgentSessionDataService {
 
     // MARK: - Lightweight decode helpers
 
+    private struct LenientContextWindowCapacity: Decodable {
+        let value: AgentContextWindowCapacity?
+
+        init(from decoder: Decoder) throws {
+            value = try? AgentContextWindowCapacity(from: decoder)
+        }
+    }
+
     private struct AgentSessionHeader: Decodable {
         let id: UUID
         let serializationVersion: Int?
@@ -232,6 +240,8 @@ actor AgentSessionDataService {
         let codexLastTotalTokens: Int?
         let codexTotalTotalTokens: Int?
         let codexMcpSessionKey: String?
+        /// Decoded leniently: one malformed capacity must not fail the header of an otherwise valid file.
+        let contextWindowCapacity: LenientContextWindowCapacity?
         let parentSessionID: UUID?
         let worktreeBindings: [AgentSessionWorktreeBinding]?
         let worktreeMergeOperations: [AgentSessionWorktreeMergeOperation]?
@@ -1284,6 +1294,7 @@ actor AgentSessionDataService {
                 codexLastTotalTokens: header.codexLastTotalTokens,
                 codexTotalTotalTokens: header.codexTotalTotalTokens,
                 codexMcpSessionKey: header.codexMcpSessionKey,
+                contextWindowCapacity: header.contextWindowCapacity?.value,
                 parentSessionID: header.parentSessionID,
                 pendingHandoffPayload: header.pendingHandoffPayload,
                 pendingHandoffCreatedAt: header.pendingHandoffCreatedAt,
