@@ -394,6 +394,8 @@ final class ApplyEditsCoreRecoveryTests: XCTestCase {
     private static let notFound = "search block not found in file (matches are exact, including whitespace/indentation)"
     private static let repeatRefused =
         "search repeats in this batch and has no unique exact match; use a distinct search for each edit"
+    private static let overlapRefused =
+        "search block overlaps an earlier edit in this batch; combine the edits or send them separately"
 
     private struct BatchCase {
         let name: String
@@ -646,6 +648,87 @@ final class ApplyEditsCoreRecoveryTests: XCTestCase {
         } catch let error as ApplyEditsError {
             XCTAssertEqual(error, .internalError("diff generation produced no changes."))
         }
+    }
+
+    /// Batch fallback (no edit applies as a unique literal): each edit is matched against the original
+    /// text, so two distinct searches can claim the same original line. Their overlapping chunks then
+    /// remove an untouched or inserted line, and every edit reports success. Each row asserts the
+    /// loss-free result: an edit whose match overlaps lines an earlier edit already claimed fails.
+    func testBatchDiffFallbackRefusesEditsThatClaimTheSameOriginalLine() async throws {
+        try await assertBatchCases([
+            BatchCase(
+                name: "later edits overlap a removed two-line block",
+                original: "B\nC\ntail\n",
+                edits: [Self.edit("b\nc", ""), Self.edit("c", "Y\nC"), Self.edit("c\ntail", "Z\ntail")],
+                expectedText: "tail\n",
+                expectedStatus: .partial,
+                expectedApplied: 1,
+                expectedOutcomes: [
+                    Self.outcome(0),
+                    Self.outcome(1, failure: Self.overlapRefused),
+                    Self.outcome(2, failure: Self.overlapRefused)
+                ]
+            ),
+            BatchCase(
+                name: "a two-line edit overlaps a removed line and a sibling's line",
+                original: "A\nB\nC\nD\n",
+                edits: [Self.edit("b", ""), Self.edit("c", "Y\nC"), Self.edit("b\nc", "X\nC")],
+                expectedText: "A\nY\nC\nD\n",
+                expectedStatus: .partial,
+                expectedApplied: 2,
+                expectedOutcomes: [
+                    Self.outcome(0),
+                    Self.outcome(1),
+                    Self.outcome(2, failure: Self.overlapRefused)
+                ]
+            ),
+            BatchCase(
+                name: "a refused edit claims nothing, so a later independent edit still applies",
+                original: "B\nC\ntail\n",
+                edits: [
+                    Self.edit("b\nc", ""),
+                    Self.edit("c", "Y\nC"),
+                    Self.edit("c\ntail", "Z\nchanged"),
+                    Self.edit("TAIL", "end")
+                ],
+                expectedText: "end\n",
+                expectedStatus: .partial,
+                expectedApplied: 2,
+                expectedOutcomes: [
+                    Self.outcome(0),
+                    Self.outcome(1, failure: Self.overlapRefused),
+                    Self.outcome(2, failure: Self.overlapRefused),
+                    Self.outcome(3)
+                ]
+            ),
+            BatchCase(
+                name: "an edit whose removed span contains an earlier insertion point is refused",
+                original: "B\nC\ntail\n",
+                edits: [Self.edit("c", "Y\nC"), Self.edit("b\nc", "")],
+                expectedText: "B\nY\nC\ntail\n",
+                expectedStatus: .partial,
+                expectedApplied: 1,
+                expectedOutcomes: [Self.outcome(0), Self.outcome(1, failure: Self.overlapRefused)]
+            ),
+            BatchCase(
+                name: "a replace-all with one occurrence over a claimed line is refused whole",
+                original: "A\nB\nA\nD\n",
+                edits: [Self.edit("a\nd", "Z"), Self.edit("a", "Q", all: true)],
+                expectedText: "A\nB\nZ\n",
+                expectedStatus: .partial,
+                expectedApplied: 1,
+                expectedOutcomes: [Self.outcome(0), Self.outcome(1, failure: Self.overlapRefused)]
+            ),
+            BatchCase(
+                name: "edits that only share an unchanged context line both apply",
+                original: "B\nC\nD\n",
+                edits: [Self.edit("b\nc", "X\nC"), Self.edit("c\nd", "C\nY")],
+                expectedText: "X\nC\nY\n",
+                expectedStatus: .success,
+                expectedApplied: 2,
+                expectedOutcomes: [Self.outcome(0), Self.outcome(1)]
+            )
+        ])
     }
 
     func testRequestsThatLeaveTheFileAsItIsReturnAnUnchangedResult() async throws {
