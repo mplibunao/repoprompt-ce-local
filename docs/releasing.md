@@ -544,11 +544,10 @@ The 0.164.0 standalone packages no longer contain bundled Zsh. As the
 [Codex 0.163.0 release notes](https://github.com/openai/codex/releases/tag/rust-v0.163.0) say,
 Codex stopped bundling its patched Zsh and runs shell commands through its standard shell
 executor. The reviewed 0.164.0 rotation removed Zsh's three layout entries, its Mach-O and
-release-signing entry, and its licence. Any later layout drift that nobody has reviewed still
-fails the candidate tool.
-The voice runtime's packaged notice, source manifest, and licences are copied as the `VOICE-*`
-files in [`ThirdPartyLicenses/codex/`](../ThirdPartyLicenses/codex/) and are covered by the
-packaged legal inventory checksum contract.
+release-signing entry, and its licence. The voice runtime's packaged notice, source manifest,
+and licences are copied as the `VOICE-*` files in
+[`ThirdPartyLicenses/codex/`](../ThirdPartyLicenses/codex/) and are covered by the packaged
+legal inventory checksum contract.
 
 To diagnose acquisition independently of a build, run:
 
@@ -606,9 +605,7 @@ The tool has no way to accept layout drift, and it refuses a candidate that isn'
 the pinned version. When a new release removes package entries, review the removal, delete
 those tree entries from `Vendor/Codex/manifest.json` while its `version` is still the current
 pin, along with the `machOFiles` and `releaseSigningEntitlements` entries of any removed Mach-O,
-and then run the official candidate against that manifest. The 0.164.0 rotation removed Zsh this
-way: the first candidate run failed on exactly Zsh's three missing paths, and the rerun
-against the adjusted manifest passed.
+and then run the official candidate against that manifest.
 
 The known-good rollback for the 0.164.0 rotation is the previously bundled Codex 0.159.0
 (`rust-v0.159.0`; manifest SHA-256
