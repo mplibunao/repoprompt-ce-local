@@ -300,7 +300,7 @@ Route B: when a synthesis question remains after the pair's findings, export aga
 
 ### Phase 6: Walk the User Through It
 
-The user has not read the report, so this is a conversation. In plain language, with enough context to follow without opening the report: the answer and the evidence that carries it, what was ruled out and by what, the recommendations, and what is still unknown. Discuss, and update the report with what you agree. On route B, then delete each export and results file that is under `prompt-exports/` (\(deleteExport)); a response the user supplied at any other path is their file and stays.
+The user has not read the report, so this is a conversation. In plain language, with enough context to follow without opening the report: the answer and the evidence that carries it, what was ruled out and by what, the recommendations, and what is still unknown. If you loaded the user's chat rules, reread their visual rules before you write the walkthrough, and follow them. Discuss, and update the report with what you agree. On route B, then delete each export and results file that is under `prompt-exports/` (\(deleteExport)); a response the user supplied at any other path is their file and stays.
 
 ---
 

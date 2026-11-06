@@ -356,7 +356,7 @@ The Phase 6 critique checks correctness, completeness, and preservation against 
 
 ### Walking the User Through a Draft
 
-Phase 4.5, Phase 5, and the final hand-off in Phase 7.5 use this list. Write in plain language for a reader new to this codebase and to the plan, and check each claim against the code before you state it. Cover, in this order:
+Phase 4.5, Phase 5, and the final hand-off in Phase 7.5 use this list. Write in plain language for a reader new to this codebase and to the plan, and check each claim against the code before you state it. If you loaded the user's chat rules, reread their visual rules before you write the walkthrough, and follow them. Cover, in this order:
 
 1. The problem, opening with the **Problem:** line: what goes wrong today and for whom, and the background needed to follow the rest: the parts of the system involved and the terms you will use.
 2. The proposed approach, in a paragraph.
