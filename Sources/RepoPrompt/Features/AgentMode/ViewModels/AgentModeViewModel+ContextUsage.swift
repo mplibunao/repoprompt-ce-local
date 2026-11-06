@@ -71,8 +71,9 @@ extension AgentModeViewModel {
         modelContextWindow: Int?
     ) -> AgentContextUsage? {
         guard !usage.isEmpty else { return nil }
-        let defaultClaudeContextWindow = 200_000
-        let maxContextTokens = max(1, modelContextWindow ?? defaultClaudeContextWindow)
+        // Without a known positive window there is no ceiling, as in live validation: a fixed
+        // fallback would discard valid occupancy restored from larger-window sessions.
+        let maxContextTokens = modelContextWindow.flatMap { $0 > 0 ? $0 : nil } ?? Int.max
         // Only trust exact stream-derived context snapshots (contextUsedTokens).
         // Do NOT fall back to promptTokens — those are billed-turn aggregates that
         // include internal tool sub-steps and cause inflated context estimates.
