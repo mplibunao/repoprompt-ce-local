@@ -3,17 +3,20 @@ import Foundation
 import XCTest
 
 #if DEBUG
-    /// Window and service fixtures for suites that exercise the process-wide
+    /// Per-window readiness and activation helpers, plus fixtures for the process-wide
     /// `WindowState.sharedMCPService`.
     ///
-    /// Callers hold `MCPSharedServerTestLease` for the whole test. The lease is not re-entrant, so
-    /// these helpers never acquire it. Constructing another `MCPService` would rewire the
-    /// process-wide controller and dashboard hooks for every later test.
+    /// Readiness and activation helpers only inspect or drive one window. Shared-service fixture
+    /// operations such as `withSharedServiceState` require callers to hold `MCPSharedServerTestLease`
+    /// for the whole test. The lease is not re-entrant, so these helpers never acquire it.
+    /// Constructing another `MCPService` would rewire the process-wide controller and dashboard
+    /// hooks for every later test.
     @MainActor
     enum MCPWindowTestSupport {
         enum FixtureError: Error, CustomStringConvertible {
             case pendingApprovalAtSetup(String)
             case missingSeedSnapshot
+            case readinessFailed(String)
 
             var description: String {
                 switch self {
@@ -21,6 +24,8 @@ import XCTest
                     "The shared MCP service already has a pending approval for \(clientID)."
                 case .missingSeedSnapshot:
                     "A new state subscription did not receive the current snapshot within the timeout."
+                case let .readinessFailed(details):
+                    details
                 }
             }
         }
@@ -57,6 +62,127 @@ import XCTest
                 try? await clock.sleep(for: .milliseconds(5))
             }
             return await condition()
+        }
+
+        static func readinessDescription(of window: WindowState, workspaceID: UUID?) -> String {
+            let manager = window.workspaceManager
+            let agent = window.agentModeViewModel
+            return "window=\(window.windowID) expectedWorkspace=\(String(describing: workspaceID)) "
+                + "actualWorkspace=\(String(describing: manager.activeWorkspaceID)) "
+                + "composeTabs=\(manager.activeWorkspace?.composeTabs.count ?? 0) "
+                + "initialized=\(manager.isInitialized) switching=\(manager.isSwitchingWorkspace) "
+                + "closing=\(window.isClosing) restoring=\(window.isWorkspaceRestoreInFlight) "
+                + "pendingDiscard=\(agent.hasPendingWorkspaceSwitchDiscard) "
+                + "agentSwitching=\(agent.workspaceSwitchInFlight) "
+                + "loadingTab=\(String(describing: agent.activeSessionLoadInProgressTabID))"
+        }
+
+        static func isRoutingReady(_ window: WindowState, workspaceID: UUID) -> Bool {
+            window.workspaceManager.activeWorkspace?.id == workspaceID
+                && window.workspaceManager.isInitialized
+                && !window.workspaceManager.isSwitchingWorkspace
+                && !window.isClosing
+                && !window.isWorkspaceRestoreInFlight
+        }
+
+        static func waitForInitialization(
+            of window: WindowState,
+            timeout: Duration = .seconds(30),
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws {
+            try await requireReadiness("workspace manager initialization", timeout: timeout, file: file, line: line) {
+                window.workspaceManager.isInitialized && !window.workspaceManager.isSwitchingWorkspace
+            } diagnostics: {
+                readinessDescription(of: window, workspaceID: nil)
+            }
+        }
+
+        static func waitForRoutingReadiness(
+            of window: WindowState,
+            workspaceID: UUID,
+            timeout: Duration = .seconds(30),
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws {
+            try await requireReadiness("routing readiness", timeout: timeout, file: file, line: line) {
+                isRoutingReady(window, workspaceID: workspaceID)
+            } diagnostics: {
+                readinessDescription(of: window, workspaceID: workspaceID)
+            }
+        }
+
+        static func waitForAgentStartReadiness(
+            of window: WindowState,
+            workspaceID: UUID,
+            timeout: Duration = .seconds(30),
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws {
+            try await requireReadiness("Agent start readiness", timeout: timeout, file: file, line: line) {
+                isRoutingReady(window, workspaceID: workspaceID)
+                    && !window.agentModeViewModel.hasPendingWorkspaceSwitchDiscard
+                    && !window.agentModeViewModel.workspaceSwitchInFlight
+                    && window.agentModeViewModel.activeSessionLoadInProgressTabID == nil
+            } diagnostics: {
+                readinessDescription(of: window, workspaceID: workspaceID)
+            }
+        }
+
+        static func activateWorkspaceForAgentStart(
+            _ workspace: WorkspaceModel,
+            in window: WindowState,
+            reason: String,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws {
+            let switchResult = await window.workspaceManager.switchWorkspace(
+                to: workspace,
+                saveState: false,
+                reason: reason
+            )
+            guard switchResult.didSwitch else {
+                let details = "\(reason): workspace switch failed: \(switchResult)"
+                XCTFail(details, file: file, line: line)
+                throw FixtureError.readinessFailed(details)
+            }
+            let activeWorkspace = try XCTUnwrap(
+                window.workspaceManager.activeWorkspace,
+                "\(reason): no active workspace after switching",
+                file: file,
+                line: line
+            )
+            guard activeWorkspace.id == workspace.id else {
+                let details = "\(reason): unexpected active workspace: \(readinessDescription(of: window, workspaceID: workspace.id))"
+                XCTFail(details, file: file, line: line)
+                throw FixtureError.readinessFailed(details)
+            }
+            try await waitForAgentStartReadiness(of: window, workspaceID: workspace.id, file: file, line: line)
+            window.promptManager.loadComposeTabsFromWorkspace(activeWorkspace, syncPromptText: true)
+            try await waitForAgentStartReadiness(of: window, workspaceID: workspace.id, file: file, line: line)
+        }
+
+        /// Synchronous snapshots keep the deadline effective even when initialization never completes.
+        static func requireReadiness(
+            _ description: String,
+            timeout: Duration = .seconds(30),
+            file: StaticString = #filePath,
+            line: UInt = #line,
+            condition: () -> Bool,
+            diagnostics: () -> String
+        ) async throws {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: timeout)
+            while clock.now < deadline {
+                try Task.checkCancellation()
+                if condition() {
+                    return
+                }
+                try await clock.sleep(for: .milliseconds(5))
+            }
+            let details = "Timed out waiting for \(description): \(diagnostics())"
+            XCTFail(details, file: file, line: line)
+            throw FixtureError.readinessFailed(details)
         }
 
         /// Runs `body` against the shared service and restores the service state a test may change.

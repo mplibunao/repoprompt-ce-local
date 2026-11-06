@@ -149,36 +149,32 @@ import XCTest
                 }
             ]
             for protection in protections {
-                // A case that throws has already recorded its failure. The loop goes on to the next case.
-                try? await expectProtectionKeepsProcess(protection)
+                try await expectProtectionKeepsProcess(protection)
             }
 
             // A message admitted while the probe is out keeps the process, and its run uses it.
-            do {
-                let fixture = makeFixture()
+            try await withFixture("submission admitted during the probe") { fixture in
                 try await fixture.runTurn("turn")
                 let probeHold = StartupTestHeldGate()
                 fixture.cleanup.heldGates.append(probeHold)
                 fixture.claude.probeHold = probeHold
                 fixture.idle.clock.advance(by: Self.interval)
                 try await startupTestEventually { probeHold.isWaiting }
+                let startupDeadline = ContinuousClock.now + .seconds(30)
                 let ticket = try fixture.submit("admitted during the probe")
                 probeHold.release()
                 try await expectIdleOutcomes([.rearmed], on: fixture, "submission admitted during the probe")
                 XCTAssertEqual(fixture.claude.shutdownsStarted, 0)
 
-                try await startupTestJoin(ticket.task)
-                try await startupTestEventually { fixture.claude.sentMessages.count == 2 }
+                try await fixture.awaitSentTurn(ticket, sentBefore: 1, deadline: startupDeadline)
                 XCTAssertEqual(fixture.claude.runtimesCreated, 1, "the admitted message started a new process")
-                try await MCPRoutingWaiter.notifyRouted(runID: XCTUnwrap(fixture.session.runID))
                 try await fixture.completeSentTurn()
                 fixture.idle.clock.advance(by: Self.interval)
                 try await expectIdleOutcomes([.rearmed, .retired], on: fixture, "submission admitted during the probe")
             }
 
             // Another session waiting on this one reads its run state, not its process.
-            do {
-                let fixture = makeFixture()
+            try await withFixture("outside waiter") { fixture in
                 try await fixture.runTurn("turn")
                 fixture.idle.runIDsWithActiveChildWaits.insert(UUID())
                 fixture.idle.clock.advance(by: Self.interval)
@@ -418,19 +414,50 @@ import XCTest
         /// full interval later once it is released.
         private func expectProtectionKeepsProcess(_ protection: Protection) async throws {
             let label = protection.label
+            try await withFixture(label) { fixture in
+                try await fixture.runTurn("turn")
+                let controller = try XCTUnwrap(fixture.session.claudeController, label)
+                var release: (@MainActor () -> Void)? = try protection.apply(fixture)
+                fixture.cleanup.releases.append {
+                    release?()
+                    release = nil
+                }
+
+                fixture.idle.clock.advance(by: Self.interval)
+                try await expectIdleOutcomes([.rearmed], on: fixture, label)
+                XCTAssertEqual(fixture.claude.shutdownsStarted, 0, label)
+                XCTAssertTrue(fixture.session.claudeController === controller, label)
+
+                release?()
+                release = nil
+                fixture.idle.clock.advance(by: Self.interval)
+                try await expectIdleOutcomes([.rearmed, .retired], on: fixture, label)
+                try await startupTestEventually { fixture.claude.shutdownObservations.count == 1 }
+            }
+        }
+
+        private func withFixture(
+            _ label: String,
+            _ operation: @MainActor (Fixture) async throws -> Void
+        ) async throws {
             let fixture = makeFixture()
-            try await fixture.runTurn("turn")
-            let release = try protection.apply(fixture)
+            do {
+                try await operation(fixture)
+            } catch {
+                await fixture.tearDown()
+                throw FixtureFailure(details: "\(label): \(error); teardownSucceeded=\(fixture.tearDownSucceeded)")
+            }
+            await fixture.tearDown()
+            guard fixture.tearDownSucceeded else {
+                throw FixtureFailure(details: "\(label): fixture teardown did not finish")
+            }
+        }
 
-            fixture.idle.clock.advance(by: Self.interval)
-            try await expectIdleOutcomes([.rearmed], on: fixture, label)
-            XCTAssertEqual(fixture.claude.shutdownsStarted, 0, label)
-            XCTAssertNotNil(fixture.session.claudeController, label)
-
-            release()
-            fixture.idle.clock.advance(by: Self.interval)
-            try await expectIdleOutcomes([.rearmed, .retired], on: fixture, label)
-            try await startupTestEventually { fixture.claude.shutdownObservations.count == 1 }
+        private struct FixtureFailure: Error, CustomStringConvertible {
+            let details: String
+            var description: String {
+                details
+            }
         }
 
         // MARK: - Fixture
@@ -458,6 +485,8 @@ import XCTest
             var onIdleOutcome: (@MainActor (Outcome) -> Void)?
             /// Run attempts that reached the wait for this tab's resume transfer.
             private(set) var runAttemptTransferWaits = 0
+            private var didTearDown = false
+            private(set) var tearDownSucceeded = false
 
             var coordinator: ClaudeAgentModeCoordinator {
                 viewModel.claudeCoordinator
@@ -486,14 +515,83 @@ import XCTest
                 }
             }
 
+            override func tearDown() async {
+                guard !didTearDown else { return }
+                didTearDown = true
+                let runTask = session.agentTask
+                await super.tearDown()
+                idle.clock.cancelSleepers()
+                var shutdownFinished = false
+                await startupTestAwaitBounded("Claude fixture shutdown did not finish", seconds: 30) {
+                    await self.coordinator.shutdownClaudeSessionIfNeeded(self.session)
+                    shutdownFinished = true
+                }
+                // The shared cleanup reports timeouts without returning a result. A case must
+                // establish completion before another case can use the same storage root.
+                var startsFinished = true
+                for ticket in cleanup.tickets {
+                    guard let task = ticket.task else { continue }
+                    let finished = await startupTestJoinBounded(task, "Claude fixture startup did not finish", seconds: 30)
+                    startsFinished = startsFinished && finished
+                }
+                let runnerFinished: Bool = if let runTask {
+                    await startupTestJoinBounded(runTask, "Claude fixture runner did not finish", seconds: 30)
+                } else {
+                    true
+                }
+                tearDownSucceeded = shutdownFinished && startsFinished && runnerFinished
+            }
+
             /// Sends `text` as a manual turn and waits until the provider has it and its run is routed.
             func sendTurn(_ text: String) async throws {
+                let deadline = ContinuousClock.now + .seconds(30)
                 let sentBefore = claude.sentMessages.count
                 let ticket = try submit(text)
-                try await startupTestJoin(ticket.task)
-                let sent = await startupTestWaitBounded { self.claude.sentMessages.count == sentBefore + 1 }
-                XCTAssertTrue(sent, "the provider never received \(text)")
-                try await MCPRoutingWaiter.notifyRouted(runID: XCTUnwrap(session.runID))
+                try await awaitSentTurn(ticket, sentBefore: sentBefore, deadline: deadline)
+            }
+
+            func awaitSentTurn(
+                _ ticket: AgentRunStartupTicket,
+                sentBefore: Int,
+                deadline: ContinuousClock.Instant
+            ) async throws {
+                do {
+                    let task = try XCTUnwrap(ticket.task, "the submitted turn has no startup task")
+                    // Runner adoption completes before provider delivery or routing acknowledgement.
+                    try await startupTestJoin(task, seconds: secondsRemaining(until: deadline))
+                    guard ticket.phase == .accepted else {
+                        throw FixtureFailure(details: "the runner did not accept the turn")
+                    }
+                    let sent = try await startupTestWaitBounded(seconds: secondsRemaining(until: deadline)) {
+                        self.claude.sentMessages.count == sentBefore + 1
+                            || self.session.runState == .failed
+                            || !self.errorTexts.isEmpty
+                    }
+                    guard sent, claude.sentMessages.count == sentBefore + 1 else {
+                        throw FixtureFailure(details: "the provider did not receive exactly one new message")
+                    }
+                    let runID = try XCTUnwrap(session.runID)
+                    try await startupTestSettle(on: self, seconds: secondsRemaining(until: deadline)) {
+                        await MCPRoutingWaiter.notifyRouted(runID: runID)
+                    }
+                } catch {
+                    throw FixtureFailure(details: "\(error); \(startupDiagnostics(ticket))")
+                }
+            }
+
+            private func secondsRemaining(until deadline: ContinuousClock.Instant) throws -> TimeInterval {
+                let remaining = ContinuousClock.now.duration(to: deadline).components
+                let seconds = Double(remaining.seconds) + Double(remaining.attoseconds) / 1e18
+                guard seconds > 0 else {
+                    throw FixtureFailure(details: "the 30-second startup deadline expired")
+                }
+                return seconds
+            }
+
+            private func startupDiagnostics(_ ticket: AgentRunStartupTicket) -> String {
+                "phase=\(ticket.phase.rawValue) readinessCalls=\(readiness.callCount) "
+                    + "events=\(claude.events) transferWaits=\(runAttemptTransferWaits) "
+                    + "terminalCommitInProgress=\(session.terminalCommitInProgress) errors=\(errorTexts)"
             }
 
             /// Completes the turn sent last and waits until its terminal has committed, which
@@ -505,7 +603,9 @@ import XCTest
                 let committed = await startupTestWaitBounded(seconds: 15) {
                     self.session.runState == .completed && !self.session.terminalCommitInProgress
                 }
-                XCTAssertTrue(committed, "the turn's terminal never committed")
+                guard committed else {
+                    throw FixtureFailure(details: "the turn's terminal never committed; errors=\(errorTexts)")
+                }
             }
 
             func runTurn(_ text: String) async throws {
@@ -548,7 +648,6 @@ import XCTest
             )
             addTeardownBlock { @MainActor in
                 await fixture.tearDown()
-                idle.clock.cancelSleepers()
             }
             return fixture
         }

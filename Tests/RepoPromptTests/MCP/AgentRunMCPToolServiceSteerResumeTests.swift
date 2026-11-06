@@ -133,38 +133,60 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
 
         var service = makeService(window: window)
         service.testDispatchSteerInstruction = { _, _, _, _ in .startedRun }
-        let completionTask = Task { @MainActor in
-            while !Task.isCancelled {
-                if let registration = await AgentRunSessionStore.currentRegistration(for: sessionID),
-                   registration != expiredContext.registration,
-                   let cursor = await AgentRunSessionStore.currentCursor(for: registration)
-                {
-                    viewModel.setMCPFollowUpRunPending(sessionID: sessionID, false)
-                    session.runState = .completed
-                    guard let snapshot = viewModel.mcpSnapshot(sessionID: sessionID) else { return }
-                    await AgentRunSessionStore.signalSnapshot(snapshot, cursor: cursor)
-                    return
-                }
-                await Task.yield()
+        var waitHookCount = 0
+        var replacementRegistration: AgentRunSessionStore.Registration?
+        service.beginAgentRunWait = { _, sessionIDs, _ in
+            waitHookCount += 1
+            XCTAssertEqual(sessionIDs, [sessionID])
+            let registration = await AgentRunSessionStore.currentRegistration(for: sessionID)
+            XCTAssertNotEqual(registration, expiredContext.registration)
+            replacementRegistration = registration
+            guard let registration,
+                  let cursor = await AgentRunSessionStore.currentCursor(for: registration)
+            else {
+                XCTFail("The steering run has no current wait cursor")
+                return nil
             }
+            XCTAssertEqual(cursor.epoch?.transitionKind, .steering)
+            XCTAssertEqual(cursor.epoch, session.mcpControlContext?.currentEpoch)
+            viewModel.setMCPFollowUpRunPending(sessionID: sessionID, false)
+            session.runState = .completed
+            guard let snapshot = viewModel.mcpSnapshot(sessionID: sessionID) else {
+                XCTFail("The steering run has no completion snapshot")
+                return nil
+            }
+            await AgentRunSessionStore.signalSnapshot(snapshot, cursor: cursor)
+            return nil
         }
 
-        let value = try await service.execute(args: [
-            "op": .string("steer"),
-            "session_id": .string(sessionID.uuidString),
-            "message": .string("wait for this follow-up"),
-            "wait": .bool(true),
-            "timeout_seconds": .double(1)
-        ])
-        completionTask.cancel()
-        await completionTask.value
+        let operation = Task { @MainActor in
+            do {
+                let value = try await service.execute(args: [
+                    "op": .string("steer"),
+                    "session_id": .string(sessionID.uuidString),
+                    "message": .string("wait for this follow-up"),
+                    "wait": .bool(true),
+                    "timeout_seconds": .double(60)
+                ])
+                return Result<Value, Error>.success(value)
+            } catch {
+                return .failure(error)
+            }
+        }
+        defer { operation.cancel() }
+        try await startupTestJoin(operation, seconds: 30)
+        let value = try await operation.value.get()
 
         XCTAssertEqual(value.objectValue?["session_id"]?.stringValue, sessionID.uuidString)
         XCTAssertEqual(value.objectValue?["status"]?.stringValue, AgentRunMCPSnapshot.Status.completed.rawValue)
         XCTAssertNotEqual(value.objectValue?["status"]?.stringValue, AgentRunMCPSnapshot.Status.expired.rawValue)
         let currentContext = try XCTUnwrap(session.mcpControlContext)
         XCTAssertNotEqual(currentContext.registration, expiredContext.registration)
+        XCTAssertEqual(currentContext.registration, replacementRegistration)
         XCTAssertEqual(currentContext.currentEpoch?.transitionKind, .steering)
+        XCTAssertEqual(waitHookCount, 1)
+        XCTAssertNotEqual(value.objectValue?["_meta"]?.objectValue?["wait_result"]?.stringValue, "timed_out")
+        XCTAssertNotEqual(value.objectValue?["_meta"]?.objectValue?["wait_result"]?.stringValue, "expired")
 
         await viewModel.mcpDeactivateControlContext(sessionID: sessionID, cleanupSessionStore: true)
     }
@@ -926,18 +948,19 @@ final class AgentRunMCPToolServiceSteerResumeTests: XCTestCase {
         }
         GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
 
+        try await MCPWindowTestSupport.waitForInitialization(of: window)
+        // New workspaces have a normalized blank tab whose switch load needs Agent Mode active.
+        window.agentModeViewModel.setAgentModeActive(true)
         let workspace = window.workspaceManager.createWorkspace(
             name: "Steer Resume \(UUID().uuidString.prefix(8))",
             repoPaths: [FileManager.default.currentDirectoryPath],
             ephemeral: true
         )
-        await window.workspaceManager.switchWorkspace(
-            to: workspace,
-            saveState: false,
+        try await MCPWindowTestSupport.activateWorkspaceForAgentStart(
+            workspace,
+            in: window,
             reason: "agentRunSteerResumeTests"
         )
-        let activeWorkspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
-        window.promptManager.loadComposeTabsFromWorkspace(activeWorkspace, syncPromptText: true)
         return window
     }
 
