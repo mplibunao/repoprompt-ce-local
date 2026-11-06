@@ -1174,7 +1174,8 @@ final class CodexNativeSessionController {
 
     private static func isMissingFreshThreadResumeError(
         _ error: Error,
-        threadID: String
+        threadID: String,
+        rolloutPath: String?
     ) -> Bool {
         guard case let CodexAppServerClient.ClientError.requestFailed(failure) = error,
               failure.method == "thread/resume",
@@ -1189,6 +1190,10 @@ final class CodexNativeSessionController {
         return normalized == "no rollout found for thread id \(normalizedThreadID)"
             || normalized == "thread not found: \(normalizedThreadID)"
             || normalized == "thread not loaded: \(normalizedThreadID)"
+            || CodexAppServerClient.isMissingRolloutPathResolutionMessage(
+                failure.message,
+                expectedRolloutPath: rolloutPath
+            )
     }
 
     private func prepareHookTrustThreadBindingRestoration() async throws -> ThreadSnapshot {
@@ -1237,7 +1242,11 @@ final class CodexNativeSessionController {
             )
         } catch {
             guard binding.existing == nil,
-                  Self.isMissingFreshThreadResumeError(error, threadID: priorThreadID)
+                  Self.isMissingFreshThreadResumeError(
+                      error,
+                      threadID: priorThreadID,
+                      rolloutPath: priorReference.rolloutPath
+                  )
             else {
                 throw error
             }
@@ -4432,6 +4441,14 @@ final class CodexNativeSessionController {
     }
 
     #if DEBUG
+        static func test_isMissingFreshThreadResumeError(
+            _ error: Error,
+            threadID: String,
+            rolloutPath: String?
+        ) -> Bool {
+            isMissingFreshThreadResumeError(error, threadID: threadID, rolloutPath: rolloutPath)
+        }
+
         func test_markHookTrustTransportRetiring(generation: UInt64) {
             markHookTrustTransportRetiring(generation: generation)
         }

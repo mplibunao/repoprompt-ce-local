@@ -7,7 +7,8 @@ import XCTest
     /// The controller rejects a `thread/start` or `thread/resume` response without a thread ID
     /// before applying thread state, draining events buffered while binding, or becoming active;
     /// the coordinator then fails the start at its thread-identity phase without a first dispatch.
-    /// A saved thread without an ID fails as a resume with no fresh-start fallback.
+    /// A saved rollout path without a thread ID fails as a resume with no fresh-start fallback, and a
+    /// session with no saved thread identity starts fresh.
     @MainActor
     final class CodexThreadBindingReadinessTests: XCTestCase {
         private var storageRoot: URL!
@@ -340,38 +341,220 @@ import XCTest
             }
         }
 
-        /// History whose saved thread has a rollout path but no ID, or nothing at all, cannot be
-        /// resumed; the start fails as a resume and never falls back to a fresh thread.
-        func testSavedThreadWithoutAnIDFailsAsAResumeWithoutAFreshStart() async throws {
-            for rolloutPath in ["/tmp/saved-rollout.jsonl", nil] {
-                let context = rolloutPath == nil ? "no saved identity" : "a path-only saved thread"
-                let fixture = makeFixture()
-                startupTestInstallSavedCodexHistory(on: fixture.session, conversationID: nil, rolloutPath: rolloutPath)
-                // The real controller's own check decides; a fresh start here would be a fallback.
-                let realController = makeController()
-                fixture.controller.startupHook = { target in
-                    guard let target else { throw FreshStartAttempted() }
-                    _ = try await realController.startOrResume(existing: target, baseInstructions: "")
-                }
+        /// History whose saved thread has a rollout path but no ID cannot be resumed; the start fails
+        /// as a resume and never falls back to a fresh thread that would replace that history.
+        func testPathOnlySavedThreadFailsAsAResumeWithoutAFreshStart() async throws {
+            let rolloutPath = "/tmp/saved-rollout.jsonl"
+            let fixture = makeFixture()
+            startupTestInstallSavedCodexHistory(on: fixture.session, conversationID: nil, rolloutPath: rolloutPath)
+            // The real controller's own check decides; a fresh start here would be a fallback.
+            let realController = makeController()
+            fixture.controller.startupHook = { target in
+                guard let target else { throw FreshStartAttempted() }
+                _ = try await realController.startOrResume(existing: target, baseInstructions: "")
+            }
 
-                let ticket = try fixture.submit("next")
-                try await startupTestJoin(ticket.task)
+            let ticket = try fixture.submit("next")
+            try await startupTestJoin(ticket.task)
 
+            XCTAssertEqual(
+                fixture.controller.startOrResumeTargets,
+                [.init(conversationID: "", rolloutPath: rolloutPath, model: nil, reasoningEffort: nil)]
+            )
+            XCTAssertEqual(fixture.controller.startUserTurnTexts, [])
+            XCTAssertEqual(fixture.errorTexts, ["Codex native resume failed: the saved thread ID is missing."])
+            XCTAssertEqual(fixture.session.runState, .failed)
+            XCTAssertEqual(fixture.session.lastTerminalCommitRevision?.terminalState, .failed)
+            XCTAssertEqual(fixture.session.codexRolloutPath, rolloutPath)
+            XCTAssertFalse(
+                fixture.session.items.contains { $0.kind == .system },
+                "a path-only saved thread announced a fresh-thread recovery"
+            )
+        }
+
+        /// A first start that fails before Codex names a thread leaves no saved identity and a
+        /// reconnect request. The next submission starts a fresh thread instead of resuming an
+        /// empty thread ID.
+        func testFailedFirstStartWithoutIdentityAllowsALaterFreshSend() async throws {
+            let fixture = makeFixture()
+            // The real controller's own check decides any resume; the recording controller answers
+            // fresh starts.
+            let realController = makeController()
+            fixture.controller.startupHook = { target in
+                guard let target else { return }
+                _ = try await realController.startOrResume(existing: target, baseInstructions: "")
+            }
+            fixture.controller.startupError = NSError(
+                domain: "CodexThreadBindingReadinessTests",
+                code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "the app-server exited before the thread started"]
+            )
+            let first = try fixture.submit("first")
+            try await startupTestJoin(first.task)
+            XCTAssertEqual(fixture.session.runState, .failed)
+            XCTAssertNil(fixture.session.codexConversationID)
+            XCTAssertNil(fixture.session.codexRolloutPath)
+            XCTAssertTrue(fixture.session.codexNeedsReconnect, "the failed first start did not request a reconnect")
+
+            fixture.controller.startupError = nil
+            let second = try fixture.submit("second")
+            try await startupTestJoin(second.task)
+
+            XCTAssertEqual(fixture.controller.startOrResumeTargets, [nil, nil])
+            XCTAssertEqual(fixture.controller.startUserTurnTexts, ["second"])
+            XCTAssertEqual(fixture.errorTexts, [
+                "Codex native start failed: the app-server exited before the thread started"
+            ])
+            XCTAssertEqual(fixture.session.codexConversationID, "startup-ticket-test")
+            XCTAssertEqual(fixture.session.codexNativeStartupDisposition, .fresh)
+            XCTAssertFalse(
+                fixture.session.items.contains { $0.kind == .system },
+                "the fresh start announced a fresh-thread recovery"
+            )
+        }
+
+        /// A saved thread stays the resume target while no controller holds an active thread, even
+        /// when nothing requested a reconnect.
+        func testSavedThreadResumesWithoutActiveControllerWhenReconnectIsFalse() async throws {
+            let fixture = makeFixture()
+            startupTestInstallSavedCodexHistory(
+                on: fixture.session,
+                conversationID: "saved-thread",
+                rolloutPath: "/tmp/saved-rollout.jsonl"
+            )
+            fixture.session.codexNeedsReconnect = false
+            XCTAssertNil(fixture.session.codexController)
+
+            let ticket = try fixture.submit("next")
+            try await startupTestJoin(ticket.task)
+
+            XCTAssertEqual(
+                fixture.controller.startOrResumeTargets,
+                [.init(conversationID: "saved-thread", rolloutPath: "/tmp/saved-rollout.jsonl", model: nil, reasoningEffort: nil)]
+            )
+            XCTAssertEqual(fixture.controller.startUserTurnTexts, ["next"])
+            XCTAssertEqual(fixture.errorTexts, [])
+            XCTAssertEqual(fixture.session.codexNativeStartupDisposition, .resumed)
+        }
+
+        /// A start cancelled while its resume is in flight does not start a fresh thread, even when
+        /// the resume then fails with the missing-rollout diagnostic for the saved thread.
+        func testCancelledStartupDoesNotRetryMissingRollout() async throws {
+            let rolloutPath = "/tmp/saved-rollout.jsonl"
+            let fixture = makeFixture(gatesStartup: true)
+            startupTestInstallSavedCodexHistory(on: fixture.session, conversationID: "saved-thread", rolloutPath: rolloutPath)
+            fixture.controller.startupError = CodexAppServerClient.ClientError.requestFailed(.init(
+                method: "thread/resume",
+                code: -32600,
+                message: "failed to resolve rollout path \(rolloutPath): file does not exist",
+                data: nil
+            ))
+
+            let ticket = try fixture.submit("cancelled during resume")
+            try await startupTestEventually { fixture.controller.isStartupWaiting }
+            try await startupTestSettle(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            fixture.controller.releaseStartup()
+            try await startupTestJoin(ticket.task)
+
+            XCTAssertEqual(ticket.phase, .cancelled)
+            XCTAssertEqual(fixture.controller.startOrResumeCount, 1, "the cancelled resume retried as a fresh start")
+            XCTAssertEqual(fixture.controller.startUserTurnTexts, [])
+            XCTAssertEqual(fixture.session.codexConversationID, "saved-thread")
+            XCTAssertEqual(fixture.session.codexRolloutPath, rolloutPath)
+            XCTAssertFalse(
+                fixture.session.items.contains { $0.kind == .system },
+                "the cancelled start announced a fresh-thread recovery"
+            )
+        }
+
+        /// A failed resume becomes a fresh start only for Codex's rollout-path diagnostic naming the
+        /// saved thread's own rollout, or for the legacy missing-thread messages. Other missing-file
+        /// errors, other paths, and other requests keep failing as the resume they are. Hook-trust
+        /// restoration of a pre-turn thread applies the same rule.
+        func testMissingRolloutFallbackIsNarrow() {
+            typealias SessionRef = CodexNativeSessionController.SessionRef
+            let savedPath = "/tmp/saved-rollout.jsonl"
+            let otherPath = "/tmp/other-rollout.jsonl"
+            let saved = SessionRef(conversationID: "saved-thread", rolloutPath: savedPath, model: nil, reasoningEffort: nil)
+            let mixedCase = SessionRef(conversationID: "saved-thread", rolloutPath: "/tmp/CaseSensitive.jsonl", model: nil, reasoningEffort: nil)
+            let idOnly = SessionRef(conversationID: "saved-thread", rolloutPath: nil, model: nil, reasoningEffort: nil)
+            func missing(_ path: String) -> String {
+                "failed to resolve rollout path \(path): file does not exist"
+            }
+
+            let textCases: [(label: String, ref: SessionRef?, message: String, retries: Bool)] = [
+                ("the saved rollout", saved, missing(savedPath), true),
+                ("upper case, padding, and a final period", saved, "  FAILED TO RESOLVE ROLLOUT PATH \(savedPath): FILE DOES NOT EXIST.  ", true),
+                ("another rollout", saved, missing(otherPath), false),
+                ("the saved rollout in its own case", mixedCase, missing("/tmp/CaseSensitive.jsonl"), true),
+                ("a path differing only in case", mixedCase, missing("/tmp/casesensitive.jsonl"), false),
+                ("any absolute path for an ID-only saved thread", idOnly, missing(otherPath), true),
+                ("a relative path for an ID-only saved thread", idOnly, missing("other-rollout.jsonl"), false),
+                ("the legacy missing-thread message", saved, "no rollout found for thread id saved-thread", true),
+                ("no saved thread", nil, missing(savedPath), false),
+                ("a workspace path", saved, "failed to resolve workspace path \(savedPath): file does not exist", false),
+                ("another reason", saved, "failed to resolve rollout path \(savedPath): permission denied", false),
+                ("a leading word", saved, "warning: \(missing(savedPath))", false),
+                ("a trailing explanation", saved, "\(missing(savedPath)); check permissions", false)
+            ]
+            for testCase in textCases {
                 XCTAssertEqual(
-                    fixture.controller.startOrResumeTargets,
-                    [.init(conversationID: "", rolloutPath: rolloutPath, model: nil, reasoningEffort: nil)],
-                    context
+                    CodexAgentModeCoordinator.test_shouldRetryCodexStartWithoutResume(
+                        existingRef: testCase.ref,
+                        errorDescription: testCase.message
+                    ),
+                    testCase.retries,
+                    "text: \(testCase.label)"
                 )
-                XCTAssertEqual(fixture.controller.startUserTurnTexts, [], context)
-                XCTAssertEqual(fixture.errorTexts, ["Codex native resume failed: the saved thread ID is missing."], context)
-                XCTAssertEqual(fixture.session.runState, .failed, context)
-                XCTAssertEqual(fixture.session.lastTerminalCommitRevision?.terminalState, .failed, context)
-                XCTAssertEqual(fixture.session.codexRolloutPath, rolloutPath, context)
-                XCTAssertFalse(
-                    fixture.session.items.contains { $0.kind == .system },
-                    "\(context) announced a fresh-thread recovery"
+            }
+
+            // A typed request failure is judged by its request, code, and path alone; one that
+            // names another path or request is not rescued by the text rules above.
+            let typedCases: [(label: String, ref: SessionRef, method: String, code: Int, message: String, retries: Bool)] = [
+                ("thread/resume naming the saved rollout", saved, "thread/resume", -32600, missing(savedPath), true),
+                ("thread/memoryMode/set naming the saved rollout", saved, "thread/memoryMode/set", -32600, missing(savedPath), true),
+                ("thread/resume naming another rollout", saved, "thread/resume", -32600, missing(otherPath), false),
+                ("thread/resume naming a path differing only in case", mixedCase, "thread/resume", -32600, missing("/tmp/casesensitive.jsonl"), false),
+                ("another request naming the saved rollout", saved, "config/read", -32600, missing(savedPath), false),
+                ("thread/resume rejected for its parameters", saved, "thread/resume", -32602, missing(savedPath), false)
+            ]
+            for testCase in typedCases {
+                XCTAssertEqual(
+                    CodexAgentModeCoordinator.test_shouldRetryCodexStartWithoutResume(
+                        existingRef: testCase.ref,
+                        method: testCase.method,
+                        code: testCase.code,
+                        message: testCase.message
+                    ),
+                    testCase.retries,
+                    "typed: \(testCase.label)"
                 )
-                await fixture.tearDown()
+            }
+
+            let hookTrustCases: [(label: String, rolloutPath: String?, method: String, code: Int, message: String, startsFresh: Bool)] = [
+                ("the saved rollout", savedPath, "thread/resume", -32600, missing(savedPath), true),
+                ("another rollout", savedPath, "thread/resume", -32600, missing(otherPath), false),
+                ("any absolute path with no saved rollout", nil, "thread/resume", -32600, missing(otherPath), true),
+                ("the legacy unknown-thread message", savedPath, "thread/resume", -32600, "thread not found: saved-thread", true),
+                ("another request", savedPath, "thread/start", -32600, missing(savedPath), false),
+                ("another error code", savedPath, "thread/resume", -32602, missing(savedPath), false)
+            ]
+            for testCase in hookTrustCases {
+                let error = CodexAppServerClient.ClientError.requestFailed(.init(
+                    method: testCase.method,
+                    code: testCase.code,
+                    message: testCase.message,
+                    data: nil
+                ))
+                XCTAssertEqual(
+                    CodexNativeSessionController.test_isMissingFreshThreadResumeError(
+                        error,
+                        threadID: "saved-thread",
+                        rolloutPath: testCase.rolloutPath
+                    ),
+                    testCase.startsFresh,
+                    "hook trust: \(testCase.label)"
+                )
             }
         }
 

@@ -4267,9 +4267,21 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         existingRef: CodexNativeSessionController.SessionRef?,
         error: Error
     ) -> Bool {
-        guard existingRef != nil else { return false }
+        guard existingRef != nil, !Task.isCancelled else { return false }
         if error is CancellationError {
             return false
+        }
+        if case let CodexAppServerClient.ClientError.requestFailed(failure) = error,
+           CodexAppServerClient.isMissingRolloutPathResolutionMessage(failure.message)
+        {
+            // A typed rollout-path diagnostic is decided here: once its request, code, or path
+            // rules it out, the looser text classification below must not accept it.
+            return ["thread/resume", "thread/memoryMode/set"].contains(failure.method)
+                && failure.code != -32601 && failure.code != -32602
+                && CodexAppServerClient.isMissingRolloutPathResolutionMessage(
+                    failure.message,
+                    expectedRolloutPath: existingRef?.rolloutPath
+                )
         }
 
         let nsError = error as NSError
@@ -4279,7 +4291,9 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             nsError.localizedRecoverySuggestion
         ].compactMap(\.self)
 
-        return candidates.contains { isMissingRolloutErrorMessage($0) }
+        return candidates.contains {
+            isMissingRolloutErrorMessage($0, expectedRolloutPath: existingRef?.rolloutPath)
+        }
     }
 
     private static func hasResumeEligibleCodexHistory(_ items: [AgentChatItem]) -> Bool {
@@ -4318,11 +4332,20 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         ) != nil
     }
 
+    /// The reconnect flag asks for a rebuilt runtime, not for a resume. With no saved thread
+    /// identity the start is fresh whatever set the flag; a saved thread is resumed when a
+    /// reconnect was requested or no controller holds a live thread. A saved rollout path or a
+    /// blank ID still becomes a resume target, so the controller rejects it instead of a fresh
+    /// thread silently replacing that history.
     private static func codexResumeCandidate(
         for session: AgentTabSession,
         skipResumeWhenNoPriorCodexHistory: Bool
     ) -> CodexNativeSessionController.SessionRef? {
-        guard session.codexNeedsReconnect else { return nil }
+        guard session.codexConversationID != nil || session.codexRolloutPath != nil,
+              session.codexNeedsReconnect || session.codexController?.hasActiveThread != true
+        else {
+            return nil
+        }
         if skipResumeWhenNoPriorCodexHistory,
            !hasResumeEligibleCodexHistory(session.items)
         {
@@ -4472,7 +4495,10 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         "Codex's last turn failed while Repo Prompt was reconnecting."
     }
 
-    private static func isMissingRolloutErrorMessage(_ message: String) -> Bool {
+    private static func isMissingRolloutErrorMessage(
+        _ message: String,
+        expectedRolloutPath: String?
+    ) -> Bool {
         let normalized = message
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
@@ -4484,6 +4510,12 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             }
         }
 
+        if CodexAppServerClient.isMissingRolloutPathResolutionMessage(
+            message,
+            expectedRolloutPath: expectedRolloutPath
+        ) {
+            return true
+        }
         guard normalized.contains("rollout") else { return false }
         let hasLoadFailure = normalized.contains("failed to load rollout")
             || normalized.contains("failed loading rollout")
@@ -9886,6 +9918,24 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 userInfo: [NSLocalizedDescriptionKey: errorDescription]
             )
             return shouldRetryCodexStartWithoutResume(existingRef: existingRef, error: error)
+        }
+
+        @_spi(TestSupport)
+        public static func test_shouldRetryCodexStartWithoutResume(
+            existingRef: CodexNativeSessionController.SessionRef?,
+            method: String,
+            code: Int?,
+            message: String
+        ) -> Bool {
+            shouldRetryCodexStartWithoutResume(
+                existingRef: existingRef,
+                error: CodexAppServerClient.ClientError.requestFailed(.init(
+                    method: method,
+                    code: code,
+                    message: message,
+                    data: nil
+                ))
+            )
         }
 
         @_spi(TestSupport)
