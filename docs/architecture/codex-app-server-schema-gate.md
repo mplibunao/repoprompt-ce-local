@@ -294,9 +294,9 @@ entry. The candidate tool ran against a manifest with only Zsh's entries removed
 exactly Zsh's three paths. The 29 remaining Mach-Os keep their entitlement assignments in the
 closed-world release-signing profile. In both targets, `codex-path/rg`, `libpcre2`, and `libz`
 keep their normalized payload digests, which exclude the code signature, and the other 26
-Mach-Os have new normalized payload digests. Upstream `LICENSE`
-and `NOTICE` and the packaged voice notice, source manifest, and licences are byte-identical to
-0.159.0. The rotation deletes `ThirdPartyLicenses/codex/ZSH-LICENCE`.
+Mach-Os have new normalized payload digests. Upstream `LICENSE` and `NOTICE` and the packaged
+voice notice, source manifest, and licences are byte-identical to 0.159.0. The rotation deletes
+`ThirdPartyLicenses/codex/ZSH-LICENCE`.
 
 **Bounded schema.** The exact verified 0.164.0 CLI passes the bounded experimental projection
 unchanged at 45 methods, 196 parameter paths, and 93 response paths. In a full generated-bundle
