@@ -149,13 +149,11 @@ import XCTest
                 }
             ]
             for protection in protections {
-                // A case that throws has already recorded its failure. The loop goes on to the next case.
-                try? await expectProtectionKeepsProcess(protection)
+                try await expectProtectionKeepsProcess(protection)
             }
 
             // A message admitted while the probe is out keeps the process, and its run uses it.
-            do {
-                let fixture = makeFixture()
+            try await withFixture("submission admitted during the probe") { fixture in
                 try await fixture.runTurn("turn")
                 let probeHold = StartupTestHeldGate()
                 fixture.cleanup.heldGates.append(probeHold)
@@ -177,8 +175,7 @@ import XCTest
             }
 
             // Another session waiting on this one reads its run state, not its process.
-            do {
-                let fixture = makeFixture()
+            try await withFixture("outside waiter") { fixture in
                 try await fixture.runTurn("turn")
                 fixture.idle.runIDsWithActiveChildWaits.insert(UUID())
                 fixture.idle.clock.advance(by: Self.interval)
@@ -418,19 +415,50 @@ import XCTest
         /// full interval later once it is released.
         private func expectProtectionKeepsProcess(_ protection: Protection) async throws {
             let label = protection.label
+            try await withFixture(label) { fixture in
+                try await fixture.runTurn("turn")
+                let controller = try XCTUnwrap(fixture.session.claudeController, label)
+                var release: (@MainActor () -> Void)? = try protection.apply(fixture)
+                fixture.cleanup.releases.append {
+                    release?()
+                    release = nil
+                }
+
+                fixture.idle.clock.advance(by: Self.interval)
+                try await expectIdleOutcomes([.rearmed], on: fixture, label)
+                XCTAssertEqual(fixture.claude.shutdownsStarted, 0, label)
+                XCTAssertTrue(fixture.session.claudeController === controller, label)
+
+                release?()
+                release = nil
+                fixture.idle.clock.advance(by: Self.interval)
+                try await expectIdleOutcomes([.rearmed, .retired], on: fixture, label)
+                try await startupTestEventually { fixture.claude.shutdownObservations.count == 1 }
+            }
+        }
+
+        private func withFixture(
+            _ label: String,
+            _ operation: @MainActor (Fixture) async throws -> Void
+        ) async throws {
             let fixture = makeFixture()
-            try await fixture.runTurn("turn")
-            let release = try protection.apply(fixture)
+            do {
+                try await operation(fixture)
+            } catch {
+                await fixture.tearDown()
+                throw FixtureFailure(details: "\(label): \(error); teardownSucceeded=\(fixture.tearDownSucceeded)")
+            }
+            await fixture.tearDown()
+            guard fixture.tearDownSucceeded else {
+                throw FixtureFailure(details: "\(label): fixture teardown did not finish")
+            }
+        }
 
-            fixture.idle.clock.advance(by: Self.interval)
-            try await expectIdleOutcomes([.rearmed], on: fixture, label)
-            XCTAssertEqual(fixture.claude.shutdownsStarted, 0, label)
-            XCTAssertNotNil(fixture.session.claudeController, label)
-
-            release()
-            fixture.idle.clock.advance(by: Self.interval)
-            try await expectIdleOutcomes([.rearmed, .retired], on: fixture, label)
-            try await startupTestEventually { fixture.claude.shutdownObservations.count == 1 }
+        private struct FixtureFailure: Error, CustomStringConvertible {
+            let details: String
+            var description: String {
+                details
+            }
         }
 
         // MARK: - Fixture
@@ -458,6 +486,8 @@ import XCTest
             var onIdleOutcome: (@MainActor (Outcome) -> Void)?
             /// Run attempts that reached the wait for this tab's resume transfer.
             private(set) var runAttemptTransferWaits = 0
+            private var didTearDown = false
+            private(set) var tearDownSucceeded = false
 
             var coordinator: ClaudeAgentModeCoordinator {
                 viewModel.claudeCoordinator
@@ -484,6 +514,33 @@ import XCTest
                     guard waitingSession.tabID == tabID else { return }
                     self?.runAttemptTransferWaits += 1
                 }
+            }
+
+            override func tearDown() async {
+                guard !didTearDown else { return }
+                didTearDown = true
+                let runTask = session.agentTask
+                await super.tearDown()
+                idle.clock.cancelSleepers()
+                var shutdownFinished = false
+                await startupTestAwaitBounded("Claude fixture shutdown did not finish", seconds: 30) {
+                    await self.coordinator.shutdownClaudeSessionIfNeeded(self.session)
+                    shutdownFinished = true
+                }
+                // The shared cleanup reports timeouts without returning a result. A case must
+                // establish completion before another case can use the same storage root.
+                var startsFinished = true
+                for ticket in cleanup.tickets {
+                    guard let task = ticket.task else { continue }
+                    let finished = await startupTestJoinBounded(task, "Claude fixture startup did not finish", seconds: 30)
+                    startsFinished = startsFinished && finished
+                }
+                let runnerFinished: Bool = if let runTask {
+                    await startupTestJoinBounded(runTask, "Claude fixture runner did not finish", seconds: 30)
+                } else {
+                    true
+                }
+                tearDownSucceeded = shutdownFinished && startsFinished && runnerFinished
             }
 
             /// Sends `text` as a manual turn and waits until the provider has it and its run is routed.
@@ -548,7 +605,6 @@ import XCTest
             )
             addTeardownBlock { @MainActor in
                 await fixture.tearDown()
-                idle.clock.cancelSleepers()
             }
             return fixture
         }
