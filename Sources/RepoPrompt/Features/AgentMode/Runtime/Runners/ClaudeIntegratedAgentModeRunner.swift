@@ -280,16 +280,9 @@ final class ClaudeIntegratedAgentModeRunner {
                     session.isDirty = true
                     hooks.persistence.scheduleSave(session)
                 }
-                if session.claudeAutoCompactWindowTokens != status.autoCompactWindowTokens {
-                    session.claudeAutoCompactWindowTokens = status.autoCompactWindowTokens
-                    // Re-resolve the displayed window through the ordinary usage path so a
-                    // configured auto-compact window applies before the first response.
-                    await hooks.transcript.handleHeadlessStreamResult(
-                        AIStreamResult(type: "usage", text: nil),
-                        session,
-                        runID,
-                        runAttemptID
-                    )
+                // Only the window is recomputed, so usage provenance is left as it is.
+                if claudeCoordinator.observeRuntimeInit(status, session: session) {
+                    hooks.bindingObservation.updateBindings(session)
                 }
                 if status.isRepoPromptServerFailed {
                     return .failed(

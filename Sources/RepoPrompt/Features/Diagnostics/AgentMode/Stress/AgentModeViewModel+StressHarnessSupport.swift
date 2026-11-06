@@ -70,6 +70,8 @@
             session.codexContextUsage = nil
             session.contextUsageSnapshot = nil
             session.contextCompactedAt = nil
+            session.contextWindowCapacity = nil
+            session.claudeAutoCompactWindowTokens = nil
             session.codexNeedsReconnect = false
             session.codexController = nil
             session.codexControllerPermissionProfile = nil
@@ -414,6 +416,7 @@
                         codexLastTotalTokens: session.codexLastTotalTokens,
                         codexTotalTotalTokens: session.codexTotalTotalTokens,
                         codexMcpSessionKey: session.codexMcpSessionKey,
+                        contextWindowCapacity: session.contextWindowCapacity,
                         pendingHandoffPayload: session.pendingHandoffPayload,
                         pendingHandoffCreatedAt: session.pendingHandoffCreatedAt,
                         pendingHandoffSourceItemID: session.pendingHandoffSourceItemID,

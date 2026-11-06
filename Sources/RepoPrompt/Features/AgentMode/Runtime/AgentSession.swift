@@ -130,6 +130,20 @@ struct AgentTokenUsagePersist: Codable, Equatable {
     }
 }
 
+/// A model's own context capacity, scoped to the provider and model it was reported for, so a
+/// value from another model never bounds or sizes this one.
+struct AgentContextWindowCapacity: Codable, Equatable {
+    var tokens: Int
+    var agentRaw: String
+    /// The base model without its effort suffix (see `modelKey(forRaw:)`): effort does not change capacity.
+    var modelRaw: String
+
+    /// The identity a capacity is stored under: the base model, or the default model when none is named.
+    static func modelKey(forRaw raw: String?) -> String {
+        ClaudeModelSpecifier(raw: raw).baseModel ?? AgentModel.defaultModel.rawValue
+    }
+}
+
 // MARK: - Agent Session
 
 /// Persisted agent mode session containing the chat transcript and configuration
@@ -201,6 +215,10 @@ struct AgentSession: Codable, Identifiable {
     var codexTotalTotalTokens: Int?
     var codexMcpSessionKey: String?
 
+    /// The model's own context capacity, before any Claude auto-compact cap. `codexContextWindow`
+    /// keeps the effective window; this is the validation ceiling for the provider and model it names.
+    var contextWindowCapacity: AgentContextWindowCapacity?
+
     /// Parent session ID for thread nesting (child sessions spawned from another session)
     var parentSessionID: UUID?
 
@@ -253,6 +271,7 @@ struct AgentSession: Codable, Identifiable {
         codexLastTotalTokens: Int? = nil,
         codexTotalTotalTokens: Int? = nil,
         codexMcpSessionKey: String? = nil,
+        contextWindowCapacity: AgentContextWindowCapacity? = nil,
         parentSessionID: UUID? = nil,
         pendingHandoffPayload: String? = nil,
         pendingHandoffCreatedAt: Date? = nil,
@@ -291,6 +310,7 @@ struct AgentSession: Codable, Identifiable {
         self.codexLastTotalTokens = codexLastTotalTokens
         self.codexTotalTotalTokens = codexTotalTotalTokens
         self.codexMcpSessionKey = codexMcpSessionKey
+        self.contextWindowCapacity = contextWindowCapacity
         self.parentSessionID = parentSessionID
         self.pendingHandoffPayload = pendingHandoffPayload
         self.pendingHandoffCreatedAt = pendingHandoffCreatedAt
@@ -331,6 +351,7 @@ struct AgentSession: Codable, Identifiable {
         case codexLastTotalTokens
         case codexTotalTotalTokens
         case codexMcpSessionKey
+        case contextWindowCapacity
         case parentSessionID
         case pendingHandoffPayload
         case pendingHandoffCreatedAt
@@ -376,6 +397,8 @@ struct AgentSession: Codable, Identifiable {
         codexLastTotalTokens = try container.decodeIfPresent(Int.self, forKey: .codexLastTotalTokens)
         codexTotalTotalTokens = try container.decodeIfPresent(Int.self, forKey: .codexTotalTotalTokens)
         codexMcpSessionKey = try container.decodeIfPresent(String.self, forKey: .codexMcpSessionKey)
+        // Decoded leniently: one malformed capacity must not fail an otherwise valid session.
+        contextWindowCapacity = try? container.decodeIfPresent(AgentContextWindowCapacity.self, forKey: .contextWindowCapacity)
         parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
         pendingHandoffPayload = try container.decodeIfPresent(String.self, forKey: .pendingHandoffPayload)
         pendingHandoffCreatedAt = try container.decodeIfPresent(Date.self, forKey: .pendingHandoffCreatedAt)

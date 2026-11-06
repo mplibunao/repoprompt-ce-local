@@ -66,6 +66,13 @@ extension AgentModeViewModel {
         }
     }
 
+    /// A newly reported capacity can leave the snapshot unchanged (two capacities capped to the same
+    /// window), so it is saved on its own rather than through the snapshot-changed result.
+    func scheduleSaveIfContextCapacityChanged(from previous: AgentContextWindowCapacity?, session: TabSession) {
+        guard session.contextWindowCapacity != previous else { return }
+        scheduleSave(for: session.tabID)
+    }
+
     nonisolated static func contextUsageFromClaudeProviderTokens(
         _ usage: [AgentTokenUsagePersist],
         modelContextWindow: Int?

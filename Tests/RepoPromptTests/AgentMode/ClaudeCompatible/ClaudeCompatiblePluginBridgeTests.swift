@@ -505,7 +505,11 @@ final class ClaudeCompatiblePluginBridgeTests: XCTestCase {
             refreshSidebar()
 
             XCTAssertNil(session.codexContextUsage?.awaitingPostCompactionUsage)
-            XCTAssertEqual(session.codexContextUsage?.modelContextWindow, 200_000)
+            let glmWindow = try XCTUnwrap(ClaudeCompatibleModelCatalogAdapter.contextWindowTokens(
+                forRequestedModelRaw: session.selectedModelRaw,
+                agentKind: .claudeCodeGLM
+            ))
+            XCTAssertEqual(session.codexContextUsage?.modelContextWindow, glmWindow, "The window stays, resized for the new provider")
             XCTAssertFalse(sidebar.snapshot.awaitingPostCompactionUsage)
             XCTAssertEqual(sidebar.snapshot.usageSource, .unavailable, "A window without occupancy is not Live")
             XCTAssertGreaterThan(try XCTUnwrap(sidebar.snapshot.displayUsedTokens), 0)
@@ -598,6 +602,122 @@ final class ClaudeCompatiblePluginBridgeTests: XCTestCase {
                 codexControllerFactory: { _, _, _, _, _, _ in preconditionFailure("Usage replay must not launch a provider") },
                 connectionPolicyInstaller: { _, _, _, _, _, _, _, _, _, _, _, _, _ in }
             )
+        }
+    }
+
+    /// Records saved before capacities were stored hold only the effective window, which may have
+    /// been an auto-compact cap. Restoring one must not turn it into a ceiling or a lasting
+    /// denominator; a stored capacity bounds restored rows, and each runtime init re-derives the window.
+    @MainActor
+    final class ClaudeContextWindowCapacityRestoreTests: XCTestCase {
+        func testLegacyCappedRecordAndCapacityRecordRestore() async throws {
+            let fixture = try await TemporaryAgentSessionWindow.make(name: "ClaudeCapacityRestore")
+            defer { fixture.tearDown() }
+            let viewModel = fixture.viewModel
+            let tabID = fixture.tabID
+            let request = AgentChatItem.user("Capacity restore")
+            let transcript = AgentTranscript(turns: [AgentTranscriptTurn(
+                request: AgentTranscriptRequestAnchor(from: request),
+                terminalState: .completed,
+                startedAt: request.timestamp,
+                completedAt: request.timestamp
+            )], nextSequenceIndex: 1)
+            // A 200K catalog model whose sessions were saved under a 150K cap.
+            let model = "opus"
+            func save(_ rows: [AgentTokenUsagePersist], capacity: AgentContextWindowCapacity?) async throws -> UUID {
+                let id = UUID()
+                try await fixture.save(AgentSession(
+                    id: id, workspaceID: fixture.workspace.id, composeTabID: tabID, name: "Capped Claude",
+                    transcript: transcript, agentKind: AgentProviderKind.claudeCode.rawValue,
+                    agentModel: model, lastRunState: "completed", providerTokenUsageByTurn: rows,
+                    codexContextWindow: 150_000, contextWindowCapacity: capacity
+                ))
+                return id
+            }
+            func runtimeInit(cap: Int?, _ session: AgentTabSession) {
+                _ = viewModel.claudeCoordinator.observeRuntimeInit(
+                    .init(sessionID: nil, tools: [], mcpServerStatuses: [:], initializeResponse: nil, autoCompactWindowTokens: cap),
+                    session: session
+                )
+            }
+            func route(to sessionID: UUID) async throws -> AgentTabSession {
+                let routed = await viewModel.activateRoutedAgentSession(tabID: tabID, sessionID: sessionID, workspace: fixture.workspace)
+                XCTAssertEqual(routed, .ready)
+                return try XCTUnwrap(viewModel.sessions[tabID])
+            }
+
+            // Legacy: a 180K reading taken under the 150K cap, saved without a capacity.
+            let legacyID = try await save(
+                [AgentTokenUsagePersist(promptTokens: 180_000, completionTokens: 10, contextUsedTokens: 180_000)],
+                capacity: nil
+            )
+            let initial = viewModel.session(for: tabID)
+            _ = try XCTUnwrap(viewModel.test_installPersistentSessionBinding(sessionID: legacyID, on: initial, updateWorkspaceMetadata: true))
+            initial.hasLoadedPersistedState = false
+            let legacy = await viewModel.ensureSessionReady(tabID: tabID)
+            XCTAssertEqual(legacy.selectedModelRaw, model)
+            XCTAssertNil(legacy.contextWindowCapacity, "A stored window is never promoted to capacity")
+            XCTAssertEqual(legacy.codexContextUsage?.lastTotalTokens, 180_000, "The legacy cap is not a ceiling")
+            XCTAssertEqual(legacy.codexContextUsage?.modelContextWindow, 150_000, "It stays as historical display data")
+            runtimeInit(cap: nil, legacy)
+            XCTAssertNil(legacy.codexContextUsage?.modelContextWindow, "An uncapped process does not keep the legacy cap")
+
+            let capacity = AgentContextWindowCapacity(
+                tokens: 200_000,
+                agentRaw: AgentProviderKind.claudeCode.rawValue,
+                modelRaw: AgentContextWindowCapacity.modelKey(forRaw: model)
+            )
+            let currentID = try await save([
+                AgentTokenUsagePersist(promptTokens: 190_000, completionTokens: 10, contextUsedTokens: 190_000),
+                AgentTokenUsagePersist(promptTokens: 250_000, completionTokens: 10, contextUsedTokens: 250_000)
+            ], capacity: capacity)
+            let current = try await route(to: currentID)
+            XCTAssertEqual(current.contextWindowCapacity, capacity)
+            XCTAssertEqual(current.codexContextUsage?.lastTotalTokens, 190_000, "The stored capacity rejects an impossible row")
+            XCTAssertEqual(current.codexContextUsage?.modelContextWindow, 150_000)
+            let inits: [(label: String, cap: Int?, window: Int)] = [
+                ("an uncapped process shows the capacity", nil, 200_000),
+                ("a capped process shows its cap", 160_000, 160_000)
+            ]
+            for initCase in inits {
+                runtimeInit(cap: initCase.cap, current)
+                XCTAssertEqual(current.codexContextUsage?.modelContextWindow, initCase.window, initCase.label)
+                XCTAssertEqual(current.codexContextUsage?.lastTotalTokens, 190_000, initCase.label)
+            }
+
+            // A baseline event with the stored capacity first replaces the hydrated snapshot with a live
+            // usage one. A new capacity under the same cap then leaves both the window and the snapshot
+            // as they were, so only the capacity change itself can schedule its save.
+            let runID = UUID()
+            let attemptID = UUID()
+            current.installRunID(runID)
+            _ = current.beginRunAttempt(source: "capacity-save", attemptID: attemptID)
+            func reportCapacity(_ tokens: Int) async {
+                await viewModel.test_handleStreamResult(
+                    AIStreamResult(type: "usage", text: nil, modelContextWindow: tokens),
+                    session: current, runID: runID, runAttemptID: attemptID
+                )
+            }
+            await reportCapacity(200_000)
+            await viewModel.flushSave(for: tabID)
+            let baseline = try XCTUnwrap(current.contextUsageSnapshot)
+            XCTAssertEqual(baseline.source, .claudeUsageEvent, "The baseline event replaces the hydrated snapshot")
+            let saveGeneration = current.saveRequestGeneration
+            await reportCapacity(300_000)
+            XCTAssertEqual(current.contextUsageSnapshot, baseline, "A capacity-only report does not change the snapshot")
+            XCTAssertEqual(current.codexContextUsage?.modelContextWindow, 160_000)
+            XCTAssertGreaterThan(current.saveRequestGeneration, saveGeneration, "A capacity-only change schedules a save")
+            _ = current.endCurrentRunAttempt(source: "capacity-save")
+            await viewModel.flushSave(for: tabID)
+
+            // Reopening the legacy record in the same tab takes neither the capacity nor the cap along.
+            let reopened = try await route(to: legacyID)
+            XCTAssertNil(reopened.contextWindowCapacity)
+            XCTAssertNil(reopened.claudeAutoCompactWindowTokens)
+            XCTAssertEqual(reopened.codexContextUsage?.lastTotalTokens, 180_000)
+
+            let resaved = try await route(to: currentID)
+            XCTAssertEqual(resaved.contextWindowCapacity?.tokens, 300_000, "The app's own save persisted the new capacity")
         }
     }
 
