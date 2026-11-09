@@ -27,6 +27,9 @@ struct WindowContentView: View {
             .environmentObject(windowState) // If your subviews need it
             .environmentObject(sparkleManager)
             .environmentObject(versionManager) // Pass versionManager to ContentView
+        #if DEBUG
+            .environment(\.agentTranscriptProbeWindowID, windowState.windowID)
+        #endif
             // Let SwiftUI own the window title. Without this, the scene re-applies the
             // default app-name title over the workspace name whenever it refreshes the
             // window chrome (visible in both window titles and native tab names).
