@@ -7454,7 +7454,7 @@ enum AgentTranscriptProjectionBuilder {
             turnID: turn.id,
             spanID: spanID,
             retentionTier: turn.retentionTier,
-            rows: [activity.toItem(isStreaming: false)],
+            rows: [activity.toItem()],
             isArchived: archived,
             primaryAnchor: conclusionAnchor(for: activity.id, turnID: turn.id),
             anchorActivityID: activity.id,
