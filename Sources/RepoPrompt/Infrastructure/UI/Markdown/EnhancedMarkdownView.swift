@@ -447,6 +447,7 @@ struct AttributedTextView: NSViewRepresentable {
         @Environment(\.agentTranscriptProbeRowID) private var probeRowID
         @Environment(\.agentTranscriptProbeWindowID) private var probeWindowID
     #endif
+    @Environment(\.windowIsPresentationVisible) private var windowIsPresentationVisible
     let attributedString: NSAttributedString
     let isEditable: Bool
     let allowsTextSelection: Bool
@@ -496,10 +497,17 @@ struct AttributedTextView: NSViewRepresentable {
                 windowID: probeWindowID
             )
         #endif
-        context.coordinator.opener = linkOpener
-        // Detect attribute changes (not just the raw string).
-        let current = textView.attributedString()
-        if !current.isEqual(to: attributedString) {
+        updateTextView(textView, coordinator: context.coordinator, presentationVisible: windowIsPresentationVisible)
+    }
+
+    /// Applies this view's content and configuration to the native text view.
+    ///
+    /// A non-editable view in a window that isn't on screen keeps its installed content, selection,
+    /// and `contentVersion`; the next visible update installs whatever content is requested then.
+    /// Editable views always update.
+    func updateTextView(_ textView: CodeBlockTextView, coordinator: Coordinator, presentationVisible: Bool) {
+        coordinator.opener = linkOpener
+        if presentationVisible || isEditable, !showsRequestedContent(textView) {
             #if DEBUG
                 AgentTranscriptTailRenderProbe.record(
                     .native(.replacement, probeRowID, textView),
@@ -524,19 +532,54 @@ struct AttributedTextView: NSViewRepresentable {
             textView.needsDisplay = true
         }
 
-        // Always sync interaction flags
-        textView.isEditable = isEditable
-        textView.isSelectable = allowsTextSelection
-        textView.delegate = context.coordinator
-        // Keep text-checking disabled on every update to guard re-renders.
-        textView.isContinuousSpellCheckingEnabled = false
-        textView.isGrammarCheckingEnabled = false
-        textView.isAutomaticSpellingCorrectionEnabled = false
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticTextReplacementEnabled = false
+        // Set interaction and text-checking flags only when they differ, so routine updates skip
+        // redundant AppKit setter work while a flag changed elsewhere is still repaired.
+        if textView.isEditable != isEditable {
+            textView.isEditable = isEditable
+        }
+        if textView.isSelectable != allowsTextSelection {
+            textView.isSelectable = allowsTextSelection
+        }
+        textView.delegate = coordinator
+        if textView.isContinuousSpellCheckingEnabled {
+            textView.isContinuousSpellCheckingEnabled = false
+        }
+        if textView.isGrammarCheckingEnabled {
+            textView.isGrammarCheckingEnabled = false
+        }
+        if textView.isAutomaticSpellingCorrectionEnabled {
+            textView.isAutomaticSpellingCorrectionEnabled = false
+        }
+        if textView.isAutomaticQuoteSubstitutionEnabled {
+            textView.isAutomaticQuoteSubstitutionEnabled = false
+        }
+        if textView.isAutomaticTextReplacementEnabled {
+            textView.isAutomaticTextReplacementEnabled = false
+        }
         if textView.layoutManager?.allowsNonContiguousLayout != false {
             textView.layoutManager?.allowsNonContiguousLayout = false
         }
+    }
+
+    /// Whether the text view already shows the requested content, attributes included.
+    ///
+    /// The text storage fixes attributes as content is installed, giving every character of a
+    /// paragraph the paragraph style of its first character. Compiled Markdown often leaves the end
+    /// of a code block or list item with a different paragraph style or none, so installed storage
+    /// rarely equals the requested string as built. A copy of the requested string with the same
+    /// fixes applied equals what installing it would produce, so matching that copy means a
+    /// replacement would change nothing.
+    private func showsRequestedContent(_ textView: CodeBlockTextView) -> Bool {
+        let installed = textView.attributedString()
+        guard installed.length == attributedString.length else {
+            return false
+        }
+        if installed.isEqual(to: attributedString) {
+            return true
+        }
+        let normalized = NSMutableAttributedString(attributedString: attributedString)
+        normalized.fixAttributes(in: NSRange(location: 0, length: normalized.length))
+        return installed.isEqual(to: normalized)
     }
 
     // MARK: Explicit sizing -----------------------------------------------
