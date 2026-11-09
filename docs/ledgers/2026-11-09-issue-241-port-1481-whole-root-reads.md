@@ -9,7 +9,7 @@ Re-implement upstream PR 1481 (upstream commit `7d5f19bbd`) by hand, so that two
 | 1. Confirm the load bodies and measure B | done | orchestrator | |
 | 2. Store extension inventory and token recount | done | pair · Orchestrate 2/4 (two cancelled for permissions, then resume 2) | `perf(workspace-context): count file extensions instead of enumerating roots for token recounts` |
 | 3. Hidden-session applied-index handler | done | engineer · Orchestrate 3/4: hidden-session applied-index handler | `perf(workspace-files): look up only modified records for hidden-session index events` |
-| 4. Byte-based candidate filenames | pending | | |
+| 4. Byte-based candidate filenames | done | engineer · Orchestrate 4/4: byte-based candidate filenames | `perf(search): take candidate filenames from key bytes instead of file URLs` |
 | 5. Validate, push, hand off for integration | pending | | |
 | 6. Measure A and open the pull request | pending | | |
 
@@ -75,5 +75,11 @@ Re-implement upstream PR 1481 (upstream commit `7d5f19bbd`) by hand, so that two
 - Evidence: `make dev-format` (no changes), `make dev-lint`, `HiddenSessionAppliedIndexHotPathTests` (1 of 1) and `make dev-swift-build PRODUCT=RepoPrompt` pass. The test sends an ordinary-root event, a session-root event with the wrong path, an empty event, a modification for two files, and a replay of each valid event. It asserts zero `files(inRoot:)` enumerations, zero root snapshots, two lookups for two records in total, and that the lookup returns the same records as the old filtered snapshot. No other suite drives this handler or the slice rebase it schedules, so that parity check is what guards the unchanged behavior downstream.
 - Review: the item's `context_builder` review found nothing to fix. Refactor gate: no material opportunities; the change reuses the store's existing lookup.
 - Deferred: `resyncWorkspaceAppliedIndexProjection` still takes a whole-root snapshot, but only on a resync, as the plan decided.
+
+## 4. Byte-based candidate filenames
+
+- Decision: `PathSearchIndex.init(paths:)` takes each candidate filename from the UTF-8 bytes after the key's last `/` and decodes them unchanged. An empty, `.` or `..` result falls back to the old `URL(fileURLWithPath:).lastPathComponent`, so degenerate keys keep Foundation's behavior and still build a `URL`. Matching, ranking and every API are unchanged. Source: approved plan.
+- Evidence: `make dev-format` (no changes), `make dev-lint`, `PathSearchIndexRecoveryTests` (4 of 4), `WorkspaceSearchServiceTests` (17 of 17) and `make dev-swift-build PRODUCT=RepoPrompt` pass. The new table test compares UTF-8 byte arrays for plain keys, both composite key forms, composed and decomposed Unicode, a combining mark right after a slash, compatibility ideographs, percent signs, `?` and `#`, `~`, newlines and backslashes. For degenerate keys, the old `URL` result is the expected value.
+- Review: the item's `context_builder` review found nothing to fix. Refactor gate: no material opportunities.
 
 ## Parked decisions
