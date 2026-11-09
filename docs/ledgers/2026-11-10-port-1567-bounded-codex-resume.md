@@ -10,7 +10,7 @@ Re-implement upstream PR 1567 (squash commit `d17409d48`, closing upstream issue
 | 2. Snapshot model and bounded resume | done | pair · Orchestrate 2/3: port 1567 snapshot model and bounded resume | `fix(codex): resume Codex threads without loading their full history` |
 | 3. Reads, native-tool probe, and Stop | done | pair · Orchestrate 3/3: port 1567 reads, probe, and Stop | `fix(codex): bound Codex snapshot reads and page Stop's active-turn check` |
 | 4. Checks and integration hand-off | done | orchestrator | `docs: record the port 1567 run ledger` |
-| 5. Live check and pull request | pending | | |
+| 5. Live check and pull request | done | orchestrator | `docs: record the port 1567 live check` |
 
 ## 1. Wire contract: fixture, schema test, doc note
 
@@ -45,6 +45,13 @@ Re-implement upstream PR 1567 (squash commit `d17409d48`, closing upstream issue
 - Decision: the second workload round ran 100 shell calls instead of the plan's repeat of 48. Codex stores at most 65,536 bytes of each command's output in the rollout, so the first 48 calls produced a 3,243,747-byte legacy resume response, and another 48 would have stayed under the 8,388,608-byte line limit. Source: orchestrator judgment from the measured per-item cap.
 - Evidence (2026-11-10, integrated debug build `c0c21c70d`, bundled Codex 0.164.0): a Codex Agent Mode session (session A) recorded a marker phrase, then ran 48 and 100 separate shell calls that each printed 262,144 bytes. A standalone Codex 0.164.0 app-server, given only a scratch copy of the session's rollout, answered a legacy `thread/resume` with 9,852,640 bytes (two turns) and a bounded resume (`excludeTurns`, 32-turn `notLoaded` page) with 37,073 bytes, for the same thread ID.
 - Evidence: after stopping session A's agent process, a follow-up message asking for the marker failed with "Codex native resume failed: Request timed out after 120.0s". No new rollout appeared, and session A's rollout didn't change.
+
+## 5. Live check and pull request
+
+- Evidence (2026-11-10, integrated debug build `91a34a7f3`: `main` with the open pull requests except #355, including #357 and this branch at `f82c198f6`, with bundled Codex 0.164.0): after the relaunch, session A, whose resume had timed out on the earlier build, was asked for the marker again. The resume completed and the agent answered with the marker. The original rollout grew from 10,640,311 to 10,648,776 bytes, no new rollout appeared, and the transcript doesn't show a fresh-thread notice.
+- Evidence: a follow-up turn made one RepoPrompt `get_file_tree` call and one shell command, and both completed. A turn running `sleep 120` was cancelled through `agent_run`: Codex recorded the turn as aborted with reason `interrupted`, the `sleep` process ended, and the next turn ran a shell command normally. This exercised Stop's lifecycle shortcut, not the paging path.
+- Evidence: `make dev-smoke` against the running debug app passes.
+- Not verified live, covered only by unit tests: Stop's paging when no lifecycle turn is known, malformed pages, cursor cycles, unknown statuses, deadlines and cancellation, the fallback page for a resume response without one, the native-tool probe's item-authority rules during a real stall, runtimes from 0.149.0 to 0.163.x, and a single active turn larger than 8 MB.
 
 ## Run decisions
 
