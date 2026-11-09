@@ -93,6 +93,7 @@ package struct DomainMutationAuthorizationSnapshot: Hashable, Sendable {
 package enum DomainMutationPolicyError: Error, Equatable, LocalizedError, Sendable {
     case principalMissing
     case principalUnverified
+    case peerExecutableMissing(processID: Int32)
     case runtimeIdentityMismatch
     case routingContextUnavailable
     case grantMissing
@@ -109,6 +110,8 @@ package enum DomainMutationPolicyError: Error, Equatable, LocalizedError, Sendab
             "Protected mutation denied because no client principal was installed."
         case .principalUnverified:
             "Protected mutation denied because the client principal is not verified."
+        case let .peerExecutableMissing(processID):
+            "Protected mutation denied because the RepoPrompt MCP helper (pid \(processID)) is running an executable that no longer exists on disk, usually because RepoPrompt CE was updated after the helper started. Reconnect the MCP server to start a current helper."
         case .runtimeIdentityMismatch:
             "Protected mutation denied because the runtime generation changed."
         case .routingContextUnavailable:
@@ -189,6 +192,11 @@ package actor DomainMutationPolicyStore {
             throw DomainMutationPolicyError.runtimeIdentityMismatch
         }
         guard context.principal.assurance != .displayNameOnly else {
+            if context.principal.verificationFailure == .executableMissing,
+               let processID = context.principal.processID
+            {
+                throw DomainMutationPolicyError.peerExecutableMissing(processID: processID)
+            }
             throw DomainMutationPolicyError.principalUnverified
         }
 

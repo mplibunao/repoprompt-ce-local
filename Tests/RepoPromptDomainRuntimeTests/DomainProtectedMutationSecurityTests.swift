@@ -90,6 +90,23 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             XCTAssertEqual(error, .principalUnverified)
         }
 
+        let unverifiedWithPID = fixture.context(
+            kind: .appProxy,
+            assurance: .displayNameOnly,
+            observedProcessID: 4242,
+            ephemeralGrantedToolNames: []
+        )
+        do {
+            _ = try await MCPDomainInvocationSecurityContext.$current.withValue(unverifiedWithPID) {
+                try await binding(["op": .string("set")])
+            }
+            XCTFail("Expected unverified-principal denial")
+        } catch let error as DomainMutationPolicyError {
+            XCTAssertEqual(error, .principalUnverified)
+        }
+        let deniedCallCount = await calls.value
+        XCTAssertEqual(deniedCallCount, 0)
+
         let verified = fixture.context(
             kind: .appProxy,
             assurance: .verifiedProcess,
@@ -101,6 +118,32 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
         XCTAssertEqual(result.stringValue, "ok")
         let appCallCount = await calls.value
         XCTAssertEqual(appCallCount, 1)
+    }
+
+    func testAppProxyWhoseExecutableWasDeletedIsDeniedWithReconnectRemedy() async throws {
+        let fixture = try RuntimeFixture(mode: .app)
+        let calls = CallCounter()
+        let binding = fixture.protectedBinding(toolName: "prompt", calls: calls)
+        let replacedHelper = fixture.context(
+            kind: .appProxy,
+            assurance: .displayNameOnly,
+            observedProcessID: 4242,
+            verificationFailure: .executableMissing,
+            ephemeralGrantedToolNames: []
+        )
+        do {
+            _ = try await MCPDomainInvocationSecurityContext.$current.withValue(replacedHelper) {
+                try await binding(["op": .string("set")])
+            }
+            XCTFail("Expected replaced-helper denial")
+        } catch let error as DomainMutationPolicyError {
+            XCTAssertEqual(error, .peerExecutableMissing(processID: 4242))
+            let rendered = try XCTUnwrap(error.errorDescription)
+            XCTAssertTrue(rendered.contains("pid 4242"), rendered)
+            XCTAssertTrue(rendered.contains("Reconnect the MCP server"), rendered)
+        }
+        let callCount = await calls.value
+        XCTAssertEqual(callCount, 0)
     }
 
     func testRunScopedGrantIsRevalidatedBeforeBackendExecution() async throws {
@@ -482,6 +525,8 @@ private final class RuntimeFixture: @unchecked Sendable {
         assurance: DomainClientPrincipalAssurance,
         stableKey: String? = "client:test",
         verifiedIdentityFingerprint: String? = nil,
+        observedProcessID: Int32? = nil,
+        verificationFailure: DomainClientPrincipalVerificationFailure? = nil,
         authorizedCanonicalRoots: Set<String> = [],
         hasAuthoritativeRoutingContext: Bool = true,
         ephemeralGrantedToolNames: Set<String>,
@@ -494,12 +539,13 @@ private final class RuntimeFixture: @unchecked Sendable {
                 displayName: "test client",
                 kind: kind,
                 assurance: assurance,
-                processID: assurance == .displayNameOnly ? nil : 42,
+                processID: assurance == .displayNameOnly ? observedProcessID : 42,
                 runID: UUID(),
                 provider: "test",
                 verifiedIdentityFingerprint: assurance == .displayNameOnly
                     ? nil
-                    : (verifiedIdentityFingerprint ?? stableKey)
+                    : (verifiedIdentityFingerprint ?? stableKey),
+                verificationFailure: verificationFailure
             ),
             connectionID: UUID(),
             connectionGeneration: 1,
