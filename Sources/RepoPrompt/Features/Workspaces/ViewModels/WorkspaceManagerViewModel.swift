@@ -6851,8 +6851,9 @@ class WorkspaceManagerViewModel: ObservableObject {
         _ = updateComposeTabStoredOnly(tab, inWorkspaceID: workspaceID)
     }
 
-    /// Exact-identity stored update. This avoids duplicate-tab ambiguity and dirties the
-    /// workspace that was actually mutated rather than whichever workspace is active.
+    /// Stored-only update: skips Prompt snapshots but still publishes a changed workspace,
+    /// once. An equal tab is a no-op. It updates the first matching workspace and tab, and
+    /// dirties that workspace rather than whichever workspace is active.
     @MainActor
     @discardableResult
     func updateComposeTabStoredOnly(_ tab: ComposeTabState, inWorkspaceID workspaceID: UUID) -> Bool {
@@ -6860,18 +6861,29 @@ class WorkspaceManagerViewModel: ObservableObject {
               let tabIndex = workspaces[workspaceIndex].composeTabs.firstIndex(where: { $0.id == tab.id })
         else { return false }
 
-        let oldSelection = workspaces[workspaceIndex].composeTabs[tabIndex].selection
+        let previous = workspaces[workspaceIndex].composeTabs[tabIndex]
+        // Compare the whole tab: an equal selection can still carry session or content edits.
+        guard previous != tab else { return true }
+
         var updatedTab = tab
         updatedTab.lastModified = Date()
-        workspaces[workspaceIndex].composeTabs[tabIndex] = updatedTab
-        recordSelectionRevisionIfChanged(
-            workspaceIndex: workspaceIndex,
-            tabIndex: tabIndex,
-            oldSelection: oldSelection,
-            newSelection: updatedTab.selection,
-            reason: "updateComposeTabStoredOnly"
-        )
-        workspaces[workspaceIndex].dateModified = Date()
+        var replacement = workspaces[workspaceIndex]
+        replacement.composeTabs[tabIndex] = updatedTab
+        replacement.dateModified = Date()
+        workspaces[workspaceIndex] = replacement
+
+        // Re-find the target instead of carrying indexes across publication.
+        if let storedWorkspaceIndex = workspaces.firstIndex(where: { $0.id == workspaceID }),
+           let storedTabIndex = workspaces[storedWorkspaceIndex].composeTabs.firstIndex(where: { $0.id == tab.id })
+        {
+            recordSelectionRevisionIfChanged(
+                workspaceIndex: storedWorkspaceIndex,
+                tabIndex: storedTabIndex,
+                oldSelection: previous.selection,
+                newSelection: updatedTab.selection,
+                reason: "updateComposeTabStoredOnly"
+            )
+        }
 
         // Important: do NOT call promptViewModel.loadComposeTabsFromWorkspace(...)
         // and do NOT publish snapshots here. We only persist the stored tab data.
