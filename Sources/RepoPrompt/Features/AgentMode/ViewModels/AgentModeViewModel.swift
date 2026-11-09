@@ -5048,33 +5048,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         #if DEBUG
             test_persistentBindingResolutionSnapshotBuildCount &+= 1
         #endif
-        let liveClaimsByTabID = Dictionary(uniqueKeysWithValues: sessions.values.compactMap { session in
-            session.activeAgentSessionID.map { (session.tabID, $0) }
-        })
-        var workspaceClaimsByTabID: [UUID: Set<UUID>] = [:]
-        var composeTabIDs = Set<UUID>()
-
-        for workspace in persistentBindingCarrierWorkspaces {
-            for tab in workspace.composeTabs {
-                if workspaceManager != nil {
-                    composeTabIDs.insert(tab.id)
-                }
-                if let claimedSessionID = tab.activeAgentSessionID {
-                    workspaceClaimsByTabID[tab.id, default: []].insert(claimedSessionID)
-                }
-            }
-            for stashed in workspace.stashedTabs {
-                if let claimedSessionID = stashed.tab.activeAgentSessionID {
-                    workspaceClaimsByTabID[stashed.tab.id, default: []].insert(claimedSessionID)
-                }
-            }
-        }
-
         return makePersistentBindingResolutionSnapshot(
-            liveClaimsByTabID: liveClaimsByTabID,
-            workspaceClaimsByTabID: workspaceClaimsByTabID,
-            indexedTabIDBySessionID: ownerValidatedSessionIndex.mapValues(\.tabID),
-            composeTabIDs: composeTabIDs
+            claimsOnTabIDs: nil,
+            indexedTabIDBySessionID: ownerValidatedSessionIndex.mapValues(\.tabID)
         )
     }
 
@@ -5086,7 +5062,6 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private func makePersistentBindingResolutionSnapshot(
         for sessionIDs: Set<UUID>
     ) -> PersistentBindingResolutionSnapshot {
-        let workspaces = persistentBindingCarrierWorkspaces
         let sessionIndex = ownerValidatedSessionIndex
         var indexedTabIDBySessionID: [UUID: UUID] = [:]
         for sessionID in sessionIDs {
@@ -5102,7 +5077,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 candidateTabIDs.insert(session.tabID)
             }
         }
-        for workspace in workspaces {
+        for workspace in persistentBindingCarrierWorkspaces {
             for tab in workspace.composeTabs {
                 if let claimedSessionID = tab.activeAgentSessionID, sessionIDs.contains(claimedSessionID) {
                     candidateTabIDs.insert(tab.id)
@@ -5117,34 +5092,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
         // Pass 2: every claim on those tabs, whichever session holds it. A single pass would miss a
         // persisted tab that shares a candidate's tab ID but comes before the claim that makes it one.
-        let liveClaimsByTabID = Dictionary(uniqueKeysWithValues: sessions.values.compactMap { session in
-            candidateTabIDs.contains(session.tabID)
-                ? session.activeAgentSessionID.map { (session.tabID, $0) }
-                : nil
-        })
-        var workspaceClaimsByTabID: [UUID: Set<UUID>] = [:]
-        var composeTabIDs = Set<UUID>()
-        for workspace in workspaces {
-            for tab in workspace.composeTabs where candidateTabIDs.contains(tab.id) {
-                if workspaceManager != nil {
-                    composeTabIDs.insert(tab.id)
-                }
-                if let claimedSessionID = tab.activeAgentSessionID {
-                    workspaceClaimsByTabID[tab.id, default: []].insert(claimedSessionID)
-                }
-            }
-            for stashed in workspace.stashedTabs where candidateTabIDs.contains(stashed.tab.id) {
-                if let claimedSessionID = stashed.tab.activeAgentSessionID {
-                    workspaceClaimsByTabID[stashed.tab.id, default: []].insert(claimedSessionID)
-                }
-            }
-        }
-
         return makePersistentBindingResolutionSnapshot(
-            liveClaimsByTabID: liveClaimsByTabID,
-            workspaceClaimsByTabID: workspaceClaimsByTabID,
-            indexedTabIDBySessionID: indexedTabIDBySessionID,
-            composeTabIDs: composeTabIDs
+            claimsOnTabIDs: candidateTabIDs,
+            indexedTabIDBySessionID: indexedTabIDBySessionID
         )
     }
 
@@ -5153,14 +5103,37 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         workspaceManager?.workspaces ?? lastKnownWorkspaceSnapshot.map { [$0] } ?? []
     }
 
-    /// Derives which tabs each session claims and which of those claims conflict. Both snapshot
-    /// builders share this so their conflict rules can't diverge.
+    /// Collects every live and persisted claim on `tabIDs`, or on every tab when `tabIDs` is nil, and
+    /// derives which tabs each session claims and which of those claims conflict. Both snapshot
+    /// builders share this so their claim and conflict rules can't diverge.
     private func makePersistentBindingResolutionSnapshot(
-        liveClaimsByTabID: [UUID: UUID],
-        workspaceClaimsByTabID: [UUID: Set<UUID>],
-        indexedTabIDBySessionID: [UUID: UUID],
-        composeTabIDs: Set<UUID>
+        claimsOnTabIDs tabIDs: Set<UUID>?,
+        indexedTabIDBySessionID: [UUID: UUID]
     ) -> PersistentBindingResolutionSnapshot {
+        func includes(_ tabID: UUID) -> Bool {
+            tabIDs?.contains(tabID) ?? true
+        }
+        let liveClaimsByTabID = Dictionary(uniqueKeysWithValues: sessions.values.compactMap { session in
+            includes(session.tabID) ? session.activeAgentSessionID.map { (session.tabID, $0) } : nil
+        })
+        var workspaceClaimsByTabID: [UUID: Set<UUID>] = [:]
+        var composeTabIDs = Set<UUID>()
+        for workspace in persistentBindingCarrierWorkspaces {
+            for tab in workspace.composeTabs where includes(tab.id) {
+                if workspaceManager != nil {
+                    composeTabIDs.insert(tab.id)
+                }
+                if let claimedSessionID = tab.activeAgentSessionID {
+                    workspaceClaimsByTabID[tab.id, default: []].insert(claimedSessionID)
+                }
+            }
+            for stashed in workspace.stashedTabs where includes(stashed.tab.id) {
+                if let claimedSessionID = stashed.tab.activeAgentSessionID {
+                    workspaceClaimsByTabID[stashed.tab.id, default: []].insert(claimedSessionID)
+                }
+            }
+        }
+
         var claimedTabIDsBySessionID: [UUID: Set<UUID>] = [:]
         var conflictingTabIDsBySessionID: [UUID: Set<UUID>] = [:]
         for (tabID, sessionID) in liveClaimsByTabID {

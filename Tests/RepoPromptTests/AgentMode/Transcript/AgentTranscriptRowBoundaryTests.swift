@@ -80,7 +80,7 @@
             // The Codex coordinator's delta path: buffering, mutation, admission, and publication.
             let expectedText = fixture.streamTailDelta(" TAILDELTA")
             try await fixture.waitUntil("the delta reaches the tail's native text view") {
-                fixture.attachedViews(Row.tail).contains { $0.string.contains("TAILDELTA") }
+                fixture.rowText(Row.tail, contains: "TAILDELTA")
             }
             try await fixture.waitForQuiet()
 
@@ -108,7 +108,7 @@
             try await fixture.expectReRenderedRows([Row.opener2], "own text") {
                 fixture.mutateSource(Row.opener2) { $0.text = "Opener CHANGEDTEXT" }
             } until: {
-                fixture.attachedViews(Row.opener2).contains { $0.string.contains("CHANGEDTEXT") }
+                fixture.rowText(Row.opener2, contains: "CHANGEDTEXT")
             }
 
             // Runtime footer: the row shows its own footer's status.
@@ -136,14 +136,14 @@
             }
 
             // Recent-assistant membership: a long settled answer renders collapsed until it's recent.
-            XCTAssertFalse(fixture.attachedViews(Row.longConclusion0).contains { $0.string.contains("COLLAPSEMARK") })
+            XCTAssertFalse(fixture.rowText(Row.longConclusion0, contains: "COLLAPSEMARK"))
             try await fixture.expectReRenderedRows([Row.longConclusion0], "recent membership") {
                 fixture.publish { snapshot in
                     snapshot.presentation = snapshot.presentation.addingRecentAssistant(Row.longConclusion0)
                     snapshot.presentationRevision += 1
                 }
             } until: {
-                fixture.attachedViews(Row.longConclusion0).contains { $0.string.contains("COLLAPSEMARK") }
+                fixture.rowText(Row.longConclusion0, contains: "COLLAPSEMARK")
             }
         }
 
@@ -472,10 +472,7 @@
             let workspace = manager.createWorkspace(name: "Row boundary \(UUID().uuidString.prefix(8))", repoPaths: [], ephemeral: true)
             let switched = await manager.switchWorkspace(to: workspace, saveState: false, reason: "transcriptRowBoundaryTests")
             guard switched.didSwitch, let active = manager.activeWorkspace, let tabID = active.activeComposeTabID else {
-                state.beginClose()
-                await state.tearDown()
-                WindowStatesManager.shared.unregisterWindowState(state)
-                _ = await runtime.shutdown()
+                await shutDown(state, runtime: runtime)
                 throw FixtureFailure("the fixture workspace did not activate")
             }
             state.promptManager.loadComposeTabsFromWorkspace(active, syncPromptText: true)
@@ -500,12 +497,20 @@
             vm.refreshDerivedTranscriptState(for: session, reason: .liveMutation)
             vm.updateBindingsFromSession(session)
             if hosted {
-                fixture.mountDetailView(windowID: state.windowID)
+                fixture.mountDetailView()
             }
             return fixture
         }
 
-        private func mountDetailView(windowID: Int) {
+        private static func shutDown(_ state: WindowState, runtime: MCPDomainRuntime) async {
+            state.beginClose()
+            await state.tearDown()
+            WindowStatesManager.shared.unregisterWindowState(state)
+            _ = await runtime.shutdown()
+        }
+
+        private func mountDetailView() {
+            let windowID = state.windowID
             let recorder = recorder
             AgentTranscriptTailRenderProbe.sink = { recorder.receive($0) }
             let detail = AgentModeDetailWithSidebarView(
@@ -553,10 +558,7 @@
             hostedWindow?.close()
             hostedWindow = nil
             host = nil
-            state.beginClose()
-            await state.tearDown()
-            WindowStatesManager.shared.unregisterWindowState(state)
-            _ = await runtime.shutdown()
+            await Self.shutDown(state, runtime: runtime)
         }
 
         // MARK: Rows
@@ -601,6 +603,10 @@
 
         func attachedViews(_ rowID: UUID) -> [CodeBlockTextView] {
             recorder.attachedViews(for: rowID, in: window)
+        }
+
+        func rowText(_ rowID: UUID, contains marker: String) -> Bool {
+            attachedViews(rowID).contains { $0.string.contains(marker) }
         }
 
         /// The settled user row's native text view, once it's attached and laid out.
@@ -796,7 +802,7 @@
                 footerTexts[id] = text
             case let .native(boundary, scope, view):
                 let key = ObjectIdentifier(view)
-                if let scope, witnesses[key]?.view !== view || witnesses[key]?.rowID != scope {
+                if let scope {
                     witnesses[key] = Witness(view: view, rowID: scope)
                 }
                 if boundary == .update, let witness = witnesses[key], witness.view === view {
