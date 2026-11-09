@@ -771,6 +771,9 @@ class WindowState: ObservableObject {
 
     private func schedulePresentationVisibilityUpdate(from window: NSWindow?) {
         guard !shouldSuppressObservationSideEffects else { return }
+        #if DEBUG
+            test_presentationVisibilityScheduleCount += 1
+        #endif
         pendingPresentationVisibilityTask?.cancel()
         pendingPresentationVisibilityTask = Task { [weak self, weak window] in
             // Leave the AppKit/SwiftUI mutation scope before publishing a fresh sample.
@@ -792,6 +795,8 @@ class WindowState: ObservableObject {
     }
 
     #if DEBUG
+        private(set) var test_presentationVisibilityScheduleCount = 0
+
         func test_waitForPendingPresentationVisibilityUpdate() async {
             await pendingPresentationVisibilityTask?.value
         }

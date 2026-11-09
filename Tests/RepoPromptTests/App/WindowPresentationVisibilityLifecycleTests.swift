@@ -33,6 +33,24 @@ final class WindowPresentationVisibilityLifecycleTests: XCTestCase {
         XCTAssertFalse(state.isPresentationVisible, "An unordered window is not visible")
         XCTAssertEqual(publications, [false])
 
+        var scheduleCount = state.test_presentationVisibilityScheduleCount
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: firstWindow)
+        await drainNotificationDelivery()
+        await state.test_waitForPendingPresentationVisibilityUpdate()
+        XCTAssertGreaterThan(state.test_presentationVisibilityScheduleCount, scheduleCount)
+
+        scheduleCount = state.test_presentationVisibilityScheduleCount
+        NotificationCenter.default.post(name: NSApplication.didUnhideNotification, object: NSApp)
+        await drainNotificationDelivery()
+        await state.test_waitForPendingPresentationVisibilityUpdate()
+        XCTAssertGreaterThan(state.test_presentationVisibilityScheduleCount, scheduleCount)
+
+        scheduleCount = state.test_presentationVisibilityScheduleCount
+        NotificationCenter.default.post(name: NSWindow.didMiniaturizeNotification, object: unrelatedWindow)
+        await drainNotificationDelivery()
+        await state.test_waitForPendingPresentationVisibilityUpdate()
+        XCTAssertEqual(state.test_presentationVisibilityScheduleCount, scheduleCount)
+
         state.attachWindow(firstWindow)
         await state.test_waitForPendingPresentationVisibilityUpdate()
         XCTAssertEqual(publications, [false], "Same-window attachment does not republish equal state")
@@ -45,10 +63,13 @@ final class WindowPresentationVisibilityLifecycleTests: XCTestCase {
         XCTAssertTrue(state.isPresentationVisible, "Only the latest detached sample may publish")
         XCTAssertEqual(publications, [false, true])
 
+        scheduleCount = state.test_presentationVisibilityScheduleCount
         NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: firstWindow)
+        NotificationCenter.default.post(name: NSApplication.didUnhideNotification, object: NSApp)
         NotificationCenter.default.post(name: NSWindow.didMiniaturizeNotification, object: unrelatedWindow)
         await drainNotificationDelivery()
         await state.test_waitForPendingPresentationVisibilityUpdate()
+        XCTAssertEqual(state.test_presentationVisibilityScheduleCount, scheduleCount)
         XCTAssertEqual(publications, [false, true], "Detached and unrelated windows cannot publish")
 
         state.attachWindow(secondWindow)
@@ -62,10 +83,12 @@ final class WindowPresentationVisibilityLifecycleTests: XCTestCase {
 
         state.attachWindow(nil)
         state.beginClose()
+        scheduleCount = state.test_presentationVisibilityScheduleCount
         NotificationCenter.default.post(name: NSApplication.didUnhideNotification, object: NSApp)
         NotificationCenter.default.post(name: NSWindow.didDeminiaturizeNotification, object: secondWindow)
         await drainNotificationDelivery()
         await state.test_waitForPendingPresentationVisibilityUpdate()
+        XCTAssertEqual(state.test_presentationVisibilityScheduleCount, scheduleCount)
         XCTAssertFalse(state.isPresentationVisible, "Close cancels the pending detached sample")
         XCTAssertEqual(publications, [false, true, false], "Close and later notifications publish nothing")
 
