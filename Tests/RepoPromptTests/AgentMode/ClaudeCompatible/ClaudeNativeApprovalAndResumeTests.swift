@@ -137,6 +137,43 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
         XCTAssertEqual(streamResultTypes, ["session_state_changed"])
     }
 
+    func testEventStreamGenerationChangesOnlyWhenTheStreamIsReplaced() async {
+        let config = ClaudeCodeAgentConfig.discovery(commandName: "/usr/bin/false")
+        let controller = ClaudeNativeProcessSessionController(
+            runID: UUID(),
+            tabID: UUID(),
+            windowID: 1,
+            workspacePath: nil,
+            config: config
+        )
+        let adapter = ClaudeCompatibleNativeSessionAdapter(
+            runtimeConfig: ClaudeCompatiblePluginBridge.runtimeConfig(from: config, mode: .agentMode)
+        ) { controller }
+
+        let initial = await adapter.eventStreamHandle
+        await controller.test_handleStdoutEOF()
+        let finished = await adapter.eventStreamHandle
+        XCTAssertEqual(finished.generation, initial.generation, "Finishing a stream doesn't replace it")
+
+        await adapter.ensureEventsStreamReady()
+        let replaced = await adapter.eventStreamHandle
+        XCTAssertNotEqual(replaced.generation, initial.generation, "A reader must tell the replacement from the stream it finished")
+
+        await controller.test_handleInboundLine(Data(#"""
+        {"type":"system","subtype":"session_state_changed","state":"idle","session_id":"claude-session-1"}
+        """#.utf8))
+        await adapter.resetEventsStreamForNewRun()
+        let reset = await adapter.eventStreamHandle
+        XCTAssertNotEqual(reset.generation, replaced.generation)
+        var replacedStreamResultTypes: [String] = []
+        for await event in replaced.stream {
+            if case let .stream(result) = event {
+                replacedStreamResultTypes.append(result.type)
+            }
+        }
+        XCTAssertEqual(replacedStreamResultTypes, ["session_state_changed"], "The handle's stream is the one its generation names")
+    }
+
     func testRepoPromptPermissionAutoApprovalAndAllowPayloadPreserveToolUseID() throws {
         let repoPromptPayload: [String: Any] = [
             "tool_name": "mcp__RepoPromptCE__read_file",

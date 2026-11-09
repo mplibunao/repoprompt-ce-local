@@ -630,6 +630,7 @@ import XCTest
         private var startedSessionID: String?
         private var eventStream: AsyncStream<NativeAgentRuntimeEvent>
         private var eventContinuation: AsyncStream<NativeAgentRuntimeEvent>.Continuation
+        private var eventStreamGeneration: UInt64 = 1
 
         init(recorder: StartupTestClaudeRecorder, index: Int) {
             self.recorder = recorder
@@ -649,10 +650,15 @@ import XCTest
             eventStream
         }
 
+        var eventStreamSnapshot: (generation: UInt64, stream: AsyncStream<NativeAgentRuntimeEvent>) {
+            (eventStreamGeneration, eventStream)
+        }
+
         func ensureEventsStreamReady() {}
 
         func resetEventsStreamForNewRun() {
             eventContinuation.finish()
+            eventStreamGeneration &+= 1
             (eventStream, eventContinuation) = AsyncStream.makeStream()
         }
 

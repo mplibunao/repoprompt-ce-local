@@ -308,6 +308,10 @@ final class ClaudeIntegratedAgentModeRunner {
                     }
                     hooks.bindingObservation.updateBindings(session)
                 }
+            case .providerTurnStarted:
+                // This run doesn't own a turn Claude Code started itself. The controller withholds
+                // that turn's output, and its completion matches none of this run's inputs.
+                continue eventLoop
             case .turnCompleted, .turnsCompleted:
                 let turnIDs: [UUID]
                 let turnStatus: ClaudeNativeProcessSessionController.TurnStatus
