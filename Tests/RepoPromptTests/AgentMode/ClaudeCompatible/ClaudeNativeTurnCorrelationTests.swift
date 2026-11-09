@@ -158,7 +158,269 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
         XCTAssertNil(hostExecution.providerTurnID, "Activity for a known host input isn't provider work")
     }
 
+    // MARK: - Controller ingress
+
+    func testProviderStartedTurnKeepsIdleProbeBusyWithoutCountingAsHostWork() async throws {
+        let controller = makeController()
+        try await feed(initPayload(), to: controller)
+        try await feed(assistant(text: "The background task finished; reading its output."), to: controller)
+        let probeDuringTurn = await controller.idleProbe()
+        let hostWorkDuringTurn = await controller.hasTurnInFlight
+        XCTAssertTrue(probeDuringTurn.turnInFlight, "The idle gate must not retire the process during the turn")
+        XCTAssertFalse(hostWorkDuringTurn, "A send during a turn the user can't see queues instead of interrupting it")
+
+        try await feed(result(text: "Done."), to: controller)
+        let probeAfterTurn = await controller.idleProbe()
+        let hostWorkAfterTurn = await controller.hasTurnInFlight
+        XCTAssertFalse(probeAfterTurn.turnInFlight)
+        XCTAssertFalse(hostWorkAfterTurn)
+    }
+
+    func testUnsolicitedTurnCannotSettleOrSpeakForQueuedHostInput() async throws {
+        let controller = makeController()
+        try await feed(initPayload(), to: controller)
+        try await feed(assistant(text: "unowned wake-up text"), to: controller)
+        let host = await controller.test_beginTurnTracking()
+        try await feed(approvalRequest(), to: controller)
+        await controller.test_handleInboundLine(Data("unowned plaintext recovered while the queued input waited for service".utf8))
+        try await feed(result(text: "unowned wake-up answer"), to: controller)
+        let hostStillPending = await controller.hasTurnInFlight
+        XCTAssertTrue(hostStillPending, "The wake-up turn's result must not settle the queued input")
+
+        for parentKey in ["parent_tool_use_id", "parentToolUseId"] {
+            var subagent = assistant(host, text: "subagent text stamped with the host input")
+            subagent[parentKey] = "toolu_parent"
+            try await feed(subagent, to: controller)
+        }
+        // Had a subagent frame claimed the main thread for the host input, this text would be owned.
+        try await feed(assistant(text: "unowned main-thread text after subagent frames"), to: controller)
+        try await feed(assistant(host, text: "owned text"), to: controller)
+        try await feed(assistant(UUID(), text: "unowned text from a foreign input"), to: controller)
+        try await feed(result([host], text: "owned final"), to: controller)
+        try await feed(result([host], text: "unowned duplicate answer"), to: controller)
+
+        let events = await eventsAfterShutdown(of: controller)
+        XCTAssertEqual(settlements(in: events), [Settlement(turnIDs: [host], status: .completed)])
+        let text = streamText(in: events)
+        XCTAssertFalse(text.contains("unowned"), text)
+        XCTAssertFalse(text.contains("subagent"), text)
+        XCTAssertTrue(text.contains("owned text"), text)
+        XCTAssertTrue(text.contains("owned final"), text)
+        XCTAssertTrue(events.contains { event in
+            if case .approvalRequest = event {
+                return true
+            }
+            return false
+        }, "Ownership filtering withholds output, not approvals")
+    }
+
+    func testPositionalCompletionEmitsOneTurnCompletedAtTheLifecycleBoundary() async throws {
+        for observesLifecycle in [false, true] {
+            let label = observesLifecycle ? "deferred until idle" : "immediate without lifecycle events"
+            let controller = makeController()
+            try await feed(initPayload(version: "2.1.291", capabilities: [String]()), to: controller)
+            let input = await controller.test_beginTurnTracking()
+            if observesLifecycle {
+                try await feed(sessionState("running"), to: controller)
+            }
+
+            try await feed(result(), to: controller)
+            let pendingAfterResult = await controller.hasTurnInFlight
+            XCTAssertEqual(pendingAfterResult, observesLifecycle, label)
+            if observesLifecycle {
+                try await feed(sessionState("idle"), to: controller)
+            }
+            let pendingAfterBoundary = await controller.hasTurnInFlight
+            XCTAssertFalse(pendingAfterBoundary, label)
+
+            // Shutdown flushes deferred completions, so inspect delivery before shutdown.
+            let stream = await controller.events
+            await controller.resetEventsStreamForNewRun()
+            var positional: [Settlement] = []
+            for await event in stream {
+                switch event {
+                case let .turnCompleted(turnID, status):
+                    positional.append(Settlement(turnIDs: [turnID], status: status))
+                case .turnsCompleted:
+                    XCTFail("Positional settlement must not emit a keyed completion: \(label)")
+                default:
+                    break
+                }
+            }
+            XCTAssertEqual(positional, [Settlement(turnIDs: [input], status: .completed)], label)
+            await controller.shutdown()
+        }
+    }
+
+    func testDeferredCompletionKeepsTheInputItsResultAnswered() async throws {
+        let controller = makeController()
+        try await feed(initPayload(), to: controller)
+        try await feed(sessionState("running"), to: controller)
+        let first = await controller.test_beginTurnTracking()
+        // Claude Code runs a wake-up turn before it serves the queued input.
+        try await feed(assistant(text: "wake-up turn"), to: controller)
+        try await feed(result(text: "wake-up answer"), to: controller)
+        try await feed(sessionState("idle"), to: controller)
+        try await feed(assistant(first), to: controller)
+        try await feed(result([first]), to: controller)
+        let second = await controller.test_beginTurnTracking()
+        try await feed(sessionState("idle"), to: controller)
+        let secondStillPending = await controller.hasTurnInFlight
+        XCTAssertTrue(secondStillPending, "An input sent after the first answer must wait for its own")
+
+        // Finish the stream without shutdown, which would flush deferred completions itself.
+        let stream = await controller.events
+        await controller.resetEventsStreamForNewRun()
+        var events: [ClaudeNativeProcessSessionController.Event] = []
+        for await event in stream {
+            events.append(event)
+        }
+        XCTAssertEqual(settlements(in: events), [Settlement(turnIDs: [first], status: .completed)], "The idle frame settles the first input only")
+        await controller.shutdown()
+    }
+
+    func testStdoutEOFReportsAnsweredOutcomeOnceAndFailsOnlyUnansweredInputs() async throws {
+        let controller = makeController()
+        try await feed(initPayload(), to: controller)
+        try await feed(sessionState("running"), to: controller)
+        let unanswered = await controller.test_beginTurnTracking()
+        let answered = await controller.test_beginTurnTracking()
+        try await feed(assistant(answered), to: controller)
+        try await feed(result([answered]), to: controller)
+
+        await controller.test_handleStdoutEOF()
+        var events: [ClaudeNativeProcessSessionController.Event] = []
+        for await event in await controller.events {
+            events.append(event)
+        }
+        XCTAssertEqual(settlements(in: events), [
+            Settlement(turnIDs: [answered], status: .completed),
+            Settlement(turnIDs: [unanswered], status: .failed)
+        ])
+    }
+
+    func testCorrelationFailureIsReportedWhenStdoutClosesRightAfterIt() async throws {
+        let controller = makeController()
+        try await feed(initPayload(), to: controller)
+        let input = await controller.test_beginTurnTracking()
+        try await feed(assistant(input), to: controller)
+        var malformed = result([input])
+        malformed["user_message_uuid"] = "not-a-uuid"
+        // The CLI's last line has no newline, so it's handled while stdout closes.
+        try await controller.test_handleStdoutChunk(JSONSerialization.data(withJSONObject: malformed))
+        await controller.test_handleStdoutEOF()
+
+        var events: [ClaudeNativeProcessSessionController.Event] = []
+        for await event in await controller.events {
+            events.append(event)
+        }
+        let errors = events.compactMap { event -> String? in
+            guard case let .error(message) = event else { return nil }
+            return message
+        }
+        XCTAssertEqual(errors, ["Claude input correlation failed; the process must be restarted."])
+        XCTAssertEqual(settlements(in: events), [Settlement(turnIDs: [input], status: .failed)])
+    }
+
+    // MARK: - Runner settlement
+
+    @MainActor
+    func testCompletionRetiresEveryAnsweredInputBeforeDecidingTheRunEnds() throws {
+        typealias Runner = ClaudeIntegratedAgentModeRunner
+        let first = UUID(), second = UUID(), third = UUID(), predecessor = UUID()
+        let session = AgentModeViewModel.TabSession(tabID: UUID())
+
+        session.claudeExpectedTurnIDs = [first, second, third]
+        let partial = try XCTUnwrap(Runner.settleCompletedTurnIDs([first, second], session: session, waitForAllUnprotected: true))
+        XCTAssertFalse(partial.terminal, "A keyed answer waits for the run's other unprotected input")
+        XCTAssertEqual(session.claudeExpectedTurnIDs, [third])
+        XCTAssertEqual(Runner.settleCompletedTurnIDs([second, third], session: session, waitForAllUnprotected: true)?.terminal, true)
+        XCTAssertNil(Runner.settleCompletedTurnIDs([third], session: session, waitForAllUnprotected: true), "A repeated answer is stale")
+
+        session.claudeExpectedTurnIDs = [predecessor, first]
+        session.claudeSupersedingProtectedTurnIDs = [predecessor]
+        session.pendingSupersedingTurnCompletions = 1
+        let predecessorOnly = try XCTUnwrap(Runner.settleCompletedTurnIDs([predecessor], session: session, waitForAllUnprotected: true))
+        XCTAssertFalse(predecessorOnly.terminal, "A protected predecessor's answer doesn't end the run")
+        XCTAssertFalse(predecessorOnly.answeredUnprotected, "Its outcome can't become the successor's")
+
+        session.claudeExpectedTurnIDs = [predecessor, first]
+        session.claudeSupersedingProtectedTurnIDs = [predecessor]
+        session.pendingSupersedingTurnCompletions = 1
+        XCTAssertEqual(Runner.settleCompletedTurnIDs([predecessor, first], session: session, waitForAllUnprotected: true)?.terminal, true)
+        XCTAssertTrue(session.claudeExpectedTurnIDs.isEmpty)
+        XCTAssertTrue(session.claudeSupersedingProtectedTurnIDs.isEmpty)
+        XCTAssertEqual(session.pendingSupersedingTurnCompletions, 0)
+
+        session.claudeExpectedTurnIDs = [first, second]
+        XCTAssertEqual(
+            Runner.settleCompletedTurnIDs([first], session: session, waitForAllUnprotected: false)?.terminal,
+            true,
+            "Positional settlement keeps ending the run at its first unprotected answer"
+        )
+    }
+
     // MARK: - Fixtures
+
+    private struct Settlement: Equatable {
+        let turnIDs: [UUID]
+        let status: ClaudeNativeProcessSessionController.TurnStatus
+    }
+
+    private func makeController() -> ClaudeNativeProcessSessionController {
+        // A fallback long enough that only an `idle` frame settles a deferred completion.
+        ClaudeNativeProcessSessionController(
+            runID: UUID(),
+            tabID: UUID(),
+            windowID: 1,
+            workspacePath: nil,
+            config: .discovery(commandName: "/usr/bin/false"),
+            authoritativeTurnIdleFallbackSeconds: 600
+        )
+    }
+
+    private func feed(_ payload: [String: Any], to controller: ClaudeNativeProcessSessionController) async throws {
+        try await controller.test_handleInboundLine(JSONSerialization.data(withJSONObject: payload))
+    }
+
+    /// Shutting down finishes the event stream, so every event the controller emitted can be read.
+    private func eventsAfterShutdown(of controller: ClaudeNativeProcessSessionController) async -> [ClaudeNativeProcessSessionController.Event] {
+        await controller.shutdown()
+        var events: [ClaudeNativeProcessSessionController.Event] = []
+        for await event in await controller.events {
+            events.append(event)
+        }
+        return events
+    }
+
+    private func settlements(in events: [ClaudeNativeProcessSessionController.Event]) -> [Settlement] {
+        events.compactMap { event in
+            switch event {
+            case let .turnCompleted(turnID, status): Settlement(turnIDs: [turnID], status: status)
+            case let .turnsCompleted(turnIDs, status): Settlement(turnIDs: turnIDs, status: status)
+            default: nil
+            }
+        }
+    }
+
+    private func streamText(in events: [ClaudeNativeProcessSessionController.Event]) -> String {
+        events.compactMap { event in
+            guard case let .stream(result) = event else { return nil }
+            return result.text ?? result.reasoning
+        }.joined(separator: "\n")
+    }
+
+    private func sessionState(_ state: String) -> [String: Any] {
+        ["type": "system", "subtype": "session_state_changed", "state": state]
+    }
+
+    private func approvalRequest() -> [String: Any] {
+        [
+            "type": "control_request",
+            "request_id": "approval-1",
+            "request": ["subtype": "can_use_tool", "tool_name": "Bash", "input": ["command": "ls"]]
+        ]
+    }
 
     private func initPayload(version: Any? = "2.1.292", capabilities: Any = ["msg_lifecycle_v1"]) -> [String: Any] {
         var payload: [String: Any] = ["type": "system", "subtype": "init", "capabilities": capabilities]
@@ -174,10 +436,10 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
         return correlation
     }
 
-    private func assistant(_ inputID: UUID? = nil) -> [String: Any] {
+    private func assistant(_ inputID: UUID? = nil, text: String = "working") -> [String: Any] {
         var payload: [String: Any] = [
             "type": "assistant",
-            "message": ["role": "assistant", "content": [["type": "text", "text": "working"]]]
+            "message": ["role": "assistant", "content": [["type": "text", "text": text]]]
         ]
         if let inputID {
             payload["user_message_uuid"] = inputID.uuidString
@@ -185,8 +447,8 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
         return payload
     }
 
-    private func result(_ inputIDs: [UUID]? = nil) -> [String: Any] {
-        var payload: [String: Any] = ["type": "result", "subtype": "success", "is_error": false, "result": "answer"]
+    private func result(_ inputIDs: [UUID]? = nil, text: String = "answer") -> [String: Any] {
+        var payload: [String: Any] = ["type": "result", "subtype": "success", "is_error": false, "result": text]
         if let inputIDs, let lastID = inputIDs.last {
             payload["user_message_uuids"] = inputIDs.map(\.uuidString)
             payload["user_message_uuid"] = lastID.uuidString
