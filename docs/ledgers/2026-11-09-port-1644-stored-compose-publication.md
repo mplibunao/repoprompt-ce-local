@@ -7,7 +7,7 @@ Make `WorkspaceManagerViewModel.updateComposeTabStoredOnly(_:inWorkspaceID:)` sk
 | Item | Outcome | Agent session | Commits |
 |------|---------|---------------|---------|
 | 1. Stored-only method change and its tests | done | engineer · Orchestrate 1/1: port 1644 stored-only publication | `perf(workspace): publish a stored-only tab update once` |
-| 2. Live check on the integrated build, then the pull request | pending | | |
+| 2. Live check on the integrated build, then the pull request | done | orchestrator | `docs(ledgers): add the run ledger for the port 1644 run`, `docs(ledgers): record the port 1644 live check` |
 
 ## Scope
 
@@ -50,8 +50,20 @@ Make `WorkspaceManagerViewModel.updateComposeTabStoredOnly(_:inWorkspaceID:)` sk
 
   A shared fixture helper for the three tests was rejected as indirection, since their fixtures differ. Afterwards `make dev-format`, `make dev-lint` and `WorkspaceEphemeralPersistenceTests` (11 tests) pass.
 
+## 2. Live check on the integrated build, then the pull request
+
+- Evidence: the debug app ran the integrated build at `c0c21c70d`, which merges this branch at `f5d40b756` with the other open pull requests. The check used `rpce-cli-debug` on a scratch compose tab scoped to this branch's worktree, in the two debug windows that show the `repoprompt-ce` workspace.
+  1. Setting `docs/porting.md` and `docs/testing.md` from the first window: the second window read the same two files for the tab, and its prompt didn't change.
+  2. Sending the identical selection again changed neither window's selection or prompt. The coordinator's existing equal-selection guard handles this request; the new equal-tab branch isn't reachable from an MCP selection, so the unit tests are the evidence for it.
+  3. A second, different selection that added `CONTRIBUTING.md` reached the second window.
+  4. `prompt set` on the background tab: a second MCP connection bound to the tab in the first window read the new prompt, and the three-file selection stayed in place. The second window kept its old prompt. This doesn't depend on this change. Peer propagation covers selections only. The 30-second save poll also skips while more than one window shows the workspace (`WorkspaceManagerViewModel.swift:2881-2890`), so a background tab's prompt doesn't reach another window's manager.
+  5. The fixture selection and prompt were cleared from the tab afterwards.
+- Result: passed. The check shows that cross-window selection sync and the stamped MCP write paths still work after the change. It doesn't measure publication counts or latency.
+
 ## Tooling notes
 
 - The run's RepoPrompt calls went to the debug app running the integrated build.
 - The first planning `context_builder` call over MCP came back to the client as interrupted, with no result. Its discovery had already filled the tab's selection, but no chat or export appeared afterwards. The same call through `rpce-cli-debug` on the same tab finished and exported the plan. The cause is unknown: either the MCP client's request deadline or the app dropped the run.
 - Each `export_response` export on a worktree-scoped tab was written to the worktree's `prompt-exports/`, while the reply gave a path under the main checkout. This is issue #368. The exports were deleted after use.
+- In the integrated build's debug CLI, `-e 'manage_selection op=set paths=["docs/porting.md"] strict=true'` replaced a three-file selection with an empty one and reported success. The quote-free `paths=[docs/porting.md]` form did the same. The `-j` JSON form with the same paths set the selection correctly.
+- An MCP `prompt clear` from this run's Claude Code connection was refused with the error `Protected mutation denied because the client principal is not verified`, while the CLI's `prompt set` and `prompt clear` on the same tab were accepted.
