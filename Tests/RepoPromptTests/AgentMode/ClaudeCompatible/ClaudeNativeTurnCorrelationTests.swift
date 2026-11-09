@@ -218,7 +218,6 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
         ]
         for testCase in cases {
             let controller = makeController()
-            await controller.test_forwardProviderOutput()
             try await feed(initPayload(), to: controller)
             try await feed(testCase.firstEvidence, to: controller)
             try await feed(assistant(text: "more wake-up output"), to: controller)
@@ -288,11 +287,11 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
     func testUnsolicitedTurnCannotSettleOrSpeakForQueuedHostInput() async throws {
         let controller = makeController()
         try await feed(initPayload(), to: controller)
-        try await feed(assistant(text: "unowned wake-up text"), to: controller)
+        try await feed(assistant(text: "provider wake-up text"), to: controller)
         let host = await controller.test_beginTurnTracking()
         try await feed(approvalRequest(), to: controller)
-        await controller.test_handleInboundLine(Data("unowned plaintext recovered while the queued input waited for service".utf8))
-        try await feed(result(text: "unowned wake-up answer"), to: controller)
+        await controller.test_handleInboundLine(Data("provider plaintext recovered while the queued input waited for service".utf8))
+        try await feed(result(text: "provider wake-up answer"), to: controller)
         let hostStillPending = await controller.hasTurnInFlight
         XCTAssertTrue(hostStillPending, "The wake-up turn's result must not settle the queued input")
 
@@ -301,8 +300,9 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
             subagent[parentKey] = "toolu_parent"
             try await feed(subagent, to: controller)
         }
-        // Had a subagent frame claimed the main thread for the host input, this text would be owned.
-        try await feed(assistant(text: "unowned main-thread text after subagent frames"), to: controller)
+        // Had a subagent frame claimed the main thread for the host input, this text would belong
+        // to the host input instead of starting a second provider turn.
+        try await feed(assistant(text: "provider main-thread text after subagent frames"), to: controller)
         try await feed(assistant(host, text: "owned text"), to: controller)
         try await feed(assistant(UUID(), text: "unowned text from a foreign input"), to: controller)
         try await feed(result([host], text: "owned final"), to: controller)
@@ -319,7 +319,11 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
         ])
         let text = streamText(in: events)
         XCTAssertFalse(text.contains("unowned"), text)
-        XCTAssertFalse(text.contains("subagent"), text)
+        XCTAssertFalse(text.contains("subagent text"), text)
+        XCTAssertTrue(text.contains("provider wake-up text"), text)
+        XCTAssertTrue(text.contains("provider plaintext recovered"), text)
+        XCTAssertTrue(text.contains("provider wake-up answer"), text)
+        XCTAssertTrue(text.contains("provider main-thread text after subagent frames"), text)
         XCTAssertTrue(text.contains("owned text"), text)
         XCTAssertTrue(text.contains("owned final"), text)
         XCTAssertTrue(events.contains { event in

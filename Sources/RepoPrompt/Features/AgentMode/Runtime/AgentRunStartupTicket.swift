@@ -73,6 +73,13 @@ final class AgentRunStartupTicket {
     /// Receives the submission a cancellation or supersession withdraws at the moment the ticket
     /// resolves, so its per-submission state goes before any other work can run.
     var onWithdrawal: ((_ submissionIDs: [UUID]) -> Void)?
+    /// Runs once when the ticket resolves, after `onWithdrawal`, so work that waited for this
+    /// start's admission can try again.
+    var onResolution: (() -> Void)?
+    /// The transcript row a cancellation settles on when no attempt owns this start yet. A start
+    /// that sends no user message, such as an adopted Claude provider turn, uses `.none`, so its
+    /// cancellation isn't attributed to the previous message.
+    var cancellationTerminalAnchor: AgentRunTerminalCommitBarrier.TerminalAnchor = .automatic
     /// The follower promoted to head after this start resolved. It carries the queued work this
     /// ticket held, so work queued behind this start answers to it from then on.
     private(set) var successor: AgentRunStartupTicket?
@@ -208,6 +215,7 @@ final class AgentRunStartupTicket {
         if resolution == .cancelled || resolution == .superseded {
             onWithdrawal?([optimisticUserItemID].compactMap(\.self))
         }
+        onResolution?()
         return true
     }
 

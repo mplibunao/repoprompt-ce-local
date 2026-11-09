@@ -203,9 +203,6 @@ final actor ClaudeNativeProcessSessionController {
     private var correlationFailed = false
     /// Positional settlement only; the matched path cancels through interrupt tokens.
     private var turnWasInterrupted = false
-    /// Output of a turn Claude Code started itself is withheld while this is false. Agent Mode reads
-    /// these events one run at a time, so forwarded output would show inside the next run.
-    private var forwardsProviderOutput = false
 
     /// Task IDs of the background tasks the CLI last reported live in `background_tasks_changed`,
     /// ambient tasks left out. The CLI sends the whole set on each change and nothing at startup,
@@ -1225,7 +1222,7 @@ final actor ClaudeNativeProcessSessionController {
         ] as [String: Any])
         // Recovered text follows the same ownership as any other output; a queued host input
         // doesn't own it.
-        if !correlationFailed, !correlation.enabled || forwardsOutput(of: correlation.outputOwner) {
+        if !correlationFailed, !correlation.enabled || correlation.outputOwner != nil {
             emit(.stream(AIStreamResult(type: "content", text: text)))
         }
         return true
@@ -1398,8 +1395,7 @@ final actor ClaudeNativeProcessSessionController {
                     // Resolve before forwarding, so a result that answers no run forwards none of
                     // its output.
                     let resolved = try correlation.resolve(payload)
-                    ownsOutput = !resolved.inputIDs.isEmpty
-                        || (resolved.providerTurnID != nil && forwardsProviderOutput)
+                    ownsOutput = !resolved.inputIDs.isEmpty || resolved.providerTurnID != nil
                     let stopReason = streamResults.last(where: { $0.type == "message_stop" })?.stopReason
                     let status: TurnStatus = resolved.interrupted
                         ? .cancelled
@@ -1413,7 +1409,7 @@ final actor ClaudeNativeProcessSessionController {
                 } else {
                     // Subagent frames have their own stream. They own no main-thread output and
                     // don't change which message later unstamped deltas belong to.
-                    ownsOutput = !Self.isSubagentActivity(payload) && forwardsOutput(of: owner)
+                    ownsOutput = !Self.isSubagentActivity(payload) && owner != nil
                 }
             } catch {
                 // Report before this actor turn ends, so EOF or shutdown can't finish the stream
@@ -1519,14 +1515,6 @@ final actor ClaudeNativeProcessSessionController {
         // A result that closes no host input or provider turn settles nothing here.
         if let completion, !completion.turnIDs.isEmpty {
             emitOrDeferCompletion(completion)
-        }
-    }
-
-    private func forwardsOutput(of owner: ClaudeNativeTurnCorrelation.OutputOwner?) -> Bool {
-        switch owner {
-        case .host: true
-        case .provider: forwardsProviderOutput
-        case nil: false
         }
     }
 
@@ -1918,10 +1906,6 @@ final actor ClaudeNativeProcessSessionController {
             await handleStdoutEOF()
         }
 
-        /// Forwards output of turns Claude Code starts itself, as a reader that outlives runs needs.
-        func test_forwardProviderOutput() {
-            forwardsProviderOutput = true
-        }
     #endif
 
     private func handleControlRequest(_ request: ClaudeSDKProtocolCodec.ControlRequest) {

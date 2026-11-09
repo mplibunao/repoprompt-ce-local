@@ -189,7 +189,18 @@ final class AgentTabSession: ObservableObject {
     /// `agent_run start` configuring and binding the session before it dispatches. While it is set,
     /// the flag stands for live work however old it is; it is released by that start, by the
     /// submission's startup ticket taking over, or by the flag dropping.
-    var mcpPendingStartOwner: UUID?
+    var mcpPendingStartOwner: UUID? {
+        didSet {
+            if oldValue != nil, mcpPendingStartOwner == nil {
+                onStartAdmissionReleased?()
+            }
+        }
+    }
+
+    /// Called when startup admission is released: the head-of-line ticket resolved, or the MCP
+    /// start that owned the pending start gave it up. The Claude coordinator uses it to offer
+    /// provider work that waited for that start again.
+    var onStartAdmissionReleased: (() -> Void)?
 
     /// Releases the pending-start ownership `owner` holds; ownership another start took over is
     /// left alone.
@@ -687,6 +698,12 @@ final class AgentTabSession: ObservableObject {
 
     var activeNonCodexTurnTokenAccumulator: AgentModeViewModel.NonCodexTurnTokenAccumulator?
 
+    /// Starts usage accounting for a turn Claude Code started by itself. No user input belongs to
+    /// it, and queued submissions keep their estimates for the turns that send them.
+    func beginProviderInitiatedTurnAccounting() {
+        activeNonCodexTurnTokenAccumulator = .init()
+    }
+
     // Codex native session identifiers and metadata
     var codexConversationID: String?
     var codexRolloutPath: String?
@@ -760,6 +777,45 @@ final class AgentTabSession: ObservableObject {
     var codexNativeToolLiveness: AgentModeViewModel.CodexNativeToolLivenessState = .init()
     /// Turn IDs started during the current run attempt, used to filter stale turnCompleted events.
     var claudeExpectedTurnIDs: Set<UUID> = []
+    /// Host inputs Claude accepted during the current attempt, whatever steering protected later.
+    var claudeAcceptedHostTurnIDs: Set<UUID> = []
+    /// Turns Claude Code started by itself that the current attempt read after its own work began.
+    /// Each still needs an owner, so a host answer can't end the attempt while one is open.
+    var claudeLiveSuccessorTurnIDs: Set<UUID> = []
+    /// The lowest sequence index whose assistant row a Claude attempt's final reply may replace.
+    /// It moves forward when a turn Claude Code started by itself begins its own output.
+    var claudeProviderOutputBoundary: (attemptID: UUID, startSequenceIndex: Int)?
+    /// The transcript row a Claude attempt's terminal belongs to, when it isn't the latest user row.
+    var claudeTerminalAnchor: (ownership: AgentRunOwnership, anchor: AgentRunTerminalCommitBarrier.TerminalAnchor)?
+
+    /// Records a host input Claude accepted. A later host input supersedes provider turns the
+    /// attempt read before it, so those stop holding the attempt and its queued steering open.
+    func acceptClaudeHostTurn(_ turnID: UUID) {
+        claudeExpectedTurnIDs.insert(turnID)
+        claudeAcceptedHostTurnIDs.insert(turnID)
+        let supersededProviderTurnIDs = claudeLiveSuccessorTurnIDs
+        for index in pendingClaudeSteeringInstructions.indices
+            where pendingClaudeSteeringInstructions[index].targetRunAttemptID == activeRunAttemptID
+        {
+            pendingClaudeSteeringInstructions[index].supersedingProtectedTurnIDs.subtract(supersededProviderTurnIDs)
+        }
+        claudeLiveSuccessorTurnIDs.removeAll()
+    }
+
+    /// Clears the Claude turn bookkeeping a settled or cancelled attempt leaves behind.
+    func clearClaudeTurnBookkeeping() {
+        pendingSupersedingTurnCompletions = 0
+        claudeSupersedingProtectedTurnIDs.removeAll()
+        claudeExpectedTurnIDs.removeAll()
+        claudeAcceptedHostTurnIDs.removeAll()
+        claudeLiveSuccessorTurnIDs.removeAll()
+    }
+
+    func terminalAnchor(for ownership: AgentRunOwnership) -> AgentRunTerminalCommitBarrier.TerminalAnchor {
+        guard let claudeTerminalAnchor, claudeTerminalAnchor.ownership == ownership else { return .automatic }
+        return claudeTerminalAnchor.anchor
+    }
+
     var hasReconciledPersistedCodexCommandStatus: Bool = false
     var activeReasoningItemID: UUID?
     var reasoningItemIDsByGroupID: [String: UUID] = [:]
@@ -979,6 +1035,9 @@ final class AgentTabSession: ObservableObject {
         ticket.onWithdrawal = { [weak self] submissionIDs in
             self?.removeQueuedUserInputTokenEstimates(forSubmissions: submissionIDs)
         }
+        ticket.onResolution = { [weak self] in
+            self?.onStartAdmissionReleased?()
+        }
         startupTicket = ticket
         mcpPendingStartOwner = nil
         return ticket
@@ -1167,6 +1226,9 @@ final class AgentTabSession: ObservableObject {
 
     @discardableResult
     func beginRunAttempt(source: String, attemptID: UUID = UUID()) -> AgentRunOwnership {
+        claudeProviderOutputBoundary = nil
+        claudeLiveSuccessorTurnIDs.removeAll()
+        claudeAcceptedHostTurnIDs.removeAll()
         // Host-specific responsibilities stay here: Codex routing resets and
         // exactly-once MCP prepared-epoch consumption. The neutral attempt
         // initialization (terminal-state reset + tracker begin) is delegated
@@ -1990,6 +2052,10 @@ final class AgentTabSession: ObservableObject {
     }
 
     func appendItem(_ item: AgentChatItem) {
+        // A message sent into an attempt Claude Code started by itself is what that attempt answers.
+        if item.kind == .user, let owner = activeRunOwnership, claudeTerminalAnchor?.ownership == owner {
+            claudeTerminalAnchor = (owner, .exact(item.id))
+        }
         var newItem = item
         newItem.sequenceIndex = nextSequenceIndex
         nextSequenceIndex += 1

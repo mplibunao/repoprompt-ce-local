@@ -116,9 +116,17 @@ final class AgentModeRunService {
         initialMessageForRun: String,
         attachments: [AgentImageAttachment],
         codexFallbackContext: AgentTabSession.CodexFallbackSubmissionContext? = nil,
-        submissionID: UUID? = nil
+        submissionID: UUID? = nil,
+        preparedClaudeEvents: ClaudeAttemptEventReservation? = nil
     ) async -> CodexAgentModeCoordinator.NativeSendOutcome? {
         assert(session.tabID == tabID, "AgentModeRunService.startRun requires the originating tab ID to match the AgentTabSession tab ID")
+        // A Claude inbox the host reserved goes to the Claude runner, or back to its listener.
+        var claudeEventsTransferred = false
+        defer {
+            if !claudeEventsTransferred, let preparedClaudeEvents {
+                preparedClaudeEvents.listener.release(preparedClaudeEvents.subscription)
+            }
+        }
         let selectedAgent = session.selectedAgent
         let runtimePermission = dependencies.providerRuntimePermissionResolver(selectedAgent, session.permissionProfile)
         let workspacePath: String?
@@ -176,15 +184,27 @@ final class AgentModeRunService {
             )
         }
         if selectedAgent.usesClaudeNativeRuntime {
-            await claudeRunner.startRun(
+            claudeEventsTransferred = true
+            let started = await claudeRunner.startRun(
                 tabID: tabID,
                 session: session,
                 initialUserMessage: initialUserMessage,
                 initialMessageForRun: initialMessageForRun,
                 attachments: attachments,
                 submissionID: submissionID,
+                preparedEvents: preparedClaudeEvents,
                 makeLease: makeLease
             )
+            guard started else {
+                // The runner sent no message. The start fails before provider dispatch and its
+                // ticket resolves as rejected, because a `nil` outcome resolves it as accepted.
+                let message = ClaudeAgentModeCoordinator.eventsUnavailableMessage
+                if let submissionID {
+                    session.removeQueuedUserInputTokenEstimates(forSubmissions: [submissionID])
+                }
+                await failAcceptedStartBeforeProvider(session: session, message: message, attachments: attachments)
+                return .preDispatchRejected(message: message)
+            }
             return nil
         }
         if let acpRunRequest {
@@ -210,6 +230,71 @@ final class AgentModeRunService {
             makeLease: makeLease
         )
         return nil
+    }
+
+    /// Adopts a turn Claude Code started by itself, waiting in `listener`'s handoff, as a new run
+    /// attempt on the session's process run.
+    ///
+    /// It first waits, holding no admission, until earlier attempts have published, so the queued
+    /// follow-up a predecessor's terminal admits keeps priority. It then takes the session's startup
+    /// admission and moves that ticket through the phases a host start uses, so admission refuses a
+    /// competing start and Stop can withdraw it.
+    ///
+    /// Returns true when an attempt adopted the turn, another start will take it from the handoff,
+    /// or the work stopped without adoption (Stop, retirement, or a failure being reported). Returns
+    /// false when no run can own the turn and the coordinator must stop that work.
+    func adoptClaudeProviderTurn(
+        session: AgentTabSession,
+        listener: ClaudeControllerEventListener,
+        turnID: UUID,
+        prepareEpoch: (AgentRunStartupTicket) async -> Bool
+    ) async -> Bool {
+        func turnStillWaits() -> Bool {
+            !Task.isCancelled
+                && listener.isCurrent()
+                && listener.pendingProviderTurnID == turnID
+                && listener.subscription == nil
+                && listener.runtimeFailure == nil
+        }
+        await listener.awaitTerminalPublication()
+        if let previous = session.lastTerminalCommitRevision {
+            await terminalCommitBarrier.awaitTerminalPublication(
+                for: previous.ownership,
+                lifecycle: session.runLifecycle
+            )
+        }
+        // An MCP run's epoch follows its predecessor's only once that result is published.
+        if session.mcpControlContext != nil, session.lastTerminalCommitRevision != nil {
+            guard case .accepted = session.lastTerminalPublicationResult else { return false }
+        }
+        guard turnStillWaits(), !session.terminalCommitInProgress else { return true }
+        // A start that holds admission takes the turn when it reserves the inbox.
+        guard session.activeRunOwnership == nil,
+              let ticket = session.admitStartIfFree(submissionID: nil)
+        else { return true }
+        ticket.cancellationTerminalAnchor = .none
+        ticket.markPreparing()
+        let epochPrepared = await prepareEpoch(ticket)
+        guard epochPrepared,
+              session.isStartupTicketCurrent(ticket),
+              turnStillWaits(),
+              !session.runState.isActive,
+              session.activeRunOwnership == nil
+        else {
+            // Stop cancelled the ticket and withdrew the turn itself.
+            if ticket.phase == .cancelled {
+                return true
+            }
+            ticket.resolve(session.isStartupTicketCurrent(ticket) ? .rejected : .superseded)
+            return false
+        }
+        ticket.markDispatching()
+        guard claudeRunner.adoptProviderTurn(session: session, listener: listener, turnID: turnID) else {
+            ticket.resolve(.rejected)
+            return false
+        }
+        ticket.resolve(.accepted)
+        return true
     }
 
     func pendingACPRetirementTask(for session: AgentTabSession) -> Task<Void, Never>? {
@@ -1018,6 +1103,31 @@ final class AgentModeRunService {
         // before any suspension blocks its dispatch and withdraws its queued work, and the
         // cancellation then settles that start rather than returning early.
         let cancelledStartup = session.invalidatePendingStartup(.cancelled)
+        // Work Claude Code started by itself that no attempt owns yet is withdrawn and its process
+        // stopped. Before its adoption takes admission no run exists, so nothing is committed: the
+        // previous run keeps its result, and queued work stays queued for that run's boundary. An
+        // adoption that took admission settles below as a cancelled start.
+        let providerTeardown = dependencies.claudeCoordinator.cancelPendingProviderAdoption(for: session)
+        if providerTeardown != nil, cancelledStartup == nil {
+            hooks.bindingObservation.updateBindings(session)
+            hooks.persistence.scheduleSave(session)
+            if let revision = session.lastTerminalCommitRevision {
+                await terminalCommitBarrier.awaitTerminalPublication(
+                    for: revision.ownership,
+                    lifecycle: session.runLifecycle
+                )
+                if completion == .terminalTeardownCompleted {
+                    await terminalCommitBarrier.awaitTerminalTeardown(
+                        for: revision.ownership,
+                        lifecycle: session.runLifecycle
+                    )
+                }
+            }
+            if completion == .terminalTeardownCompleted {
+                await providerTeardown?()
+            }
+            return
+        }
         if cancelledStartup == nil,
            session.runState.isTerminalForCommit,
            let revision = session.lastTerminalCommitRevision
@@ -1067,9 +1177,7 @@ final class AgentModeRunService {
         session.pendingInstructions.removeAll()
         session.pendingClaudeSteeringInstructions.removeAll()
         session.pendingACPSteeringInstructions.removeAll()
-        session.pendingSupersedingTurnCompletions = 0
-        session.claudeSupersedingProtectedTurnIDs.removeAll()
-        session.claudeExpectedTurnIDs.removeAll()
+        session.clearClaudeTurnBookkeeping()
         if hadPendingTokenQueue || hadActiveTurnAccumulator || hadPendingInstructions {
             session.isDirty = true
         }
@@ -1080,6 +1188,9 @@ final class AgentModeRunService {
             reason: intent.cancellationReason
         )
 
+        let unclaimedStartupAnchor = session.activeRunOwnership == nil
+            ? cancelledStartup?.cancellationTerminalAnchor
+            : nil
         let ownership: AgentRunOwnership = if let activeOwnership = session.activeRunOwnership {
             activeOwnership
         } else if let cancelledStartup {
@@ -1114,6 +1225,7 @@ final class AgentModeRunService {
             finalizeNonCodexUsage: session.selectedAgent != .codexExec,
             supportsFollowUp: false,
             notifyTurnComplete: false,
+            terminalAnchor: unclaimedStartupAnchor ?? session.terminalAnchor(for: ownership),
             providerDrainGeneration: session.providerTerminalDrainGeneration,
             providerBuffersAreDrained: { [dependencies] in
                 session.selectedAgent != .codexExec

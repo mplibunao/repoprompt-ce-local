@@ -105,6 +105,14 @@ final class ClaudeAttemptEventSubscription {
         head = 0
     }
 
+    /// Turns Claude Code started by itself whose start is still unread in this inbox.
+    var bufferedProviderTurnIDs: Set<UUID> {
+        Set(events[head...].compactMap { event in
+            guard case let .native(.providerTurnStarted(turnID)) = event else { return nil }
+            return turnID
+        })
+    }
+
     /// Claude permission request IDs still unread in this inbox.
     var bufferedApprovalIDs: [String] {
         events[head...].compactMap { event in
@@ -313,6 +321,13 @@ final class ClaudeControllerEventListener {
             route(event)
         }
         publishBusyIfChanged()
+    }
+
+    /// Ends a reservation whose attempt has nothing left to publish, or that no attempt read: its
+    /// unread events are routed again and no adoption waits on it.
+    func release(_ inbox: ClaudeAttemptEventSubscription) {
+        close(inbox, returningTail: true)
+        terminalPublished(for: inbox)
     }
 
     /// The attempt that held `inbox` finished its terminal publication.

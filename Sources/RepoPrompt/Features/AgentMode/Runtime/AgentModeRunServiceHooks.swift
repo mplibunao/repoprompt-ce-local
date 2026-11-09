@@ -101,6 +101,9 @@ extension AgentModeRunService {
         let finalizePendingToolCalls: (AgentTabSession, AgentSessionRunState) -> Void
         let finalizePendingToolCallsWithUpperBound: (AgentTabSession, AgentSessionRunState, Int?) -> Void
         let flushPendingAssistantDelta: (AgentTabSession) -> Void
+        /// Ends the assistant row being streamed, so a turn Claude Code starts by itself writes its
+        /// output into a new row.
+        let beginClaudeProviderOutputSegment: (AgentTabSession) -> Void
         let clearPendingAssistantDelta: (AgentTabSession) -> Void
     }
 
