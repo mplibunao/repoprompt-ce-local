@@ -14,6 +14,9 @@ extension EnvironmentValues {
 /// - Uses the shared message timestamp formatter so timestamp labels stay consistent.
 /// - Observes FontScaleManager so footer text follows Agent Mode text size.
 private struct MessageFooterStrip: View {
+    #if DEBUG
+        @Environment(\.agentTranscriptProbeRowID) private var probeRowID
+    #endif
     let text: String
     let timestamp: Date
     let isTrailing: Bool
@@ -68,6 +71,7 @@ private struct MessageFooterStrip: View {
             if let completedDate = runtimeFooter.completedDate {
                 #if DEBUG
                     let _ = AgentModePerfDiagnostics.increment("timeline.messageFooter.completed")
+                    let _ = AgentTranscriptTailRenderProbe.record(.footer(probeRowID, runtimeFooter.statusText))
                 #endif
                 let elapsed = AgentRuntimeDurationFormatter.string(from: runtimeFooter.anchorDate, to: completedDate)
                 Text("\(runtimeFooter.statusText) \(elapsed)")
@@ -96,6 +100,9 @@ private struct MessageFooterStrip: View {
     }
 
     private func runtimeFooterText(_ runtimeFooter: AgentMessageRuntimeFooter, now: Date) -> some View {
+        #if DEBUG
+            AgentTranscriptTailRenderProbe.record(.footer(probeRowID, runtimeFooter.statusText))
+        #endif
         let elapsed = AgentRuntimeDurationFormatter.string(from: runtimeFooter.anchorDate, to: now)
         return Text("\(runtimeFooter.statusText) · \(elapsed)")
             .font(fontPreset.swiftUIFont(sizeAtNormal: 10))
@@ -189,6 +196,9 @@ struct AgentMessageBubble: View {
     let showRunScopedToolCancel: Bool
     let cancelActiveToolsAction: (() -> Void)?
     let codexManagedLoginAction: CodexManagedLoginAction?
+    #if DEBUG
+        @Environment(\.agentTranscriptProbeWindowID) private var probeWindowID
+    #endif
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.agentRecentAssistantItemIDs) private var recentAssistantItemIDs
     @Environment(\.agentMessageRuntimeFooterByItemID) private var runtimeFooterByItemID
@@ -257,6 +267,13 @@ struct AgentMessageBubble: View {
     }
 
     var body: some View {
+        #if DEBUG
+            let _ = AgentTranscriptTailRenderProbe.record(
+                .body(item.id, item.text),
+                counting: .bubbleBody,
+                windowID: probeWindowID
+            )
+        #endif
         let renderItem = renderingItem
         switch renderItem.kind {
         case .user:

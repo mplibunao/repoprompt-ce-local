@@ -2604,6 +2604,9 @@ struct AgentModeChatDetailView: View {
 
     @ViewBuilder
     private func transcriptBlockView(block: AgentTranscriptRenderBlock, renderContext: TranscriptRenderContext) -> some View {
+        #if DEBUG
+            let _ = AgentTranscriptTailRenderProbe.record(.block(block.id))
+        #endif
         switch block.kind {
         case .activityCluster:
             let supportsExpansion = transcriptBlockSupportsExpansion(block)
@@ -2798,6 +2801,9 @@ struct AgentModeChatDetailView: View {
         .environment(\.agentLiveBashExecutionByItemID, transcript.activeBashLiveExecutionByItemID)
         .environment(\.agentRecentAssistantItemIDs, renderContext.recentAssistantItemIDs)
         .environment(\.agentApprovalVisible, renderContext.interactionBlockerVisible)
+        #if DEBUG
+            .environment(\.agentTranscriptProbeRowID, item.id)
+        #endif
     }
 
     private func toolCardAutoExpandEnabled(for block: AgentTranscriptRenderBlock) -> Bool {
