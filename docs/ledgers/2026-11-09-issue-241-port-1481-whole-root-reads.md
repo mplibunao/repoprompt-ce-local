@@ -10,8 +10,8 @@ Re-implement upstream PR 1481 (upstream commit `7d5f19bbd`) by hand, so that two
 | 2. Store extension inventory and token recount | done | pair · Orchestrate 2/4 (two cancelled for permissions, then resume 2) | `perf(workspace-context): count file extensions instead of enumerating roots for token recounts` |
 | 3. Hidden-session applied-index handler | done | engineer · Orchestrate 3/4: hidden-session applied-index handler | `perf(workspace-files): look up only modified records for hidden-session index events` |
 | 4. Byte-based candidate filenames | done | engineer · Orchestrate 4/4: byte-based candidate filenames | `perf(search): take candidate filenames from key bytes instead of file URLs` |
-| 5. Validate, push, hand off for integration | pending | | |
-| 6. Measure A and open the pull request | pending | | |
+| 5. Validate, push, hand off for integration | done | orchestrator | |
+| 6. Measure A and open the pull request | done | orchestrator | `docs(ledgers): record the port 1481 run and its live measurement` |
 
 ## Decisions from the approved plan
 
@@ -82,4 +82,34 @@ Re-implement upstream PR 1481 (upstream commit `7d5f19bbd`) by hand, so that two
 - Evidence: `make dev-format` (no changes), `make dev-lint`, `PathSearchIndexRecoveryTests` (4 of 4), `WorkspaceSearchServiceTests` (17 of 17) and `make dev-swift-build PRODUCT=RepoPrompt` pass. The new table test compares UTF-8 byte arrays for plain keys, both composite key forms, composed and decomposed Unicode, a combining mark right after a slash, compatibility ideographs, percent signs, `?` and `#`, `~`, newlines and backslashes. For degenerate keys, the old `URL` result is the expected value.
 - Review: the item's `context_builder` review found nothing to fix. Refactor gate: no material opportunities.
 
-## Parked decisions
+## 5. Validate, push, hand off for integration
+
+- Evidence: the first `pr-ready` run at `abd090f1b` failed two root tests that #274 tracks as intermittent: `BindContextRoutingAuthorityTests/testNewWindowSwitchReusesPreferredWindowAlreadyShowingWorkspace` and `MCPWorkspaceScopedCursorModelParameterTests/testSettingsPinnedCursorEffortAndSpeedReachRoleLabelRun`. Another worktree's heavy jobs were running at the same time. Both passed when rerun alone on the same build, and the occurrence is recorded on #274. The second `pr-ready` run passed: Swift lint, the root tests (five bundles, `RepoPromptTests` 1,954 of 1,954), and the RepoPrompt product build.
+- Evidence: after the push preflight, the branch was pushed at `abd090f1b` and handed to the integration thread for the debug-app run.
+
+## 6. Measure A and open the pull request
+
+- Provenance, build A (2026-11-09 23:58 to 2026-11-10 local): the integrated build at `c0c21c70d`, which is `origin/main` at `403c210a8`, the open distribution pull requests, this branch at `abd090f1b`, and `port/1644-stored-compose-publication` at `f5d40b756`. Debug app version 1.4.0 from the `DebugApps` bundle, one process for every run (started 23:47:54). The other dog-food threads were paused, and no Agent Mode session or Context Builder run was active. Same settings, roots, driver and sampling method as B.
+- Decision: the aggregate B-to-A comparison is confounded, because A also merged the 1644 head. That head changes only a stored-only compose-tab update in `WorkspaceManagerViewModel`, not the store or the token-count path, so the consumer-removal result stands either way. Source: approved plan.
+- Evidence, recount: on A, each recount logs `tokenRecount.calculate.fileExtensions.end` with `extensions=1` in 0.1 ms. On B it logged `allFiles.end` with `files=100001` in about 0.7 s. `txt` is the only extension in the three loaded roots (the workspace's Git data root holds no files). No `allFiles` event appears on A.
+- Evidence, parity burst: patched with 201 effective edits at 100,200 files, and `parity_matched` was true.
+- Evidence, controlled runs at 100,000 files (runs 1, 2, 3; median, with B's median for comparison): every run applied 51–60 publications in its 60 s window, logged 58–61 `fileExtensions` recount events (median 0.1 ms, maximum 22 ms), read the idle file 29–30 times with no failure (median 0.25–0.28 s, maximum 4.4 s), and drained within 0.4 s. Samples under store entry frames:
+
+  | Category | Run 1 | Run 2 | Run 3 | A median | B median |
+  |---|---:|---:|---:|---:|---:|
+  | Hidden-session `appliedIndexRootSnapshot` | 0 | 0 | 0 | 0 | 1,565 |
+  | Token recount `files(inRoot:)` | 0 | 0 | 0 | 0 | 1,463 |
+  | `makeFileTreePresentation` | 1,423 | 2,879 | 2,556 | 2,556 | 1,239 |
+  | Search catalog merge | 209 | 637 | 665 | 637 | 378 |
+  | Ingress mutation and publication | 44 | 127 | 131 | 127 | 105 |
+  | `FileSystemService` eligibility under ingress | 40 | 75 | 82 | 75 | 62 |
+  | Other store entry work | 3 | 10 | 5 | 5 | 7 |
+  | **All store entry frames** | 1,719 | 3,728 | 3,439 | 3,439 | 5,104 |
+
+  No A capture holds an `allStoreFileRecords` frame, an `appliedIndexRootSnapshot` frame from any caller, or a `files(inRoot:)` frame from any caller. The median total fell from 5,104 to 3,439. The ranges overlap, though (B 2,674–5,708, A 1,719–3,728), and the comparison is confounded, so the aggregate improvement is not established. The file-tree presentation took up part of the freed time: more recounts finished per run (35–39 `calculate.end` events per run, against 22–26 on B), and each one builds the presentation.
+- Evidence, issue 213 reproduction: the generator reached 2,750 live folders (550,000 files on disk) after 313 s. The store applied all 589 publications and the whole 550,000-file root, and the backlog drained 233 s after the generator stopped. On B, 285 publications were still outstanding at the 300 s drain bound, and the applied root held about 241,000 files. Outstanding publications peaked at 133, and the oldest reached 226 s just before the drain (on B, 504 and 535 s). Applied publications per second by minute: 3.70, 1.91, 0.90, 0.46, 0.55, 0.82, 0.65, 0.48, 0.44 (B: 2.82, 1.00, 0.59, 0.35, 0.33, 0.69, 0.75, 0.60, 0.54). All 226 idle reads succeeded (median 0.95 s, maximum 11.2 s; on B, median 0.72 s and maximum 3.9 s). Freshness probes: the first 9 succeeded within 0.3–14 s, up to 143 s into the run. The 12 taken from 182 s until the drain ended in `workspace_freshness_timeout` after 31–39 s. The 4 after the drain succeeded in 6–12 s. No probe returned a wrong result. These are single runs, confounded, and not tail-latency estimates.
+- Evidence, reproduction captures: near 27,000 files (A 28,400 → 37,200 applied, overlapping B's 28,200 → 39,400), A had 0 samples in the hidden-session snapshot (B 2,178) and 0 in the token-recount enumeration (B 220), against 503 in `makeFileTreePresentation` (B 449), 216 in the search merge (B 183), 1,242 in ingress (B 940), 2,165 in eligibility (B 1,619), and 350 in the path-index rebase (B 1,262). The near-100,000 captures don't overlap (A 106,600 → 120,200, B 100,200 → 101,000), so they aren't compared; the A capture again had 0 samples in both removed consumers. In the path-index rebase, `closure #1 in PathSearchIndex.init(paths:)` fell from 1,240 samples to 87 near 27,000 files and from 922 to 98 near 100,000, with no `URL.init(fileURLWithPath:)` beneath it on A.
+- Evidence, accounting gate: with the idle file selected in the scratch window, the recount (`selectedPaths=1`) published `fileTokens=9 fileTreeTokens=14 totalTokens=23`, and `workspace_context` showed the same numbers with the file tree `idle/idle.txt`. Its "stale … refresh pending" label describes the render's cache source; the values matched the published recount.
+- Gates: every focused test passes; recounts on A log `fileExtensions` events and the extension set matches the files on disk; no A capture holds a sample in either removed consumer; project-structure and selected-file accounting are correct; both parity bursts matched; no wrong file or search result was accepted as success. The DEBUG missing-count assertion didn't fire.
+- Cleanup: the patch cap override is back to the release value and comparison is off. The recount log stays on, as the debug app's defaults already had it. The scratch workspace was deleted with `close_window`, the generated folders were removed, and the window and workspace lists match the ones recorded before A.
+- Deferred: the prompt-stats file tree (`makeFileTreePresentation`) is now the largest store-actor consumer per publication, and the search catalog merge still reads whole roots. #241 and #222 stay open for them.
