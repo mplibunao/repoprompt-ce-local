@@ -35,20 +35,17 @@ final class WindowPresentationVisibilityLifecycleTests: XCTestCase {
 
         var scheduleCount = state.test_presentationVisibilityScheduleCount
         NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: firstWindow)
-        await drainNotificationDelivery()
-        await state.test_waitForPendingPresentationVisibilityUpdate()
+        await settle(state)
         XCTAssertGreaterThan(state.test_presentationVisibilityScheduleCount, scheduleCount)
 
         scheduleCount = state.test_presentationVisibilityScheduleCount
         NotificationCenter.default.post(name: NSApplication.didUnhideNotification, object: NSApp)
-        await drainNotificationDelivery()
-        await state.test_waitForPendingPresentationVisibilityUpdate()
+        await settle(state)
         XCTAssertGreaterThan(state.test_presentationVisibilityScheduleCount, scheduleCount)
 
         scheduleCount = state.test_presentationVisibilityScheduleCount
         NotificationCenter.default.post(name: NSWindow.didMiniaturizeNotification, object: unrelatedWindow)
-        await drainNotificationDelivery()
-        await state.test_waitForPendingPresentationVisibilityUpdate()
+        await settle(state)
         XCTAssertEqual(state.test_presentationVisibilityScheduleCount, scheduleCount)
 
         state.attachWindow(firstWindow)
@@ -58,8 +55,7 @@ final class WindowPresentationVisibilityLifecycleTests: XCTestCase {
         state.attachWindow(firstWindow)
         state.attachWindow(secondWindow)
         state.attachWindow(nil)
-        await drainNotificationDelivery()
-        await state.test_waitForPendingPresentationVisibilityUpdate()
+        await settle(state)
         XCTAssertTrue(state.isPresentationVisible, "Only the latest detached sample may publish")
         XCTAssertEqual(publications, [false, true])
 
@@ -67,8 +63,7 @@ final class WindowPresentationVisibilityLifecycleTests: XCTestCase {
         NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: firstWindow)
         NotificationCenter.default.post(name: NSApplication.didUnhideNotification, object: NSApp)
         NotificationCenter.default.post(name: NSWindow.didMiniaturizeNotification, object: unrelatedWindow)
-        await drainNotificationDelivery()
-        await state.test_waitForPendingPresentationVisibilityUpdate()
+        await settle(state)
         XCTAssertEqual(state.test_presentationVisibilityScheduleCount, scheduleCount)
         XCTAssertEqual(publications, [false, true], "Detached and unrelated windows cannot publish")
 
@@ -77,8 +72,7 @@ final class WindowPresentationVisibilityLifecycleTests: XCTestCase {
         XCTAssertFalse(state.isPresentationVisible)
         state.attachWindow(nil)
         state.attachWindow(secondWindow)
-        await drainNotificationDelivery()
-        await state.test_waitForPendingPresentationVisibilityUpdate()
+        await settle(state)
         XCTAssertEqual(publications, [false, true, false], "A stale detach must not restore true after reattachment")
 
         state.attachWindow(nil)
@@ -86,8 +80,7 @@ final class WindowPresentationVisibilityLifecycleTests: XCTestCase {
         scheduleCount = state.test_presentationVisibilityScheduleCount
         NotificationCenter.default.post(name: NSApplication.didUnhideNotification, object: NSApp)
         NotificationCenter.default.post(name: NSWindow.didDeminiaturizeNotification, object: secondWindow)
-        await drainNotificationDelivery()
-        await state.test_waitForPendingPresentationVisibilityUpdate()
+        await settle(state)
         XCTAssertEqual(state.test_presentationVisibilityScheduleCount, scheduleCount)
         XCTAssertFalse(state.isPresentationVisible, "Close cancels the pending detached sample")
         XCTAssertEqual(publications, [false, true, false], "Close and later notifications publish nothing")
@@ -95,10 +88,12 @@ final class WindowPresentationVisibilityLifecycleTests: XCTestCase {
         await state.tearDown()
     }
 
-    private func drainNotificationDelivery() async {
+    /// Lets queued notification sinks run on the main run loop, then waits for the visibility sample they scheduled.
+    private func settle(_ state: WindowState) async {
         await withCheckedContinuation { continuation in
             RunLoop.main.perform { continuation.resume() }
         }
+        await state.test_waitForPendingPresentationVisibilityUpdate()
     }
 
     private func makeTestWindow() -> NSWindow {
