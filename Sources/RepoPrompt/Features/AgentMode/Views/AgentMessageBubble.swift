@@ -174,9 +174,151 @@ private struct MessageFooterStrip: View {
 
 // MARK: - Agent Message Bubble
 
-struct CodexManagedLoginAction {
+/// Codex sign-in callbacks for an error row. Equality compares the owner and revision, not the
+/// closures, so transcript rows stay equal while the callbacks are unchanged.
+struct CodexManagedLoginAction: Equatable {
+    /// The object that supplies the callbacks.
+    let ownerID: ObjectIdentifier
+    /// The owner must advance this whenever it replaces the callbacks.
+    var revision: UInt64 = 0
     let browser: (@MainActor @escaping @Sendable (URL) -> Void) async throws -> Bool
     let deviceCode: (@MainActor @escaping @Sendable (CodexManagedChatgptDeviceCode, Bool) -> Void) async throws -> Bool
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.ownerID == rhs.ownerID && lhs.revision == rhs.revision
+    }
+}
+
+/// The compared inputs of one transcript row. The row builds its callbacks from these values and
+/// the owners it holds, so no closure takes part in row equality.
+struct AgentTranscriptRowInputs: Equatable {
+    let item: AgentChatItem
+    let isMostRecentEditBubble: Bool
+    let windowID: Int
+    let workspaceID: UUID?
+    let tabID: UUID?
+    let suppressAskUserTranscriptUI: Bool
+    let activeContextBuilderCallID: UUID?
+    let activeContextBuilderResultID: UUID?
+    let rawToolResultPayload: String?
+    let rawToolResultPayloadRenderRevision: Int
+    /// The run whose tools the header cancel button stops, or nil when the row doesn't show the button.
+    let cancelRunID: UUID?
+    let runInteraction: AgentRunInteractionUISnapshot
+    let runtimeFooter: AgentMessageRuntimeFooter?
+    let autoExpandEnabled: Bool
+    let liveBashExecution: AgentModeViewModel.BashLiveExecutionState?
+    let isRecentAssistant: Bool
+    let approvalVisible: Bool
+}
+
+/// One Agent Mode transcript row behind an equatable boundary, so a streaming delta re-renders only
+/// the rows whose inputs changed. Theme, font, focus, and window visibility aren't inputs. The
+/// bubble's descendants read them from the environment and `FontScaleManager`.
+@MainActor
+struct AgentTranscriptRow: View, @MainActor Equatable {
+    let inputs: AgentTranscriptRowInputs
+    let agentModeVM: AgentModeViewModel
+    let promptManager: PromptViewModel
+    let contextBuilderAgentVM: ContextBuilderAgentViewModel
+    /// Passed only to error rows that offer Codex sign-in.
+    let codexManagedLoginAction: CodexManagedLoginAction?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.inputs == rhs.inputs
+            && lhs.agentModeVM === rhs.agentModeVM
+            && lhs.promptManager === rhs.promptManager
+            && lhs.contextBuilderAgentVM === rhs.contextBuilderAgentVM
+            && lhs.codexManagedLoginAction == rhs.codexManagedLoginAction
+    }
+
+    var body: some View {
+        let cancelAction = cancelAction
+        let showsCancel = cancelAction != nil
+        AgentMessageBubble(
+            item: inputs.item,
+            isMostRecentEditBubble: inputs.isMostRecentEditBubble,
+            windowID: inputs.windowID,
+            currentWorkspaceID: inputs.workspaceID,
+            currentTabID: inputs.tabID,
+            suppressAskUserTranscriptUI: inputs.suppressAskUserTranscriptUI,
+            contextBuilderContext: .init(
+                tabID: inputs.tabID,
+                contextBuilderAgentVM: contextBuilderAgentVM,
+                activeContextBuilderCallItemID: inputs.activeContextBuilderCallID,
+                activeContextBuilderResultItemID: inputs.activeContextBuilderResultID,
+                oracleOpenContext: .init(
+                    windowID: inputs.windowID,
+                    workspaceID: inputs.workspaceID,
+                    tabID: inputs.tabID
+                ),
+                showRunScopedToolCancel: showsCancel,
+                cancelActiveToolsAction: cancelAction
+            ),
+            promptManager: promptManager,
+            handoffConfig: handoffConfig,
+            rawToolResultPayload: inputs.rawToolResultPayload,
+            rawToolResultPayloadRenderRevision: inputs.rawToolResultPayloadRenderRevision,
+            showRunScopedToolCancel: showsCancel,
+            cancelActiveToolsAction: cancelAction,
+            codexManagedLoginAction: codexManagedLoginAction,
+            recentAssistantItemIDs: inputs.isRecentAssistant ? [inputs.item.id] : [],
+            runtimeFooter: inputs.runtimeFooter
+        )
+        .environment(\.markdownFileLinkOpener, MarkdownFileLinkOpener { [promptManager] target in
+            await promptManager.fileManager.openFileForMarkdownLink(target)
+        })
+        .environment(\.agentToolCardAutoExpandEnabled, inputs.autoExpandEnabled)
+        .environment(
+            \.agentLiveBashExecutionByItemID,
+            inputs.liveBashExecution.map { [inputs.item.id: $0] } ?? [:]
+        )
+        .environment(\.agentApprovalVisible, inputs.approvalVisible)
+        #if DEBUG
+            .environment(\.agentTranscriptProbeRowID, inputs.item.id)
+        #endif
+    }
+
+    /// Cancels the tools of the run captured in the inputs, even if another run is active when the
+    /// user clicks.
+    var cancelAction: (() -> Void)? {
+        guard let runID = inputs.cancelRunID else { return nil }
+        return { [weak agentModeVM] in
+            agentModeVM?.cancelActiveToolsForRun(runID: runID, reason: "tool_card_header_cancel")
+        }
+    }
+
+    /// The handoff from this row, available only while the session can be forked. Its cutoff is this
+    /// row's item, and it hands off with the agent, model, and effort the user submits.
+    var handoffConfig: AgentHandoffConfig? {
+        guard inputs.runInteraction.canForkCurrentSession else { return nil }
+        let itemID = inputs.item.id
+        return AgentHandoffConfig(
+            itemID: itemID,
+            defaultDestinationAgent: inputs.runInteraction.selectedAgent,
+            defaultModelRaw: inputs.runInteraction.selectedModelRaw,
+            defaultReasoningEffortRaw: inputs.runInteraction.selectedReasoningEffortRaw,
+            availableAgentsProvider: { [weak agentModeVM] in
+                agentModeVM?.availableAgents ?? []
+            },
+            modelOptionsProvider: { [weak agentModeVM] agent in
+                agentModeVM?.modelOptions(for: agent) ?? []
+            },
+            windowID: inputs.windowID,
+            buildPayloadForClipboard: { [weak agentModeVM] in
+                await agentModeVM?.buildHandoffPayload(upToItemID: itemID) ?? ""
+            },
+            performHandoff: { [weak agentModeVM] selection in
+                guard let vm = agentModeVM else { return }
+                try await vm.prepareHandoffToNewTab(
+                    upToItemID: itemID,
+                    destinationAgent: selection.agent,
+                    destinationModelRaw: selection.modelRaw,
+                    destinationReasoningEffortRaw: selection.reasoningEffortRaw
+                )
+            }
+        )
+    }
 }
 
 /// A bubble view for displaying agent chat items (user, assistant, tool calls, etc.)
@@ -200,8 +342,8 @@ struct AgentMessageBubble: View {
         @Environment(\.agentTranscriptProbeWindowID) private var probeWindowID
     #endif
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.agentRecentAssistantItemIDs) private var recentAssistantItemIDs
-    @Environment(\.agentMessageRuntimeFooterByItemID) private var runtimeFooterByItemID
+    private let recentAssistantItemIDs: Set<UUID>
+    private let runtimeFooter: AgentMessageRuntimeFooter?
     @ObservedObject private var fontScale = FontScaleManager.shared
     @State private var activeCodexManagedLoginFlow: CodexManagedLoginFlow?
     @State private var codexManagedLoginOperationID: UUID?
@@ -227,7 +369,9 @@ struct AgentMessageBubble: View {
         rawToolResultPayloadRenderRevision: Int = 0,
         showRunScopedToolCancel: Bool = false,
         cancelActiveToolsAction: (() -> Void)? = nil,
-        codexManagedLoginAction: CodexManagedLoginAction? = nil
+        codexManagedLoginAction: CodexManagedLoginAction? = nil,
+        recentAssistantItemIDs: Set<UUID> = [],
+        runtimeFooter: AgentMessageRuntimeFooter? = nil
     ) {
         self.item = item
         self.isMostRecentEditBubble = isMostRecentEditBubble
@@ -243,10 +387,8 @@ struct AgentMessageBubble: View {
         self.showRunScopedToolCancel = showRunScopedToolCancel
         self.cancelActiveToolsAction = cancelActiveToolsAction
         self.codexManagedLoginAction = codexManagedLoginAction
-    }
-
-    private var runtimeFooter: AgentMessageRuntimeFooter? {
-        runtimeFooterByItemID[item.id]
+        self.recentAssistantItemIDs = recentAssistantItemIDs
+        self.runtimeFooter = runtimeFooter
     }
 
     private var normalizedToolName: String? {
@@ -1003,8 +1145,13 @@ struct AgentMessageBubble: View {
             .padding(.horizontal, 4)
     }
 
-    private var shouldShowCodexManagedLoginAction: Bool {
+    /// Whether the item is an error row that offers Codex sign-in.
+    static func offersCodexManagedLogin(for item: AgentChatItem) -> Bool {
         item.kind == .error && CodexManagedAuthRecoveryClassifier.preservesAsUserFacingGuidance(item.text)
+    }
+
+    private var shouldShowCodexManagedLoginAction: Bool {
+        Self.offersCodexManagedLogin(for: item)
     }
 
     private func startCodexManagedChatgptLogin() {
