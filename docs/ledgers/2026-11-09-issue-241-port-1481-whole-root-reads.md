@@ -8,7 +8,7 @@ Re-implement upstream PR 1481 (upstream commit `7d5f19bbd`) by hand, so that two
 |------|---------|---------------|---------|
 | 1. Confirm the load bodies and measure B | done | orchestrator | |
 | 2. Store extension inventory and token recount | done | pair · Orchestrate 2/4 (two cancelled for permissions, then resume 2) | `perf(workspace-context): count file extensions instead of enumerating roots for token recounts` |
-| 3. Hidden-session applied-index handler | pending | | |
+| 3. Hidden-session applied-index handler | done | engineer · Orchestrate 3/4: hidden-session applied-index handler | `perf(workspace-files): look up only modified records for hidden-session index events` |
 | 4. Byte-based candidate filenames | pending | | |
 | 5. Validate, push, hand off for integration | pending | | |
 | 6. Measure A and open the pull request | pending | | |
@@ -68,5 +68,12 @@ Re-implement upstream PR 1481 (upstream commit `7d5f19bbd`) by hand, so that two
 - Decision: the managed-only test also removes the file while it is still managed-only, before promotion, then recreates and rematerializes it. This covers the "managed-only removal: no decrement" row; the plan's step list only removed the file after promotion. Source: item review finding (round 1).
 - Evidence: `make dev-format` (no changes) and `make dev-lint` pass; `CatalogFileExtensionInventoryTests` 3 of 3 and `WorkspaceSearchServiceTests` 17 of 17 pass; `make dev-swift-build PRODUCT=RepoPrompt` passes. Two throwaway mutations, both reverted, were caught. Without the promotion increment and the `removeFile` decrement, 4 assertions failed in two tests. With an unconditional `removeFile` decrement, the managed-only test stopped on the missing-key assertion.
 - Review: the item's `context_builder` review found every transition in Design A correct and raised one test gap, which was fixed; the follow-up found nothing. Refactor gate: no material opportunities. The review judged that the count updates are already consolidated in `RootState` and that the mutation sites are distinct membership transitions.
+
+## 3. Hidden-session applied-index handler
+
+- Decision: `handleHiddenSessionRootAppliedIndexEvent` follows the plan's order. It checks the root's kind and path from `roots()`, returns for a replayed generation before any record request, and asks `appliedIndexRecordLookup` for the event's modified file IDs only. A nil lookup returns `false` without advancing the handled generation. The contiguous-generation and full-resync rule is unchanged. Source: approved plan.
+- Evidence: `make dev-format` (no changes), `make dev-lint`, `HiddenSessionAppliedIndexHotPathTests` (1 of 1) and `make dev-swift-build PRODUCT=RepoPrompt` pass. The test sends an ordinary-root event, a session-root event with the wrong path, an empty event, a modification for two files, and a replay of each valid event. It asserts zero `files(inRoot:)` enumerations, zero root snapshots, two lookups for two records in total, and that the lookup returns the same records as the old filtered snapshot. No other suite drives this handler or the slice rebase it schedules, so that parity check is what guards the unchanged behavior downstream.
+- Review: the item's `context_builder` review found nothing to fix. Refactor gate: no material opportunities; the change reuses the store's existing lookup.
+- Deferred: `resyncWorkspaceAppliedIndexProjection` still takes a whole-root snapshot, but only on a resync, as the plan decided.
 
 ## Parked decisions
