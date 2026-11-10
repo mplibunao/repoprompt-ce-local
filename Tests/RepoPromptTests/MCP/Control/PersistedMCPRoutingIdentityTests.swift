@@ -374,6 +374,48 @@ import XCTest
             }
         }
 
+        // MARK: - Route-owner authority
+
+        /// A committed route proves which process owns the run only when its connection's observed
+        /// kernel peer is the expected process or one of its descendants.
+        func testCommittedRouteRequiresExpectedProcessAncestry() async throws {
+            try await withEstablishedRun { run in
+                await run.installRunPolicy()
+                let client = try await run.connect(run.c4, sessionToken: run.c4Token)
+                let admission = try await run.initialize(client)
+                XCTAssertNil(admission)
+                await run.assertOwner(run.c4)
+
+                let manager = run.manager
+                let runID = run.runID
+                let windowID = run.window.windowID
+                func isCommitted(tabID: UUID?, expectedAgentPID: pid_t?) async -> Bool {
+                    await manager.isRunRouteAuthoritativelyCommitted(
+                        runID: runID,
+                        windowID: windowID,
+                        tabID: tabID,
+                        expectedAgentPID: expectedAgentPID
+                    )
+                }
+
+                // The socket's observed kernel peer is this test process.
+                let ownProcess = await isCommitted(tabID: run.tabID, expectedAgentPID: getpid())
+                XCTAssertTrue(ownProcess)
+                let parentProcess = await isCommitted(tabID: run.tabID, expectedAgentPID: getppid())
+                XCTAssertTrue(parentProcess, "A descendant of the expected process owns the route.")
+                let unrelated = await isCommitted(tabID: run.tabID, expectedAgentPID: pid_t(Int32.max))
+                XCTAssertFalse(unrelated, "Another process must not authorize the route.")
+                let wrongTab = await isCommitted(tabID: UUID(), expectedAgentPID: getpid())
+                XCTAssertFalse(wrongTab)
+
+                await manager.debugSetObservedPeerPIDForTesting(nil, connectionID: run.c4)
+                let unobserved = await isCommitted(tabID: run.tabID, expectedAgentPID: getpid())
+                XCTAssertFalse(unobserved, "A route with no observed peer PID fails closed.")
+                let withoutExpectedPID = await isCommitted(tabID: run.tabID, expectedAgentPID: nil)
+                XCTAssertTrue(withoutExpectedPID, "Without an expected PID the query is unchanged.")
+            }
+        }
+
         // MARK: - Recovery and cleanup
 
         func testRefusedConnectionRecoversOnSameSocketThroughNewRunPolicy() async throws {
