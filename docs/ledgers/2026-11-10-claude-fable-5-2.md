@@ -7,8 +7,8 @@ Add Claude Fable 5.2 (`claude-fable-5-2`) as a selectable, pinnable model wherev
 | Item | Outcome | Agent session | Commits |
 |------|---------|---------------|---------|
 | 1. Add Fable 5.2 to the five catalog surfaces, with the test updates | done | engineer · Orchestrate 1/1: Fable 5.2 catalog entries | `feat(models): add Claude Fable 5.2 to the Claude Code, Anthropic, and OpenRouter catalogs` |
-| 2. Branch-level validation and push | pending | pair · Review: Fable 5.2 catalog branch | `test(models): drop the Fable 5.2 provider-default assertion` |
-| 3. Live validation on the integrated debug build and pull request | pending | | |
+| 2. Branch-level validation and push | done | pair · Review: Fable 5.2 catalog branch | `test(models): drop the Fable 5.2 provider-default assertion`, `docs(ledgers): add the run ledger for Claude Fable 5.2` |
+| 3. Live validation on the integrated debug build and pull request | done | none | `docs(ledgers): record the Fable 5.2 live check` |
 
 ## 1. Add Fable 5.2 to the five catalog surfaces, with the test updates
 
@@ -30,3 +30,16 @@ Add Claude Fable 5.2 (`claude-fable-5-2`) as a selectable, pinnable model wherev
 - Decision: the pull request text limits the adaptive-thinking claim to direct Anthropic requests. The OpenRouter provider builds its own request and can send `temperature`, which OpenRouter's model list (checked 2026-11-10) doesn't list as supported for Fable 5.2, Fable 5.1, or Opus 5.5. OpenRouter ignores unsupported parameters by default, so this behaviour predates the change and doesn't make requests fail. Source: review finding.
 - Evidence: after the fix, `make dev-format` left every file unchanged, `make dev-lint` passes, and `ClaudeCompatibleRuntimeSupportTests/testProviderCatalogDefaultsExposeStableRawValues` passes.
 - Evidence: `git merge-tree` shows the branch merges cleanly with the heads of #363, #353, and #364, which touch model and role settings.
+- Evidence: `pr-ready` passed on `origin/main..HEAD` before the first push. It ran Swift lint, the root and provider tests, and the `RepoPrompt` product build, with no failures. The push preflight passed.
+- Decision: pull request #382 opened before the debug-app check because the coordinating thread asked for an early review. The dog-food rules allow that when the description says the check is pending. Source: coordinating thread.
+- Decision: the type label is `enhancement`, because a model addition fits none of the six type labels in `CONTRIBUTING.md`. The preflight lanes don't check the type label. The area labels are `area:agent-mode`, `area:chat`, and `provider:claude`. Source: approved plan.
+
+## 3. Live validation on the integrated debug build and pull request
+
+- Evidence: the integrated debug build contained this branch at `54bac0ae0`. `make dev-smoke` passed against it.
+- Evidence: in the debug app, `app_settings` `options` for Claude Code lists Fable 5.2 between Fable Latest and Fable 5.1 in the Agent Mode catalog, with Low to Max efforts and a 1M context window. Its tags match Fable 5.1's. The Claude Code chat catalog lists `claude_code__claude-fable-5-2` and its five effort variants. The role mapping matched the mapping before the rebuild, and no role moved to Fable 5.2.
+- Decision: the catalog check used `app_settings` `options` instead of `agent_manage` `list_agents`. The debug profile sets `restrictMCPAgentDiscoveryToRoleLabels`, so `list_agents` returns only the role labels. The check left that setting unchanged. Source: orchestrator judgment.
+- Evidence: an agent started on `claudeCode:claude-fable-5-2:high` replied with the expected token. The app sent `claude-fable-5-2` in `apply_flag_settings`, and the CLI's `init` event reported `model` `claude-fable-5-2` on Claude Code 2.1.321.
+- Evidence: an agent started on `claudeCode:claude-fable-5-1:high` replied with its token. The app sent `claude-fable-5-1`, and the `init` event reported `claude-fable-5-1` on Claude Code 2.1.321. Claude Code 2.1.321 runs an explicit Fable 5.1 pin as Fable 5.1.
+- Evidence: Claude raw event logging and the performance diagnostics were already on, and the check left every setting unchanged. Both test sessions finished and were deleted, and the debug app kept the same process throughout.
+- Evidence: `pr-ready` on the full branch after this ledger update failed in two root tests that this change doesn't touch. `BindContextRoutingAuthorityTests/testNewWindowSwitchReusesPreferredWindowAlreadyShowingWorkspace` passed when rerun alone. `MCPWorkspaceScopedCursorModelParameterTests/testSettingsPinnedCursorEffortAndSpeedReachRoleLabelRun` failed with `CancellationError()` in every rerun, including one on `origin/main` `403c210a8`. Issue #274 tracks both tests.
