@@ -157,6 +157,15 @@ class WindowState: ObservableObject {
     /// either way, so a later click on this window is never undone.
     var onAttachedAsKey: (() -> Void)?
 
+    // MARK: - Presentation Visibility
+
+    /// Unknown visibility stays enabled until an attached window is sampled.
+    @Published private(set) var isPresentationVisible: Bool = true
+
+    private var presentationVisibilityCancellables = Set<AnyCancellable>()
+    private weak var presentationVisibilityObservedWindow: NSWindow?
+    private var pendingPresentationVisibilityTask: Task<Void, Never>?
+
     // MARK: - Per-Window View Models
 
     let workspaceFileContextStore: WorkspaceFileContextStore
@@ -317,6 +326,7 @@ class WindowState: ObservableObject {
         onFocusChanged = nil
         onAttachedAsKey = nil
         removeFocusObservers()
+        removePresentationVisibilityObservers()
         pendingWindowTitleUpdateTask?.cancel()
         pendingWindowTitleUpdateTask = nil
         pendingFocusUpdateTask?.cancel()
@@ -596,11 +606,13 @@ class WindowState: ObservableObject {
             detachTitlebarAccessoryControllers(from: oldWindow)
             nsWindow = nil
             removeFocusObservers()
+            removePresentationVisibilityObservers()
             pendingWindowTitleUpdateTask?.cancel()
             pendingWindowTitleUpdateTask = nil
             pendingFocusUpdateTask?.cancel()
             pendingFocusUpdateTask = nil
             scheduleFocusUpdate(false)
+            schedulePresentationVisibilityUpdate(from: nil)
             return
         }
         guard let window else { return }
@@ -609,6 +621,7 @@ class WindowState: ObservableObject {
             configureWindowChrome(for: window)
             ensureWindowDelegateProxy(for: window)
             scheduleFocusUpdate(from: window)
+            schedulePresentationVisibilityUpdate(from: window)
             requestWindowTitleUpdate(reason: .windowAttached)
             applyAgentTitlebarAccessoryIfPossible()
             return
@@ -627,6 +640,8 @@ class WindowState: ObservableObject {
         configureWindowChrome(for: window)
         installFocusObservers(for: window)
         scheduleFocusUpdate(from: window)
+        installPresentationVisibilityObservers(for: window)
+        schedulePresentationVisibilityUpdate(from: window)
         ensureWindowDelegateProxy(for: window)
         // Use deferred update to avoid recursive layout issues
         requestWindowTitleUpdate(reason: .windowAttached)
@@ -723,6 +738,69 @@ class WindowState: ObservableObject {
         focusCancellables.removeAll()
         focusObservedWindow = nil
     }
+
+    private func installPresentationVisibilityObservers(for window: NSWindow) {
+        guard !shouldSuppressObservationSideEffects, presentationVisibilityObservedWindow !== window else { return }
+        removePresentationVisibilityObservers()
+        presentationVisibilityObservedWindow = window
+
+        let center = NotificationCenter.default
+        let publishers = WindowPresentationVisibility.windowNotifications.map {
+            center.publisher(for: $0, object: window)
+        } + WindowPresentationVisibility.applicationNotifications.map {
+            center.publisher(for: $0)
+        }
+
+        for publisher in publishers {
+            publisher
+                .receive(on: RunLoop.main)
+                .sink { [weak self, weak window] _ in
+                    guard let self, let window, presentationVisibilityObservedWindow === window else { return }
+                    schedulePresentationVisibilityUpdate(from: window)
+                }
+                .store(in: &presentationVisibilityCancellables)
+        }
+    }
+
+    private func removePresentationVisibilityObservers() {
+        presentationVisibilityCancellables.removeAll()
+        presentationVisibilityObservedWindow = nil
+        pendingPresentationVisibilityTask?.cancel()
+        pendingPresentationVisibilityTask = nil
+    }
+
+    private func schedulePresentationVisibilityUpdate(from window: NSWindow?) {
+        guard !shouldSuppressObservationSideEffects else { return }
+        #if DEBUG
+            test_presentationVisibilityScheduleCount += 1
+        #endif
+        pendingPresentationVisibilityTask?.cancel()
+        pendingPresentationVisibilityTask = Task { [weak self, weak window] in
+            // Leave the AppKit/SwiftUI mutation scope before publishing a fresh sample.
+            await Task.yield()
+            guard let self, !Task.isCancelled, !shouldSuppressObservationSideEffects else { return }
+
+            let visible: Bool
+            if let window {
+                guard nsWindow === window else { return }
+                visible = WindowPresentationVisibility.sample(window)
+            } else {
+                guard nsWindow == nil else { return }
+                visible = true
+            }
+
+            guard isPresentationVisible != visible else { return }
+            isPresentationVisible = visible
+        }
+    }
+
+    #if DEBUG
+        private(set) var test_presentationVisibilityScheduleCount = 0
+
+        func test_waitForPendingPresentationVisibilityUpdate() async {
+            await pendingPresentationVisibilityTask?.value
+        }
+    #endif
 
     private func setFocused(_ focused: Bool) {
         guard !shouldSuppressObservationSideEffects, isCurrentlyFocused != focused else { return }
@@ -1860,6 +1938,7 @@ class WindowState: ObservableObject {
         pendingWindowTitleUpdateTask?.cancel()
         pendingFocusUpdateTask?.cancel()
         pendingFocusSideEffectsTask?.cancel()
+        pendingPresentationVisibilityTask?.cancel()
         // Do not call unregisterWindowState here; deinit is nonisolated and
         // you can't hop to @MainActor. Unregistration happens in ContentView onDisappear.
     }
