@@ -5731,8 +5731,17 @@ enum AgentTranscriptProjectionBuilder {
         let protectedTurnID = protection.protectedTurnID
         var updatedTurnCaches = turnCaches.filter { transcriptTurnIDs.contains($0.key) }
         var cacheHitCount = 0
+        #if DEBUG
+            var completedTurnCount = 0
+            var cacheMissCount = 0
+        #endif
 
         for turn in transcript.turns.dropFirst(reusablePrefix?.turnCount ?? 0) {
+            #if DEBUG
+                if turn.isCompleted, turn.id != protectedTurnID {
+                    completedTurnCount += 1
+                }
+            #endif
             let detailedToolTailLimit = detailedToolTailLimits[turn.id] ?? 0
             if let cachedProjection = cachedProjection(
                 for: turn,
@@ -5766,6 +5775,9 @@ enum AgentTranscriptProjectionBuilder {
                 anchorBlockIndex: &anchorBlockIndex
             )
             if turn.isCompleted, turn.id != protectedTurnID {
+                #if DEBUG
+                    cacheMissCount += 1
+                #endif
                 updatedTurnCaches[turn.id] = projectionCache(
                     for: turn,
                     detailedToolTailLimit: detailedToolTailLimit,
@@ -5793,6 +5805,39 @@ enum AgentTranscriptProjectionBuilder {
             workingUnitCount: workingBlocks.count
         )
         #if DEBUG
+            var sourceStreamingConclusionCount = 0
+            var streamingConclusionRowCount = 0
+            if AgentModePerfDiagnostics.isEnabled {
+                sourceStreamingConclusionCount = transcript.turns.reduce(into: 0) { count, turn in
+                    guard turn.retentionTier == .full, let conclusionID = turn.conclusionActivityID else { return }
+                    if turn.responseSpans.contains(where: { span in
+                        span.activities.contains { activity in
+                            activity.id == conclusionID && activity.isStreaming && AgentDisplayableText.hasDisplayableBody(activity.text)
+                        }
+                    }) {
+                        count += 1
+                    }
+                }
+                streamingConclusionRowCount = (workingBlocks + archivedBlocks).reduce(into: 0) { count, block in
+                    if block.retentionTier == .full, block.kind == .conclusion {
+                        count += block.rows.filter(\.isStreaming).count
+                    }
+                }
+                AgentModePerfDiagnostics.increment("transcript.projection.build")
+                AgentModePerfDiagnostics.increment("transcript.projection.cacheHit", by: cacheHitCount)
+                AgentModePerfDiagnostics.increment("transcript.projection.cacheMiss", by: cacheMissCount)
+                AgentModePerfDiagnostics.increment("transcript.projection.sourceStreamingConclusion", by: sourceStreamingConclusionCount)
+                AgentModePerfDiagnostics.increment("transcript.projection.streamingConclusionRow", by: streamingConclusionRowCount)
+                AgentModePerfDiagnostics.event("transcript.projection.build", fields: [
+                    "turnCount": String(transcript.turns.count),
+                    "reusedPrefixTurnCount": String(reusablePrefix?.turnCount ?? 0),
+                    "completedTurnCount": String(completedTurnCount),
+                    "cacheHitCount": String(cacheHitCount),
+                    "cacheMissCount": String(cacheMissCount),
+                    "sourceStreamingConclusionCount": String(sourceStreamingConclusionCount),
+                    "streamingConclusionRowCount": String(streamingConclusionRowCount)
+                ])
+            }
             let workingRowTail = Array(workingRows.suffix(8)).map(debugRowSummary).joined(separator: ", ")
             let workingBlockTail = Array(workingBlocks.suffix(8)).map(debugBlockSummary).joined(separator: " | ")
             AgentModeViewModel.logCodexDebug(

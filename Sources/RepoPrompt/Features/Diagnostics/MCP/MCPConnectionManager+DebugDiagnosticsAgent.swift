@@ -88,6 +88,7 @@ import MCP
                 case .invalid:
                     return debugDiagnosticsError(op: op, code: "invalid_params", message: "`window_id` must be a non-negative integer.")
                 }
+                let mutateCompletedConclusion = debugBool(arguments, "mutate_completed_conclusion") ?? false
                 let reset = debugBool(arguments, "reset") ?? true
                 let activateAgentMode = debugBool(arguments, "activate_agent_mode") ?? true
                 let tabID: UUID?
@@ -100,12 +101,17 @@ import MCP
                     tabID = nil
                 }
 
+                if mutateCompletedConclusion, tabID == nil {
+                    return debugDiagnosticsError(op: op, code: "invalid_params", message: "`tab_id` is required when `mutate_completed_conclusion` is true.")
+                }
+
                 switch await Self.debugSeedAgentTextDerivationFixture(
                     op: op,
                     windowID: windowID,
                     tabID: tabID,
                     reset: reset,
-                    activateAgentMode: activateAgentMode
+                    activateAgentMode: activateAgentMode,
+                    mutateCompletedConclusion: mutateCompletedConclusion
                 ) {
                 case let .payload(payload):
                     return debugDiagnosticsResult(payload)
@@ -123,7 +129,8 @@ import MCP
             windowID: Int,
             tabID: UUID?,
             reset: Bool,
-            activateAgentMode: Bool
+            activateAgentMode: Bool,
+            mutateCompletedConclusion: Bool
         ) async -> DebugDiagnosticsPayloadResult {
             let manager = WindowStatesManager.shared
             let selectedWindow: WindowState? = if windowID > 0 {
@@ -134,6 +141,21 @@ import MCP
             guard let window = selectedWindow else {
                 return .error(code: "no_window", message: "No matching RepoPrompt window is available for text derivation fixture seeding.")
             }
+
+            #if DEBUG
+                if mutateCompletedConclusion {
+                    guard let tabID,
+                          var payload = window.agentModeViewModel.testMutateCompletedTextDerivationConclusion(tabID: tabID)
+                    else {
+                        return .error(code: "fixture_mismatch", message: "The tab must contain an inactive text-derivation fixture with at least two turns and a completed first-turn conclusion.")
+                    }
+                    payload["ok"] = true
+                    payload["op"] = op
+                    payload["window_id"] = window.windowID
+                    payload["tab_id"] = tabID.uuidString
+                    return .payload(payload)
+                }
+            #endif
 
             guard let tab = await window.promptManager.ensureActiveComposeTab(
                 tabID,
