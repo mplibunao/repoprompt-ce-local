@@ -129,22 +129,32 @@ import XCTest
             XCTAssertEqual(fixture.viewModel.mcpSnapshot(sessionID: fixture.sessionID)?.status, .completed)
         }
 
-        /// A compaction request that fails after the compaction was cancelled leaves the committed
-        /// cancellation as the session's result, live and stored.
+        /// A failed request can outlive cancellation; it must not rewrite the committed result
+        /// or the store's settled projection.
         func testCompactionFailureAfterCancellationKeepsTheCancellation() async throws {
             let fixture = makeFixture()
             let registration = try await fixture.beginHeldFailingCompaction()
 
-            try await settleWithin(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
+            // The held fake emits no native progress events. Its observed running snapshot must
+            // reach the store before the baseline, rather than race the failed request's release.
+            fixture.viewModel.publishMCPStateChange(for: fixture.session)
+            try await eventually {
+                await AgentRunSessionStore.snapshot(for: registration)?.status == .running
+            }
+
+            try await settleWithin(on: fixture) {
+                await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID, completion: .terminalPublished)
+            }
             XCTAssertEqual(fixture.session.runState, .cancelled)
-            let storedAtCancellation = await AgentRunSessionStore.snapshot(for: registration)
+            let baseline = await AgentRunSessionStore.snapshot(for: registration)
+            let storedAtCancellation = try XCTUnwrap(baseline)
             try await fixture.releaseCompactionFailure()
 
             XCTAssertEqual(fixture.session.runState, .cancelled, "the failed request restored the result before the cancellation")
             XCTAssertEqual(fixture.session.lastTerminalCommitRevision?.terminalState, .cancelled)
             XCTAssertEqual(fixture.viewModel.mcpSnapshot(sessionID: fixture.sessionID)?.status, .cancelled)
             let stored = await AgentRunSessionStore.snapshot(for: registration)
-            XCTAssertEqual(stored?.status, storedAtCancellation?.status, "the failed request changed the stored result")
+            XCTAssertEqual(stored?.status, storedAtCancellation.status, "the failed request changed the stored result")
             XCTAssertNotEqual(stored?.status, .completed)
         }
 
@@ -152,7 +162,8 @@ import XCTest
         /// successor's attempt and state alone.
         func testCompactionFailureAfterASuccessorStartedLeavesTheSuccessorAlone() async throws {
             let fixture = makeFixture(gatedReadinessCalls: [1])
-            _ = try await fixture.beginHeldFailingCompaction()
+            let registration = try await fixture.beginHeldFailingCompaction()
+            let compactionCursor = try XCTUnwrap(fixture.viewModel.mcpWaitCursor(sessionID: fixture.sessionID))
             try await settleWithin(on: fixture) { await fixture.viewModel.cancelAgentRun(tabID: fixture.tabID) }
 
             let successor = Task { await fixture.viewModel.startAgentRun(tabID: fixture.tabID, initialMessage: "successor") }
@@ -160,10 +171,22 @@ import XCTest
             try await eventually { fixture.readiness.isWaiting(1) }
             let successorOwnership = try XCTUnwrap(fixture.session.activeRunOwnership)
             let successorRunState = fixture.session.runState
+            let successorCursor = try XCTUnwrap(fixture.viewModel.mcpWaitCursor(sessionID: fixture.sessionID))
+            XCTAssertEqual(successorCursor.registration, registration)
+            XCTAssertNotEqual(successorCursor, compactionCursor)
+            let successorEpoch = try XCTUnwrap(successorOwnership.turnEpoch)
+            XCTAssertEqual(successorCursor.epoch, successorEpoch)
+            let successorSnapshot = try XCTUnwrap(fixture.viewModel.mcpSnapshot(sessionID: fixture.sessionID))
+            await AgentRunSessionStore.signalSnapshot(successorSnapshot, cursor: successorCursor)
             try await fixture.releaseCompactionFailure()
 
             XCTAssertEqual(fixture.session.activeRunOwnership, successorOwnership, "the failed request ended the successor's attempt")
             XCTAssertEqual(fixture.session.runState, successorRunState)
+            XCTAssertEqual(fixture.viewModel.mcpWaitCursor(sessionID: fixture.sessionID), successorCursor)
+            let storedCursor = await AgentRunSessionStore.currentCursor(for: registration)
+            XCTAssertEqual(storedCursor, successorCursor)
+            let stored = await AgentRunSessionStore.snapshot(for: successorCursor)
+            XCTAssertEqual(stored?.status, .running)
 
             fixture.readiness.release(1, ready: true)
             try await eventually { fixture.controller.startUserTurnTexts == ["successor"] }
