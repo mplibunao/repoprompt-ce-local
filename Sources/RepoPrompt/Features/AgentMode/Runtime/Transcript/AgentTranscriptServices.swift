@@ -5470,14 +5470,12 @@ enum AgentTranscriptCompactor {
 }
 
 struct AgentTranscriptTurnProjectionCache: Equatable {
+    /// The inputs the entry was projected from. An entry is reused only when the current turn
+    /// and its detailed tool-tail allocation equal these, so an in-place change to any of the
+    /// turn's items re-projects it.
     struct ValidationToken: Equatable {
-        let turnID: UUID
-        let retentionTier: AgentTranscriptRetentionTier
-        let isCompleted: Bool
-        let responseSpanCount: Int
-        let activityCount: Int
-        let conclusionActivityID: UUID?
-        let frozenDetailedToolTailLimit: Int?
+        let sourceTurn: AgentTranscriptTurn
+        let detailedToolTailLimit: Int
     }
 
     let token: ValidationToken
@@ -5487,6 +5485,21 @@ struct AgentTranscriptTurnProjectionCache: Equatable {
     let archivedRows: [AgentChatItem]
     let rowAnchorIndex: [UUID: AgentTranscriptAnchor]
     let anchorBlockIndex: [AgentTranscriptAnchor: String]
+
+    /// Returns this entry with `turn`, which must equal the current source turn, as its source.
+    /// Keeping the newest equal value lets the next build's comparison return early when the
+    /// storage is shared, and releases the older copy.
+    fileprivate func replacingSourceTurn(_ turn: AgentTranscriptTurn) -> AgentTranscriptTurnProjectionCache {
+        AgentTranscriptTurnProjectionCache(
+            token: ValidationToken(sourceTurn: turn, detailedToolTailLimit: token.detailedToolTailLimit),
+            workingBlocks: workingBlocks,
+            archivedBlocks: archivedBlocks,
+            workingRows: workingRows,
+            archivedRows: archivedRows,
+            rowAnchorIndex: rowAnchorIndex,
+            anchorBlockIndex: anchorBlockIndex
+        )
+    }
 }
 
 struct AgentTranscriptProjectionBuildResult: Equatable {
@@ -5718,10 +5731,21 @@ enum AgentTranscriptProjectionBuilder {
         let protectedTurnID = protection.protectedTurnID
         var updatedTurnCaches = turnCaches.filter { transcriptTurnIDs.contains($0.key) }
         var cacheHitCount = 0
+        #if DEBUG
+            var completedTurnCount = 0
+            var cacheMissCount = 0
+        #endif
 
         for turn in transcript.turns.dropFirst(reusablePrefix?.turnCount ?? 0) {
+            #if DEBUG
+                if turn.isCompleted, turn.id != protectedTurnID {
+                    completedTurnCount += 1
+                }
+            #endif
+            let detailedToolTailLimit = detailedToolTailLimits[turn.id] ?? 0
             if let cachedProjection = cachedProjection(
                 for: turn,
+                detailedToolTailLimit: detailedToolTailLimit,
                 protectedTurnID: protectedTurnID,
                 turnCaches: updatedTurnCaches
             ) {
@@ -5734,13 +5758,14 @@ enum AgentTranscriptProjectionBuilder {
                     rowAnchorIndex: &rowAnchorIndex,
                     anchorBlockIndex: &anchorBlockIndex
                 )
+                updatedTurnCaches[turn.id] = cachedProjection.replacingSourceTurn(turn)
                 cacheHitCount += 1
                 continue
             }
 
             let appendedState = appendProjectionState(
                 for: turn,
-                detailedToolTailLimit: detailedToolTailLimits[turn.id] ?? 0,
+                detailedToolTailLimit: detailedToolTailLimit,
                 context: context,
                 workingBlocks: &workingBlocks,
                 archivedBlocks: &archivedBlocks,
@@ -5750,9 +5775,12 @@ enum AgentTranscriptProjectionBuilder {
                 anchorBlockIndex: &anchorBlockIndex
             )
             if turn.isCompleted, turn.id != protectedTurnID {
+                #if DEBUG
+                    cacheMissCount += 1
+                #endif
                 updatedTurnCaches[turn.id] = projectionCache(
                     for: turn,
-                    token: validationToken(for: turn),
+                    detailedToolTailLimit: detailedToolTailLimit,
                     workingBlocks: appendedState.workingBlocks,
                     archivedBlocks: appendedState.archivedBlocks,
                     workingRows: appendedState.workingRows,
@@ -5777,6 +5805,39 @@ enum AgentTranscriptProjectionBuilder {
             workingUnitCount: workingBlocks.count
         )
         #if DEBUG
+            var sourceStreamingConclusionCount = 0
+            var streamingConclusionRowCount = 0
+            if AgentModePerfDiagnostics.isEnabled {
+                sourceStreamingConclusionCount = transcript.turns.reduce(into: 0) { count, turn in
+                    guard turn.retentionTier == .full, let conclusionID = turn.conclusionActivityID else { return }
+                    if turn.responseSpans.contains(where: { span in
+                        span.activities.contains { activity in
+                            activity.id == conclusionID && activity.isStreaming && AgentDisplayableText.hasDisplayableBody(activity.text)
+                        }
+                    }) {
+                        count += 1
+                    }
+                }
+                streamingConclusionRowCount = (workingBlocks + archivedBlocks).reduce(into: 0) { count, block in
+                    if block.retentionTier == .full, block.kind == .conclusion {
+                        count += block.rows.filter(\.isStreaming).count
+                    }
+                }
+                AgentModePerfDiagnostics.increment("transcript.projection.build")
+                AgentModePerfDiagnostics.increment("transcript.projection.cacheHit", by: cacheHitCount)
+                AgentModePerfDiagnostics.increment("transcript.projection.cacheMiss", by: cacheMissCount)
+                AgentModePerfDiagnostics.increment("transcript.projection.sourceStreamingConclusion", by: sourceStreamingConclusionCount)
+                AgentModePerfDiagnostics.increment("transcript.projection.streamingConclusionRow", by: streamingConclusionRowCount)
+                AgentModePerfDiagnostics.event("transcript.projection.build", fields: [
+                    "turnCount": String(transcript.turns.count),
+                    "reusedPrefixTurnCount": String(reusablePrefix?.turnCount ?? 0),
+                    "completedTurnCount": String(completedTurnCount),
+                    "cacheHitCount": String(cacheHitCount),
+                    "cacheMissCount": String(cacheMissCount),
+                    "sourceStreamingConclusionCount": String(sourceStreamingConclusionCount),
+                    "streamingConclusionRowCount": String(streamingConclusionRowCount)
+                ])
+            }
             let workingRowTail = Array(workingRows.suffix(8)).map(debugRowSummary).joined(separator: ", ")
             let workingBlockTail = Array(workingBlocks.suffix(8)).map(debugBlockSummary).joined(separator: " | ")
             AgentModeViewModel.logCodexDebug(
@@ -5810,6 +5871,7 @@ enum AgentTranscriptProjectionBuilder {
     ) -> [UUID: AgentTranscriptTurnProjectionCache] {
         let transcriptTurnIDs = Set(transcript.turns.map(\.id))
         let protectedTurnID = protection.protectedTurnID
+        let detailedToolTailLimits = detailedToolTailLimits(for: transcript)
         var updatedTurnCaches = existingTurnCaches.filter { transcriptTurnIDs.contains($0.key) }
         for turn in transcript.turns {
             guard turn.isCompleted else {
@@ -5819,7 +5881,7 @@ enum AgentTranscriptProjectionBuilder {
             guard turn.id != protectedTurnID else { continue }
             updatedTurnCaches[turn.id] = projectionCache(
                 for: turn,
-                token: validationToken(for: turn),
+                detailedToolTailLimit: detailedToolTailLimits[turn.id] ?? 0,
                 projection: projection
             )
         }
@@ -6124,27 +6186,23 @@ enum AgentTranscriptProjectionBuilder {
         )
     }
 
-    static func validationToken(for turn: AgentTranscriptTurn) -> AgentTranscriptTurnProjectionCache.ValidationToken {
-        .init(
-            turnID: turn.id,
-            retentionTier: turn.retentionTier,
-            isCompleted: turn.isCompleted,
-            responseSpanCount: turn.responseSpans.count,
-            activityCount: turn.allActivities.count,
-            conclusionActivityID: turn.conclusionActivityID,
-            frozenDetailedToolTailLimit: turn.frozenDetailedToolTailLimit
-        )
+    static func validationToken(
+        for turn: AgentTranscriptTurn,
+        detailedToolTailLimit: Int
+    ) -> AgentTranscriptTurnProjectionCache.ValidationToken {
+        .init(sourceTurn: turn, detailedToolTailLimit: detailedToolTailLimit)
     }
 
     private static func cachedProjection(
         for turn: AgentTranscriptTurn,
+        detailedToolTailLimit: Int,
         protectedTurnID: UUID?,
         turnCaches: [UUID: AgentTranscriptTurnProjectionCache]
     ) -> AgentTranscriptTurnProjectionCache? {
         guard turn.isCompleted,
               turn.id != protectedTurnID,
               let cachedProjection = turnCaches[turn.id],
-              cachedProjection.token == validationToken(for: turn)
+              cachedProjection.token == validationToken(for: turn, detailedToolTailLimit: detailedToolTailLimit)
         else {
             return nil
         }
@@ -6170,7 +6228,7 @@ enum AgentTranscriptProjectionBuilder {
 
     private static func projectionCache(
         for turn: AgentTranscriptTurn,
-        token: AgentTranscriptTurnProjectionCache.ValidationToken,
+        detailedToolTailLimit: Int,
         workingBlocks: [AgentTranscriptRenderBlock],
         archivedBlocks: [AgentTranscriptRenderBlock],
         workingRows: [AgentChatItem],
@@ -6179,7 +6237,7 @@ enum AgentTranscriptProjectionBuilder {
         anchorBlockIndex: [AgentTranscriptAnchor: String]
     ) -> AgentTranscriptTurnProjectionCache {
         AgentTranscriptTurnProjectionCache(
-            token: token,
+            token: validationToken(for: turn, detailedToolTailLimit: detailedToolTailLimit),
             workingBlocks: workingBlocks,
             archivedBlocks: archivedBlocks,
             workingRows: workingRows,
@@ -6191,14 +6249,14 @@ enum AgentTranscriptProjectionBuilder {
 
     private static func projectionCache(
         for turn: AgentTranscriptTurn,
-        token: AgentTranscriptTurnProjectionCache.ValidationToken,
+        detailedToolTailLimit: Int,
         projection: AgentTranscriptProjection
     ) -> AgentTranscriptTurnProjectionCache {
         let workingBlocks = projection.workingBlocks.filter { $0.turnID == turn.id }
         let archivedBlocks = projection.archivedBlocks.filter { $0.turnID == turn.id }
         return projectionCache(
             for: turn,
-            token: token,
+            detailedToolTailLimit: detailedToolTailLimit,
             workingBlocks: workingBlocks,
             archivedBlocks: archivedBlocks,
             workingRows: projectionRows(for: workingBlocks),
@@ -7454,7 +7512,7 @@ enum AgentTranscriptProjectionBuilder {
             turnID: turn.id,
             spanID: spanID,
             retentionTier: turn.retentionTier,
-            rows: [activity.toItem(isStreaming: false)],
+            rows: [activity.toItem()],
             isArchived: archived,
             primaryAnchor: conclusionAnchor(for: activity.id, turnID: turn.id),
             anchorActivityID: activity.id,

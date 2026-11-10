@@ -182,6 +182,8 @@ rpce-cli-debug -w 1 -c agent_run -j '{"op":"wait","session_id":"<session_id>","t
 
 ### DEBUG-only diagnostics
 
+With performance diagnostics enabled, `agent_perf_metrics` reports the counters `transcript.projection.build`, `transcript.projection.cacheHit`, `transcript.projection.cacheMiss`, `transcript.projection.sourceStreamingConclusion`, and `transcript.projection.streamingConclusionRow`, plus the `transcript.projection.build` event with per-build counts. To check that an in-place change to a completed turn reaches its row, seed two text-derivation fixture turns in one tab (the second call with that tab's `tab_id` and `reset: false`), then call `seed_agent_text_derivation_fixture` with the same `tab_id` and `mutate_completed_conclusion: true`. It rewrites the first turn's conclusion in place, refreshes the transcript, and reports whether the published row has the new text.
+
 Before live Agent Mode or Claude investigations, enable debug-only diagnostics through the CE debug app's MCP `app_settings` surface:
 
 ```bash
