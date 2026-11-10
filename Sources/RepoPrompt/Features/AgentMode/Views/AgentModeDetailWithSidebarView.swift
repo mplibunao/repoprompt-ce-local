@@ -158,6 +158,7 @@ struct AgentModeDetailWithSidebarView: View {
                 selectionCoordinator: selectionCoordinator,
                 workspaceSearchService: workspaceSearchService,
                 activeAgentSessionID: statusPillsUI.snapshot.activeAgentSessionID,
+                contextLookupIdentity: statusPillsUI.snapshot.contextLookupIdentity,
                 agentModeVM: agentModeVM,
                 windowID: windowID,
                 currentTabID: currentTabID
@@ -228,6 +229,7 @@ struct AgentModeDetailWithSidebarView: View {
                 selectionCoordinator: selectionCoordinator,
                 workspaceSearchService: workspaceSearchService,
                 activeAgentSessionID: statusPillsUI.snapshot.activeAgentSessionID,
+                contextLookupIdentity: statusPillsUI.snapshot.contextLookupIdentity,
                 agentModeVM: agentModeVM,
                 windowID: windowID,
                 currentTabID: currentTabID
@@ -370,6 +372,7 @@ private struct AgentContextInspectorPresenter<PrimaryContent: View>: View {
     let workspaceSearchService: WorkspaceSearchService
     @StateObject private var fileBrowseModel: AgentContextFileBrowseModel
     let activeAgentSessionID: UUID?
+    let contextLookupIdentity: AgentWorkspaceLookupContextIdentity
     let agentModeVM: AgentModeViewModel
     let windowID: Int
     let currentTabID: UUID?
@@ -384,6 +387,7 @@ private struct AgentContextInspectorPresenter<PrimaryContent: View>: View {
         selectionCoordinator: WorkspaceSelectionCoordinator,
         workspaceSearchService: WorkspaceSearchService,
         activeAgentSessionID: UUID?,
+        contextLookupIdentity: AgentWorkspaceLookupContextIdentity,
         agentModeVM: AgentModeViewModel,
         windowID: Int,
         currentTabID: UUID?,
@@ -412,6 +416,7 @@ private struct AgentContextInspectorPresenter<PrimaryContent: View>: View {
             )
         })
         self.activeAgentSessionID = activeAgentSessionID
+        self.contextLookupIdentity = contextLookupIdentity
         self.agentModeVM = agentModeVM
         self.windowID = windowID
         self.currentTabID = currentTabID
@@ -438,6 +443,7 @@ private struct AgentContextInspectorPresenter<PrimaryContent: View>: View {
                         windowID: windowID,
                         currentTabID: currentTabID,
                         activeAgentSessionID: activeAgentSessionID,
+                        contextLookupIdentity: contextLookupIdentity,
                         worktreeBindingsProvider: { sessionID, tabID in
                             agentModeVM.worktreeBindings(forAgentSessionID: sessionID, tabID: tabID)
                         }
