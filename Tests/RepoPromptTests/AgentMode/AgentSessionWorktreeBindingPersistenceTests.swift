@@ -128,6 +128,55 @@ final class AgentSessionWorktreeBindingPersistenceTests: XCTestCase {
         XCTAssertEqual(sidebar.preferredSessionIDByTabID[tabID], sessionID)
     }
 
+    /// The model's capacity is persisted beside, not instead of, the effective window, and one
+    /// unreadable capacity must not fail a session file on either load path.
+    func testContextCapacitySurvivesFullAndHeaderLoads() async throws {
+        let service = AgentSessionDataService.shared
+        let workspace = makeTemporaryWorkspace()
+        defer { try? FileManager.default.removeItem(at: try XCTUnwrap(workspace.customStoragePath)) }
+        let sessionID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000108"))
+        let capacity = AgentContextWindowCapacity(tokens: 1_000_000, agentRaw: AgentProviderKind.claudeCode.rawValue, modelRaw: "claude-fable-5")
+        let session = AgentSession(
+            id: sessionID,
+            workspaceID: workspace.id,
+            name: "Capacity Session",
+            savedAt: Date(timeIntervalSinceReferenceDate: 40),
+            agentKind: AgentProviderKind.claudeCode.rawValue,
+            agentModel: "claude-fable-5",
+            codexContextWindow: 400_000,
+            contextWindowCapacity: capacity
+        )
+        let fileURL = try await service.saveAgentSession(
+            session,
+            for: workspace,
+            preparation: .alreadyCanonicalTranscript,
+            trustedCanonicalItemCount: 0
+        )
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
+
+        let records: [(label: String, record: Any?, expected: AgentContextWindowCapacity?)] = [
+            ("valid", payload["contextWindowCapacity"], capacity),
+            ("missing", nil, nil),
+            ("null", NSNull(), nil),
+            ("malformed value", "bogus", nil),
+            ("malformed fields", ["tokens": "many"], nil)
+        ]
+        for record in records {
+            payload["contextWindowCapacity"] = record.record
+            try JSONSerialization.data(withJSONObject: payload).write(to: fileURL)
+            let loads = try await [
+                ("header", service.loadAgentSessionStub(from: fileURL)),
+                ("full", service.loadAgentSession(from: fileURL))
+            ]
+            for (route, loaded) in loads {
+                let label = "\(record.label), \(route) load"
+                XCTAssertEqual(loaded.id, sessionID, label)
+                XCTAssertEqual(loaded.codexContextWindow, 400_000, label)
+                XCTAssertEqual(loaded.contextWindowCapacity, record.expected, label)
+            }
+        }
+    }
+
     func testLegacyMetadataIndexRecordsDecodeWithEmptyWorktreeBindingSummaries() throws {
         let payload = """
         {

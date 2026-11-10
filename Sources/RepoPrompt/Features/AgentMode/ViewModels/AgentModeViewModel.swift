@@ -9,6 +9,8 @@ struct AgentContextUsage: Codable, Equatable {
     var modelContextWindow: Int?
     var lastTotalTokens: Int?
     var totalTotalTokens: Int?
+    /// Optional for backward-compatible decoding of older usage snapshots; nil means not pending.
+    var awaitingPostCompactionUsage: Bool? = nil
 }
 
 // MARK: - Agent Mode View Model
@@ -5654,14 +5656,34 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             isStagedForSend: false
         )
 
+        session.contextWindowCapacity = agentSession.contextWindowCapacity
+        // A hydrated conversation has no process yet; its runtime init reports the cap that applies.
+        session.claudeAutoCompactWindowTokens = nil
         codexCoordinator.restoreCodexMetadata(from: agentSession, session: session)
         switch session.selectedAgent {
         case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
-            if session.codexContextUsage?.lastTotalTokens == nil {
-                session.codexContextUsage = Self.contextUsageFromClaudeProviderTokens(
+            session.contextCompactedAt = session.providerTokenUsageByTurn.last(where: { $0.contextCompacted })?.timestamp
+            // A stale flattened count never overrides a persisted compaction fence.
+            if session.codexContextUsage?.lastTotalTokens == nil || session.contextCompactedAt != nil {
+                // The stored window may be an auto-compact cap, so restored rows are bounded only by
+                // the model's verified capacity; the stored window stays the displayed window.
+                let capacity = ClaudeContextUsageEstimator.verifiedCapacity(reported: nil, session: session)
+                let displayedWindow = session.codexContextUsage?.modelContextWindow ?? capacity
+                if var rebuilt = Self.contextUsageFromClaudeProviderTokens(
                     session.providerTokenUsageByTurn,
-                    modelContextWindow: session.codexContextUsage?.modelContextWindow
-                )
+                    modelContextWindow: capacity
+                ) {
+                    rebuilt.modelContextWindow = displayedWindow
+                    session.codexContextUsage = rebuilt
+                } else if !session.providerTokenUsageByTurn.isEmpty, let displayedWindow {
+                    session.codexContextUsage = AgentContextUsage(
+                        modelContextWindow: displayedWindow,
+                        lastTotalTokens: nil,
+                        totalTotalTokens: nil
+                    )
+                } else {
+                    session.codexContextUsage = nil
+                }
             }
         case .codexExec, .openCode, .cursor, .grokBuild:
             break
@@ -15664,6 +15686,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             worktreeMergeOperations: session.worktreeMergeOperations
         )
         codexCoordinator.applyCodexPersistence(from: session, to: &agentSession)
+        agentSession.contextWindowCapacity = session.contextWindowCapacity
         guard let saveToken = makeSaveCommitToken(for: session, workspaceID: workspace.id),
               isSaveCommitTokenCurrent(saveToken)
         else {
@@ -19397,16 +19420,18 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 }
 
             case "usage":
-                if let estimator = nonCodexContextUsageEstimator(for: session.selectedAgent),
-                   estimator.ingestUsageSignal(
-                       promptTokens: result.promptTokens,
-                       completionTokens: result.completionTokens,
-                       contextUsedTokens: result.contextUsedTokens,
-                       modelContextWindow: result.modelContextWindow,
-                       session: session
-                   ) != nil
-                {
-                    shouldUpdateBindings = true
+                if let estimator = nonCodexContextUsageEstimator(for: session.selectedAgent) {
+                    let capacityBeforeReport = session.contextWindowCapacity
+                    if estimator.ingestUsageSignal(
+                        promptTokens: result.promptTokens,
+                        completionTokens: result.completionTokens,
+                        contextUsedTokens: result.contextUsedTokens,
+                        modelContextWindow: result.modelContextWindow,
+                        session: session
+                    ) != nil {
+                        shouldUpdateBindings = true
+                    }
+                    scheduleSaveIfContextCapacityChanged(from: capacityBeforeReport, session: session)
                 }
 
             case "auth_status":
@@ -19497,6 +19522,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
                 // Track per-turn token usage for resumable non-Codex agents.
                 if let estimator = nonCodexContextUsageEstimator(for: session.selectedAgent) {
+                    let capacityBeforeResult = session.contextWindowCapacity
                     _ = estimator.ingestTurnFinalizationSignal(
                         contextUsedTokens: result.contextUsedTokens,
                         modelContextWindow: result.modelContextWindow,
@@ -19508,6 +19534,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                         completionTokens: result.completionTokens,
                         contextUsedTokens: result.contextUsedTokens
                     )
+                    scheduleSaveIfContextCapacityChanged(from: capacityBeforeResult, session: session)
                 }
                 shouldUpdateBindings = true
 
@@ -20987,6 +21014,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         // Detach before clearing the provider session ID so async cleanup cannot
         // restore the old conversation or affect a replacement controller.
         claudeCoordinator.prepareForConversationResetSync(session)
+        // The cap described the process just torn down; the next process's runtime init reports its own.
+        session.claudeAutoCompactWindowTokens = nil
         session.providerSessionID = nil
         session.providerCleanupHandle = nil
         session.providerTokenUsageByTurn.removeAll()
