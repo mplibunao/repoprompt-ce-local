@@ -23,8 +23,19 @@ struct ClaudeNativeTurnCorrelation {
         let executionID: UUID
         /// Host inputs the result answers, in the order the result lists them.
         let inputIDs: [UUID]
+        /// The closed execution's ID when Claude Code started it without a known host input. It's
+        /// the ID `providerTurnID` reported while the execution ran.
+        let providerTurnID: UUID?
         /// Whether an interrupt requested during this execution applies to it.
         let interrupted: Bool
+    }
+
+    /// Whose run a main-thread message's output belongs to.
+    enum OutputOwner {
+        /// An outstanding host input.
+        case host
+        /// A turn Claude Code started itself that hasn't picked up a host input.
+        case provider
     }
 
     /// The first Claude Code version that echoes input UUIDs, when it also reports `lifecycleCapability`.
@@ -72,7 +83,23 @@ struct ClaudeNativeTurnCorrelation {
         return !execution.inputIDs.isDisjoint(with: outstanding)
     }
 
-    /// The current execution's ID when Claude Code started it without a known host input.
+    /// Whether output from the current main-thread message belongs to a turn Claude Code started
+    /// itself. Once that turn picks up a host input, its output follows the host input instead.
+    var ownsProviderOutput: Bool {
+        guard let execution else { return false }
+        return execution.providerInitiated && execution.inputIDs.isEmpty
+    }
+
+    /// The owner of output from the current main-thread message, or nil when no run owns it.
+    var outputOwner: OutputOwner? {
+        if ownsOutput {
+            return .host
+        }
+        return ownsProviderOutput ? .provider : nil
+    }
+
+    /// The current execution's ID when Claude Code started it without a known host input. It stays
+    /// the same if the execution picks up a host input.
     var providerTurnID: UUID? {
         guard let execution, execution.providerInitiated else { return nil }
         return execution.id
@@ -95,11 +122,11 @@ struct ClaudeNativeTurnCorrelation {
         order.append(id)
     }
 
-    /// Records main-thread execution evidence and returns whether the frame's output belongs to
-    /// an outstanding host input. Every frame owns its output while matching is off.
+    /// Records main-thread execution evidence and returns whose run the frame's output belongs to.
+    /// Every frame's output belongs to the host while matching is off.
     @discardableResult
-    mutating func observeActivity(_ payload: [String: Any]) throws -> Bool {
-        guard enabled else { return true }
+    mutating func observeActivity(_ payload: [String: Any]) throws -> OutputOwner? {
+        guard enabled else { return .host }
         let ids = try Self.inputIDs(payload)
         if let ids {
             let known = Set(ids).intersection(outstanding)
@@ -114,7 +141,7 @@ struct ClaudeNativeTurnCorrelation {
                     bindInterruptToObservedExecution()
                 }
                 messageHasHostOwner = false
-                return false
+                return outputOwner
             }
             messageHasHostOwner = true
             if execution == nil {
@@ -127,7 +154,7 @@ struct ClaudeNativeTurnCorrelation {
             execution = Execution(id: UUID(), providerInitiated: true, inputIDs: [])
         }
         bindInterruptToObservedExecution()
-        return ownsOutput
+        return outputOwner
     }
 
     /// Starts tracking an interrupt request. An accepted input isn't execution evidence, so an
@@ -187,6 +214,7 @@ struct ClaudeNativeTurnCorrelation {
             bindInterrupt(to: executionID)
         }
         let interrupted = interrupt?.executionID == executionID
+        let closedProviderTurnID = closesExecution ? providerTurnID : nil
         if closesExecution {
             execution = nil
             messageHasHostOwner = false
@@ -196,7 +224,12 @@ struct ClaudeNativeTurnCorrelation {
             outstanding.remove(id)
         }
         compact()
-        return Resolution(executionID: executionID, inputIDs: matched, interrupted: interrupted)
+        return Resolution(
+            executionID: executionID,
+            inputIDs: matched,
+            providerTurnID: closedProviderTurnID,
+            interrupted: interrupted
+        )
     }
 
     /// Positional settlement: removes and returns the oldest outstanding input.
@@ -207,10 +240,11 @@ struct ClaudeNativeTurnCorrelation {
         return id
     }
 
-    /// For transport retirement only: returns the unresolved inputs in send order and resets
-    /// everything, including matching and any interrupt, for the next process.
+    /// For transport retirement only: returns the unresolved inputs in send order, then the running
+    /// provider execution's ID, and resets everything, including matching and any interrupt, for
+    /// the next process.
     mutating func drain() -> [UUID] {
-        let ids = order[head...].filter { outstanding.contains($0) }
+        let ids = order[head...].filter { outstanding.contains($0) } + (providerTurnID.map { [$0] } ?? [])
         self = Self()
         return ids
     }

@@ -815,6 +815,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         var test_beforeStartRejectedSettlement: (@MainActor () async -> Void)?
         /// Runs as a terminal commit is about to publish its result to the session store.
         var test_beforeTerminalPublication: (@MainActor () async -> Void)?
+        /// Runs once an admitted Claude provider-turn adoption has prepared its epoch, so a test can
+        /// hold the adoption while it owns its startup ticket.
+        var test_afterClaudeProviderEpochPreparation: (@MainActor () async -> Void)?
         /// Runs in an MCP dispatch once its submission is made, before its delivery bookkeeping.
         var test_afterMCPDispatchSubmission: (@MainActor () async -> Void)?
         var test_beforeMCPSelectionCommit: (@MainActor () async -> Void)?
@@ -2201,13 +2204,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private weak var oracleViewModel: OracleViewModel?
 
     private func makeClaudeCoordinatorHostCapabilities() -> ClaudeAgentModeCoordinator.HostCapabilities {
-        ClaudeAgentModeCoordinator.HostCapabilities(
+        var capabilities = ClaudeAgentModeCoordinator.HostCapabilities(
             isSessionCurrent: { [weak self] session in
                 guard let self else { return false }
                 return sessions[session.tabID] === session
             },
             requestUIRefresh: { [weak self] session, urgent in
                 guard let self, sessions[session.tabID] === session else { return }
+                handleObservedMCPStateChange(for: session)
                 requestUIRefresh(tabID: session.tabID, urgent: urgent)
             },
             scheduleSave: { [weak self] session in
@@ -2220,6 +2224,84 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 self?.prependPendingHandoffIfNeeded(text, session: session) ?? text
             }
         )
+        capabilities.adoptProviderTurn = { [weak self] session, listener, turnID in
+            guard let self else { return false }
+            let activationGeneration = session.mcpControlActivationGeneration
+            defer {
+                // The pending flag was raised for this provider work. A start that holds admission
+                // now owns it, and a newer MCP activation raised its own.
+                if sessions[session.tabID] === session,
+                   session.mcpControlActivationGeneration == activationGeneration,
+                   session.unresolvedStartupTicket == nil,
+                   session.mcpPendingStartOwner == nil,
+                   listener.subscription == nil || session.activeRunOwnership != nil
+                {
+                    session.mcpFollowUpRunPending = false
+                    handleObservedMCPStateChange(for: session)
+                }
+                syncComposerUIStateIfCurrent(session)
+            }
+            guard sessions[session.tabID] === session else { return false }
+            return await runService.adoptClaudeProviderTurn(
+                session: session,
+                listener: listener,
+                turnID: turnID
+            ) { ticket in
+                let prepared = await self.prepareClaudeProviderEpoch(session: session, ticket: ticket)
+                #if DEBUG
+                    await self.test_afterClaudeProviderEpochPreparation?()
+                #endif
+                return prepared
+            }
+        }
+        capabilities.cleanupProviderRun = { [weak self] session, runID in
+            await self?.cleanupMCPRunRoutingIfPresent(
+                boundSessionID: session.activeAgentSessionID,
+                liveSession: session,
+                explicitRunID: runID,
+                reason: "claudeNative.providerInitiated"
+            )
+        }
+        return capabilities
+    }
+
+    /// Prepares the MCP epoch an adopted provider turn runs under: a related follow-up of the
+    /// session's previous run. Returns false unless that epoch is the one the store and the
+    /// session's MCP context hold, and `ticket` still owns the session.
+    private func prepareClaudeProviderEpoch(session: TabSession, ticket: AgentRunStartupTicket) async -> Bool {
+        guard startupTicketOwnsSession(ticket, session: session), !Task.isCancelled else { return false }
+        guard let original = session.mcpControlContext else { return true }
+        let activationGeneration = session.mcpControlActivationGeneration
+        if original.preparedEpoch == nil {
+            do {
+                try await withMCPRunEpochTransition(sessionID: original.sessionID, kind: .relatedFollowUp) {
+                    await self.prepareMCPWaitTrackingForRunStart(session: session, startupTicket: ticket)
+                    guard session.mcpControlContext?.preparedEpoch != nil else { throw CancellationError() }
+                }
+            } catch {
+                return false
+            }
+        }
+        guard !Task.isCancelled,
+              startupTicketOwnsSession(ticket, session: session),
+              session.mcpControlActivationGeneration == activationGeneration,
+              let context = session.mcpControlContext,
+              context.activationID == original.activationID,
+              let prepared = context.preparedEpoch,
+              context.currentEpoch == prepared,
+              mcpControlledSession(sessionID: context.sessionID) === session
+        else { return false }
+        let storeEpoch = await AgentRunSessionStore.currentEpoch(for: context.registration)
+        let snapshot = await AgentRunSessionStore.snapshot(for: context.registration)
+        return !Task.isCancelled
+            && startupTicketOwnsSession(ticket, session: session)
+            && session.mcpControlActivationGeneration == activationGeneration
+            && session.mcpControlContext?.registration == context.registration
+            && session.mcpControlContext?.preparedEpoch == prepared
+            && storeEpoch == prepared
+            && snapshot?.status.isTerminal != true
+            && prepared.activationID == context.activationID
+            && prepared.registrationGeneration == context.registration.generation
     }
 
     init(
@@ -3095,6 +3177,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 },
                 flushPendingAssistantDelta: { [weak self] session in
                     self?.flushPendingAssistantDelta(session)
+                },
+                beginClaudeProviderOutputSegment: { [weak self] session in
+                    self?.flushPendingAssistantDelta(session)
+                    self?.endActiveAssistantSegment(session)
                 },
                 clearPendingAssistantDelta: { [weak self] session in
                     self?.clearPendingAssistantDelta(session)
@@ -4935,6 +5021,22 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
         }
 
+        // The Claude process belongs to the conversation of the binding being replaced, and its
+        // listener's callbacks must not act on the new binding.
+        if previousSessionID != nil, session.claudeController != nil {
+            let retiredRunID = session.runID
+            claudeCoordinator.prepareForConversationResetSync(session)
+            if let retiredRunID {
+                Task {
+                    await self.cleanupMCPRunRoutingIfPresent(
+                        boundSessionID: previousSessionID,
+                        liveSession: nil,
+                        explicitRunID: retiredRunID,
+                        reason: "claudeNative.rebind"
+                    )
+                }
+            }
+        }
         if invalidateAsyncWork {
             cancelPersistedLoad(for: session)
             removePendingUIRefresh(for: session.tabID)
@@ -6948,8 +7050,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             && Self.mcpRunningMaskHasExpired(since: session.mcpFollowUpRunPendingUpdatedAt, now: now)
         let supersedingMaskIsStale = session.pendingSupersedingTurnCompletions > 0
             && Self.mcpRunningMaskHasExpired(since: session.pendingSupersedingTurnCompletionsUpdatedAt, now: now)
+        // Provider work raises the follow-up mask until its run publishes, however long it waits.
         guard followUpMaskIsStale || supersedingMaskIsStale,
-              Self.sessionHoldsNoQueuedRunWork(session)
+              Self.sessionHoldsNoQueuedRunWork(session),
+              !claudeCoordinator.hasPendingProviderWork(for: session)
         else { return }
         Self.steeringDebugLog("[AgentRunSteeringWake] clearing stale MCP running mask sessionID=\(sessionID) tab=\(session.tabID) runState=\(session.runState.rawValue) settled=\(settled.status.rawValue) followUp=\(session.mcpFollowUpRunPending) superseding=\(session.pendingSupersedingTurnCompletions)")
         // Each mask goes only when it is stale itself: an expired superseding mask must not take a
@@ -7008,6 +7112,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return false
         }
         guard session.mcpPendingStartOwner == nil else { return true }
+        // Claude Code started a turn that waits for adoption and holds no ticket yet. A start
+        // admitted now takes that turn over instead of competing with it.
+        if claudeCoordinator.hasPendingProviderAdoption(for: session) {
+            return false
+        }
         let flagExpired = Self.mcpRunningMaskHasExpired(since: session.mcpFollowUpRunPendingUpdatedAt, now: Date())
         return !(flagExpired && Self.sessionHoldsNoQueuedRunWork(session))
     }
@@ -10284,6 +10393,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         case .codex: session.codexConversationID
         }
         if case .codex = runtime, codexCoordinator.hasCodexWorkInFlight(for: session) {
+            return .providerBusy
+        }
+        // Work Claude Code started by itself is busy from its first event until its run publishes.
+        if case .claude = runtime, claudeCoordinator.hasPendingProviderWork(for: session) {
             return .providerBusy
         }
         if storedConversationID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
@@ -16909,6 +17022,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         guard let itemID,
               let index = session.items.firstIndex(where: { $0.id == itemID }),
               session.removeItem(at: index) != nil else { return }
+        // A terminal anchored to a message that was never sent belongs to no row.
+        if let terminalAnchor = session.claudeTerminalAnchor, terminalAnchor.anchor == .exact(itemID) {
+            session.claudeTerminalAnchor = (terminalAnchor.ownership, .none)
+        }
         Self.steeringDebugLog(
             "[AgentRunSteeringWake] removed unconfirmed optimistic item tab=\(tabID) itemID=\(itemID) reason=\(reason)"
         )
@@ -18751,6 +18868,20 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             )
             return .preDispatchRejected(message: message)
         }
+        // A Claude start reserves the session's event inbox before it first suspends, so a turn
+        // Claude Code started by itself that waits for adoption becomes this run's predecessor
+        // instead of a competing run. The reservation goes to the run service or back to the
+        // listener, which then offers the turn for adoption again.
+        var preparedClaudeEvents: ClaudeAttemptEventReservation?
+        var claudeEventsTransferred = false
+        defer {
+            if !claudeEventsTransferred, let preparedClaudeEvents {
+                preparedClaudeEvents.listener.release(preparedClaudeEvents.subscription)
+            }
+        }
+        if session.selectedAgent.usesClaudeNativeRuntime, session.claudeController != nil {
+            preparedClaudeEvents = claudeCoordinator.reserveEvents(for: session)
+        }
         // The previous run's terminal commit still owns the session while its result publishes: an
         // epoch or attempt begun now would overtake that publication.
         await session.runLifecycle.waitForTerminalCommitCompletion()
@@ -18862,6 +18993,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 dispatchTicket: context.dispatchTicket
             )
         }
+        claudeEventsTransferred = true
         return await runService.startRun(
             tabID: tabID,
             session: session,
@@ -18869,7 +19001,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             initialMessageForRun: initialMessageForRun,
             attachments: attachments,
             codexFallbackContext: preparedCodexFallbackContext,
-            submissionID: submissionID
+            submissionID: submissionID,
+            preparedClaudeEvents: preparedClaudeEvents
         )
     }
 
@@ -19213,14 +19346,24 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 // very last item if system events (e.g. rate-limit telemetry) were
                 // interleaved, which can prematurely finalize the streaming segment.
                 // Walk past system items but stop at tool calls, user messages, etc.
+                // A Claude attempt never replaces a row older than its own output, so a turn
+                // Claude Code started by itself can't overwrite the previous answer.
+                let replaceableFrom = session.claudeProviderOutputBoundary.flatMap {
+                    $0.attemptID == runAttemptID ? $0.startSequenceIndex : nil
+                }
+                let isReplaceable: (Int) -> Bool = { index in
+                    replaceableFrom.map { session.items[index].sequenceIndex >= $0 } ?? true
+                }
                 let tailAssistantIndex: Int? = {
-                    if let streamingAssistantIndex = self.resumableStreamingAssistantIndexAcrossTrailingUserInterjections(in: session) {
+                    if let streamingAssistantIndex = self.resumableStreamingAssistantIndexAcrossTrailingUserInterjections(in: session),
+                       isReplaceable(streamingAssistantIndex)
+                    {
                         return streamingAssistantIndex
                     }
                     for i in session.items.indices.reversed() {
                         switch session.items[i].kind {
                         case .assistant:
-                            return i
+                            return isReplaceable(i) ? i : nil
                         case .system:
                             continue
                         default:
