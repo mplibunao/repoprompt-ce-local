@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "RepoPromptCEDebug": {
+      "type": "stdio",
+      "command": "${HOME}/RepoPrompt/repoprompt_ce_cli_debug",
+      "args": []
+    }
+  }
+}
