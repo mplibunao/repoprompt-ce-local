@@ -374,6 +374,254 @@ final class OracleTransportActivityPropagationTests: XCTestCase {
         XCTAssertEqual(OracleViewModel.lifecycleActivityKind(for: reasoningOutput), .streamActivity)
     }
 
+    // MARK: - Claude stream-json completion
+
+    func testClaudeStreamJSONPreservesOrderedTopLevelText() throws {
+        let firstBlock = String(repeating: "First section. ", count: 2000) + "\n```swift\nfunc handl"
+        let textDelta: [String: Any] = [
+            "type": "stream_event",
+            "event": ["type": "content_block_delta", "delta": ["type": "text_delta", "text": "First section. "]]
+        ]
+        let terminal: [String: Any] = [
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "Done.",
+            "usage": ["input_tokens": 11, "output_tokens": 7],
+            "total_cost_usd": 0.12
+        ]
+        let output = try [
+            "[SandboxDebug] Preparing sandbox",
+            claudeEventLine(["type": "system", "subtype": "init"]),
+            claudeEventLine(textDelta),
+            claudeAssistantLine([
+                ["type": "thinking", "thinking": "private reasoning"],
+                ["type": "text", "text": firstBlock],
+                ["type": "tool_use", "id": "tool_1", "text": "not answer text"]
+            ], stopReason: "max_tokens"),
+            claudeEventLine(["type": "user", "message": ["role": "user", "content": "continue"]]),
+            claudeAssistantLine([["type": "text", "text": "subagent text"]], parentToolUseID: "child"),
+            "[SandboxDebug] Sandbox ready",
+            claudeEventLine(textDelta),
+            claudeAssistantLine([
+                ["type": "text", "text": "eRequest() {}\n"],
+                ["type": "text", "text": "```\n\n"]
+            ]),
+            claudeAssistantLine([["type": "text", "text": "  Done.  "]]),
+            claudeEventLine(terminal)
+        ].joined(separator: "\n")
+
+        let completion = try ClaudeCodeProvider.parseStreamJSONCompletionPayload(Data(output.utf8))
+
+        XCTAssertEqual(completion.text, firstBlock + "eRequest() {}\n" + "```\n\n" + "  Done.  ")
+        XCTAssertEqual(completion.promptTokens, 11)
+        XCTAssertEqual(completion.completionTokens, 7)
+        XCTAssertEqual(try XCTUnwrap(completion.cost), 0.12, accuracy: 1e-9)
+    }
+
+    func testClaudeStreamJSONFallsBackToTerminalResultWithoutAnswerText() throws {
+        let terminal: [String: Any] = [
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "Done",
+            "usage": ["input_tokens": 3, "output_tokens": 2]
+        ]
+        let output = try [
+            claudeEventLine(["type": "system", "subtype": "init"]),
+            claudeAssistantLine([["type": "thinking", "thinking": "only thinking"]]),
+            claudeAssistantLine([["type": "text", "text": "subagent text"]], parentToolUseID: "child"),
+            claudeEventLine(terminal)
+        ].joined(separator: "\n")
+
+        let completion = try ClaudeCodeProvider.parseStreamJSONCompletionPayload(Data(output.utf8))
+
+        XCTAssertEqual(completion.text, "Done")
+        XCTAssertEqual(completion.promptTokens, 3)
+        XCTAssertEqual(completion.completionTokens, 2)
+    }
+
+    func testClaudeStreamJSONRejectsMalformedOrMissingTerminal() throws {
+        let assistant = try claudeAssistantLine([["type": "text", "text": "PRIVATE ANSWER TEXT"]])
+        let success = #"{"type":"result","subtype":"success","is_error":false,"result":"Done"}"#
+        let truncatedAssistant = #"{"type":"assistant","message":{"content":[{"type":"text","text":"PRIVATE ANSWER TEXT"#
+        let truncatedDelta = #"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"#
+        let cases: [(label: String, output: String, detail: String)] = [
+            (
+                "missing terminal",
+                assistant,
+                "Claude CLI returned stream JSON without completion payload"
+            ),
+            (
+                "diagnostics only",
+                "[SandboxDebug] no events",
+                "Claude CLI returned no stream JSON events"
+            ),
+            (
+                "malformed middle line",
+                [assistant, truncatedAssistant, success].joined(separator: "\n"),
+                "Claude CLI returned malformed stream JSON (line 2)"
+            ),
+            (
+                "malformed stream_event line",
+                [assistant, truncatedDelta, success].joined(separator: "\n"),
+                "Claude CLI returned malformed stream JSON (line 2)"
+            ),
+            (
+                "truncated line after the terminal",
+                [assistant, success, "{"].joined(separator: "\n"),
+                "Claude CLI returned malformed stream JSON (line 3)"
+            )
+        ]
+
+        for row in cases {
+            XCTAssertEqual(claudeStreamJSONFailureDetail(row.output), row.detail, row.label)
+        }
+    }
+
+    func testClaudeStreamJSONRejectsTerminalErrors() throws {
+        let assistant = try claudeAssistantLine([["type": "text", "text": "Partial answer"]])
+        let cases: [(label: String, terminal: String, detail: String)] = [
+            (
+                "error event",
+                #"{"type":"error","message":"Event failed"}"#,
+                "Event failed"
+            ),
+            (
+                "error event type in another case",
+                #"{"type":"Error","message":"Mixed case"}"#,
+                "Mixed case"
+            ),
+            (
+                "is_error result",
+                #"{"type":"result","subtype":"success","is_error":true,"result":"API Error: overloaded"}"#,
+                "API Error: overloaded"
+            ),
+            (
+                "error subtype",
+                #"{"type":"result","subtype":"error_max_turns","result":"Reached max turns"}"#,
+                "Reached max turns"
+            ),
+            (
+                "error subtype in another case",
+                #"{"type":"result","subtype":"ERROR_DURING_EXECUTION","result":"Aborted"}"#,
+                "Aborted"
+            ),
+            (
+                "non-empty errors array",
+                #"{"type":"result","subtype":"success","is_error":false,"errors":["First failure","Second"]}"#,
+                "First failure"
+            ),
+            (
+                "error without usable text",
+                #"{"type":"result","is_error":true}"#,
+                "Claude CLI returned an error"
+            )
+        ]
+
+        for row in cases {
+            XCTAssertEqual(
+                claudeStreamJSONFailureDetail([assistant, row.terminal].joined(separator: "\n")),
+                row.detail,
+                row.label
+            )
+        }
+    }
+
+    func testClaudeStreamJSONExtractsTerminalFailureDetail() throws {
+        let assistant = try claudeAssistantLine([["type": "text", "text": "Partial answer"]])
+        let abortedTerminal = #"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Request was aborted by user"],"usage":{"input_tokens":11,"output_tokens":0}}"#
+        let cases: [(label: String, stdout: String, detail: String?)] = [
+            (
+                "structured terminal error after answer text",
+                [assistant, abortedTerminal].joined(separator: "\n"),
+                "Request was aborted by user"
+            ),
+            (
+                "error entry object",
+                #"{"type":"result","is_error":true,"errors":[{"message":"Nested failure"}]}"#,
+                "Nested failure"
+            ),
+            (
+                "error event text is trimmed",
+                #"{"type":"error","error":"  Upstream failed  "}"#,
+                "Upstream failed"
+            ),
+            (
+                "launch diagnostics before any JSON",
+                "[SandboxDebug] starting\nError: unknown option '--include-partial-messages'\n\n",
+                "Error: unknown option '--include-partial-messages'"
+            ),
+            (
+                "events without a terminal, then a crash line",
+                [assistant, "Segmentation fault: 11"].joined(separator: "\n"),
+                "Segmentation fault: 11"
+            ),
+            (
+                "truncated line before a structured error",
+                ["{", abortedTerminal].joined(separator: "\n"),
+                "Request was aborted by user"
+            ),
+            (
+                "truncated line after a structured error",
+                [abortedTerminal, "{"].joined(separator: "\n"),
+                "Request was aborted by user"
+            ),
+            (
+                "successful terminal from a failing process",
+                [assistant, #"{"type":"result","subtype":"success","result":"Done"}"#].joined(separator: "\n"),
+                nil
+            ),
+            (
+                "error terminal without usable text",
+                #"{"type":"result","is_error":true}"#,
+                nil
+            ),
+            (
+                "events without a terminal or a plain line",
+                assistant,
+                nil
+            )
+        ]
+
+        for row in cases {
+            XCTAssertEqual(
+                ClaudeCodeProvider.extractStreamJSONErrorDetail(from: Data(row.stdout.utf8)),
+                row.detail,
+                row.label
+            )
+        }
+    }
+
+    private func claudeEventLine(_ event: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func claudeAssistantLine(
+        _ blocks: [[String: Any]],
+        parentToolUseID: Any = NSNull(),
+        stopReason: String = "end_turn"
+    ) throws -> String {
+        try claudeEventLine([
+            "type": "assistant",
+            "parent_tool_use_id": parentToolUseID,
+            "message": ["id": "msg_1", "stop_reason": stopReason, "content": blocks]
+        ])
+    }
+
+    /// The `invalidResponse` detail the codec throws for `output`, or nil when it parses.
+    private func claudeStreamJSONFailureDetail(_ output: String) -> String? {
+        do {
+            _ = try ClaudeCodeProvider.parseStreamJSONCompletionPayload(Data(output.utf8))
+            return nil
+        } catch let AIProviderError.invalidResponse(detail) {
+            return detail
+        } catch {
+            return "unexpected error: \(error)"
+        }
+    }
+
     @MainActor
     private func makeOracleViewModel() -> OracleViewModel {
         let keyManager = KeyManager(

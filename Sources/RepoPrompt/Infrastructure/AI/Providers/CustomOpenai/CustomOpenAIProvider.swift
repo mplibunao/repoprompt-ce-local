@@ -529,6 +529,7 @@ class CustomOpenAIProvider: AIProvider, AIModelGetter {
                 var currentDelay: TimeInterval = 1.0
                 let maxAttempts = 3
                 let maxDelay: TimeInterval = 10.0
+                var transportActivity = ProviderTransportActivityThrottle()
 
                 for attempt in 1 ... maxAttempts {
                     if Task.isCancelled {
@@ -567,6 +568,12 @@ class CustomOpenAIProvider: AIProvider, AIModelGetter {
                         for try await line in bytes.lines {
                             if Task.isCancelled {
                                 throw CancellationError()
+                            }
+
+                            // Keepalive comments and content-less deltas are dropped below, but any
+                            // received line shows the response is alive.
+                            if transportActivity.shouldEmit(at: .now) {
+                                continuation.yield(ProviderTransportActivity.result())
                             }
 
                             // Check for SSE error events
