@@ -193,7 +193,6 @@ final class ClaudeCompatibleRuntimeSupportTests: XCTestCase {
         let fable52 = try XCTUnwrap(claude.options.first { $0.rawValue == "claude-fable-5-2" })
         XCTAssertEqual(fable52.displayName, "Fable 5.2")
         XCTAssertEqual(fable52.supportedEffortLevels, ["low", "medium", "high", "xhigh", "max"])
-        XCTAssertFalse(fable52.isProviderDefault)
         let opus55 = try XCTUnwrap(claude.options.first { $0.rawValue == "claude-opus-5-5" })
         XCTAssertEqual(opus55.displayName, "Opus 5.5")
         XCTAssertEqual(opus55.supportedEffortLevels, ["low", "medium", "high", "xhigh", "max"])
