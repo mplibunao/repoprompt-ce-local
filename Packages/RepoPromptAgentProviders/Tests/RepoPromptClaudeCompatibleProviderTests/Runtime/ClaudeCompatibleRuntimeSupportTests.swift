@@ -168,6 +168,7 @@ final class ClaudeCompatibleRuntimeSupportTests: XCTestCase {
         XCTAssertEqual(claude.options.map(\.rawValue), [
             "default",
             "fable",
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-fable-5",
             "claude-mythos-5-1",
@@ -189,6 +190,9 @@ final class ClaudeCompatibleRuntimeSupportTests: XCTestCase {
         ])
         XCTAssertTrue(claude.options.contains { $0.rawValue == "claude-fable-5" && $0.supportedEffortLevels.contains("xhigh") })
         XCTAssertTrue(claude.options.contains { $0.rawValue == "opus[1m]" && $0.supportedEffortLevels.contains("xhigh") })
+        let fable52 = try XCTUnwrap(claude.options.first { $0.rawValue == "claude-fable-5-2" })
+        XCTAssertEqual(fable52.displayName, "Fable 5.2")
+        XCTAssertEqual(fable52.supportedEffortLevels, ["low", "medium", "high", "xhigh", "max"])
         let opus55 = try XCTUnwrap(claude.options.first { $0.rawValue == "claude-opus-5-5" })
         XCTAssertEqual(opus55.displayName, "Opus 5.5")
         XCTAssertEqual(opus55.supportedEffortLevels, ["low", "medium", "high", "xhigh", "max"])
@@ -244,7 +248,7 @@ final class ClaudeCompatibleRuntimeSupportTests: XCTestCase {
         )
         XCTAssertFalse(expandedClaude.options.contains { $0.rawValue == "claude-opus-4-8[1m]" })
         XCTAssertFalse(expandedClaude.options.contains { $0.rawValue.hasPrefix("claude-opus-4-8[1m]:") })
-        for raw in ["claude-sonnet-5-5", "claude-mythos-5-1"] {
+        for raw in ["claude-fable-5-2", "claude-sonnet-5-5", "claude-mythos-5-1"] {
             XCTAssertEqual(
                 expandedClaude.options.filter { $0.rawValue.hasPrefix("\(raw):") }.map(\.rawValue),
                 ["low", "medium", "high", "xhigh", "max"].map { "\(raw):\($0)" },

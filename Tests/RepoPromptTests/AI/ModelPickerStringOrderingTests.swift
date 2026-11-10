@@ -105,8 +105,8 @@ final class ModelPickerStringOrderingTests: XCTestCase {
         )
         let fableRunStart = try XCTUnwrap(groupRaws.firstIndex(of: "fable"))
         XCTAssertEqual(
-            Array(groupRaws[fableRunStart...].prefix(5)),
-            ["fable", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "opus[1m]"]
+            Array(groupRaws[fableRunStart...].prefix(6)),
+            ["fable", "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "opus[1m]"]
         )
         for (raw, displayName) in [("claude-sonnet-5-5", "Sonnet 5.5"), ("claude-mythos-5-1", "Mythos 5.1 (Restricted)")] {
             let newGroup = try XCTUnwrap(menu.groups.first { $0.baseModelRaw == raw }, raw)

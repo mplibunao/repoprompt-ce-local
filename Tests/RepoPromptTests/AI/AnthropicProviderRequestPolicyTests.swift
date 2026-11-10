@@ -10,6 +10,7 @@ final class AnthropicProviderRequestPolicyTests: XCTestCase {
         .claudeSonnet5,
         .claudeOpus55,
         .claudeOpus5,
+        .claudeFable52,
         .claudeFable51,
         .claudeMythos51,
         // Saved custom names: legacy thinking suffixes, mixed case, and surrounding whitespace.
