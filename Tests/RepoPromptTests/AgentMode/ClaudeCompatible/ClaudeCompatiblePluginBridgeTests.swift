@@ -39,7 +39,7 @@ final class ClaudeCompatiblePluginBridgeTests: XCTestCase {
         XCTAssertTrue(AgentModel.modelsForAgent(.claudeCode).contains(.claudeOpus55))
     }
 
-    func testClaudeCodeCatalogExposesSonnet55AndRestrictedMythos51() throws {
+    func testClaudeCodeCatalogKeepsAgentAndChatPinnedModelsConsistent() throws {
         let availability = AgentModelCatalog.AvailabilityContext(
             claudeCodeAvailable: true,
             codexAvailable: false,
@@ -51,7 +51,12 @@ final class ClaudeCompatiblePluginBridgeTests: XCTestCase {
 
         // The provider package (through Agent Mode options) and the chat picker must offer the same
         // effort variants; a mismatch lets one surface accept a selection the other rejects.
-        for (model, displayName) in [(AgentModel.claudeSonnet55, "Sonnet 5.5"), (.claudeMythos51, "Mythos 5.1 (Restricted)")] {
+        for (model, displayName) in [
+            (AgentModel.claudeFable52, "Fable 5.2"),
+            (.claudeFable51, "Fable 5.1"),
+            (.claudeSonnet55, "Sonnet 5.5"),
+            (.claudeMythos51, "Mythos 5.1 (Restricted)")
+        ] {
             let raw = model.rawValue
             let expectedRaws = expectedEfforts.map { "\(raw):\($0)" }
             XCTAssertEqual(agentOptions.filter { $0.rawValue.hasPrefix("\(raw):") }.map(\.rawValue), expectedRaws, raw)
@@ -69,6 +74,7 @@ final class ClaudeCompatiblePluginBridgeTests: XCTestCase {
             XCTAssertNil(ClaudeCodeAIModelCatalog.validatedModel(specifier: "\(raw):ultra"))
         }
 
+        XCTAssertEqual(AgentModel.claudeFable52.discoveryTags, AgentModel.claudeFable51.discoveryTags)
         XCTAssertEqual(AgentModel.claudeSonnet55.discoveryTags, [.balanced, .engineering, .extendedContext])
         XCTAssertEqual(AgentModel.claudeSonnet5.discoveryTags, [])
         // The restricted tier is selectable but never a recommendation target or provider default.

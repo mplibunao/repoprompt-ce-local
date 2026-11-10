@@ -151,6 +151,7 @@ public enum AIModel: Equatable, Hashable {
     case claudeSonnet5
     case claudeOpus55
     case claudeOpus5
+    case claudeFable52
     case claudeFable51
     case claudeMythos51
     case claude45Haiku
@@ -192,6 +193,7 @@ public enum AIModel: Equatable, Hashable {
     case openrouterGpt6Luna
     case openrouterClaudeSonnet55
     case openrouterClaudeOpus55
+    case openrouterClaudeFable52
     case openrouterClaudeFable51
 
     case openrouterGeminiPro25
@@ -403,6 +405,7 @@ public enum AIModel: Equatable, Hashable {
         ModelInfo(model: .claudeSonnet5, rawValue: "claude-sonnet-5", actualName: nil, displayName: "Claude Sonnet 5", provider: ProviderIndex.anthropic),
         ModelInfo(model: .claudeOpus55, rawValue: "claude-opus-5-5", actualName: nil, displayName: "Claude Opus 5.5", provider: ProviderIndex.anthropic),
         ModelInfo(model: .claudeOpus5, rawValue: "claude-opus-5", actualName: nil, displayName: "Claude Opus 5", provider: ProviderIndex.anthropic),
+        ModelInfo(model: .claudeFable52, rawValue: "claude-fable-5-2", actualName: nil, displayName: "Claude Fable 5.2", provider: ProviderIndex.anthropic),
         ModelInfo(model: .claudeFable51, rawValue: "claude-fable-5-1", actualName: nil, displayName: "Claude Fable 5.1", provider: ProviderIndex.anthropic),
         // Restricted-access tier: listed for entitled accounts and excluded from automatic selection.
         ModelInfo(model: .claudeMythos51, rawValue: "claude-mythos-5-1", actualName: nil, displayName: "Claude Mythos 5.1 (Restricted)", provider: ProviderIndex.anthropic),
@@ -439,6 +442,7 @@ public enum AIModel: Equatable, Hashable {
         ModelInfo(model: .openrouterGpt6Luna, rawValue: "openai/gpt-6-luna", actualName: nil, displayName: "oRouter/GPT-6 Luna", provider: ProviderIndex.openRouter),
         ModelInfo(model: .openrouterClaudeSonnet55, rawValue: "anthropic/claude-sonnet-5.5", actualName: nil, displayName: "oRouter/Claude Sonnet 5.5", provider: ProviderIndex.openRouter),
         ModelInfo(model: .openrouterClaudeOpus55, rawValue: "anthropic/claude-opus-5.5", actualName: nil, displayName: "oRouter/Claude Opus 5.5", provider: ProviderIndex.openRouter),
+        ModelInfo(model: .openrouterClaudeFable52, rawValue: "anthropic/claude-fable-5.2", actualName: nil, displayName: "oRouter/Claude Fable 5.2", provider: ProviderIndex.openRouter),
         ModelInfo(model: .openrouterClaudeFable51, rawValue: "anthropic/claude-fable-5.1", actualName: nil, displayName: "oRouter/Claude Fable 5.1", provider: ProviderIndex.openRouter),
 
         // **New DeepSeek Models**
@@ -2304,6 +2308,7 @@ public enum AIModel: Equatable, Hashable {
         case claudeSonnet5
         case claudeOpus55
         case claudeOpus5
+        case claudeFable52
         case claudeFable51
         case claudeMythos51
         case claude45Haiku
@@ -2336,6 +2341,7 @@ public enum AIModel: Equatable, Hashable {
         case openrouterGpt6Luna
         case openrouterClaudeSonnet55
         case openrouterClaudeOpus55
+        case openrouterClaudeFable52
         case openrouterClaudeFable51
         case openrouterGeminiPro25
         case fireworksDeepseekV3p1Terminus
@@ -2564,6 +2570,8 @@ public enum AIModel: Equatable, Hashable {
             .staticCase(.claudeOpus55)
         case .claudeOpus5:
             .staticCase(.claudeOpus5)
+        case .claudeFable52:
+            .staticCase(.claudeFable52)
         case .claudeFable51:
             .staticCase(.claudeFable51)
         case .claudeMythos51:
@@ -2628,6 +2636,8 @@ public enum AIModel: Equatable, Hashable {
             .staticCase(.openrouterClaudeSonnet55)
         case .openrouterClaudeOpus55:
             .staticCase(.openrouterClaudeOpus55)
+        case .openrouterClaudeFable52:
+            .staticCase(.openrouterClaudeFable52)
         case .openrouterClaudeFable51:
             .staticCase(.openrouterClaudeFable51)
         case .openrouterGeminiPro25:

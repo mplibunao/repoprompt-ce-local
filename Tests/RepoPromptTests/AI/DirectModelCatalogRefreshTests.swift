@@ -161,6 +161,7 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
             (.claudeSonnet5, "claude-sonnet-5", "Claude Sonnet 5"),
             (.claudeOpus55, "claude-opus-5-5", "Claude Opus 5.5"),
             (.claudeOpus5, "claude-opus-5", "Claude Opus 5"),
+            (.claudeFable52, "claude-fable-5-2", "Claude Fable 5.2"),
             (.claudeFable51, "claude-fable-5-1", "Claude Fable 5.1"),
             (.claudeMythos51, "claude-mythos-5-1", "Claude Mythos 5.1 (Restricted)")
         ]
@@ -187,6 +188,7 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
             (.openrouterGpt6Luna, "openai/gpt-6-luna", "oRouter/GPT-6 Luna"),
             (.openrouterClaudeSonnet55, "anthropic/claude-sonnet-5.5", "oRouter/Claude Sonnet 5.5"),
             (.openrouterClaudeOpus55, "anthropic/claude-opus-5.5", "oRouter/Claude Opus 5.5"),
+            (.openrouterClaudeFable52, "anthropic/claude-fable-5.2", "oRouter/Claude Fable 5.2"),
             (.openrouterClaudeFable51, "anthropic/claude-fable-5.1", "oRouter/Claude Fable 5.1")
         ]
         let openRouterModels = AIModel.modelsForProvider(.openRouter)
@@ -223,13 +225,13 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         .codexCliGpt54Low, .codexCliGpt54Medium, .codexCliGpt54High, .codexCliGpt54XHigh, .codexCliGpt5Mini,
         .codexCliGpt5CodexLow, .codexCliGpt5CodexMedium, .codexCliGpt5CodexHigh, .codexCliGpt5CodexXHigh, .codexCliGpt5CodexMini,
         .gpt4o, .o3, .o1Preview, .o1Mini, .gpt5Pro, .gpt5ProXHigh, .gpt54Pro, .gpt54ProXHigh, .o3Low, .o3High,
-        .claudeSonnet55, .claudeSonnet5, .claudeOpus55, .claudeOpus5, .claudeFable51, .claudeMythos51,
+        .claudeSonnet55, .claudeSonnet5, .claudeOpus55, .claudeOpus5, .claudeFable52, .claudeFable51, .claudeMythos51,
         .claude45Haiku, .claude4Sonnet, .claude4SonnetThinking, .claude4SonnetThinkingMax, .claude4Opus, .claude4OpusThinking,
         .geminiFlashLatest, .gemini2flashlite, .geminiProLatest, .geminiFlash2, .geminiFlash25, .geminiFlash25LitePreview,
         .geminiFlashThinking, .geminiPro25, .gemini3p1ProPreview, .gemini3FlashPreview,
         .deepseekChat, .deepseekReasoner, .ollama,
         .openrouterDeepseekChat, .openrouterGpt5, .openrouterGeminiFlash, .openrouterGeminiPro, .openrouterClaude4Sonnet, .openrouterClaude4Opus,
-        .openrouterGpt61Sol, .openrouterGpt6Astra, .openrouterGpt6Luna, .openrouterClaudeSonnet55, .openrouterClaudeOpus55, .openrouterClaudeFable51,
+        .openrouterGpt61Sol, .openrouterGpt6Astra, .openrouterGpt6Luna, .openrouterClaudeSonnet55, .openrouterClaudeOpus55, .openrouterClaudeFable52, .openrouterClaudeFable51,
         .openrouterGeminiPro25,
         .fireworksDeepseekV3p1Terminus, .fireworksGLM46, .fireworksKimiK2Instruct0905, .fireworksGptOss120b,
         .fireworksQwen3235bA22bThinking2507, .fireworksQwen3Coder480bA35bInstruct, .fireworksQwen3235bA22bInstruct2507,
@@ -259,13 +261,13 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
              .codexCliGpt54Low, .codexCliGpt54Medium, .codexCliGpt54High, .codexCliGpt54XHigh, .codexCliGpt5Mini,
              .codexCliGpt5CodexLow, .codexCliGpt5CodexMedium, .codexCliGpt5CodexHigh, .codexCliGpt5CodexXHigh, .codexCliGpt5CodexMini,
              .gpt4o, .o3, .o1Preview, .o1Mini, .gpt5Pro, .gpt5ProXHigh, .gpt54Pro, .gpt54ProXHigh, .o3Low, .o3High,
-             .claudeSonnet55, .claudeSonnet5, .claudeOpus55, .claudeOpus5, .claudeFable51, .claudeMythos51,
+             .claudeSonnet55, .claudeSonnet5, .claudeOpus55, .claudeOpus5, .claudeFable52, .claudeFable51, .claudeMythos51,
              .claude45Haiku, .claude4Sonnet, .claude4SonnetThinking, .claude4SonnetThinkingMax, .claude4Opus, .claude4OpusThinking,
              .geminiFlashLatest, .gemini2flashlite, .geminiProLatest, .geminiFlash2, .geminiFlash25, .geminiFlash25LitePreview,
              .geminiFlashThinking, .geminiPro25, .gemini3p1ProPreview, .gemini3FlashPreview,
              .deepseekChat, .deepseekReasoner, .ollama,
              .openrouterDeepseekChat, .openrouterGpt5, .openrouterGeminiFlash, .openrouterGeminiPro, .openrouterClaude4Sonnet, .openrouterClaude4Opus,
-             .openrouterGpt61Sol, .openrouterGpt6Astra, .openrouterGpt6Luna, .openrouterClaudeSonnet55, .openrouterClaudeOpus55, .openrouterClaudeFable51,
+             .openrouterGpt61Sol, .openrouterGpt6Astra, .openrouterGpt6Luna, .openrouterClaudeSonnet55, .openrouterClaudeOpus55, .openrouterClaudeFable52, .openrouterClaudeFable51,
              .openrouterGeminiPro25,
              .fireworksDeepseekV3p1Terminus, .fireworksGLM46, .fireworksKimiK2Instruct0905, .fireworksGptOss120b,
              .fireworksQwen3235bA22bThinking2507, .fireworksQwen3Coder480bA35bInstruct, .fireworksQwen3235bA22bInstruct2507,
@@ -429,9 +431,11 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         }
         let ordinary: [AIModel] = [
             .claudeSonnet55,
+            .claudeFable52,
             .claudeFable51,
             .claudeCodeModel(specifier: "claude-sonnet-5-5:high"),
             .anthropicCustom(name: "claude-sonnet-5-5-thinking"),
+            .openrouterClaudeFable52,
             .openrouterClaudeFable51,
             .gpt61SolHigh,
             .codexCustom(name: "gpt-6.1-sol-high")
