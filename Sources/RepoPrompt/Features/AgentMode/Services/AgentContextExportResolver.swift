@@ -82,22 +82,43 @@ struct AgentContextExportSourceBuildRequest {
 }
 
 enum AgentContextExportSourceBuilder {
+    static func resolveSelection(
+        requestedTabID: UUID?,
+        activeComposeTabID: UUID?,
+        selectionSnapshot: WorkspaceSelectionCoordinator.Snapshot?,
+        composeTabs: [ComposeTabState]
+    ) -> (tabID: UUID?, selection: StoredSelection) {
+        let resolvedTabID = requestedTabID ?? selectionSnapshot?.tabID ?? activeComposeTabID
+        let tab = resolvedTabID.flatMap { tabID in
+            composeTabs.first { $0.id == tabID }
+        }
+        let selectionSnapshotApplies = selectionSnapshot?.tabID == resolvedTabID
+        let selection = selectionSnapshotApplies
+            ? selectionSnapshot?.selection ?? StoredSelection()
+            : tab?.selection ?? StoredSelection()
+        return (resolvedTabID, selection)
+    }
+
     static func makeSource(_ request: AgentContextExportSourceBuildRequest) -> AgentContextExportSource {
-        let resolvedTabID = request.requestedTabID
-            ?? request.selectionSnapshot?.tabID
-            ?? request.activeComposeTabID
+        let (resolvedTabID, selection) = resolveSelection(
+            requestedTabID: request.requestedTabID,
+            activeComposeTabID: request.activeComposeTabID,
+            selectionSnapshot: request.selectionSnapshot,
+            composeTabs: request.composeTabs
+        )
         let tab = resolvedTabID.flatMap { tabID in
             request.composeTabs.first { $0.id == tabID }
         }
-        let selectionSnapshotApplies = request.selectionSnapshot?.tabID == resolvedTabID
-        let selection = selectionSnapshotApplies
-            ? request.selectionSnapshot?.selection ?? StoredSelection()
-            : tab?.selection ?? StoredSelection()
         let promptText = resolvedTabID == request.activeComposeTabID
             ? request.activePromptText
             : tab?.promptText ?? request.activePromptText
         let sessionID = request.explicitActiveAgentSessionID ?? tab?.activeAgentSessionID
-        let bindings = sessionID.map { request.worktreeBindingsProvider($0, resolvedTabID) } ?? []
+        let bindings: [AgentSessionWorktreeBinding] = sessionID.map { sessionID in
+            #if DEBUG
+                AgentModePerfDiagnostics.increment("context.exportSource.worktreeBindingsLookup", tabID: resolvedTabID)
+            #endif
+            return request.worktreeBindingsProvider(sessionID, resolvedTabID)
+        } ?? []
 
         return AgentContextExportSource(
             tabID: resolvedTabID,
@@ -363,6 +384,9 @@ enum AgentContextExportResolver {
     }
 
     static func selectionSummary(for selection: StoredSelection) -> AgentContextSelectionSummary {
+        #if DEBUG
+            AgentModePerfDiagnostics.increment("context.selectionSummary.compute")
+        #endif
         let selectedFileKeys = Set(selection.selectedPaths.map(normalizedSelectionKey))
         let manualCodemapKeys = Set(selection.manualCodemapPaths.map(normalizedSelectionKey))
         var explicitFileKeys = selectedFileKeys.union(manualCodemapKeys)

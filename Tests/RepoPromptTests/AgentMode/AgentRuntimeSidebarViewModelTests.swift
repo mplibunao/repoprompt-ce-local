@@ -50,6 +50,108 @@ final class AgentRuntimeSidebarViewModelTests: XCTestCase {
         XCTAssertNil(store.runtimeVM.snapshot.selectionFileCount)
     }
 
+    func testLiveSelectionSurvivesTranscriptOnlyUpdates() throws {
+        let liveSummary = AgentContextExportResolver.selectionSummary(
+            for: StoredSelection(
+                selectedPaths: ["Sources/File0.swift"],
+                slices: ["Sources/File0.swift": [LineRange(start: 4, end: 8)]],
+                codemapAutoEnabled: false
+            )
+        )
+        let earlierManageSelection = try makeManageSelectionItem(fileCount: 3)
+        let newSameCountManageSelection = try makeManageSelectionItem(fileCount: 1)
+        let followUps: [(label: String, transcript: AgentTranscriptAnalyticsSnapshot)] = [
+            (
+                "streamed text with the earlier selection result",
+                AgentTranscriptAnalyticsSnapshot(
+                    latestManageSelectionItem: earlierManageSelection,
+                    estimatedTranscriptTokens: 200
+                )
+            ),
+            (
+                "new selection result with the live file count",
+                AgentTranscriptAnalyticsSnapshot(
+                    latestManageSelectionItem: newSameCountManageSelection,
+                    estimatedTranscriptTokens: 200
+                )
+            )
+        ]
+
+        for followUp in followUps {
+            let store = AgentRuntimeMetricsUIStore()
+            store.update(
+                transcriptSnapshot: AgentTranscriptAnalyticsSnapshot(
+                    latestManageSelectionItem: earlierManageSelection,
+                    estimatedTranscriptTokens: 100
+                ),
+                codexUsage: nil,
+                liveSelectedFileCount: liveSummary.totalExplicitFileCount,
+                liveSelectionSummary: liveSummary,
+                selectedAgent: .codexExec,
+                selectedModelRaw: "gpt-5.1-codex"
+            )
+            store.update(
+                transcriptSnapshot: followUp.transcript,
+                codexUsage: nil,
+                liveSelectedFileCount: nil,
+                selectedAgent: .codexExec,
+                selectedModelRaw: "gpt-5.1-codex"
+            )
+
+            XCTAssertEqual(store.runtimeVM.snapshot.selectionSummary, liveSummary, followUp.label)
+            XCTAssertEqual(store.runtimeVM.snapshot.selectionFileCount, 1, followUp.label)
+            XCTAssertNil(store.runtimeVM.snapshot.selectionTokens, followUp.label)
+            XCTAssertEqual(store.runtimeVM.snapshot.estimatedTranscriptTokens, 200, followUp.label)
+        }
+    }
+
+    func testLiveSelectionDoesNotCrossClearOrTabBoundary() {
+        let tabID = UUID()
+        let liveSummary = AgentContextExportResolver.selectionSummary(
+            for: StoredSelection(
+                selectedPaths: ["Sources/File0.swift", "Sources/File1.swift"],
+                codemapAutoEnabled: false
+            )
+        )
+        func publish(
+            _ store: AgentRuntimeMetricsUIStore,
+            tabID: UUID?,
+            liveSummary: AgentContextSelectionSummary? = nil
+        ) {
+            store.update(
+                transcriptSnapshot: AgentTranscriptAnalyticsSnapshot(),
+                codexUsage: nil,
+                liveSelectedFileCount: liveSummary?.totalExplicitFileCount,
+                liveSelectionSummary: liveSummary,
+                tabID: tabID,
+                selectedAgent: .codexExec,
+                selectedModelRaw: "gpt-5.1-codex"
+            )
+        }
+        let boundaries: [(label: String, cross: (AgentRuntimeMetricsUIStore) -> Void)] = [
+            ("explicit clear", { store in
+                store.clearLiveSelection()
+                publish(store, tabID: tabID)
+            }),
+            ("update for another tab", { publish($0, tabID: UUID()) }),
+            ("update without a tab", { publish($0, tabID: nil) })
+        ]
+
+        for boundary in boundaries {
+            let store = AgentRuntimeMetricsUIStore()
+            publish(store, tabID: tabID, liveSummary: liveSummary)
+            XCTAssertEqual(store.runtimeVM.snapshot.selectionSummary, liveSummary, boundary.label)
+
+            boundary.cross(store)
+            XCTAssertNil(store.runtimeVM.snapshot.selectionSummary, "\(boundary.label), at the boundary")
+            XCTAssertNil(store.runtimeVM.snapshot.selectionFileCount, "\(boundary.label), at the boundary")
+
+            publish(store, tabID: tabID)
+            XCTAssertNil(store.runtimeVM.snapshot.selectionSummary, "\(boundary.label), back on the tab")
+            XCTAssertNil(store.runtimeVM.snapshot.selectionFileCount, "\(boundary.label), back on the tab")
+        }
+    }
+
     func testNewerManageSelectionWinsOverOlderWorkspaceContextSelectionCount() throws {
         let store = AgentRuntimeMetricsUIStore()
         let olderWorkspaceContext = try makeWorkspaceContextItem(

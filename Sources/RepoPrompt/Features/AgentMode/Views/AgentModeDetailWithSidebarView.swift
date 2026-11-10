@@ -158,6 +158,7 @@ struct AgentModeDetailWithSidebarView: View {
                 selectionCoordinator: selectionCoordinator,
                 workspaceSearchService: workspaceSearchService,
                 activeAgentSessionID: statusPillsUI.snapshot.activeAgentSessionID,
+                contextLookupIdentity: statusPillsUI.snapshot.contextLookupIdentity,
                 agentModeVM: agentModeVM,
                 windowID: windowID,
                 currentTabID: currentTabID
@@ -228,6 +229,7 @@ struct AgentModeDetailWithSidebarView: View {
                 selectionCoordinator: selectionCoordinator,
                 workspaceSearchService: workspaceSearchService,
                 activeAgentSessionID: statusPillsUI.snapshot.activeAgentSessionID,
+                contextLookupIdentity: statusPillsUI.snapshot.contextLookupIdentity,
                 agentModeVM: agentModeVM,
                 windowID: windowID,
                 currentTabID: currentTabID
@@ -289,13 +291,7 @@ struct AgentModeDetailWithSidebarView: View {
     }
 
     private func syncRuntimeMetricsSelectionCount() {
-        guard let targetTabID = runtimeMetricsTargetTabID,
-              let snapshot = selectionCoordinator.selectionSnapshot(for: targetTabID, flushPendingUIIfActive: true)
-        else {
-            agentModeVM.syncRuntimeMetricsUIState(liveSelectedFileCount: nil, liveSelectionSummary: nil)
-            return
-        }
-        syncRuntimeMetricsSelectionCount(selection: snapshot.selection)
+        syncRuntimeMetricsSelection(flushPendingUIIfActive: true)
     }
 
     private func syncRuntimeMetricsSelectionCountFromActiveUIIfCurrent() {
@@ -305,15 +301,28 @@ struct AgentModeDetailWithSidebarView: View {
 
     private func syncRuntimeMetricsSelectionCount(from change: WorkspaceSelectionCoordinator.Change) {
         guard change.tabID == runtimeMetricsTargetTabID else { return }
-        syncRuntimeMetricsSelectionCount(selection: change.selection)
+        // Some events are sent from inside the asynchronous UI mirror, so the payload can describe an
+        // earlier selection than the stored one. The store keeps this observation until the next
+        // selection event, so publish the canonical selection rather than the payload.
+        syncRuntimeMetricsSelection(flushPendingUIIfActive: false)
     }
 
-    private func syncRuntimeMetricsSelectionCount(selection: StoredSelection) {
-        let summary = AgentContextExportResolver.selectionSummary(for: selection)
-        agentModeVM.syncRuntimeMetricsUIState(
-            liveSelectedFileCount: summary.totalExplicitFileCount,
-            liveSelectionSummary: summary
-        )
+    private func syncRuntimeMetricsSelection(flushPendingUIIfActive: Bool) {
+        let targetTabID = runtimeMetricsTargetTabID
+        // A callback for another tab, such as a stale event during a tab switch, must neither
+        // replace nor clear the selection the store keeps for the current tab.
+        guard targetTabID == agentModeVM.currentTabID else { return }
+        guard let targetTabID,
+              let snapshot = selectionCoordinator.selectionSnapshot(
+                  for: targetTabID,
+                  flushPendingUIIfActive: flushPendingUIIfActive
+              )
+        else {
+            agentModeVM.syncRuntimeMetricsUIState(liveSelection: .clear)
+            return
+        }
+        let summary = AgentContextExportResolver.selectionSummary(for: snapshot.selection)
+        agentModeVM.syncRuntimeMetricsUIState(liveSelection: .replace(summary))
     }
 }
 
@@ -363,6 +372,7 @@ private struct AgentContextInspectorPresenter<PrimaryContent: View>: View {
     let workspaceSearchService: WorkspaceSearchService
     @StateObject private var fileBrowseModel: AgentContextFileBrowseModel
     let activeAgentSessionID: UUID?
+    let contextLookupIdentity: AgentWorkspaceLookupContextIdentity
     let agentModeVM: AgentModeViewModel
     let windowID: Int
     let currentTabID: UUID?
@@ -377,6 +387,7 @@ private struct AgentContextInspectorPresenter<PrimaryContent: View>: View {
         selectionCoordinator: WorkspaceSelectionCoordinator,
         workspaceSearchService: WorkspaceSearchService,
         activeAgentSessionID: UUID?,
+        contextLookupIdentity: AgentWorkspaceLookupContextIdentity,
         agentModeVM: AgentModeViewModel,
         windowID: Int,
         currentTabID: UUID?,
@@ -405,6 +416,7 @@ private struct AgentContextInspectorPresenter<PrimaryContent: View>: View {
             )
         })
         self.activeAgentSessionID = activeAgentSessionID
+        self.contextLookupIdentity = contextLookupIdentity
         self.agentModeVM = agentModeVM
         self.windowID = windowID
         self.currentTabID = currentTabID
@@ -431,6 +443,7 @@ private struct AgentContextInspectorPresenter<PrimaryContent: View>: View {
                         windowID: windowID,
                         currentTabID: currentTabID,
                         activeAgentSessionID: activeAgentSessionID,
+                        contextLookupIdentity: contextLookupIdentity,
                         worktreeBindingsProvider: { sessionID, tabID in
                             agentModeVM.worktreeBindings(forAgentSessionID: sessionID, tabID: tabID)
                         }
