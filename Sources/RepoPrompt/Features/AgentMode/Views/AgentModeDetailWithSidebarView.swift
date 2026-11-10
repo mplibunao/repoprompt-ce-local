@@ -289,13 +289,7 @@ struct AgentModeDetailWithSidebarView: View {
     }
 
     private func syncRuntimeMetricsSelectionCount() {
-        guard let targetTabID = runtimeMetricsTargetTabID,
-              let snapshot = selectionCoordinator.selectionSnapshot(for: targetTabID, flushPendingUIIfActive: true)
-        else {
-            agentModeVM.syncRuntimeMetricsUIState(liveSelectedFileCount: nil, liveSelectionSummary: nil)
-            return
-        }
-        syncRuntimeMetricsSelectionCount(selection: snapshot.selection)
+        syncRuntimeMetricsSelection(flushPendingUIIfActive: true)
     }
 
     private func syncRuntimeMetricsSelectionCountFromActiveUIIfCurrent() {
@@ -305,15 +299,28 @@ struct AgentModeDetailWithSidebarView: View {
 
     private func syncRuntimeMetricsSelectionCount(from change: WorkspaceSelectionCoordinator.Change) {
         guard change.tabID == runtimeMetricsTargetTabID else { return }
-        syncRuntimeMetricsSelectionCount(selection: change.selection)
+        // Some events are sent from inside the asynchronous UI mirror, so the payload can describe an
+        // earlier selection than the stored one. The store keeps this observation until the next
+        // selection event, so publish the canonical selection rather than the payload.
+        syncRuntimeMetricsSelection(flushPendingUIIfActive: false)
     }
 
-    private func syncRuntimeMetricsSelectionCount(selection: StoredSelection) {
-        let summary = AgentContextExportResolver.selectionSummary(for: selection)
-        agentModeVM.syncRuntimeMetricsUIState(
-            liveSelectedFileCount: summary.totalExplicitFileCount,
-            liveSelectionSummary: summary
-        )
+    private func syncRuntimeMetricsSelection(flushPendingUIIfActive: Bool) {
+        let targetTabID = runtimeMetricsTargetTabID
+        // A callback for another tab, such as a stale event during a tab switch, must neither
+        // replace nor clear the selection the store keeps for the current tab.
+        guard targetTabID == agentModeVM.currentTabID else { return }
+        guard let targetTabID,
+              let snapshot = selectionCoordinator.selectionSnapshot(
+                  for: targetTabID,
+                  flushPendingUIIfActive: flushPendingUIIfActive
+              )
+        else {
+            agentModeVM.syncRuntimeMetricsUIState(liveSelection: .clear)
+            return
+        }
+        let summary = AgentContextExportResolver.selectionSummary(for: snapshot.selection)
+        agentModeVM.syncRuntimeMetricsUIState(liveSelection: .replace(summary))
     }
 }
 
