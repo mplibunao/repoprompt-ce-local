@@ -281,19 +281,42 @@ final class AgentModeRunService {
               !session.runState.isActive,
               session.activeRunOwnership == nil
         else {
-            // Stop cancelled the ticket and withdrew the turn itself.
-            if ticket.phase == .cancelled {
-                return true
-            }
-            ticket.resolve(session.isStartupTicketCurrent(ticket) ? .rejected : .superseded)
-            return false
+            return await settleRefusedProviderAdoption(ticket, session: session, listener: listener)
         }
         ticket.markDispatching()
         guard claudeRunner.adoptProviderTurn(session: session, listener: listener, turnID: turnID) else {
+            return await settleRefusedProviderAdoption(ticket, session: session, listener: listener)
+        }
+        ticket.resolve(.accepted)
+        return true
+    }
+
+    /// Settles an adoption that took admission but can't begin its attempt. Returns what
+    /// `adoptClaudeProviderTurn` returns: false leaves stopping the work and reporting the refusal
+    /// to the coordinator.
+    private func settleRefusedProviderAdoption(
+        _ ticket: AgentRunStartupTicket,
+        session: AgentTabSession,
+        listener: ClaudeControllerEventListener
+    ) async -> Bool {
+        // Stop cancelled the ticket and withdrew the turn itself.
+        if ticket.phase == .cancelled {
+            return true
+        }
+        guard session.isStartupTicketCurrent(ticket) else {
+            ticket.resolve(.superseded)
+            return false
+        }
+        guard session.mcpControlContext?.preparedEpoch != nil else {
             ticket.resolve(.rejected)
             return false
         }
-        ticket.resolve(.accepted)
+        // The MCP store already moved to the prepared epoch, so that epoch gets the refusal as its
+        // failed result. The work stops first, so no other path reports the same failure.
+        let message = listener.runtimeFailure ?? ClaudeAgentModeCoordinator.providerTurnRefusedMessage
+        dependencies.claudeCoordinator.stopUnadoptedProviderWork(for: session, listener: listener)
+        await failBeforeProviderStartup(session: session, message: message, terminalAnchor: .none)
+        ticket.resolve(.rejected)
         return true
     }
 
@@ -583,7 +606,8 @@ final class AgentModeRunService {
     private func failBeforeProviderStartup(
         session: AgentTabSession,
         message: String,
-        attachmentReservationID: UUID? = nil
+        attachmentReservationID: UUID? = nil,
+        terminalAnchor: AgentRunTerminalCommitBarrier.TerminalAnchor = .automatic
     ) async {
         // A start nobody claimed yet settles under its own reserved run identity, so the failure
         // cannot land on the previous run's ID.
@@ -607,6 +631,7 @@ final class AgentModeRunService {
             finalizeNonCodexUsage: session.selectedAgent != .codexExec,
             supportsFollowUp: false,
             notifyTurnComplete: false,
+            terminalAnchor: terminalAnchor,
             providerDrainGeneration: session.providerTerminalDrainGeneration,
             prepareProviderState: {
                 session.provider = nil
@@ -775,7 +800,7 @@ final class AgentModeRunService {
         steeringID: UUID
     ) {
         guard session.selectedAgent.usesClaudeNativeRuntime,
-              session.runState == .running,
+              Self.claudeSteeringRunState(session.runState),
               let runID = session.runID,
               let runAttemptID = session.activeRunAttemptID,
               let steeringIndex = session.pendingClaudeSteeringInstructions.firstIndex(where: { $0.id == steeringID })
@@ -790,19 +815,37 @@ final class AgentModeRunService {
         }
 
         let claimableTurnIDs = session.claudeExpectedTurnIDs.subtracting(session.claudeSupersedingProtectedTurnIDs)
-        guard !claimableTurnIDs.isEmpty else { return }
+        // Provider turns read after the attempt's own work began are protected already. The steer
+        // records them too, so releasing it hands them back to the attempt.
+        let liveSuccessorTurnIDs = session.claudeLiveSuccessorTurnIDs.intersection(session.claudeExpectedTurnIDs)
+        guard !claimableTurnIDs.isEmpty || !liveSuccessorTurnIDs.isEmpty else { return }
 
         session.claudeSupersedingProtectedTurnIDs.formUnion(claimableTurnIDs)
-        session.pendingClaudeSteeringInstructions[steeringIndex].supersedingProtectedTurnIDs.formUnion(claimableTurnIDs)
+        session.pendingClaudeSteeringInstructions[steeringIndex].supersedingProtectedTurnIDs
+            .formUnion(claimableTurnIDs.union(liveSuccessorTurnIDs))
         session.pendingSupersedingTurnCompletions += claimableTurnIDs.count
     }
 
+    /// Steering runs while the run is running or waiting for an approval, which the steer cancels.
+    private static func claudeSteeringRunState(_ runState: AgentSessionRunState) -> Bool {
+        runState == .running || runState == .waitingForApproval
+    }
+
+    /// Hands the turns unsent steering protected back to the current attempt, and tells its
+    /// consumer, which can then settle on them. Steering aimed at another attempt changes nothing.
     private func releaseUnconsumedClaudeSupersedingProtection(
         for instructions: [AgentTabSession.ClaudeSteeringInstruction],
         session: AgentTabSession
     ) {
-        let protectedTurnIDs = Set(instructions.flatMap(\.supersedingProtectedTurnIDs))
+        let currentInstructions = instructions.filter { $0.targetRunAttemptID == session.activeRunAttemptID }
+        guard !currentInstructions.isEmpty else { return }
+        let liveSuccessorTurnIDs = session.claudeLiveSuccessorTurnIDs
+            .intersection(session.claudeExpectedTurnIDs)
+            .intersection(session.claudeSupersedingProtectedTurnIDs)
+        let protectedTurnIDs = Set(currentInstructions.flatMap(\.supersedingProtectedTurnIDs))
+            .union(liveSuccessorTurnIDs)
         guard !protectedTurnIDs.isEmpty else { return }
+        dependencies.claudeCoordinator.notifySteeringSettlement(session: session, protectedIDs: protectedTurnIDs)
 
         let unconsumedTurnIDs = protectedTurnIDs
             .intersection(session.claudeExpectedTurnIDs)
@@ -845,7 +888,7 @@ final class AgentModeRunService {
     @discardableResult
     func submitQueuedClaudeSteeringIfSupported(session: AgentTabSession) async -> Bool {
         guard session.selectedAgent.usesClaudeNativeRuntime,
-              session.runState == .running
+              Self.claudeSteeringRunState(session.runState)
         else {
             return false
         }
@@ -875,7 +918,11 @@ final class AgentModeRunService {
             guard let self, let session else { return }
             defer {
                 session.claudeSteeringFlushTask = nil
-                if session.runState == .running,
+                // Protection released while this flush ran couldn't settle the attempt yet.
+                if session.activeRunOwnership == ownership {
+                    self.dependencies.claudeCoordinator.recheckSteeringSettlement(session: session)
+                }
+                if Self.claudeSteeringRunState(session.runState),
                    session.selectedAgent.usesClaudeNativeRuntime,
                    !session.pendingClaudeSteeringInstructions.isEmpty
                 {
@@ -976,11 +1023,13 @@ final class AgentModeRunService {
                     session
                 )
                 steeringDebugLog("[AgentRunSteeringWake] Claude flush sending native interrupt id=\(steering.id) tab=\(tabID) runID=\(runID) attempt=\(runAttemptID)")
+                var inputWasAttempted = false
                 let sendOutcome = await dependencies.claudeCoordinator.sendClaudeNativeMessage(
                     session: session,
                     text: augmentedSteeringText,
                     attachments: [],
-                    intent: .runAttempt(ownership: ownership, runID: runID)
+                    intent: .runAttempt(ownership: ownership, runID: runID),
+                    inputAttemptChanged: { inputWasAttempted = $0 }
                 )
                 steeringDebugLog("[AgentRunSteeringWake] Claude flush send completed id=\(steering.id) tab=\(tabID) runID=\(runID) attempt=\(runAttemptID) outcome=\(String(describing: sendOutcome))")
                 switch sendOutcome {
@@ -988,11 +1037,27 @@ final class AgentModeRunService {
                     hooks.providerInput.recordPendingHandoffSendOutcome(session, true)
                     await hooks.continuation.signalMCPInstructionDelivered(session)
                 case .failed:
+                    // The attempt ends instead of settling on the protected work when Claude Code
+                    // may have the steer, so an answer can't be told from the work's, or when the
+                    // process the work ran in was stopped and nothing replaced it.
+                    let endsAttempt = inputWasAttempted || session.claudeController == nil
+                    if endsAttempt, session.activeRunOwnership == ownership {
+                        dependencies.claudeCoordinator.notifySteeringSettlement(
+                            session: session,
+                            protectedIDs: steering.supersedingProtectedTurnIDs,
+                            endsAttempt: true
+                        )
+                    }
                     hooks.providerInput.recordPendingHandoffSendOutcome(session, false)
                     // Re-insert the failed instruction so it's included in the restore.
                     // The coordinator deliberately leaves the live run state and
                     // ownership untouched; the owner event loop settles later.
-                    session.pendingClaudeSteeringInstructions.insert(steering, at: 0)
+                    var restoredSteering = steering
+                    if endsAttempt {
+                        // Restoring the draft must not release the protected work as answered.
+                        restoredSteering.supersedingProtectedTurnIDs.removeAll()
+                    }
+                    session.pendingClaudeSteeringInstructions.insert(restoredSteering, at: 0)
                     if let dequeuedUserInputTokens {
                         session.pendingNonCodexUserInputTokenQueue.insert(dequeuedUserInputTokens, at: 0)
                     }
@@ -1012,7 +1077,7 @@ final class AgentModeRunService {
         runID: UUID,
         runAttemptID: UUID
     ) -> Bool {
-        session.runState == .running
+        Self.claudeSteeringRunState(session.runState)
             && session.selectedAgent.usesClaudeNativeRuntime
             && session.runID == runID
             && session.activeRunAttemptID == runAttemptID
@@ -1106,42 +1171,47 @@ final class AgentModeRunService {
         // Work Claude Code started by itself that no attempt owns yet is withdrawn and its process
         // stopped. Before its adoption takes admission no run exists, so nothing is committed: the
         // previous run keeps its result, and queued work stays queued for that run's boundary. An
-        // adoption that took admission settles below as a cancelled start.
+        // adoption that took admission settles below as a cancelled start. The join also covers
+        // provider work an earlier Stop withdrew, whose process may still be shutting down.
+        let withdrawsProviderWork = dependencies.claudeCoordinator.hasPendingProviderAdoption(for: session)
         let providerTeardown = dependencies.claudeCoordinator.cancelPendingProviderAdoption(for: session)
-        if providerTeardown != nil, cancelledStartup == nil {
+        if withdrawsProviderWork, cancelledStartup == nil {
             hooks.bindingObservation.updateBindings(session)
             hooks.persistence.scheduleSave(session)
-            if let revision = session.lastTerminalCommitRevision {
-                await terminalCommitBarrier.awaitTerminalPublication(
-                    for: revision.ownership,
-                    lifecycle: session.runLifecycle
-                )
-                if completion == .terminalTeardownCompleted {
-                    await terminalCommitBarrier.awaitTerminalTeardown(
-                        for: revision.ownership,
-                        lifecycle: session.runLifecycle
-                    )
-                }
-            }
-            if completion == .terminalTeardownCompleted {
-                await providerTeardown?()
-            }
+            await awaitExistingCancellationCompletion(
+                session: session,
+                revision: session.lastTerminalCommitRevision,
+                completion: completion,
+                providerTeardown: providerTeardown
+            )
+            return
+        }
+        if cancelledStartup == nil,
+           session.selectedAgent.usesClaudeNativeRuntime,
+           session.runState == .cancelled,
+           session.activeRunOwnership == nil,
+           session.lastTerminalCommitRevision == nil
+        {
+            // An earlier Stop withdrew provider work no run owned, and no run committed since. There
+            // is no run to settle, so this Stop only joins that work's teardown.
+            await awaitExistingCancellationCompletion(
+                session: session,
+                revision: nil,
+                completion: completion,
+                providerTeardown: providerTeardown
+            )
             return
         }
         if cancelledStartup == nil,
            session.runState.isTerminalForCommit,
            let revision = session.lastTerminalCommitRevision
         {
-            await terminalCommitBarrier.awaitTerminalPublication(
-                for: revision.ownership,
-                lifecycle: session.runLifecycle
+            await awaitExistingCancellationCompletion(
+                session: session,
+                revision: revision,
+                completion: completion,
+                providerTeardown: providerTeardown
             )
-            if completion == .terminalTeardownCompleted {
-                await terminalCommitBarrier.awaitTerminalTeardown(
-                    for: revision.ownership,
-                    lifecycle: session.runLifecycle
-                )
-            }
             return
         }
         hooks.interactions.cancelPendingQuestion(session)
@@ -1274,6 +1344,30 @@ final class AgentModeRunService {
                 for: ownership,
                 lifecycle: session.runLifecycle
             )
+            await providerTeardown?()
+        }
+    }
+
+    private func awaitExistingCancellationCompletion(
+        session: AgentTabSession,
+        revision: AgentRunTerminalCommitRevision?,
+        completion: CancellationCompletion,
+        providerTeardown: (@MainActor () async -> Void)?
+    ) async {
+        if let revision {
+            await terminalCommitBarrier.awaitTerminalPublication(
+                for: revision.ownership,
+                lifecycle: session.runLifecycle
+            )
+            if completion == .terminalTeardownCompleted {
+                await terminalCommitBarrier.awaitTerminalTeardown(
+                    for: revision.ownership,
+                    lifecycle: session.runLifecycle
+                )
+            }
+        }
+        if completion == .terminalTeardownCompleted {
+            await providerTeardown?()
         }
     }
 

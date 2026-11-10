@@ -362,6 +362,11 @@ final class ClaudeIntegratedAgentModeRunner {
         // released and the attempt ends on them.
         var completedProtectedStatuses: [UUID: TurnStatus] = [:]
         var releasedProtectedTurnIDs: Set<UUID> = []
+        // Host inputs whose registration marker this attempt has read. A provider start read while
+        // an accepted input's marker is still unread started before Claude Code could read that input.
+        var markedHostTurnIDs: Set<UUID> = []
+        // A provider turn's output began a segment that a later host input's output must not share.
+        var providerOutputSinceBoundary = false
         // A released steer leaves the attempt nothing more to wait for once a turn it protected
         // has already been answered and no other input or steering is outstanding.
         func settlesAfterReleasedSteering() -> Bool {
@@ -387,9 +392,9 @@ final class ClaudeIntegratedAgentModeRunner {
             switch item {
             case let .native(nativeEvent):
                 event = nativeEvent
-            case let .steeringReleased(protectedIDs, inputWasAttempted):
-                // Claude Code may have received the steer, so its answer can't be told apart.
-                if inputWasAttempted {
+            case let .steeringReleased(protectedIDs, endsAttempt):
+                // The attempt can't settle on the work the steer protected.
+                if endsAttempt {
                     return .failed(errorText: nil, shouldShutdownSession: true)
                 }
                 releasedProtectedTurnIDs.formUnion(protectedIDs)
@@ -427,19 +432,31 @@ final class ClaudeIntegratedAgentModeRunner {
                 // a predecessor before this attempt read its start.
                 hooks.transcript.beginClaudeProviderOutputSegment(session)
                 session.claudeProviderOutputBoundary = (runAttemptID, session.nextSequenceIndex)
+                providerOutputSinceBoundary = true
                 let hasLivePredecessor = !session.claudeExpectedTurnIDs.isEmpty
                     || answeredUnprotected
                     || !session.pendingClaudeSteeringInstructions.isEmpty
                     || session.claudeSteeringFlushTask != nil
+                let precedesUnmarkedInput = !session.claudeAcceptedHostTurnIDs.isSubset(of: markedHostTurnIDs)
                 // The adopted turn and turns registered before a host send are expected already.
                 guard session.claudeExpectedTurnIDs.insert(turnID).inserted else { continue eventLoop }
                 session.claudeSupersedingProtectedTurnIDs.insert(turnID)
                 session.pendingSupersedingTurnCompletions += 1
-                if hasLivePredecessor {
+                // A predecessor's outcome never becomes the attempt's, and it doesn't hold the attempt open.
+                if hasLivePredecessor, !precedesUnmarkedInput {
                     if hostTurnIDsAtFirstSuccessor == nil {
                         hostTurnIDsAtFirstSuccessor = session.claudeAcceptedHostTurnIDs
                     }
                     session.claudeLiveSuccessorTurnIDs.insert(turnID)
+                }
+            case let .inputRegistered(turnID):
+                markedHostTurnIDs.insert(turnID)
+                // The host input's output starts its own segment, so its final-only reply can't
+                // replace the output of a provider turn that started before it.
+                if providerOutputSinceBoundary, session.claudeAcceptedHostTurnIDs.contains(turnID) {
+                    providerOutputSinceBoundary = false
+                    hooks.transcript.beginClaudeProviderOutputSegment(session)
+                    session.claudeProviderOutputBoundary = (runAttemptID, session.nextSequenceIndex)
                 }
             case let .stream(result):
                 #if DEBUG
@@ -468,12 +485,7 @@ final class ClaudeIntegratedAgentModeRunner {
                 hooks.bindingObservation.updateBindings(session)
             case let .approvalCancelled(requestID):
                 if session.pendingApproval?.requestID == .claudeControl(requestID) {
-                    session.pendingApproval = nil
-                    if session.runState == .waitingForApproval {
-                        session.clearClaudeReasoningStatus(clearDisplayedStatus: true)
-                        session.setRunningStatus("Thinking…", source: .transport)
-                        session.runState = .running
-                    }
+                    _ = session.dismissClaudeApproval(requestID: requestID)
                     hooks.bindingObservation.updateBindings(session)
                 }
             case .turnCompleted, .turnsCompleted:

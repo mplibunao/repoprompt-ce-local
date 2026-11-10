@@ -8,9 +8,10 @@ enum ClaudeAttemptEvent {
     /// An event from the Claude controller's stream.
     case native(NativeAgentRuntimeEvent)
     /// A steer ended without its input being accepted, so the provider work it protected can
-    /// settle the attempt again. `inputWasAttempted` is true when the write was attempted, so
-    /// Claude Code may have received the input.
-    case steeringReleased(protectedIDs: Set<UUID>, inputWasAttempted: Bool)
+    /// settle the attempt again. `endsAttempt` is true when the attempt can't settle on that work:
+    /// Claude Code may have received the input, or the process the work ran in was stopped and
+    /// nothing replaced it.
+    case steeringReleased(protectedIDs: Set<UUID>, endsAttempt: Bool)
     /// The attempt should check again whether it can settle.
     case settlementRecheck
 }
@@ -190,11 +191,30 @@ final class ClaudeControllerEventListener {
     /// The first runtime failure seen while idle on this installation. The coordinator reports a
     /// failure only while this is `nil`, and `install` clears it.
     var runtimeFailure: String?
+    /// The installation whose `runtimeFailure` was ready to report while the listener wasn't
+    /// current. The coordinator reports it once the listener is current again.
+    var heldFailureInstallation: UUID?
     private(set) var subscription: ClaudeAttemptEventSubscription?
     /// The provider turn waiting in the handoff for an attempt to adopt it.
     private(set) var pendingProviderTurnID: UUID?
     /// Provider turns that started and haven't completed.
     private(set) var providerTurnIDs: Set<UUID> = []
+    /// Provider turns the current transport started, completed or not.
+    private(set) var transportProviderTurnIDs: Set<UUID> = []
+    /// Claude permission requests the current transport raised that nobody answered or cancelled
+    /// yet, in arrival order: unread in the inbox or the handoff, shown by an attempt, or held.
+    var openApprovalIDs: [String] {
+        heldEvents.reduce(into: routedOpenApprovalIDs) { ids, event in
+            if let id = event.claudeApprovalRequestID {
+                if !ids.contains(id) {
+                    ids.append(id)
+                }
+            } else if case let .approvalCancelled(id) = event {
+                ids.removeAll { $0 == id }
+            }
+        }
+    }
+
     private(set) var isRetired = false
 
     /// Whether the session, binding, and process run this listener was created for are still current.
@@ -213,6 +233,13 @@ final class ClaudeControllerEventListener {
     private var controllerID: ObjectIdentifier?
     private var generation: UInt64?
     private var handoff: [NativeAgentRuntimeEvent] = []
+    /// Events of the current installation that arrived while the listener wasn't current, as during
+    /// a binding transition. They're routed in order once it is current again.
+    private var heldEvents: [NativeAgentRuntimeEvent] = []
+    /// The current installation's stream ended while the listener wasn't current.
+    private var heldStreamEnd: UUID?
+    /// The open permission requests among the routed events.
+    private var routedOpenApprovalIDs: [String] = []
     private var publishedBusy = false
     /// Inboxes closed with their tail returned whose attempts haven't finished terminal
     /// publication. The next adoption waits for all of them.
@@ -224,9 +251,10 @@ final class ClaudeControllerEventListener {
         self.isCurrent = isCurrent
     }
 
-    /// Provider work is waiting for adoption or still running.
+    /// Provider work is waiting for adoption or still running, or a held event started it and
+    /// hasn't been routed yet.
     var isBusy: Bool {
-        pendingProviderTurnID != nil || !providerTurnIDs.isEmpty
+        pendingProviderTurnID != nil || !providerTurnIDs.isEmpty || heldEvents.contains(where: \.startsProviderTurn)
     }
 
     /// Identifies the current installation, so a callback can tell after an `await` whether the
@@ -251,6 +279,10 @@ final class ClaudeControllerEventListener {
         guard !isRetired else { return }
         let identity = ObjectIdentifier(controller)
         guard controllerID != identity || generation != handle.generation else { return }
+        // Events the replaced transport delivered while the listener was current still count.
+        routeHeldEvents()
+        heldEvents.removeAll()
+        heldStreamEnd = nil
         // A new installation ID first, so an event the old reader already holds is rejected.
         let installation = UUID()
         installationID = installation
@@ -258,38 +290,77 @@ final class ClaudeControllerEventListener {
         controllerID = identity
         generation = handle.generation
         runtimeFailure = nil
+        heldFailureInstallation = nil
         subscription?.attachTransport()
         readerTask = Task { [weak self] in
             for await event in handle.stream {
-                guard let self, accepts(installation) else { return }
+                guard let self, reads(installation) else { return }
                 receive(event)
             }
-            guard let self, accepts(installation) else { return }
+            guard let self, reads(installation) else { return }
+            guard isCurrent() else {
+                heldStreamEnd = installation
+                return
+            }
             await onStreamEnd?(installation)
         }
     }
 
-    /// Routes one controller event. The reader calls this for each event of the current installation.
+    /// Routes one controller event. The reader calls this for each event of the current
+    /// installation. While the listener isn't current the event is held, not routed.
     func receive(_ event: NativeAgentRuntimeEvent) {
-        guard !isRetired, isCurrent() else { return }
-        switch event {
-        case let .providerTurnStarted(turnID):
-            providerTurnIDs.insert(turnID)
-        case let .turnsCompleted(turnIDs, _):
-            providerTurnIDs.subtract(turnIDs)
-        case let .turnCompleted(turnID, _):
-            providerTurnIDs.remove(turnID)
-        default:
-            break
+        guard !isRetired else { return }
+        guard isCurrent() else {
+            heldEvents.append(event)
+            return
         }
-        route(event)
-        publishBusyIfChanged()
+        routeHeldEvents()
+        process(event)
+    }
+
+    /// Routes what arrived while the listener wasn't current, once it is current again: a binding
+    /// transition that ended without replacing the binding leaves it current.
+    func resumeHeldEvents() {
+        guard !isRetired, isCurrent() else { return }
+        routeHeldEvents()
+        if heldEvents.isEmpty, let installation = heldStreamEnd, installation == installationID {
+            heldStreamEnd = nil
+            Task { [weak self] in
+                guard let self, reads(installation) else { return }
+                await onStreamEnd?(installation)
+            }
+        }
+    }
+
+    /// The coordinator couldn't handle `installation`'s stream end because the listener stopped
+    /// being current meanwhile. It's handled once the listener is current again.
+    func holdStreamEnd(_ installation: UUID) {
+        guard !isRetired, installation == installationID else { return }
+        heldStreamEnd = installation
+    }
+
+    /// A permission request the coordinator answered.
+    func approvalAnswered(_ id: String) {
+        routedOpenApprovalIDs.removeAll { $0 == id }
+    }
+
+    /// A permission request the coordinator cancelled. An unread request becomes its cancellation.
+    /// The attempt may already have taken the request from its inbox without showing it yet, so
+    /// otherwise the cancellation follows in the inbox.
+    func withdrawApproval(_ id: String) {
+        let unreadInInbox = subscription?.bufferedApprovalIDs.contains(id) == true
+        cancelBufferedApproval(id)
+        approvalAnswered(id)
+        if !unreadInInbox {
+            subscription?.append(.native(.approvalCancelled(requestID: id)))
+        }
     }
 
     /// Reserves the inbox for one attempt. A waiting handoff moves into it, so the attempt that
     /// reserves first owns that provider turn. Returns `nil` while another attempt holds the inbox.
     func reserve() -> ClaudeAttemptEventSubscription? {
         guard !isRetired, subscription == nil else { return nil }
+        routeHeldEvents()
         let inbox = ClaudeAttemptEventSubscription()
         subscription = inbox
         if pendingProviderTurnID != nil {
@@ -378,16 +449,22 @@ final class ClaudeControllerEventListener {
         publishBusyIfChanged()
     }
 
-    /// Claude permission request IDs waiting unread in the inbox or the handoff.
+    /// Claude permission request IDs waiting unread in the inbox, the handoff, or the held events.
     var bufferedApprovalIDs: [String] {
-        (subscription?.bufferedApprovalIDs ?? []) + handoff.compactMap(\.claudeApprovalRequestID)
+        (subscription?.bufferedApprovalIDs ?? [])
+            + handoff.compactMap(\.claudeApprovalRequestID)
+            + heldEvents.compactMap(\.claudeApprovalRequestID)
     }
 
-    /// Replaces an unread approval request, in the inbox or the handoff, with its cancellation.
+    /// Replaces an unread approval request, in the inbox, the handoff, or the held events, with its
+    /// cancellation.
     func cancelBufferedApproval(_ id: String) {
         subscription?.cancelBufferedApproval(id)
         for index in handoff.indices where handoff[index].claudeApprovalRequestID == id {
             handoff[index] = .approvalCancelled(requestID: id)
+        }
+        for index in heldEvents.indices where heldEvents[index].claudeApprovalRequestID == id {
+            heldEvents[index] = .approvalCancelled(requestID: id)
         }
     }
 
@@ -398,13 +475,47 @@ final class ClaudeControllerEventListener {
         controllerID = nil
         generation = nil
         handoff.removeAll()
+        heldEvents.removeAll()
+        heldStreamEnd = nil
+        heldFailureInstallation = nil
         pendingProviderTurnID = nil
         providerTurnIDs.removeAll()
+        transportProviderTurnIDs.removeAll()
+        routedOpenApprovalIDs.removeAll()
     }
 
-    /// A listener that's no longer current stops reading. Its owner replaces it.
-    private func accepts(_ installation: UUID) -> Bool {
-        !Task.isCancelled && installationID == installation && !isRetired && isCurrent()
+    /// The reader keeps reading while the listener isn't current, so a transition that leaves the
+    /// binding in place loses nothing. A replaced installation or a retired listener stops it.
+    private func reads(_ installation: UUID) -> Bool {
+        !Task.isCancelled && installationID == installation && !isRetired
+    }
+
+    private func process(_ event: NativeAgentRuntimeEvent) {
+        switch event {
+        case let .providerTurnStarted(turnID):
+            providerTurnIDs.insert(turnID)
+            transportProviderTurnIDs.insert(turnID)
+        case let .turnsCompleted(turnIDs, _):
+            providerTurnIDs.subtract(turnIDs)
+        case let .turnCompleted(turnID, _):
+            providerTurnIDs.remove(turnID)
+        case .approvalRequest:
+            if let id = event.claudeApprovalRequestID, !routedOpenApprovalIDs.contains(id) {
+                routedOpenApprovalIDs.append(id)
+            }
+        case let .approvalCancelled(id):
+            routedOpenApprovalIDs.removeAll { $0 == id }
+        default:
+            break
+        }
+        route(event)
+        publishBusyIfChanged()
+    }
+
+    private func routeHeldEvents() {
+        while !heldEvents.isEmpty, !isRetired, isCurrent() {
+            process(heldEvents.removeFirst())
+        }
     }
 
     private func route(_ event: NativeAgentRuntimeEvent) {
@@ -443,6 +554,13 @@ final class ClaudeControllerEventListener {
 }
 
 private extension NativeAgentRuntimeEvent {
+    var startsProviderTurn: Bool {
+        if case .providerTurnStarted = self {
+            return true
+        }
+        return false
+    }
+
     var claudeApprovalRequestID: String? {
         guard case let .approvalRequest(request) = self, case let .claudeControl(id) = request.requestID else { return nil }
         return id

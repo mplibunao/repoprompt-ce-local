@@ -186,19 +186,8 @@ final class ClaudeControllerEventListenerTests: XCTestCase {
         XCTAssertNil(listener.reserve())
     }
 
-    func testBufferedApprovalRequestsAreReplacedByCancellations() async throws {
+    func testApprovalWaitingInProviderHandoffIsReplacedByCancellation() async throws {
         let listener = ClaudeControllerEventListener(isCurrent: { true })
-        let inbox = try XCTUnwrap(listener.reserve())
-        listener.receive(approval("in-inbox"))
-        listener.receive(output("after"))
-        XCTAssertEqual(listener.bufferedApprovalIDs, ["in-inbox"])
-        listener.cancelBufferedApproval("in-inbox")
-        XCTAssertEqual(listener.bufferedApprovalIDs, [])
-        let inboxFirst = await read(inbox)
-        let inboxSecond = await read(inbox)
-        XCTAssertEqual([inboxFirst, inboxSecond], ["approvalCancelled:in-inbox", "output:after"])
-        listener.close(inbox, returningTail: false)
-
         let providerTurnID = UUID()
         listener.receive(.providerTurnStarted(turnID: providerTurnID))
         listener.receive(approval("in-handoff"))
@@ -209,6 +198,49 @@ final class ClaudeControllerEventListenerTests: XCTestCase {
         let adoptedFirst = await read(adopted)
         let adoptedSecond = await read(adopted)
         XCTAssertEqual([adoptedFirst, adoptedSecond], ["providerStart:\(providerTurnID)", "approvalCancelled:in-handoff"])
+        listener.retire()
+    }
+
+    /// A withdrawn permission request reaches the attempt as one cancellation, whether the attempt
+    /// already took the request from its inbox or hadn't read it yet.
+    func testWithdrawnApprovalReachesTheAttemptAsOneCancellation() async throws {
+        let listener = ClaudeControllerEventListener(isCurrent: { true })
+        let inbox = try XCTUnwrap(listener.reserve())
+        listener.receive(approval("taken"))
+        let taken = await read(inbox)
+        listener.withdrawApproval("taken")
+        listener.receive(approval("unread"))
+        listener.withdrawApproval("unread")
+        listener.receive(output("after"))
+
+        var reads = [taken]
+        for _ in 0 ..< 3 {
+            await reads.append(read(inbox))
+        }
+        XCTAssertEqual(reads, ["approval", "approvalCancelled:taken", "approvalCancelled:unread", "output:after"])
+        XCTAssertEqual(listener.openApprovalIDs, [])
+        listener.retire()
+    }
+
+    /// A permission request held while the listener isn't current is open, so Stop and steering
+    /// cancel it, and its cancellation is what the listener routes once it is current again.
+    func testHeldApprovalRequestIsOpenAndIsReplacedByItsCancellation() async throws {
+        let currency = Recorder<Bool>()
+        currency.values = [false]
+        let listener = ClaudeControllerEventListener(isCurrent: { currency.values.last == true })
+        let providerTurnID = UUID()
+        listener.receive(.providerTurnStarted(turnID: providerTurnID))
+        listener.receive(approval("held"))
+        XCTAssertEqual(listener.openApprovalIDs, ["held"])
+        listener.cancelBufferedApproval("held")
+        XCTAssertEqual(listener.openApprovalIDs, [])
+
+        currency.values.append(true)
+        listener.resumeHeldEvents()
+        let adopted = try XCTUnwrap(listener.reserve())
+        let adoptedFirst = await read(adopted)
+        let adoptedSecond = await read(adopted)
+        XCTAssertEqual([adoptedFirst, adoptedSecond], ["providerStart:\(providerTurnID)", "approvalCancelled:held"])
         listener.retire()
     }
 

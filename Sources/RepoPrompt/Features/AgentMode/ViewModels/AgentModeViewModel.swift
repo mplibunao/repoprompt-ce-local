@@ -815,6 +815,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         var test_beforeStartRejectedSettlement: (@MainActor () async -> Void)?
         /// Runs as a terminal commit is about to publish its result to the session store.
         var test_beforeTerminalPublication: (@MainActor () async -> Void)?
+        /// Runs once an admitted Claude provider-turn adoption has prepared its epoch, so a test can
+        /// hold the adoption while it owns its startup ticket.
+        var test_afterClaudeProviderEpochPreparation: (@MainActor () async -> Void)?
         /// Runs in an MCP dispatch once its submission is made, before its delivery bookkeeping.
         var test_afterMCPDispatchSubmission: (@MainActor () async -> Void)?
         var test_beforeMCPSelectionCommit: (@MainActor () async -> Void)?
@@ -2244,7 +2247,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 listener: listener,
                 turnID: turnID
             ) { ticket in
-                await self.prepareClaudeProviderEpoch(session: session, ticket: ticket)
+                let prepared = await self.prepareClaudeProviderEpoch(session: session, ticket: ticket)
+                #if DEBUG
+                    await self.test_afterClaudeProviderEpochPreparation?()
+                #endif
+                return prepared
             }
         }
         capabilities.cleanupProviderRun = { [weak self] session, runID in
@@ -5014,6 +5021,22 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
         }
 
+        // The Claude process belongs to the conversation of the binding being replaced, and its
+        // listener's callbacks must not act on the new binding.
+        if previousSessionID != nil, session.claudeController != nil {
+            let retiredRunID = session.runID
+            claudeCoordinator.prepareForConversationResetSync(session)
+            if let retiredRunID {
+                Task {
+                    await self.cleanupMCPRunRoutingIfPresent(
+                        boundSessionID: previousSessionID,
+                        liveSession: nil,
+                        explicitRunID: retiredRunID,
+                        reason: "claudeNative.rebind"
+                    )
+                }
+            }
+        }
         if invalidateAsyncWork {
             cancelPersistedLoad(for: session)
             removePendingUIRefresh(for: session.tabID)
@@ -7027,8 +7050,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             && Self.mcpRunningMaskHasExpired(since: session.mcpFollowUpRunPendingUpdatedAt, now: now)
         let supersedingMaskIsStale = session.pendingSupersedingTurnCompletions > 0
             && Self.mcpRunningMaskHasExpired(since: session.pendingSupersedingTurnCompletionsUpdatedAt, now: now)
+        // Provider work raises the follow-up mask until its run publishes, however long it waits.
         guard followUpMaskIsStale || supersedingMaskIsStale,
-              Self.sessionHoldsNoQueuedRunWork(session)
+              Self.sessionHoldsNoQueuedRunWork(session),
+              !claudeCoordinator.hasPendingProviderWork(for: session)
         else { return }
         Self.steeringDebugLog("[AgentRunSteeringWake] clearing stale MCP running mask sessionID=\(sessionID) tab=\(session.tabID) runState=\(session.runState.rawValue) settled=\(settled.status.rawValue) followUp=\(session.mcpFollowUpRunPending) superseding=\(session.pendingSupersedingTurnCompletions)")
         // Each mask goes only when it is stale itself: an expired superseding mask must not take a
@@ -7087,6 +7112,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             return false
         }
         guard session.mcpPendingStartOwner == nil else { return true }
+        // Claude Code started a turn that waits for adoption and holds no ticket yet. A start
+        // admitted now takes that turn over instead of competing with it.
+        if claudeCoordinator.hasPendingProviderAdoption(for: session) {
+            return false
+        }
         let flagExpired = Self.mcpRunningMaskHasExpired(since: session.mcpFollowUpRunPendingUpdatedAt, now: Date())
         return !(flagExpired && Self.sessionHoldsNoQueuedRunWork(session))
     }
@@ -10363,6 +10393,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         case .codex: session.codexConversationID
         }
         if case .codex = runtime, codexCoordinator.hasCodexWorkInFlight(for: session) {
+            return .providerBusy
+        }
+        // Work Claude Code started by itself is busy from its first event until its run publishes.
+        if case .claude = runtime, claudeCoordinator.hasPendingProviderWork(for: session) {
             return .providerBusy
         }
         if storedConversationID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {

@@ -197,9 +197,9 @@ final class AgentTabSession: ObservableObject {
         }
     }
 
-    /// Called when startup admission is released: the head-of-line ticket resolved, or the MCP
-    /// start that owned the pending start gave it up. The Claude coordinator uses it to offer
-    /// provider work that waited for that start again.
+    /// Called when startup admission is released: the head-of-line ticket resolved, the MCP start
+    /// that owned the pending start gave it up, or a binding transition ended. The Claude
+    /// coordinator uses it to resume provider work that waited for one of them.
     var onStartAdmissionReleased: (() -> Void)?
 
     /// Releases the pending-start ownership `owner` holds; ownership another start took over is
@@ -1150,11 +1150,13 @@ final class AgentTabSession: ObservableObject {
         precondition(binding == nil || binding?.tabID == tabID)
         persistentSessionBindingIdentity = binding
         bindingTransitionInProgress = false
+        onStartAdmissionReleased?()
     }
 
     func finishPersistentBindingTransition(generation: UInt64) {
-        guard bindingTransitionGeneration == generation else { return }
+        guard bindingTransitionGeneration == generation, bindingTransitionInProgress else { return }
         bindingTransitionInProgress = false
+        onStartAdmissionReleased?()
     }
 
     func markCurrentBindingHydrated() {
@@ -1182,6 +1184,17 @@ final class AgentTabSession: ObservableObject {
             || !queuedUserInputRequests.isEmpty
             || !queuedMCPElicitationRequests.isEmpty
             || !queuedApprovalRequests.isEmpty
+    }
+
+    func dismissClaudeApproval(requestID: String) -> Bool {
+        guard pendingApproval?.requestID == .claudeControl(requestID) else { return false }
+        pendingApproval = nil
+        if runState == .waitingForApproval {
+            clearClaudeReasoningStatus(clearDisplayedStatus: true)
+            setRunningStatus("Thinking…", source: .transport)
+            runState = .running
+        }
+        return true
     }
 
     /// Abandoning approvals drops the queue with the pending one; otherwise a queued request could

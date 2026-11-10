@@ -77,6 +77,9 @@ final actor ClaudeNativeProcessSessionController {
         /// background task ends. Emitted before the turn's output and approval requests; the turn's
         /// completion carries the same ID.
         case providerTurnStarted(turnID: UUID)
+        /// The controller registered a host input with this ID. A provider turn whose start comes
+        /// before this event in the stream started before Claude Code could have read the input.
+        case inputRegistered(turnID: UUID)
         /// Positional settlement, and per-input failure when the transport retires.
         case turnCompleted(turnID: UUID, status: TurnStatus)
         /// The host inputs one result answers on the matched path, settled together.
@@ -507,6 +510,7 @@ final actor ClaudeNativeProcessSessionController {
         try sendLine(payload)
         // No suspension between the write and registration, so the echo can't arrive first.
         correlation.register(id)
+        emit(.inputRegistered(turnID: id))
         return id
     }
 
