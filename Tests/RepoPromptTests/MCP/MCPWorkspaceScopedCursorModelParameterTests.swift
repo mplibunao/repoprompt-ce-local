@@ -7,9 +7,7 @@ import XCTest
 final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     func testFixtureRootsUseUniqueUUIDPaths() throws {
         let first = try makeFixture()
-        defer { first.cleanup() }
         let second = try makeFixture()
-        defer { second.cleanup() }
 
         XCTAssertNotEqual(first.root, second.root)
     }
@@ -25,7 +23,6 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     /// validation/serialization gate sees the selected model.
     func testResumeAcquiresForEffectiveWorktreeAndPersistsSelection() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
 
         // Deterministic real worktree: a genuine repo + `git worktree add`, so the runtime
         // resolver's on-disk validation of the bound worktree root passes. Identity fields are
@@ -36,7 +33,6 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         try git.runGit(["worktree", "add", "--detach", worktree.path, "HEAD"], at: logicalRoot)
 
         let window = try await makeWindow(name: "OpenCode worktree resume", root: logicalRoot)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
         let tabID = try XCTUnwrap(workspace.activeComposeTabID)
@@ -158,9 +154,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     /// answer about which providers may carry model parameters.
     func testOpenCodeSelectionForSelectedModelIsAcceptedAndStored() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "OpenCode parameter store", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         let tabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
         let session = await viewModel.ensureSessionReady(tabID: tabID)
@@ -184,9 +178,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     /// model, is never stored. Non-ACP agents remain rejected outright.
     func testOpenCodeSelectionProviderAndModelMismatchesAreRejected() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "OpenCode parameter store rejects", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         let tabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
         let session = await viewModel.ensureSessionReady(tabID: tabID)
@@ -253,9 +245,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     /// leave the count at zero without exercising the discard scope).
     func testCreateDiscardsTargetWhenParameterAcquisitionFails() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "OpenCode create discard", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         // OpenCode must be available for its compound model_id to resolve; the default
         // availability context has it unavailable.
@@ -340,9 +330,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testResumeRejectsModelParameterChangesWhileRunIsActive() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor active resume", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
@@ -379,9 +367,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testParameterWriteRejectsSessionThatBecameActiveAfterSetup() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor late admission", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         let tabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
         let session = await viewModel.ensureSessionReady(tabID: tabID)
@@ -402,9 +388,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testConfigurationRejectsRunActivatedDuringHydrationBeforeChangingModelOrParameters() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor configuration admission", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         let tabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
         let session = await viewModel.ensureSessionReady(tabID: tabID)
@@ -439,9 +423,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     func testExplicitResumeRejectsCompetingRunBeforeAndAfterActivationAndPreservesControl() async throws {
         for afterActivation in [false, true] {
             let fixture = try makeFixture()
-            defer { fixture.cleanup() }
             let window = try await makeWindow(name: "Cursor resume barrier", root: fixture.root)
-            defer { WindowStatesManager.shared.unregisterWindowState(window) }
             let viewModel = window.agentModeViewModel
             var service = makeManageService(window: window)
             let created = try await service.execute(args: [
@@ -505,9 +487,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testResumeFailureSettlesProvisionalClaimAfterPublicSteerStartsNewerRun() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor resume public ownership", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let viewModel = window.agentModeViewModel
         let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
@@ -598,9 +578,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testConfigurationRejectsStaleTargetBeforeChangingReplacementSession() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor stale target", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         let tabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
         let original = await viewModel.ensureSessionReady(tabID: tabID)
@@ -626,9 +604,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testLosingResumePreservesNewerInactiveActivationOnSameBinding() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor activation ownership", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         let service = makeManageService(window: window)
         let created = try await service.execute(args: [
@@ -684,9 +660,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testOwnedDeactivationCannotRemoveSuccessorActivation() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor owned cleanup", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         let target = try await viewModel.mcpResolveOrCreateSessionTarget(
             tabID: nil, sessionID: nil, createIfNeeded: true, sessionName: nil
@@ -714,9 +688,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testAgentManageListCreateAndResumeUseReleaseCatalogMetadata() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor MCP", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
 
         let service = makeManageService(window: window)
         let listed = try await service.execute(args: ["op": .string("list_agents")])
@@ -757,9 +729,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testAgentManageListAgentsRefreshesOpenCodeCatalogForActiveWorkspaceBeforeEnrichment() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "OpenCode workspace catalog", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         window.apiSettingsViewModel.isOpenCodeConnected = true
 
         let staleModel = "opencode-go/glm-5.3"
@@ -867,9 +837,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testAgentRunStartRejectsUnknownReleaseCatalogParameter() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor MCP Run", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let service = makeRunService(window: window)
 
         do {
@@ -887,9 +855,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testAgentRunSuccessfulStartStagesLegacyComposerAliasWithCanonicalSpeedSelection() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor MCP Successful Run", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         var stagedSelections: [ACPModelParameterSelection] = []
         let service = makeRunService(
             window: window,
@@ -917,9 +883,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testAgentRunFailedStartRestoresExistingSessionCursorParameters() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor MCP Run Rollback", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let agentModeVM = window.agentModeViewModel
         let tabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
         let target = try await agentModeVM.mcpResolveOrCreateSessionTarget(
@@ -967,9 +931,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     func testRollbackRestoresOnlyParametersWithoutNewerIntent() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor independent parameter rollback", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let viewModel = window.agentModeViewModel
         let tabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
         let session = await viewModel.ensureSessionReady(tabID: tabID)
@@ -1006,9 +968,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     /// write (it persists to the user's real settings file).
     func testAgentRunStartRoleLabelInheritsStoredPinAndExplicitOverrides() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor MCP Role Inherit", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         AgentMCPSelectionResolver.testRoleDefaultsStore = roleDefaultsStore(
             engineerValueRaw: "high",
             exploreValueRaw: "low"
@@ -1067,9 +1027,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     /// when the caller supplies no explicit parameters.
     func testAgentRunStartCompoundModelIDInheritsNoRolePin() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor MCP Compound No Inherit", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         AgentMCPSelectionResolver.testRoleDefaultsStore = roleDefaultsStore(
             engineerValueRaw: "high",
             exploreValueRaw: "low"
@@ -1100,9 +1058,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     /// store seam gives the explore role a distinct stored pin so the delivery is observable.
     func testAgentExploreStartDeliversCapturedExploreRoleSelections() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor MCP Explore Delivery", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let agentModeVM = window.agentModeViewModel
         let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
         let callerTabID = try XCTUnwrap(workspace.activeComposeTabID)
@@ -1158,13 +1114,11 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     /// explicit one-kind value replaces only that kind, and a compound ID inherits neither pin.
     func testSettingsPinnedCursorEffortAndSpeedReachRoleLabelRun() async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(
             name: "Cursor MCP Settings Pins",
             root: fixture.root,
             isolatesProviderCatalogs: true
         )
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let workspaceID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.id)
         let settingsURL = fixture.root.appendingPathComponent("Settings/globalSettings.json")
         let effort = selection(value: "xhigh")
@@ -1267,9 +1221,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
 
     private func assertFailedStartPreservesNewerSelection(_ newerValue: String) async throws {
         let fixture = try makeFixture()
-        defer { fixture.cleanup() }
         let window = try await makeWindow(name: "Cursor MCP Run Concurrent Selection", root: fixture.root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let agentModeVM = window.agentModeViewModel
         let tabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
         let initialTarget = try await agentModeVM.mcpResolveOrCreateSessionTarget(
@@ -1318,7 +1270,9 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("rpce-cursor-mcp-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        return Fixture(root: root)
+        let fixture = Fixture(root: root)
+        addTeardownBlock { fixture.cleanup() }
+        return fixture
     }
 
     /// `isolatesProviderCatalogs: true` builds the window through
@@ -1334,20 +1288,28 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
             ? ACPModelParameterTestSupport.makeWindowWithoutLiveProviderCatalogs()
             : WindowState()
         WindowStatesManager.shared.registerWindowState(window)
+        addTeardownBlock { @MainActor in
+            window.beginClose()
+            // Closing suppresses UI root unloading, so stop fixture writers before root cleanup.
+            await window.workspaceFilesViewModel.unloadAllRootFolders()
+            await window.tearDown()
+            WindowStatesManager.shared.unregisterWindowState(window)
+        }
         GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
+        try await MCPWindowTestSupport.waitForInitialization(of: window)
+        // New workspaces have a normalized blank tab whose switch load needs Agent Mode active.
+        window.agentModeViewModel.setAgentModeActive(true)
         window.apiSettingsViewModel.isCursorConnected = true
         let workspace = window.workspaceManager.createWorkspace(
             name: name,
             repoPaths: [root.path],
             ephemeral: true
         )
-        await window.workspaceManager.switchWorkspace(
-            to: workspace,
-            saveState: false,
+        try await MCPWindowTestSupport.activateWorkspaceForAgentStart(
+            workspace,
+            in: window,
             reason: "releaseGatedCursorMCPTests"
         )
-        let activeWorkspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
-        window.promptManager.loadComposeTabsFromWorkspace(activeWorkspace, syncPromptText: true)
         return window
     }
 

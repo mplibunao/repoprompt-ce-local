@@ -587,7 +587,7 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
             // The handler resolves its target from the disk snapshot, so the target goes through a
             // workspace manager's persistence instead of an in-memory fixture.
             let persister = makeWindowInstance()
-            await persister.workspaceManager.awaitInitialized()
+            try await MCPWindowTestSupport.waitForInitialization(of: persister)
             let target = persister.workspaceManager.createWorkspace(
                 name: "Reuse Target \(UUID().uuidString)",
                 repoPaths: [root.path]
@@ -598,6 +598,11 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
                 let outcome = await persister.workspaceManager.deleteWorkspaceAsync(target)
                 XCTAssertEqual(outcome, .deleted)
             }
+            let persisted = await MCPWindowTestSupport.waitUntil(timeout: .seconds(30)) {
+                await persister.workspaceManager.loadWorkspaceSnapshotFromDisk().contains { $0.id == target.id }
+            }
+            guard persisted else { throw BindContextRoutingFixtureError.workspacePersistenceTimedOut }
+
             // Same roots, different UUID: a window showing it does not show the target.
             let sameRoots = WorkspaceModel(name: "Same Roots", repoPaths: [root.path])
             let windows = try await makeRegisteredWindows(activeWorkspaces: [sameRoots, target, target])
@@ -607,12 +612,6 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
                 for window in [lower, higher] {
                     try? await self.configureWindow(window, activeWorkspace: sameRoots)
                 }
-            }
-            // Workspace creation persists on a background task.
-            let deadline = Date().addingTimeInterval(10)
-            while await !sameRootsWindow.workspaceManager.loadWorkspaceSnapshotFromDisk().contains(where: { $0.id == target.id }) {
-                guard Date() < deadline else { throw BindContextRoutingFixtureError.workspacePersistenceTimedOut }
-                try await Task.sleep(nanoseconds: 20_000_000)
             }
             let connection = try await makeProductionMCPConnection()
             addTeardownBlock { await connection.cleanup() }
@@ -633,24 +632,40 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
                     window.isCurrentlyFocused = window === testCase.focused
                 }
 
+                let selectedID = await ServerNetworkManager.shared.selectedWindow(for: connection.connectionID)
+                func diagnostics() -> String {
+                    "\(testCase.label): selected=\(String(describing: selectedID)) "
+                        + "focused=\(String(describing: windows.first(where: { $0.isCurrentlyFocused })?.windowID)) "
+                        + "restoreSessionLoading=\(WindowStatesManager.shared.isRestoreSessionLoadPending) "
+                        + windows.map { MCPWindowTestSupport.readinessDescription(of: $0, workspaceID: target.id) }
+                        .joined(separator: "; ")
+                }
+                try await MCPWindowTestSupport.requireReadiness("eligible reuse candidates") {
+                    !WindowStatesManager.shared.isRestoreSessionLoadPending
+                        && [lower, higher].allSatisfy { MCPWindowTestSupport.isRoutingReady($0, workspaceID: target.id) }
+                } diagnostics: {
+                    diagnostics()
+                }
+
                 let result = await callTool(connection, name: "manage_workspaces", arguments: [
                     "action": .string("switch"),
                     "workspace": .string(target.id.uuidString),
                     "open_in_new_window": .bool(true),
                     "_rawJSON": .bool(true)
                 ])
-                XCTAssertFalse(result.isError, "\(testCase.label): \(result.text)")
+                let details = diagnostics()
+                XCTAssertFalse(result.isError, "\(details): \(result.text)")
                 let response = try JSONDecoder().decode(ManageWorkspacesResponse.self, from: Data(result.text.utf8))
-                XCTAssertEqual(response.windowID, testCase.expected.windowID, testCase.label)
-                XCTAssertEqual(response.reusedWindow, true, testCase.label)
+                XCTAssertEqual(response.windowID, testCase.expected.windowID, details)
+                XCTAssertEqual(response.reusedWindow, true, details)
                 let affinity = await ServerNetworkManager.shared.selectedWindow(for: connection.connectionID)
-                XCTAssertEqual(affinity, testCase.expected.windowID, testCase.label)
-                XCTAssertEqual(WindowStatesManager.shared.allWindows.map(\.windowID), registeredWindowIDs, testCase.label)
-                XCTAssertEqual(windows.map(\.workspaceManager.activeWorkspaceID), shownWorkspaceIDs, testCase.label)
+                XCTAssertEqual(affinity, testCase.expected.windowID, details)
+                XCTAssertEqual(WindowStatesManager.shared.allWindows.map(\.windowID), registeredWindowIDs, details)
+                XCTAssertEqual(windows.map(\.workspaceManager.activeWorkspaceID), shownWorkspaceIDs, details)
                 XCTAssertEqual(
                     windows.map { $0.workspaceManager.activeWorkspace?.activeComposeTabID },
                     activeTabIDs,
-                    testCase.label
+                    details
                 )
             }
         }
@@ -885,16 +900,18 @@ final class BindContextRoutingAuthorityTests: XCTestCase {
         activeWorkspace: WorkspaceModel,
         savedWorkspaces: [WorkspaceModel] = []
     ) async throws {
-        await window.workspaceManager.awaitInitialized()
+        try await MCPWindowTestSupport.waitForInitialization(of: window)
         window.workspaceManager.workspaces = [activeWorkspace] + savedWorkspaces
-        _ = await window.workspaceManager.switchWorkspace(
+        let switchResult = await window.workspaceManager.switchWorkspace(
             to: activeWorkspace,
             saveState: false,
             reason: "bindContextRoutingAuthorityTest"
         )
-        guard window.workspaceManager.activeWorkspaceID == activeWorkspace.id else {
+        guard switchResult.didSwitch else {
+            XCTFail("Routing fixture workspace switch failed: \(String(describing: switchResult.message))")
             throw BindContextRoutingFixtureError.workspaceActivationFailed
         }
+        try await MCPWindowTestSupport.waitForRoutingReadiness(of: window, workspaceID: activeWorkspace.id)
     }
 
     #if DEBUG
