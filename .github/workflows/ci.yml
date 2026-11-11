@@ -162,7 +162,7 @@ jobs:
         if: needs.changes.outputs.markdown_only != 'true'
         uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: 26
 
       - name: Install pinned Codex CLI
         if: needs.changes.outputs.markdown_only != 'true'
