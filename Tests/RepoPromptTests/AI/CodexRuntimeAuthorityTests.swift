@@ -51,13 +51,14 @@ final class CodexRuntimeAuthorityTests: XCTestCase {
         XCTAssertFalse(runtime.redactedDiagnosticSummary.contains(temporaryDirectory.path))
     }
 
-    func testRuntimePrepareStateProjectsGlobalInstructionsIntoManagedCodexHome() throws {
+    func testRuntimePrepareStateProjectsGlobalFilesIntoManagedCodexHome() throws {
         let resources = temporaryDirectory.appendingPathComponent("Resources", isDirectory: true)
         let support = temporaryDirectory.appendingPathComponent("Support", isDirectory: true)
         let ordinaryHome = temporaryDirectory.appendingPathComponent("ordinary", isDirectory: true)
         try FileManager.default.createDirectory(at: ordinaryHome, withIntermediateDirectories: true)
         try Data().write(to: ordinaryHome.appendingPathComponent("AGENTS.override.md"))
         try Data("global".utf8).write(to: ordinaryHome.appendingPathComponent("AGENTS.md"))
+        try Data(#"{"hooks":{}}"#.utf8).write(to: ordinaryHome.appendingPathComponent("hooks.json"))
         _ = try makePackage(in: resources, target: "aarch64-apple-darwin")
 
         let runtime = try CodexRuntimeAuthority.resolve(
@@ -75,6 +76,10 @@ final class CodexRuntimeAuthorityTests: XCTestCase {
         XCTAssertEqual(
             try Data(contentsOf: runtime.statePaths.codexHome.appendingPathComponent("AGENTS.md")),
             Data("global".utf8)
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: runtime.statePaths.codexHome.appendingPathComponent("hooks.json")),
+            Data(#"{"hooks":{}}"#.utf8)
         )
         XCTAssertTrue(
             FileManager.default.fileExists(

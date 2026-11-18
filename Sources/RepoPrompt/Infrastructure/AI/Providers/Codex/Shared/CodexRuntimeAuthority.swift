@@ -41,7 +41,7 @@ enum CodexRuntimeAuthority {
             try fileManager.createDirectory(at: statePaths.sqliteHome, withIntermediateDirectories: true)
             let ordinaryCodexHome = ordinaryCodexHomeURL
                 ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
-            try CodexGlobalInstructionsProjection.prepare(
+            try CodexGlobalFilesProjection.prepare(
                 ordinaryCodexHome: ordinaryCodexHome,
                 managedCodexHome: statePaths.codexHome,
                 fileManager: fileManager

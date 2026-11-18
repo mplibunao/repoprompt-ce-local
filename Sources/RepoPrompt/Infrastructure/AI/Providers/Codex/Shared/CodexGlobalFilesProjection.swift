@@ -2,7 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-enum CodexGlobalInstructionsProjection {
+enum CodexGlobalFilesProjection {
     enum Failure: Error, LocalizedError {
         case sourceUnreadable(URL, String)
         case manifestInvalid(URL, String)
@@ -16,27 +16,34 @@ enum CodexGlobalInstructionsProjection {
         var errorDescription: String? {
             switch self {
             case let .sourceUnreadable(url, detail):
-                "RepoPrompt could not read the global Codex instruction file at `\(url.path)` (\(detail)). Neither managed instruction file was changed."
+                "RepoPrompt could not read the global Codex file at `\(url.path)` (\(detail)). Its managed copy was not changed."
             case let .manifestInvalid(url, detail):
-                "RepoPrompt could not use its Codex instruction projection manifest at `\(url.path)` (\(detail)). Neither managed instruction file was changed. Preserve anything needed, move or remove the manifest, and try again."
+                "RepoPrompt could not use its Codex global file projection manifest at `\(url.path)` (\(detail)). No managed global Codex file that this manifest covers was changed. Preserve anything needed, move or remove the manifest, and try again."
             case let .unownedDestination(url):
-                "RepoPrompt found an unowned Codex instruction file at `\(url.path)`. It was preserved and neither managed instruction file was changed. Preserve anything needed, move or remove the file, and try again."
+                "RepoPrompt found an unowned global Codex file at `\(url.path)`. It was preserved. Preserve anything needed, move or remove the file, and try again."
             case let .modifiedDestination(url):
-                "RepoPrompt found a modified managed Codex instruction file at `\(url.path)`. It was preserved and neither managed instruction file was changed. Preserve anything needed, move or remove the file, and try again."
+                "RepoPrompt found a modified managed global Codex file at `\(url.path)`. It was preserved. Preserve anything needed, move or remove the file, and try again."
             case let .unsupportedDestination(url, kind):
-                "RepoPrompt found a \(kind) at managed Codex instruction path `\(url.path)`. It was preserved and neither managed instruction file was changed. Preserve anything needed, move or remove the entry, and try again."
+                "RepoPrompt found a \(kind) at managed global Codex file path `\(url.path)`. It was preserved. Preserve anything needed, move or remove the entry, and try again."
             case let .inspectionFailed(url, detail):
-                "RepoPrompt could not inspect Codex instruction state at `\(url.path)` (\(detail)). Neither managed instruction file was changed."
+                "RepoPrompt could not inspect Codex global file state at `\(url.path)` (\(detail))."
             case let .destinationMutationFailed(url, detail):
-                "RepoPrompt could not update the managed Codex instruction file at `\(url.path)` (\(detail)). Try again so RepoPrompt can reconcile the managed projection."
+                "RepoPrompt could not update the managed global Codex file at `\(url.path)` (\(detail)). Other managed global Codex files may already have been updated. Try again. If RepoPrompt then reports an unowned file, move or remove it and try again."
             case let .manifestMutationFailed(url, detail):
-                "RepoPrompt could not update its Codex instruction projection manifest at `\(url.path)` (\(detail)). Try again so RepoPrompt can reconcile the managed projection."
+                "RepoPrompt could not update its Codex global file projection manifest at `\(url.path)` (\(detail)). Managed global Codex files may already have been updated. Try again. If RepoPrompt then reports an unowned file, move or remove it and try again."
             }
         }
     }
 
-    private struct InstructionFile {
+    private struct ProjectedFile {
         let name: String
+    }
+
+    /// Files that share one ownership manifest. Every action in a set is planned before any is
+    /// applied, so a conflict on one file blocks every change in its set.
+    private struct FileSet {
+        let files: [ProjectedFile]
+        let manifestName: String
     }
 
     private struct SourceSnapshot {
@@ -58,7 +65,7 @@ enum CodexGlobalInstructionsProjection {
     }
 
     private struct ProjectionAction {
-        let file: InstructionFile
+        let file: ProjectedFile
         let destination: URL
         let action: DestinationAction
         let desiredHash: String?
@@ -69,11 +76,20 @@ enum CodexGlobalInstructionsProjection {
         let projectedFileHashes: [String: String]
     }
 
-    private static let files = [
-        InstructionFile(name: "AGENTS.override.md"),
-        InstructionFile(name: "AGENTS.md")
-    ]
-    private static let manifestName = ".repoprompt-agents-projection.json"
+    /// A build rejects a manifest that names a file outside its own set, and then every Codex launch
+    /// it makes fails. Builds of different versions share one profile, so a set's names never grow:
+    /// a newly projected file gets a new set and a new manifest, which older builds never read.
+    private static let instructionFiles = FileSet(
+        files: [ProjectedFile(name: "AGENTS.override.md"), ProjectedFile(name: "AGENTS.md")],
+        manifestName: ".repoprompt-agents-projection.json"
+    )
+    private static let hookFiles = FileSet(
+        files: [ProjectedFile(name: "hooks.json")],
+        manifestName: ".repoprompt-hooks-projection.json"
+    )
+    // Instructions reconcile and commit before hooks are read, so a hooks failure leaves the
+    // instruction copies as they would be without hooks. A failing set stops every set after it.
+    private static let fileSets = [instructionFiles, hookFiles]
     private static let lock = NSLock()
 
     static func prepare(
@@ -84,12 +100,29 @@ enum CodexGlobalInstructionsProjection {
         lock.lock()
         defer { lock.unlock() }
 
+        for fileSet in fileSets {
+            try reconcile(
+                fileSet,
+                ordinaryCodexHome: ordinaryCodexHome,
+                managedCodexHome: managedCodexHome,
+                fileManager: fileManager
+            )
+        }
+    }
+
+    private static func reconcile(
+        _ fileSet: FileSet,
+        ordinaryCodexHome: URL,
+        managedCodexHome: URL,
+        fileManager: FileManager
+    ) throws {
+        let files = fileSet.files
         let sourceSnapshots = try Dictionary(uniqueKeysWithValues: files.map { file in
             let source = ordinaryCodexHome.appendingPathComponent(file.name)
             return try (file.name, sourceSnapshot(at: source))
         })
-        let manifestURL = managedCodexHome.appendingPathComponent(manifestName)
-        let previousManifest = try loadManifest(at: manifestURL)
+        let manifestURL = managedCodexHome.appendingPathComponent(fileSet.manifestName)
+        let previousManifest = try loadManifest(at: manifestURL, allowedNames: Set(files.map(\.name)))
 
         let actions = try files.map { file in
             let destination = managedCodexHome.appendingPathComponent(file.name)
@@ -160,7 +193,7 @@ enum CodexGlobalInstructionsProjection {
         }
     }
 
-    private static func loadManifest(at url: URL) throws -> Manifest? {
+    private static func loadManifest(at url: URL, allowedNames: Set<String>) throws -> Manifest? {
         switch try destinationSnapshot(at: url) {
         case .missing:
             return nil
@@ -182,7 +215,6 @@ enum CodexGlobalInstructionsProjection {
             throw Failure.manifestInvalid(url, "unsupported schema version \(manifest.schemaVersion)")
         }
 
-        let allowedNames = Set(files.map(\.name))
         guard Set(manifest.projectedFileHashes.keys).isSubset(of: allowedNames) else {
             throw Failure.manifestInvalid(url, "the manifest contains an unknown filename")
         }
@@ -193,7 +225,7 @@ enum CodexGlobalInstructionsProjection {
     }
 
     private static func projectionAction(
-        file: InstructionFile,
+        file: ProjectedFile,
         destination: URL,
         source: SourceSnapshot?,
         destinationSnapshot: DestinationSnapshot,
