@@ -35,17 +35,21 @@ final class CodexHookReviewCardStateTests: XCTestCase {
     }
 
     /// The card shows a hook's command over several lines, so it asks for line breaks and tabs to stay. Every other
-    /// control or bidi character still shows as its escape, and every other hook field gets no exception.
+    /// control, format, or variation-selector character still shows as its escape, including the ones that attach to
+    /// the character before them (tag characters, variation selectors), and every other hook field gets no exception.
     func testHookDisplayEscapingKeepsLineBreaksAndTabsOnlyWhenAsked() {
         let command = "a\tb\nc\r\nd\u{2028}e\u{202E}f\u{7}g\u{200F}h"
+            + "\u{200B}i\u{E0041}j\u{E0002}k\u{FE0F}l\u{61C}m"
 
         XCTAssertEqual(
             command.escapedForDisplay(keepingLineBreaksAndTabs: true),
             "a\tb\nc\r\nd\u{2028}e\\u{202E}f\\u{0007}g\\u{200F}h"
+                + "\\u{200B}i\\u{E0041}j\\u{E0002}k\\u{FE0F}l\\u{061C}m"
         )
         XCTAssertEqual(
             command.escapedForDisplay(),
             "a\\u{0009}b\\nc\\nd\\ne\\u{202E}f\\u{0007}g\\u{200F}h"
+                + "\\u{200B}i\\u{E0041}j\\u{E0002}k\\u{FE0F}l\\u{061C}m"
         )
     }
 

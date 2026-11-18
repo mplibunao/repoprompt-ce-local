@@ -6,10 +6,11 @@ extension String {
     /// is shown. It is for display only: keep the original for identity, selection, and writes.
     ///
     /// Each line break, meaning a `Character` whose `isNewline` is true, becomes `\n`, so a value can't start a line of
-    /// its own and pass as another entry. Every other C0 or C1 control character, and the bidi formatting characters
-    /// U+061C, U+200E, U+200F, U+202A-U+202E, and U+2066-U+2069, become `\u{XXXX}`, because a bidi control can make
-    /// text read differently from what it holds. With `keepingLineBreaksAndTabs`, line breaks and tabs stay as they
-    /// are, for text that a view shows over several lines; everything else is escaped the same way.
+    /// its own and pass as another entry. Every other scalar that is invisible or reorders text becomes `\u{XXXX}`:
+    /// the controls (general category Cc), the format characters (Cf), and the variation selectors. Cf covers the bidi
+    /// controls, which can make text read differently from what it holds, and the zero-width, joiner, soft hyphen, and
+    /// tag characters, which a person can't see but an agent reads. With `keepingLineBreaksAndTabs`, line breaks and
+    /// tabs stay as they are, for text that a view shows over several lines; everything else is escaped the same way.
     func escapedForDisplay(keepingLineBreaksAndTabs: Bool = false) -> String {
         var escaped = ""
         for character in self {
@@ -37,10 +38,12 @@ extension String {
 private extension Unicode.Scalar {
     var isEscapedForDisplay: Bool {
         switch value {
-        case 0x061C, 0x200E, 0x200F, 0x202A ... 0x202E, 0x2066 ... 0x2069:
+        // The variation selectors are nonspacing marks, and the tag block holds unassigned scalars beside its Cf ones,
+        // so no general category covers them.
+        case 0xFE00 ... 0xFE0F, 0xE0000 ... 0xE007F, 0xE0100 ... 0xE01EF:
             true
         default:
-            properties.generalCategory == .control
+            properties.generalCategory == .control || properties.generalCategory == .format
         }
     }
 }
