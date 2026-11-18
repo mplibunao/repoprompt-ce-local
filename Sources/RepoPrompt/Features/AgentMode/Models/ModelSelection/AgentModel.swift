@@ -25,7 +25,19 @@ enum AgentModel: String, CaseIterable, Codable {
     /// GPT-5.1 Codex Mini (separate fast model)
     case codexMini = "gpt-5.1-codex-mini"
 
-    // GPT-6.1 and GPT-6 models exposed through Codex CLI
+    // GPT-6.2, GPT-6.1, and GPT-6 models exposed through Codex CLI
+    case gpt62SolLow = "gpt-6.2-sol-low"
+    case gpt62SolMedium = "gpt-6.2-sol-medium"
+    case gpt62SolHigh = "gpt-6.2-sol-high"
+    case gpt62SolXHigh = "gpt-6.2-sol-xhigh"
+    case gpt62SolMax = "gpt-6.2-sol-max"
+    case gpt62SolUltra = "gpt-6.2-sol-ultra"
+    case gpt62AstraLow = "gpt-6.2-astra-low"
+    case gpt62AstraMedium = "gpt-6.2-astra-medium"
+    case gpt62AstraHigh = "gpt-6.2-astra-high"
+    case gpt62AstraXHigh = "gpt-6.2-astra-xhigh"
+    case gpt62AstraMax = "gpt-6.2-astra-max"
+    case gpt62AstraUltra = "gpt-6.2-astra-ultra"
     case gpt61SolLow = "gpt-6.1-sol-low"
     case gpt61SolMedium = "gpt-6.1-sol-medium"
     case gpt61SolHigh = "gpt-6.1-sol-high"
@@ -142,6 +154,18 @@ enum AgentModel: String, CaseIterable, Codable {
     var displayName: String {
         switch self {
         case .codexMini: "GPT-5.1 Codex Mini"
+        case .gpt62SolLow: "GPT-6.2 Sol Low"
+        case .gpt62SolMedium: "GPT-6.2 Sol Medium"
+        case .gpt62SolHigh: "GPT-6.2 Sol High"
+        case .gpt62SolXHigh: "GPT-6.2 Sol XHigh"
+        case .gpt62SolMax: "GPT-6.2 Sol Max"
+        case .gpt62SolUltra: "GPT-6.2 Sol Ultra"
+        case .gpt62AstraLow: "GPT-6.2 Astra Low"
+        case .gpt62AstraMedium: "GPT-6.2 Astra Medium"
+        case .gpt62AstraHigh: "GPT-6.2 Astra High"
+        case .gpt62AstraXHigh: "GPT-6.2 Astra XHigh"
+        case .gpt62AstraMax: "GPT-6.2 Astra Max"
+        case .gpt62AstraUltra: "GPT-6.2 Astra Ultra"
         case .gpt61SolLow: "GPT-6.1 Sol Low"
         case .gpt61SolMedium: "GPT-6.1 Sol Medium"
         case .gpt61SolHigh: "GPT-6.1 Sol High"
@@ -236,6 +260,18 @@ enum AgentModel: String, CaseIterable, Codable {
     var description: String {
         switch self {
         case .codexMini: "Ultra-fast. Good for quick lookups, simple edits, and surface-level exploration."
+        case .gpt62SolLow: "Fast GPT-6.2 Sol reasoning through Codex. Recommended for Context Builder, prompt building, and bounded engineering."
+        case .gpt62SolMedium: "Balanced GPT-6.2 Sol reasoning through Codex. Recommended for Engineer/default implementation work."
+        case .gpt62SolHigh: "Deep GPT-6.2 Sol reasoning through Codex. Recommended for planning, review, and pair-agent work."
+        case .gpt62SolXHigh: "Extra-high GPT-6.2 Sol reasoning through Codex. Use selectively for hard agentic tasks."
+        case .gpt62SolMax: "Maximum GPT-6.2 Sol reasoning through Codex. Can use substantially more tokens; reserve for exceptional tasks."
+        case .gpt62SolUltra: "Ultra GPT-6.2 Sol reasoning through Codex. Can use substantially more tokens; choose intentionally for exceptional tasks."
+        case .gpt62AstraLow: "Fast GPT-6.2 Astra reasoning through Codex for complex coding and professional work."
+        case .gpt62AstraMedium: "Balanced GPT-6.2 Astra reasoning through Codex for demanding end-to-end work."
+        case .gpt62AstraHigh: "Deep GPT-6.2 Astra reasoning through Codex for demanding reasoning, research, and coding."
+        case .gpt62AstraXHigh: "Extra-high GPT-6.2 Astra reasoning through Codex. Use selectively for hard tasks."
+        case .gpt62AstraMax: "Maximum GPT-6.2 Astra reasoning through Codex. Reserve for exceptional tasks."
+        case .gpt62AstraUltra: "Ultra GPT-6.2 Astra reasoning through Codex. Can use substantially more tokens; choose intentionally for exceptional tasks."
         case .gpt61SolLow: "Fast GPT-6.1 Sol reasoning through Codex. Recommended for Context Builder, prompt building, and bounded engineering."
         case .gpt61SolMedium: "Balanced GPT-6.1 Sol reasoning through Codex. Recommended for Engineer/default implementation work."
         case .gpt61SolHigh: "Deep GPT-6.1 Sol reasoning through Codex. Recommended for planning, review, and pair-agent work."
@@ -490,6 +526,44 @@ enum AgentModel: String, CaseIterable, Codable {
             }
         }
 
+        func gpt62Sol(for effort: CodexReasoningEffort?) -> AgentModel {
+            switch effort {
+            case .some(.low):
+                .gpt62SolLow
+            case .some(.high):
+                .gpt62SolHigh
+            case .some(.xhigh):
+                .gpt62SolXHigh
+            case .some(.max):
+                .gpt62SolMax
+            case .some(.ultra):
+                .gpt62SolUltra
+            case .some(.none), .some(.minimal), .some(.medium):
+                .gpt62SolMedium
+            case nil, .some:
+                .gpt62SolMedium
+            }
+        }
+
+        func gpt62Astra(for effort: CodexReasoningEffort?) -> AgentModel {
+            switch effort {
+            case .some(.low):
+                .gpt62AstraLow
+            case .some(.high):
+                .gpt62AstraHigh
+            case .some(.xhigh):
+                .gpt62AstraXHigh
+            case .some(.max):
+                .gpt62AstraMax
+            case .some(.ultra):
+                .gpt62AstraUltra
+            case .some(.none), .some(.minimal), .some(.medium):
+                .gpt62AstraMedium
+            case nil, .some:
+                .gpt62AstraMedium
+            }
+        }
+
         func gpt61Sol(for effort: CodexReasoningEffort?) -> AgentModel {
             switch effort {
             case .some(.low):
@@ -648,6 +722,12 @@ enum AgentModel: String, CaseIterable, Codable {
         }
         if base.contains("gpt-5.3-codex") {
             return codex53(for: effort)
+        }
+        if base == "gpt-6.2-sol" {
+            return gpt62Sol(for: effort)
+        }
+        if base == "gpt-6.2-astra" {
+            return gpt62Astra(for: effort)
         }
         if base == "gpt-6.1-sol" {
             return gpt61Sol(for: effort)

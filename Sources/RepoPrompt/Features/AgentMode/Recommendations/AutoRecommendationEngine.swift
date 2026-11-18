@@ -522,7 +522,7 @@ final class AutoRecommendationEngine {
         // Suggest upgrade if only some CLIs are available
         let upgradeHint: String? = {
             if recommendedStatus.codexCLI != .ready {
-                return "Connect Codex CLI for GPT-6 Luna High (explore/discovery) and the newest Sol it advertises, such as GPT-6.1 Sol, at Medium (engineer and design fallback) and High (pair/Oracle)."
+                return "Connect Codex CLI for GPT-6 Luna High (explore/discovery) and the newest Sol it advertises, such as GPT-6.2 Sol, at Medium (engineer and design fallback) and High (pair/Oracle)."
             }
             if recommendedStatus.claudeCodeCLI != .ready {
                 return "Connect Claude Code for Claude Opus (design/pair). Best for architecture and creative work."

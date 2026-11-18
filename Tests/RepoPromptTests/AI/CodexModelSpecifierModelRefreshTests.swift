@@ -2,7 +2,7 @@
 import XCTest
 
 final class CodexModelSpecifierModelRefreshTests: XCTestCase {
-    private let gpt6GenerationBases = ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra"]
+    private let gpt6GenerationBases = ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra"]
 
     func testGPT6FamiliesSplitEveryEffortWithoutDiscovery() {
         for base in gpt6GenerationBases {
@@ -18,7 +18,7 @@ final class CodexModelSpecifierModelRefreshTests: XCTestCase {
             assertWire(raw: "\(base)-ultra", records: [], model: "\(base)-ultra", effort: nil, serviceTier: nil)
         }
         // Discovered capability, not the family backfill, authorizes Ultra.
-        for base in ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra"] {
+        for base in ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra"] {
             assertWire(
                 raw: "\(base)-ultra",
                 records: [record(base, efforts: ["high", "ultra"])],
@@ -30,7 +30,7 @@ final class CodexModelSpecifierModelRefreshTests: XCTestCase {
     }
 
     func testExactAdvertisedIdentifierOwnsItsWireIdentity() {
-        for raw in ["gpt-6-sol-max", "gpt-6.1-sol-max"] {
+        for raw in ["gpt-6-sol-max", "gpt-6.1-sol-max", "gpt-6.2-sol-max", "gpt-6.2-astra-max"] {
             assertWire(raw: raw, records: [record(raw, efforts: ["high"])], model: raw, effort: nil, serviceTier: nil)
         }
         assertWire(

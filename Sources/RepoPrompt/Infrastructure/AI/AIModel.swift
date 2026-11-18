@@ -78,6 +78,16 @@ public enum AIModel: Equatable, Hashable {
     case gpt54Nano
 
     // GPT-6 family (OpenAI Responses API)
+    case gpt62Sol
+    case gpt62SolLow
+    case gpt62SolHigh
+    case gpt62SolXHigh
+    case gpt62SolMax
+    case gpt62Astra
+    case gpt62AstraLow
+    case gpt62AstraHigh
+    case gpt62AstraXHigh
+    case gpt62AstraMax
     case gpt61Sol
     case gpt61SolLow
     case gpt61SolHigh
@@ -188,6 +198,8 @@ public enum AIModel: Equatable, Hashable {
     case openrouterGeminiPro
     case openrouterClaude4Sonnet
     case openrouterClaude4Opus
+    case openrouterGpt62Sol
+    case openrouterGpt62Astra
     case openrouterGpt61Sol
     case openrouterGpt6Astra
     case openrouterGpt6Luna
@@ -331,6 +343,16 @@ public enum AIModel: Equatable, Hashable {
         ModelInfo(model: .gpt54Nano, rawValue: "gpt-5.4-nano", actualName: nil, displayName: "GPT-5.4 Nano", provider: ProviderIndex.openAI),
 
         // GPT-6 family. The base raw is the Medium variant; GPT-6 Sol is a Medium-only pin.
+        ModelInfo(model: .gpt62Sol, rawValue: "gpt-6.2-sol", actualName: nil, displayName: "GPT-6.2 Sol Med", provider: ProviderIndex.openAI),
+        ModelInfo(model: .gpt62SolLow, rawValue: "gpt-6.2-sol-low", actualName: "gpt-6.2-sol", displayName: "GPT-6.2 Sol Low", provider: ProviderIndex.openAI),
+        ModelInfo(model: .gpt62SolHigh, rawValue: "gpt-6.2-sol-high", actualName: "gpt-6.2-sol", displayName: "GPT-6.2 Sol High", provider: ProviderIndex.openAI),
+        ModelInfo(model: .gpt62SolXHigh, rawValue: "gpt-6.2-sol-xhigh", actualName: "gpt-6.2-sol", displayName: "GPT-6.2 Sol XHigh", provider: ProviderIndex.openAI),
+        ModelInfo(model: .gpt62SolMax, rawValue: "gpt-6.2-sol-max", actualName: "gpt-6.2-sol", displayName: "GPT-6.2 Sol Max", provider: ProviderIndex.openAI),
+        ModelInfo(model: .gpt62Astra, rawValue: "gpt-6.2-astra", actualName: nil, displayName: "GPT-6.2 Astra Med", provider: ProviderIndex.openAI),
+        ModelInfo(model: .gpt62AstraLow, rawValue: "gpt-6.2-astra-low", actualName: "gpt-6.2-astra", displayName: "GPT-6.2 Astra Low", provider: ProviderIndex.openAI),
+        ModelInfo(model: .gpt62AstraHigh, rawValue: "gpt-6.2-astra-high", actualName: "gpt-6.2-astra", displayName: "GPT-6.2 Astra High", provider: ProviderIndex.openAI),
+        ModelInfo(model: .gpt62AstraXHigh, rawValue: "gpt-6.2-astra-xhigh", actualName: "gpt-6.2-astra", displayName: "GPT-6.2 Astra XHigh", provider: ProviderIndex.openAI),
+        ModelInfo(model: .gpt62AstraMax, rawValue: "gpt-6.2-astra-max", actualName: "gpt-6.2-astra", displayName: "GPT-6.2 Astra Max", provider: ProviderIndex.openAI),
         ModelInfo(model: .gpt61Sol, rawValue: "gpt-6.1-sol", actualName: nil, displayName: "GPT-6.1 Sol Med", provider: ProviderIndex.openAI),
         ModelInfo(model: .gpt61SolLow, rawValue: "gpt-6.1-sol-low", actualName: "gpt-6.1-sol", displayName: "GPT-6.1 Sol Low", provider: ProviderIndex.openAI),
         ModelInfo(model: .gpt61SolHigh, rawValue: "gpt-6.1-sol-high", actualName: "gpt-6.1-sol", displayName: "GPT-6.1 Sol High", provider: ProviderIndex.openAI),
@@ -437,6 +459,8 @@ public enum AIModel: Equatable, Hashable {
         ModelInfo(model: .openrouterClaude4Sonnet, rawValue: "anthropic/claude-sonnet-4.5", actualName: nil, displayName: "oRouter/Claude Sonnet 4.5", provider: ProviderIndex.openRouter),
         ModelInfo(model: .openrouterClaude4Opus, rawValue: "anthropic/claude-opus-4.6", actualName: nil, displayName: "oRouter/Claude Opus 4.6", provider: ProviderIndex.openRouter),
         // OpenRouter keeps dotted Anthropic version slugs, unlike Anthropic's hyphenated API IDs.
+        ModelInfo(model: .openrouterGpt62Sol, rawValue: "openai/gpt-6.2-sol", actualName: nil, displayName: "oRouter/GPT-6.2 Sol", provider: ProviderIndex.openRouter),
+        ModelInfo(model: .openrouterGpt62Astra, rawValue: "openai/gpt-6.2-astra", actualName: nil, displayName: "oRouter/GPT-6.2 Astra", provider: ProviderIndex.openRouter),
         ModelInfo(model: .openrouterGpt61Sol, rawValue: "openai/gpt-6.1-sol", actualName: nil, displayName: "oRouter/GPT-6.1 Sol", provider: ProviderIndex.openRouter),
         ModelInfo(model: .openrouterGpt6Astra, rawValue: "openai/gpt-6-astra", actualName: nil, displayName: "oRouter/GPT-6 Astra", provider: ProviderIndex.openRouter),
         ModelInfo(model: .openrouterGpt6Luna, rawValue: "openai/gpt-6-luna", actualName: nil, displayName: "oRouter/GPT-6 Luna", provider: ProviderIndex.openRouter),
@@ -1110,6 +1134,16 @@ public enum AIModel: Equatable, Hashable {
             .gpt54MiniHigh,
             .gpt54MiniXHigh,
             .gpt54Nano,
+            .gpt62Sol,
+            .gpt62SolLow,
+            .gpt62SolHigh,
+            .gpt62SolXHigh,
+            .gpt62SolMax,
+            .gpt62Astra,
+            .gpt62AstraLow,
+            .gpt62AstraHigh,
+            .gpt62AstraXHigh,
+            .gpt62AstraMax,
             .gpt61Sol,
             .gpt61SolLow,
             .gpt61SolHigh,
@@ -1339,11 +1373,11 @@ public enum AIModel: Equatable, Hashable {
         case .gpt5, .gpt54, .gpt5CodexMed, .o3: return "medium"
         case .gpt5Low, .gpt54Low, .gpt5CodexLow, .o3Low: return "low"
         // GPT-6 family (API)
-        case .gpt61SolMax, .gpt6AstraMax: return "max"
-        case .gpt61SolXHigh, .gpt6AstraXHigh, .gpt6LunaXHigh: return "xhigh"
-        case .gpt61SolHigh, .gpt6AstraHigh, .gpt6LunaHigh: return "high"
-        case .gpt61Sol, .gpt6Astra, .gpt6Luna, .gpt6Sol: return "medium"
-        case .gpt61SolLow, .gpt6AstraLow, .gpt6LunaLow: return "low"
+        case .gpt62SolMax, .gpt62AstraMax, .gpt61SolMax, .gpt6AstraMax: return "max"
+        case .gpt62SolXHigh, .gpt62AstraXHigh, .gpt61SolXHigh, .gpt6AstraXHigh, .gpt6LunaXHigh: return "xhigh"
+        case .gpt62SolHigh, .gpt62AstraHigh, .gpt61SolHigh, .gpt6AstraHigh, .gpt6LunaHigh: return "high"
+        case .gpt62Sol, .gpt62Astra, .gpt61Sol, .gpt6Astra, .gpt6Luna, .gpt6Sol: return "medium"
+        case .gpt62SolLow, .gpt62AstraLow, .gpt61SolLow, .gpt6AstraLow, .gpt6LunaLow: return "low"
         // Codex CLI models
         case .codexCliGpt56SolUltra, .codexCliGpt56TerraUltra: return "ultra"
         case .codexCliGpt56SolMax, .codexCliGpt56TerraMax, .codexCliGpt56LunaMax: return "max"
@@ -2244,6 +2278,16 @@ public enum AIModel: Equatable, Hashable {
         case gpt54MiniHigh
         case gpt54MiniXHigh
         case gpt54Nano
+        case gpt62Sol
+        case gpt62SolLow
+        case gpt62SolHigh
+        case gpt62SolXHigh
+        case gpt62SolMax
+        case gpt62Astra
+        case gpt62AstraLow
+        case gpt62AstraHigh
+        case gpt62AstraXHigh
+        case gpt62AstraMax
         case gpt61Sol
         case gpt61SolLow
         case gpt61SolHigh
@@ -2336,6 +2380,8 @@ public enum AIModel: Equatable, Hashable {
         case openrouterGeminiPro
         case openrouterClaude4Sonnet
         case openrouterClaude4Opus
+        case openrouterGpt62Sol
+        case openrouterGpt62Astra
         case openrouterGpt61Sol
         case openrouterGpt6Astra
         case openrouterGpt6Luna
@@ -2442,6 +2488,26 @@ public enum AIModel: Equatable, Hashable {
             .staticCase(.gpt54MiniXHigh)
         case .gpt54Nano:
             .staticCase(.gpt54Nano)
+        case .gpt62Sol:
+            .staticCase(.gpt62Sol)
+        case .gpt62SolLow:
+            .staticCase(.gpt62SolLow)
+        case .gpt62SolHigh:
+            .staticCase(.gpt62SolHigh)
+        case .gpt62SolXHigh:
+            .staticCase(.gpt62SolXHigh)
+        case .gpt62SolMax:
+            .staticCase(.gpt62SolMax)
+        case .gpt62Astra:
+            .staticCase(.gpt62Astra)
+        case .gpt62AstraLow:
+            .staticCase(.gpt62AstraLow)
+        case .gpt62AstraHigh:
+            .staticCase(.gpt62AstraHigh)
+        case .gpt62AstraXHigh:
+            .staticCase(.gpt62AstraXHigh)
+        case .gpt62AstraMax:
+            .staticCase(.gpt62AstraMax)
         case .gpt61Sol:
             .staticCase(.gpt61Sol)
         case .gpt61SolLow:
@@ -2626,6 +2692,10 @@ public enum AIModel: Equatable, Hashable {
             .staticCase(.openrouterClaude4Sonnet)
         case .openrouterClaude4Opus:
             .staticCase(.openrouterClaude4Opus)
+        case .openrouterGpt62Sol:
+            .staticCase(.openrouterGpt62Sol)
+        case .openrouterGpt62Astra:
+            .staticCase(.openrouterGpt62Astra)
         case .openrouterGpt61Sol:
             .staticCase(.openrouterGpt61Sol)
         case .openrouterGpt6Astra:

@@ -173,28 +173,26 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
     }
 
     func testRoleDefaultsPreferDiscoveredGPT6AtEachRolePosition() {
-        CodexDiscoveryTestState.setDiscoveredModels(CodexDiscoveryTestState.gpt6Models())
         let availability = AgentModelCatalog.AvailabilityContext()
+        // Each catalog advertises GPT-6 Luna, so Explore stays on it while the Sol roles follow the newest Sol.
+        let catalogs: [(label: String, models: [CodexAppServerClient.RemoteModel], newestSol: String)] = [
+            ("GPT-6", CodexDiscoveryTestState.gpt6Models(), "gpt-6-sol"),
+            ("GPT-6.1", CodexDiscoveryTestState.gpt61Models(), "gpt-6.1-sol"),
+            ("GPT-6.2", CodexDiscoveryTestState.gpt62Models(), "gpt-6.2-sol")
+        ]
+        for catalog in catalogs {
+            CodexDiscoveryTestState.setDiscoveredModels(catalog.models)
 
-        XCTAssertEqual(resolve(.explore, availability), selection(.codexExec, "gpt-6-luna-high"))
-        XCTAssertEqual(resolve(.engineer, availability), selection(.codexExec, "gpt-6-sol-medium"))
-        XCTAssertEqual(resolve(.pair, availability), selection(.codexExec, "gpt-6-sol-high"))
-        XCTAssertEqual(resolve(.design, availability)?.agent, .claudeCode)
-        XCTAssertEqual(
-            resolve(.design, AgentModelCatalog.AvailabilityContext(claudeCodeAvailable: false)),
-            selection(.codexExec, "gpt-6-sol-medium")
-        )
-
-        CodexDiscoveryTestState.setDiscoveredModels(CodexDiscoveryTestState.gpt61Models())
-
-        XCTAssertEqual(resolve(.explore, availability), selection(.codexExec, "gpt-6-luna-high"))
-        XCTAssertEqual(resolve(.engineer, availability), selection(.codexExec, "gpt-6.1-sol-medium"))
-        XCTAssertEqual(resolve(.pair, availability), selection(.codexExec, "gpt-6.1-sol-high"))
-        XCTAssertEqual(resolve(.design, availability)?.agent, .claudeCode)
-        XCTAssertEqual(
-            resolve(.design, AgentModelCatalog.AvailabilityContext(claudeCodeAvailable: false)),
-            selection(.codexExec, "gpt-6.1-sol-medium")
-        )
+            XCTAssertEqual(resolve(.explore, availability), selection(.codexExec, "gpt-6-luna-high"), catalog.label)
+            XCTAssertEqual(resolve(.engineer, availability), selection(.codexExec, "\(catalog.newestSol)-medium"), catalog.label)
+            XCTAssertEqual(resolve(.pair, availability), selection(.codexExec, "\(catalog.newestSol)-high"), catalog.label)
+            XCTAssertEqual(resolve(.design, availability)?.agent, .claudeCode, catalog.label)
+            XCTAssertEqual(
+                resolve(.design, AgentModelCatalog.AvailabilityContext(claudeCodeAvailable: false)),
+                selection(.codexExec, "\(catalog.newestSol)-medium"),
+                catalog.label
+            )
+        }
     }
 
     func testRoleDefaultsFallBackWhenNewestFamilyLacksTheEffort() {
@@ -228,9 +226,11 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
     }
 
     func testPartialGPT61CatalogDoesNotBackfillGPT61Efforts() {
-        // GPT-6.1 Sol, GPT-6 Luna Low, and GPT-5.3 Codex are advertised but GPT-5.6 Sol is not, so the
-        // static list is merged in while GPT-6.1 keeps only its advertised efforts.
+        // GPT-6.2 Sol and Astra, GPT-6.1 Sol, GPT-6 Luna Low, and GPT-5.3 Codex are advertised but GPT-5.6 Sol
+        // isn't, so the static list is merged in while GPT-6.2 and GPT-6.1 keep only their advertised efforts.
         CodexDiscoveryTestState.setDiscoveredModels([
+            CodexDiscoveryTestState.remoteModel("gpt-6.2-sol", efforts: ["low"]),
+            CodexDiscoveryTestState.remoteModel("gpt-6.2-astra", efforts: ["high"]),
             CodexDiscoveryTestState.remoteModel("gpt-6.1-sol", efforts: ["low", "medium", "high"], isDefault: true),
             CodexDiscoveryTestState.remoteModel("gpt-6-luna", efforts: ["low"]),
             CodexDiscoveryTestState.remoteModel("gpt-5.3-codex", efforts: ["medium"])
@@ -249,6 +249,11 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
             XCTAssertEqual(
                 Set(raws.filter { $0.hasPrefix("gpt-6.1-") && !$0.contains("-fast") }),
                 ["gpt-6.1-sol-low", "gpt-6.1-sol-medium", "gpt-6.1-sol-high"],
+                surface
+            )
+            XCTAssertEqual(
+                Set(raws.filter { $0.hasPrefix("gpt-6.2-") && !$0.contains("-fast") }),
+                ["gpt-6.2-sol-low", "gpt-6.2-astra-high"],
                 surface
             )
             for raw in ["gpt-5.6-sol-low", "gpt-5.6-sol-medium", "gpt-5.6-sol-high"] {
@@ -289,6 +294,14 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
             ("gpt-6-astra", [
                 "low": .gpt6AstraLow, "medium": .gpt6AstraMedium, "high": .gpt6AstraHigh,
                 "xhigh": .gpt6AstraXHigh, "max": .gpt6AstraMax
+            ]),
+            ("gpt-6.2-sol", [
+                "low": .gpt62SolLow, "medium": .gpt62SolMedium, "high": .gpt62SolHigh,
+                "xhigh": .gpt62SolXHigh, "max": .gpt62SolMax
+            ]),
+            ("gpt-6.2-astra", [
+                "low": .gpt62AstraLow, "medium": .gpt62AstraMedium, "high": .gpt62AstraHigh,
+                "xhigh": .gpt62AstraXHigh, "max": .gpt62AstraMax
             ])
         ]
         for (family, efforts) in expected {
@@ -307,7 +320,10 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
 
         // A saved selection keeps its exact raw, never the approximate UI binding, with or without discovery.
         func assertPersistedRawsAreKept(_ discoveryState: String) {
-            for raw in ["gpt-6.1-sol-ultra", "gpt-6.1-sol-max", "gpt-6.1-sol", "gpt-6-astra-ultra", "gpt-6-astra-max"] {
+            for raw in [
+                "gpt-6.1-sol-ultra", "gpt-6.1-sol-max", "gpt-6.1-sol", "gpt-6-astra-ultra", "gpt-6-astra-max",
+                "gpt-6.2-sol-ultra", "gpt-6.2-sol", "gpt-6.2-astra-ultra"
+            ] {
                 let normalized = AgentModelCatalog.normalizePersistedSelection(
                     agentRaw: AgentProviderKind.codexExec.rawValue,
                     modelRaw: raw,
@@ -332,6 +348,12 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
             availability: AgentModelCatalog.AvailabilityContext()
         )
         XCTAssertTrue(astraUltraLabel.hasSuffix(" Ultra"), astraUltraLabel)
+
+        // GPT-6.2 Astra, unlike GPT-6 Astra, has an Ultra binding once Codex advertises Ultra.
+        CodexDiscoveryTestState.setDiscoveredModels(CodexDiscoveryTestState.gpt62Models())
+        assertPersistedRawsAreKept("GPT-6.2 discovery")
+        XCTAssertEqual(AgentModel.resolvedModel(forRaw: "gpt-6.2-sol-ultra", agentKind: .codexExec), .gpt62SolUltra)
+        XCTAssertEqual(AgentModel.resolvedModel(forRaw: "gpt-6.2-astra-ultra", agentKind: .codexExec), .gpt62AstraUltra)
     }
 
     func testGPT6MetadataAndDiscoveryTags() {
@@ -339,19 +361,29 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
         let solAndLuna = generation.filter { $0.rawValue.hasPrefix("gpt-6-sol-") || $0.rawValue.hasPrefix("gpt-6-luna-") }
         let gpt61Sol = generation.filter { $0.rawValue.hasPrefix("gpt-6.1-sol-") }
         let astra = generation.filter { $0.rawValue.hasPrefix("gpt-6-astra-") }
-        XCTAssertEqual(generation.count, solAndLuna.count + gpt61Sol.count + astra.count)
-        XCTAssertEqual([solAndLuna.count, gpt61Sol.count, astra.count], [10, 6, 5])
+        let gpt62Sol = generation.filter { $0.rawValue.hasPrefix("gpt-6.2-sol-") }
+        let gpt62Astra = generation.filter { $0.rawValue.hasPrefix("gpt-6.2-astra-") }
+        XCTAssertEqual(generation.count, solAndLuna.count + gpt61Sol.count + astra.count + gpt62Sol.count + gpt62Astra.count)
+        XCTAssertEqual([solAndLuna.count, gpt61Sol.count, astra.count, gpt62Sol.count, gpt62Astra.count], [10, 6, 5, 6, 6])
         for model in solAndLuna {
             XCTAssertEqual(model.contextWindowTokens, 1_050_000, model.rawValue)
             XCTAssertTrue(model.isExtendedContext, model.rawValue)
             XCTAssertTrue(model.displayName.hasPrefix("GPT-6 "), model.rawValue)
         }
         // A Codex session's configured context is smaller than the API maximum, so these claim none.
-        for model in gpt61Sol + astra {
-            XCTAssertNil(model.contextWindowTokens, model.rawValue)
-            XCTAssertFalse(model.isExtendedContext, model.rawValue)
-            XCTAssertTrue(model.displayName.hasPrefix(gpt61Sol.contains(model) ? "GPT-6.1 Sol " : "GPT-6 Astra "), model.rawValue)
-            XCTAssertEqual(model.discoveryTags, model == .gpt61SolHigh ? [.complex, .engineering, .pair] : [], model.rawValue)
+        let unsized: [(models: [AgentModel], displayPrefix: String)] = [
+            (gpt61Sol, "GPT-6.1 Sol "),
+            (astra, "GPT-6 Astra "),
+            (gpt62Sol, "GPT-6.2 Sol "),
+            (gpt62Astra, "GPT-6.2 Astra ")
+        ]
+        for (models, displayPrefix) in unsized {
+            for model in models {
+                XCTAssertNil(model.contextWindowTokens, model.rawValue)
+                XCTAssertFalse(model.isExtendedContext, model.rawValue)
+                XCTAssertTrue(model.displayName.hasPrefix(displayPrefix), model.rawValue)
+                XCTAssertEqual(model.discoveryTags, model == .gpt61SolHigh ? [.complex, .engineering, .pair] : [], model.rawValue)
+            }
         }
         XCTAssertEqual(AgentModel.gpt6LunaHigh.discoveryTags, [.exploration, .engineering])
         XCTAssertEqual(AgentModel.gpt6SolHigh.discoveryTags, [.complex, .engineering, .pair])

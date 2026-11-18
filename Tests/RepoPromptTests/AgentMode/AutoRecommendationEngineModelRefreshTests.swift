@@ -72,7 +72,7 @@ final class AutoRecommendationEngineModelRefreshTests: XCTestCase {
             ("before discovery", [], "codex_custom_gpt-5.6-sol-high"),
             ("GPT-6 discovered", CodexDiscoveryTestState.gpt6Models(), "codex_custom_gpt-6-sol-high"),
             ("GPT-6.1 discovered", CodexDiscoveryTestState.gpt61Models(), "codex_custom_gpt-6.1-sol-high"),
-            ("GPT-6.1 Low only", Self.gpt61LowOnlyModels(), "codex_custom_gpt-5.6-sol-high")
+            ("GPT-6.1 Low only", Self.solLowOnlyModels("gpt-6.1-sol"), "codex_custom_gpt-5.6-sol-high")
         ]
         for state in codexStates {
             CodexDiscoveryTestState.setDiscoveredModels(state.models)
@@ -90,11 +90,13 @@ final class AutoRecommendationEngineModelRefreshTests: XCTestCase {
         XCTAssertEqual(beforeDiscovery.recommendedModel, .gpt56SolLow)
         XCTAssertEqual(beforeDiscovery.rationale, BestPracticeProfiles.contextBuilderRationale)
 
-        // The newest advertised Sol wins at Low, including a GPT-6.1 catalog that offers only Low.
+        // Context Builder takes the newest advertised Sol at Low, including when that Sol offers only Low.
         let discoveredStates: [(label: String, models: [CodexAppServerClient.RemoteModel], expected: AgentModel)] = [
             ("GPT-6 discovered", CodexDiscoveryTestState.gpt6Models(), .gpt6SolLow),
             ("GPT-6.1 discovered", CodexDiscoveryTestState.gpt61Models(), .gpt61SolLow),
-            ("GPT-6.1 Low only", Self.gpt61LowOnlyModels(), .gpt61SolLow)
+            ("GPT-6.1 Low only", Self.solLowOnlyModels("gpt-6.1-sol"), .gpt61SolLow),
+            ("GPT-6.2 discovered", CodexDiscoveryTestState.gpt62Models(), .gpt62SolLow),
+            ("GPT-6.2 Low only", Self.solLowOnlyModels("gpt-6.2-sol"), .gpt62SolLow)
         ]
         for state in discoveredStates {
             CodexDiscoveryTestState.setDiscoveredModels(state.models)
@@ -135,10 +137,16 @@ final class AutoRecommendationEngineModelRefreshTests: XCTestCase {
             )),
             ("GPT-6.1 discovered", CodexDiscoveryTestState.gpt61Models(), Self.gpt61Defaults),
             // Engineer and Pair keep their GPT-5.6 fallbacks; only Context Builder's Low is advertised.
-            ("GPT-6.1 Low only", Self.gpt61LowOnlyModels(), CodexDefaults(
+            ("GPT-6.1 Low only", Self.solLowOnlyModels("gpt-6.1-sol"), CodexDefaults(
                 explore: "gpt-6-luna-high", engineer: "gpt-5.6-sol-medium", pair: "gpt-5.6-sol-high", contextBuilder: "gpt-6.1-sol-low"
             )),
-            ("GPT-6.1 repeated", CodexDiscoveryTestState.gpt61Models(), Self.gpt61Defaults)
+            ("GPT-6.1 repeated", CodexDiscoveryTestState.gpt61Models(), Self.gpt61Defaults),
+            ("GPT-6.2 discovered", CodexDiscoveryTestState.gpt62Models(), Self.gpt62Defaults),
+            // Repeats the previous update exactly.
+            ("GPT-6.2 repeated", CodexDiscoveryTestState.gpt62Models(), Self.gpt62Defaults),
+            ("GPT-6.2 Low only", Self.solLowOnlyModels("gpt-6.2-sol"), CodexDefaults(
+                explore: "gpt-6-luna-high", engineer: "gpt-5.6-sol-medium", pair: "gpt-5.6-sol-high", contextBuilder: "gpt-6.2-sol-low"
+            ))
         ]
         for (index, state) in states.enumerated() {
             CodexDiscoveryTestState.setDiscoveredModels(state.models)
@@ -193,6 +201,11 @@ final class AutoRecommendationEngineModelRefreshTests: XCTestCase {
             AgentModelCatalog.TaskLabelKind.pair.rawValue: AgentModelSelectionID(
                 agentRaw: AgentProviderKind.claudeCode.rawValue,
                 modelRaw: AgentModel.claudeOpus55.rawValue
+            ).rawValue,
+            // Discovering a newer Sol generation leaves a pin on an older one unchanged.
+            AgentModelCatalog.TaskLabelKind.design.rawValue: AgentModelSelectionID(
+                agentRaw: AgentProviderKind.codexExec.rawValue,
+                modelRaw: "gpt-6.1-sol-high"
             ).rawValue
         ]
         let customPlanningRaw = "openai_custom_reasoning_high__gpt-6-sol"
@@ -213,7 +226,9 @@ final class AutoRecommendationEngineModelRefreshTests: XCTestCase {
             ("before discovery", [], "gpt-5.6-sol-medium", "gpt-5.6-sol-low"),
             ("GPT-6 discovered", CodexDiscoveryTestState.gpt6Models(), "gpt-6-sol-medium", "gpt-6-sol-low"),
             ("GPT-6.1 discovered", CodexDiscoveryTestState.gpt61Models(), "gpt-6.1-sol-medium", "gpt-6.1-sol-low"),
-            ("GPT-6.1 Low only", Self.gpt61LowOnlyModels(), "gpt-5.6-sol-medium", "gpt-6.1-sol-low")
+            ("GPT-6.1 Low only", Self.solLowOnlyModels("gpt-6.1-sol"), "gpt-5.6-sol-medium", "gpt-6.1-sol-low"),
+            ("GPT-6.2 discovered", CodexDiscoveryTestState.gpt62Models(), "gpt-6.2-sol-medium", "gpt-6.2-sol-low"),
+            ("GPT-6.2 Low only", Self.solLowOnlyModels("gpt-6.2-sol"), "gpt-5.6-sol-medium", "gpt-6.2-sol-low")
         ]
         for state in discoveryStates {
             CodexDiscoveryTestState.setDiscoveredModels(state.models)
@@ -227,6 +242,7 @@ final class AutoRecommendationEngineModelRefreshTests: XCTestCase {
             // Overridden roles keep their saved selection; unpinned roles follow discovery.
             XCTAssertEqual(effective[.explore], selection(.codexExec, "gpt-5.6-sol-low"), state.label)
             XCTAssertEqual(effective[.pair], selection(.claudeCode, AgentModel.claudeOpus55.rawValue), state.label)
+            XCTAssertEqual(effective[.design], selection(.codexExec, "gpt-6.1-sol-high"), state.label)
             XCTAssertEqual(effective[.engineer], selection(.codexExec, state.engineer), state.label)
 
             let profile = fixture.store.globalAgentModelsProfile()
@@ -323,10 +339,17 @@ final class AutoRecommendationEngineModelRefreshTests: XCTestCase {
         contextBuilder: "gpt-6.1-sol-low"
     )
 
-    /// GPT-6.1 Sol advertising only Low beside a complete GPT-6 Luna.
-    private static func gpt61LowOnlyModels() -> [CodexAppServerClient.RemoteModel] {
+    private static let gpt62Defaults = CodexDefaults(
+        explore: "gpt-6-luna-high",
+        engineer: "gpt-6.2-sol-medium",
+        pair: "gpt-6.2-sol-high",
+        contextBuilder: "gpt-6.2-sol-low"
+    )
+
+    /// One Sol generation advertising only Low beside a complete GPT-6 Luna.
+    private static func solLowOnlyModels(_ sol: String) -> [CodexAppServerClient.RemoteModel] {
         [
-            CodexDiscoveryTestState.remoteModel("gpt-6.1-sol", efforts: ["low"], isDefault: true),
+            CodexDiscoveryTestState.remoteModel(sol, efforts: ["low"], isDefault: true),
             CodexDiscoveryTestState.remoteModel("gpt-6-luna", efforts: ["low", "medium", "high", "xhigh", "max"])
         ]
     }

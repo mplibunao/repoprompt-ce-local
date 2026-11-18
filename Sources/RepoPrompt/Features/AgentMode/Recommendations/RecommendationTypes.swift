@@ -407,7 +407,7 @@ enum BestPracticeProfiles {
             "Efficient file exploration and selection",
             "Lower usage burn than higher GPT-6 Sol efforts",
             "Practical default for repeated Context Builder runs",
-            "Follows the newest Sol generation Codex CLI advertises, such as GPT-6.1 Sol Low"
+            "Follows the newest Sol generation Codex CLI advertises, such as GPT-6.2 Sol Low"
         ]
     )
 

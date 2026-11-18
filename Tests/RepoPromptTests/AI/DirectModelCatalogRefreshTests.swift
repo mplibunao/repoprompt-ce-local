@@ -15,6 +15,16 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
     }
 
     private let openAIRows: [OpenAIRow] = [
+        .init(model: .gpt62Sol, raw: "gpt-6.2-sol", wireModel: "gpt-6.2-sol", effort: "medium", displayName: "GPT-6.2 Sol Med"),
+        .init(model: .gpt62SolLow, raw: "gpt-6.2-sol-low", wireModel: "gpt-6.2-sol", effort: "low", displayName: "GPT-6.2 Sol Low"),
+        .init(model: .gpt62SolHigh, raw: "gpt-6.2-sol-high", wireModel: "gpt-6.2-sol", effort: "high", displayName: "GPT-6.2 Sol High"),
+        .init(model: .gpt62SolXHigh, raw: "gpt-6.2-sol-xhigh", wireModel: "gpt-6.2-sol", effort: "xhigh", displayName: "GPT-6.2 Sol XHigh"),
+        .init(model: .gpt62SolMax, raw: "gpt-6.2-sol-max", wireModel: "gpt-6.2-sol", effort: "max", displayName: "GPT-6.2 Sol Max"),
+        .init(model: .gpt62Astra, raw: "gpt-6.2-astra", wireModel: "gpt-6.2-astra", effort: "medium", displayName: "GPT-6.2 Astra Med"),
+        .init(model: .gpt62AstraLow, raw: "gpt-6.2-astra-low", wireModel: "gpt-6.2-astra", effort: "low", displayName: "GPT-6.2 Astra Low"),
+        .init(model: .gpt62AstraHigh, raw: "gpt-6.2-astra-high", wireModel: "gpt-6.2-astra", effort: "high", displayName: "GPT-6.2 Astra High"),
+        .init(model: .gpt62AstraXHigh, raw: "gpt-6.2-astra-xhigh", wireModel: "gpt-6.2-astra", effort: "xhigh", displayName: "GPT-6.2 Astra XHigh"),
+        .init(model: .gpt62AstraMax, raw: "gpt-6.2-astra-max", wireModel: "gpt-6.2-astra", effort: "max", displayName: "GPT-6.2 Astra Max"),
         .init(model: .gpt61Sol, raw: "gpt-6.1-sol", wireModel: "gpt-6.1-sol", effort: "medium", displayName: "GPT-6.1 Sol Med"),
         .init(model: .gpt61SolLow, raw: "gpt-6.1-sol-low", wireModel: "gpt-6.1-sol", effort: "low", displayName: "GPT-6.1 Sol Low"),
         .init(model: .gpt61SolHigh, raw: "gpt-6.1-sol-high", wireModel: "gpt-6.1-sol", effort: "high", displayName: "GPT-6.1 Sol High"),
@@ -60,7 +70,10 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         }
 
         // The direct effort set has no Medium raw, no Ultra, and no Luna Max.
-        for raw in ["gpt-6.1-sol-medium", "gpt-6.1-sol-ultra", "gpt-6-astra-ultra", "gpt-6-luna-max", "gpt-6-sol-high"] {
+        for raw in [
+            "gpt-6.2-sol-medium", "gpt-6.2-astra-ultra",
+            "gpt-6.1-sol-medium", "gpt-6.1-sol-ultra", "gpt-6-astra-ultra", "gpt-6-luna-max", "gpt-6-sol-high"
+        ] {
             XCTAssertNil(AIModel.fromModelName(raw), raw)
         }
 
@@ -107,13 +120,14 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         // A configured deployment ID is authoritative, including one named exactly like a variant;
         // the catalog model behind it still supplies the effort.
         let configured = try azureProvider(models: [
-            .init(id: "prod-sol", displayName: "Prod Sol", baseModelID: "gpt-6.1-sol-xhigh"),
+            .init(id: "prod-sol", displayName: "Prod Sol", baseModelID: "gpt-6.2-sol-xhigh"),
             .init(id: "gpt-6.1-sol-high", baseModelID: "gpt-6.1-sol-high"),
+            .init(id: "gpt-6.2-astra-max", baseModelID: "gpt-6.2-astra-max"),
             .init(id: "gpt-6-astra-max", baseModelID: "gpt-6-astra-max"),
             .init(id: "gpt-6-luna-low", baseModelID: "gpt-6-luna-low")
         ])
-        try assertRoute(configured.requestRoute(for: .azureCustom(name: "prod-sol")), deploymentID: "prod-sol", row: XCTUnwrap(rowsByRaw["gpt-6.1-sol-xhigh"]))
-        for raw in ["gpt-6.1-sol-high", "gpt-6-astra-max", "gpt-6-luna-low"] {
+        try assertRoute(configured.requestRoute(for: .azureCustom(name: "prod-sol")), deploymentID: "prod-sol", row: XCTUnwrap(rowsByRaw["gpt-6.2-sol-xhigh"]))
+        for raw in ["gpt-6.1-sol-high", "gpt-6.2-astra-max", "gpt-6-astra-max", "gpt-6-luna-low"] {
             let row = try XCTUnwrap(rowsByRaw[raw])
             try assertRoute(configured.requestRoute(for: .azureCustom(name: raw)), deploymentID: raw, row: row)
         }
@@ -183,6 +197,8 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         XCTAssertEqual(AIModel.fromModelName("claude-sonnet-5-5:high"), .claudeCodeModel(specifier: "claude-sonnet-5-5:high"))
 
         let openRouterRows: [(AIModel, String, String)] = [
+            (.openrouterGpt62Sol, "openai/gpt-6.2-sol", "oRouter/GPT-6.2 Sol"),
+            (.openrouterGpt62Astra, "openai/gpt-6.2-astra", "oRouter/GPT-6.2 Astra"),
             (.openrouterGpt61Sol, "openai/gpt-6.1-sol", "oRouter/GPT-6.1 Sol"),
             (.openrouterGpt6Astra, "openai/gpt-6-astra", "oRouter/GPT-6 Astra"),
             (.openrouterGpt6Luna, "openai/gpt-6-luna", "oRouter/GPT-6 Luna"),
@@ -214,6 +230,8 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
     private let staticModels: [AIModel] = [
         .gpt41, .gpt5, .gpt5Low, .gpt5High, .gpt5XHigh,
         .gpt54, .gpt54Low, .gpt54High, .gpt54XHigh, .gpt54Mini, .gpt54MiniLow, .gpt54MiniHigh, .gpt54MiniXHigh, .gpt54Nano,
+        .gpt62Sol, .gpt62SolLow, .gpt62SolHigh, .gpt62SolXHigh, .gpt62SolMax,
+        .gpt62Astra, .gpt62AstraLow, .gpt62AstraHigh, .gpt62AstraXHigh, .gpt62AstraMax,
         .gpt61Sol, .gpt61SolLow, .gpt61SolHigh, .gpt61SolXHigh, .gpt61SolMax,
         .gpt6Astra, .gpt6AstraLow, .gpt6AstraHigh, .gpt6AstraXHigh, .gpt6AstraMax,
         .gpt6Luna, .gpt6LunaLow, .gpt6LunaHigh, .gpt6LunaXHigh, .gpt6Sol,
@@ -231,6 +249,7 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         .geminiFlashThinking, .geminiPro25, .gemini3p1ProPreview, .gemini3FlashPreview,
         .deepseekChat, .deepseekReasoner, .ollama,
         .openrouterDeepseekChat, .openrouterGpt5, .openrouterGeminiFlash, .openrouterGeminiPro, .openrouterClaude4Sonnet, .openrouterClaude4Opus,
+        .openrouterGpt62Sol, .openrouterGpt62Astra,
         .openrouterGpt61Sol, .openrouterGpt6Astra, .openrouterGpt6Luna, .openrouterClaudeSonnet55, .openrouterClaudeOpus55, .openrouterClaudeFable52, .openrouterClaudeFable51,
         .openrouterGeminiPro25,
         .fireworksDeepseekV3p1Terminus, .fireworksGLM46, .fireworksKimiK2Instruct0905, .fireworksGptOss120b,
@@ -250,6 +269,8 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
             false
         case .gpt41, .gpt5, .gpt5Low, .gpt5High, .gpt5XHigh,
              .gpt54, .gpt54Low, .gpt54High, .gpt54XHigh, .gpt54Mini, .gpt54MiniLow, .gpt54MiniHigh, .gpt54MiniXHigh, .gpt54Nano,
+             .gpt62Sol, .gpt62SolLow, .gpt62SolHigh, .gpt62SolXHigh, .gpt62SolMax,
+             .gpt62Astra, .gpt62AstraLow, .gpt62AstraHigh, .gpt62AstraXHigh, .gpt62AstraMax,
              .gpt61Sol, .gpt61SolLow, .gpt61SolHigh, .gpt61SolXHigh, .gpt61SolMax,
              .gpt6Astra, .gpt6AstraLow, .gpt6AstraHigh, .gpt6AstraXHigh, .gpt6AstraMax,
              .gpt6Luna, .gpt6LunaLow, .gpt6LunaHigh, .gpt6LunaXHigh, .gpt6Sol,
@@ -267,6 +288,7 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
              .geminiFlashThinking, .geminiPro25, .gemini3p1ProPreview, .gemini3FlashPreview,
              .deepseekChat, .deepseekReasoner, .ollama,
              .openrouterDeepseekChat, .openrouterGpt5, .openrouterGeminiFlash, .openrouterGeminiPro, .openrouterClaude4Sonnet, .openrouterClaude4Opus,
+             .openrouterGpt62Sol, .openrouterGpt62Astra,
              .openrouterGpt61Sol, .openrouterGpt6Astra, .openrouterGpt6Luna, .openrouterClaudeSonnet55, .openrouterClaudeOpus55, .openrouterClaudeFable52, .openrouterClaudeFable51,
              .openrouterGeminiPro25,
              .fireworksDeepseekV3p1Terminus, .fireworksGLM46, .fireworksKimiK2Instruct0905, .fireworksGptOss120b,
