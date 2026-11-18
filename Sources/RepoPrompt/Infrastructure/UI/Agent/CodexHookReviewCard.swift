@@ -230,11 +230,11 @@ struct CodexHookReviewCard: View {
             .accessibilityLabel(state.selectedHookKeys.contains(hook.key) ? "Deselect hook" : "Select hook")
 
             VStack(alignment: .leading, spacing: 5) {
-                Text(hook.key)
+                Text(hook.key.escapedForDisplay())
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
                 HStack(spacing: 8) {
-                    Text(hook.eventName)
+                    Text(hook.eventName.escapedForDisplay())
                     Text(hook.enabled ? "Enabled" : "Disabled")
                     Text(hook.trustStatus.rawValue.capitalized)
                 }
@@ -245,7 +245,7 @@ struct CodexHookReviewCard: View {
                 metadataRow(label: "Matcher", value: hook.matcherDisplay, isCode: hook.matcher != nil)
                 metadataRow(label: "Current hash", value: hook.currentHash, isCode: true)
                 if let command = hook.commandOrHandler, !command.isEmpty {
-                    metadataRow(label: "Command / handler", value: command, isCode: true)
+                    metadataRow(label: "Command / handler", value: command, isCode: true, showsLineBreaks: true)
                 }
             }
         }
@@ -275,12 +275,14 @@ struct CodexHookReviewCard: View {
         }
     }
 
-    private func metadataRow(label: String, value: String, isCode: Bool) -> some View {
+    /// Shows a value with its control and bidi characters escaped, so what a person approves reads as what it holds.
+    /// Only a command keeps its line breaks and tabs, because the card shows it over several lines.
+    private func metadataRow(label: String, value: String, isCode: Bool, showsLineBreaks: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
                 .font(.caption2)
                 .foregroundColor(.secondary)
-            Text(value)
+            Text(value.escapedForDisplay(keepingLineBreaksAndTabs: showsLineBreaks))
                 .font(isCode ? .caption.monospaced() : .caption)
                 .textSelection(.enabled)
         }

@@ -851,11 +851,13 @@ enum AppSettingValueFormatter {
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
+    /// Counts ASCII backticks over Unicode scalars, because Markdown reads a backtick that carries a combining mark as
+    /// a backtick, while a `Character` made of the two would not match.
     fileprivate static func longestBacktickRun(in content: String) -> Int {
         var longestRun = 0
         var currentRun = 0
-        for character in content {
-            if character == "`" {
+        for scalar in content.unicodeScalars {
+            if scalar == "`" {
                 currentRun += 1
                 longestRun = max(longestRun, currentRun)
             } else {
@@ -867,7 +869,7 @@ enum AppSettingValueFormatter {
 
     fileprivate static func markdownCodeSpan(_ content: String) -> String {
         let delimiter = String(repeating: "`", count: longestBacktickRun(in: content) + 1)
-        let needsPadding = content.first == "`" || content.last == "`"
+        let needsPadding = content.unicodeScalars.first == "`" || content.unicodeScalars.last == "`"
         let padding = needsPadding ? " " : ""
         return "\(delimiter)\(padding)\(content)\(padding)\(delimiter)"
     }
@@ -6100,11 +6102,16 @@ extension ToolOutputFormatter {
         return [.text(lines.joined(separator: "\n"))]
     }
 
-    /// Lists the advertised hook decisions, the review's error and warnings, how to pass `hook_keys`, and each hook's
-    /// details for a `hook_approval` interaction. The `Error`, `Warning`, and `Hook N <Field>` details come from the
-    /// labels that `AgentModeViewModel.mcpCodexHookInteraction` writes, so a rename there needs a matching change here.
+    /// Lists the interaction's context, the advertised hook decisions, the review's error and warnings, how to pass
+    /// `hook_keys`, and each hook's details for a `hook_approval` interaction. The `Error`, `Warning`, and
+    /// `Hook N <Field>` details come from the labels that `AgentModeViewModel.mcpCodexHookInteraction` writes, so a
+    /// rename there needs a matching change here. Every value goes through `escapedForDisplay`, because project hooks
+    /// come from repository content.
     private static func formattedAgentRunHookApprovalGuidance(interaction: [String: Value]?) -> [String] {
         var lines: [String] = []
+        if let context = interaction?["context"]?.stringValue, !context.isEmpty {
+            lines.append("- Context: \(context.escapedForDisplay())")
+        }
         let actions = (interaction?["options"]?.arrayValue ?? []).compactMap { $0.objectValue?["label"]?.stringValue }
         if !actions.isEmpty {
             lines.append("- Allowed response values: \(actions.map { "`\($0)`" }.joined(separator: ", "))")
@@ -6118,7 +6125,7 @@ extension ToolOutputFormatter {
                   let value = object["value"]?.stringValue
             else { continue }
             if label == "Error" || label == "Warning" {
-                lines.append("- \(label): \(escapedHookText(value))")
+                lines.append("- \(label): \(value.escapedForDisplay())")
                 continue
             }
             guard label.hasPrefix("Hook ") else { continue }
@@ -6141,7 +6148,7 @@ extension ToolOutputFormatter {
             let fields = hooks[number] ?? [:]
             func text(_ field: String) -> String? {
                 guard let entry = fields[field] else { return nil }
-                let escaped = escapedHookText(entry.value)
+                let escaped = entry.value.escapedForDisplay()
                 return entry.isCode ? AppSettingValueFormatter.markdownCodeSpan(escaped) : escaped
             }
             let details = [
@@ -6153,49 +6160,20 @@ extension ToolOutputFormatter {
             ].compactMap(\.self).filter { !$0.isEmpty }
             let heading = text("Key") ?? "Hook \(number)"
             lines.append("  - \(heading)" + (details.isEmpty ? "" : ": " + details.joined(separator: " · ")))
-            guard let command = fields["Command / Handler"]?.value, !command.isEmpty else { continue }
+            guard let rawCommand = fields["Command / Handler"]?.value, !rawCommand.isEmpty else { continue }
+            let command = rawCommand.escapedForDisplay(keepingLineBreaksAndTabs: true)
             if command.contains(where: \.isNewline) {
                 // A code span folds line breaks, so a multiline command gets a fenced block that keeps them.
                 let fence = String(repeating: "`", count: max(3, AppSettingValueFormatter.longestBacktickRun(in: command) + 1))
                 lines.append("    command:")
                 lines.append("    \(fence)")
-                lines.append(contentsOf: command.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map {
-                    "    \(escapedHookText(String($0), keepingTabs: true))"
-                })
+                lines.append(contentsOf: command.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map { "    \($0)" })
                 lines.append("    \(fence)")
             } else {
-                lines.append("    command: \(AppSettingValueFormatter.markdownCodeSpan(escapedHookText(command, keepingTabs: true)))")
+                lines.append("    command: \(AppSettingValueFormatter.markdownCodeSpan(command))")
             }
         }
         return lines
-    }
-
-    /// Makes a value that a hook or Codex supplied safe to print in the guidance. Project hooks come from repository
-    /// content, so a line break could forge another hook entry or response line, and a bidi control could make the value
-    /// read differently from what it holds. Each line-break character becomes `\n`; the other control characters and
-    /// the bidi formatting characters become `\u{XXXX}`. `keepingTabs` leaves tabs alone, for a command in a fence.
-    private static func escapedHookText(_ value: String, keepingTabs: Bool = false) -> String {
-        var escaped = ""
-        for character in value {
-            if character.isNewline {
-                escaped += "\\n"
-                continue
-            }
-            for scalar in character.unicodeScalars {
-                let isBidiControl = switch scalar.value {
-                case 0x061C, 0x200E, 0x200F, 0x202A ... 0x202E, 0x2066 ... 0x2069: true
-                default: false
-                }
-                let isEscapedControl = scalar.properties.generalCategory == .control && !(keepingTabs && scalar == "\t")
-                if isBidiControl || isEscapedControl {
-                    let hex = String(scalar.value, radix: 16, uppercase: true)
-                    escaped += "\\u{" + String(repeating: "0", count: max(0, 4 - hex.count)) + hex + "}"
-                } else {
-                    escaped.unicodeScalars.append(scalar)
-                }
-            }
-        }
-        return escaped
     }
 
     private static func agentRunWorktreeObjects(from object: [String: Value]) -> [[String: Value]] {

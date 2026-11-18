@@ -34,6 +34,21 @@ final class CodexHookReviewCardStateTests: XCTestCase {
         XCTAssertNil(state.actionErrorMessage)
     }
 
+    /// The card shows a hook's command over several lines, so it asks for line breaks and tabs to stay. Every other
+    /// control or bidi character still shows as its escape, and every other hook field gets no exception.
+    func testHookDisplayEscapingKeepsLineBreaksAndTabsOnlyWhenAsked() {
+        let command = "a\tb\nc\r\nd\u{2028}e\u{202E}f\u{7}g\u{200F}h"
+
+        XCTAssertEqual(
+            command.escapedForDisplay(keepingLineBreaksAndTabs: true),
+            "a\tb\nc\r\nd\u{2028}e\\u{202E}f\\u{0007}g\\u{200F}h"
+        )
+        XCTAssertEqual(
+            command.escapedForDisplay(),
+            "a\\u{0009}b\\nc\\nd\\ne\\u{202E}f\\u{0007}g\\u{200F}h"
+        )
+    }
+
     func testLiveStrictModeToggleHidesAndShowsContinueAndDismissesConfirmation() {
         var state = CodexHookReviewCardState(interactionID: UUID())
         var isStrictModeEnabled = false
