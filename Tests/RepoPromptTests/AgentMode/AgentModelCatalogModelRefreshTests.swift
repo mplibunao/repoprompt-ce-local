@@ -377,12 +377,14 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
             (gpt62Sol, "GPT-6.2 Sol "),
             (gpt62Astra, "GPT-6.2 Astra ")
         ]
+        // Only the High effort of each Sol generation carries tags; every Astra case stays untagged.
+        let taggedHigh: Set<AgentModel> = [.gpt62SolHigh, .gpt61SolHigh]
         for (models, displayPrefix) in unsized {
             for model in models {
                 XCTAssertNil(model.contextWindowTokens, model.rawValue)
                 XCTAssertFalse(model.isExtendedContext, model.rawValue)
                 XCTAssertTrue(model.displayName.hasPrefix(displayPrefix), model.rawValue)
-                XCTAssertEqual(model.discoveryTags, model == .gpt61SolHigh ? [.complex, .engineering, .pair] : [], model.rawValue)
+                XCTAssertEqual(model.discoveryTags, taggedHigh.contains(model) ? [.complex, .engineering, .pair] : [], model.rawValue)
             }
         }
         XCTAssertEqual(AgentModel.gpt6LunaHigh.discoveryTags, [.exploration, .engineering])

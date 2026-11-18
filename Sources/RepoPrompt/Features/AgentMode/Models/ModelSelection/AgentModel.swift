@@ -813,7 +813,7 @@ enum AgentModel: String, CaseIterable, Codable {
         switch self {
         case .gpt6LunaHigh:
             [.exploration, .engineering]
-        case .gpt61SolHigh, .gpt6SolHigh:
+        case .gpt62SolHigh, .gpt61SolHigh, .gpt6SolHigh:
             [.complex, .engineering, .pair]
         case .gpt56SolLow:
             [.fast, .exploration, .engineering]

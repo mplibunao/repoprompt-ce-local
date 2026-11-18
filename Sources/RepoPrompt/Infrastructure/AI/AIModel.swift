@@ -893,9 +893,13 @@ public enum AIModel: Equatable, Hashable {
     // DIFF PRIORITY ARRAYS
     // ==========================================================
 
-    // GPT-6.1 Sol reaches Codex only through live discovery, so its priority entries are the exact
-    // discovered option identities. Matching is by equality, so a hint wins only when Codex
-    // advertises that exact option; an absent effort falls through to the next entry.
+    // GPT-6.2 Sol and GPT-6.1 Sol reach Codex only through live discovery, so their priority entries
+    // are the exact discovered option identities. Matching is by equality, so a hint wins only when
+    // Codex advertises that exact option; an absent effort falls through to the next entry.
+    private static let codexCliGpt62SolLow: AIModel = .codexCustom(name: "gpt-6.2-sol-low")
+    private static let codexCliGpt62SolMedium: AIModel = .codexCustom(name: "gpt-6.2-sol-medium")
+    private static let codexCliGpt62SolHigh: AIModel = .codexCustom(name: "gpt-6.2-sol-high")
+    private static let codexCliGpt62SolXHigh: AIModel = .codexCustom(name: "gpt-6.2-sol-xhigh")
     private static let codexCliGpt61SolLow: AIModel = .codexCustom(name: "gpt-6.1-sol-low")
     private static let codexCliGpt61SolMedium: AIModel = .codexCustom(name: "gpt-6.1-sol-medium")
     private static let codexCliGpt61SolHigh: AIModel = .codexCustom(name: "gpt-6.1-sol-high")
@@ -905,12 +909,18 @@ public enum AIModel: Equatable, Hashable {
     static let simpleDiffPriority: [AIModel] = [
         // Prioritize practical current CLI variants first
         .claudeCodeSonnet,
+        .codexCliGpt62SolMedium,
+        .codexCliGpt62SolLow,
+        .codexCliGpt62SolHigh,
         .codexCliGpt61SolMedium,
         .codexCliGpt61SolLow,
         .codexCliGpt61SolHigh,
         .codexCliGpt56SolMedium,
         .codexCliGpt56SolLow,
         .codexCliGpt56SolHigh,
+        .gpt62SolLow,
+        .gpt62Sol,
+        .gpt62SolHigh,
         .gpt61SolLow,
         .gpt61Sol,
         .gpt61SolHigh,
@@ -941,12 +951,18 @@ public enum AIModel: Equatable, Hashable {
     static let mediumDiffPriority: [AIModel] = [
         // Prioritize practical current CLI variants first
         .claudeCodeSonnet,
+        .codexCliGpt62SolHigh,
+        .codexCliGpt62SolMedium,
+        .codexCliGpt62SolLow,
         .codexCliGpt61SolHigh,
         .codexCliGpt61SolMedium,
         .codexCliGpt61SolLow,
         .codexCliGpt56SolHigh,
         .codexCliGpt56SolMedium,
         .codexCliGpt56SolLow,
+        .gpt62Sol,
+        .gpt62SolHigh,
+        .gpt62SolLow,
         .gpt61Sol,
         .gpt61SolHigh,
         .gpt61SolLow,
@@ -977,12 +993,17 @@ public enum AIModel: Equatable, Hashable {
     static let highDiffPriority: [AIModel] = [
         // Then other top models
         .claudeCodeSonnet,
+        .codexCliGpt62SolHigh,
+        .codexCliGpt62SolXHigh,
+        .codexCliGpt62SolMedium,
         .codexCliGpt61SolHigh,
         .codexCliGpt61SolXHigh,
         .codexCliGpt61SolMedium,
         .codexCliGpt56SolHigh,
         .codexCliGpt56SolXHigh,
         .codexCliGpt56SolMedium,
+        .gpt62SolHigh,
+        .gpt62Sol,
         .gpt61SolHigh,
         .gpt61Sol,
         .gpt54High,
@@ -1043,6 +1064,7 @@ public enum AIModel: Equatable, Hashable {
     static let mediumWholePriority: [AIModel] = [
         .claudeCodeSonnet,
         .gemini3FlashPreview,
+        .gpt62Sol,
         .gpt61Sol,
         .gpt54,
         // Then the simple priorities
@@ -1070,6 +1092,7 @@ public enum AIModel: Equatable, Hashable {
     static let highWholePriority: [AIModel] = [
         // Prioritize higher-quality models for complex whole-file edits
         .claudeCodeSonnet,
+        .gpt62SolHigh,
         .gpt61SolHigh,
         .gpt54High,
         .gemini3FlashPreview,

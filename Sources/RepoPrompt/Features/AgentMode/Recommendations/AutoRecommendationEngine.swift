@@ -131,7 +131,7 @@ final class AutoRecommendationEngine {
         )
         let codexPlanningModel = AIModel.codexCustom(name: codexPlanningRaw)
         let codexPlanningLabel = AgentModelCatalog.displayName(for: codexPlanningRaw, agentKind: .codexExec)
-        let apiPlanningModel = AIModel.gpt61SolHigh
+        let apiPlanningModel = AIModel.gpt62SolHigh
         let apiPlanningModelString = apiPlanningModel.rawValue
         let apiPlanningModelLabel = apiPlanningModel.displayName
 
@@ -165,7 +165,7 @@ final class AutoRecommendationEngine {
                 tradeoffs: [
                     "• API-backed planning and review when Codex CLI is unavailable",
                     "• Visible reasoning traces",
-                    "• GPT-6.1 Sol is available through the OpenAI Responses API"
+                    "• GPT-6.2 Sol is available through the OpenAI Responses API"
                 ]
             )
         }
@@ -261,8 +261,8 @@ final class AutoRecommendationEngine {
             openAIOption = ChatBackendOption(
                 kind: .openAI,
                 displayName: "OpenAI API",
-                modelString: AIModel.gpt61Sol.rawValue,
-                description: "GPT-6.1 Sol via OpenAI API",
+                modelString: AIModel.gpt62Sol.rawValue,
+                description: "GPT-6.2 Sol via OpenAI API",
                 tradeoffs: [
                     "• Superior reasoning capabilities",
                     "• Pay-per-use pricing",
@@ -630,7 +630,7 @@ final class AutoRecommendationEngine {
             ).rawValue
         case .openAI:
             rec.openAIOption?.modelString
-                ?? AIModel.gpt61SolHigh.rawValue
+                ?? AIModel.gpt62SolHigh.rawValue
         }
         let trimmedModel = modelString.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedModel.isEmpty ? nil : trimmedModel
