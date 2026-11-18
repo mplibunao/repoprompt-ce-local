@@ -6118,7 +6118,7 @@ extension ToolOutputFormatter {
                   let value = object["value"]?.stringValue
             else { continue }
             if label == "Error" || label == "Warning" {
-                lines.append("- \(label): \(value)")
+                lines.append("- \(label): \(escapedHookText(value))")
                 continue
             }
             guard label.hasPrefix("Hook ") else { continue }
@@ -6141,7 +6141,8 @@ extension ToolOutputFormatter {
             let fields = hooks[number] ?? [:]
             func text(_ field: String) -> String? {
                 guard let entry = fields[field] else { return nil }
-                return entry.isCode ? AppSettingValueFormatter.markdownCodeSpan(entry.value) : entry.value
+                let escaped = escapedHookText(entry.value)
+                return entry.isCode ? AppSettingValueFormatter.markdownCodeSpan(escaped) : escaped
             }
             let details = [
                 text("Event").map { "event \($0)" },
@@ -6158,13 +6159,43 @@ extension ToolOutputFormatter {
                 let fence = String(repeating: "`", count: max(3, AppSettingValueFormatter.longestBacktickRun(in: command) + 1))
                 lines.append("    command:")
                 lines.append("    \(fence)")
-                lines.append(contentsOf: command.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map { "    \($0)" })
+                lines.append(contentsOf: command.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map {
+                    "    \(escapedHookText(String($0), keepingTabs: true))"
+                })
                 lines.append("    \(fence)")
             } else {
-                lines.append("    command: \(AppSettingValueFormatter.markdownCodeSpan(command))")
+                lines.append("    command: \(AppSettingValueFormatter.markdownCodeSpan(escapedHookText(command, keepingTabs: true)))")
             }
         }
         return lines
+    }
+
+    /// Makes a value that a hook or Codex supplied safe to print in the guidance. Project hooks come from repository
+    /// content, so a line break could forge another hook entry or response line, and a bidi control could make the value
+    /// read differently from what it holds. Each line-break character becomes `\n`; the other control characters and
+    /// the bidi formatting characters become `\u{XXXX}`. `keepingTabs` leaves tabs alone, for a command in a fence.
+    private static func escapedHookText(_ value: String, keepingTabs: Bool = false) -> String {
+        var escaped = ""
+        for character in value {
+            if character.isNewline {
+                escaped += "\\n"
+                continue
+            }
+            for scalar in character.unicodeScalars {
+                let isBidiControl = switch scalar.value {
+                case 0x061C, 0x200E, 0x200F, 0x202A ... 0x202E, 0x2066 ... 0x2069: true
+                default: false
+                }
+                let isEscapedControl = scalar.properties.generalCategory == .control && !(keepingTabs && scalar == "\t")
+                if isBidiControl || isEscapedControl {
+                    let hex = String(scalar.value, radix: 16, uppercase: true)
+                    escaped += "\\u{" + String(repeating: "0", count: max(0, 4 - hex.count)) + hex + "}"
+                } else {
+                    escaped.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return escaped
     }
 
     private static func agentRunWorktreeObjects(from object: [String: Value]) -> [[String: Value]] {
