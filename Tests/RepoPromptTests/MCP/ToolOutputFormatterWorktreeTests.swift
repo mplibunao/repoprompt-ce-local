@@ -481,6 +481,84 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
         }
     }
 
+    func testAgentRunHookApprovalGuidanceListsDecisionsHookKeysAndFullHookDetails() throws {
+        let sessionID = "11111111-1111-1111-1111-111111111111"
+        let interaction = try AgentRunMCPSnapshot.Interaction(
+            id: XCTUnwrap(UUID(uuidString: "22222222-2222-2222-2222-222222222222")),
+            kind: .hookApproval,
+            responseType: .decision,
+            title: "Codex Hook Approval",
+            prompt: "The initial Codex turn is paused until global and project hook trust is reviewed.",
+            context: nil,
+            allowsMultiple: nil,
+            options: [
+                .init(label: "approve_selected", description: "Trust only the selected hooks"),
+                .init(label: "trust_all"),
+                .init(label: "continue_without_hooks")
+            ],
+            fields: [],
+            details: [
+                .init(label: "Execution Directory", value: "/workspace/repo", isCode: true),
+                .init(label: "Phase", value: "writeFailed", isCode: false),
+                .init(label: "Error", value: "Codex could not save hook trust: permission denied", isCode: false),
+                .init(label: "Warning", value: "A hooks.json entry was skipped", isCode: false),
+                .init(label: "Hook 1 Key", value: "/home/hooks.json:pre_tool_use:0:0", isCode: true),
+                .init(label: "Hook 1 Event", value: "preToolUse", isCode: false),
+                .init(label: "Hook 1 Source", value: "Global (user)", isCode: false),
+                .init(label: "Hook 1 Source Path", value: "/home/hooks.json", isCode: true),
+                .init(label: "Hook 1 Matcher", value: "Bash", isCode: true),
+                .init(label: "Hook 1 Trust", value: "untrusted", isCode: false),
+                .init(label: "Hook 1 Current Hash", value: "sha256:global", isCode: true),
+                .init(label: "Hook 1 Command / Handler", value: "rtk hook codex --flag a b c", isCode: true),
+                .init(label: "Hook 2 Key", value: "/workspace/repo/.codex/hooks.json:stop:0:0", isCode: true),
+                .init(label: "Hook 2 Event", value: "stop", isCode: false),
+                .init(label: "Hook 2 Source", value: "Project (project)", isCode: false),
+                .init(label: "Hook 2 Source Path", value: "/workspace/repo/.codex/hooks.json", isCode: true),
+                .init(label: "Hook 2 Matcher", value: "Not provided by Codex", isCode: false),
+                .init(label: "Hook 2 Trust", value: "modified", isCode: false),
+                .init(label: "Hook 2 Current Hash", value: "sha256:project", isCode: true),
+                .init(label: "Hook 2 Command / Handler", value: "echo `date`\n./guard.sh", isCode: true)
+            ]
+        )
+        let value = Value.object([
+            "op": .string("poll"),
+            "status": .string("waiting_for_input"),
+            "session_id": .string(sessionID),
+            "interaction_id": .string(interaction.id.uuidString),
+            "interaction": .object(interaction.asObject())
+        ])
+
+        let text = try Self.onlyText(ToolOutputFormatter.formatAgentRun(args: ["op": .string("poll")], value: value))
+
+        XCTAssertTrue(
+            text.contains(
+                "- Allowed response values: `approve_selected`, `trust_all`, `continue_without_hooks`\n"
+                    + "- Error: Codex could not save hook trust: permission denied\n"
+                    + "- Warning: A hooks.json entry was skipped\n"
+            ),
+            text
+        )
+        XCTAssertFalse(text.contains("writeFailed"), text)
+        XCTAssertTrue(text.contains("`answers={\"hook_keys\":[\"<hook key>\", ...]}`"), text)
+        XCTAssertTrue(
+            text.contains(
+                "  - `/home/hooks.json:pre_tool_use:0:0`: event preToolUse · Global (user) `/home/hooks.json` · "
+                    + "matcher `Bash` · trust untrusted · hash `sha256:global`\n"
+                    + "    command: `rtk hook codex --flag a b c`"
+            ),
+            text
+        )
+        // A hook with no matcher shows the note unquoted, and a multiline command keeps its line breaks in a fence.
+        XCTAssertTrue(
+            text.contains(
+                "  - `/workspace/repo/.codex/hooks.json:stop:0:0`: event stop · Project (project) "
+                    + "`/workspace/repo/.codex/hooks.json` · matcher Not provided by Codex · trust modified · hash `sha256:project`\n"
+                    + "    command:\n    ```\n    echo `date`\n    ./guard.sh\n    ```\n"
+            ),
+            text
+        )
+    }
+
     func testAgentRunOutputShowsWorktreeSummaryAndUnavailableState() throws {
         let cases = [
             (
