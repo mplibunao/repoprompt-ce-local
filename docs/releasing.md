@@ -619,7 +619,10 @@ packages have no such file. An added Mach-O also gets a `machOFiles` entry and i
 `codex-package.json` names, also gets `requiredLayout` and `signedExecutables` entries.
 `Scripts/codex_runtime_artifact.py` fixes the required layout, the set of primary signature
 policies, and the expected `codex-package.json` metadata, so change those in the same working
-tree and leave its `SUPPORTED_VERSION` at the current pin. The official candidate then checks
+tree and leave its `SUPPORTED_VERSION` at the current pin. `Scripts/codex_vendor_guardrails.sh`
+pins the same primary signature policies, and `CodexRuntimeAuthority.swift` checks the package
+metadata and each primary executable before launch, so an added primary executable changes both
+too. The official candidate then checks
 each declared primary signing identity and entitlement profile against the release, and its
 report lists the placeholder entries among the changed payloads. Replace the manifest with the
 reviewed `candidate-manifest.json`, then move `SUPPORTED_VERSION` and the other pins to the new
