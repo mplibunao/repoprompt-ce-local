@@ -447,9 +447,9 @@ hooks are reviewed, the trust write, and the post-write verification all use tha
 
 - **`matcher`.** RepoPrompt now consumes `data[].hooks[].matcher` from `hooks/list`, so the approval
   card and the MCP interaction show which tool calls a hook applies to, next to its full command.
-  The contract records it as optional and nullable, as the generated 0.159.0 schema declares it.
-  A missing key or `null` decodes as absent, a string decodes exactly, and any other type is a
-  malformed response. This raises the response paths from 93 to 94.
+  The contract records it as optional and nullable, as the generated 0.159.0 and 0.170.0 schemas
+  declare it. A missing key or `null` decodes as absent, a string decodes exactly, and any other
+  type is a malformed response. This raises the response paths from 93 to 94.
 - **Warnings.** Discovery warnings never block the first turn. When the gate's first discovery
   reports warnings and leaves nothing to review, RepoPrompt appends one transcript notice with a
   bounded summary and continues. When a review appears, it lists the warnings on the card and in
