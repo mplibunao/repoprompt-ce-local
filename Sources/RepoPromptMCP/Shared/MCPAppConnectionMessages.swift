@@ -66,14 +66,32 @@ enum MCPAppConnectionMessages {
         }
     }
 
+    /// The condition a failed `connect(2)` to the app's socket shows, or nil for an `errno` that
+    /// says nothing about the app. `ENOENT` means the socket or its directory is missing, and
+    /// `ECONNREFUSED` without a socket file means the path is not a live socket.
+    static func connectFailureCondition(errno: Int32) -> Condition? {
+        if errno == EPERM || errno == EACCES {
+            return .socketPermissionDenied(errno: errno)
+        } else if errno == ENOENT || errno == ECONNREFUSED {
+            return .unavailable
+        }
+        return nil
+    }
+
     /// The description of a failed `connect(2)` to the app's socket, chosen by its `errno`.
     static func connectFailure(errno: Int32, identity: MCPFilesystemIdentity) -> String {
-        if errno == EPERM || errno == EACCES {
-            return text(for: .socketPermissionDenied(errno: errno), identity: identity)
-        } else if errno == ENOENT || errno == ECONNREFUSED {
-            return text(for: .unavailable, identity: identity)
+        connectFailureCondition(errno: errno).map { text(for: $0, identity: identity) }
+            ?? "Failed to connect: \(errno)"
+    }
+
+    /// The app answered the session's `initialize` with an error, so the session ends. The app's
+    /// own message says why, for example which agent session refused the client.
+    static func sessionRefused(appMessage: String?, identity: MCPFilesystemIdentity) -> String {
+        let app = identity.appDisplayName
+        guard let appMessage, !appMessage.isEmpty else {
+            return "\(app) refused this client's MCP session."
         }
-        return "Failed to connect: \(errno)"
+        return "\(app) refused this client's MCP session: \(appMessage)"
     }
 
     /// The text the helper returns to its client while it has no working connection: the same cause

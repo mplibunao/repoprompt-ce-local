@@ -441,6 +441,8 @@ enum SocketProxyError: Swift.Error, LocalizedError {
     case terminatedByServer(reason: TerminationReason?, message: String?)
     case handshakeFailed(reason: String)
     case handshakeRejected(errorCode: String?, reason: String?)
+    /// The app answered the session's replayed `initialize` with a JSON-RPC error.
+    case initializeReplayRejected(code: Int?, message: String?)
     case protocolVersionMismatch
     case hostDisconnected // Host process closed stdin or stdout pipe broken
 
@@ -496,6 +498,8 @@ enum SocketProxyError: Swift.Error, LocalizedError {
             let code = errorCode ?? "unknown"
             let message = reason ?? "Rejected by server"
             return "Handshake rejected (\(code)): \(message)"
+        case let .initializeReplayRejected(_, message):
+            return MCPAppConnectionMessages.sessionRefused(appMessage: message, identity: MCPFilesystemConstants.identity)
         case .protocolVersionMismatch:
             return "Protocol version mismatch. Update the CLI or RepoPrompt app."
         case .hostDisconnected:
@@ -540,6 +544,7 @@ enum CLIProxyRuntimePolicy {
             switch socketError {
             case .approvalDenied,
                  .handshakeFailed,
+                 .initializeReplayRejected,
                  .protocolVersionMismatch,
                  .socketCreationFailed,
                  .descriptorConfigurationFailed,
@@ -570,6 +575,45 @@ enum CLIProxyRuntimePolicy {
                  .terminatedByServer:
                 return true
             }
+        }
+    }
+
+    /// What the proxy does when its first connection attempt fails.
+    ///
+    /// Only a missing socket goes offline at once, because it means the app isn't serving MCP. A
+    /// socket that is present but refuses, times out, or rejects transiently can belong to an app
+    /// that is starting up or busy, and Agent Mode's own helper must not start its run without
+    /// tools for that, so it gets one retry first.
+    static func firstAttemptDisposition(after error: CLIRuntimeError) -> MCPProxyFirstAttemptDisposition {
+        guard shouldRetry(after: error) else {
+            return .terminal
+        }
+        guard case let .connectionFailed(underlying) = error,
+              case let .connectFailed(errno) = underlying as? SocketProxyError,
+              MCPAppConnectionMessages.connectFailureCondition(errno: errno) == .unavailable
+        else {
+            return .retryOnce
+        }
+        return .offline
+    }
+
+    /// The condition the offline responder reports for a failed connection attempt.
+    static func connectionCondition(for error: CLIRuntimeError) -> MCPAppConnectionMessages.Condition {
+        guard case let .connectionFailed(underlying) = error,
+              let socketError = underlying as? SocketProxyError
+        else {
+            return .transportFailure(reason: failureReason(for: error))
+        }
+        switch socketError {
+        case .connectionRefused:
+            return .unavailable
+        case let .connectFailed(errno):
+            return MCPAppConnectionMessages.connectFailureCondition(errno: errno)
+                ?? .transportFailure(reason: "connect failed with errno \(errno)")
+        case .bootstrapResponseTimeout:
+            return .bootstrapTimeout
+        default:
+            return .transportFailure(reason: socketError.errorDescription ?? failureReason(for: error))
         }
     }
 
@@ -621,6 +665,7 @@ enum CLIProxyRuntimePolicy {
                 case let .terminatedByServer(reason, _): return reason?.rawValue ?? "terminated_by_server"
                 case .handshakeFailed: return "handshake_failed"
                 case .handshakeRejected: return "handshake_rejected"
+                case .initializeReplayRejected: return "mcp_session_resume_initialize_replay_rejected"
                 case .protocolVersionMismatch: return "protocol_version_mismatch"
                 case .hostDisconnected: return "host_disconnected"
                 }
@@ -735,7 +780,7 @@ enum CLIProxyRuntimePolicy {
         switch error {
         case .stdoutBrokenPipe, .stdoutWriteTimeout, .hostDisconnected:
             return .host
-        case .approvalDenied, .terminatedByServer:
+        case .approvalDenied, .terminatedByServer, .initializeReplayRejected:
             return .app
         case .serverClosed, .connectionReset:
             return .peer
@@ -779,6 +824,15 @@ enum CLIProxyRuntimePolicy {
             return false
         }
     }
+}
+
+enum MCPProxyFirstAttemptDisposition: Equatable {
+    /// Answer the client locally and keep trying the app in the background.
+    case offline
+    /// Try once more after the first retry delay, then go offline if that attempt fails too.
+    case retryOnce
+    /// End the session.
+    case terminal
 }
 
 enum MCPServiceProxyTaskOutcome {
@@ -855,9 +909,14 @@ actor BootstrapSocketProxy {
     private let replayInitializationOnStart: Bool
     private let bridgeLedger: JSONRPCBridgeLedger
     private let faultRule: JSONRPCBridgeFaultRule?
+    private let stdinFD: Int32
+    private let stdoutFD: Int32
+    private let stderrFD: Int32
     private var socketFD: Int32 = -1
+    private var replayedInitializedNotification = false
 
     init(
+        socketURL: URL,
         sessionToken: String,
         clientName: String?,
         identityCache: ClientIdentityCache,
@@ -865,9 +924,12 @@ actor BootstrapSocketProxy {
         outstandingRequestReplayState: MCPOutstandingRequestReplayState,
         replayInitializationOnStart: Bool,
         bridgeLedger: JSONRPCBridgeLedger,
-        faultRule: JSONRPCBridgeFaultRule?
+        faultRule: JSONRPCBridgeFaultRule?,
+        stdinFD: Int32 = STDIN_FILENO,
+        stdoutFD: Int32 = STDOUT_FILENO,
+        stderrFD: Int32 = STDERR_FILENO
     ) {
-        socketURL = MCPFilesystemConstants.bootstrapSocketURL()
+        self.socketURL = socketURL
         self.sessionToken = sessionToken
         self.clientName = clientName
         self.identityCache = identityCache
@@ -876,71 +938,112 @@ actor BootstrapSocketProxy {
         self.replayInitializationOnStart = replayInitializationOnStart
         self.bridgeLedger = bridgeLedger
         self.faultRule = faultRule
+        self.stdinFD = stdinFD
+        self.stdoutFD = stdoutFD
+        self.stderrFD = stderrFD
     }
 
+    /// Connects, replays an initialized session when asked to, and bridges until the connection
+    /// ends. This is the reconnect path after the app goes away mid-session.
     func start() async throws {
-        // Connect to app's bootstrap socket
-        try connectToSocket()
+        try await connectAndAccept()
 
         defer {
             closeSocket()
         }
 
-        // Send handshake request
-        log.debug("BootstrapSocketProxy: Connected, sending handshake...")
-        debugLog("Connected to bootstrap socket, sending handshake")
-        try sendHandshakeRequest()
-
-        // Wait for response
-        let response = try await readHandshakeResponse(
-            timeout: MCPBootstrapTiming.initialResponseTimeout
-        )
-
         var initialSocketBytes = Data()
-        switch response.type {
-        case "accepted":
-            log.debug("BootstrapSocketProxy: Handshake accepted, starting bridge")
-            debugLog("Handshake accepted, starting stdin/stdout bridge")
-            if replayInitializationOnStart {
-                let plan = try await Self.requireReplayPlan(from: initializeReplayState)
-                initialSocketBytes = try await Self.replayInitializedSession(plan, socketFD: socketFD)
-                try await Self.replayOutstandingClientRequests(
-                    outstandingRequestReplayState.replayFrames(),
-                    socketFD: socketFD
-                )
-            }
-
-        case "rejected":
-            log.warning("BootstrapSocketProxy: Handshake rejected: \(response.reason ?? "unknown")")
-            if response.errorCode == MCPBootstrapErrorCode.approvalDenied.rawValue {
-                throw SocketProxyError.approvalDenied
-            }
-            if response.errorCode == MCPBootstrapErrorCode.protocolVersionMismatch.rawValue {
-                throw SocketProxyError.protocolVersionMismatch
-            }
-            throw SocketProxyError.handshakeRejected(errorCode: response.errorCode, reason: response.reason)
-
-        default:
-            throw SocketProxyError.handshakeFailed(reason: "Unknown response type: \(response.type)")
+        if replayInitializationOnStart {
+            initialSocketBytes = try await replayInitialize(timeout: MCPBootstrapTiming.initialResponseTimeout)
+            try await replayOutstandingRequests()
         }
+        try await runAcceptedBridge(initialStdinBytes: Data(), initialSocketBytes: initialSocketBytes)
+    }
 
-        // Run the bidirectional bridge
-        // IMPORTANT: Use static (non-actor) methods to avoid actor starvation.
-        // The poll() in socket→stdout has no await points and would block the actor,
-        // preventing stdin→socket from ever running again.
-        let fd = socketFD
-        let cache = identityCache
-        let replayState = initializeReplayState
-        let outstandingReplayState = outstandingRequestReplayState
-        let ledger = bridgeLedger
-        let faultRule = faultRule
+    /// Connects to the app's socket and completes the bootstrap handshake, without reading stdin
+    /// or writing stdout. On success the socket stays open, owned by this proxy until its bridge
+    /// ends or `stop` closes it.
+    func connectAndAccept() async throws {
+        try connectToSocket()
+        do {
+            debugLog("Connected to bootstrap socket, sending handshake")
+            try sendHandshakeRequest()
+            let response = try await readHandshakeResponse(
+                timeout: MCPBootstrapTiming.initialResponseTimeout
+            )
+            switch response.type {
+            case "accepted":
+                debugLog("Handshake accepted")
+            case "rejected":
+                debugLog("BootstrapSocketProxy: Handshake rejected: \(response.reason ?? "unknown")")
+                if response.errorCode == MCPBootstrapErrorCode.approvalDenied.rawValue {
+                    throw SocketProxyError.approvalDenied
+                }
+                if response.errorCode == MCPBootstrapErrorCode.protocolVersionMismatch.rawValue {
+                    throw SocketProxyError.protocolVersionMismatch
+                }
+                throw SocketProxyError.handshakeRejected(errorCode: response.errorCode, reason: response.reason)
+            default:
+                throw SocketProxyError.handshakeFailed(reason: "Unknown response type: \(response.type)")
+            }
+        } catch {
+            closeSocket()
+            throw error
+        }
+    }
+
+    /// Writes the session's cached `initialize` to the accepted socket and waits for the app to
+    /// admit it. A nil timeout waits until the app answers or the task is cancelled, because
+    /// admission can wait on a person approving the client.
+    ///
+    /// - Returns: Server frames the app sent before its initialize result, for the bridge to deliver.
+    func replayInitialize(timeout: TimeInterval?) async throws -> Data {
+        let plan = try await Self.requireReplayPlan(from: initializeReplayState)
+        let bufferedServerFrames = try await Self.replayInitializedSession(plan, socketFD: socketFD, timeout: timeout)
+        replayedInitializedNotification = plan.initializeResultFingerprint != nil && plan.initializedFrame != nil
+        return bufferedServerFrames
+    }
+
+    /// The client's `notifications/initialized` when it reached the helper only after
+    /// `replayInitialize` captured its plan, so the bridge can forward it and the app sees it
+    /// exactly once. Nil when the replay already wrote it or the client hasn't sent it.
+    func takeLateInitializedNotification() async -> Data? {
+        guard !replayedInitializedNotification,
+              case let .success(plan) = await initializeReplayState.replayPlan(),
+              let initializedFrame = plan.initializedFrame
+        else {
+            return nil
+        }
+        replayedInitializedNotification = true
+        return initializedFrame
+    }
+
+    func replayOutstandingRequests() async throws {
+        try await Self.replayOutstandingClientRequests(
+            outstandingRequestReplayState.replayFrames(),
+            socketFD: socketFD
+        )
+    }
+
+    /// Bridges stdin and stdout to the accepted socket until either side ends.
+    ///
+    /// - Parameters:
+    ///   - initialStdinBytes: Client bytes a previous stdin owner read but did not consume.
+    ///   - initialSocketBytes: Server frames to deliver before reading the socket.
+    func runAcceptedBridge(initialStdinBytes: Data, initialSocketBytes: Data) async throws {
+        // The pumps are static and run off this actor: the socket poll has no await points and
+        // would otherwise block the actor and starve the stdin pump.
         try await Self.runBridge(
-            socketFD: fd,
-            identityCache: cache,
-            initializeReplayState: replayState,
-            outstandingRequestReplayState: outstandingReplayState,
-            bridgeLedger: ledger,
+            socketFD: socketFD,
+            stdinFD: stdinFD,
+            stdoutFD: stdoutFD,
+            identityCache: identityCache,
+            initializeReplayState: initializeReplayState,
+            outstandingRequestReplayState: outstandingRequestReplayState,
+            bridgeLedger: bridgeLedger,
             faultRule: faultRule,
+            drainLogDescriptor: stderrFD,
+            initialStdinBytes: initialStdinBytes,
             initialSocketBytes: initialSocketBytes
         )
     }
@@ -1013,7 +1116,7 @@ actor BootstrapSocketProxy {
         }
 
         socketFD = fd
-        log.debug("BootstrapSocketProxy: Connected to \(socketURL.path)")
+        debugLog("BootstrapSocketProxy: Connected to \(socketURL.path)")
     }
 
     private func closeSocket() {
@@ -1177,11 +1280,13 @@ extension BootstrapSocketProxy {
         }
     }
 
+    /// - Parameter timeout: How long to wait for the app's initialize result, or nil to wait until
+    ///   it answers, the socket fails, or the task is cancelled.
     @discardableResult
     static func replayInitializedSession(
         _ plan: MCPInitializeReplayPlan,
         socketFD: Int32,
-        timeout: TimeInterval = MCPBootstrapTiming.initialResponseTimeout
+        timeout: TimeInterval? = MCPBootstrapTiming.initialResponseTimeout
     ) async throws -> Data {
         debugLog("BootstrapSocketProxy: replaying MCP initialize after reconnect")
         try writeToSocket(plan.initializeFrame, socketFD: socketFD)
@@ -1219,19 +1324,20 @@ extension BootstrapSocketProxy {
         socketFD: Int32,
         expectedID: JSONRPCBridgeID,
         expectedResultFingerprint: String,
-        timeout: TimeInterval
+        timeout: TimeInterval?
     ) async throws -> Data {
         var buffer = Data()
         var bufferedServerFrames = Data()
-        let deadline = Date().addingTimeInterval(timeout)
+        let deadline = timeout.map { Date().addingTimeInterval($0) }
 
-        while Date() < deadline {
+        while deadline.map({ Date() < $0 }) ?? true {
             if Task.isCancelled {
                 throw SocketProxyError.cancelled
             }
 
             var pfd = pollfd(fd: socketFD, events: Int16(POLLIN), revents: 0)
-            let remaining = Int32(deadline.timeIntervalSinceNow * 1000)
+            // Short polls keep cancellation prompt while the app waits on an approval prompt.
+            let remaining = deadline.map { Int32($0.timeIntervalSinceNow * 1000) } ?? 100
             let pollResult = poll(&pfd, 1, min(100, max(1, remaining)))
 
             if pollResult < 0 {
@@ -1244,7 +1350,11 @@ extension BootstrapSocketProxy {
                 continue
             }
 
-            if pfd.revents & Int16(POLLHUP | POLLERR) != 0 {
+            // A hangup still leaves the app's last frames readable, such as a termination sent
+            // just before it closed the socket; reading reaches EOF after them.
+            if pfd.revents & Int16(POLLERR) != 0
+                || pfd.revents & Int16(POLLIN) == 0 && pfd.revents & Int16(POLLHUP) != 0
+            {
                 throw SocketProxyError.connectionReset
             }
 
@@ -1273,13 +1383,25 @@ extension BootstrapSocketProxy {
                       let responseID = MCPInitializeReplayState.jsonRPCID(from: response["id"]),
                       responseID == expectedID
                 else {
+                    // The app can end the connection while it decides admission. Buffered, the
+                    // termination would be lost if the app then closed the socket.
+                    if let termination = extractTerminateParams(from: frame) {
+                        throw SocketProxyError.terminatedByServer(
+                            reason: termination.reason,
+                            message: termination.message
+                        )
+                    }
                     bufferedServerFrames.append(frame)
                     continue
                 }
                 guard let result = response["result"],
                       response["error"] == nil
                 else {
-                    throw JSONRPCBridgeLedgerError.terminal("mcp_session_resume_initialize_replay_rejected")
+                    let error = response["error"] as? [String: Any]
+                    throw SocketProxyError.initializeReplayRejected(
+                        code: error?["code"] as? Int,
+                        message: error?["message"] as? String
+                    )
                 }
                 guard MCPInitializeReplayState.initializeCompatibilityFingerprint(result) == expectedResultFingerprint else {
                     throw JSONRPCBridgeLedgerError.terminal("mcp_session_resume_initialize_replay_result_mismatch")
@@ -1306,6 +1428,7 @@ extension BootstrapSocketProxy {
         drainVisibilityInterval: TimeInterval = 30,
         drainLogDescriptor: Int32 = STDERR_FILENO,
         onStdinClosed: @escaping @Sendable () async -> Void = {},
+        initialStdinBytes: Data = Data(),
         initialSocketBytes: Data = Data()
     ) async throws {
         let drainState = BridgeDrainState(clock: drainClock)
@@ -1314,6 +1437,7 @@ extension BootstrapSocketProxy {
                 try await Self.pumpStdinToSocket(
                     socketFD: socketFD,
                     stdinFD: stdinFD,
+                    initialStdinBytes: initialStdinBytes,
                     identityCache: identityCache,
                     initializeReplayState: initializeReplayState,
                     outstandingRequestReplayState: outstandingRequestReplayState,
@@ -1453,92 +1577,24 @@ extension BootstrapSocketProxy {
     }
 
     /// Pumps stdin to socket. Static to run outside actor isolation.
-    /// Also parses MCP initialize requests to cache the client name for reconnects.
     private static func pumpStdinToSocket(
         socketFD: Int32,
         stdinFD: Int32 = STDIN_FILENO,
+        initialStdinBytes: Data = Data(),
         identityCache: ClientIdentityCache,
         initializeReplayState: MCPInitializeReplayState?,
         outstandingRequestReplayState: MCPOutstandingRequestReplayState?,
         bridgeLedger: JSONRPCBridgeLedger,
         faultRule: JSONRPCBridgeFaultRule?
     ) async throws {
-        let flags = fcntl(stdinFD, F_GETFL)
-        if flags >= 0 {
-            _ = fcntl(stdinFD, F_SETFL, flags | O_NONBLOCK)
-        }
         debugLog("BootstrapSocketProxy: pumpStdinToSocket started")
-
-        var buffer = [UInt8](repeating: 0, count: 8192)
-        var pending = Data()
-        var hasCachedIdentity = false // Stop parsing after first capture
-
-        while !Task.isCancelled {
-            var pfd = pollfd(fd: stdinFD, events: Int16(POLLIN), revents: 0)
-            let pollResult = poll(&pfd, 1, 1000)
-
-            if pollResult < 0 {
-                try validateCLIHostInputPollResult(pollResult, errno: errno)
-                continue
-            }
-            if pollResult == 0 {
-                continue
-            }
-
-            let revents = Int32(pfd.revents)
-            if revents & (POLLERR | POLLNVAL) != 0 {
-                debugLog("BootstrapSocketProxy: stdin error - host disconnected")
-                throw SocketProxyError.hostDisconnected
-            }
-            let sawHangup = revents & POLLHUP != 0
-            if revents & POLLIN == 0 {
-                if sawHangup {
-                    debugLog("BootstrapSocketProxy: stdin hangup after draining input")
-                    try await requireCleanBridgeStop(
-                        ledger: bridgeLedger,
-                        direction: .clientToServer,
-                        pendingByteCount: pending.count,
-                        reason: "stdin_hangup"
-                    )
-                    return
-                }
-                continue
-            }
-
-            let bytesRead = buffer.withUnsafeMutableBufferPointer { ptr in
-                Darwin.read(stdinFD, ptr.baseAddress!, ptr.count)
-            }
-
-            if bytesRead < 0 {
-                try validateCLIHostInputReadResult(bytesRead, errno: errno)
-                continue
-            }
-            if bytesRead == 0 {
-                debugLog("BootstrapSocketProxy: stdin EOF after draining input")
-                try await requireCleanBridgeStop(
-                    ledger: bridgeLedger,
-                    direction: .clientToServer,
-                    pendingByteCount: pending.count,
-                    reason: "stdin_eof"
-                )
-                return
-            }
-
-            pending.append(contentsOf: buffer[0 ..< bytesRead])
-            debugLog("BootstrapSocketProxy: read \(bytesRead) bytes from stdin, pending=\(pending.count)")
-
-            while let newline = pending.firstIndex(of: UInt8(ascii: "\n")) {
-                let message = pending[..<newline]
-                pending = Data(pending[(newline + 1)...])
-
-                // Parse MCP initialize to extract clientInfo.name (best-effort, once only)
-                if !hasCachedIdentity, let name = extractMCPClientName(from: Data(message)) {
-                    hasCachedIdentity = true
-                    await identityCache.setIfEmpty(name)
-                }
-
-                var payload = Data(message)
-                payload.append(UInt8(ascii: "\n"))
+        do {
+            _ = try await MCPProxyStdinPump.run(
+                stdinFD: stdinFD,
+                initialBytes: initialStdinBytes,
+                ledger: bridgeLedger,
+                identityCache: identityCache
+            ) { payload in
                 debugLog("BootstrapSocketProxy: → socket bytes=\(payload.count) sha256=\(MCPResponseDeliveryTracer.sha256Hex(payload))")
                 let prepared = try await Self.forwardClientFrameToSocket(
                     frame: payload,
@@ -1556,43 +1612,10 @@ extension BootstrapSocketProxy {
                     )
                 }
             }
-
-            if sawHangup {
-                debugLog("BootstrapSocketProxy: stdin hangup after forwarding complete frames")
-                try await requireCleanBridgeStop(
-                    ledger: bridgeLedger,
-                    direction: .clientToServer,
-                    pendingByteCount: pending.count,
-                    reason: "stdin_hangup"
-                )
-                return
-            }
+        } catch is CancellationError {
+            // The bridge cancels its stdin reader once the socket side ends; that ends this pump
+            // without an error of its own.
         }
-    }
-
-    /// Extracts the client name from an MCP initialize request.
-    /// Returns nil if not an initialize request or if parsing fails.
-    private static func extractMCPClientName(from data: Data) -> String? {
-        // Quick check for "initialize" string before full JSON parse
-        guard let str = String(data: data, encoding: .utf8),
-              str.contains("\"initialize\"")
-        else {
-            return nil
-        }
-
-        // Parse as JSON-RPC request
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let method = json["method"] as? String,
-              method == "initialize",
-              let params = json["params"] as? [String: Any],
-              let clientInfo = params["clientInfo"] as? [String: Any],
-              let name = clientInfo["name"] as? String
-        else {
-            return nil
-        }
-
-        debugLog("Extracted MCP client name from initialize: \(name)")
-        return name
     }
 
     /// Extracts a human-readable message from a progress notification.
@@ -1721,18 +1744,7 @@ extension BootstrapSocketProxy {
                         }
                         return
                     }
-                    do {
-                        try NonBlockingFDWriter.writeAll(
-                            framed,
-                            to: stdoutFD,
-                            stallTimeout: stdoutWriteStallTimeout,
-                            pollIntervalMilliseconds: stdoutWritePollIntervalMilliseconds,
-                            setNonBlocking: false
-                        )
-                    } catch let writeError as NonBlockingFDWriteError {
-                        debugLog("BootstrapSocketProxy: stdout bridge write failed provenance=\(writeError.provenance)")
-                        throw mapStdoutWriteError(writeError)
-                    }
+                    try writeClientFrame(framed, stdoutFD: stdoutFD)
                 }
                 if let delivered = prepared.deliveryFrame,
                    Self.extractProgressMessage(from: delivered) == nil
@@ -1857,6 +1869,22 @@ extension BootstrapSocketProxy {
         }
     }
 
+    /// Writes one frame to the client's stdout, which the caller has made non-blocking.
+    static func writeClientFrame(_ frame: Data, stdoutFD: Int32) throws {
+        do {
+            try NonBlockingFDWriter.writeAll(
+                frame,
+                to: stdoutFD,
+                stallTimeout: stdoutWriteStallTimeout,
+                pollIntervalMilliseconds: stdoutWritePollIntervalMilliseconds,
+                setNonBlocking: false
+            )
+        } catch let writeError as NonBlockingFDWriteError {
+            debugLog("BootstrapSocketProxy: stdout bridge write failed provenance=\(writeError.provenance)")
+            throw mapStdoutWriteError(writeError)
+        }
+    }
+
     private static func shouldFinishSocketDrain(
         drainState: BridgeDrainState,
         ledger: JSONRPCBridgeLedger,
@@ -1925,7 +1953,7 @@ extension BootstrapSocketProxy {
         throw SocketProxyError.serverClosed
     }
 
-    private static func requireCleanBridgeStop(
+    static func requireCleanBridgeStop(
         ledger: JSONRPCBridgeLedger,
         direction: JSONRPCBridgeDirection,
         pendingByteCount: Int,
@@ -1943,7 +1971,7 @@ extension BootstrapSocketProxy {
         }
     }
 
-    private static func mapStdoutWriteError(_ error: NonBlockingFDWriteError) -> SocketProxyError {
+    static func mapStdoutWriteError(_ error: NonBlockingFDWriteError) -> SocketProxyError {
         switch error {
         case let .brokenPipe(bytesWritten, totalBytes):
             .stdoutBrokenPipe(bytesWritten: bytesWritten, totalBytes: totalBytes)
@@ -2319,17 +2347,7 @@ actor MCPService: Service {
         }
     }
 
-    // MARK: - Reconnection Logic
-
-    /// Determines whether a runtime error is transient and should trigger a retry.
-    /// Terminal errors (approval denied, explicit termination, host disconnect) return false.
-    private func shouldRetry(after error: CLIRuntimeError) -> Bool {
-        CLIProxyRuntimePolicy.shouldRetry(after: error)
-    }
-
-    private func transportFailureReason(for error: CLIRuntimeError) -> String {
-        CLIProxyRuntimePolicy.failureReason(for: error)
-    }
+    // MARK: - Transport
 
     private static func responseDeliveryFaultRuleFromEnvironment() -> JSONRPCBridgeFaultRule? {
         #if DEBUG
@@ -2365,163 +2383,36 @@ actor MCPService: Service {
         #endif
     }
 
-    /// Runs the MCP transport with reconnection on transient failures.
-    /// Exits on approvalDenied, terminatedByServer, hostDisconnected, or fatal transport errors.
-    ///
-    /// Retry strategy:
-    /// - First 60 seconds: aggressive retries every 0.5s (app might just be restarting)
-    /// - After 60 seconds: exponential backoff from 1s up to 30s
+    /// Runs the proxy session on the process's own stdin, stdout, and stderr. The session always
+    /// ends with an error, which `run` records and the caller reports.
     private func runTransport() async throws {
-        var attempt = 0
-        var firstFailureTime: Date?
-
-        // Phase 1: Aggressive retries (first 60 seconds)
-        let aggressiveDelay = 0.5
-        let aggressivePhaseDuration = 60.0
-
-        // Phase 2: Exponential backoff
-        let backoffBase = 1.0
-        let maxDelay = 30.0
-
-        while !Task.isCancelled {
-            do {
-                try await runSocketLoop()
-                // If runSocketLoop() returns without throwing, treat as clean exit
-                return
-            } catch let err as CLIRuntimeError {
-                // Reconnection is legal while the bridge ledger can prove there is no
-                // pending transaction, response in delivery, or unreplayable active work.
-                // If the session already initialized, the next socket loop replays
-                // initialize privately, then replays outstanding host requests.
-                let protocolActiveFailure = await bridgeLedger.recordConnectionFailure(
-                    transportFailureReason(for: err)
-                )
-                guard !protocolActiveFailure, shouldRetry(after: err) else {
-                    throw err
-                }
-
-                attempt += 1
-                let now = Date()
-                if firstFailureTime == nil {
-                    firstFailureTime = now
-                }
-
-                let elapsedSinceFirstFailure = now.timeIntervalSince(firstFailureTime!)
-                let delay: Double
-
-                if elapsedSinceFirstFailure < aggressivePhaseDuration {
-                    // Phase 1: Frequent retries - app might just be restarting
-                    let jitter = Double.random(in: 0 ... 0.1)
-                    delay = aggressiveDelay + jitter
+        let ending = await MCPProxySession.run(
+            client: MCPProxySession.Client(
+                sessionToken: sessionToken,
+                identityCache: identityCache,
+                initializeReplayState: initializeReplayState,
+                outstandingRequestReplayState: outstandingRequestReplayState,
+                bridgeLedger: bridgeLedger
+            ),
+            socketURL: MCPFilesystemConstants.bootstrapSocketURL(),
+            identity: MCPFilesystemConstants.identity,
+            serverVersion: CLI_VERSION,
+            faultRule: Self.responseDeliveryFaultRuleFromEnvironment(),
+            logMessage: { level, message in
+                if level == .debug {
+                    debugLog(message)
                 } else {
-                    // Phase 2: Exponential backoff with jitter
-                    let backoffAttempt = attempt - Int(aggressivePhaseDuration / aggressiveDelay)
-                    let expDelay = min(maxDelay, backoffBase * pow(2.0, Double(max(0, backoffAttempt - 1))))
-                    let jitter = Double.random(in: 0 ... (0.2 * expDelay))
-                    delay = min(maxDelay, expDelay + jitter)
+                    log.log(level: level, "\(message)")
                 }
-
-                log.warning("Bootstrap connection lost (\(err)). Retrying in \(String(format: "%.1f", delay))s (attempt \(attempt), elapsed \(String(format: "%.0f", elapsedSinceFirstFailure))s)")
-
-                do {
-                    try await MCPCompatibilitySleep.sleep(.seconds(delay))
-                } catch is CancellationError {
-                    // Cancelled by kill signal or PPID watchdog
-                    throw CLIRuntimeError.hostDisconnected(.taskCancelled)
-                }
-            } catch {
-                // Unknown error type - treat as fatal connection failure
-                throw CLIRuntimeError.connectionFailed(underlying: error)
+            },
+            retryWait: { delay in
+                try await MCPCompatibilitySleep.sleep(.seconds(delay))
+            },
+            onPhaseChange: { phase in
+                debugLog("MCPProxySession: phase \(phase)")
             }
-        }
-
-        // If loop exits due to Task cancellation
-        throw CLIRuntimeError.hostDisconnected(.taskCancelled)
-    }
-
-    /// Single connection attempt to the bootstrap socket.
-    private func runSocketLoop() async throws {
-        let snapshotBeforeReconnect = await bridgeLedger.snapshot()
-        let replayInitialization = snapshotBeforeReconnect.hasForwardedProtocolFrame
-        if replayInitialization {
-            switch await initializeReplayState.replayPlan() {
-            case .success:
-                break
-            case let .failure(reason):
-                let terminalReason = await bridgeLedger.terminalizeConnection(reason: reason.terminalReason)
-                throw CLIRuntimeError.connectionFailed(
-                    underlying: JSONRPCBridgeLedgerError.terminal(terminalReason)
-                )
-            }
-        }
-
-        _ = try await bridgeLedger.beginConnection()
-
-        // Build the best available client name for the handshake:
-        // 1. Cached MCP clientInfo.name (from previous initialize)
-        // 2. Parent process executable name
-        // 3. Our own process name (fallback)
-        let cachedName = await identityCache.currentName()
-        let displayName = cachedName
-            ?? CLIEventLogger.detectClientName()
-            ?? ProcessInfo.processInfo.processName
-
-        // Use bootstrap socket proxy (CLI connects to app's socket server)
-        let proxy = BootstrapSocketProxy(
-            sessionToken: sessionToken,
-            clientName: displayName,
-            identityCache: identityCache,
-            initializeReplayState: initializeReplayState,
-            outstandingRequestReplayState: outstandingRequestReplayState,
-            replayInitializationOnStart: replayInitialization,
-            bridgeLedger: bridgeLedger,
-            faultRule: Self.responseDeliveryFaultRuleFromEnvironment()
         )
-
-        do {
-            try await proxy.start()
-            log.debug("Bootstrap socket proxy stopped cleanly")
-            throw CLIRuntimeError.hostDisconnected(.stdinClosed)
-        } catch let err as SocketProxyError {
-            await proxy.stop()
-            switch err {
-            case .approvalDenied:
-                throw CLIRuntimeError.approvalDenied
-            case .hostDisconnected:
-                // Host process closed stdin - clean exit
-                throw CLIRuntimeError.hostDisconnected(.stdinClosed)
-            case let .stdoutBrokenPipe(bytesWritten, totalBytes):
-                debugLog("BootstrapSocketProxy: stdout bridge broken_pipe bytes_written=\(bytesWritten) total_bytes=\(totalBytes)")
-                throw CLIRuntimeError.hostDisconnected(.stdoutBrokenPipe(
-                    bytesWritten: bytesWritten,
-                    totalBytes: totalBytes
-                ))
-            case .stdoutWriteTimeout:
-                throw CLIRuntimeError.connectionFailed(underlying: err)
-            case .serverClosed, .connectionReset, .connectionTimeout:
-                throw CLIRuntimeError.connectionFailed(underlying: err)
-            case .connectionRefused:
-                // App not running or not accepting connections
-                throw CLIRuntimeError.connectionFailed(underlying: err)
-            case let .terminatedByServer(reason, message):
-                // Server explicitly killed this connection - exit without retry
-                throw CLIRuntimeError.terminatedByServer(CLIServerTerminationProvenance(
-                    reason: reason,
-                    message: message
-                ))
-            case let .handshakeFailed(reason):
-                log.error("Bootstrap handshake failed: \(reason)")
-                throw CLIRuntimeError.connectionFailed(underlying: err)
-            default:
-                throw CLIRuntimeError.connectionFailed(underlying: err)
-            }
-        } catch let err as CLIRuntimeError {
-            await proxy.stop()
-            throw err
-        } catch {
-            await proxy.stop()
-            throw CLIRuntimeError.connectionFailed(underlying: error)
-        }
+        throw ending
     }
 
     func shutdown() async throws {
