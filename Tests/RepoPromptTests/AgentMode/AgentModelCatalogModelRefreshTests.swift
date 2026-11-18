@@ -225,7 +225,7 @@ final class AgentModelCatalogModelRefreshTests: XCTestCase {
         )
     }
 
-    func testPartialGPT61CatalogDoesNotBackfillGPT61Efforts() {
+    func testPartialGPT6CatalogDoesNotBackfillGPT61OrGPT62Efforts() {
         // GPT-6.2 Sol and Astra, GPT-6.1 Sol, GPT-6 Luna Low, and GPT-5.3 Codex are advertised but GPT-5.6 Sol
         // isn't, so the static list is merged in while GPT-6.2 and GPT-6.1 keep only their advertised efforts.
         CodexDiscoveryTestState.setDiscoveredModels([
