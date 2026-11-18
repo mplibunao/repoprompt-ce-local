@@ -1,3 +1,4 @@
+import Combine
 @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import XCTest
@@ -447,6 +448,171 @@ import XCTest
             XCTAssertEqual(revisionOutcome?.disposition, .applied)
             XCTAssertEqual(Set(result.deletedWorkspaceIDs), [firstID, laterID])
             XCTAssertTrue(result.failedReasonsByWorkspaceID.isEmpty)
+        }
+
+        func testStoredOnlySelectionChangePublishesOnce() async throws {
+            let manager = makeManager(windowID: -774)
+            await manager.awaitInitialized()
+            let oldDate = Date(timeIntervalSince1970: 100)
+            manager.workspaces = [
+                WorkspaceModel(
+                    dateModified: oldDate,
+                    name: "Target",
+                    repoPaths: [],
+                    ephemeralFlag: true,
+                    composeTabs: [
+                        ComposeTabState(name: "Target", lastModified: oldDate),
+                        ComposeTabState(name: "Sibling", lastModified: oldDate)
+                    ]
+                ),
+                WorkspaceModel(
+                    dateModified: oldDate,
+                    name: "Other",
+                    repoPaths: [],
+                    ephemeralFlag: true,
+                    composeTabs: [ComposeTabState(lastModified: oldDate)]
+                )
+            ]
+            let target = manager.workspaces[0]
+            let other = manager.workspaces[1]
+            let targetTab = target.composeTabs[0]
+            let otherTab = other.composeTabs[0]
+            let targetVersion = manager.debugStateVersionForWorkspace(target.id)
+            let otherVersion = manager.debugStateVersionForWorkspace(other.id)
+            let targetRevision = manager.selectionRevisionForMCP(workspaceID: target.id, tabID: targetTab.id)
+            let siblingRevision = manager.selectionRevisionForMCP(workspaceID: target.id, tabID: target.composeTabs[1].id)
+            let otherRevision = manager.selectionRevisionForMCP(workspaceID: other.id, tabID: otherTab.id)
+            var emissions: [[WorkspaceModel]] = []
+            let subscription = manager.$workspaces.dropFirst().sink { emissions.append($0) }
+            defer { subscription.cancel() }
+            var updatedTab = targetTab
+            updatedTab.selection = StoredSelection(
+                selectedPaths: ["/tmp/selected.swift"],
+                manualCodemapPaths: ["/tmp/manual.swift"],
+                slices: ["/tmp/selected.swift": [LineRange(start: 2, end: 4, description: "body")]],
+                codemapAutoEnabled: false
+            )
+
+            let before = Date()
+            let accepted = manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: target.id)
+            let after = Date()
+
+            XCTAssertTrue(accepted)
+            XCTAssertEqual(emissions.count, 1, "Changed selection must publish once")
+            let published = try XCTUnwrap(emissions.first)
+            let publishedTarget = try XCTUnwrap(published.first { $0.id == target.id })
+            XCTAssertEqual(publishedTarget.composeTabs[0].selection, updatedTab.selection)
+            XCTAssertGreaterThanOrEqual(publishedTarget.composeTabs[0].lastModified, before)
+            XCTAssertLessThanOrEqual(publishedTarget.composeTabs[0].lastModified, after)
+            XCTAssertGreaterThanOrEqual(publishedTarget.dateModified, before, "Publication must include the workspace timestamp")
+            XCTAssertLessThanOrEqual(publishedTarget.dateModified, after)
+            XCTAssertEqual(manager.workspace(withID: target.id), publishedTarget)
+            XCTAssertEqual(publishedTarget.composeTabs[1], target.composeTabs[1])
+            XCTAssertEqual(manager.workspaces[0].composeTabs[1], target.composeTabs[1])
+            XCTAssertEqual(published[1], other)
+            XCTAssertEqual(manager.workspace(withID: other.id), other)
+            XCTAssertEqual(manager.debugStateVersionForWorkspace(target.id), targetVersion + 1)
+            XCTAssertEqual(manager.debugStateVersionForWorkspace(other.id), otherVersion)
+            XCTAssertGreaterThan(manager.selectionRevisionForMCP(workspaceID: target.id, tabID: targetTab.id), targetRevision)
+            XCTAssertEqual(manager.selectionRevisionForMCP(workspaceID: target.id, tabID: target.composeTabs[1].id), siblingRevision)
+            XCTAssertEqual(manager.selectionRevisionForMCP(workspaceID: other.id, tabID: otherTab.id), otherRevision)
+        }
+
+        func testStoredOnlyNoWriteResultsPreserveState() async {
+            let manager = makeManager(windowID: -775)
+            await manager.awaitInitialized()
+            let oldDate = Date(timeIntervalSince1970: 100)
+            manager.workspaces = [WorkspaceModel(
+                dateModified: oldDate,
+                name: "Target",
+                repoPaths: [],
+                ephemeralFlag: true,
+                composeTabs: [ComposeTabState(lastModified: oldDate)]
+            )]
+            let workspaceID = manager.workspaces[0].id
+            var changedTab = manager.workspaces[0].composeTabs[0]
+            changedTab.selection = StoredSelection(selectedPaths: ["/tmp/selected.swift"])
+            XCTAssertTrue(manager.updateComposeTabStoredOnly(changedTab, inWorkspaceID: workspaceID))
+            XCTAssertGreaterThan(manager.selectionRevisionForMCP(workspaceID: workspaceID, tabID: changedTab.id), 0)
+
+            for label in ["equal qualified", "equal unqualified", "missing workspace", "missing tab"] {
+                let baseline = manager.workspaces
+                let storedTab = baseline[0].composeTabs[0]
+                let versions = baseline.map { manager.debugStateVersionForWorkspace($0.id) }
+                let revision = manager.selectionRevisionForMCP(workspaceID: workspaceID, tabID: storedTab.id)
+                var publicationCount = 0
+                let subscription = manager.$workspaces.dropFirst().sink { _ in publicationCount += 1 }
+
+                switch label {
+                case "equal qualified":
+                    XCTAssertTrue(manager.updateComposeTabStoredOnly(storedTab, inWorkspaceID: workspaceID), label)
+                case "equal unqualified":
+                    manager.updateComposeTabStoredOnly(storedTab)
+                case "missing workspace":
+                    XCTAssertFalse(manager.updateComposeTabStoredOnly(storedTab, inWorkspaceID: UUID()), label)
+                default:
+                    var missingTab = storedTab
+                    missingTab.id = UUID()
+                    XCTAssertFalse(manager.updateComposeTabStoredOnly(missingTab, inWorkspaceID: workspaceID), label)
+                }
+
+                subscription.cancel()
+                XCTAssertEqual(publicationCount, 0, "\(label): no-write result must not publish")
+                XCTAssertEqual(manager.workspaces, baseline, "\(label): storage and timestamps must stay unchanged")
+                XCTAssertEqual(baseline.map { manager.debugStateVersionForWorkspace($0.id) }, versions, "\(label): dirty versions must stay unchanged")
+                XCTAssertEqual(manager.selectionRevisionForMCP(workspaceID: workspaceID, tabID: storedTab.id), revision, label)
+            }
+        }
+
+        func testStoredOnlyEqualSelectionEditsStillPublishOnce() async {
+            let manager = makeManager(windowID: -776)
+            await manager.awaitInitialized()
+            let oldDate = Date(timeIntervalSince1970: 100)
+            manager.workspaces = [WorkspaceModel(
+                dateModified: oldDate,
+                name: "Target",
+                repoPaths: [],
+                ephemeralFlag: true,
+                composeTabs: [ComposeTabState(lastModified: oldDate)]
+            )]
+            let workspaceID = manager.workspaces[0].id
+            let sessionID = UUID()
+            let callerStamp = Date(timeIntervalSince1970: 200)
+
+            for label in ["agent session", "chat session", "prompt", "timestamp"] {
+                let storedTab = manager.workspaces[0].composeTabs[0]
+                let version = manager.debugStateVersionForWorkspace(workspaceID)
+                let revision = manager.selectionRevisionForMCP(workspaceID: workspaceID, tabID: storedTab.id)
+                var updatedTab = storedTab
+                switch label {
+                case "agent session": updatedTab.activeAgentSessionID = sessionID
+                case "chat session": updatedTab.activeChatSessionID = sessionID
+                case "prompt": updatedTab.promptText = "Updated prompt"
+                default: updatedTab.lastModified = callerStamp
+                }
+                var publicationCount = 0
+                let subscription = manager.$workspaces.dropFirst().sink { _ in publicationCount += 1 }
+
+                let before = Date()
+                if label == "prompt" {
+                    manager.updateComposeTabStoredOnly(updatedTab)
+                } else {
+                    XCTAssertTrue(manager.updateComposeTabStoredOnly(updatedTab, inWorkspaceID: workspaceID), label)
+                }
+                let after = Date()
+                subscription.cancel()
+
+                let result = manager.workspaces[0].composeTabs[0]
+                XCTAssertEqual(publicationCount, 1, "\(label): equal-selection edit must publish once")
+                XCTAssertEqual(manager.debugStateVersionForWorkspace(workspaceID), version + 1, label)
+                XCTAssertEqual(result.activeAgentSessionID, updatedTab.activeAgentSessionID, label)
+                XCTAssertEqual(result.activeChatSessionID, updatedTab.activeChatSessionID, label)
+                XCTAssertEqual(result.promptText, updatedTab.promptText, label)
+                XCTAssertEqual(result.selection, storedTab.selection, label)
+                XCTAssertGreaterThanOrEqual(result.lastModified, before, label)
+                XCTAssertLessThanOrEqual(result.lastModified, after, label)
+                XCTAssertEqual(manager.selectionRevisionForMCP(workspaceID: workspaceID, tabID: storedTab.id), revision, label)
+            }
         }
 
         private func leakedFixtureWorkspace(id: UUID = UUID()) -> WorkspaceModel {
