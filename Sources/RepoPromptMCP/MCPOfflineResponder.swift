@@ -130,7 +130,7 @@ struct MCPOfflineResponder {
     private func notificationOutcome(method: String?) -> Outcome {
         // The helper never waits for `notifications/initialized` before answering, so only its
         // replay copy matters. Cancellations are accounted for by the ledger; nothing reaches the app.
-        Outcome(recordsClientFrameForReplay: method == Self.initializedNotificationName && initializeAnswered)
+        Outcome(recordsClientFrameForReplay: method == InitializedNotification.name && initializeAnswered)
     }
 
     private mutating func requestOutcome(
@@ -144,8 +144,6 @@ struct MCPOfflineResponder {
             try initializeOutcome(id: id, params: params)
         case Ping.name:
             try reply(id: id, result: Empty())
-        case "server/discover":
-            try fail(id: id, .methodNotFound("Unknown method: \(method)"))
         case ListTools.name:
             try initializedReply(id: id, result: appToolList ?? Self.emptyToolList)
         case ListPrompts.name:
@@ -227,8 +225,6 @@ struct MCPOfflineResponder {
     private static let connectionUnavailableCode = -32001
 
     private static let emptyToolList: Value = .object(["tools": .array([])])
-
-    private static let initializedNotificationName = InitializedNotification.name
 
     private static func decodeInitializeParameters(_ params: Any?) -> Initialize.Parameters? {
         guard let params = params as? [String: Any],

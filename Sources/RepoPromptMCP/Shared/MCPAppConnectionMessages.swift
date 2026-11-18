@@ -38,7 +38,7 @@ enum MCPAppConnectionMessages {
         }
     }
 
-    static let reconnectNotice = "This helper reconnects automatically."
+    private static let reconnectNotice = "This helper reconnects automatically."
 
     /// The cause and remedy, for exec and interactive output and for error descriptions.
     static func text(for condition: Condition, identity: MCPFilesystemIdentity) -> String {

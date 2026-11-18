@@ -89,11 +89,7 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         harness.start()
         _ = try await harness.initializeOffline()
 
-        let app = try harness.startFakeApp()
-        harness.retryGate.open()
-        let connection = try await app.accept()
-        _ = try await connection.acceptBootstrap()
-        let replayed = try await connection.readMessage()
+        let (connection, replayed) = try await harness.acceptReplayedInitialize()
         XCTAssertEqual(replayed["method"] as? String, "initialize")
 
         // The app holds its answer to the replayed initialize, as it does while a person decides.
@@ -158,11 +154,7 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         harness.start()
         _ = try await harness.initializeOffline()
 
-        let app = try harness.startFakeApp()
-        harness.retryGate.open()
-        let connection = try await app.accept()
-        _ = try await connection.acceptBootstrap()
-        let replayed = try await connection.readMessage()
+        let (connection, replayed) = try await harness.acceptReplayedInitialize()
 
         // A full stdout pipe holds the offline loop inside its reply to frame A, so the handoff
         // falls between A and B with B, C, and the head of D already read from stdin.
@@ -308,11 +300,7 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         }, "the cancellation")
 
         // The handshake the new connection receives is the one recorded from local frames.
-        let app = try harness.startFakeApp()
-        harness.retryGate.open()
-        let connection = try await app.accept()
-        _ = try await connection.acceptBootstrap()
-        let replayed = try await connection.readMessage()
+        let (connection, replayed) = try await harness.acceptReplayedInitialize()
         XCTAssertEqual(replayed["method"] as? String, "initialize")
         try connection.send(appInitializeResult(for: replayed))
         let initialized = try await connection.readMessage()
@@ -452,11 +440,7 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
             harness.start()
             _ = try await harness.initializeOffline()
 
-            let app = try harness.startFakeApp()
-            harness.retryGate.open()
-            let connection = try await app.accept()
-            _ = try await connection.acceptBootstrap()
-            let replayed = try await connection.readMessage()
+            let (connection, replayed) = try await harness.acceptReplayedInitialize()
             let waiting = try await harness.client.request(toolCall(id: 1, name: "apply_edits"))
             XCTAssertEqual(
                 resultText(waiting),
@@ -481,14 +465,7 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
                 }
                 XCTAssertEqual(code, -32600, label)
                 XCTAssertEqual(message, refusal, label)
-                let record = await CLIProxyRuntimePolicy.makeTerminalRecord(
-                    sessionToken: "offline-startup-test",
-                    localPID: 1,
-                    initialParentPID: 2,
-                    ledgerSnapshot: harness.ledger.snapshot(),
-                    runtimeError: ending,
-                    fallbackReason: "unexpected_fallback"
-                )
+                let record = await harness.terminalRecord(for: ending)
                 XCTAssertEqual(record.reason, "mcp_session_resume_initialize_replay_rejected", label)
                 XCTAssertEqual(record.initiator, .app, label)
                 XCTAssertTrue(record.errorDescription?.contains(refusal) == true, label)
@@ -503,14 +480,7 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
                     .terminal("mcp_session_resume_initialize_replay_result_mismatch"),
                     label
                 )
-                let record = await CLIProxyRuntimePolicy.makeTerminalRecord(
-                    sessionToken: "offline-startup-test",
-                    localPID: 1,
-                    initialParentPID: 2,
-                    ledgerSnapshot: harness.ledger.snapshot(),
-                    runtimeError: ending,
-                    fallbackReason: "unexpected_fallback"
-                )
+                let record = await harness.terminalRecord(for: ending)
                 XCTAssertEqual(record.reason, "mcp_session_resume_initialize_replay_result_mismatch", label)
             case let (.termination, .terminatedByServer(provenance)):
                 XCTAssertEqual(provenance.reason, .userBootFromDashboard, label)
@@ -549,14 +519,7 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
             XCTAssertEqual(harness.retryGate.counts.started, 1, "\(label): no later attempt")
             XCTAssertEqual(harness.retryGate.counts.cancelled, 1, "\(label): the worker's wait was cancelled")
             XCTAssertFalse(CLIProxyRuntimePolicy.shouldRetry(after: ending), label)
-            let record = await CLIProxyRuntimePolicy.makeTerminalRecord(
-                sessionToken: "offline-startup-test",
-                localPID: 1,
-                initialParentPID: 2,
-                ledgerSnapshot: harness.ledger.snapshot(),
-                runtimeError: ending,
-                fallbackReason: "unexpected_fallback"
-            )
+            let record = await harness.terminalRecord(for: ending)
             XCTAssertTrue(testCase.expectedReasons.contains(record.reason), "\(label): \(record.reason)")
             XCTAssertEqual(record.initiator, .host, label)
         }
@@ -567,11 +530,7 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         harness.start()
         _ = try await harness.initializeOffline()
 
-        let app = try harness.startFakeApp()
-        harness.retryGate.open()
-        let connection = try await app.accept()
-        _ = try await connection.acceptBootstrap()
-        let replayed = try await connection.readMessage()
+        let (connection, replayed) = try await harness.acceptReplayedInitialize()
         XCTAssertEqual(replayed["method"] as? String, "initialize")
 
         harness.cancel()
@@ -1337,14 +1296,21 @@ private final class ProxyHarness: @unchecked Sendable {
         }
     }
 
-    /// Starts the fake app, admits the replayed initialize, and returns once the client has the
-    /// helper's `list_changed`.
-    func attachToFakeApp() async throws -> FakeAppConnection {
+    /// Starts the fake app, lets the session's next attempt through, accepts its bootstrap, and
+    /// returns the connection and the helper's replayed `initialize`, unanswered.
+    func acceptReplayedInitialize() async throws -> (connection: FakeAppConnection, replayed: [String: Any]) {
         let app = try startFakeApp()
         retryGate.open()
         let connection = try await app.accept()
         _ = try await connection.acceptBootstrap()
         let replayed = try await connection.readMessage()
+        return (connection, replayed)
+    }
+
+    /// Starts the fake app, admits the replayed initialize, and returns once the client has the
+    /// helper's `list_changed`.
+    func attachToFakeApp() async throws -> FakeAppConnection {
+        let (connection, replayed) = try await acceptReplayedInitialize()
         guard replayed["method"] as? String == "initialize" else {
             throw FixtureError.unexpected("expected the replayed initialize, got \(replayed)")
         }
@@ -1371,6 +1337,18 @@ private final class ProxyHarness: @unchecked Sendable {
         let ending = EventLog<CLIRuntimeError>()
         Task { await ending.append(task.value) }
         return try await ending.first(where: { _ in true }, timeout: timeout, "the session to end")
+    }
+
+    /// The terminal record the helper writes when this session ends with `ending`.
+    func terminalRecord(for ending: CLIRuntimeError) async -> MCPTerminalRecord {
+        await CLIProxyRuntimePolicy.makeTerminalRecord(
+            sessionToken: "offline-startup-test",
+            localPID: 1,
+            initialParentPID: 2,
+            ledgerSnapshot: ledger.snapshot(),
+            runtimeError: ending,
+            fallbackReason: "unexpected_fallback"
+        )
     }
 
     func readStderr() async throws -> String {

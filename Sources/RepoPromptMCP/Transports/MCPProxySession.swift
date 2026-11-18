@@ -267,7 +267,7 @@ struct MCPProxySession {
     }
 
     /// The runtime error that a failed connection or session part ends with.
-    static func runtimeError(
+    private static func runtimeError(
         for error: Swift.Error,
         logMessage: @Sendable (Logger.Level, String) -> Void
     ) -> CLIRuntimeError {
