@@ -459,14 +459,7 @@ enum SocketProxyError: Swift.Error, LocalizedError {
         case let .acceptFailed(errno):
             return "Failed to accept connection: \(errno)"
         case let .connectFailed(errno):
-            if errno == EPERM || errno == EACCES {
-                return "Permission denied (errno \(errno)). If running in a sandboxed environment (e.g., Codex), disable sandbox or grant Unix socket access."
-            } else if errno == ENOENT {
-                return "Socket not found. Is RepoPrompt running with MCP enabled?"
-            } else if errno == ECONNREFUSED {
-                return "Connection refused. RepoPrompt may need to be restarted."
-            }
-            return "Failed to connect: \(errno)"
+            return MCPAppConnectionMessages.connectFailure(errno: errno, identity: MCPFilesystemConstants.identity)
         case .notListening:
             return "Socket not listening"
         case .notConnected:
@@ -474,11 +467,11 @@ enum SocketProxyError: Swift.Error, LocalizedError {
         case .connectionTimeout:
             return "Connection timeout"
         case .bootstrapResponseTimeout:
-            return "Timed out waiting for RepoPrompt bootstrap response"
+            return MCPAppConnectionMessages.text(for: .bootstrapTimeout, identity: MCPFilesystemConstants.identity)
         case .connectionReset:
             return "Connection reset"
         case .connectionRefused:
-            return "Connection refused. RepoPrompt may be busy or restarting; try again."
+            return MCPAppConnectionMessages.text(for: .transportFailure(reason: "connection refused"), identity: MCPFilesystemConstants.identity)
         case let .writeFailed(errno):
             return "Write failed: \(errno)"
         case let .readFailed(errno):

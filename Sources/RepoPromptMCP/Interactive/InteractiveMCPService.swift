@@ -88,39 +88,6 @@ actor InteractiveMCPService: Service {
             return
         }
 
-        switch error {
-        case .appNotRunning:
-            fputs("""
-            \u{001B}[31mError: Cannot connect to RepoPrompt\u{001B}[0m
-
-            The RepoPrompt app is not running or MCP is disabled.
-
-            To fix:
-            1. Launch RepoPrompt.app
-            2. Ensure MCP Server is enabled in Settings > MCP
-
-            """, stderr)
-
-        case .approvalDenied:
-            fputs("""
-            \u{001B}[31mError: Connection approval denied\u{001B}[0m
-
-            Your connection request was rejected by RepoPrompt.
-            Check the MCP approval dialog in RepoPrompt.
-
-            """, stderr)
-
-        case .bootstrapResponseTimeout:
-            fputs("""
-            \u{001B}[31mError: RepoPrompt did not respond to the bootstrap handshake\u{001B}[0m
-
-            The app accepted the socket connection too slowly or is wedged.
-            If RepoPrompt recently crashed under the debugger, restart it and try again.
-
-            """, stderr)
-
-        default:
-            fputs("\u{001B}[31mError: \(error.description)\u{001B}[0m\n", stderr)
-        }
+        fputs("\u{001B}[31mError: \(error.description)\u{001B}[0m\n", stderr)
     }
 }
