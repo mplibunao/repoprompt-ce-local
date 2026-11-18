@@ -19,16 +19,18 @@ enum MCPProxyStdinPump {
 
     /// - Parameters:
     ///   - initialBytes: Unread bytes from the previous owner, consumed before stdin is read.
-    ///   - shouldHandOff: Checked before each frame is taken and before each read of stdin.
-    ///     A frame already passed to `consumeFrame` always finishes first.
+    ///   - shouldHandOff: Runs at each frame boundary, before a frame is taken and before each
+    ///     read of stdin, and returns true to stop there. The owner may also do its own boundary
+    ///     work in it, such as writing replies. A frame already passed to `consumeFrame` always
+    ///     finishes first.
     ///   - consumeFrame: Receives each complete frame with its trailing newline.
-    /// - Throws: Host-input and ledger errors, consumer errors, and `CancellationError`.
+    /// - Throws: Host-input and ledger errors, owner and consumer errors, and `CancellationError`.
     static func run(
         stdinFD: Int32,
         initialBytes: Data,
         ledger: JSONRPCBridgeLedger,
         identityCache: ClientIdentityCache,
-        shouldHandOff: () async -> Bool = { false },
+        shouldHandOff: () async throws -> Bool = { false },
         consumeFrame: (Data) async throws -> Void
     ) async throws -> Result {
         let flags = fcntl(stdinFD, F_GETFL)
@@ -43,7 +45,7 @@ enum MCPProxyStdinPump {
         // Returns true when the owner asked to hand off before the next complete frame.
         func consumeCompleteFrames() async throws -> Bool {
             while let newline = pending.firstIndex(of: UInt8(ascii: "\n")) {
-                if await shouldHandOff() {
+                if try await shouldHandOff() {
                     return true
                 }
                 let message = Data(pending[..<newline])
@@ -68,7 +70,7 @@ enum MCPProxyStdinPump {
 
         while true {
             try Task.checkCancellation()
-            if await shouldHandOff() {
+            if try await shouldHandOff() {
                 return .handoff(unreadBytes: pending)
             }
 

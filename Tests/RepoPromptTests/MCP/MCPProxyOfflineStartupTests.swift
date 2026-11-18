@@ -95,7 +95,23 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
     }
 
     func testHandoffPreservesCompleteAndPartialUnreadFrames() async throws {
-        let label = "offline loop to bridge"
+        try await assertHandoffFromOfflineLoopToBridge(label: "offline loop to bridge")
+        try await assertHandoffFromBridgeToOfflineLoop(label: "bridge to offline loop after a socket failure")
+    }
+
+    /// Frames A to D, as one chunk holding A, B, C, and the head of D, and the rest of D.
+    private func handoffFrames() throws -> (chunk: Data, restOfD: Data) {
+        let frameD = try jsonLine(toolCall(id: 13, name: "get_file_tree"))
+        let splitIndex = frameD.count / 2
+        var chunk = Data()
+        try chunk.append(jsonLine(toolCall(id: 10, name: "read_file")))
+        try chunk.append(jsonLine(toolCall(id: 11, name: "file_search")))
+        try chunk.append(jsonLine(["jsonrpc": "2.0", "id": 12, "method": "tools/list"]))
+        chunk.append(frameD.prefix(splitIndex))
+        return (chunk, Data(frameD.suffix(from: splitIndex)))
+    }
+
+    private func assertHandoffFromOfflineLoopToBridge(label: String) async throws {
         let harness = try makeHarness(identity: identity)
         harness.start()
         _ = try await harness.initializeOffline()
@@ -109,13 +125,7 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         // A full stdout pipe holds the offline loop inside its reply to frame A, so the handoff
         // falls between A and B with B, C, and the head of D already read from stdin.
         let fillerByteCount = try harness.client.fillStdoutPipe()
-        let frameD = try jsonLine(toolCall(id: 13, name: "get_file_tree"))
-        let splitIndex = frameD.count / 2
-        var chunk = Data()
-        try chunk.append(jsonLine(toolCall(id: 10, name: "read_file")))
-        try chunk.append(jsonLine(toolCall(id: 11, name: "file_search")))
-        try chunk.append(jsonLine(["jsonrpc": "2.0", "id": 12, "method": "tools/list"]))
-        chunk.append(frameD.prefix(splitIndex))
+        let (chunk, restOfD) = try handoffFrames()
         try harness.client.sendRaw(chunk)
 
         _ = try await harness.trace.first(where: { event in
@@ -135,7 +145,7 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         for _ in 0 ..< 3 {
             try await appFrames.append(connection.readMessage())
         }
-        try harness.client.sendRaw(frameD.suffix(from: splitIndex))
+        try harness.client.sendRaw(restOfD)
         try await appFrames.append(connection.readMessage())
         XCTAssertEqual(appFrames.map { $0["method"] as? String }, ["notifications/initialized", "tools/call", "tools/list", "tools/call"], label)
         XCTAssertEqual(appFrames.map { $0["id"] as? Int }, [nil, 11, 12, 13], label)
@@ -154,6 +164,153 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         assertHostDisconnected(ending, .stdinClosed, label)
         let laterAppFrames = try await connection.readRemainingMessages()
         XCTAssertTrue(laterAppFrames.isEmpty, "\(label): the app received a frame twice: \(laterAppFrames)")
+    }
+
+    private func assertHandoffFromBridgeToOfflineLoop(label: String) async throws {
+        let harness = try makeHarness(identity: identity)
+        _ = try await harness.connectDirectly()
+
+        // The ledger holds the bridge inside its forwarding of frame A while the app quits, so the
+        // bridge's stdin pump stops between A and B with B, C, and the head of D already read.
+        harness.ledgerHold.arm { event in
+            event.phase == "frame_prepared" && event.direction == .clientToServer && event.id == .number(10)
+        }
+        let (chunk, restOfD) = try handoffFrames()
+        try harness.client.sendRaw(chunk)
+        _ = try await harness.ledgerHold.reached.first(where: { _ in true }, "the bridge forwarding frame A")
+        harness.quitApp()
+        harness.ledgerHold.release()
+
+        // A is a read held for the app's return. The offline loop answers the rest.
+        let unavailable = MCPAppConnectionMessages.offlineText(for: .unavailable, identity: identity)
+        let replyB = try await harness.client.readMessage()
+        XCTAssertEqual(replyB["id"] as? Int, 11, label)
+        XCTAssertEqual(resultText(replyB), unavailable, label)
+        let replyC = try await harness.client.readMessage()
+        XCTAssertEqual(replyC["id"] as? Int, 12, label)
+        XCTAssertEqual(((replyC["result"] as? [String: Any])?["tools"] as? [Any])?.count, 0, label)
+        try harness.client.sendRaw(restOfD)
+        let replyD = try await harness.client.readMessage()
+        XCTAssertEqual(replyD["id"] as? Int, 13, label)
+        XCTAssertEqual(resultText(replyD), unavailable, label)
+
+        harness.client.closeStdin()
+        let ending = try await harness.finish()
+        assertHostDisconnected(ending, .stdinClosed, label)
+        let laterClientFrames = try await harness.client.readRemainingMessages()
+        XCTAssertTrue(laterClientFrames.isEmpty, "\(label): the client received \(laterClientFrames)")
+    }
+
+    func testToolCallDuringOutageGetsNamedErrorThenWorksAfterReturn() async throws {
+        let harness = try makeHarness(identity: identity)
+        _ = try await harness.connectDirectly()
+
+        harness.quitApp()
+        _ = try await harness.phases.first(where: { $0 == .outage }, "the outage")
+        // The retry gate stays closed, so this answer can't depend on a reconnect attempt.
+        let call = try await harness.client.request(toolCall(id: 5, name: "apply_edits"))
+        XCTAssertTrue(isErrorResult(call))
+        XCTAssertEqual(resultText(call), MCPAppConnectionMessages.offlineText(for: .unavailable, identity: identity))
+
+        let connection = try await harness.attachToFakeApp()
+        try harness.client.send(toolCall(id: 6, name: "get_file_tree"))
+        let forwarded = try await connection.readMessage()
+        XCTAssertEqual(forwarded["id"] as? Int, 6, "the returned app received another frame first: \(forwarded)")
+        try connection.send(["jsonrpc": "2.0", "id": 6, "result": ["content": [["type": "text", "text": "tree from the app"]]]])
+        let result = try await harness.client.readMessage()
+        XCTAssertEqual(resultText(result), "tree from the app")
+
+        harness.client.closeStdin()
+        let ending = try await harness.finish()
+        assertHostDisconnected(ending, .stdinClosed)
+        let laterAppFrames = try await connection.readRemainingMessages()
+        XCTAssertTrue(laterAppFrames.isEmpty, "the returned app received \(laterAppFrames)")
+    }
+
+    func testReadInFlightAtOutageReplaysWhenAppReturnsWithinGrace() async throws {
+        let harness = try makeHarness(identity: identity)
+        harness.start()
+        _ = try await harness.initializeOffline()
+        let firstConnection = try await harness.attachToFakeApp()
+        harness.retryGate.close()
+
+        try harness.client.send(toolCall(id: 7, name: "read_file", arguments: ["path": "a.txt"]))
+        try harness.client.send(toolCall(id: 9, name: "read_file", arguments: ["path": "b.txt"]))
+        let inFlight = try await [firstConnection.readMessage(), firstConnection.readMessage()]
+        XCTAssertEqual(inFlight.map { $0["id"] as? Int }, [7, 9])
+        harness.quitApp()
+        _ = try await harness.phases.first(where: { $0 == .outage }, "the outage")
+        // The grace wait stays blocked for the rest of the test.
+        _ = try await harness.graceGate.started.first(where: { $0 == 1 }, "the grace wait")
+        // A held request the client cancels is not replayed.
+        try harness.client.send(["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": 9]])
+        _ = try await harness.trace.first(where: { event in
+            event.phase == "frame_committed" && event.method == "notifications/cancelled"
+        }, "the cancellation")
+
+        // The handshake the new connection receives is the one recorded from local frames.
+        let app = try harness.startFakeApp()
+        harness.retryGate.open()
+        let connection = try await app.accept()
+        _ = try await connection.acceptBootstrap()
+        let replayed = try await connection.readMessage()
+        XCTAssertEqual(replayed["method"] as? String, "initialize")
+        try connection.send(appInitializeResult(for: replayed))
+        let initialized = try await connection.readMessage()
+        XCTAssertEqual(initialized["method"] as? String, "notifications/initialized")
+        let read = try await connection.readMessage()
+        XCTAssertEqual(read["id"] as? Int, 7)
+        XCTAssertEqual((read["params"] as? [String: Any])?["name"] as? String, "read_file")
+
+        try connection.send(["jsonrpc": "2.0", "id": 7, "result": ["content": [["type": "text", "text": "a.txt from the app"]]]])
+        let changed = try await harness.client.readMessage()
+        XCTAssertEqual(changed["method"] as? String, ToolListChangedNotification.name)
+        let result = try await harness.client.readMessage()
+        XCTAssertEqual(result["id"] as? Int, 7)
+        XCTAssertEqual(resultText(result), "a.txt from the app")
+
+        harness.client.closeStdin()
+        let ending = try await harness.finish()
+        assertHostDisconnected(ending, .stdinClosed)
+        let laterClientFrames = try await harness.client.readRemainingMessages()
+        XCTAssertTrue(laterClientFrames.isEmpty, "the client received more than one result: \(laterClientFrames)")
+        let laterAppFrames = try await connection.readRemainingMessages()
+        XCTAssertTrue(laterAppFrames.isEmpty, "the returned app received \(laterAppFrames)")
+    }
+
+    func testReadInFlightAtOutageGetsNamedErrorAfterGrace() async throws {
+        let harness = try makeHarness(identity: identity)
+        harness.start()
+        _ = try await harness.initializeOffline()
+        let firstConnection = try await harness.attachToFakeApp()
+        harness.retryGate.close()
+
+        try harness.client.send(toolCall(id: 7, name: "read_file", arguments: ["path": "a.txt"]))
+        let inFlight = try await firstConnection.readMessage()
+        XCTAssertEqual(inFlight["id"] as? Int, 7)
+        harness.quitApp()
+        _ = try await harness.phases.first(where: { $0 == .outage }, "the outage")
+        _ = try await harness.graceGate.started.first(where: { $0 == 1 }, "the grace wait")
+
+        harness.graceGate.open()
+        let expired = try await harness.client.readMessage()
+        XCTAssertEqual(expired["id"] as? Int, 7)
+        XCTAssertTrue(isErrorResult(expired))
+        XCTAssertEqual(resultText(expired), MCPAppConnectionMessages.offlineText(for: .unavailable, identity: identity))
+
+        // Requests held for replay go to the app before anything the client sends next.
+        let connection = try await harness.attachToFakeApp()
+        try harness.client.send(toolCall(id: 8, name: "get_file_tree"))
+        let next = try await connection.readMessage()
+        XCTAssertEqual(next["id"] as? Int, 8, "the returned app received \(next)")
+        try connection.send(["jsonrpc": "2.0", "id": 8, "result": ["content": [["type": "text", "text": "tree from the app"]]]])
+        _ = try await harness.client.readMessage()
+
+        harness.client.closeStdin()
+        let ending = try await harness.finish()
+        assertHostDisconnected(ending, .stdinClosed)
+        let laterAppFrames = try await connection.readRemainingMessages()
+        XCTAssertTrue(laterAppFrames.isEmpty, "the returned app received \(laterAppFrames)")
     }
 
     func testLocallyAnsweredCallsAreNeverReplayedIntoTheApp() async throws {
@@ -278,6 +435,15 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
                     .terminal("mcp_session_resume_initialize_replay_result_mismatch"),
                     label
                 )
+                let record = await CLIProxyRuntimePolicy.makeTerminalRecord(
+                    sessionToken: "offline-startup-test",
+                    localPID: 1,
+                    initialParentPID: 2,
+                    ledgerSnapshot: harness.ledger.snapshot(),
+                    runtimeError: ending,
+                    fallbackReason: "unexpected_fallback"
+                )
+                XCTAssertEqual(record.reason, "mcp_session_resume_initialize_replay_result_mismatch", label)
             case let (.termination, .terminatedByServer(provenance)):
                 XCTAssertEqual(provenance.reason, .userBootFromDashboard, label)
                 XCTAssertEqual(provenance.message, terminationMessage, label)
@@ -554,6 +720,40 @@ private final class RetryGate: @unchecked Sendable {
         for continuation in waiting {
             continuation.resume()
         }
+    }
+
+    /// Makes later waits block again until the next `open`.
+    func close() {
+        lock.withLock { isOpen = false }
+    }
+}
+
+/// Holds the ledger, and with it the session's frame handling, inside the first trace event a test
+/// arms it for, until the test releases it.
+private final class LedgerHold: @unchecked Sendable {
+    let reached = EventLog<MCPResponseDeliveryTraceEvent>()
+    private let lock = NSLock()
+    private var predicate: ((MCPResponseDeliveryTraceEvent) -> Bool)?
+    private let released = DispatchSemaphore(value: 0)
+
+    func arm(_ predicate: @escaping (MCPResponseDeliveryTraceEvent) -> Bool) {
+        lock.withLock { self.predicate = predicate }
+    }
+
+    /// Runs inside the ledger. The wait's timeout only keeps a broken test from hanging the suite.
+    func pass(_ event: MCPResponseDeliveryTraceEvent) {
+        let matched = lock.withLock { () -> Bool in
+            guard let predicate, predicate(event) else { return false }
+            self.predicate = nil
+            return true
+        }
+        guard matched else { return }
+        reached.append(event)
+        _ = released.wait(timeout: .now() + 10)
+    }
+
+    func release() {
+        released.signal()
     }
 }
 
@@ -905,6 +1105,8 @@ private final class ProxyHarness: @unchecked Sendable {
     let socketURL: URL
     let client: ClientPipes
     let retryGate = RetryGate()
+    let graceGate = RetryGate()
+    let ledgerHold: LedgerHold
     let phases = EventLog<MCPProxySession.Phase>()
     let trace: EventLog<MCPResponseDeliveryTraceEvent>
     let ledger: JSONRPCBridgeLedger
@@ -925,8 +1127,11 @@ private final class ProxyHarness: @unchecked Sendable {
         stderrWrite = errorPipe[1]
         let trace = EventLog<MCPResponseDeliveryTraceEvent>()
         self.trace = trace
+        let ledgerHold = LedgerHold()
+        self.ledgerHold = ledgerHold
         ledger = JSONRPCBridgeLedger(connectionID: "offline-startup-test", traceSink: { event in
             trace.append(event)
+            ledgerHold.pass(event)
         })
     }
 
@@ -944,6 +1149,7 @@ private final class ProxyHarness: @unchecked Sendable {
         let socketURL = socketURL
         let identity = identity
         let retryGate = retryGate
+        let graceGate = graceGate
         let phases = phases
         let task = Task {
             await MCPProxySession.run(
@@ -955,35 +1161,72 @@ private final class ProxyHarness: @unchecked Sendable {
                 identity: identity,
                 serverVersion: "9.9.9-test",
                 retryWait: { _ in try await retryGate.wait() },
+                graceWait: { _ in try await graceGate.wait() },
                 onPhaseChange: { phase in phases.append(phase) }
             )
         }
         lock.withLock { sessionTask = task }
     }
 
+    private static let initializeRequest: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": [
+            "protocolVersion": "2025-06-18",
+            "capabilities": [String: Any](),
+            "clientInfo": ["name": "offline-startup-test", "version": "1"]
+        ]
+    ]
+    private static let initializedNotification: [String: Any] = ["jsonrpc": "2.0", "method": "notifications/initialized"]
+
     /// Sends `initialize` and `notifications/initialized` while the app is away.
     func initializeOffline() async throws -> [String: Any] {
-        let response = try await client.request([
-            "jsonrpc": "2.0",
-            "id": 0,
-            "method": "initialize",
-            "params": [
-                "protocolVersion": "2025-06-18",
-                "capabilities": [String: Any](),
-                "clientInfo": ["name": "offline-startup-test", "version": "1"]
-            ]
-        ])
+        let response = try await client.request(Self.initializeRequest)
         guard response["result"] != nil else {
             throw FixtureError.unexpected("offline initialize failed: \(response)")
         }
-        try client.send(["jsonrpc": "2.0", "method": "notifications/initialized"])
+        try client.send(Self.initializedNotification)
         return response
+    }
+
+    /// Starts the fake app, then the session, which reaches the app on its first attempt, and
+    /// completes the client's handshake through the bridge.
+    func connectDirectly() async throws -> FakeAppConnection {
+        let app = try startFakeApp()
+        start()
+        let connection = try await app.accept()
+        _ = try await connection.acceptBootstrap()
+        try client.send(Self.initializeRequest)
+        let initialize = try await connection.readMessage()
+        try connection.send(appInitializeResult(for: initialize))
+        let response = try await client.readMessage()
+        guard response["result"] != nil else {
+            throw FixtureError.unexpected("initialize through the app failed: \(response)")
+        }
+        try client.send(Self.initializedNotification)
+        let initialized = try await connection.readMessage()
+        guard initialized["method"] as? String == "notifications/initialized" else {
+            throw FixtureError.unexpected("expected notifications/initialized, got \(initialized)")
+        }
+        return connection
     }
 
     func startFakeApp() throws -> FakeApp {
         let app = try FakeApp(socketURL: socketURL)
         lock.withLock { fakeApps.append(app) }
         return app
+    }
+
+    /// Quits every fake app: its connections and listener close and its socket file goes away.
+    func quitApp() {
+        let apps = lock.withLock { () -> [FakeApp] in
+            defer { fakeApps.removeAll() }
+            return fakeApps
+        }
+        for app in apps {
+            app.close()
+        }
     }
 
     /// Starts the fake app, admits the replayed initialize, and returns once the client has the

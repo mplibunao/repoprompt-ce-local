@@ -9,46 +9,47 @@ import RepoPromptShared
 /// the first failure, while the app may be restarting, then exponential backoff from 1 s to 30 s,
 /// with no overall limit. A session keeps one schedule from its first failure on.
 private struct MCPProxyRetrySchedule: Sendable {
+    /// How long attempts stay frequent after the first failure, because the app may be restarting.
+    static let aggressivePhaseDuration: TimeInterval = 60
+
     private(set) var attempt = 0
     private var firstFailureAt: Date?
 
     /// Records one failed attempt and returns how long to wait before the next one.
     mutating func delayAfterFailure(now: Date = Date()) -> TimeInterval {
         let aggressiveDelay = 0.5
-        let aggressivePhaseDuration = 60.0
         let backoffBase = 1.0
         let maxDelay = 30.0
 
         attempt += 1
         let firstFailureAt = firstFailureAt ?? now
         self.firstFailureAt = firstFailureAt
-        guard now.timeIntervalSince(firstFailureAt) >= aggressivePhaseDuration else {
+        guard now.timeIntervalSince(firstFailureAt) >= Self.aggressivePhaseDuration else {
             return aggressiveDelay + Double.random(in: 0 ... 0.1)
         }
-        let backoffAttempt = attempt - Int(aggressivePhaseDuration / aggressiveDelay)
+        let backoffAttempt = attempt - Int(Self.aggressivePhaseDuration / aggressiveDelay)
         let expDelay = min(maxDelay, backoffBase * pow(2.0, Double(max(0, backoffAttempt - 1))))
         return min(maxDelay, expDelay + Double.random(in: 0 ... (0.2 * expDelay)))
-    }
-
-    func elapsedSinceFirstFailure(now: Date = Date()) -> TimeInterval {
-        firstFailureAt.map { now.timeIntervalSince($0) } ?? 0
     }
 }
 
 /// What the offline loop and the attachment worker share while the helper answers the client
-/// itself. The loop reads the condition for each answer and checks for a handoff at each frame
-/// boundary; the worker waits for the client's initialize result before its first attempt and
-/// requests the handoff when it has an admitted candidate or a terminal failure.
+/// itself. The loop reads the condition for each answer and checks for a handoff and the end of
+/// the outage grace at each frame boundary; the worker waits for the client's initialize result
+/// before its first attempt and requests the handoff when it has an admitted candidate or a
+/// terminal failure.
 private final class MCPProxyAttachmentState: @unchecked Sendable {
     private let lock = NSLock()
     private var condition: MCPAppConnectionMessages.Condition
-    private var initializeResultDelivered = false
+    private var initializeResultDelivered: Bool
     private var initializeResultWaiter: CheckedContinuation<Void, Never>?
     private var initializeResultWaitCancelled = false
     private var handoffRequested = false
+    private var graceEnded = false
 
-    init(condition: MCPAppConnectionMessages.Condition) {
+    init(condition: MCPAppConnectionMessages.Condition, initializeResultDelivered: Bool) {
         self.condition = condition
+        self.initializeResultDelivered = initializeResultDelivered
     }
 
     func connectionMessage(identity: MCPFilesystemIdentity) -> String {
@@ -103,6 +104,19 @@ private final class MCPProxyAttachmentState: @unchecked Sendable {
     func requestHandoff() {
         lock.withLock { handoffRequested = true }
     }
+
+    /// Records that the grace for requests held at the disconnect ran out.
+    func endGrace() {
+        lock.withLock { graceEnded = true }
+    }
+
+    /// True once, at the first check after the grace ran out.
+    func takeGraceEnd() -> Bool {
+        lock.withLock {
+            defer { graceEnded = false }
+            return graceEnded
+        }
+    }
 }
 
 /// One client's MCP session through the helper, from the first connection attempt to its end.
@@ -111,7 +125,8 @@ private final class MCPProxyAttachmentState: @unchecked Sendable {
 /// stdin and stdout and answers the client with `MCPOfflineResponder`, while one attachment worker
 /// keeps trying the app on `MCPProxyRetrySchedule`. Once the app admits the session's replayed
 /// `initialize`, the loop stops at a frame boundary and the bridge takes over with the unread
-/// bytes. A disconnect after that takes the reconnect loop, which replays the session as before.
+/// bytes. When the app goes away after that and the ledger allows a reconnect, the bridge hands
+/// the client back to the offline loop the same way, and the same worker reconnects.
 struct MCPProxySession {
     /// Client state that lives as long as the helper process and survives every reconnect.
     struct Client: Sendable {
@@ -132,10 +147,18 @@ struct MCPProxySession {
         case attachmentReady
         /// The bridge relays between the client and the app.
         case connected
+        /// The app went away mid-session. The offline loop answers the client while the worker
+        /// reconnects.
+        case outage
     }
 
     typealias RetryWait = @Sendable (TimeInterval) async throws -> Void
     typealias PhaseObserver = @Sendable (Phase) -> Void
+
+    /// How long requests the app received but never answered wait for it to return after it goes
+    /// away mid-session, before the client gets an error for each: the retry schedule's window for
+    /// an app that is restarting.
+    static let outageGracePeriod = MCPProxyRetrySchedule.aggressivePhaseDuration
 
     private struct AttachmentCandidate {
         let proxy: BootstrapSocketProxy
@@ -154,6 +177,25 @@ struct MCPProxySession {
         case offline(MCPAppConnectionMessages.Condition)
     }
 
+    /// How the offline loop takes the client over.
+    private struct OfflineEntry {
+        /// True when the app went away mid-session, false when it wasn't reachable at startup.
+        let isOutage: Bool
+        let condition: MCPAppConnectionMessages.Condition
+        /// Client bytes the previous owner of stdin read but did not consume.
+        let unreadStdinBytes: Data
+    }
+
+    /// Where the client's handshake stands when the offline loop takes it over.
+    private enum Handshake: Equatable {
+        /// The client hasn't sent an `initialize` the session can replay.
+        case notStarted
+        /// The app went away before answering the client's `initialize`.
+        case awaitingResult(initializeFrame: Data)
+        /// The client has its initialize result.
+        case initialized
+    }
+
     private static let toolsListChangedNotification = Data(
         "{\"jsonrpc\":\"2.0\",\"method\":\"\(ToolListChangedNotification.name)\"}\n".utf8
     )
@@ -168,6 +210,7 @@ struct MCPProxySession {
     private let faultRule: JSONRPCBridgeFaultRule?
     private let logMessage: @Sendable (Logger.Level, String) -> Void
     private let retryWait: RetryWait
+    private let graceWait: RetryWait
     private let onPhaseChange: PhaseObserver?
 
     /// Runs one proxy session until it ends.
@@ -177,6 +220,8 @@ struct MCPProxySession {
     ///   - serverVersion: The `serverInfo.version` of an offline initialize result.
     ///   - logMessage: Receives the session's log lines at the level it emits them.
     ///   - retryWait: Waits between connection attempts. It must throw when cancelled.
+    ///   - graceWait: Waits out `outageGracePeriod` after the app goes away mid-session with
+    ///     requests unanswered. It must throw when cancelled.
     ///   - onPhaseChange: Called as the session moves between the phases it reports.
     /// - Returns: Why the session ended. Cancellation ends it as `.hostDisconnected(.taskCancelled)`.
     static func run(
@@ -190,6 +235,7 @@ struct MCPProxySession {
         faultRule: JSONRPCBridgeFaultRule? = nil,
         logMessage: @escaping @Sendable (Logger.Level, String) -> Void = { _, _ in },
         retryWait: @escaping RetryWait,
+        graceWait: @escaping RetryWait,
         onPhaseChange: PhaseObserver? = nil
     ) async -> CLIRuntimeError {
         let session = MCPProxySession(
@@ -203,6 +249,7 @@ struct MCPProxySession {
             faultRule: faultRule,
             logMessage: logMessage,
             retryWait: retryWait,
+            graceWait: graceWait,
             onPhaseChange: onPhaseChange
         )
         var ending: CLIRuntimeError
@@ -249,22 +296,26 @@ struct MCPProxySession {
     }
 
     private func runUntilEnded() async throws -> Never {
+        // One schedule for the whole session, from its first failure on.
         var schedule = MCPProxyRetrySchedule()
+        var entry: OfflineEntry
         switch try await connectInitially(schedule: &schedule) {
         case let .accepted(proxy):
             onPhaseChange?(.connected)
-            try await runConnectionLoop(schedule: schedule) {
-                try await runConnection(proxy) {
-                    try await proxy.runAcceptedBridge(initialStdinBytes: Data(), initialSocketBytes: Data())
-                }
+            let interruption = try await runConnection(proxy) {
+                try await proxy.runAcceptedBridge(initialStdinBytes: Data(), initialSocketBytes: Data())
             }
+            entry = try await outageEntry(after: interruption)
         case let .offline(condition):
-            let (candidate, unreadStdinBytes) = try await runOfflineStartup(condition: condition, schedule: schedule)
-            try await runConnectionLoop(schedule: candidate.schedule) {
-                try await runConnection(candidate.proxy) {
-                    try await attach(candidate, unreadStdinBytes: unreadStdinBytes)
-                }
+            entry = OfflineEntry(isOutage: false, condition: condition, unreadStdinBytes: Data())
+        }
+        while true {
+            let (candidate, unreadStdinBytes) = try await runOffline(entry, schedule: schedule)
+            schedule = candidate.schedule
+            let interruption = try await runConnection(candidate.proxy) {
+                try await attach(candidate, unreadStdinBytes: unreadStdinBytes)
             }
+            entry = try await outageEntry(after: interruption)
         }
     }
 
@@ -277,7 +328,7 @@ struct MCPProxySession {
         var retried = false
         while true {
             _ = try await client.bridgeLedger.beginConnection()
-            let proxy = await makeProxy(replayInitializationOnStart: false)
+            let proxy = await makeProxy()
             let failure: CLIRuntimeError
             do {
                 try await proxy.connectAndAccept()
@@ -310,31 +361,76 @@ struct MCPProxySession {
         }
     }
 
-    // MARK: Offline startup and attachment
+    // MARK: Offline phase and attachment
+
+    /// Decides, through the ledger as before the offline loop existed, whether the session survives
+    /// its app going away mid-session.
+    ///
+    /// - Returns: How the offline loop takes the client over while the worker reconnects.
+    private func outageEntry(after interruption: MCPProxyBridgeInterruption) async throws -> OfflineEntry {
+        let failure = Self.runtimeError(for: interruption.underlying, logMessage: logMessage)
+        // Reconnection is legal while the ledger can prove there is no pending transaction,
+        // response in delivery, or unreplayable active work.
+        let protocolActiveFailure = await client.bridgeLedger.recordConnectionFailure(
+            CLIProxyRuntimePolicy.failureReason(for: failure)
+        )
+        guard !protocolActiveFailure, CLIProxyRuntimePolicy.shouldRetry(after: failure) else {
+            throw failure
+        }
+        // A cancelled session's bridge can end as a socket failure; it is not a reason to retry.
+        if Task.isCancelled {
+            throw CLIRuntimeError.hostDisconnected(.taskCancelled)
+        }
+        logMessage(.warning, "Bootstrap connection lost (\(failure)). Answering the client locally while reconnecting")
+        return OfflineEntry(isOutage: true, condition: .unavailable, unreadStdinBytes: interruption.unreadStdinBytes)
+    }
 
     /// Answers the client locally until the attachment worker has an admitted candidate.
     ///
     /// - Returns: The candidate, and the stdin bytes the offline loop read but did not consume.
-    private func runOfflineStartup(
-        condition: MCPAppConnectionMessages.Condition,
+    private func runOffline(
+        _ entry: OfflineEntry,
         schedule: MCPProxyRetrySchedule
     ) async throws -> (AttachmentCandidate, Data) {
-        onPhaseChange?(.offlineStartup)
-        let attachment = MCPProxyAttachmentState(condition: condition)
+        let handshake = try await handshake(for: entry)
+        onPhaseChange?(entry.isOutage ? .outage : .offlineStartup)
+        let attachment = MCPProxyAttachmentState(
+            condition: entry.condition,
+            initializeResultDelivered: handshake == .initialized
+        )
         let worker = Task {
             await runAttachmentWorker(attachment: attachment, schedule: schedule)
+        }
+        // Requests the app received but never answered wait for it to return, for a while.
+        let heldRequests = entry.isOutage ? await client.outstandingRequestReplayState.replayFrames() : []
+        let grace: Task<Void, Never>? = if !heldRequests.isEmpty {
+            Task { [graceWait] in
+                do {
+                    try await graceWait(Self.outageGracePeriod)
+                    attachment.endGrace()
+                } catch {}
+            }
+        } else {
+            nil
         }
 
         let loopResult: Result<MCPProxyStdinPump.Result, Swift.Error>
         do {
             loopResult = try await .success(withTaskCancellationHandler {
-                try await runOfflineLoop(attachment: attachment)
+                try await runOfflineLoop(
+                    attachment: attachment,
+                    handshake: handshake,
+                    unreadStdinBytes: entry.unreadStdinBytes
+                )
             } onCancel: {
                 worker.cancel()
+                grace?.cancel()
             })
         } catch {
             loopResult = .failure(error)
         }
+        grace?.cancel()
+        await grace?.value
 
         // The loop hands off only after the worker has published its outcome.
         if case let .success(.handoff(unreadBytes)) = loopResult, !Task.isCancelled {
@@ -342,6 +438,13 @@ struct MCPProxySession {
             case let .ready(candidate):
                 return (candidate, unreadBytes)
             case let .failed(failure):
+                // A replay the app can't resume also ends the ledger, so the terminal record
+                // names the replay's reason rather than a generic ledger failure.
+                if case let .connectionFailed(underlying) = failure,
+                   case let .terminal(reason) = underlying as? JSONRPCBridgeLedgerError
+                {
+                    await client.bridgeLedger.terminalizeConnection(reason: reason)
+                }
                 throw failure
             case .cancelled:
                 break
@@ -364,9 +467,33 @@ struct MCPProxySession {
         }
     }
 
+    /// Where the client's handshake stands, from what the session recorded for replay.
+    private func handshake(for entry: OfflineEntry) async throws -> Handshake {
+        guard entry.isOutage else { return .notStarted }
+        switch await client.initializeReplayState.replayPlan() {
+        case let .success(plan):
+            return plan.initializeResultFingerprint == nil
+                ? .awaitingResult(initializeFrame: plan.initializeFrame)
+                : .initialized
+        case let .failure(reason):
+            // A session that exchanged frames with the app without a replayable handshake can't
+            // be resumed in another connection.
+            guard await client.bridgeLedger.snapshot().hasForwardedProtocolFrame else {
+                return .notStarted
+            }
+            let terminalReason = await client.bridgeLedger.terminalizeConnection(reason: reason.terminalReason)
+            throw CLIRuntimeError.connectionFailed(underlying: JSONRPCBridgeLedgerError.terminal(terminalReason))
+        }
+    }
+
     /// Answers each client frame before reading the next, so no local request is outstanding at a
-    /// frame boundary and the handoff never leaves work behind in the ledger.
-    private func runOfflineLoop(attachment: MCPProxyAttachmentState) async throws -> MCPProxyStdinPump.Result {
+    /// frame boundary and the handoff never leaves work behind in the ledger. Requests held since
+    /// the app went away stay active until the app returns or the grace ends.
+    private func runOfflineLoop(
+        attachment: MCPProxyAttachmentState,
+        handshake: Handshake,
+        unreadStdinBytes: Data
+    ) async throws -> MCPProxyStdinPump.Result {
         let originalStdoutFlags: Int32
         do {
             originalStdoutFlags = try NonBlockingFDWriter.setNonBlocking(fd: stdoutFD)
@@ -379,13 +506,44 @@ struct MCPProxySession {
         }
 
         let ledger = client.bridgeLedger
-        var responder = MCPOfflineResponder(identity: identity, serverVersion: serverVersion)
+        var responder = MCPOfflineResponder(
+            identity: identity,
+            serverVersion: serverVersion,
+            initializeAnswered: handshake == .initialized
+        )
+        if case let .awaitingResult(initializeFrame) = handshake {
+            // The app went away before answering the client's initialize. Answering it here, as at
+            // startup, gives the worker a handshake it can replay; held for the app instead, it
+            // would hold the worker too, which never starts before the client has its result.
+            let outcome = try responder.respond(
+                to: initializeFrame,
+                connectionMessage: attachment.connectionMessage(identity: identity)
+            )
+            if let response = outcome.response {
+                try await deliverLocalResponse(response, attachment: attachment)
+            }
+            // A rejected initialize stays the session's cached handshake, which the app can never
+            // admit, so the worker would never start. End the session instead of answering forever.
+            guard attachment.hasDeliveredInitializeResult else {
+                let reason = await ledger.terminalizeConnection(
+                    reason: MCPInitializeReplayUnavailableReason.missingInitializeResponseFingerprint.terminalReason
+                )
+                throw CLIRuntimeError.connectionFailed(underlying: JSONRPCBridgeLedgerError.terminal(reason))
+            }
+        }
         return try await MCPProxyStdinPump.run(
             stdinFD: stdinFD,
-            initialBytes: Data(),
+            initialBytes: unreadStdinBytes,
             ledger: ledger,
             identityCache: client.identityCache,
-            shouldHandOff: { attachment.isHandoffRequested }
+            shouldHandOff: {
+                // Held requests wait for the app only until the grace ends, even when the worker
+                // became ready since the last boundary.
+                if attachment.takeGraceEnd() {
+                    try await answerHeldRequests(attachment: attachment)
+                }
+                return attachment.isHandoffRequested
+            }
         ) { frame in
             let prepared = try await ledger.prepare(frame: frame, direction: .clientToServer)
             let outcome: MCPOfflineResponder.Outcome
@@ -405,9 +563,34 @@ struct MCPProxySession {
                 await client.initializeReplayState.recordForwardedClientFrame(frame)
             }
             try await ledger.commit(prepared)
+            // A held request the client cancels leaves replay too. Only the cancellations the
+            // ledger committed are applied, one at a time, so the replay cache never reads a frame
+            // differently from the ledger, and nothing in the frame is recorded for replay.
+            for message in prepared.messages
+                where message.kind == .notification && message.method == CancelledNotification.name
+            {
+                guard let cancelledID = message.id, cancelledID != .null else {
+                    continue
+                }
+                await client.outstandingRequestReplayState.recordClientCancellation(for: cancelledID)
+            }
             if let response = outcome.response {
                 try await deliverLocalResponse(response, attachment: attachment)
             }
+        }
+    }
+
+    /// Answers each request the app received but never answered, once the grace for its return
+    /// ran out. The delivered answer takes the request out of replay, so it never runs later.
+    private func answerHeldRequests(attachment: MCPProxyAttachmentState) async throws {
+        for frame in await client.outstandingRequestReplayState.replayFrames() {
+            guard let response = try MCPOfflineResponder.unavailableResponse(
+                toForwardedRequest: frame,
+                connectionMessage: attachment.connectionMessage(identity: identity)
+            ) else {
+                continue
+            }
+            try await deliverLocalResponse(response, attachment: attachment)
         }
     }
 
@@ -432,8 +615,9 @@ struct MCPProxySession {
         }
     }
 
-    /// Makes every connection attempt while the offline loop answers the client. A failed
-    /// candidate is not a failure of the client's connection, so attempts leave the ledger alone.
+    /// Makes every connection attempt while the offline loop answers the client, at startup and
+    /// after an outage. A failed candidate is not a failure of the client's connection, so attempts
+    /// leave the ledger alone.
     private func runAttachmentWorker(
         attachment: MCPProxyAttachmentState,
         schedule: MCPProxyRetrySchedule
@@ -444,13 +628,12 @@ struct MCPProxySession {
             try await attachment.waitForInitializeResult()
             while true {
                 try await retryWait(schedule.delayAfterFailure())
-                let proxy = await makeProxy(replayInitializationOnStart: true)
+                let proxy = await makeProxy()
                 do {
                     try await proxy.connectAndAccept()
                     attachment.setCondition(.awaitingApproval)
                     onPhaseChange?(.awaitingAdmission)
-                    // No deadline: admission can wait on a person approving the client.
-                    let bufferedServerFrames = try await proxy.replayInitialize(timeout: nil)
+                    let bufferedServerFrames = try await proxy.replayInitialize()
                     attachment.requestHandoff()
                     onPhaseChange?(.attachmentReady)
                     return .ready(AttachmentCandidate(
@@ -479,92 +662,45 @@ struct MCPProxySession {
 
     /// Moves the client from the offline loop to the bridge on an admitted candidate.
     ///
-    /// Nothing here writes to the socket before the bridge owns it, so a candidate that fails right
-    /// after admission fails inside the bridge, with the client's bytes and the catalog refresh
-    /// already in the bridge's hands.
+    /// The app receives, in order, the client's late `initialized` notification, the requests held
+    /// since it went away, and then the client's unread bytes through the bridge. A candidate that
+    /// fails before its bridge starts takes the same way back to the offline loop as one that fails
+    /// inside it.
     private func attach(_ candidate: AttachmentCandidate, unreadStdinBytes: Data) async throws {
         // Every local request was answered before the next frame was read, so nothing is pending
         // or unreplayable; `beginConnection` ends the session if that ever fails to hold.
         _ = try await client.bridgeLedger.beginConnection()
-        // The client sent this before every unread byte, so it goes first.
-        let lateInitialized = await candidate.proxy.takeLateInitializedNotification() ?? Data()
+        do {
+            try await candidate.proxy.writeLateInitializedNotification()
+            try await candidate.proxy.replayOutstandingRequests()
+        } catch where CLIProxyRuntimePolicy.isRecoverableAppSideFailure(error) {
+            throw MCPProxyBridgeInterruption(underlying: error, unreadStdinBytes: unreadStdinBytes)
+        }
         onPhaseChange?(.connected)
-        // The client listed an empty catalog offline. The app sends its own `list_changed` only
-        // from routing and readiness paths, so the helper sends one to make the client re-list.
+        // The client's catalog is empty or stale. The app sends its own `list_changed` only from
+        // routing and readiness paths, so the helper sends one to make the client re-list.
         try await candidate.proxy.runAcceptedBridge(
-            initialStdinBytes: lateInitialized + unreadStdinBytes,
+            initialStdinBytes: unreadStdinBytes,
             initialSocketBytes: Self.toolsListChangedNotification + candidate.bufferedServerFrames
         )
     }
 
-    // MARK: Connected session and reconnects
+    // MARK: Connected session
 
-    /// Runs `firstConnection`, then reconnects after each failure the ledger allows, replaying the
-    /// initialized session into the new connection.
-    private func runConnectionLoop(
-        schedule: MCPProxyRetrySchedule,
-        firstConnection: () async throws -> Never
-    ) async throws -> Never {
-        var schedule = schedule
-        var connectionCount = 0
-        while true {
-            do {
-                connectionCount += 1
-                if connectionCount == 1 {
-                    try await firstConnection()
-                } else {
-                    try await reconnect()
-                }
-            } catch {
-                let failure = Self.runtimeError(for: error, logMessage: logMessage)
-                // Reconnection is legal while the ledger can prove there is no pending transaction,
-                // response in delivery, or unreplayable active work.
-                let protocolActiveFailure = await client.bridgeLedger.recordConnectionFailure(
-                    CLIProxyRuntimePolicy.failureReason(for: failure)
-                )
-                guard !protocolActiveFailure, CLIProxyRuntimePolicy.shouldRetry(after: failure) else {
-                    throw failure
-                }
-                // A cancelled session's bridge can end as a socket failure; it is not a reason to retry.
-                if Task.isCancelled {
-                    throw CLIRuntimeError.hostDisconnected(.taskCancelled)
-                }
-                let delay = schedule.delayAfterFailure()
-                logMessage(.warning, "Bootstrap connection lost (\(failure)). Retrying in \(String(format: "%.1f", delay))s (attempt \(schedule.attempt), elapsed \(String(format: "%.0f", schedule.elapsedSinceFirstFailure()))s)")
-                try await waitForRetry(delay)
-            }
-        }
-    }
-
-    private func reconnect() async throws -> Never {
-        let replayInitialization = await client.bridgeLedger.snapshot().hasForwardedProtocolFrame
-        if replayInitialization {
-            switch await client.initializeReplayState.replayPlan() {
-            case .success:
-                break
-            case let .failure(reason):
-                let terminalReason = await client.bridgeLedger.terminalizeConnection(reason: reason.terminalReason)
-                throw CLIRuntimeError.connectionFailed(
-                    underlying: JSONRPCBridgeLedgerError.terminal(terminalReason)
-                )
-            }
-        }
-
-        _ = try await client.bridgeLedger.beginConnection()
-        let proxy = await makeProxy(replayInitializationOnStart: replayInitialization)
-        try await runConnection(proxy) {
-            try await proxy.start()
-        }
-    }
-
-    /// Runs one accepted connection and closes its socket when it ends. A connection that ends
-    /// without an error ended because the client closed stdin.
+    /// Runs one accepted connection and closes its socket when it ends.
+    ///
+    /// - Returns: The interruption, when the app side failed in a way the session may recover from.
+    /// - Throws: Any other failure. A connection that ends without one ended because the client
+    ///   closed stdin.
     private func runConnection(
         _ proxy: BootstrapSocketProxy,
         _ body: () async throws -> Void
-    ) async throws -> Never {
+    ) async throws -> MCPProxyBridgeInterruption {
         do {
             try await body()
+        } catch let interruption as MCPProxyBridgeInterruption {
+            await proxy.stop()
+            return interruption
         } catch {
             await proxy.stop()
             throw error
@@ -580,7 +716,7 @@ struct MCPProxySession {
 
     // MARK: Helpers
 
-    private func makeProxy(replayInitializationOnStart: Bool) async -> BootstrapSocketProxy {
+    private func makeProxy() async -> BootstrapSocketProxy {
         // The handshake names the client by its MCP clientInfo.name once the helper has seen an
         // initialize, else by the parent process.
         let clientName = await client.identityCache.currentName()
@@ -593,7 +729,6 @@ struct MCPProxySession {
             identityCache: client.identityCache,
             initializeReplayState: client.initializeReplayState,
             outstandingRequestReplayState: client.outstandingRequestReplayState,
-            replayInitializationOnStart: replayInitializationOnStart,
             bridgeLedger: client.bridgeLedger,
             faultRule: faultRule,
             stdinFD: stdinFD,

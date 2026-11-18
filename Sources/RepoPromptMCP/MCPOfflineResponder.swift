@@ -48,6 +48,34 @@ struct MCPOfflineResponder {
         return try respond(to: object, connectionMessage: connectionMessage)
     }
 
+    /// The answer to a request that reached the app before it went away and was held for replay,
+    /// once the helper stops waiting for the app to return. A `tools/call` gets an error result the
+    /// model can read; any other request gets the server error that `prompts/get` gets offline.
+    ///
+    /// - Returns: Nil when the frame is not a single request with a method and an id.
+    static func unavailableResponse(toForwardedRequest frame: Data, connectionMessage: String) throws -> Data? {
+        guard let object = (try? JSONSerialization.jsonObject(with: frame)) as? [String: Any],
+              let method = object["method"] as? String,
+              let id = JSONRPCBridgeID.parseJSONValue(object["id"]), id != .null
+        else {
+            return nil
+        }
+        guard method == CallTool.name else {
+            return try encodeFrame(Envelope(
+                id: id,
+                body: .error(.serverError(code: connectionUnavailableCode, message: connectionMessage))
+            ))
+        }
+        return try encodeFrame(Envelope(id: id, body: .result(unavailableToolResult(connectionMessage))))
+    }
+
+    private static func unavailableToolResult(_ connectionMessage: String) -> CallTool.Result {
+        CallTool.Result(
+            content: [.text(text: connectionMessage, annotations: nil, _meta: nil)],
+            isError: true
+        )
+    }
+
     // MARK: - Single messages
 
     private mutating func respond(to object: [String: Any], connectionMessage: String) throws -> Outcome {
@@ -93,29 +121,25 @@ struct MCPOfflineResponder {
     ) throws -> Outcome {
         switch method {
         case Initialize.name:
-            return try initializeOutcome(id: id, params: params)
+            try initializeOutcome(id: id, params: params)
         case Ping.name:
-            return try reply(id: id, result: Empty())
+            try reply(id: id, result: Empty())
         case "server/discover":
-            return try fail(id: id, .methodNotFound("Unknown method: \(method)"))
+            try fail(id: id, .methodNotFound("Unknown method: \(method)"))
         case ListTools.name:
-            return try initializedReply(id: id, result: ListTools.Result(tools: []))
+            try initializedReply(id: id, result: ListTools.Result(tools: []))
         case ListPrompts.name:
-            return try initializedReply(id: id, result: ListPrompts.Result(prompts: []))
+            try initializedReply(id: id, result: ListPrompts.Result(prompts: []))
         case ListResources.name:
-            return try initializedReply(id: id, result: ListResources.Result(resources: []))
+            try initializedReply(id: id, result: ListResources.Result(resources: []))
         case ListResourceTemplates.name:
-            return try initializedReply(id: id, result: ListResourceTemplates.Result(templates: []))
+            try initializedReply(id: id, result: ListResourceTemplates.Result(templates: []))
         case CallTool.name:
-            let result = CallTool.Result(
-                content: [.text(text: connectionMessage, annotations: nil, _meta: nil)],
-                isError: true
-            )
-            return try initializedReply(id: id, result: result)
+            try initializedReply(id: id, result: Self.unavailableToolResult(connectionMessage))
         case GetPrompt.name, ReadResource.name:
-            return try fail(id: id, .serverError(code: Self.connectionUnavailableCode, message: connectionMessage))
+            try fail(id: id, .serverError(code: Self.connectionUnavailableCode, message: connectionMessage))
         default:
-            return try fail(id: id, .methodNotFound("Unknown method: \(method)"))
+            try fail(id: id, .methodNotFound("Unknown method: \(method)"))
         }
     }
 

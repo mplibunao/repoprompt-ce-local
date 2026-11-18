@@ -140,6 +140,11 @@ actor MCPOutstandingRequestReplayState {
         recordClientCancellations(frame)
     }
 
+    /// Takes every held request with this id out of replay, as the client cancelled it.
+    func recordClientCancellation(for id: JSONRPCBridgeID) {
+        removeEntries(withID: id)
+    }
+
     @discardableResult
     func recordPreparedClientRequestFrame(
         _ frame: Data,
@@ -238,7 +243,7 @@ actor MCPOutstandingRequestReplayState {
             else {
                 continue
             }
-            removeEntries(withID: cancelledID)
+            recordClientCancellation(for: cancelledID)
         }
     }
 

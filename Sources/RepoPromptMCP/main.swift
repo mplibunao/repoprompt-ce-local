@@ -578,6 +578,22 @@ enum CLIProxyRuntimePolicy {
         }
     }
 
+    /// Whether a failure on the app side of a connected session lets the session keep the client
+    /// while it reconnects: the bridge then hands stdin back at a frame boundary instead of
+    /// cancelling its reader. The ledger still decides whether the work in flight allows it.
+    static func isRecoverableAppSideFailure(_ error: Swift.Error) -> Bool {
+        guard let socketError = error as? SocketProxyError else {
+            return false
+        }
+        switch socketError {
+        case .cancelled, .terminatedByServer:
+            // Cancellation ends the session, and a termination is the app's decision.
+            return false
+        default:
+            return shouldRetry(after: .connectionFailed(underlying: socketError))
+        }
+    }
+
     /// What the proxy does when its first connection attempt fails.
     ///
     /// Only a missing socket goes offline at once, because it means the app isn't serving MCP. A
@@ -906,7 +922,6 @@ actor BootstrapSocketProxy {
     private let identityCache: ClientIdentityCache
     private let initializeReplayState: MCPInitializeReplayState
     private let outstandingRequestReplayState: MCPOutstandingRequestReplayState
-    private let replayInitializationOnStart: Bool
     private let bridgeLedger: JSONRPCBridgeLedger
     private let faultRule: JSONRPCBridgeFaultRule?
     private let stdinFD: Int32
@@ -922,7 +937,6 @@ actor BootstrapSocketProxy {
         identityCache: ClientIdentityCache,
         initializeReplayState: MCPInitializeReplayState,
         outstandingRequestReplayState: MCPOutstandingRequestReplayState,
-        replayInitializationOnStart: Bool,
         bridgeLedger: JSONRPCBridgeLedger,
         faultRule: JSONRPCBridgeFaultRule?,
         stdinFD: Int32 = STDIN_FILENO,
@@ -935,29 +949,11 @@ actor BootstrapSocketProxy {
         self.identityCache = identityCache
         self.initializeReplayState = initializeReplayState
         self.outstandingRequestReplayState = outstandingRequestReplayState
-        self.replayInitializationOnStart = replayInitializationOnStart
         self.bridgeLedger = bridgeLedger
         self.faultRule = faultRule
         self.stdinFD = stdinFD
         self.stdoutFD = stdoutFD
         self.stderrFD = stderrFD
-    }
-
-    /// Connects, replays an initialized session when asked to, and bridges until the connection
-    /// ends. This is the reconnect path after the app goes away mid-session.
-    func start() async throws {
-        try await connectAndAccept()
-
-        defer {
-            closeSocket()
-        }
-
-        var initialSocketBytes = Data()
-        if replayInitializationOnStart {
-            initialSocketBytes = try await replayInitialize(timeout: MCPBootstrapTiming.initialResponseTimeout)
-            try await replayOutstandingRequests()
-        }
-        try await runAcceptedBridge(initialStdinBytes: Data(), initialSocketBytes: initialSocketBytes)
     }
 
     /// Connects to the app's socket and completes the bootstrap handshake, without reading stdin
@@ -992,32 +988,39 @@ actor BootstrapSocketProxy {
         }
     }
 
-    /// Writes the session's cached `initialize` to the accepted socket and waits for the app to
-    /// admit it. A nil timeout waits until the app answers or the task is cancelled, because
-    /// admission can wait on a person approving the client.
+    /// Writes the session's cached `initialize` to the accepted socket and waits, with no deadline,
+    /// for the app to admit it: admission can wait on a person approving the client, and the
+    /// client is answered locally meanwhile. Cancellation stops the wait.
     ///
     /// - Returns: Server frames the app sent before its initialize result, for the bridge to deliver.
-    func replayInitialize(timeout: TimeInterval?) async throws -> Data {
-        let plan = try await Self.requireReplayPlan(from: initializeReplayState)
-        let bufferedServerFrames = try await Self.replayInitializedSession(plan, socketFD: socketFD, timeout: timeout)
-        replayedInitializedNotification = plan.initializeResultFingerprint != nil && plan.initializedFrame != nil
+    func replayInitialize() async throws -> Data {
+        let (plan, expectedResultFingerprint) = try await Self.requireReplayPlan(from: initializeReplayState)
+        let bufferedServerFrames = try await Self.replayInitializedSession(
+            plan,
+            expectedResultFingerprint: expectedResultFingerprint,
+            socketFD: socketFD
+        )
+        replayedInitializedNotification = plan.initializedFrame != nil
         return bufferedServerFrames
     }
 
-    /// The client's `notifications/initialized` when it reached the helper only after
-    /// `replayInitialize` captured its plan, so the bridge can forward it and the app sees it
-    /// exactly once. Nil when the replay already wrote it or the client hasn't sent it.
-    func takeLateInitializedNotification() async -> Data? {
+    /// Writes the client's `notifications/initialized` when it reached the helper only after
+    /// `replayInitialize` captured its plan, so the app sees it exactly once and before anything
+    /// else the client sent. Does nothing when the replay already wrote it or the client hasn't
+    /// sent it.
+    func writeLateInitializedNotification() async throws {
         guard !replayedInitializedNotification,
               case let .success(plan) = await initializeReplayState.replayPlan(),
               let initializedFrame = plan.initializedFrame
         else {
-            return nil
+            return
         }
         replayedInitializedNotification = true
-        return initializedFrame
+        try writeToSocket(initializedFrame)
     }
 
+    /// Writes the requests the previous connection received but never answered, in the order the
+    /// client sent them.
     func replayOutstandingRequests() async throws {
         try await Self.replayOutstandingClientRequests(
             outstandingRequestReplayState.replayFrames(),
@@ -1223,7 +1226,43 @@ actor BootstrapSocketProxy {
 
 private enum BridgeTaskExit {
     case stdinClosed
+    /// The stdin pump stopped at a frame boundary after an app-side failure.
+    case stdinHandedOff(unreadBytes: Data)
     case socketClosed
+    /// The socket pump ended with a failure the session may recover from.
+    case socketFailed
+}
+
+/// The first failure on a bridge's app side, shared by its two pumps. Recording one asks the
+/// stdin pump to stop at its next frame boundary.
+private final class BridgeAppSideFailure: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failure: Swift.Error?
+
+    var error: Swift.Error? {
+        lock.withLock { failure }
+    }
+
+    var isRecorded: Bool {
+        lock.withLock { failure != nil }
+    }
+
+    func record(_ error: Swift.Error) {
+        lock.withLock {
+            if failure == nil {
+                failure = error
+            }
+        }
+    }
+}
+
+/// A connected bridge whose app side failed in a way the session may recover from. Its stdin pump
+/// stopped at a frame boundary, so the next owner of stdin processes these bytes before reading
+/// more, and the session lets its ledger decide whether to keep the client.
+struct MCPProxyBridgeInterruption: Swift.Error {
+    let underlying: Swift.Error
+    /// Complete client frames not yet consumed, followed by any partial trailing frame.
+    let unreadStdinBytes: Data
 }
 
 enum BridgeSocketPollResult {
@@ -1271,34 +1310,34 @@ private actor BridgeDrainState {
 extension BootstrapSocketProxy {
     private static func requireReplayPlan(
         from replayState: MCPInitializeReplayState
-    ) async throws -> MCPInitializeReplayPlan {
+    ) async throws -> (plan: MCPInitializeReplayPlan, initializeResultFingerprint: String) {
         switch await replayState.replayPlan() {
         case let .success(plan):
-            plan
+            guard let fingerprint = plan.initializeResultFingerprint else {
+                throw JSONRPCBridgeLedgerError.terminal(
+                    MCPInitializeReplayUnavailableReason.missingInitializeResponseFingerprint.terminalReason
+                )
+            }
+            return (plan, fingerprint)
         case let .failure(reason):
             throw JSONRPCBridgeLedgerError.terminal(reason.terminalReason)
         }
     }
 
-    /// - Parameter timeout: How long to wait for the app's initialize result, or nil to wait until
-    ///   it answers, the socket fails, or the task is cancelled.
+    /// Waits for the app's initialize result until it answers, the socket fails, or the task is
+    /// cancelled.
     @discardableResult
     static func replayInitializedSession(
         _ plan: MCPInitializeReplayPlan,
-        socketFD: Int32,
-        timeout: TimeInterval? = MCPBootstrapTiming.initialResponseTimeout
+        expectedResultFingerprint: String,
+        socketFD: Int32
     ) async throws -> Data {
         debugLog("BootstrapSocketProxy: replaying MCP initialize after reconnect")
         try writeToSocket(plan.initializeFrame, socketFD: socketFD)
-        guard let expectedResultFingerprint = plan.initializeResultFingerprint else {
-            debugLog("BootstrapSocketProxy: replayed pending MCP initialize; response will be forwarded to host")
-            return Data()
-        }
         let bufferedServerFrames = try await readReplayInitializeResponse(
             socketFD: socketFD,
             expectedID: plan.initializeRequestID,
-            expectedResultFingerprint: expectedResultFingerprint,
-            timeout: timeout
+            expectedResultFingerprint: expectedResultFingerprint
         )
         if let initializedFrame = plan.initializedFrame {
             try writeToSocket(initializedFrame, socketFD: socketFD)
@@ -1323,22 +1362,19 @@ extension BootstrapSocketProxy {
     private static func readReplayInitializeResponse(
         socketFD: Int32,
         expectedID: JSONRPCBridgeID,
-        expectedResultFingerprint: String,
-        timeout: TimeInterval?
+        expectedResultFingerprint: String
     ) async throws -> Data {
         var buffer = Data()
         var bufferedServerFrames = Data()
-        let deadline = timeout.map { Date().addingTimeInterval($0) }
 
-        while deadline.map({ Date() < $0 }) ?? true {
+        while true {
             if Task.isCancelled {
                 throw SocketProxyError.cancelled
             }
 
             var pfd = pollfd(fd: socketFD, events: Int16(POLLIN), revents: 0)
             // Short polls keep cancellation prompt while the app waits on an approval prompt.
-            let remaining = deadline.map { Int32($0.timeIntervalSinceNow * 1000) } ?? 100
-            let pollResult = poll(&pfd, 1, min(100, max(1, remaining)))
+            let pollResult = poll(&pfd, 1, 100)
 
             if pollResult < 0 {
                 if errno == EINTR {
@@ -1409,10 +1445,12 @@ extension BootstrapSocketProxy {
                 return bufferedServerFrames
             }
         }
-
-        throw JSONRPCBridgeLedgerError.terminal("mcp_session_resume_initialize_replay_timeout")
     }
 
+    /// Relays between the client and the app until either side ends.
+    ///
+    /// - Throws: `MCPProxyBridgeInterruption` when the app side fails in a way the session may
+    ///   recover from, after the stdin pump stopped at a frame boundary; any other failure as is.
     static func runBridge(
         socketFD: Int32,
         stdinFD: Int32 = STDIN_FILENO,
@@ -1432,9 +1470,10 @@ extension BootstrapSocketProxy {
         initialSocketBytes: Data = Data()
     ) async throws {
         let drainState = BridgeDrainState(clock: drainClock)
+        let appSideFailure = BridgeAppSideFailure()
         try await withThrowingTaskGroup(of: BridgeTaskExit.self) { group in
             group.addTask {
-                try await Self.pumpStdinToSocket(
+                let result = try await Self.pumpStdinToSocket(
                     socketFD: socketFD,
                     stdinFD: stdinFD,
                     initialStdinBytes: initialStdinBytes,
@@ -1442,44 +1481,80 @@ extension BootstrapSocketProxy {
                     initializeReplayState: initializeReplayState,
                     outstandingRequestReplayState: outstandingRequestReplayState,
                     bridgeLedger: bridgeLedger,
-                    faultRule: faultRule
+                    faultRule: faultRule,
+                    appSideFailure: appSideFailure
                 )
+                if case let .handoff(unreadBytes) = result {
+                    return .stdinHandedOff(unreadBytes: unreadBytes)
+                }
                 await drainState.markStdinClosed()
                 await onStdinClosed()
                 return .stdinClosed
             }
             group.addTask {
-                try await Self.pumpSocketToStdout(
-                    socketFD: socketFD,
-                    stdoutFD: stdoutFD,
-                    drainState: drainState,
-                    initializeReplayState: initializeReplayState,
-                    outstandingRequestReplayState: outstandingRequestReplayState,
-                    bridgeLedger: bridgeLedger,
-                    faultRule: faultRule,
-                    socketPoller: socketPoller,
-                    initialSocketBytes: initialSocketBytes,
-                    drainDeadline: drainDeadline,
-                    drainVisibilityInterval: drainVisibilityInterval,
-                    drainLogDescriptor: drainLogDescriptor
+                do {
+                    try await Self.pumpSocketToStdout(
+                        socketFD: socketFD,
+                        stdoutFD: stdoutFD,
+                        drainState: drainState,
+                        initializeReplayState: initializeReplayState,
+                        outstandingRequestReplayState: outstandingRequestReplayState,
+                        bridgeLedger: bridgeLedger,
+                        faultRule: faultRule,
+                        socketPoller: socketPoller,
+                        initialSocketBytes: initialSocketBytes,
+                        drainDeadline: drainDeadline,
+                        drainVisibilityInterval: drainVisibilityInterval,
+                        drainLogDescriptor: drainLogDescriptor
+                    )
+                    return .socketClosed
+                } catch where CLIProxyRuntimePolicy.isRecoverableAppSideFailure(error) {
+                    appSideFailure.record(error)
+                    return .socketFailed
+                }
+            }
+
+            func makeInterruption(unreadStdinBytes: Data) -> MCPProxyBridgeInterruption {
+                MCPProxyBridgeInterruption(
+                    underlying: appSideFailure.error ?? SocketProxyError.serverClosed,
+                    unreadStdinBytes: unreadStdinBytes
                 )
-                return .socketClosed
             }
 
             var stdinClosed = false
+            var socketFailed = false
             do {
                 while let exit = try await group.next() {
                     switch exit {
                     case .stdinClosed:
                         stdinClosed = true
+                        if socketFailed {
+                            throw makeInterruption(unreadStdinBytes: Data())
+                        }
+                    case let .stdinHandedOff(unreadBytes):
+                        // A failed write to the app can stop the stdin pump before the socket pump
+                        // sees the failure. Stop the socket pump either way: a reply it was writing
+                        // when cancelled makes the ledger terminal, so the session never puts a
+                        // second writer on a half-written stdout.
+                        group.cancelAll()
+                        throw makeInterruption(unreadStdinBytes: unreadBytes)
                     case .socketClosed:
                         group.cancelAll()
                         if stdinClosed {
                             return
                         }
                         throw SocketProxyError.serverClosed
+                    case .socketFailed:
+                        if stdinClosed {
+                            throw makeInterruption(unreadStdinBytes: Data())
+                        }
+                        // The stdin pump stops at its next frame boundary and returns its unread
+                        // bytes; cancelling it instead could drop a partly read client frame.
+                        socketFailed = true
                     }
                 }
+            } catch let interruption as MCPProxyBridgeInterruption {
+                throw interruption
             } catch {
                 let message = "[MCPBridge] task_failed error=\(error)\n"
                 BestEffortStderrWriter.writeNonBlocking(
@@ -1577,6 +1652,9 @@ extension BootstrapSocketProxy {
     }
 
     /// Pumps stdin to socket. Static to run outside actor isolation.
+    ///
+    /// - Returns: `.handoff` with the unread bytes once an app-side failure is recorded, at the
+    ///   next frame boundary; `.stdinClosed` at EOF or when the bridge cancels the pump.
     private static func pumpStdinToSocket(
         socketFD: Int32,
         stdinFD: Int32 = STDIN_FILENO,
@@ -1585,25 +1663,36 @@ extension BootstrapSocketProxy {
         initializeReplayState: MCPInitializeReplayState?,
         outstandingRequestReplayState: MCPOutstandingRequestReplayState?,
         bridgeLedger: JSONRPCBridgeLedger,
-        faultRule: JSONRPCBridgeFaultRule?
-    ) async throws {
+        faultRule: JSONRPCBridgeFaultRule?,
+        appSideFailure: BridgeAppSideFailure
+    ) async throws -> MCPProxyStdinPump.Result {
         debugLog("BootstrapSocketProxy: pumpStdinToSocket started")
         do {
-            _ = try await MCPProxyStdinPump.run(
+            return try await MCPProxyStdinPump.run(
                 stdinFD: stdinFD,
                 initialBytes: initialStdinBytes,
                 ledger: bridgeLedger,
-                identityCache: identityCache
+                identityCache: identityCache,
+                shouldHandOff: { appSideFailure.isRecorded }
             ) { payload in
                 debugLog("BootstrapSocketProxy: → socket bytes=\(payload.count) sha256=\(MCPResponseDeliveryTracer.sha256Hex(payload))")
-                let prepared = try await Self.forwardClientFrameToSocket(
-                    frame: payload,
-                    socketFD: socketFD,
-                    ledger: bridgeLedger,
-                    initializeReplayState: initializeReplayState,
-                    outstandingRequestReplayState: outstandingRequestReplayState,
-                    faultRule: faultRule
-                )
+                let prepared: JSONRPCBridgePreparedFrame
+                do {
+                    prepared = try await Self.forwardClientFrameToSocket(
+                        frame: payload,
+                        socketFD: socketFD,
+                        ledger: bridgeLedger,
+                        initializeReplayState: initializeReplayState,
+                        outstandingRequestReplayState: outstandingRequestReplayState,
+                        faultRule: faultRule
+                    )
+                } catch let writeError as SocketProxyError where isRecoverableAppWriteFailure(writeError) {
+                    // The frame was committed as sent before the write error surfaced, so the
+                    // ledger decides whether it can be replayed. The pump stops before the next
+                    // frame and keeps the rest of the client's bytes for the next owner.
+                    appSideFailure.record(writeError)
+                    return
+                }
                 if prepared.deliveryFrame != nil {
                     MCPResponseDeliveryTracer.emitPreparedFrame(
                         layer: "proxy_app_uds",
@@ -1613,8 +1702,9 @@ extension BootstrapSocketProxy {
                 }
             }
         } catch is CancellationError {
-            // The bridge cancels its stdin reader once the socket side ends; that ends this pump
-            // without an error of its own.
+            // The bridge cancels its stdin reader when it ends for any reason other than an
+            // app-side failure; that ends this pump without an error of its own.
+            return .stdinClosed
         }
     }
 
@@ -2406,6 +2496,9 @@ actor MCPService: Service {
                 }
             },
             retryWait: { delay in
+                try await MCPCompatibilitySleep.sleep(.seconds(delay))
+            },
+            graceWait: { delay in
                 try await MCPCompatibilitySleep.sleep(.seconds(delay))
             },
             onPhaseChange: { phase in
