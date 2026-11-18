@@ -42,6 +42,48 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         }
     }
 
+    /// A socket file with no listener is an app that is starting or busy. The first attempt retries it
+    /// once, so an Agent Mode run doesn't lose its tools to a transient refusal, and only once, so
+    /// the client never waits on an app that isn't coming.
+    func testRefusedFirstConnectionGetsExactlyOneRetry() async throws {
+        for appStartsListening in [false, true] {
+            let label = appStartsListening ? "the app starts listening before the retry" : "the app stays unreachable"
+            let harness = try makeHarness(identity: identity)
+            try FakeApp(socketURL: harness.socketURL).stopListening()
+            harness.start()
+
+            // The helper reads no stdin until its first attempt ends, so this wait is the retry.
+            _ = try await harness.retryGate.started.first(where: { $0 == 1 }, "\(label): the first attempt's retry wait")
+            var app: FakeApp?
+            if appStartsListening {
+                unlink(harness.socketURL.path)
+                app = try harness.startFakeApp()
+            }
+            // Releases this wait only. The offline worker waits after the client's initialize
+            // result, so every later wait finds the gate closed.
+            harness.retryGate.open()
+            harness.retryGate.close()
+
+            if let app {
+                let connection = try await app.accept()
+                _ = try await connection.acceptBootstrap()
+                _ = try await harness.phases.first(where: { $0 == .connected }, "\(label): the session served by the app")
+                XCTAssertFalse(connection.peerHasClosed(), label)
+            } else {
+                // A second retry would hold this answer behind the closed gate.
+                let initialize = try await harness.initializeOffline()
+                let serverInfo = (initialize["result"] as? [String: Any])?["serverInfo"] as? [String: Any]
+                XCTAssertEqual(serverInfo?["name"] as? String, identity.appDisplayName, label)
+                _ = try await harness.retryGate.started.first(where: { $0 == 2 }, "\(label): the worker's first retry wait")
+            }
+
+            harness.client.closeStdin()
+            let ending = try await harness.finish()
+            assertHostDisconnected(ending, .stdinClosed, label)
+            XCTAssertEqual(harness.retryGate.counts.started, app == nil ? 2 : 1, "\(label): the retry waits")
+        }
+    }
+
     func testLateAppAdmissionRefreshesToolsOnTheSameClient() async throws {
         let harness = try makeHarness(identity: identity)
         harness.start()
@@ -1016,7 +1058,7 @@ private final class ClientPipes: @unchecked Sendable {
 /// The app's end of the bootstrap socket.
 private final class FakeApp: @unchecked Sendable {
     private let socketURL: URL
-    private let listenFD: Int32
+    private var listenFD: Int32
     private let lock = NSLock()
     private var connections: [FakeAppConnection] = []
 
@@ -1050,7 +1092,7 @@ private final class FakeApp: @unchecked Sendable {
     }
 
     func accept(timeout: TimeInterval = 10) async throws -> FakeAppConnection {
-        let listenFD = listenFD
+        let listenFD = lock.withLock { self.listenFD }
         let fd = try await offPool { () throws -> Int32 in
             let deadline = Date().addingTimeInterval(timeout)
             while deadline.timeIntervalSinceNow > 0 {
@@ -1075,8 +1117,18 @@ private final class FakeApp: @unchecked Sendable {
         return connection
     }
 
+    /// Stops listening and leaves the socket file behind, as an app that died without cleaning up
+    /// does: connecting to the file is refused.
+    func stopListening() {
+        lock.withLock {
+            guard listenFD >= 0 else { return }
+            Darwin.close(listenFD)
+            listenFD = -1
+        }
+    }
+
     func close() {
-        Darwin.close(listenFD)
+        stopListening()
         unlink(socketURL.path)
         for connection in lock.withLock({ connections }) {
             connection.close()
