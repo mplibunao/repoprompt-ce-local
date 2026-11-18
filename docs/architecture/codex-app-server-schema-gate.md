@@ -373,8 +373,9 @@ a manifest that declared the helper as a third primary executable, as
 [`docs/releasing.md`](../releasing.md) describes for an added entry. `OpenAI OpCo, LLC` (team
 `2DC432GLL2`) signs the helper with hardened runtime and a trusted timestamp. The helper has no
 entitlements, and its release-signing profile is empty. The 29 existing Mach-Os keep their
-signing identities and entitlements. Only `codex-path/rg` keeps its normalized payload digest. Upstream `LICENSE` and `NOTICE` and the packaged voice notice and licences are
-byte-identical to 0.164.0. The packaged voice source manifest records PCRE2 10.48 in place of
+signing identities and entitlements. Only `codex-path/rg` keeps its normalized payload digest.
+Upstream `LICENSE` and `NOTICE` and the packaged voice notice and licences are byte-identical to
+0.164.0. The packaged voice source manifest records PCRE2 10.48 in place of
 10.47.
 
 **Bounded schema.** The exact verified 0.170.0 CLI passes the bounded experimental projection
@@ -410,6 +411,30 @@ to 0.159.0 or 0.164.0. The model catalog bundled in the 0.170.0 executable
 ([`codex-rs/models-manager/models.json` at `rust-v0.170.0`](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/models-manager/models.json))
 adds `gpt-6.2-sol`, `gpt-6.2-astra`, and `gpt-6.1-terra`. Availability still comes from
 `model/list` and depends on the account, and the rotation doesn't add a static picker entry.
+
+**Old-thread continuity.** The live checks below used the debug app built from this rotation,
+whose packaged arm64 runtime reports `codex-cli 0.170.0`, with a validation account signed in
+through ChatGPT. A Codex thread that bundled 0.159.0 created on 2026-11-03 resumes on bundled
+0.170.0 as the same thread: a new GPT-6 Luna turn appends to that thread's rollout and
+completes, and the thread's recorded `cli_version` stays 0.159.0.
+
+**Start and the helper.** New Agent Mode threads on `gpt-6.2-sol`, `gpt-6.2-astra`, and
+`gpt-6.1-sol` at low effort each complete a turn, and each rollout records `cli_version` 0.170.0
+and the requested model in its turn context. A thread that calls a RepoPrompt tool and then runs
+`sleep 300` through its shell runs the command as a child of the app-server, beside
+`codex-code-mode-host`, and no `codex-exec-server` process starts. Quitting the debug app ends
+the app-server, the code-mode host, and the command.
+
+**Account discovery.** On 0.170.0, the model list Codex fetched for the validation account
+advertises `gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-6.1-terra`, `gpt-reserve`, `gpt-6.1-sol`,
+`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and
+`codex-auto-review`. These entries come from server discovery, not the bundled catalog, and
+depend on the account and on when the list is fetched.
+
+**Unverified.** x86_64 runtime behavior, voice capture, command and terminal-input approvals on
+0.170.0 (the live checks ran with full access), compaction on 0.170.0, any path that starts
+`codex-exec-server`, the Developer ID re-signing path, staging both targets inside one universal
+app bundle, and accounts other than the one used for validation.
 
 ## Files and tests
 
