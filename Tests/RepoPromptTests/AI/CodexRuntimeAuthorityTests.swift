@@ -32,8 +32,8 @@ final class CodexRuntimeAuthorityTests: XCTestCase {
         ).get()
 
         XCTAssertEqual(runtime.executableURL, armExecutable)
-        XCTAssertEqual(runtime.version, .init(major: 0, minor: 164, patch: 0))
-        XCTAssertEqual(CodexRuntimeAuthority.bundledVersion, .init(major: 0, minor: 164, patch: 0))
+        XCTAssertEqual(runtime.version, .init(major: 0, minor: 170, patch: 0))
+        XCTAssertEqual(CodexRuntimeAuthority.bundledVersion, .init(major: 0, minor: 170, patch: 0))
         XCTAssertEqual(CodexRuntimeAuthority.minimumExternalVersion, .init(major: 0, minor: 149, patch: 0))
         XCTAssertEqual(runtime.source, .bundled(target: "aarch64-apple-darwin"))
         XCTAssertTrue(runtime.statePaths.codexHome.path.hasPrefix(support.path))
@@ -47,7 +47,7 @@ final class CodexRuntimeAuthorityTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: runtime.statePaths.codexHome.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: runtime.statePaths.sqliteHome.path))
         XCTAssertTrue(runtime.redactedDiagnosticSummary.contains("provenance=bundled:aarch64-apple-darwin"))
-        XCTAssertTrue(runtime.redactedDiagnosticSummary.contains("version=0.164.0"))
+        XCTAssertTrue(runtime.redactedDiagnosticSummary.contains("version=0.170.0"))
         XCTAssertFalse(runtime.redactedDiagnosticSummary.contains(temporaryDirectory.path))
     }
 
@@ -125,6 +125,21 @@ final class CodexRuntimeAuthorityTests: XCTestCase {
             ),
             .bundledMetadataUnreadable(target: "aarch64-apple-darwin")
         )
+    }
+
+    func testBundledRuntimeRequiresExecutableExecServer() throws {
+        let resources = temporaryDirectory.appendingPathComponent("Resources", isDirectory: true)
+        let target = "aarch64-apple-darwin"
+        let executable = try makePackage(in: resources, target: target)
+        try FileManager.default.removeItem(at: executable.deletingLastPathComponent().appendingPathComponent("codex-exec-server"))
+
+        let result = CodexRuntimeAuthority.resolve(
+            resourcesURL: resources,
+            architectureTarget: target,
+            applicationSupportURL: temporaryDirectory
+        )
+
+        XCTAssertEqual(failure(from: result), .bundledLayoutIncomplete(target: target, missingComponent: "bin/codex-exec-server"))
     }
 
     func testVersionParserRejectsMalformedTokensAndInvalidNumericPrereleaseIdentifiers() {
@@ -289,6 +304,7 @@ final class CodexRuntimeAuthorityTests: XCTestCase {
         let executable = root.appendingPathComponent("bin/codex")
         try makeExecutable(at: executable)
         try makeExecutable(at: root.appendingPathComponent("bin/codex-code-mode-host"))
+        try makeExecutable(at: root.appendingPathComponent("bin/codex-exec-server"))
         try FileManager.default.createDirectory(
             at: root.appendingPathComponent("codex-resources", isDirectory: true),
             withIntermediateDirectories: true
@@ -299,10 +315,11 @@ final class CodexRuntimeAuthorityTests: XCTestCase {
         )
         let metadata: [String: Any] = [
             "layoutVersion": 1,
-            "version": "0.164.0",
+            "version": "0.170.0",
             "target": target,
             "variant": "codex",
             "entrypoint": "bin/codex",
+            "execServer": "bin/codex-exec-server",
             "resourcesDir": "codex-resources",
             "pathDir": "codex-path"
         ]

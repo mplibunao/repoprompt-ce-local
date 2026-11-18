@@ -6,7 +6,7 @@ import Foundation
 /// only user-configurable external fallback is an absolute path supplied through
 /// `REPOPROMPT_CODEX_EXECUTABLE`; ordinary PATH lookup is intentionally not consulted.
 enum CodexRuntimeAuthority {
-    static let bundledVersion = Version(major: 0, minor: 164, patch: 0)
+    static let bundledVersion = Version(major: 0, minor: 170, patch: 0)
     static let minimumExternalVersion = Version(major: 0, minor: 149, patch: 0)
     static let externalExecutableOverrideEnvironmentKey = "REPOPROMPT_CODEX_EXECUTABLE"
 
@@ -187,6 +187,7 @@ enum CodexRuntimeAuthority {
         let target: String
         let variant: String
         let entrypoint: String
+        let execServer: String
         let resourcesDir: String
         let pathDir: String
     }
@@ -284,6 +285,7 @@ enum CodexRuntimeAuthority {
               metadata.target == architectureTarget,
               metadata.variant == "codex",
               metadata.entrypoint == "bin/codex",
+              metadata.execServer == "bin/codex-exec-server",
               metadata.resourcesDir == "codex-resources",
               metadata.pathDir == "codex-path"
         else {
@@ -306,7 +308,8 @@ enum CodexRuntimeAuthority {
         }
         let executableURL = packageRoot.appendingPathComponent(metadata.entrypoint)
         let codeModeHostURL = packageRoot.appendingPathComponent("bin/codex-code-mode-host")
-        for url in [executableURL, codeModeHostURL] where !FileManager.default.isExecutableFile(atPath: url.path) {
+        let execServerURL = packageRoot.appendingPathComponent(metadata.execServer)
+        for url in [executableURL, codeModeHostURL, execServerURL] where !FileManager.default.isExecutableFile(atPath: url.path) {
             return .failure(
                 .bundledLayoutIncomplete(
                     target: architectureTarget,

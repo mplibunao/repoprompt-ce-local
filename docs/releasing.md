@@ -464,11 +464,11 @@ package.
 
 ## Bundled Codex artifact
 
-Debug and release packaging include the complete official OpenAI Codex 0.164.0 standalone
+Debug and release packaging include the complete official OpenAI Codex 0.170.0 standalone
 package. The authority is the repository-owned
 [`Vendor/Codex/manifest.json`](../Vendor/Codex/manifest.json), which pins the official
-[`rust-v0.164.0` release](https://github.com/openai/codex/releases/tag/rust-v0.164.0), the
-official [`codex-package_SHA256SUMS`](https://github.com/openai/codex/releases/download/rust-v0.164.0/codex-package_SHA256SUMS),
+[`rust-v0.170.0` release](https://github.com/openai/codex/releases/tag/rust-v0.170.0), the
+official [`codex-package_SHA256SUMS`](https://github.com/openai/codex/releases/download/rust-v0.170.0/codex-package_SHA256SUMS),
 both macOS package assets, their complete extracted layouts, file hashes, architectures, and
 primary executable signing identities. The upstream release publishes SHA-256 sums but does
 not document a public GPG, minisign, or SLSA verification procedure, so acquisition requires
@@ -497,9 +497,9 @@ its selected target directory, while explicit `REPOPROMPT_CODEX_ARCH=all` output
 artifacts contain both `aarch64-apple-darwin/` and `x86_64-apple-darwin/`. Runtime selection
 fails closed unless the package matching the running app architecture is present. Each target
 subtree preserves `codex-package.json`, `bin/codex`, `bin/codex-code-mode-host`,
-`codex-resources/`, `codex-path/`, and all additional package resources; the binaries inside
-remain thin and must match the directory's target architecture. Each package also carries a
-native voice runtime under `codex-resources/voice/`. Its `bin/codex-voice-host` executable and
+`bin/codex-exec-server`, `codex-resources/`, `codex-path/`, and all additional package
+resources; the binaries inside remain thin and must match the directory's target
+architecture. Each package also carries a native voice runtime under `codex-resources/voice/`. Its `bin/codex-voice-host` executable and
 its libraries and plugins are manifest-owned Mach-Os like the rest of the package, and their
 third-party components are listed in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
@@ -507,9 +507,10 @@ The two signing paths treat this subtree differently. Debug and local production
 through `Scripts/package_app.sh` does **not** thin, mutate, or re-sign anything in it: the
 outer app signature seals the resource tree, and the exact-byte pin preserves the upstream
 signatures. The artifact verifier then rechecks every byte and architecture, plus the OpenAI
-signing identity and V8 entitlements pinned for `bin/codex` and `bin/codex-code-mode-host`.
-This mixed-authority layout passes macOS strict deep code signature verification without
-changing the upstream binary hashes. The voice host's shipped entitlements are not part of
+signing identity and entitlements pinned for the three primary executables: V8 for `bin/codex`
+and `bin/codex-code-mode-host`, and none for `bin/codex-exec-server`. This mixed-authority
+layout passes macOS strict deep code signature verification without changing the upstream
+binary hashes. The voice host's shipped entitlements are not part of
 that vendor-preserved contract, and the outer app gains no microphone entitlement from
 carrying the voice runtime. The parked Developer ID path in
 `Scripts/sign_staged_release.sh` instead re-signs every manifest-owned Mach-O at its final
@@ -524,7 +525,7 @@ The bundled package is RepoPrompt's default Codex runtime authority; runtime sel
 falls through to the user's shell `PATH`. Advanced users may set one explicit absolute external
 override with `REPOPROMPT_CODEX_EXECUTABLE`. RepoPrompt rejects overrides older than 0.149.0,
 the external admission minimum, which stays deliberately below the exact bundled and
-schema-gate pin at 0.164.0 because no outgoing request needs the newer version.
+schema-gate pin at 0.170.0 because no outgoing request needs the newer version.
 [`docs/architecture/codex-app-server-schema-gate.md`](architecture/codex-app-server-schema-gate.md)
 owns the per-rotation schema findings behind both numbers and the limits of what admission at
 the floor proves. Bundled and external runtimes both use RepoPrompt-owned `CODEX_HOME`
@@ -540,11 +541,13 @@ preserves other TOML, applies repeated updates idempotently, and stops with an a
 conflict instead of guessing when the code-mode policy is ambiguous, uses dotted or inline
 definitions that would redefine the owned table/keys, or uses `non_prefixed_mcp_tool_names`.
 
-The 0.164.0 standalone packages no longer contain bundled Zsh. As the
+The 0.170.0 packages contain a standalone `bin/codex-exec-server` executable, which
+`codex-package.json` names in its `execServer` field. RepoPrompt still launches only
+`bin/codex`, but runtime selection refuses a bundled package whose helper is missing or not
+executable. The packages contain no bundled Zsh: as the
 [Codex 0.163.0 release notes](https://github.com/openai/codex/releases/tag/rust-v0.163.0) say,
 Codex stopped bundling its patched Zsh and runs shell commands through its standard shell
-executor. The reviewed 0.164.0 rotation removed Zsh's three layout entries, its Mach-O and
-release-signing entry, and its licence. The voice runtime's packaged notice, source manifest,
+executor. The voice runtime's packaged notice, source manifest,
 and licences are copied as the `VOICE-*` files in
 [`ThirdPartyLicenses/codex/`](../ThirdPartyLicenses/codex/) and are covered by the packaged
 legal inventory checksum contract.
@@ -555,7 +558,7 @@ To diagnose acquisition independently of a build, run:
 python3 Scripts/codex_runtime_artifact.py acquire --arch all
 python3 Scripts/codex_runtime_artifact.py verify \
   --arch aarch64-apple-darwin \
-  --package .build/codex-runtime/0.164.0/aarch64-apple-darwin
+  --package .build/codex-runtime/0.170.0/aarch64-apple-darwin
 python3 Scripts/codex_runtime_artifact.py stage-bundle \
   --arch all \
   --cache-root .build/codex-runtime \
@@ -598,7 +601,7 @@ uses the same artifact verifier as packaging to reject extracted-layout, Mach-O
 inventory/architecture, normalized-payload, and OpenAI signing-identity drift. The official
 output directory contains a proposed `candidate-manifest.json`, `candidate-provenance.json`,
 sanitized `release-metadata.json`, the upstream checksum file, self-checksums, and a
-deterministic `candidate-report.md`. The live 0.164.0 pin remains authoritative until a
+deterministic `candidate-report.md`. The live 0.170.0 pin remains authoritative until a
 complete rotation change is reviewed and deliberately applied.
 
 The tool has no way to accept layout drift, and it refuses a candidate that isn't newer than
@@ -607,17 +610,39 @@ those tree entries from `Vendor/Codex/manifest.json` while its `version` is stil
 pin, along with the `machOFiles` and `releaseSigningEntitlements` entries of any removed Mach-O,
 and then run the official candidate against that manifest.
 
-The known-good rollback for the 0.164.0 rotation is the previously bundled Codex 0.159.0
+When a new release adds package entries, review each addition, then add it to the manifest
+while its `version` is still the current pin. Each added path gets a tree entry with its
+expected kind and executable bit; the candidate run fails if either is wrong. A file's
+`sha256`, and a Mach-O's `normalizedSha256`, take an all-zero placeholder, because the pinned
+packages have no such file. An added Mach-O also gets a `machOFiles` entry and its reviewed
+`releaseSigningEntitlements` profile. An added primary executable, one that
+`codex-package.json` names, also gets `requiredLayout` and `signedExecutables` entries.
+`Scripts/codex_runtime_artifact.py` fixes the required layout, the set of primary signature
+policies, and the expected `codex-package.json` metadata, so change those in the same working
+tree and leave its `SUPPORTED_VERSION` at the current pin. The official candidate then checks
+each declared primary signing identity and entitlement profile against the release, and its
+report lists the placeholder entries among the changed payloads. Replace the manifest with the
+reviewed `candidate-manifest.json`, then move `SUPPORTED_VERSION` and the other pins to the new
+version. The 0.170.0 rotation added `bin/codex-exec-server` this way.
+
+The known-good production rollback for the 0.170.0 rotation is Codex 0.159.0
 (`rust-v0.159.0`; manifest SHA-256
 `e4f0751ca1be87f05920b76fd867d349759dc468e4e4e2f0db8e321be8197246`, arm64 package archive
 SHA-256 `7748d07d7921a67b91d015e9d0f43177c675977e67f955b2f8fb96dc880dd5d7`, x86_64 package
-archive SHA-256 `ab64d30288454124c7c15abd81672a9dfda7e3e723d76c4cfa6c0aba4b439017`). The
-older verified fallback is Codex 0.156.1 (`rust-v0.156.1`; manifest SHA-256
+archive SHA-256 `ab64d30288454124c7c15abd81672a9dfda7e3e723d76c4cfa6c0aba4b439017`), the
+runtime the last promoted build bundled. The previous pin, Codex 0.164.0 (`rust-v0.164.0`;
+manifest SHA-256 `316b368a777d469a2b814c4c48a5fdcc70da5ade492ac0ee1706febe8401910a`, arm64
+package archive SHA-256 `dd99e9092270691a67bdde7be04ac283dea9da8e86cbde356c2cc851a79205fa`,
+x86_64 package archive SHA-256
+`cfb2a9988d7ea448511166a35789af07a0065d1117db54350b17d46cf03d0294`), was never promoted, so
+it's a comparison point rather than a rollback target. The older verified fallback is
+Codex 0.156.1 (`rust-v0.156.1`; manifest SHA-256
 `ac9160b972a8d2c816e1496e1368220fffea939d836d40f2af043b4e240e2d53`, arm64 package archive
 SHA-256 `fea42f9625091f011e38f059da974d52e57ba31831648bb1c7f0b1a385fde547`, x86_64 package
 archive SHA-256 `618dbcd55419fa041871f777a14b107ceb3fe2d339ef81e21e6ab5374420dc71`). Roll back by
-reverting the complete rotation change and rebuilding from the restored manifest rather than
-mixing old and new authority files. A source revert does not undo saved model selections that
+reverting each complete rotation change made since the target runtime and rebuilding from the
+restored manifest, rather than mixing old and new authority files. Returning to 0.159.0 means
+reverting both the 0.170.0 and the 0.164.0 rotations. A source revert does not undo saved model selections that
 only the newer runtime advertises, or any state the newer runtime wrote under the
 RepoPrompt-owned Codex home; restore those from the [rollback unit](#rollback-unit) archive
 when needed.
