@@ -6,7 +6,8 @@
     import SwiftUI
     import XCTest
 
-    /// Contracts of the equatable transcript row boundary, `AgentTranscriptRow`.
+    /// Contracts of the equatable transcript row boundary, `AgentTranscriptRow`, and of where the
+    /// transcript scrolls when a hidden window is shown again.
     ///
     /// The hosted tests render the production Agent Mode detail view in a window that's never ordered
     /// on screen, and observe rows through `AgentTranscriptTailRenderProbe`.
@@ -187,6 +188,37 @@
             XCTAssertTrue(fixture.attachedViews(Row.user0).contains { $0 === userView })
         }
 
+        /// Text that streams in while the window is hidden is laid out only after the window is shown
+        /// again, and a transcript that was following its live bottom follows it there.
+        func testPinnedTranscriptFollowsTextLaidOutAfterReveal() async throws {
+            let fixture = try await makeFixture(hosted: true)
+            _ = try await fixture.settledUserView()
+            for delta in 0 ..< 3 {
+                _ = fixture.streamTailDelta(Self.paragraphs("Visible", delta: delta, count: 4))
+                try await fixture.waitForQuiet()
+            }
+            try await fixture.waitUntil("the transcript scrolls and follows its live bottom") {
+                fixture.transcriptScrollsPastViewport()
+                    && fixture.transcriptDistanceToBottom() <= Self.pinnedBottomTolerance
+            }
+
+            fixture.focus.isPresentationVisible = false
+            try await fixture.waitForQuiet()
+            for delta in 0 ..< 4 {
+                _ = fixture.streamTailDelta(Self.paragraphs("Hidden", delta: delta, count: 10))
+            }
+            try await fixture.waitForQuiet()
+            XCTAssertFalse(fixture.rowText(Row.tail, contains: "Hidden 3.9"), "a hidden window keeps the text it installed")
+
+            fixture.focus.isPresentationVisible = true
+            try await fixture.waitUntil("the shown window installs the latest text") {
+                fixture.rowText(Row.tail, contains: "Hidden 3.9")
+            }
+            try await fixture.waitUntil("the transcript follows to the bottom of the installed text") {
+                fixture.transcriptDistanceToBottom() <= Self.pinnedBottomTolerance
+            }
+        }
+
         // MARK: - Row actions
 
         /// The header cancel action stops the run captured when its row was built, even after a later
@@ -312,6 +344,15 @@
             return made
         }
 
+        /// A transcript following its live bottom keeps the bottom within its clearance.
+        private static let pinnedBottomTolerance: CGFloat = 40
+
+        private static func paragraphs(_ label: String, delta: Int, count: Int) -> String {
+            (0 ..< count).map { paragraph in
+                "\n\n\(label) \(delta).\(paragraph), long enough to wrap onto a second line in the transcript view."
+            }.joined()
+        }
+
         private static func perfCounter(_ key: String) -> Int {
             let counters = AgentModePerfDiagnostics.debugStateSnapshot(lineLimit: 1)["counters"] as? [String: Int]
             return counters?[key] ?? 0
@@ -419,7 +460,7 @@
 
     /// A window state over an isolated runtime, with a running, hydrated session holding `Fixture.items`.
     /// When hosted, the production Agent Mode detail view renders in an unordered window with the probe
-    /// recording and a test-controlled window focus.
+    /// recording and test-controlled window focus and visibility.
     @MainActor
     private final class TranscriptFixture {
         let recorder = RenderRecorder()
@@ -609,6 +650,35 @@
             attachedViews(rowID).contains { $0.string.contains(marker) }
         }
 
+        /// The distance from the transcript's visible bottom to its document's bottom.
+        func transcriptDistanceToBottom() -> CGFloat {
+            guard let scrollView = transcriptScrollView(), let document = scrollView.documentView else {
+                return .greatestFiniteMagnitude
+            }
+            let visible = scrollView.documentVisibleRect
+            return document.isFlipped ? document.bounds.maxY - visible.maxY : visible.minY - document.bounds.minY
+        }
+
+        func transcriptScrollsPastViewport() -> Bool {
+            guard let scrollView = transcriptScrollView(), let document = scrollView.documentView else { return false }
+            return document.bounds.height > scrollView.documentVisibleRect.height
+        }
+
+        /// The transcript is the hosted window's scroll view with the tallest document.
+        private func transcriptScrollView() -> NSScrollView? {
+            var tallest: NSScrollView?
+            var pending: [NSView] = host.map { [$0] } ?? []
+            while let view = pending.popLast() {
+                if let scrollView = view as? NSScrollView,
+                   (scrollView.documentView?.bounds.height ?? 0) > (tallest?.documentView?.bounds.height ?? 0)
+                {
+                    tallest = scrollView
+                }
+                pending.append(contentsOf: view.subviews)
+            }
+            return tallest
+        }
+
         /// The settled user row's native text view, once it's attached and laid out.
         func settledUserView() async throws -> CodeBlockTextView {
             try await waitUntil("the settled user row renders a native text view") {
@@ -735,6 +805,7 @@
         var body: some View {
             detail
                 .environment(\.agentWindowIsFocused, focus.isFocused)
+                .environment(\.windowIsPresentationVisible, focus.isPresentationVisible)
                 .environment(\.agentTranscriptProbeWindowID, windowID)
                 .onPreferenceChange(AgentToolCardRenderStatePreferenceKey.self) { states in
                     MainActor.assumeIsolated { toolCards.states = states }
@@ -745,6 +816,7 @@
     @MainActor
     private final class FocusFlag: ObservableObject {
         @Published var isFocused = false
+        @Published var isPresentationVisible = true
     }
 
     @MainActor

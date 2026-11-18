@@ -205,6 +205,7 @@ struct AgentModeChatDetailView: View {
     let currentTabID: UUID?
     let codexManagedLoginAction: CodexManagedLoginAction
     @Environment(\.agentWindowIsFocused) private var agentWindowIsFocused
+    @Environment(\.windowIsPresentationVisible) private var windowIsPresentationVisible
     @ObservedObject private var workflowStore: AgentWorkflowStore = .shared
     @ObservedObject private var fontScale = FontScaleManager.shared
     private var fontPreset: FontScalePreset {
@@ -1998,6 +1999,13 @@ struct AgentModeChatDetailView: View {
                         to: newSnapshot,
                         proxy: proxy
                     )
+                }
+                .onChange(of: windowIsPresentationVisible) { _, isVisible in
+                    // A hidden window defers Markdown compiles and native text installs, so the text
+                    // that arrived while it was hidden is laid out only now, with no presentation change
+                    // to start pinned maintenance. Showing the window is that transcript change.
+                    guard isVisible else { return }
+                    requestPinnedLiveBottom(proxy: proxy, source: .transcriptChangeWhilePinned)
                 }
                 .onChange(of: runInteractionSnapshot.isWaitingForInstruction) { _, _ in
                     guard isPinnedToLiveBottom, !isInteractionBlockerVisible, !isUserInteractingWithScroll else { return }
