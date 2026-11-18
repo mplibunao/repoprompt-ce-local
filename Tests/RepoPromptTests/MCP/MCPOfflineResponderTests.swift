@@ -300,6 +300,20 @@ final class MCPOfflineResponderTests: XCTestCase {
             expectedResponse: #"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#, records: false,
             "resumed responder lists tools"
         )
+
+        // Given the app's last list, it repeats that list as the app sent it, unknown fields included.
+        let appToolList = #"{"tools":[{"name":"read_file","inputSchema":{"type":"object"},"futureField":{"kept":true}}]}"#
+        var remembering = try MCPOfflineResponder(
+            identity: identity,
+            serverVersion: serverVersion,
+            initializeAnswered: true,
+            appToolList: JSONDecoder().decode(Value.self, from: Data(appToolList.utf8))
+        )
+        try assertRespond(
+            &remembering, #"{"jsonrpc":"2.0","id":"l-3","method":"tools/list"}"#,
+            expectedResponse: #"{"jsonrpc":"2.0","id":"l-3","result":"# + appToolList + "}", records: false,
+            "tools/list repeats the app's last list"
+        )
     }
 
     /// The offline loop delivers each reply through the same ledger as connected traffic, so a reply

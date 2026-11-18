@@ -1,4 +1,5 @@
 import Foundation
+import MCP
 import RepoPromptShared
 
 struct MCPInitializeReplayPlan: Equatable {
@@ -117,6 +118,8 @@ actor MCPInitializeReplayState {
     }
 }
 
+/// Requests the app received and has not answered, kept so a later connection can replay them,
+/// and the last complete tool list the app answered one of them with.
 actor MCPOutstandingRequestReplayState {
     private struct EntryKey: Hashable {
         let id: JSONRPCBridgeID
@@ -131,6 +134,7 @@ actor MCPOutstandingRequestReplayState {
 
     private var nextFallbackOrdinal: UInt64 = 0
     private var entries: [EntryKey: Entry] = [:]
+    private var lastCompleteToolList: Value?
 
     func recordForwardedClientFrame(
         _ frame: Data,
@@ -177,6 +181,10 @@ actor MCPOutstandingRequestReplayState {
     ) {
         let preparedResponses = prepared?.messages.filter { $0.kind == .response } ?? []
         if !preparedResponses.isEmpty {
+            // Only a frame that answers a single request can complete a recorded tool list.
+            if prepared?.messages.count == 1, let message = preparedResponses.first {
+                rememberCompleteToolList(frame, answering: message)
+            }
             for message in preparedResponses {
                 guard let id = message.id else { continue }
                 removeDeliveredResponse(id: id, requestOrdinal: message.requestOrdinal)
@@ -198,6 +206,41 @@ actor MCPOutstandingRequestReplayState {
         entries.values
             .sorted { $0.ordinal < $1.ordinal }
             .map(\.frame)
+    }
+
+    /// The `result` of the last `tools/list` the app answered with every tool: a reply to a single
+    /// request without a cursor whose result has no `nextCursor`. The helper answers `tools/list`
+    /// with it while the app is away, so the client keeps the tools it last listed. Nil until the
+    /// app has answered one.
+    func lastCompleteToolListResult() -> Value? {
+        lastCompleteToolList
+    }
+
+    /// Keeps the frame's result when it answers a recorded `tools/list` with the whole catalog. The
+    /// result is kept as generic JSON, so fields this helper's SDK doesn't know survive, as they do
+    /// when the app's SDK is newer than the helper's.
+    private func rememberCompleteToolList(_ frame: Data, answering message: JSONRPCBridgeMessageMetadata) {
+        guard message.method == ListTools.name,
+              let id = message.id,
+              let ordinal = message.requestOrdinal,
+              let request = entries[EntryKey(id: id, ordinal: ordinal)],
+              !Self.requestCarriesCursor(request.frame),
+              case let .object(response)? = try? JSONDecoder().decode(Value.self, from: frame),
+              response["error"] == nil,
+              case let .object(result)? = response["result"],
+              case .array? = result["tools"],
+              (result["nextCursor"] ?? .null) == .null
+        else {
+            return
+        }
+        lastCompleteToolList = .object(result)
+    }
+
+    /// True when a list request asks for a page after the first.
+    private static func requestCarriesCursor(_ frame: Data) -> Bool {
+        let params = MCPInitializeReplayState.jsonObject(from: frame)?["params"] as? [String: Any]
+        guard let cursor = params?["cursor"] else { return false }
+        return !(cursor is NSNull)
     }
 
     @discardableResult

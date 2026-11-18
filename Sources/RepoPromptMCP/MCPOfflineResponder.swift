@@ -8,7 +8,8 @@ import RepoPromptShared
 /// The responder does no I/O and keeps one bit of state, whether it has answered an `initialize`.
 /// It never executes or queues a request: a `tools/call` always fails with the connection message,
 /// so a call made while the app is away cannot run later when the app returns. It is a protocol
-/// table, not a second implementation of the app's tools, catalog, or instructions.
+/// table, not a second implementation of the app's tools, catalog, or instructions: the only tools
+/// it lists are the ones the app last listed, repeated as the app sent them.
 struct MCPOfflineResponder {
     struct Outcome: Equatable {
         /// The newline-terminated frame to write to the client, if the input calls for one.
@@ -22,13 +23,23 @@ struct MCPOfflineResponder {
 
     private let identity: MCPFilesystemIdentity
     private let serverVersion: String
+    private let appToolList: Value?
     private var initializeAnswered: Bool
 
-    /// - Parameter initializeAnswered: Pass `true` when the client already has an initialize result,
-    ///   as when the helper answers again after the app disconnects mid-session.
-    init(identity: MCPFilesystemIdentity, serverVersion: String, initializeAnswered: Bool = false) {
+    /// - Parameters:
+    ///   - initializeAnswered: Pass `true` when the client already has an initialize result, as when
+    ///     the helper answers again after the app disconnects mid-session.
+    ///   - appToolList: The result of the app's last complete `tools/list`, which a `tools/list`
+    ///     gets in its place, so the client keeps those tools while the app is away. Nil lists none.
+    init(
+        identity: MCPFilesystemIdentity,
+        serverVersion: String,
+        initializeAnswered: Bool = false,
+        appToolList: Value? = nil
+    ) {
         self.identity = identity
         self.serverVersion = serverVersion
+        self.appToolList = appToolList
         self.initializeAnswered = initializeAnswered
     }
 
@@ -50,15 +61,24 @@ struct MCPOfflineResponder {
 
     /// The answer to a request that reached the app before it went away and was held for replay,
     /// once the helper stops waiting for the app to return. A `tools/call` gets an error result the
-    /// model can read; any other request gets the server error that `prompts/get` gets offline.
+    /// model can read, and a `tools/list` gets the app's last complete list when there is one. Any
+    /// other request gets the server error that `prompts/get` gets offline.
     ///
+    /// - Parameter appToolList: The result of the app's last complete `tools/list`, if any.
     /// - Returns: Nil when the frame is not a single request with a method and an id.
-    static func unavailableResponse(toForwardedRequest frame: Data, connectionMessage: String) throws -> Data? {
+    static func unavailableResponse(
+        toForwardedRequest frame: Data,
+        connectionMessage: String,
+        appToolList: Value?
+    ) throws -> Data? {
         guard let object = (try? JSONSerialization.jsonObject(with: frame)) as? [String: Any],
               let method = object["method"] as? String,
               let id = JSONRPCBridgeID.parseJSONValue(object["id"]), id != .null
         else {
             return nil
+        }
+        if method == ListTools.name, let appToolList {
+            return try encodeFrame(Envelope(id: id, body: .result(appToolList)))
         }
         guard method == CallTool.name else {
             return try encodeFrame(Envelope(
@@ -127,7 +147,7 @@ struct MCPOfflineResponder {
         case "server/discover":
             try fail(id: id, .methodNotFound("Unknown method: \(method)"))
         case ListTools.name:
-            try initializedReply(id: id, result: ListTools.Result(tools: []))
+            try initializedReply(id: id, result: appToolList ?? Self.emptyToolList)
         case ListPrompts.name:
             try initializedReply(id: id, result: ListPrompts.Result(prompts: []))
         case ListResources.name:
@@ -205,6 +225,8 @@ struct MCPOfflineResponder {
 
     /// The JSON-RPC server-error code the SDK uses for a transport that cannot deliver.
     private static let connectionUnavailableCode = -32001
+
+    private static let emptyToolList: Value = .object(["tools": .array([])])
 
     private static let initializedNotificationName = InitializedNotification.name
 

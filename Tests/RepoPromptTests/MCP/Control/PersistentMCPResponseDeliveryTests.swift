@@ -1,5 +1,7 @@
 import Foundation
+import MCP
 @testable import RepoPromptMCP
+import RepoPromptShared
 import XCTest
 
 final class PersistentMCPResponseDeliveryTests: XCTestCase {
@@ -69,6 +71,72 @@ final class PersistentMCPResponseDeliveryTests: XCTestCase {
         await replayState.recordForwardedClientFrame(line(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#))
         frames = await replayState.replayFrames()
         XCTAssertEqual(frames, [])
+    }
+
+    /// The helper answers `tools/list` with the remembered list while the app is away, so only a
+    /// reply that lists every tool may replace it.
+    func testOutstandingReplayStateRemembersTheAppsLastCompleteToolList() async throws {
+        let ledger = JSONRPCBridgeLedger(connectionID: "tool-list-memory-test")
+        _ = try await ledger.beginConnection()
+        let replayState = MCPOutstandingRequestReplayState()
+        // Forwards the client's request and delivers the app's reply through the ledger, as the bridge does.
+        func exchange(_ request: String, _ response: String) async throws {
+            let requestFrame = line(request)
+            let preparedRequest = try await ledger.prepare(frame: requestFrame, direction: .clientToServer)
+            try await ledger.commit(preparedRequest)
+            await replayState.recordForwardedClientFrame(requestFrame, prepared: preparedRequest)
+            let preparedResponse = try await ledger.prepare(frame: line(response), direction: .serverToClient)
+            try await ledger.commit(preparedResponse)
+            let delivered = try XCTUnwrap(preparedResponse.deliveryFrame)
+            await replayState.recordDeliveredServerFrame(delivered, prepared: preparedResponse)
+        }
+        let initial = await replayState.lastCompleteToolListResult()
+        XCTAssertNil(initial)
+
+        try await exchange(
+            #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            #"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"a"}]}}"#
+        )
+        try await exchange(
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"b"}]}}"#
+        )
+        let latest = try JSONDecoder().decode(Value.self, from: Data(#"{"tools":[{"name":"b"}]}"#.utf8))
+        let afterNewerList = await replayState.lastCompleteToolListResult()
+        XCTAssertEqual(afterNewerList, latest, "a newer complete list replaces the older one")
+
+        let incomplete: [(label: String, request: String, response: String)] = [
+            (
+                "a later page",
+                #"{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"cursor":"page-2"}}"#,
+                #"{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"c"}]}}"#
+            ),
+            (
+                "a first page",
+                #"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#,
+                #"{"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"d"}],"nextCursor":"page-2"}}"#
+            ),
+            (
+                "an error",
+                #"{"jsonrpc":"2.0","id":5,"method":"tools/list"}"#,
+                #"{"jsonrpc":"2.0","id":5,"error":{"code":-32603,"message":"Tool catalog not ready. Please retry."}}"#
+            ),
+            (
+                "a batch",
+                #"[{"jsonrpc":"2.0","id":6,"method":"tools/list"}]"#,
+                #"[{"jsonrpc":"2.0","id":6,"result":{"tools":[{"name":"e"}]}}]"#
+            ),
+            (
+                "a reply to another list method",
+                #"{"jsonrpc":"2.0","id":7,"method":"prompts/list"}"#,
+                #"{"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"f"}]}}"#
+            )
+        ]
+        for row in incomplete {
+            try await exchange(row.request, row.response)
+            let remembered = await replayState.lastCompleteToolListResult()
+            XCTAssertEqual(remembered, latest, row.label)
+        }
     }
 
     func testInitializeReplayStateReportsUnsupportedResumeReasons() async throws {

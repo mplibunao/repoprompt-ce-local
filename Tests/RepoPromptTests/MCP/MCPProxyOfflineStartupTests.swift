@@ -201,13 +201,21 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         XCTAssertTrue(laterClientFrames.isEmpty, "\(label): the client received \(laterClientFrames)")
     }
 
-    func testToolCallDuringOutageGetsNamedErrorThenWorksAfterReturn() async throws {
+    func testOutageKeepsTheAppsToolsListedAndCallsGetNamedErrorUntilReturn() async throws {
         let harness = try makeHarness(identity: identity)
-        _ = try await harness.connectDirectly()
+        let firstConnection = try await harness.connectDirectly()
+        try await listAppTools(id: 1, harness: harness, connection: firstConnection)
 
+        // Quitting, the app announces that its tools changed and closes. The client re-lists, as
+        // Claude Code does, and must keep the tools so its next call reaches the helper.
+        try firstConnection.send(["jsonrpc": "2.0", "method": ToolListChangedNotification.name])
+        let changed = try await harness.client.readMessage()
+        XCTAssertEqual(changed["method"] as? String, ToolListChangedNotification.name)
         harness.quitApp()
         _ = try await harness.phases.first(where: { $0 == .outage }, "the outage")
-        // The retry gate stays closed, so this answer can't depend on a reconnect attempt.
+        // The retry gate stays closed, so these answers can't depend on a reconnect attempt.
+        let list = try await harness.client.request(["jsonrpc": "2.0", "id": 4, "method": "tools/list"])
+        XCTAssertEqual(list["result"] as? NSDictionary, appToolListResult as NSDictionary)
         let call = try await harness.client.request(toolCall(id: 5, name: "apply_edits"))
         XCTAssertTrue(isErrorResult(call))
         XCTAssertEqual(resultText(call), MCPAppConnectionMessages.offlineText(for: .unavailable, identity: identity))
@@ -278,25 +286,31 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         XCTAssertTrue(laterAppFrames.isEmpty, "the returned app received \(laterAppFrames)")
     }
 
-    func testReadInFlightAtOutageGetsNamedErrorAfterGrace() async throws {
+    func testRequestsInFlightAtOutageAreAnsweredLocallyAfterGrace() async throws {
         let harness = try makeHarness(identity: identity)
         harness.start()
         _ = try await harness.initializeOffline()
         let firstConnection = try await harness.attachToFakeApp()
         harness.retryGate.close()
+        try await listAppTools(id: 3, harness: harness, connection: firstConnection)
 
         try harness.client.send(toolCall(id: 7, name: "read_file", arguments: ["path": "a.txt"]))
-        let inFlight = try await firstConnection.readMessage()
-        XCTAssertEqual(inFlight["id"] as? Int, 7)
+        try harness.client.send(["jsonrpc": "2.0", "id": 9, "method": "tools/list"])
+        let inFlight = try await [firstConnection.readMessage(), firstConnection.readMessage()]
+        XCTAssertEqual(inFlight.map { $0["id"] as? Int }, [7, 9])
         harness.quitApp()
         _ = try await harness.phases.first(where: { $0 == .outage }, "the outage")
         _ = try await harness.graceGate.started.first(where: { $0 == 1 }, "the grace wait")
 
+        // A held call gets the named error; a held list gets the tools the app last listed.
         harness.graceGate.open()
         let expired = try await harness.client.readMessage()
         XCTAssertEqual(expired["id"] as? Int, 7)
         XCTAssertTrue(isErrorResult(expired))
         XCTAssertEqual(resultText(expired), MCPAppConnectionMessages.offlineText(for: .unavailable, identity: identity))
+        let expiredList = try await harness.client.readMessage()
+        XCTAssertEqual(expiredList["id"] as? Int, 9)
+        XCTAssertEqual(expiredList["result"] as? NSDictionary, appToolListResult as NSDictionary)
 
         // Requests held for replay go to the app before anything the client sends next.
         let connection = try await harness.attachToFakeApp()
@@ -516,6 +530,22 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// Lists the client's tools through the bridge, with the app answering `appToolListResult`.
+    private func listAppTools(
+        id: Int,
+        harness: ProxyHarness,
+        connection: FakeAppConnection,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        try harness.client.send(["jsonrpc": "2.0", "id": id, "method": "tools/list"])
+        let request = try await connection.readMessage()
+        XCTAssertEqual(request["method"] as? String, "tools/list", file: file, line: line)
+        try connection.send(["jsonrpc": "2.0", "id": id, "result": appToolListResult])
+        let list = try await harness.client.readMessage()
+        XCTAssertEqual(list["result"] as? NSDictionary, appToolListResult as NSDictionary, file: file, line: line)
+    }
+
     private func makeHarness(identity: MCPFilesystemIdentity) throws -> ProxyHarness {
         let harness = try ProxyHarness(identity: identity)
         addTeardownBlock {
@@ -539,6 +569,15 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
 }
 
 // MARK: - Frames
+
+/// The app's answer to `tools/list`, with a field this helper's SDK doesn't define, as a newer app
+/// may send.
+private let appToolListResult: [String: Any] = [
+    "tools": [
+        ["name": "get_file_tree", "inputSchema": ["type": "object"], "futureField": ["kept": true]],
+        ["name": "apply_edits", "inputSchema": ["type": "object"]]
+    ]
+]
 
 private func toolCall(id: Int, name: String, arguments: [String: Any] = [:]) -> [String: Any] {
     ["jsonrpc": "2.0", "id": id, "method": "tools/call", "params": ["name": name, "arguments": arguments]]

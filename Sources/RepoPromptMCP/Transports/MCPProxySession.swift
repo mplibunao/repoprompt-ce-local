@@ -506,10 +506,12 @@ struct MCPProxySession {
         }
 
         let ledger = client.bridgeLedger
-        var responder = MCPOfflineResponder(
+        // The app's list changes only while the bridge relays, so it stays the same while the loop runs.
+        var responder = await MCPOfflineResponder(
             identity: identity,
             serverVersion: serverVersion,
-            initializeAnswered: handshake == .initialized
+            initializeAnswered: handshake == .initialized,
+            appToolList: client.outstandingRequestReplayState.lastCompleteToolListResult()
         )
         if case let .awaitingResult(initializeFrame) = handshake {
             // The app went away before answering the client's initialize. Answering it here, as at
@@ -583,10 +585,13 @@ struct MCPProxySession {
     /// Answers each request the app received but never answered, once the grace for its return
     /// ran out. The delivered answer takes the request out of replay, so it never runs later.
     private func answerHeldRequests(attachment: MCPProxyAttachmentState) async throws {
-        for frame in await client.outstandingRequestReplayState.replayFrames() {
+        let replayState = client.outstandingRequestReplayState
+        let appToolList = await replayState.lastCompleteToolListResult()
+        for frame in await replayState.replayFrames() {
             guard let response = try MCPOfflineResponder.unavailableResponse(
                 toForwardedRequest: frame,
-                connectionMessage: attachment.connectionMessage(identity: identity)
+                connectionMessage: attachment.connectionMessage(identity: identity),
+                appToolList: appToolList
             ) else {
                 continue
             }
