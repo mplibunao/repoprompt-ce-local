@@ -949,23 +949,46 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         )
     }
 
+    /// Codex diagnostics can be long and span several lines, so a transcript or review message
+    /// shows only the first three, each flattened to one line of at most 300 characters.
+    private static func codexHookDiagnosticSummary(_ diagnostics: [String]) -> String? {
+        let details = diagnostics.prefix(3).map { raw in
+            let normalized = raw
+                .components(separatedBy: .newlines)
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return String(normalized.prefix(300))
+        }.filter { !$0.isEmpty }
+        return details.isEmpty ? nil : details.joined(separator: "; ")
+    }
+
     private func codexHookDiscoveryFailureMessage(_ error: Error) -> String {
         if let hookError = error as? CodexHookTrustError,
-           case let .discoveryFailed(cwdErrors) = hookError
+           case let .discoveryFailed(cwdErrors) = hookError,
+           let summary = Self.codexHookDiagnosticSummary(cwdErrors)
         {
-            let details = cwdErrors.prefix(3).map { raw in
-                let normalized = raw
-                    .components(separatedBy: .newlines)
-                    .joined(separator: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                return String(normalized.prefix(300))
-            }.filter { !$0.isEmpty }
-            if !details.isEmpty {
-                return "Codex hook discovery failed: \(details.joined(separator: "; "))"
-            }
+            return "Codex hook discovery failed: \(summary)"
         }
         return (error as? LocalizedError)?.errorDescription
             ?? "Codex hook discovery failed. Retry hook discovery."
+    }
+
+    /// Records hook-discovery warnings that arrived with nothing to review, which would otherwise
+    /// pass unseen. A review already lists its warnings, so only the gate's no-review path calls
+    /// this.
+    private func appendCodexHookDiscoveryWarningNotice(
+        _ warnings: [String],
+        session: AgentTabSession
+    ) {
+        guard !warnings.isEmpty else { return }
+        let detail = Self.codexHookDiagnosticSummary(warnings).map { ": \($0)" } ?? ""
+        let notice = "Codex reported \(warnings.count) hook discovery warning(s), so some hooks may not be loaded\(detail). "
+            + "Global hooks are copied from ~/.codex/hooks.json at launch and are edited there."
+        session.appendItem(AgentChatItem.system(
+            notice,
+            sequenceIndex: session.nextSequenceIndex
+        ))
+        viewModel?.scheduleSave(for: session.tabID)
     }
 
     private func codexHookExecutionCWD(for session: AgentTabSession) -> String {
@@ -1033,7 +1056,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         }
     }
 
-    private func gateFirstTurnForProjectHooks(
+    private func gateFirstTurnForCodexHooks(
         session: AgentTabSession,
         controller: any CodexSessionControlling
     ) async throws -> UUID? {
@@ -1072,11 +1095,12 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             guard authority.isCurrent(in: session) else {
                 throw CancellationError()
             }
-            let unresolved = inventory.unresolvedProjectHooks
+            let unresolved = inventory.unresolvedReviewableHooks
             if unresolved.isEmpty {
                 session.codexHookGateAttemptToken = nil
                 session.codexHookGateInventoryFingerprint = nil
                 session.codexHookGateBindingMemo = binding
+                appendCodexHookDiscoveryWarningNotice(inventory.warnings, session: session)
                 synchronizeCodexThreadReferenceAfterHookGate(
                     session: session,
                     controller: controller
@@ -1286,7 +1310,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             let approvedIdentities = Set(candidates.map(\.selectionIdentity))
             let expectedSkippedIdentities = Set(request.trustCandidates.map(\.selectionIdentity))
                 .subtracting(approvedIdentities)
-            let verifiedUnresolvedIdentities = Set(verified.unresolvedProjectHooks.map(\.selectionIdentity))
+            let verifiedUnresolvedIdentities = Set(verified.unresolvedReviewableHooks.map(\.selectionIdentity))
             let strictModeRequiresRefresh = isCodexHookApprovalStrictModeEnabled()
                 && !verifiedUnresolvedIdentities.isEmpty
             guard !strictModeRequiresRefresh,
@@ -1357,7 +1381,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         priorRequest: AgentCodexHookReviewRequest,
         binding: AgentTabSession.CodexHookGateBindingIdentity
     ) {
-        let unresolved = inventory.unresolvedProjectHooks
+        let unresolved = inventory.unresolvedReviewableHooks
         if unresolved.isEmpty {
             completeCodexHookReview(
                 session: session,
@@ -3436,7 +3460,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         }
         let hookGateDispatchOwnerToken: UUID?
         do {
-            hookGateDispatchOwnerToken = try await gateFirstTurnForProjectHooks(
+            hookGateDispatchOwnerToken = try await gateFirstTurnForCodexHooks(
                 session: session,
                 controller: controller
             )
@@ -3914,7 +3938,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         else { return nil }
         let hookGateDispatchOwnerToken: UUID?
         do {
-            hookGateDispatchOwnerToken = try await gateFirstTurnForProjectHooks(
+            hookGateDispatchOwnerToken = try await gateFirstTurnForCodexHooks(
                 session: session,
                 controller: controller
             )
@@ -5501,7 +5525,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             guard replayTurn.expectedTurnID == nil else {
                 return false
             }
-            let hookGateDispatchOwnerToken = try await gateFirstTurnForProjectHooks(
+            let hookGateDispatchOwnerToken = try await gateFirstTurnForCodexHooks(
                 session: session,
                 controller: controller
             )
@@ -7076,7 +7100,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             setRunningStatus("Sending message…", source: .transport, session: session, urgent: true)
             switch dispatchPlan {
             case .start:
-                let hookGateDispatchOwnerToken = try await gateFirstTurnForProjectHooks(
+                let hookGateDispatchOwnerToken = try await gateFirstTurnForCodexHooks(
                     session: session,
                     controller: controller
                 )
@@ -9777,22 +9801,6 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         @_spi(TestSupport)
         public func test_setReadySessionToolTrackingGate(_ gate: (@Sendable () async -> Void)?) {
             testReadySessionToolTrackingGate = gate
-        }
-
-        @_spi(TestSupport)
-        public func test_gateFirstTurnForProjectHooks(
-            session: AgentTabSession,
-            controller: any CodexSessionControlling
-        ) async throws {
-            if let dispatchOwnerToken = try await gateFirstTurnForProjectHooks(
-                session: session,
-                controller: controller
-            ) {
-                session.finishCodexHookGateOwnerDispatch(
-                    token: dispatchOwnerToken,
-                    succeeded: true
-                )
-            }
         }
 
         @_spi(TestSupport)

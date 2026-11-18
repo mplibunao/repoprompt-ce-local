@@ -188,15 +188,18 @@ struct CodexHookInventory: Hashable {
         )
     }
 
-    var projectHooks: [CodexHookMetadata] {
-        hooks.filter { $0.source == "project" }
+    /// Hooks the approval flow reviews and trusts: exactly those whose source is `project` or
+    /// `user`. Hooks from every other source are decoded but never offered for approval.
+    var reviewableHooks: [CodexHookMetadata] {
+        hooks.filter { $0.source == "project" || $0.source == "user" }
     }
 
-    var unresolvedProjectHooks: [CodexHookMetadata] {
-        projectHooks.filter { !$0.trustStatus.isResolved }
+    /// Reviewable hooks that are neither trusted nor managed, including disabled ones.
+    var unresolvedReviewableHooks: [CodexHookMetadata] {
+        reviewableHooks.filter { !$0.trustStatus.isResolved }
     }
 
-    func validatesUnresolvedProjectHooks(
+    func validatesUnresolvedReviewableHooks(
         for candidates: [CodexHookTrustCandidate]
     ) -> Bool {
         guard !candidates.isEmpty else { return false }
@@ -204,7 +207,7 @@ struct CodexHookInventory: Hashable {
         for candidate in candidates {
             guard candidate.isValid,
                   selectedKeys.insert(candidate.keyIdentity).inserted,
-                  let hook = unresolvedProjectHooks.first(where: { $0.keyIdentity == candidate.keyIdentity }),
+                  let hook = unresolvedReviewableHooks.first(where: { $0.keyIdentity == candidate.keyIdentity }),
                   hook.hashIdentity == candidate.hashIdentity
             else {
                 return false
@@ -215,7 +218,7 @@ struct CodexHookInventory: Hashable {
 
     func verifies(_ candidates: [CodexHookTrustCandidate]) -> Bool {
         candidates.allSatisfy { candidate in
-            projectHooks.contains {
+            reviewableHooks.contains {
                 $0.selectionIdentity == candidate.selectionIdentity && $0.trustStatus.isResolved
             }
         }
