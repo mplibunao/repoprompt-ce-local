@@ -9,13 +9,13 @@ The run ports upstream PR 1734, an open upstream change that adds the GPT-6.2 mo
 | 1. Model catalogs and agent identities | done | pair (Claude Opus 5.5) · Orchestrate 1/4; refactor by engineer (Claude Sonnet 5.5) | `feat(models): add GPT-6.2 Sol and GPT-6.2 Astra catalog entries` |
 | 2. Recommendations, tags, and priority hints | done | engineer (Claude Sonnet 5.5) · Orchestrate 2/4 | `feat(models): recommend GPT-6.2 Sol` |
 | 3. Bundled Codex 0.164.0 to 0.170.0 | done | pair (Claude Opus 5.5) · Orchestrate 3/4 | `feat(codex): bundle Codex app-server 0.170.0` |
-| 4. Integrated acceptance and pull request | done | review by engineer (Claude Sonnet 5.5); cleanup by pair (Claude Opus 5.5) | `docs(codex): record the 0.170.0 live findings`, `test(models): name the partial-catalog test after both GPT-6 families`, `docs(releasing): name every file an added primary executable changes`, `chore(codex): tidy the 0.170.0 rotation text`, `docs(ledgers): record the GPT-6.2 run`, `docs(ledgers): quote the models Codex recorded for each live turn` |
+| 4. Integrated acceptance and pull request | done | review by engineer (Claude Sonnet 5.5); cleanup by pair (Claude Opus 5.5) | `docs(codex): record the 0.170.0 live findings`, `test(models): name the partial-catalog test after both GPT-6 families`, `docs(releasing): name every file an added primary executable changes`, `chore(codex): tidy the 0.170.0 rotation text`, `docs(ledgers): record the GPT-6.2 run`, `docs(ledgers): quote the models Codex recorded for each live turn`, `docs(ledgers): point the deferrals at their issues` |
 
 ## Setup: rebase PR #357
 
 - Decision: rebase PR #357's branch `port/1527-codex-0-164-0` onto `origin/main` before stacking, because it was 22 commits behind and lacked the Claude Fable 5.2 commit, which edits the same model files as item 1. Source: approved plan. The coordinating thread confirmed that no other session owns #357.
 - Evidence: the four commits replayed onto `origin/main` without conflicts, and none of `main`'s 22 new commits touches a file #357 changes. `make release-selftest` passed. The first `pr-ready` run on the whole branch failed one test, `WorkspaceSelectionMirrorRecoveryTests.testFocusChangeDuringMirrorPreservesIdentityAndCancellation` ("the physical mirror attempt never started"), while another worktree was building. That suite passed alone, and the second `pr-ready` run passed: swift lint, the full root suite, the `RepoPrompt` build, and the CI runner self-tests. The branch was pushed with a lease on its old head, and its new head is `312eb3f1b`.
-- Deferred: the mirror-recovery test looks timing-sensitive under load, and no issue tracks it yet (see Parked decisions).
+- Deferred: #274 tracks the mirror-recovery test's failures under load, and this failure is recorded there.
 
 ## 1. Model catalogs and agent identities
 
@@ -37,7 +37,7 @@ The run ports upstream PR 1734, an open upstream change that adds the GPT-6.2 mo
 - Decision: the export-planning line says "model ID", matching the surrounding text. Source: refactor review finding.
 - Evidence: `make dev-format` and `make dev-lint` clean; focused `make dev-test` passed for `DirectModelCatalogRefreshTests` (7), `AutoRecommendationEngineModelRefreshTests` (7), `AgentModelCatalogModelRefreshTests` (14), and `AIModelPreferenceRegressionTests` (8); `make dev-swift-build PRODUCT=RepoPrompt` passed. A throwaway mutation check removed `.gpt62Sol` from `mediumWholePriority` and the `gpt62SolHigh` tags, and the priority and metadata tests failed on them. A new assertion rejects any GPT-6.1 mention left in the recommendation text, including spellings with non-breaking hyphens. The correctness review had no findings, and the refactor review ended clean after the wording fix.
 - Evidence: no test calls Azure's `preferredDeploymentID` directly, but `findBestAvailableModel` covers the same array.
-- Deferred: one GPT-6.1 Sol pick that moved to GPT-6.2 Sol sits in `AutoRecommendationEngine.computeFreeTierChatModelRecommendation`, a private function with no callers, so no test reaches it. Removing it is outside this run, and no issue tracks it yet (see Parked decisions).
+- Deferred: one GPT-6.1 Sol pick that moved to GPT-6.2 Sol sits in `AutoRecommendationEngine.computeFreeTierChatModelRecommendation`, a private function with no callers, so no test reaches it. Removing it is outside this run, and #397 tracks it.
 
 ## 3. Bundled Codex 0.164.0 to 0.170.0
 
@@ -62,8 +62,9 @@ The run ports upstream PR 1734, an open upstream change that adds the GPT-6.2 mo
 - Decision: the review's nit about the remaining ChatGPT Pro export wording is declined, because those lines describe exporting a prompt for ChatGPT Pro, which this run doesn't change. Source: review finding, declined by orchestrator judgment.
 - Decision: the cleanup pass removed a guardrail comment that restated the dictionary below it and rewrapped lines in the two docs. Source: refactor pass.
 - Evidence: the review had no blockers. After the test rename, `make dev-format` and `make dev-lint` were clean, and `make dev-test` passed for `AgentModelCatalogModelRefreshTests` (14). The cleanup's doc edits change line breaks only, as `git diff -w --word-diff` shows.
+- Evidence: the first hosted CI run of Build and Test on the pull request failed one test, `AgentManageStopSessionTests/testCompletedSessionReleasesProviderAndKeepsConversation`, whose Cursor row without `loadSession` counted two agent processes instead of one. #274 tracks that test. The suite passed 5 of 5 runs alone on the same head, the first rerun found no runner, and the second rerun passed.
 - Evidence: the direct OpenAI, Azure OpenAI, and OpenRouter entries weren't checked in the live app, because the MCP options list for the Oracle model prints only its first 40 rows, and this profile fills them with Anthropic and Azure entries. The unit tests cover those catalogs.
 
 ## Parked decisions
 
-- Should issues be filed for the two deferrals: the mirror-recovery test that failed once under load (Setup) and the uncalled `computeFreeTierChatModelRecommendation` (item 2)? Options: file both, file only the test, or file neither and leave them in this ledger. Recommendation: file both. Blocks: nothing in this run. Answer:
+- Should issues be filed for the two deferrals: the mirror-recovery test that failed once under load (Setup) and the uncalled `computeFreeTierChatModelRecommendation` (item 2)? Options: file both, file only the test, or file neither and leave them in this ledger. Recommendation: file both. Blocks: nothing in this run. Answer: track all three. #274 already tracked both flaky tests, so this run's failures of the mirror-recovery test and of `AgentManageStopSessionTests` are comments there, and #397 tracks the uncalled function.
