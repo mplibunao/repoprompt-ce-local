@@ -185,8 +185,6 @@ for path in ("bin/codex", "bin/codex-code-mode-host"):
 expected_release_profiles["codex-resources/voice/bin/codex-voice-host"] = AUDIO_INPUT_PROFILE
 if manifest.get("releaseSigningEntitlements") != expected_release_profiles:
     sys.exit("pinned release-signing profiles must grant only the approved V8 and voice audio-input entitlements")
-# The vendor-preserved signatures of the three primary executables are pinned
-# exactly: V8 for Codex and its code-mode host, and none for the exec-server.
 expected_vendor_profiles = {
     "bin/codex": V8_PROFILE,
     "bin/codex-code-mode-host": V8_PROFILE,

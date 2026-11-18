@@ -499,7 +499,8 @@ fails closed unless the package matching the running app architecture is present
 subtree preserves `codex-package.json`, `bin/codex`, `bin/codex-code-mode-host`,
 `bin/codex-exec-server`, `codex-resources/`, `codex-path/`, and all additional package
 resources; the binaries inside remain thin and must match the directory's target
-architecture. Each package also carries a native voice runtime under `codex-resources/voice/`. Its `bin/codex-voice-host` executable and
+architecture. Each package also carries a native voice runtime under
+`codex-resources/voice/`. Its `bin/codex-voice-host` executable and
 its libraries and plugins are manifest-owned Mach-Os like the rest of the package, and their
 third-party components are listed in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
@@ -622,11 +623,11 @@ policies, and the expected `codex-package.json` metadata, so change those in the
 tree and leave its `SUPPORTED_VERSION` at the current pin. `Scripts/codex_vendor_guardrails.sh`
 pins the same primary signature policies, and `CodexRuntimeAuthority.swift` checks the package
 metadata and each primary executable before launch, so an added primary executable changes both
-too. The official candidate then checks
-each declared primary signing identity and entitlement profile against the release, and its
-report lists the placeholder entries among the changed payloads. Replace the manifest with the
-reviewed `candidate-manifest.json`, then move `SUPPORTED_VERSION` and the other pins to the new
-version. The 0.170.0 rotation added `bin/codex-exec-server` this way.
+too. The official candidate then checks each declared primary signing identity and entitlement
+profile against the release, and its report lists the placeholder entries among the changed
+payloads. Replace the manifest with the reviewed `candidate-manifest.json`, then move
+`SUPPORTED_VERSION` and the other pins to the new version. The 0.170.0 rotation added
+`bin/codex-exec-server` this way.
 
 The known-good production rollback for the 0.170.0 rotation is Codex 0.159.0
 (`rust-v0.159.0`; manifest SHA-256
@@ -645,10 +646,10 @@ SHA-256 `fea42f9625091f011e38f059da974d52e57ba31831648bb1c7f0b1a385fde547`, x86_
 archive SHA-256 `618dbcd55419fa041871f777a14b107ceb3fe2d339ef81e21e6ab5374420dc71`). Roll back by
 reverting each complete rotation change made since the target runtime and rebuilding from the
 restored manifest, rather than mixing old and new authority files. Returning to 0.159.0 means
-reverting both the 0.170.0 and the 0.164.0 rotations. A source revert does not undo saved model selections that
-only the newer runtime advertises, or any state the newer runtime wrote under the
-RepoPrompt-owned Codex home; restore those from the [rollback unit](#rollback-unit) archive
-when needed.
+reverting both the 0.170.0 and the 0.164.0 rotations. A source revert does not undo saved
+model selections that only the newer runtime advertises, or any state the newer runtime wrote
+under the RepoPrompt-owned Codex home; restore those from the [rollback unit](#rollback-unit)
+archive when needed.
 
 The manual **Codex Runtime Update Candidate** workflow runs only from `main`, has
 `contents: read`, uploads those evidence files, and cannot commit, open a pull request, or

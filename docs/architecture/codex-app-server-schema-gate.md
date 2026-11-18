@@ -375,8 +375,7 @@ a manifest that declared the helper as a third primary executable, as
 entitlements, and its release-signing profile is empty. The 29 existing Mach-Os keep their
 signing identities and entitlements. Only `codex-path/rg` keeps its normalized payload digest.
 Upstream `LICENSE` and `NOTICE` and the packaged voice notice and licences are byte-identical to
-0.164.0. The packaged voice source manifest records PCRE2 10.48 in place of
-10.47.
+0.164.0. The packaged voice source manifest records PCRE2 10.48 in place of 10.47.
 
 **Bounded schema.** The exact verified 0.170.0 CLI passes the bounded experimental projection
 unchanged at 45 methods, 196 parameter paths, and 93 response paths. A full generated-bundle
@@ -407,7 +406,8 @@ while the schema contract and CI pin move to 0.170.0.
 
 **Model discovery.** This rotation exists for model discovery. On 2026-11-18, OpenAI's server
 sent GPT-6.2 Sol (`gpt-6.2-sol`) and GPT-6.2 Astra (`gpt-6.2-astra`) to Codex 0.166.0 but not
-to 0.159.0 or 0.164.0. The model catalog bundled in the 0.170.0 executable
+to 0.159.0 or 0.164.0. The three model lists came from one ChatGPT account on that day; 0.165.0
+wasn't tried. The model catalog bundled in the 0.170.0 executable
 ([`codex-rs/models-manager/models.json` at `rust-v0.170.0`](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/models-manager/models.json))
 adds `gpt-6.2-sol`, `gpt-6.2-astra`, and `gpt-6.1-terra`. Availability still comes from
 `model/list` and depends on the account, and the rotation doesn't add a static picker entry.
