@@ -158,7 +158,7 @@ extension DomainAgentRunSnapshot.Interaction.Kind {
         case .approval:
             "approval needed"
         case .hookApproval:
-            "project hook approval"
+            "codex hook approval"
         case .question:
             "question"
         case .instruction:

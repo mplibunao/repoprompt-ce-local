@@ -316,7 +316,7 @@ struct AgentModeGeneralSettingsView: View {
                 .frame(width: fontPreset.scaledClamped(22, max: 30), alignment: .center)
                 .foregroundColor(.accentColor)
             VStack(alignment: .leading, spacing: fontPreset.scaledClamped(6, max: 10)) {
-                Toggle("Require Codex project-hook approval", isOn: codexHookApprovalStrictModeBinding)
+                Toggle("Require Codex hook approval", isOn: codexHookApprovalStrictModeBinding)
                     .font(fontPreset.swiftUIFont(sizeAtNormal: 13, weight: .semibold))
                 if workspaceID != nil {
                     Picker("In this workspace:", selection: codexHookApprovalWorkspaceSettingBinding) {
@@ -330,7 +330,7 @@ struct AgentModeGeneralSettingsView: View {
                     .pickerStyle(.menu)
                     .font(fontPreset.swiftUIFont(sizeAtNormal: 12))
                 }
-                Text("When enabled, Continue Without Hooks is unavailable. Codex first turns remain blocked until the displayed project hooks are approved or become trusted externally.")
+                Text("When enabled, Continue Without Hooks is unavailable. The first turn of each Codex controller binding remains blocked until every displayed global and project hook is trusted or managed. Discovery errors must be resolved.")
                     .font(fontPreset.swiftUIFont(sizeAtNormal: 12))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

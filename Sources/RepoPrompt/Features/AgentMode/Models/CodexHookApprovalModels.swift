@@ -3,20 +3,51 @@ import Foundation
 struct AgentCodexHookReviewHook: Hashable {
     let key: String
     let eventName: String
+    /// The raw `source` Codex reports, such as `user` or `project`.
+    let source: String
     let sourcePath: String
     let currentHash: String
     let enabled: Bool
     let trustStatus: CodexHookTrustStatus
     let commandOrHandler: String?
+    let matcher: String?
 
     init(metadata: CodexHookMetadata) {
         key = metadata.key
         eventName = metadata.eventName
+        source = metadata.source
         sourcePath = metadata.sourcePath
         currentHash = metadata.currentHash
         enabled = metadata.enabled
         trustStatus = metadata.trustStatus
         commandOrHandler = metadata.commandOrHandler
+        matcher = metadata.matcher
+    }
+
+    /// How the review card and the MCP interaction name the hook's source. A review holds only
+    /// `user` and `project` hooks, so any other source is shown raw.
+    var sourceLabel: String {
+        switch source {
+        case "user":
+            "Global (user)"
+        case "project":
+            "Project (project)"
+        default:
+            source
+        }
+    }
+
+    /// How the review card and the MCP interaction show the matcher: the exact string, `""` for an
+    /// empty one, and a note when Codex reported none.
+    var matcherDisplay: String {
+        switch matcher {
+        case .none:
+            "Not provided by Codex"
+        case "":
+            "\"\""
+        case let .some(matcher):
+            matcher
+        }
     }
 
     var trustCandidate: CodexHookTrustCandidate {
@@ -156,19 +187,19 @@ enum AgentCodexHookReviewResolutionError: Error, LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .noPendingReview:
-            "No Codex project-hook review is pending."
+            "No Codex hook review is pending."
         case .staleRequest:
-            "The Codex project-hook inventory changed. Review the current interaction and retry."
+            "The Codex hook inventory changed. Review the current interaction and retry."
         case .busy:
-            "A Codex project-hook operation is already in progress."
+            "A Codex hook operation is already in progress."
         case .invalidDecision:
-            "That decision is not available for the current Codex project-hook review phase."
+            "That decision is not available for the current Codex hook review phase."
         case .invalidSelection:
             "Approve Selected requires one or more unique hook keys from the current review."
         case .staleController:
-            "The Codex controller binding changed. Start the turn again to review the current project hooks."
+            "The Codex controller binding changed. Start the turn again to review the current Codex hooks."
         case .strictModeRequiresApproval:
-            "Codex hook approval strict mode requires approving every project hook in the current review before continuing."
+            "Codex hook approval strict mode requires approving every global and project hook in the current review before continuing."
         }
     }
 }

@@ -8,7 +8,8 @@ Make the bundled Codex that RepoPrompt CE launches run the user's global Codex h
 |------|---------|---------------|---------|
 | 1. Project `hooks.json` into the private Codex home | done | engineer · Orchestrate 1/4: project hooks.json | `feat(codex): copy the global hooks.json into the private Codex home` |
 | 2. Gate, approve, and verify user hooks; surface discovery warnings | done | pair · Orchestrate 2/4: gate and approve user hooks | `feat(agent-mode): review and trust global Codex hooks in the first-turn gate` |
-| 3. Show hook source and matcher at approval; source-neutral copy | pending | | |
+| 3. Show hook source and matcher at approval; source-neutral copy | done | pair · Orchestrate 3/4: consent metadata and copy | `feat(agent-mode): show hook source and matcher when approving Codex hooks` |
+| 3b. Show hook approvals in the default MCP `agent_run` text | pending | | |
 | 4. Current docs and ADR | pending | | |
 | 5. Debug-app acceptance run | pending | | |
 
@@ -25,3 +26,11 @@ Make the bundled Codex that RepoPrompt CE launches run the user's global Codex h
 - Decision: the uncalled test SPI `test_gateFirstTurnForProjectHooks` is deleted instead of renamed. The gate test drives the real send path. Source: approved plan.
 - Decision: if every summarized warning is blank, the notice leaves out the summary. Source: orchestrator judgment (an agent's choice, accepted).
 - Evidence: `CodexHookTrustTests` (2 passed) and `CodexHookGateTests` (2 passed). With the filter set back to project-only and the notice call removed, all four new tests fail. The 13 suites that use the changed test double all pass, among them `AgentRunStartupTicketTests` (38) and `AgentRunMCPToolServiceRespondDiagnosticsTests` (5). Format and lint were clean, and the correctness and refactor reviews found nothing to change.
+
+## 3. Show hook source and matcher at approval; source-neutral copy
+
+- Decision: hook metadata decodes the optional `matcher`. A missing key or null becomes nil, a string is kept exactly, and any other type is rejected. The schema contract lists `data[].hooks[].matcher` as optional and nullable, as the Codex 0.159.0 schema reports it. Source: approved plan.
+- Decision: the review hook carries the raw `source` and `matcher`, and one `sourceLabel` ("Global (user)", "Project (project)") and one `matcherDisplay` feed both the card and the MCP interaction. The reported `sourcePath` is shown unchanged. Source: approved plan.
+- Decision: every hook-approval string says "Codex hooks" rather than "project hooks", and the card says global hooks are edited in `~/.codex/hooks.json`. Raw identifiers, settings keys, response parsing, and request identity are unchanged. Source: approved plan.
+- Evidence: `CodexHookTrustTests` (3), `CodexHookGateTests` (2), `AgentRunMCPToolServiceRespondDiagnosticsTests` (6), `CodexHookReviewCardStateTests` (4), and `AppSettingsMCPServiceAgentModeSettingsTests` (9) pass. The decode and MCP snapshot tests fail when the decoder trims the matcher or the details show the raw source. `make dev-codex-schema-check` checks against the Codex on `PATH`, which is 0.166.0. `Scripts/check_codex_app_server_schema.py` run directly against the bundled 0.159.0 also passes, with 45 methods, 196 parameter paths, and 94 response paths. Format and lint were clean, and the correctness and refactor reviews found nothing to change.
+- Deferred: the default `agent_run` text showed none of these details, because `ToolOutputFormatter` had no `hook_approval` case. That predates this branch; item 3b fixes it.

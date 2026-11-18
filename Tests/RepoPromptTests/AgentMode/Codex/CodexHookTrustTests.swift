@@ -46,6 +46,55 @@ final class CodexHookTrustTests: XCTestCase {
         )
     }
 
+    /// The approval surfaces show the matcher and the command a user is asked to trust, so decoding
+    /// must keep both byte for byte at any length, and keep an empty matcher distinct from none.
+    func testDecodePreservesFullApprovalMetadata() throws {
+        // Longer than the 1,024-character command and 512-character matcher caps an earlier upstream
+        // design applied, with edge whitespace and a decomposed character that trimming or
+        // Unicode normalization would change.
+        let command = " rtk hook codex --label \"Cafe\u{301}\"\n" + String(repeating: "--flag ", count: 300)
+        let matcher = " ^(Bash|Shell)$|Cafe\u{301}|" + String(repeating: "Tool|", count: 200) + "\n"
+        var full = try Self.protocolHook(Self.hook(source: "user", key: "a:full", trustStatus: .untrusted))
+        full["command"] = command
+        full["matcher"] = matcher
+        var empty = try Self.protocolHook(Self.hook(source: "user", key: "b:empty", trustStatus: .untrusted))
+        empty["matcher"] = ""
+        var null = try Self.protocolHook(Self.hook(source: "project", key: "c:null", trustStatus: .untrusted))
+        null["matcher"] = NSNull()
+        var missing = try Self.protocolHook(Self.hook(source: "project", key: "d:missing", trustStatus: .untrusted))
+        missing.removeValue(forKey: "matcher")
+
+        let inventory = try CodexHookInventory.decode(
+            result: Self.listResult(hooks: [full, empty, null, missing]),
+            executionCWD: Self.executionCWD
+        )
+
+        XCTAssertEqual(inventory.hooks.map(\.key), ["a:full", "b:empty", "c:null", "d:missing"])
+        let decodedFull = try XCTUnwrap(inventory.hooks.first)
+        XCTAssertEqual(decodedFull.commandOrHandler.map { Array($0.utf8) }, Array(command.utf8))
+        XCTAssertEqual(decodedFull.matcher.map { Array($0.utf8) }, Array(matcher.utf8))
+        XCTAssertEqual(inventory.hooks[1].matcher, "")
+        XCTAssertNil(inventory.hooks[2].matcher)
+        XCTAssertNil(inventory.hooks[3].matcher)
+
+        let invalidMatchers: [Any] = [1, true, ["Bash"]]
+        for invalid in invalidMatchers {
+            var malformed = full
+            malformed["matcher"] = invalid
+            XCTAssertThrowsError(
+                try CodexHookInventory.decode(
+                    result: Self.listResult(hooks: [malformed]),
+                    executionCWD: Self.executionCWD
+                ),
+                "matcher \(invalid) was accepted"
+            ) { error in
+                guard case .malformedListResponse = error as? CodexHookTrustError else {
+                    return XCTFail("expected malformedListResponse, got \(error)")
+                }
+            }
+        }
+    }
+
     func testTrustWritesOnlyValidatedSelections() async throws {
         let userKey = "/codex-home/hooks.json:pre_tool_use:0:0"
         let untrustedUser = try Self.hook(source: "user", key: userKey, trustStatus: .untrusted)
@@ -130,14 +179,7 @@ final class CodexHookTrustTests: XCTestCase {
                 throw CodexHookTrustService.RequestError.unsupportedMethod
             }
             let hooks = lock.withLock { recordedMutations.isEmpty ? beforeWrite : afterWrite }
-            return [
-                "data": [[
-                    "cwd": CodexHookTrustTests.executionCWD,
-                    "hooks": hooks.map(CodexHookTrustTests.protocolHook),
-                    "errors": [String](),
-                    "warnings": [String]()
-                ]]
-            ]
+            return CodexHookTrustTests.listResult(hooks: hooks.map(CodexHookTrustTests.protocolHook))
         }
 
         func mutate(method: String, params: [String: Any]?) -> CodexHookTrustMutationSettlement {
@@ -180,7 +222,20 @@ final class CodexHookTrustTests: XCTestCase {
             "enabled": hook.enabled,
             "trustStatus": hook.trustStatus.rawValue,
             "handlerType": hook.handlerType,
-            "command": hook.commandOrHandler ?? NSNull()
+            "command": hook.commandOrHandler ?? NSNull(),
+            "matcher": hook.matcher ?? NSNull()
+        ]
+    }
+
+    /// A `hooks/list` result for the suite's execution directory with no diagnostics.
+    private static func listResult(hooks: [[String: Any]]) -> [String: Any] {
+        [
+            "data": [[
+                "cwd": executionCWD,
+                "hooks": hooks,
+                "errors": [String](),
+                "warnings": [String]()
+            ]]
         ]
     }
 }

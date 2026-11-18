@@ -1177,8 +1177,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 throw AgentCodexHookReviewResolutionError.strictModeRequiresApproval
             }
             let skippedCount = request.phase == .discoveryFailed ? nil : request.hooks.count
-            let skippedDescription = skippedCount.map { "\($0) Codex project hook(s)" }
-                ?? "an unknown number of Codex project hooks"
+            let skippedDescription = skippedCount.map { "\($0) Codex hook(s)" }
+                ?? "an unknown number of Codex hooks"
             completeCodexHookReview(
                 session: session,
                 request: request,
@@ -1186,7 +1186,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 status: .continuedWithoutHooks,
                 approvedCount: 0,
                 skippedCount: skippedCount,
-                notice: "Continued without trusting \(skippedDescription). The hooks remain untrusted for this controller binding."
+                notice: "Continued without trusting \(skippedDescription). This decision does not disable already trusted or managed hooks."
             )
 
         case .retryDiscovery:
@@ -1332,7 +1332,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 status: status,
                 approvedCount: candidates.count,
                 skippedCount: selectionSkippedCount,
-                notice: "Trusted \(candidates.count) Codex project hook(s); \(verifiedUnresolvedIdentities.count) remain untrusted for this controller binding."
+                notice: "Trusted \(candidates.count) Codex hook(s); \(verifiedUnresolvedIdentities.count) remain unresolved for this controller binding."
             )
         } catch is CancellationError {
             guard session.codexHookGateAttemptToken == token else { return }
@@ -1390,7 +1390,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 status: .resolvedExternally,
                 approvedCount: 0,
                 skippedCount: 0,
-                notice: "Codex project hooks were resolved externally after the review was shown."
+                notice: "Codex hooks were resolved externally after the review was shown."
             )
             return
         }

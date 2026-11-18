@@ -177,10 +177,83 @@ final class AgentRunMCPToolServiceRespondDiagnosticsTests: XCTestCase {
             "HOOK_PATH_SENTINEL",
             "HOOK_HASH_SENTINEL",
             "HOOK_COMMAND_SENTINEL",
+            "HOOK_MATCHER_SENTINEL",
             "HOOK_ERROR_SENTINEL"
         ] {
             XCTAssertFalse(expectedMessage.contains(sentinel), sentinel)
         }
+    }
+
+    /// An agent approving through MCP sees each hook's source, path, matcher, and full command as
+    /// the review card does, under the unchanged interaction kind, action, and answer identifiers.
+    func testHookApprovalSnapshotPreservesGlobalMetadata() async throws {
+        let fixture = try await ControlledApprovalSessionFixture.make()
+        addTeardownBlock { @MainActor in await fixture.cleanup() }
+        let home = "/Users/example/Library/Application Support/RepoPrompt CE/Codex/Release/home"
+        let globalKey = "\(home)/hooks.json:pre_tool_use:0:0"
+        let projectKey = "/workspace/repo/.codex/hooks.json:stop:0:0"
+        let command = "rtk hook codex\n" + String(repeating: "--flag ", count: 300)
+        let request = try fixture.installHookApprovalReview(hooks: [
+            CodexHookMetadata(
+                eventName: "preToolUse",
+                source: "user",
+                sourcePath: "\(home)/hooks.json",
+                key: globalKey,
+                currentHash: "sha256:global",
+                enabled: true,
+                handlerType: "command",
+                trustStatus: .untrusted,
+                commandOrHandler: command,
+                matcher: "Bash"
+            ),
+            CodexHookMetadata(
+                eventName: "stop",
+                source: "project",
+                sourcePath: "/workspace/repo/.codex/hooks.json",
+                key: projectKey,
+                currentHash: "sha256:project",
+                enabled: true,
+                handlerType: "command",
+                trustStatus: .modified,
+                commandOrHandler: "./guard.sh"
+            )
+        ])
+
+        let snapshot = try await fixture.service.execute(args: [
+            "op": .string("poll"),
+            "session_id": .string(fixture.sessionID.uuidString)
+        ])
+
+        let interaction = try XCTUnwrap(snapshot.objectValue?["interaction"]?.objectValue)
+        XCTAssertEqual(interaction["id"]?.stringValue, request.id.uuidString)
+        XCTAssertEqual(interaction["kind"]?.stringValue, "hook_approval")
+        XCTAssertEqual(interaction["response_type"]?.stringValue, "decision")
+        let actions = (interaction["options"]?.arrayValue ?? []).compactMap { $0.objectValue?["label"]?.stringValue }
+        XCTAssertEqual(Array(actions.prefix(2)), ["approve_selected", "trust_all"])
+        let field = try XCTUnwrap(interaction["fields"]?.arrayValue?.first?.objectValue)
+        XCTAssertEqual(field["id"]?.stringValue, "hook_keys")
+        XCTAssertEqual(
+            (field["options"]?.arrayValue ?? []).compactMap { $0.objectValue?["label"]?.stringValue },
+            [globalKey, projectKey]
+        )
+
+        var details: [String: String] = [:]
+        for detail in interaction["details"]?.arrayValue ?? [] {
+            if let label = detail.objectValue?["label"]?.stringValue,
+               let value = detail.objectValue?["value"]?.stringValue
+            {
+                details[label] = value
+            }
+        }
+        XCTAssertEqual(details["Hook 1 Key"], globalKey)
+        XCTAssertEqual(details["Hook 1 Source"], "Global (user)")
+        XCTAssertEqual(details["Hook 1 Source Path"], "\(home)/hooks.json")
+        XCTAssertEqual(details["Hook 1 Matcher"], "Bash")
+        XCTAssertEqual(details["Hook 1 Command / Handler"], command)
+        XCTAssertEqual(details["Hook 2 Key"], projectKey)
+        XCTAssertEqual(details["Hook 2 Source"], "Project (project)")
+        XCTAssertEqual(details["Hook 2 Source Path"], "/workspace/repo/.codex/hooks.json")
+        XCTAssertEqual(details["Hook 2 Matcher"], "Not provided by Codex")
     }
 
     private func assertInvalidParams(
@@ -294,27 +367,43 @@ final class AgentRunMCPToolServiceRespondDiagnosticsTests: XCTestCase {
         func installHookApprovalPrivacySentinels() throws -> UUID {
             let metadata = try CodexHookMetadata(
                 eventName: "PreToolUse",
-                source: "project",
+                source: "user",
                 sourcePath: "/private/HOOK_PATH_SENTINEL",
                 key: "HOOK_KEY_SENTINEL",
                 currentHash: "HOOK_HASH_SENTINEL",
                 enabled: true,
                 handlerType: "command",
                 trustStatus: .untrusted,
-                commandOrHandler: "HOOK_COMMAND_SENTINEL"
+                commandOrHandler: "HOOK_COMMAND_SENTINEL",
+                matcher: "HOOK_MATCHER_SENTINEL"
             )
+            return installHookApprovalReview(
+                hooks: [metadata],
+                executionCWD: "/private/HOOK_PATH_SENTINEL",
+                phase: .writeFailed,
+                errorMessage: "HOOK_ERROR_SENTINEL"
+            ).id
+        }
+
+        @discardableResult
+        func installHookApprovalReview(
+            hooks: [CodexHookMetadata],
+            executionCWD: String = "/workspace/repo",
+            phase: AgentCodexHookReviewRequest.Phase = .reviewRequired,
+            errorMessage: String? = nil
+        ) -> AgentCodexHookReviewRequest {
             let request = AgentCodexHookReviewRequest(
                 tabID: session.tabID,
                 runAttemptID: nil,
                 runID: nil,
-                executionCWD: "/private/HOOK_PATH_SENTINEL",
-                hooks: [AgentCodexHookReviewHook(metadata: metadata)],
-                phase: .writeFailed,
-                errorMessage: "HOOK_ERROR_SENTINEL",
+                executionCWD: executionCWD,
+                hooks: hooks.map(AgentCodexHookReviewHook.init(metadata:)),
+                phase: phase,
+                errorMessage: errorMessage,
                 gateGeneration: 1
             )
             session.pendingCodexHookReview = request
-            return request.id
+            return request
         }
 
         @discardableResult
