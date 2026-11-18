@@ -206,14 +206,23 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         let firstConnection = try await harness.connectDirectly()
         try await listAppTools(id: 1, harness: harness, connection: firstConnection)
 
-        // Quitting, the app announces that its tools changed and closes. The client re-lists, as
-        // Claude Code does, and must keep the tools so its next call reaches the helper.
+        // Quitting, the app announces that its tools changed, answers the client's re-list with
+        // part of its catalog, and closes. The client must get every tool back from the helper, so
+        // its next call reaches the helper instead of failing in the client as an unknown tool.
         try firstConnection.send(["jsonrpc": "2.0", "method": ToolListChangedNotification.name])
-        let changed = try await harness.client.readMessage()
-        XCTAssertEqual(changed["method"] as? String, ToolListChangedNotification.name)
+        let appChanged = try await harness.client.readMessage()
+        XCTAssertEqual(appChanged["method"] as? String, ToolListChangedNotification.name)
+        try harness.client.send(["jsonrpc": "2.0", "id": 2, "method": "tools/list"])
+        let relist = try await firstConnection.readMessage()
+        XCTAssertEqual(relist["id"] as? Int, 2)
+        try firstConnection.send(["jsonrpc": "2.0", "id": 2, "result": quittingAppToolListResult])
+        let partialList = try await harness.client.readMessage()
+        XCTAssertEqual(partialList["result"] as? NSDictionary, quittingAppToolListResult as NSDictionary)
         harness.quitApp()
         _ = try await harness.phases.first(where: { $0 == .outage }, "the outage")
         // The retry gate stays closed, so these answers can't depend on a reconnect attempt.
+        let helperChanged = try await harness.client.readMessage()
+        XCTAssertEqual(helperChanged["method"] as? String, ToolListChangedNotification.name)
         let list = try await harness.client.request(["jsonrpc": "2.0", "id": 4, "method": "tools/list"])
         XCTAssertEqual(list["result"] as? NSDictionary, appToolListResult as NSDictionary)
         let call = try await harness.client.request(toolCall(id: 5, name: "apply_edits"))
@@ -302,7 +311,10 @@ final class MCPProxyOfflineStartupTests: XCTestCase {
         _ = try await harness.phases.first(where: { $0 == .outage }, "the outage")
         _ = try await harness.graceGate.started.first(where: { $0 == 1 }, "the grace wait")
 
-        // A held call gets the named error; a held list gets the tools the app last listed.
+        // The helper's list_changed comes first. Then a held call gets the named error, and a held
+        // list gets the tools the app listed.
+        let changed = try await harness.client.readMessage()
+        XCTAssertEqual(changed["method"] as? String, ToolListChangedNotification.name)
         harness.graceGate.open()
         let expired = try await harness.client.readMessage()
         XCTAssertEqual(expired["id"] as? Int, 7)
@@ -577,6 +589,11 @@ private let appToolListResult: [String: Any] = [
         ["name": "get_file_tree", "inputSchema": ["type": "object"], "futureField": ["kept": true]],
         ["name": "apply_edits", "inputSchema": ["type": "object"]]
     ]
+]
+
+/// What an app that is quitting answers a re-list with: part of its catalog.
+private let quittingAppToolListResult: [String: Any] = [
+    "tools": [["name": "get_file_tree", "inputSchema": ["type": "object"]]]
 ]
 
 private func toolCall(id: Int, name: String, arguments: [String: Any] = [:]) -> [String: Any] {

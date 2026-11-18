@@ -506,12 +506,13 @@ struct MCPProxySession {
         }
 
         let ledger = client.bridgeLedger
-        // The app's list changes only while the bridge relays, so it stays the same while the loop runs.
-        var responder = await MCPOfflineResponder(
+        // The remembered list changes only while the bridge relays, so it stays the same while the loop runs.
+        let appToolList = await client.outstandingRequestReplayState.rememberedToolListResult()
+        var responder = MCPOfflineResponder(
             identity: identity,
             serverVersion: serverVersion,
             initializeAnswered: handshake == .initialized,
-            appToolList: client.outstandingRequestReplayState.lastCompleteToolListResult()
+            appToolList: appToolList
         )
         if case let .awaitingResult(initializeFrame) = handshake {
             // The app went away before answering the client's initialize. Answering it here, as at
@@ -522,7 +523,7 @@ struct MCPProxySession {
                 connectionMessage: attachment.connectionMessage(identity: identity)
             )
             if let response = outcome.response {
-                try await deliverLocalResponse(response, attachment: attachment)
+                try await deliverLocalFrame(response, attachment: attachment)
             }
             // A rejected initialize stays the session's cached handshake, which the app can never
             // admit, so the worker would never start. End the session instead of answering forever.
@@ -532,6 +533,13 @@ struct MCPProxySession {
                 )
                 throw CLIRuntimeError.connectionFailed(underlying: JSONRPCBridgeLedgerError.terminal(reason))
             }
+        }
+        // A list is remembered only once the app has relayed one, so this runs only in an outage.
+        // The client may hold part of the catalog from the app's last answer; announcing a change
+        // makes it re-list from the helper. It goes out before any answer to a held request, which
+        // waits for a frame boundary.
+        if appToolList != nil {
+            try await deliverLocalFrame(Self.toolsListChangedNotification, attachment: attachment)
         }
         return try await MCPProxyStdinPump.run(
             stdinFD: stdinFD,
@@ -577,7 +585,7 @@ struct MCPProxySession {
                 await client.outstandingRequestReplayState.recordClientCancellation(for: cancelledID)
             }
             if let response = outcome.response {
-                try await deliverLocalResponse(response, attachment: attachment)
+                try await deliverLocalFrame(response, attachment: attachment)
             }
         }
     }
@@ -586,7 +594,7 @@ struct MCPProxySession {
     /// ran out. The delivered answer takes the request out of replay, so it never runs later.
     private func answerHeldRequests(attachment: MCPProxyAttachmentState) async throws {
         let replayState = client.outstandingRequestReplayState
-        let appToolList = await replayState.lastCompleteToolListResult()
+        let appToolList = await replayState.rememberedToolListResult()
         for frame in await replayState.replayFrames() {
             guard let response = try MCPOfflineResponder.unavailableResponse(
                 toForwardedRequest: frame,
@@ -595,14 +603,16 @@ struct MCPProxySession {
             ) else {
                 continue
             }
-            try await deliverLocalResponse(response, attachment: attachment)
+            try await deliverLocalFrame(response, attachment: attachment)
         }
     }
 
-    private func deliverLocalResponse(_ response: Data, attachment: MCPProxyAttachmentState) async throws {
+    /// Writes a frame the helper sends on the app's behalf to the client, through the ledger as
+    /// the bridge writes the app's frames.
+    private func deliverLocalFrame(_ frame: Data, attachment: MCPProxyAttachmentState) async throws {
         let stdoutFD = stdoutFD
         let prepared = try await JSONRPCBridgeDelivery.forward(
-            frame: response,
+            frame: frame,
             direction: .serverToClient,
             ledger: client.bridgeLedger,
             faultRule: faultRule
@@ -701,6 +711,7 @@ struct MCPProxySession {
         _ proxy: BootstrapSocketProxy,
         _ body: () async throws -> Void
     ) async throws -> MCPProxyBridgeInterruption {
+        await client.outstandingRequestReplayState.beginAttachment()
         do {
             try await body()
         } catch let interruption as MCPProxyBridgeInterruption {

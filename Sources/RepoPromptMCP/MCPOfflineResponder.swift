@@ -9,7 +9,7 @@ import RepoPromptShared
 /// It never executes or queues a request: a `tools/call` always fails with the connection message,
 /// so a call made while the app is away cannot run later when the app returns. It is a protocol
 /// table, not a second implementation of the app's tools, catalog, or instructions: the only tools
-/// it lists are the ones the app last listed, repeated as the app sent them.
+/// it lists are ones the app listed, repeated as the app sent them.
 struct MCPOfflineResponder {
     struct Outcome: Equatable {
         /// The newline-terminated frame to write to the client, if the input calls for one.
@@ -29,7 +29,7 @@ struct MCPOfflineResponder {
     /// - Parameters:
     ///   - initializeAnswered: Pass `true` when the client already has an initialize result, as when
     ///     the helper answers again after the app disconnects mid-session.
-    ///   - appToolList: The result of the app's last complete `tools/list`, which a `tools/list`
+    ///   - appToolList: The result of a complete `tools/list` the app answered, which a `tools/list`
     ///     gets in its place, so the client keeps those tools while the app is away. Nil lists none.
     init(
         identity: MCPFilesystemIdentity,
@@ -61,10 +61,10 @@ struct MCPOfflineResponder {
 
     /// The answer to a request that reached the app before it went away and was held for replay,
     /// once the helper stops waiting for the app to return. A `tools/call` gets an error result the
-    /// model can read, and a `tools/list` gets the app's last complete list when there is one. Any
-    /// other request gets the server error that `prompts/get` gets offline.
+    /// model can read, and a `tools/list` gets the app's complete list when there is one. Any other
+    /// request gets the server error that `prompts/get` gets offline.
     ///
-    /// - Parameter appToolList: The result of the app's last complete `tools/list`, if any.
+    /// - Parameter appToolList: The result of a complete `tools/list` the app answered, if any.
     /// - Returns: Nil when the frame is not a single request with a method and an id.
     static func unavailableResponse(
         toForwardedRequest frame: Data,

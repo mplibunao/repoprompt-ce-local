@@ -74,8 +74,9 @@ final class PersistentMCPResponseDeliveryTests: XCTestCase {
     }
 
     /// The helper answers `tools/list` with the remembered list while the app is away, so only a
-    /// reply that lists every tool may replace it.
-    func testOutstandingReplayStateRemembersTheAppsLastCompleteToolList() async throws {
+    /// reply that lists every tool may replace it, and within one attachment only one that lists at
+    /// least as many tools.
+    func testOutstandingReplayStateRemembersACompleteToolListThatShrinksOnlyAtAttachment() async throws {
         let ledger = JSONRPCBridgeLedger(connectionID: "tool-list-memory-test")
         _ = try await ledger.beginConnection()
         let replayState = MCPOutstandingRequestReplayState()
@@ -90,7 +91,7 @@ final class PersistentMCPResponseDeliveryTests: XCTestCase {
             let delivered = try XCTUnwrap(preparedResponse.deliveryFrame)
             await replayState.recordDeliveredServerFrame(delivered, prepared: preparedResponse)
         }
-        let initial = await replayState.lastCompleteToolListResult()
+        let initial = await replayState.rememberedToolListResult()
         XCTAssertNil(initial)
 
         try await exchange(
@@ -102,10 +103,10 @@ final class PersistentMCPResponseDeliveryTests: XCTestCase {
             #"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"b"}]}}"#
         )
         let latest = try JSONDecoder().decode(Value.self, from: Data(#"{"tools":[{"name":"b"}]}"#.utf8))
-        let afterNewerList = await replayState.lastCompleteToolListResult()
-        XCTAssertEqual(afterNewerList, latest, "a newer complete list replaces the older one")
+        let afterNewerList = await replayState.rememberedToolListResult()
+        XCTAssertEqual(afterNewerList, latest, "a newer complete list as long as the older one replaces it")
 
-        let incomplete: [(label: String, request: String, response: String)] = [
+        let ignored: [(label: String, request: String, response: String)] = [
             (
                 "a later page",
                 #"{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"cursor":"page-2"}}"#,
@@ -130,13 +131,29 @@ final class PersistentMCPResponseDeliveryTests: XCTestCase {
                 "a reply to another list method",
                 #"{"jsonrpc":"2.0","id":7,"method":"prompts/list"}"#,
                 #"{"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"f"}]}}"#
+            ),
+            (
+                "a shorter list in the same attachment",
+                #"{"jsonrpc":"2.0","id":8,"method":"tools/list"}"#,
+                #"{"jsonrpc":"2.0","id":8,"result":{"tools":[]}}"#
             )
         ]
-        for row in incomplete {
+        for row in ignored {
             try await exchange(row.request, row.response)
-            let remembered = await replayState.lastCompleteToolListResult()
+            let remembered = await replayState.rememberedToolListResult()
             XCTAssertEqual(remembered, latest, row.label)
         }
+
+        // A new attachment keeps the list until the app lists again, and then takes the app's list.
+        await replayState.beginAttachment()
+        let afterAttachment = await replayState.rememberedToolListResult()
+        XCTAssertEqual(afterAttachment, latest, "a new attachment keeps the list until the app lists again")
+        try await exchange(
+            #"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#,
+            #"{"jsonrpc":"2.0","id":9,"result":{"tools":[]}}"#
+        )
+        let afterReattachedList = await replayState.rememberedToolListResult()
+        XCTAssertEqual(afterReattachedList, .object(["tools": .array([])]), "the first list after an attachment replaces a longer one")
     }
 
     func testInitializeReplayStateReportsUnsupportedResumeReasons() async throws {

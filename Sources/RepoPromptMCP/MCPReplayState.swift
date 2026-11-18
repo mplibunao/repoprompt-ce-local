@@ -119,7 +119,7 @@ actor MCPInitializeReplayState {
 }
 
 /// Requests the app received and has not answered, kept so a later connection can replay them,
-/// and the last complete tool list the app answered one of them with.
+/// and a complete tool list the app answered one of them with.
 actor MCPOutstandingRequestReplayState {
     private struct EntryKey: Hashable {
         let id: JSONRPCBridgeID
@@ -132,9 +132,16 @@ actor MCPOutstandingRequestReplayState {
         var frame: Data
     }
 
+    private struct RememberedToolList {
+        let result: Value
+        let toolCount: Int
+        /// False from the start of a later attachment until the app lists its tools on it.
+        var isFromCurrentAttachment: Bool
+    }
+
     private var nextFallbackOrdinal: UInt64 = 0
     private var entries: [EntryKey: Entry] = [:]
-    private var lastCompleteToolList: Value?
+    private var rememberedToolList: RememberedToolList?
 
     func recordForwardedClientFrame(
         _ frame: Data,
@@ -208,17 +215,27 @@ actor MCPOutstandingRequestReplayState {
             .map(\.frame)
     }
 
-    /// The `result` of the last `tools/list` the app answered with every tool: a reply to a single
-    /// request without a cursor whose result has no `nextCursor`. The helper answers `tools/list`
-    /// with it while the app is away, so the client keeps the tools it last listed. Nil until the
-    /// app has answered one.
-    func lastCompleteToolListResult() -> Value? {
-        lastCompleteToolList
+    /// Records that the helper is connecting to the app again. The app's first complete tool list
+    /// on the new connection replaces the remembered one even when it is shorter, because the app
+    /// may have changed its catalog while it was away. Until then the remembered list stays.
+    func beginAttachment() {
+        rememberedToolList?.isFromCurrentAttachment = false
+    }
+
+    /// The `result` of a `tools/list` the app answered with every tool: a reply to a single request
+    /// without a cursor whose result has no `nextCursor`. The helper answers `tools/list` with it
+    /// while the app is away, so the client keeps the app's tools. Nil until the app has answered one.
+    func rememberedToolListResult() -> Value? {
+        rememberedToolList?.result
     }
 
     /// Keeps the frame's result when it answers a recorded `tools/list` with the whole catalog. The
     /// result is kept as generic JSON, so fields this helper's SDK doesn't know survive, as they do
     /// when the app's SDK is newer than the helper's.
+    ///
+    /// Within one attachment the remembered list never shrinks: an app that is quitting can answer
+    /// a re-list with part of its catalog before it closes the socket, and the helper would then
+    /// list only that part for the whole outage.
     private func rememberCompleteToolList(_ frame: Data, answering message: JSONRPCBridgeMessageMetadata) {
         guard message.method == ListTools.name,
               let id = message.id,
@@ -228,12 +245,19 @@ actor MCPOutstandingRequestReplayState {
               case let .object(response)? = try? JSONDecoder().decode(Value.self, from: frame),
               response["error"] == nil,
               case let .object(result)? = response["result"],
-              case .array? = result["tools"],
+              case let .array(tools)? = result["tools"],
               (result["nextCursor"] ?? .null) == .null
         else {
             return
         }
-        lastCompleteToolList = .object(result)
+        if let remembered = rememberedToolList, remembered.isFromCurrentAttachment, tools.count < remembered.toolCount {
+            return
+        }
+        rememberedToolList = RememberedToolList(
+            result: .object(result),
+            toolCount: tools.count,
+            isFromCurrentAttachment: true
+        )
     }
 
     /// True when a list request asks for a page after the first.
