@@ -533,7 +533,16 @@ the floor proves. Bundled and external runtimes both use RepoPrompt-owned `CODEX
 and `CODEX_SQLITE_HOME` directories in the build flavor's profile,
 `~/Library/Application Support/RepoPrompt CE/Codex/Release/` for release and
 `~/Library/Application Support/RepoPrompt CE Debug/Codex/Debug/` for debug, leaving
-`~/.codex` and official Codex App state untouched.
+`~/.codex` and official Codex App state unmodified. On each launch RepoPrompt reads three global
+files from `~/.codex` (`AGENTS.override.md`, `AGENTS.md`, and `hooks.json`) into the
+RepoPrompt-owned `CODEX_HOME` and never writes to `~/.codex`. Codex stores hook trust in that
+home's `config.toml`, separate from `~/.codex`, so approving a global hook enables it for every
+Codex session in that build profile. Edit global hooks in `~/.codex/hooks.json`, never in the copy
+in the RepoPrompt-owned home, because a copy edited to match neither the last copied version nor
+`~/.codex/hooks.json` fails every Codex launch. Hook commands run
+with the RepoPrompt-owned `CODEX_HOME`, so a path under `$CODEX_HOME` doesn't resolve to
+`~/.codex`.
+[The ADR](adr/2026-11-18-codex-global-hooks-in-isolated-home.md) records the decision.
 
 Within that isolated `config.toml`, RepoPrompt owns the `[mcp_servers.RepoPromptCE]`
 launch/policy keys, the managed global tool-output limit, and exactly
