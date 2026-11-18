@@ -21,9 +21,9 @@ consumes at its current integration boundary.
 
 ## Version contract
 
-- The contract floor is **Codex CLI 0.164.0**.
-- Local validation accepts 0.164.0 or newer so a developer can detect drift before CI moves.
-- CI installs exactly `@openai/codex@0.164.0`, making the required check deterministic.
+- The contract floor is **Codex CLI 0.170.0**.
+- Local validation accepts 0.170.0 or newer so a developer can detect drift before CI moves.
+- CI installs exactly `@openai/codex@0.170.0`, making the required check deterministic.
 - The gate fails before generation when the installed CLI is older than the floor.
 
 This schema baseline and exact CI pin are distinct from
@@ -65,7 +65,7 @@ hook-key → `{trusted_hash}` object shape cannot be expressed by the current ch
 After a trust write, the post-write `hooks/list` result is the semantic success authority;
 `config/batchWrite.status` alone is not.
 
-The current 0.164.0 baseline checks 45 methods, 196 parameter paths, and 93 response paths. A failure names
+The current 0.170.0 baseline checks 45 methods, 196 parameter paths, and 93 response paths. A failure names
 the union, method, and exact missing field, required field, response path, or enum value.
 
 This is intentionally not a complete protocol mirror. New upstream methods do not fail the gate
@@ -359,6 +359,82 @@ is fetched.
 ran it), voice capture, command and terminal-input approvals on 0.164.0, the Developer ID
 re-signing path, staging both targets inside one universal app bundle, a model-list fetch that
 bypasses Codex's model cache, and accounts other than the one used for validation.
+
+## 0.170.0 rotation findings (2026-11-18)
+
+This rotation moves the bundled runtime from 0.164.0 to `rust-v0.170.0`.
+
+**Official artifacts.** The repository candidate flow verified both official macOS packages in
+official online mode. Both packages add a standalone `bin/codex-exec-server` executable, and
+`codex-package.json` gains an `execServer` field naming it. That is the only layout change:
+each target goes from 49 to 50 tree entries and from 29 to 30 thin Mach-Os. Against the
+unchanged manifest the candidate tool failed on exactly that path. The candidate passed against
+a manifest that declared the helper as a third primary executable, as
+[`docs/releasing.md`](../releasing.md) describes for an added entry. `OpenAI OpCo, LLC` (team
+`2DC432GLL2`) signs the helper with hardened runtime and a trusted timestamp. The helper has no
+entitlements, and its release-signing profile is empty. The 29 existing Mach-Os keep their
+signing identities and entitlements. Only `codex-path/rg` keeps its normalized payload digest.
+Upstream `LICENSE` and `NOTICE` and the packaged voice notice and licences are byte-identical to
+0.164.0. The packaged voice source manifest records PCRE2 10.48 in place of 10.47.
+
+**Bounded schema.** The exact verified 0.170.0 CLI passes the bounded experimental projection
+unchanged at 45 methods, 196 parameter paths, and 93 response paths. A full generated-bundle
+comparison with verified 0.164.0 schemas (458 to 479 files) finds every method and definition
+still present. The parameter definitions for `initialize`, `thread/start`, `thread/resume`,
+`turn/start`, and `turn/steer`, and the `model/list` response, are identical. The changes
+include:
+
+- new client methods, among them `accountSession/list`, `modelProvider/list`,
+  `thread/memory/read`, `thread/guardianReview`, and `thread/prepareApprovedPlan`, and the
+  notification `thread/section/changed`, none of which RepoPrompt calls or handles;
+- optional fields RepoPrompt doesn't send or read, such as `requiredHumanApproval` on the
+  initialize capabilities, `modelProvider` on `model/list`, `environments` on settings updates,
+  `moderation` on agent messages, and `contentTokenCount` on completed items;
+- the command-approval kind `humanCommand`, which Codex sends only to a client that declares
+  `requiredHumanApproval`; RepoPrompt doesn't declare it, and it derives an approval's kind from
+  the request method;
+- the `CodexErrorInfo` values `modelNotFound`, `policyCapacityUnavailable`, and
+  `inferenceHookDenied`. The catch-all last member still accepts any string or object, and the
+  `activeTurnNotSteerable` variant whose `turnKind` RepoPrompt reads is identical;
+- removals outside RepoPrompt's boundary: the review delivery mode `detached` (RepoPrompt
+  doesn't call `review/start`) and the URL forms of audio input, which RepoPrompt doesn't send;
+- `HookRunSummary.sourcePath` changes from `AbsolutePathBuf` to `LegacyAppPathString`, both
+  strings. The `hooks/list` source path that RepoPrompt reads keeps its type.
+
+No new outgoing request requires 0.170.0, so the external admission minimum remains 0.149.0,
+while the schema contract and CI pin move to 0.170.0.
+
+**Model discovery.** This rotation exists for model discovery. On 2026-11-18, OpenAI's server
+sent GPT-6.2 Sol (`gpt-6.2-sol`) and GPT-6.2 Astra (`gpt-6.2-astra`) to Codex 0.166.0 but not
+to 0.159.0 or 0.164.0. The three model lists came from one ChatGPT account on that day; 0.165.0
+wasn't tried. The model catalog bundled in the 0.170.0 executable
+([`codex-rs/models-manager/models.json` at `rust-v0.170.0`](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/models-manager/models.json))
+adds `gpt-6.2-sol`, `gpt-6.2-astra`, and `gpt-6.1-terra`. Availability still comes from
+`model/list` and depends on the account, and the rotation doesn't add a static picker entry.
+
+**Old-thread continuity.** The live checks below used the debug app built from this rotation,
+whose packaged arm64 runtime reports `codex-cli 0.170.0`, with a validation account signed in
+through ChatGPT. A Codex thread that bundled 0.159.0 created on 2026-11-03 resumes on bundled
+0.170.0 as the same thread: a new GPT-6 Luna turn appends to that thread's rollout and
+completes, and the thread's recorded `cli_version` stays 0.159.0.
+
+**Start and the helper.** New Agent Mode threads on `gpt-6.2-sol`, `gpt-6.2-astra`, and
+`gpt-6.1-sol` at low effort each complete a turn, and each rollout records `cli_version` 0.170.0
+and the requested model in its turn context. A thread that calls a RepoPrompt tool and then runs
+`sleep 300` through its shell runs the command as a child of the app-server, beside
+`codex-code-mode-host`, and no `codex-exec-server` process starts. Quitting the debug app ends
+the app-server, the code-mode host, and the command.
+
+**Account discovery.** On 0.170.0, the model list Codex fetched for the validation account
+advertises `gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-6.1-terra`, `gpt-reserve`, `gpt-6.1-sol`,
+`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and
+`codex-auto-review`. These entries come from server discovery, not the bundled catalog, and
+depend on the account and on when the list is fetched.
+
+**Unverified.** x86_64 runtime behavior, voice capture, command and terminal-input approvals on
+0.170.0 (the live checks ran with full access), compaction on 0.170.0, any path that starts
+`codex-exec-server`, the Developer ID re-signing path, staging both targets inside one universal
+app bundle, and accounts other than the one used for validation.
 
 ## Files and tests
 

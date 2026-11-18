@@ -15,6 +15,16 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
     }
 
     private let openAIRows: [OpenAIRow] = [
+        .init(model: .gpt62Sol, raw: "gpt-6.2-sol", wireModel: "gpt-6.2-sol", effort: "medium", displayName: "GPT-6.2 Sol Med"),
+        .init(model: .gpt62SolLow, raw: "gpt-6.2-sol-low", wireModel: "gpt-6.2-sol", effort: "low", displayName: "GPT-6.2 Sol Low"),
+        .init(model: .gpt62SolHigh, raw: "gpt-6.2-sol-high", wireModel: "gpt-6.2-sol", effort: "high", displayName: "GPT-6.2 Sol High"),
+        .init(model: .gpt62SolXHigh, raw: "gpt-6.2-sol-xhigh", wireModel: "gpt-6.2-sol", effort: "xhigh", displayName: "GPT-6.2 Sol XHigh"),
+        .init(model: .gpt62SolMax, raw: "gpt-6.2-sol-max", wireModel: "gpt-6.2-sol", effort: "max", displayName: "GPT-6.2 Sol Max"),
+        .init(model: .gpt62Astra, raw: "gpt-6.2-astra", wireModel: "gpt-6.2-astra", effort: "medium", displayName: "GPT-6.2 Astra Med"),
+        .init(model: .gpt62AstraLow, raw: "gpt-6.2-astra-low", wireModel: "gpt-6.2-astra", effort: "low", displayName: "GPT-6.2 Astra Low"),
+        .init(model: .gpt62AstraHigh, raw: "gpt-6.2-astra-high", wireModel: "gpt-6.2-astra", effort: "high", displayName: "GPT-6.2 Astra High"),
+        .init(model: .gpt62AstraXHigh, raw: "gpt-6.2-astra-xhigh", wireModel: "gpt-6.2-astra", effort: "xhigh", displayName: "GPT-6.2 Astra XHigh"),
+        .init(model: .gpt62AstraMax, raw: "gpt-6.2-astra-max", wireModel: "gpt-6.2-astra", effort: "max", displayName: "GPT-6.2 Astra Max"),
         .init(model: .gpt61Sol, raw: "gpt-6.1-sol", wireModel: "gpt-6.1-sol", effort: "medium", displayName: "GPT-6.1 Sol Med"),
         .init(model: .gpt61SolLow, raw: "gpt-6.1-sol-low", wireModel: "gpt-6.1-sol", effort: "low", displayName: "GPT-6.1 Sol Low"),
         .init(model: .gpt61SolHigh, raw: "gpt-6.1-sol-high", wireModel: "gpt-6.1-sol", effort: "high", displayName: "GPT-6.1 Sol High"),
@@ -60,7 +70,10 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         }
 
         // The direct effort set has no Medium raw, no Ultra, and no Luna Max.
-        for raw in ["gpt-6.1-sol-medium", "gpt-6.1-sol-ultra", "gpt-6-astra-ultra", "gpt-6-luna-max", "gpt-6-sol-high"] {
+        for raw in [
+            "gpt-6.2-sol-medium", "gpt-6.2-astra-ultra",
+            "gpt-6.1-sol-medium", "gpt-6.1-sol-ultra", "gpt-6-astra-ultra", "gpt-6-luna-max", "gpt-6-sol-high"
+        ] {
             XCTAssertNil(AIModel.fromModelName(raw), raw)
         }
 
@@ -107,13 +120,14 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         // A configured deployment ID is authoritative, including one named exactly like a variant;
         // the catalog model behind it still supplies the effort.
         let configured = try azureProvider(models: [
-            .init(id: "prod-sol", displayName: "Prod Sol", baseModelID: "gpt-6.1-sol-xhigh"),
+            .init(id: "prod-sol", displayName: "Prod Sol", baseModelID: "gpt-6.2-sol-xhigh"),
             .init(id: "gpt-6.1-sol-high", baseModelID: "gpt-6.1-sol-high"),
+            .init(id: "gpt-6.2-astra-max", baseModelID: "gpt-6.2-astra-max"),
             .init(id: "gpt-6-astra-max", baseModelID: "gpt-6-astra-max"),
             .init(id: "gpt-6-luna-low", baseModelID: "gpt-6-luna-low")
         ])
-        try assertRoute(configured.requestRoute(for: .azureCustom(name: "prod-sol")), deploymentID: "prod-sol", row: XCTUnwrap(rowsByRaw["gpt-6.1-sol-xhigh"]))
-        for raw in ["gpt-6.1-sol-high", "gpt-6-astra-max", "gpt-6-luna-low"] {
+        try assertRoute(configured.requestRoute(for: .azureCustom(name: "prod-sol")), deploymentID: "prod-sol", row: XCTUnwrap(rowsByRaw["gpt-6.2-sol-xhigh"]))
+        for raw in ["gpt-6.1-sol-high", "gpt-6.2-astra-max", "gpt-6-astra-max", "gpt-6-luna-low"] {
             let row = try XCTUnwrap(rowsByRaw[raw])
             try assertRoute(configured.requestRoute(for: .azureCustom(name: raw)), deploymentID: raw, row: row)
         }
@@ -183,6 +197,8 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         XCTAssertEqual(AIModel.fromModelName("claude-sonnet-5-5:high"), .claudeCodeModel(specifier: "claude-sonnet-5-5:high"))
 
         let openRouterRows: [(AIModel, String, String)] = [
+            (.openrouterGpt62Sol, "openai/gpt-6.2-sol", "oRouter/GPT-6.2 Sol"),
+            (.openrouterGpt62Astra, "openai/gpt-6.2-astra", "oRouter/GPT-6.2 Astra"),
             (.openrouterGpt61Sol, "openai/gpt-6.1-sol", "oRouter/GPT-6.1 Sol"),
             (.openrouterGpt6Astra, "openai/gpt-6-astra", "oRouter/GPT-6 Astra"),
             (.openrouterGpt6Luna, "openai/gpt-6-luna", "oRouter/GPT-6 Luna"),
@@ -214,6 +230,8 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
     private let staticModels: [AIModel] = [
         .gpt41, .gpt5, .gpt5Low, .gpt5High, .gpt5XHigh,
         .gpt54, .gpt54Low, .gpt54High, .gpt54XHigh, .gpt54Mini, .gpt54MiniLow, .gpt54MiniHigh, .gpt54MiniXHigh, .gpt54Nano,
+        .gpt62Sol, .gpt62SolLow, .gpt62SolHigh, .gpt62SolXHigh, .gpt62SolMax,
+        .gpt62Astra, .gpt62AstraLow, .gpt62AstraHigh, .gpt62AstraXHigh, .gpt62AstraMax,
         .gpt61Sol, .gpt61SolLow, .gpt61SolHigh, .gpt61SolXHigh, .gpt61SolMax,
         .gpt6Astra, .gpt6AstraLow, .gpt6AstraHigh, .gpt6AstraXHigh, .gpt6AstraMax,
         .gpt6Luna, .gpt6LunaLow, .gpt6LunaHigh, .gpt6LunaXHigh, .gpt6Sol,
@@ -231,6 +249,7 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         .geminiFlashThinking, .geminiPro25, .gemini3p1ProPreview, .gemini3FlashPreview,
         .deepseekChat, .deepseekReasoner, .ollama,
         .openrouterDeepseekChat, .openrouterGpt5, .openrouterGeminiFlash, .openrouterGeminiPro, .openrouterClaude4Sonnet, .openrouterClaude4Opus,
+        .openrouterGpt62Sol, .openrouterGpt62Astra,
         .openrouterGpt61Sol, .openrouterGpt6Astra, .openrouterGpt6Luna, .openrouterClaudeSonnet55, .openrouterClaudeOpus55, .openrouterClaudeFable52, .openrouterClaudeFable51,
         .openrouterGeminiPro25,
         .fireworksDeepseekV3p1Terminus, .fireworksGLM46, .fireworksKimiK2Instruct0905, .fireworksGptOss120b,
@@ -250,6 +269,8 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
             false
         case .gpt41, .gpt5, .gpt5Low, .gpt5High, .gpt5XHigh,
              .gpt54, .gpt54Low, .gpt54High, .gpt54XHigh, .gpt54Mini, .gpt54MiniLow, .gpt54MiniHigh, .gpt54MiniXHigh, .gpt54Nano,
+             .gpt62Sol, .gpt62SolLow, .gpt62SolHigh, .gpt62SolXHigh, .gpt62SolMax,
+             .gpt62Astra, .gpt62AstraLow, .gpt62AstraHigh, .gpt62AstraXHigh, .gpt62AstraMax,
              .gpt61Sol, .gpt61SolLow, .gpt61SolHigh, .gpt61SolXHigh, .gpt61SolMax,
              .gpt6Astra, .gpt6AstraLow, .gpt6AstraHigh, .gpt6AstraXHigh, .gpt6AstraMax,
              .gpt6Luna, .gpt6LunaLow, .gpt6LunaHigh, .gpt6LunaXHigh, .gpt6Sol,
@@ -267,6 +288,7 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
              .geminiFlashThinking, .geminiPro25, .gemini3p1ProPreview, .gemini3FlashPreview,
              .deepseekChat, .deepseekReasoner, .ollama,
              .openrouterDeepseekChat, .openrouterGpt5, .openrouterGeminiFlash, .openrouterGeminiPro, .openrouterClaude4Sonnet, .openrouterClaude4Opus,
+             .openrouterGpt62Sol, .openrouterGpt62Astra,
              .openrouterGpt61Sol, .openrouterGpt6Astra, .openrouterGpt6Luna, .openrouterClaudeSonnet55, .openrouterClaudeOpus55, .openrouterClaudeFable52, .openrouterClaudeFable51,
              .openrouterGeminiPro25,
              .fireworksDeepseekV3p1Terminus, .fireworksGLM46, .fireworksKimiK2Instruct0905, .fireworksGptOss120b,
@@ -306,33 +328,48 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
 
     // MARK: - Priority hints
 
-    /// Each diff list's GPT-6.1 hints, in order, ahead of its GPT-5.6 CLI entries.
-    private let gpt61DiffHints: [(name: String, priorities: [AIModel], hints: [String])] = [
-        ("simple", AIModel.simpleDiffPriority, ["gpt-6.1-sol-medium", "gpt-6.1-sol-low", "gpt-6.1-sol-high"]),
-        ("medium", AIModel.mediumDiffPriority, ["gpt-6.1-sol-high", "gpt-6.1-sol-medium", "gpt-6.1-sol-low"]),
-        ("high", AIModel.highDiffPriority, ["gpt-6.1-sol-high", "gpt-6.1-sol-xhigh", "gpt-6.1-sol-medium"])
+    /// Each diff list's Codex hints, in order, ahead of its GPT-5.6 CLI entries: GPT-6.2 Sol, then GPT-6.1 Sol.
+    private let solDiffHints: [(name: String, priorities: [AIModel], gpt62: [String], gpt61: [String])] = [
+        (
+            "simple", AIModel.simpleDiffPriority,
+            ["gpt-6.2-sol-medium", "gpt-6.2-sol-low", "gpt-6.2-sol-high"],
+            ["gpt-6.1-sol-medium", "gpt-6.1-sol-low", "gpt-6.1-sol-high"]
+        ),
+        (
+            "medium", AIModel.mediumDiffPriority,
+            ["gpt-6.2-sol-high", "gpt-6.2-sol-medium", "gpt-6.2-sol-low"],
+            ["gpt-6.1-sol-high", "gpt-6.1-sol-medium", "gpt-6.1-sol-low"]
+        ),
+        (
+            "high", AIModel.highDiffPriority,
+            ["gpt-6.2-sol-high", "gpt-6.2-sol-xhigh", "gpt-6.2-sol-medium"],
+            ["gpt-6.1-sol-high", "gpt-6.1-sol-xhigh", "gpt-6.1-sol-medium"]
+        )
     ]
 
     func testDynamicCodexPriorityHintsDoNotCreateAvailableModels() {
         let discoveryState = CodexDiscoveryTestState.capture()
         defer { discoveryState.restore() }
 
-        for list in gpt61DiffHints {
+        for list in solDiffHints {
             let codexEntries = list.priorities.filter { $0.providerType == .codex }
             XCTAssertEqual(
-                Array(codexEntries.prefix(3)),
-                list.hints.map { AIModel.codexCustom(name: $0) },
-                "\(list.name) hints are the exact discovered option identities"
+                Array(codexEntries.prefix(6)),
+                (list.gpt62 + list.gpt61).map { AIModel.codexCustom(name: $0) },
+                "\(list.name) hints are the exact discovered option identities, newest generation first"
             )
         }
 
         // Before discovery the picker holds the static GPT-5.6 entries only; selection must not
-        // return a hinted GPT-6.1 identity the catalog never offered.
+        // return a hinted GPT-6.2 or GPT-6.1 identity the catalog never offered.
         CodexDiscoveryTestState.setDiscoveredModels([])
         let staticCodex = AIModel.modelsForProvider(.codex)
-        XCTAssertFalse(staticCodex.contains { $0.rawValue.contains("gpt-6.1") }, "\(staticCodex.map(\.rawValue))")
+        XCTAssertFalse(
+            staticCodex.contains { $0.rawValue.contains("gpt-6.2") || $0.rawValue.contains("gpt-6.1") },
+            "\(staticCodex.map(\.rawValue))"
+        )
         let staticExpectations: [AIModel] = [.codexCliGpt56SolMedium, .codexCliGpt56SolHigh, .codexCliGpt56SolHigh]
-        for (list, expected) in zip(gpt61DiffHints, staticExpectations) {
+        for (list, expected) in zip(solDiffHints, staticExpectations) {
             XCTAssertEqual(
                 AIModel.findBestAvailableModel(in: staticCodex, desiredFormat: .diff, priorities: list.priorities),
                 expected,
@@ -340,28 +377,31 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
             )
         }
 
-        // A catalog advertising only GPT-6.1 Low satisfies only the hint naming that exact option;
-        // the High list skips to the backfilled GPT-5.6 entry instead of inventing GPT-6.1 High.
-        CodexDiscoveryTestState.setDiscoveredModels([
-            CodexDiscoveryTestState.remoteModel("gpt-6.1-sol", efforts: ["low"], isDefault: true)
-        ])
-        let partialCodex = AIModel.modelsForProvider(.codex)
-        XCTAssertEqual(
-            Set(partialCodex.compactMap { model -> String? in
-                guard case let .codexCustom(name) = model, name.hasPrefix("gpt-6.1-"), !name.contains("-fast") else { return nil }
-                return name
-            }),
-            ["gpt-6.1-sol-low"]
-        )
-        let partialExpectations: [AIModel] = [
-            .codexCustom(name: "gpt-6.1-sol-low"),
-            .codexCustom(name: "gpt-6.1-sol-low"),
-            .codexCliGpt56SolHigh
-        ]
-        for (list, expected) in zip(gpt61DiffHints, partialExpectations) {
-            let picked = AIModel.findBestAvailableModel(in: partialCodex, desiredFormat: .diff, priorities: list.priorities)
-            XCTAssertEqual(picked, expected, list.name)
-            XCTAssertTrue(picked.map { partialCodex.contains($0) } == true, list.name)
+        // A catalog advertising only one generation's Low satisfies only the hint naming that exact
+        // option; the High list skips to the backfilled GPT-5.6 entry instead of inventing High.
+        for family in ["gpt-6.2-sol", "gpt-6.1-sol"] {
+            CodexDiscoveryTestState.setDiscoveredModels([
+                CodexDiscoveryTestState.remoteModel(family, efforts: ["low"], isDefault: true)
+            ])
+            let partialCodex = AIModel.modelsForProvider(.codex)
+            XCTAssertEqual(
+                Set(partialCodex.compactMap { model -> String? in
+                    guard case let .codexCustom(name) = model, name.hasPrefix("gpt-6."), !name.contains("-fast") else { return nil }
+                    return name
+                }),
+                ["\(family)-low"],
+                family
+            )
+            let partialExpectations: [AIModel] = [
+                .codexCustom(name: "\(family)-low"),
+                .codexCustom(name: "\(family)-low"),
+                .codexCliGpt56SolHigh
+            ]
+            for (list, expected) in zip(solDiffHints, partialExpectations) {
+                let picked = AIModel.findBestAvailableModel(in: partialCodex, desiredFormat: .diff, priorities: list.priorities)
+                XCTAssertEqual(picked, expected, "\(family) \(list.name)")
+                XCTAssertTrue(picked.map { partialCodex.contains($0) } == true, "\(family) \(list.name)")
+            }
         }
     }
 
@@ -369,43 +409,63 @@ final class DirectModelCatalogRefreshTests: XCTestCase {
         let discoveryState = CodexDiscoveryTestState.capture()
         defer { discoveryState.restore() }
 
-        // Discovered GPT-6.1 Sol (with its synthesized Fast variants and every advertised effort)
-        // satisfies each list's first hint at exactly that effort and standard service tier.
-        CodexDiscoveryTestState.setDiscoveredModels(CodexDiscoveryTestState.gpt61Models())
-        let codex = AIModel.modelsForProvider(.codex)
-        let withoutHigh = codex.filter { $0 != .codexCustom(name: "gpt-6.1-sol-high") }
-        let codexExpectations: [(full: String, withoutHigh: String)] = [
-            ("gpt-6.1-sol-medium", "gpt-6.1-sol-medium"),
-            ("gpt-6.1-sol-high", "gpt-6.1-sol-medium"),
-            ("gpt-6.1-sol-high", "gpt-6.1-sol-xhigh")
+        // Discovered Sol (with its synthesized Fast variants and every advertised effort) satisfies
+        // each list's first hint at exactly that effort and standard service tier. With both
+        // generations advertised the newer one wins, and without High it still outranks GPT-6.1 High.
+        let codexStates: [(label: String, models: [CodexAppServerClient.RemoteModel], family: String)] = [
+            ("GPT-6.1 only", CodexDiscoveryTestState.gpt61Models(), "gpt-6.1-sol"),
+            ("both generations", CodexDiscoveryTestState.gpt62Models(), "gpt-6.2-sol")
         ]
-        for (list, expected) in zip(gpt61DiffHints, codexExpectations) {
-            for (available, name) in [(codex, expected.full), (withoutHigh, expected.withoutHigh)] {
-                let picked = AIModel.findBestAvailableModel(in: available, desiredFormat: .diff, priorities: list.priorities)
-                XCTAssertEqual(picked, .codexCustom(name: name), list.name)
-                XCTAssertEqual(picked?.defaultReasoningEffort, CodexModelSpecifier(raw: name).reasoningEffort?.rawValue, list.name)
-                XCTAssertNil(picked?.codexServiceTier, list.name)
+        for state in codexStates {
+            CodexDiscoveryTestState.setDiscoveredModels(state.models)
+            let codex = AIModel.modelsForProvider(.codex)
+            let withoutHigh = codex.filter { $0 != .codexCustom(name: "\(state.family)-high") }
+            let codexExpectations: [(full: String, withoutHigh: String)] = [
+                ("\(state.family)-medium", "\(state.family)-medium"),
+                ("\(state.family)-high", "\(state.family)-medium"),
+                ("\(state.family)-high", "\(state.family)-xhigh")
+            ]
+            for (list, expected) in zip(solDiffHints, codexExpectations) {
+                for (available, name) in [(codex, expected.full), (withoutHigh, expected.withoutHigh)] {
+                    let picked = AIModel.findBestAvailableModel(in: available, desiredFormat: .diff, priorities: list.priorities)
+                    XCTAssertEqual(picked, .codexCustom(name: name), "\(state.label) \(list.name)")
+                    XCTAssertEqual(
+                        picked?.defaultReasoningEffort,
+                        CodexModelSpecifier(raw: name).reasoningEffort?.rawValue,
+                        "\(state.label) \(list.name)"
+                    )
+                    XCTAssertNil(picked?.codexServiceTier, "\(state.label) \(list.name)")
+                }
             }
         }
 
-        // Direct OpenAI entries keep the effort their position names in each list.
+        // Direct OpenAI entries keep the effort their position names in each list, and fall back to
+        // the GPT-6.1 entry when no GPT-6.2 entry is offered, as for an Azure resource without one.
         let openAI = AIModel.modelsForProvider(.openAI)
-        let directExpectations: [(priorities: [AIModel], format: PromptViewModel.FileEditFormat, model: AIModel, effort: String)] = [
-            (AIModel.simpleDiffPriority, .diff, .gpt61SolLow, "low"),
-            (AIModel.mediumDiffPriority, .diff, .gpt61Sol, "medium"),
-            (AIModel.highDiffPriority, .diff, .gpt61SolHigh, "high"),
-            (AIModel.simpleWholePriority, .whole, .gpt6LunaLow, "low"),
-            (AIModel.mediumWholePriority, .whole, .gpt61Sol, "medium"),
-            (AIModel.highWholePriority, .whole, .gpt61SolHigh, "high")
+        let withoutGPT62 = openAI.filter { !$0.rawValue.contains("gpt-6.2") }
+        let directExpectations: [
+            (priorities: [AIModel], format: PromptViewModel.FileEditFormat, model: AIModel, effort: String, fallback: AIModel)
+        ] = [
+            (AIModel.simpleDiffPriority, .diff, .gpt62SolLow, "low", .gpt61SolLow),
+            (AIModel.mediumDiffPriority, .diff, .gpt62Sol, "medium", .gpt61Sol),
+            (AIModel.highDiffPriority, .diff, .gpt62SolHigh, "high", .gpt61SolHigh),
+            (AIModel.simpleWholePriority, .whole, .gpt6LunaLow, "low", .gpt6LunaLow),
+            (AIModel.mediumWholePriority, .whole, .gpt62Sol, "medium", .gpt61Sol),
+            (AIModel.highWholePriority, .whole, .gpt62SolHigh, "high", .gpt61SolHigh)
         ]
         for expected in directExpectations {
             let picked = AIModel.findBestAvailableModel(in: openAI, desiredFormat: expected.format, priorities: expected.priorities)
             XCTAssertEqual(picked, expected.model, expected.model.rawValue)
             XCTAssertEqual(picked?.defaultReasoningEffort, expected.effort, expected.model.rawValue)
+            XCTAssertEqual(
+                AIModel.findBestAvailableModel(in: withoutGPT62, desiredFormat: expected.format, priorities: expected.priorities),
+                expected.fallback,
+                expected.model.rawValue
+            )
         }
 
         // Sonnet 5.5 precedes Sonnet 4 for direct Anthropic and OpenRouter keys.
-        for list in gpt61DiffHints {
+        for list in solDiffHints {
             let anthropic = AIModel.modelsForProvider(.anthropic)
             XCTAssertEqual(AIModel.findBestAvailableModel(in: anthropic, desiredFormat: .diff, priorities: list.priorities), .claudeSonnet55, list.name)
             let openRouter: [AIModel] = [.openrouterClaude4Sonnet, .openrouterClaudeSonnet55]

@@ -28,7 +28,7 @@ DEFAULT_MANIFEST = ROOT / "Vendor" / "Codex" / "manifest.json"
 DEFAULT_CACHE_ROOT = ROOT / ".build" / "codex-runtime"
 # Compatibility authority shared with the schema-gate branch that must land first.
 # Pin rotations intentionally update these values and Vendor/Codex/manifest.json together.
-SUPPORTED_VERSION = "0.164.0"
+SUPPORTED_VERSION = "0.170.0"
 SUPPORTED_TAG = f"rust-v{SUPPORTED_VERSION}"
 OFFICIAL_REPOSITORY_URL = "https://github.com/openai/codex"
 OFFICIAL_RELEASE_URL = f"{OFFICIAL_REPOSITORY_URL}/releases/tag/{SUPPORTED_TAG}"
@@ -37,6 +37,7 @@ REQUIRED_LAYOUT = {
     "codex-package.json",
     "bin/codex",
     "bin/codex-code-mode-host",
+    "bin/codex-exec-server",
     "codex-resources",
     "codex-path",
 }
@@ -197,11 +198,13 @@ def load_manifest(
     for relative, profile in release_entitlements.items():
         validate_entitlement_profile(profile, f"release-signing entitlements for {relative}")
     signed = manifest.get("signedExecutables")
-    if not isinstance(signed, list) or {item.get("path") for item in signed if isinstance(item, dict)} != {
-        "bin/codex",
-        "bin/codex-code-mode-host",
-    }:
-        raise ContractError("pinned manifest must contain both primary executable signature policies")
+    signed_paths = [item.get("path") for item in signed if isinstance(item, dict)] if isinstance(signed, list) else []
+    if (
+        not isinstance(signed, list)
+        or len(signed_paths) != len(set(signed_paths))
+        or set(signed_paths) != {"bin/codex", "bin/codex-code-mode-host", "bin/codex-exec-server"}
+    ):
+        raise ContractError("pinned manifest must contain exactly one signature policy for each of the three primary executables")
     for policy in signed:
         if not isinstance(policy, dict):
             raise ContractError("invalid executable signature policy")
@@ -571,6 +574,7 @@ def verify_package(
         "target": target,
         "variant": "codex",
         "entrypoint": "bin/codex",
+        "execServer": "bin/codex-exec-server",
         "resourcesDir": "codex-resources",
         "pathDir": "codex-path",
     }

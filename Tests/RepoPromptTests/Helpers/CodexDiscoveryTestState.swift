@@ -57,6 +57,21 @@ struct CodexDiscoveryTestState {
         ]
     }
 
+    /// The GPT-6 generation as Codex 0.166.0 and later advertise it: GPT-6.2 Sol (provider default)
+    /// and GPT-6.2 Astra through Ultra, both defaulting to Low, beside the older GPT-6.1 and GPT-6 families.
+    static func gpt62Models() -> [CodexAppServerClient.RemoteModel] {
+        let throughMax = ["low", "medium", "high", "xhigh", "max"]
+        let throughUltra = throughMax + ["ultra"]
+        return [
+            remoteModel("gpt-6.2-sol", efforts: throughUltra, defaultEffort: "low", isDefault: true),
+            remoteModel("gpt-6.2-astra", efforts: throughUltra, defaultEffort: "low"),
+            remoteModel("gpt-6.1-sol", efforts: throughUltra, defaultEffort: "medium"),
+            remoteModel("gpt-6-sol", efforts: throughUltra, defaultEffort: "medium"),
+            remoteModel("gpt-6-astra", efforts: throughUltra, defaultEffort: "medium"),
+            remoteModel("gpt-6-luna", efforts: throughMax, defaultEffort: "medium")
+        ]
+    }
+
     static func remoteModel(
         _ id: String,
         efforts: [String],
