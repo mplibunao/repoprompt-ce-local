@@ -7,17 +7,26 @@ Make the bundled Codex that RepoPrompt CE launches run the user's global Codex h
 | Item | Outcome | Agent session | Commits |
 |------|---------|---------------|---------|
 | 1. Project `hooks.json` into the private Codex home | done | engineer · Orchestrate 1/4: project hooks.json | `feat(codex): copy the global hooks.json into the private Codex home` |
+| 1b. Give `hooks.json` its own projection manifest | done | pair · Orchestrate 1b: separate hooks manifest | folded into `feat(codex): copy the global hooks.json into the private Codex home` |
 | 2. Gate, approve, and verify user hooks; surface discovery warnings | done | pair · Orchestrate 2/4: gate and approve user hooks | `feat(agent-mode): review and trust global Codex hooks in the first-turn gate` |
 | 3. Show hook source and matcher at approval; source-neutral copy | done | pair · Orchestrate 3/4: consent metadata and copy | `feat(agent-mode): show hook source and matcher when approving Codex hooks` |
 | 3b. Show hook approvals in the default MCP `agent_run` text | done | engineer · Orchestrate 3b: hook_approval MCP text | `feat(mcp): explain hook approval pauses in agent_run output`, `fix(mcp): escape line breaks and control characters in hook approval text`, `fix(agent-mode): show hook text literally on the approval card and in agent_run`, `fix(agent-mode): escape invisible format characters in hook text` |
 | 4. Current docs and ADR | done | engineer · Orchestrate 4/4: docs and ADR | `docs(codex): record the global hooks projection and its ADR` |
-| 5. Debug-app acceptance run | pending | | |
+| 5. Debug-app acceptance run | done | orchestrator | none (evidence only) |
 
 ## 1. Project `hooks.json` into the private Codex home
 
-- Decision: extend the existing projection's allowlist with `hooks.json` and rename the type to `CodexGlobalFilesProjection`, keeping the manifest file `.repoprompt-agents-projection.json` and schema version 1. Existing manifests stay valid, so instruction copies stay owned. Source: approved plan.
+- Decision: extend the existing projection's allowlist with `hooks.json` and rename the type to `CodexGlobalFilesProjection`, keeping the manifest file `.repoprompt-agents-projection.json` and schema version 1. Existing manifests stay valid, so instruction copies stay owned. Source: approved plan. Item 1b replaced the single manifest.
 - Decision: the error strings say "global Codex file" throughout. `inspectionFailed` no longer claims that no file changed, because `commitManifest` can raise it after the file writes. The two mutation failures say a retry can report an unowned file. Source: approved plan, design critique.
 - Evidence: `make dev-test FILTER=RepoPromptTests.CodexGlobalFilesProjectionTests` (9 passed) and `FILTER=RepoPromptTests.CodexRuntimeAuthorityTests` (9 passed). `make dev-format` and `make dev-lint` were clean. The correctness review and the refactor review found nothing to change.
+
+## 1b. Give `hooks.json` its own projection manifest
+
+- Decision: `hooks.json` gets its own manifest, `.repoprompt-hooks-projection.json`, and `.repoprompt-agents-projection.json` again lists only `AGENTS.override.md` and `AGENTS.md`, as on `main`. A build rejects a manifest that lists a file it doesn't know and then fails every Codex launch. Every branch's debug build on a machine shares one debug profile, so a single manifest would break Codex in every other branch's debug build until it rebased. Source: user (via the parent session).
+- Decision: one reconcile routine runs once per file set, instructions first, so a conflict on `hooks.json` neither blocks nor undoes the instruction copies. Each set stays all-or-nothing on its own, and five error messages that said no file changed now name only the file or manifest at hand. The change is folded into item 1's commit, so no commit on the branch has the single-manifest form. Source: orchestrator judgment.
+- Decision: a build without this change ignores the hooks manifest and the copy, and its projection works as before. Its Codex loads the copy as a `user` hook, which its project-only gate never offers, so the hook is skipped while untrusted and runs only when its exact definition is already trusted in that home, as when a newer build approved it. No launch fails or hangs. This was read from `origin/main`'s projection, which lists only the two AGENTS files, and its `CodexHookTrustModels.swift`, which offers only `project` hooks and decodes every source. Source: orchestrator judgment.
+- Decision: the production rollback unit needs no change. `Scripts/local_release_archive.sh` archives every top-level Application Support entry except `DebugApps`, `Rollbacks`, and `Conductor`, so `Codex/` with both manifests, the copy, and its trust in `config.toml` is restored together. Source: orchestrator judgment.
+- Evidence: `CodexGlobalFilesProjectionTests` (10), `CodexRuntimeAuthorityTests` (9), and `CodexExecAgentProviderRuntimePreparationTests` (1) pass. Running hooks first fails the ordering test, and merging `hooks.json` back into the instructions set fails the ownership, copy, and ordering tests. Format and lint were clean, and the correctness and refactor reviews found nothing to change.
 
 ## 2. Gate, approve, and verify user hooks; surface discovery warnings
 
@@ -49,3 +58,16 @@ Make the bundled Codex that RepoPrompt CE launches run the user's global Codex h
 - Decision: the project and approve decision gets an ADR, [`docs/adr/2026-11-18-codex-global-hooks-in-isolated-home.md`](../adr/2026-11-18-codex-global-hooks-in-isolated-home.md). It is hard to reverse, because it persists trust and manifest ownership. It would surprise a reader of upstream's "no global hook bridge". And it trades isolation for global tooling. Source: approved plan.
 - Decision: `docs/releasing.md` owns the operating rules: which files are read from `~/.codex`, where trust lives, that global hooks are edited in `~/.codex/hooks.json`, and that hook commands run with the private `CODEX_HOME`. The ADR owns why warnings don't block. `docs/architecture/codex-app-server-schema-gate.md` owns the current behavior, the `matcher` contract path, and the gap that the gate can't pin the `user` source value. Each links to the others instead of repeating them. Source: refactor review.
 - Evidence: `make guardrails` passes. `make dev-codex-schema-check` reports 45 methods, 196 parameter paths, and 94 response paths, and the doc now says 94. Vale shows no findings above suggestion level on the changed lines. The writing agent's accuracy review ended clean after three rounds, and the consolidation review's two findings are applied.
+
+## 5. Debug-app acceptance run
+
+- Decision: the run used `codexExec:gpt-6.1-sol-medium`, because this build offers no GPT-6.2 Codex model and the plan asks only for an explicit Codex model. Source: orchestrator judgment.
+- Decision: `make dev-smoke-launch` packaged and launched the debug app from this branch, then stopped at its workspace-switch stage because window 1 was still restoring its saved workspace. `make dev-smoke` against the running app then passed. Source: orchestrator judgment.
+- Evidence, from one pass on the debug build:
+  - Copy: after launch, the debug home's `hooks.json` is a regular file with the SHA-256 of `~/.codex/hooks.json`. `.repoprompt-hooks-projection.json` lists only `hooks.json` with that hash, and `.repoprompt-agents-projection.json` lists only `AGENTS.md`.
+  - Pause: a native Codex Agent Mode session in a throwaway repository with no project hooks paused its first turn on a `hook_approval` interaction. The default `agent_run` text and the raw interaction showed source `Global (user)`, the managed source path, matcher `Bash`, command `rtk hook codex`, the current hash, `approve_selected` and `trust_all`, and the `hook_keys` syntax. The approval card showed the new title, the introduction that says global hooks are edited in `~/.codex/hooks.json`, and the Source, Source path, and Matcher rows.
+  - Trust: `approve_selected` with that one key wrote `[hooks.state]` for the key with `trusted_hash` equal to the displayed hash, and the turn continued.
+  - Rewrite: the Codex session rollout records the model's `exec_command` call as `git status` and the executed command as `rtk git status`. rtk's own history recorded neither the hook decision nor the command from the app-server environment, so the rollout is the independent record.
+  - Reuse: a new session with unchanged hook bytes asked for no approval, and its `git log --oneline -1` ran as `rtk git log --oneline -1`.
+  - Chat: one `oracle_send` chat request through the Codex Oracle model completed, and the copy, the manifest, and the trust were unchanged afterwards.
+- Evidence: `pr-ready` passed on the whole branch against `main`, with Swift lint, 2,055 root tests, and the RepoPrompt product build. Its first run on the rebased branch failed `WorkspaceSelectionMirrorRecoveryTests.testFocusChangeDuringMirrorPreservesIdentityAndCancellation` ("the physical mirror attempt never started"), a test outside this change and not in #274. It passed five focused reruns and its suite, and the next `pr-ready` passed.
