@@ -51,9 +51,14 @@ struct AgentContextExportViewContext {
     }
 
     var selectionSummary: AgentContextSelectionSummary {
-        AgentContextExportResolver.selectionSummary(
-            for: makeExportSource(flushPendingUI: false).selection
+        let request = makeSourceBuildRequest(flushPendingUI: false)
+        let resolved = AgentContextExportSourceBuilder.resolveSelection(
+            requestedTabID: request.requestedTabID,
+            activeComposeTabID: request.activeComposeTabID,
+            selectionSnapshot: request.selectionSnapshot,
+            composeTabs: request.composeTabs
         )
+        return AgentContextExportResolver.selectionSummary(for: resolved.selection)
     }
 
     var selectionChangesPublisher: AnyPublisher<WorkspaceSelectionCoordinator.Change, Never> {
@@ -89,23 +94,25 @@ struct AgentContextExportViewContext {
     }
 
     func makeExportSource(flushPendingUI: Bool = true) -> AgentContextExportSource {
+        AgentContextExportSourceBuilder.makeSource(makeSourceBuildRequest(flushPendingUI: flushPendingUI))
+    }
+
+    private func makeSourceBuildRequest(flushPendingUI: Bool) -> AgentContextExportSourceBuildRequest {
         let activeComposeTabID = promptManager.activeComposeTabID
         let requestedTabID = currentTabID ?? activeComposeTabID
         let selectionSnapshot = requestedTabID.flatMap {
             selectionCoordinator?.selectionSnapshot(for: $0, flushPendingUIIfActive: flushPendingUI)
         }
-        return AgentContextExportSourceBuilder.makeSource(
-            AgentContextExportSourceBuildRequest(
-                requestedTabID: requestedTabID,
-                activeComposeTabID: activeComposeTabID,
-                activePromptText: promptManager.promptText,
-                selectionSnapshot: selectionSnapshot,
-                composeTabs: promptManager.currentComposeTabs,
-                explicitActiveAgentSessionID: activeAgentSessionID,
-                worktreeBindingsProvider: { sessionID, tabID in
-                    worktreeBindingsProvider?(sessionID, tabID) ?? []
-                }
-            )
+        return AgentContextExportSourceBuildRequest(
+            requestedTabID: requestedTabID,
+            activeComposeTabID: activeComposeTabID,
+            activePromptText: promptManager.promptText,
+            selectionSnapshot: selectionSnapshot,
+            composeTabs: promptManager.currentComposeTabs,
+            explicitActiveAgentSessionID: activeAgentSessionID,
+            worktreeBindingsProvider: { sessionID, tabID in
+                worktreeBindingsProvider?(sessionID, tabID) ?? []
+            }
         )
     }
 
