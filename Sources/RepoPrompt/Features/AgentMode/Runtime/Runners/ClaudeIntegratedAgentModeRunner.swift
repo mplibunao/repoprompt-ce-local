@@ -280,6 +280,10 @@ final class ClaudeIntegratedAgentModeRunner {
                     session.isDirty = true
                     hooks.persistence.scheduleSave(session)
                 }
+                // Only the window is recomputed, so usage provenance is left as it is.
+                if claudeCoordinator.observeRuntimeInit(status, session: session) {
+                    hooks.bindingObservation.updateBindings(session)
+                }
                 if status.isRepoPromptServerFailed {
                     return .failed(
                         errorText: "RepoPrompt MCP failed to initialize for Claude (session \(status.sessionID ?? "unknown")).",

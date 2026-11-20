@@ -66,31 +66,45 @@ extension AgentModeViewModel {
         }
     }
 
+    /// A newly reported capacity can leave the snapshot unchanged (two capacities capped to the same
+    /// window), so it is saved on its own rather than through the snapshot-changed result.
+    func scheduleSaveIfContextCapacityChanged(from previous: AgentContextWindowCapacity?, session: TabSession) {
+        guard session.contextWindowCapacity != previous else { return }
+        scheduleSave(for: session.tabID)
+    }
+
     nonisolated static func contextUsageFromClaudeProviderTokens(
         _ usage: [AgentTokenUsagePersist],
         modelContextWindow: Int?
     ) -> AgentContextUsage? {
         guard !usage.isEmpty else { return nil }
-        let defaultClaudeContextWindow = 200_000
-        let maxContextTokens = max(1, modelContextWindow ?? defaultClaudeContextWindow)
+        // Without a known positive window there is no ceiling, as in live validation: a fixed
+        // fallback would discard valid occupancy restored from larger-window sessions.
+        let maxContextTokens = modelContextWindow.flatMap { $0 > 0 ? $0 : nil } ?? Int.max
         // Only trust exact stream-derived context snapshots (contextUsedTokens).
         // Do NOT fall back to promptTokens — those are billed-turn aggregates that
         // include internal tool sub-steps and cause inflated context estimates.
-        let latestContextUsed = usage.reversed().compactMap { turn -> Int? in
+        // A compaction fence ends the scan: occupancy recorded before it describes
+        // the old context, so usage stays pending until a later row measures it.
+        for turn in usage.reversed() {
+            if turn.contextCompacted {
+                return AgentContextUsage(
+                    modelContextWindow: modelContextWindow,
+                    lastTotalTokens: nil,
+                    totalTotalTokens: nil,
+                    awaitingPostCompactionUsage: true
+                )
+            }
             if let contextUsed = turn.contextUsedTokens,
                contextUsed > 0,
                contextUsed <= maxContextTokens
             {
-                return contextUsed
+                return AgentContextUsage(
+                    modelContextWindow: modelContextWindow,
+                    lastTotalTokens: contextUsed,
+                    totalTotalTokens: contextUsed
+                )
             }
-            return nil
-        }.first
-        if let latestContextUsed {
-            return AgentContextUsage(
-                modelContextWindow: modelContextWindow,
-                lastTotalTokens: latestContextUsed,
-                totalTotalTokens: latestContextUsed
-            )
         }
         guard modelContextWindow != nil else { return nil }
         return AgentContextUsage(

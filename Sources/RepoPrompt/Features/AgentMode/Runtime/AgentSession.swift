@@ -36,6 +36,8 @@ struct AgentTokenUsagePersist: Codable, Equatable {
     let promptTokens: Int
     let completionTokens: Int
     let contextUsedTokens: Int?
+    /// A zero-cost boundary record: older occupancy cannot describe the compacted context.
+    let contextCompacted: Bool
     let estimatedUserInputTokens: Int
     let estimatedToolInputTokens: Int
     let estimatedToolOutputTokens: Int
@@ -45,6 +47,7 @@ struct AgentTokenUsagePersist: Codable, Equatable {
         promptTokens: Int,
         completionTokens: Int,
         contextUsedTokens: Int? = nil,
+        contextCompacted: Bool = false,
         estimatedUserInputTokens: Int = 0,
         estimatedToolInputTokens: Int = 0,
         estimatedToolOutputTokens: Int = 0,
@@ -52,6 +55,7 @@ struct AgentTokenUsagePersist: Codable, Equatable {
     ) {
         self.promptTokens = max(0, promptTokens)
         self.completionTokens = max(0, completionTokens)
+        self.contextCompacted = contextCompacted
         if let contextUsedTokens {
             let normalized = max(0, contextUsedTokens)
             self.contextUsedTokens = normalized > 0 ? normalized : nil
@@ -87,6 +91,7 @@ struct AgentTokenUsagePersist: Codable, Equatable {
         case promptTokens
         case completionTokens
         case contextUsedTokens
+        case contextCompacted
         case estimatedUserInputTokens
         case estimatedToolInputTokens
         case estimatedToolOutputTokens
@@ -97,6 +102,7 @@ struct AgentTokenUsagePersist: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         promptTokens = try max(0, container.decode(Int.self, forKey: .promptTokens))
         completionTokens = try max(0, container.decode(Int.self, forKey: .completionTokens))
+        contextCompacted = try container.decodeIfPresent(Bool.self, forKey: .contextCompacted) ?? false
         if let decodedContext = try container.decodeIfPresent(Int.self, forKey: .contextUsedTokens) {
             let normalized = max(0, decodedContext)
             contextUsedTokens = normalized > 0 ? normalized : nil
@@ -114,10 +120,27 @@ struct AgentTokenUsagePersist: Codable, Equatable {
         try container.encode(promptTokens, forKey: .promptTokens)
         try container.encode(completionTokens, forKey: .completionTokens)
         try container.encodeIfPresent(contextUsedTokens, forKey: .contextUsedTokens)
+        if contextCompacted {
+            try container.encode(true, forKey: .contextCompacted)
+        }
         try container.encode(estimatedUserInputTokens, forKey: .estimatedUserInputTokens)
         try container.encode(estimatedToolInputTokens, forKey: .estimatedToolInputTokens)
         try container.encode(estimatedToolOutputTokens, forKey: .estimatedToolOutputTokens)
         try container.encode(timestamp, forKey: .timestamp)
+    }
+}
+
+/// A model's own context capacity, scoped to the provider and model it was reported for, so a
+/// value from another model never bounds or sizes this one.
+struct AgentContextWindowCapacity: Codable, Equatable {
+    var tokens: Int
+    var agentRaw: String
+    /// The base model without its effort suffix (see `modelKey(forRaw:)`): effort does not change capacity.
+    var modelRaw: String
+
+    /// The identity a capacity is stored under: the base model, or the default model when none is named.
+    static func modelKey(forRaw raw: String?) -> String {
+        ClaudeModelSpecifier(raw: raw).baseModel ?? AgentModel.defaultModel.rawValue
     }
 }
 
@@ -192,6 +215,10 @@ struct AgentSession: Codable, Identifiable {
     var codexTotalTotalTokens: Int?
     var codexMcpSessionKey: String?
 
+    /// The model's own context capacity, before any Claude auto-compact cap. `codexContextWindow`
+    /// keeps the effective window; this is the validation ceiling for the provider and model it names.
+    var contextWindowCapacity: AgentContextWindowCapacity?
+
     /// Parent session ID for thread nesting (child sessions spawned from another session)
     var parentSessionID: UUID?
 
@@ -244,6 +271,7 @@ struct AgentSession: Codable, Identifiable {
         codexLastTotalTokens: Int? = nil,
         codexTotalTotalTokens: Int? = nil,
         codexMcpSessionKey: String? = nil,
+        contextWindowCapacity: AgentContextWindowCapacity? = nil,
         parentSessionID: UUID? = nil,
         pendingHandoffPayload: String? = nil,
         pendingHandoffCreatedAt: Date? = nil,
@@ -282,6 +310,7 @@ struct AgentSession: Codable, Identifiable {
         self.codexLastTotalTokens = codexLastTotalTokens
         self.codexTotalTotalTokens = codexTotalTotalTokens
         self.codexMcpSessionKey = codexMcpSessionKey
+        self.contextWindowCapacity = contextWindowCapacity
         self.parentSessionID = parentSessionID
         self.pendingHandoffPayload = pendingHandoffPayload
         self.pendingHandoffCreatedAt = pendingHandoffCreatedAt
@@ -322,6 +351,7 @@ struct AgentSession: Codable, Identifiable {
         case codexLastTotalTokens
         case codexTotalTotalTokens
         case codexMcpSessionKey
+        case contextWindowCapacity
         case parentSessionID
         case pendingHandoffPayload
         case pendingHandoffCreatedAt
@@ -367,6 +397,8 @@ struct AgentSession: Codable, Identifiable {
         codexLastTotalTokens = try container.decodeIfPresent(Int.self, forKey: .codexLastTotalTokens)
         codexTotalTotalTokens = try container.decodeIfPresent(Int.self, forKey: .codexTotalTotalTokens)
         codexMcpSessionKey = try container.decodeIfPresent(String.self, forKey: .codexMcpSessionKey)
+        // Decoded leniently: one malformed capacity must not fail an otherwise valid session.
+        contextWindowCapacity = try? container.decodeIfPresent(AgentContextWindowCapacity.self, forKey: .contextWindowCapacity)
         parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
         pendingHandoffPayload = try container.decodeIfPresent(String.self, forKey: .pendingHandoffPayload)
         pendingHandoffCreatedAt = try container.decodeIfPresent(Date.self, forKey: .pendingHandoffCreatedAt)

@@ -1497,6 +1497,17 @@ final class ClaudeAgentModeCoordinator {
         Task { await cancelClaudeRun(session, oldController: detached) }
     }
 
+    /// Records a runtime init's auto-compact window. Every init recomputes the effective window,
+    /// including one repeating the last cap: a reset conversation or replaced process must not keep
+    /// a stale or missing window. Returns `true` when the window changed, so the host can refresh
+    /// its presentation.
+    @discardableResult
+    func observeRuntimeInit(_ status: NativeAgentRuntimeRuntimeInitStatus, session: AgentTabSession) -> Bool {
+        session.claudeAutoCompactWindowTokens = status.autoCompactWindowTokens
+        guard session.selectedAgent.usesClaudeNativeRuntime else { return false }
+        return ClaudeContextUsageEstimator.reconcileContextWindow(session: session, createsUsage: true)
+    }
+
     /// Returns the transfer that shuts `oldController` down, with its generation when it was
     /// installed as the tab's pending transfer. When a transfer is already pending, the new one goes
     /// to the retired list and has no generation. Returns nil when there is no controller to retire.
