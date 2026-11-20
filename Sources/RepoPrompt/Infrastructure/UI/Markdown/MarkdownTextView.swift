@@ -451,7 +451,12 @@ struct MarkdownTextView: View, Equatable {
     let suppressBareLinksTouchingEndBoundary: Bool
     let renderCadence: MarkdownRenderCadence
     private let allowsStreamingSegmentation: Bool
+    @Environment(\.windowIsPresentationVisible) private var windowIsPresentationVisible
     @Environment(\.markdownFileLinkOpener) private var markdownFileLinkOpener
+    #if DEBUG
+        @Environment(\.agentTranscriptProbeRowID) private var probeRowID
+        @Environment(\.agentTranscriptProbeWindowID) private var probeWindowID
+    #endif
     @ObservedObject private var fontScale = FontScaleManager.shared
     private var fontPreset: FontScalePreset {
         fontScale.preset
@@ -506,6 +511,13 @@ struct MarkdownTextView: View, Equatable {
                     updateMarkdownRenderingLifecycle()
                 }
                 .onChange(of: renderRequestContext) { _, _ in
+                    updateMarkdownRenderingLifecycle()
+                }
+                // A hidden window compiles nothing and keeps the last compiled output. Hiding
+                // cancels the pending compile here because the compile task holds this view's
+                // value from when it was scheduled and can't see the change. Revealing schedules
+                // the latest request under the usual cadence.
+                .onChange(of: windowIsPresentationVisible) { _, _ in
                     updateMarkdownRenderingLifecycle()
                 }
                 .onDisappear {
@@ -589,7 +601,7 @@ struct MarkdownTextView: View, Equatable {
     }
 
     private func updateMarkdownRenderingLifecycle(now: Date = Date()) {
-        guard isMarkdown else {
+        guard isMarkdown, windowIsPresentationVisible else {
             cancelPendingCompile()
             return
         }
@@ -601,7 +613,7 @@ struct MarkdownTextView: View, Equatable {
     }
 
     private func scheduleMarkdownCompile(for context: MarkdownRenderRequestContext, now: Date = Date()) {
-        guard isMarkdown else {
+        guard isMarkdown, windowIsPresentationVisible else {
             cancelPendingCompile()
             return
         }
@@ -666,6 +678,13 @@ struct MarkdownTextView: View, Equatable {
     }
 
     private func compileMarkdown(for signature: MarkdownRenderSignature, requestID: Int) {
+        #if DEBUG
+            AgentTranscriptTailRenderProbe.record(
+                .markdownCompile(probeRowID),
+                counting: .markdownCompile,
+                windowID: probeWindowID
+            )
+        #endif
         let document = Document(parsing: signature.text)
         var compiler = EnhancedMarkdownCompiler()
         compiler.fontSize = signature.fontSize

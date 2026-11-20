@@ -166,7 +166,10 @@ struct AgentModeView: View {
     }
 
     private var codexManagedLoginAction: CodexManagedLoginAction {
+        // The callbacks only forward to the settings view model, so its identity is the owner and the
+        // revision stays 0.
         CodexManagedLoginAction(
+            ownerID: ObjectIdentifier(windowState.apiSettingsViewModel),
             browser: { openURL in
                 try await windowState.apiSettingsViewModel.startCodexManagedChatgptLogin(openURL: openURL)
             },
@@ -202,6 +205,7 @@ struct AgentModeChatDetailView: View {
     let currentTabID: UUID?
     let codexManagedLoginAction: CodexManagedLoginAction
     @Environment(\.agentWindowIsFocused) private var agentWindowIsFocused
+    @Environment(\.windowIsPresentationVisible) private var windowIsPresentationVisible
     @ObservedObject private var workflowStore: AgentWorkflowStore = .shared
     @ObservedObject private var fontScale = FontScaleManager.shared
     private var fontPreset: FontScalePreset {
@@ -1464,12 +1468,6 @@ struct AgentModeChatDetailView: View {
         #endif
     }
 
-    private var markdownFileLinkOpener: MarkdownFileLinkOpener {
-        MarkdownFileLinkOpener { target in
-            await promptManager.fileManager.openFileForMarkdownLink(target)
-        }
-    }
-
     private var supportsAutoScroll: Bool {
         if #available(macOS 15.0, *) {
             return true
@@ -2001,6 +1999,13 @@ struct AgentModeChatDetailView: View {
                         to: newSnapshot,
                         proxy: proxy
                     )
+                }
+                .onChange(of: windowIsPresentationVisible) { _, isVisible in
+                    // A hidden window defers Markdown compiles and native text installs, so the text
+                    // that arrived while it was hidden is laid out only now, with no presentation change
+                    // to start pinned maintenance. Showing the window is that transcript change.
+                    guard isVisible else { return }
+                    requestPinnedLiveBottom(proxy: proxy, source: .transcriptChangeWhilePinned)
                 }
                 .onChange(of: runInteractionSnapshot.isWaitingForInstruction) { _, _ in
                     guard isPinnedToLiveBottom, !isInteractionBlockerVisible, !isUserInteractingWithScroll else { return }
@@ -2598,12 +2603,14 @@ struct AgentModeChatDetailView: View {
             transcriptBlockView(block: block, renderContext: renderContext)
                 .id(block.id)
         }
-        .environment(\.agentMessageRuntimeFooterByItemID, transcriptSnapshot.runtimeFooterByItemID)
         .messageTimestampEnvironment()
     }
 
     @ViewBuilder
     private func transcriptBlockView(block: AgentTranscriptRenderBlock, renderContext: TranscriptRenderContext) -> some View {
+        #if DEBUG
+            let _ = AgentTranscriptTailRenderProbe.record(.block(block.id))
+        #endif
         switch block.kind {
         case .activityCluster:
             let supportsExpansion = transcriptBlockSupportsExpansion(block)
@@ -2743,14 +2750,6 @@ struct AgentModeChatDetailView: View {
         return false
     }
 
-    /// Stable cancel closure for the active run, captured at render time.
-    private func cancelActiveToolsAction(runInteraction: AgentRunInteractionUISnapshot) -> (() -> Void)? {
-        guard let runID = runInteraction.activeRunID else { return nil }
-        return { [weak agentModeVM] in
-            agentModeVM?.cancelActiveToolsForRun(runID: runID, reason: "tool_card_header_cancel")
-        }
-    }
-
     private func transcriptRowView(
         item: AgentChatItem,
         block: AgentTranscriptRenderBlock,
@@ -2760,44 +2759,36 @@ struct AgentModeChatDetailView: View {
         runInteraction: AgentRunInteractionUISnapshot
     ) -> some View {
         let showCancel = showRunScopedToolCancel(for: item, in: block, runInteraction: runInteraction)
-        let cancelAction = showCancel ? cancelActiveToolsAction(runInteraction: runInteraction) : nil
         let ownerTabID = transcript.presentation.tabID ?? transcript.currentTabID ?? currentTabID
         let ownerWorkspaceID = oracleViewModel.workspaceManager.activeWorkspaceID
-        return AgentMessageBubble(
-            item: item,
-            isMostRecentEditBubble: item.id == renderContext.mostRecentEditID,
-            windowID: windowID,
-            currentWorkspaceID: ownerWorkspaceID,
-            currentTabID: ownerTabID,
-            suppressAskUserTranscriptUI: renderContext.isContextBuilderQuestionActive,
-            contextBuilderContext: .init(
+        return AgentTranscriptRow(
+            inputs: AgentTranscriptRowInputs(
+                item: item,
+                isMostRecentEditBubble: item.id == renderContext.mostRecentEditID,
+                windowID: windowID,
+                workspaceID: ownerWorkspaceID,
                 tabID: ownerTabID,
-                contextBuilderAgentVM: contextBuilderAgentVM,
-                activeContextBuilderCallItemID: renderContext.activeContextBuilderCallID,
-                activeContextBuilderResultItemID: renderContext.activeContextBuilderResultID,
-                oracleOpenContext: .init(
-                    windowID: windowID,
-                    workspaceID: ownerWorkspaceID,
-                    tabID: ownerTabID
-                ),
-                showRunScopedToolCancel: showCancel,
-                cancelActiveToolsAction: cancelAction
+                suppressAskUserTranscriptUI: renderContext.isContextBuilderQuestionActive,
+                activeContextBuilderCallID: renderContext.activeContextBuilderCallID,
+                activeContextBuilderResultID: renderContext.activeContextBuilderResultID,
+                rawToolResultPayload: agentModeVM.rawToolResultPayloadForRendering(tabID: ownerTabID, itemID: item.id),
+                rawToolResultPayloadRenderRevision: transcript.presentation
+                    .rawToolResultPayloadRenderRevisionByItemID[item.id] ?? 0,
+                cancelRunID: showCancel ? runInteraction.activeRunID : nil,
+                runInteraction: runInteraction,
+                runtimeFooter: transcript.runtimeFooterByItemID[item.id],
+                autoExpandEnabled: autoExpandEnabled,
+                liveBashExecution: transcript.activeBashLiveExecutionByItemID[item.id],
+                isRecentAssistant: renderContext.recentAssistantItemIDs.contains(item.id),
+                approvalVisible: renderContext.interactionBlockerVisible
             ),
+            agentModeVM: agentModeVM,
             promptManager: promptManager,
-            handoffConfig: runInteraction.canForkCurrentSession ? handoffConfig(for: item.id, runInteraction: runInteraction) : nil,
-            rawToolResultPayload: agentModeVM.rawToolResultPayloadForRendering(tabID: ownerTabID, itemID: item.id),
-            rawToolResultPayloadRenderRevision: transcript.presentation
-                .rawToolResultPayloadRenderRevisionByItemID[item.id] ?? 0,
-            showRunScopedToolCancel: showCancel,
-            cancelActiveToolsAction: cancelAction,
-            codexManagedLoginAction: codexManagedLoginAction
+            contextBuilderAgentVM: contextBuilderAgentVM,
+            codexManagedLoginAction: AgentMessageBubble.offersCodexManagedLogin(for: item) ? codexManagedLoginAction : nil
         )
+        .equatable()
         .id(item.id)
-        .environment(\.markdownFileLinkOpener, markdownFileLinkOpener)
-        .environment(\.agentToolCardAutoExpandEnabled, autoExpandEnabled)
-        .environment(\.agentLiveBashExecutionByItemID, transcript.activeBashLiveExecutionByItemID)
-        .environment(\.agentRecentAssistantItemIDs, renderContext.recentAssistantItemIDs)
-        .environment(\.agentApprovalVisible, renderContext.interactionBlockerVisible)
     }
 
     private func toolCardAutoExpandEnabled(for block: AgentTranscriptRenderBlock) -> Bool {
@@ -3264,36 +3255,6 @@ struct AgentModeChatDetailView: View {
         }
         transcriptBlockExpansion = nextExpansion
         transcriptBlockDefaultExpansion = nextDefaults
-    }
-
-    // MARK: - Handoff
-
-    private func handoffConfig(for itemID: UUID, runInteraction: AgentRunInteractionUISnapshot) -> AgentHandoffConfig {
-        AgentHandoffConfig(
-            itemID: itemID,
-            defaultDestinationAgent: runInteraction.selectedAgent,
-            defaultModelRaw: runInteraction.selectedModelRaw,
-            defaultReasoningEffortRaw: runInteraction.selectedReasoningEffortRaw,
-            availableAgentsProvider: { [weak agentModeVM] in
-                agentModeVM?.availableAgents ?? []
-            },
-            modelOptionsProvider: { [weak agentModeVM] agent in
-                agentModeVM?.modelOptions(for: agent) ?? []
-            },
-            windowID: windowID,
-            buildPayloadForClipboard: { [weak agentModeVM] in
-                await agentModeVM?.buildHandoffPayload(upToItemID: itemID) ?? ""
-            },
-            performHandoff: { [weak agentModeVM] selection in
-                guard let vm = agentModeVM else { return }
-                try await vm.prepareHandoffToNewTab(
-                    upToItemID: itemID,
-                    destinationAgent: selection.agent,
-                    destinationModelRaw: selection.modelRaw,
-                    destinationReasoningEffortRaw: selection.reasoningEffortRaw
-                )
-            }
-        )
     }
 
     private var topSentinel: some View {
