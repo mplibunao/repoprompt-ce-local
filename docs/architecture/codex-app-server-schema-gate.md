@@ -71,6 +71,18 @@ the union, method, and exact missing field, required field, response path, or en
 This is intentionally not a complete protocol mirror. New upstream methods do not fail the gate
 unless RPCE adopts them.
 
+## Bounded thread history (2026-11-10)
+
+On Codex runtimes 0.164.0 or newer, RPCE sends `excludeTurns` and `initialTurnsPage` on
+`thread/resume` and calls `thread/turns/list`. Ordinary reads fetch one 32-turn metadata page.
+Only Stop follows cursors to the end to establish that exactly one turn is active. The watchdog's
+native-tool probe loads the full items of the latest active turn only. Runtimes below 0.164.0
+keep full-history reads.
+
+These fields exist at the 0.159.0 schema floor. The 0.164.0 gate is a runtime activation choice.
+With these entries, the projection checks 46 methods, 207 parameter paths, and 111 response paths
+at 0.159.0.
+
 ## First baseline findings (2026-07-19)
 
 The baseline was generated with the installed `codex-cli 0.144.6`. It uncovered these concrete
