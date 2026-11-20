@@ -65,7 +65,7 @@ hook-key → `{trusted_hash}` object shape cannot be expressed by the current ch
 After a trust write, the post-write `hooks/list` result is the semantic success authority;
 `config/batchWrite.status` alone is not.
 
-The current 0.170.0 baseline checks 45 methods, 196 parameter paths, and 93 response paths. A failure names
+The current 0.170.0 baseline checks 45 methods, 196 parameter paths, and 94 response paths. A failure names
 the union, method, and exact missing field, required field, response path, or enum value.
 
 This is intentionally not a complete protocol mirror. New upstream methods do not fail the gate
@@ -435,6 +435,34 @@ depend on the account and on when the list is fetched.
 0.170.0 (the live checks ran with full access), compaction on 0.170.0, any path that starts
 `codex-exec-server`, the Developer ID re-signing path, staging both targets inside one universal
 app bundle, and accounts other than the one used for validation.
+
+## Global hook approval (2026-11-18)
+
+RepoPrompt copies `~/.codex/hooks.json` into its RepoPrompt-owned `CODEX_HOME` on each launch, where
+Codex loads it as a hook with `source` `user`. The Agent Mode approval flow reviews, trusts, and
+verifies hooks whose `source` is `user` or `project`, and RepoPrompt decodes hooks from other
+sources but never offers them. The first-turn gate, which pauses a session's first turn until its
+hooks are reviewed, the trust write, and the post-write verification all use that one set.
+[The ADR](../adr/2026-11-18-codex-global-hooks-in-isolated-home.md) records the decision.
+
+- **`matcher`.** RepoPrompt now consumes `data[].hooks[].matcher` from `hooks/list`, so the approval
+  card and the MCP interaction show which tool calls a hook applies to, next to its full command.
+  The contract records it as optional and nullable, as the generated 0.159.0 and 0.170.0 schemas
+  declare it. A missing key or `null` decodes as absent, a string decodes exactly, and any other
+  type is a malformed response. This raises the response paths from 93 to 94.
+- **Warnings.** Discovery warnings never block the first turn. When the gate's first discovery
+  reports warnings and leaves nothing to review, RepoPrompt appends one transcript notice with a
+  bounded summary and continues. When a review appears, it lists the warnings on the card and in
+  the MCP interaction. Codex reports a malformed `hooks.json` this way, with no hooks and one
+  warning. Discovery errors still fail discovery.
+  [The ADR](../adr/2026-11-18-codex-global-hooks-in-isolated-home.md) gives the reason warnings
+  don't block.
+- **Gap: the `user` source.** The approval flow depends on Codex reporting the literal `user` for a
+  hook in `$CODEX_HOME/hooks.json`, and the gate can't pin it. `consumedEnumValues` compares an exact
+  set (`Scripts/check_codex_app_server_schema.py:847-856`), and the generated schema declares eleven
+  `HookSource` values, which RepoPrompt treats as free-form text. A rotation that renamed or removed
+  `user` would pass the gate, and global hooks would stop appearing for approval. Each runtime
+  rotation checks it by approving a global hook in the debug app.
 
 ## Files and tests
 

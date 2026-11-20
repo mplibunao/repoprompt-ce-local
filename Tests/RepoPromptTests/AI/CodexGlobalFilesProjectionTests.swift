@@ -4,14 +4,14 @@ import Foundation
 @testable import RepoPromptApp
 import XCTest
 
-final class CodexGlobalInstructionsProjectionTests: XCTestCase {
+final class CodexGlobalFilesProjectionTests: XCTestCase {
     private var root: URL!
     private var ordinaryHome: URL!
     private var managedHome: URL!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("CodexGlobalInstructionsProjectionTests-\(UUID().uuidString)")
+            .appendingPathComponent("CodexGlobalFilesProjectionTests-\(UUID().uuidString)")
         ordinaryHome = root.appendingPathComponent("ordinary", isDirectory: true)
         managedHome = root.appendingPathComponent("managed", isDirectory: true)
         try FileManager.default.createDirectory(at: ordinaryHome, withIntermediateDirectories: true)
@@ -22,22 +22,74 @@ final class CodexGlobalInstructionsProjectionTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    func testPrepareCopiesBothFilesIncludingEmptyOverride() throws {
+    func testPrepareCopiesGlobalFilesIncludingEmptyOverride() throws {
+        let hooks = Data(#"{"hooks":{}}"#.utf8)
         try write(Data(), to: ordinary("AGENTS.override.md"))
         try write(Data("fallback".utf8), to: ordinary("AGENTS.md"))
+        try write(hooks, to: ordinary("hooks.json"))
 
         try project()
 
         XCTAssertEqual(try Data(contentsOf: managed("AGENTS.override.md")), Data())
         XCTAssertEqual(try Data(contentsOf: managed("AGENTS.md")), Data("fallback".utf8))
+        XCTAssertEqual(try Data(contentsOf: managed("hooks.json")), hooks)
         assertRegularFile(managed("AGENTS.override.md"))
         assertRegularFile(managed("AGENTS.md"))
+        assertRegularFile(managed("hooks.json"))
         let hashes = try manifestHashes()
         XCTAssertEqual(hashes["AGENTS.override.md"], hash(Data()))
         XCTAssertEqual(hashes["AGENTS.md"], hash(Data("fallback".utf8)))
+        XCTAssertEqual(try manifestHashes(at: hooksManifestURL), ["hooks.json": hash(hooks)])
 
         try project()
         XCTAssertEqual(try Data(contentsOf: managed("AGENTS.md")), Data("fallback".utf8))
+    }
+
+    func testPrepareOwnsHooksOutsideExistingInstructionManifest() throws {
+        let override = Data("override".utf8)
+        let fallback = Data("fallback".utf8)
+        let hooks = Data(#"{"hooks":{}}"#.utf8)
+        try write(override, to: ordinary("AGENTS.override.md"))
+        try write(fallback, to: ordinary("AGENTS.md"))
+        try write(hooks, to: ordinary("hooks.json"))
+        try write(override, to: managed("AGENTS.override.md"))
+        try write(fallback, to: managed("AGENTS.md"))
+        let twoFileManifest = """
+        {"schemaVersion":1,"projectedFileHashes":{"AGENTS.md":"\(hash(fallback))","AGENTS.override.md":"\(hash(override))"}}
+        """
+        try write(Data(twoFileManifest.utf8), to: manifestURL)
+
+        try project()
+
+        XCTAssertEqual(try Data(contentsOf: managed("AGENTS.override.md")), override)
+        XCTAssertEqual(try Data(contentsOf: managed("AGENTS.md")), fallback)
+        XCTAssertEqual(try Data(contentsOf: managed("hooks.json")), hooks)
+        // Older builds fail every Codex launch when this manifest names any other file.
+        XCTAssertEqual(try manifestObject(at: manifestURL)["schemaVersion"] as? Int, 1)
+        XCTAssertEqual(
+            try manifestHashes(),
+            ["AGENTS.override.md": hash(override), "AGENTS.md": hash(fallback)]
+        )
+        XCTAssertEqual(try manifestHashes(at: hooksManifestURL), ["hooks.json": hash(hooks)])
+    }
+
+    func testPrepareReconcilesInstructionsWhenHooksConflict() throws {
+        let fallback = Data("fallback".utf8)
+        let foreignHooks = Data(#"{"foreign":true}"#.utf8)
+        try write(fallback, to: ordinary("AGENTS.md"))
+        try write(Data(#"{"hooks":{}}"#.utf8), to: ordinary("hooks.json"))
+        try write(foreignHooks, to: managed("hooks.json"))
+
+        XCTAssertThrowsError(try project()) { error in
+            guard case let CodexGlobalFilesProjection.Failure.unownedDestination(url) = error else {
+                return XCTFail("Expected unowned destination failure, got \(error)")
+            }
+            XCTAssertEqual(url.lastPathComponent, "hooks.json")
+        }
+        XCTAssertEqual(try Data(contentsOf: managed("AGENTS.md")), fallback)
+        XCTAssertEqual(try manifestHashes(), ["AGENTS.md": hash(fallback)])
+        XCTAssertEqual(try Data(contentsOf: managed("hooks.json")), foreignHooks)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: hooksManifestURL.path))
     }
 
     func testPrepareRefreshesOwnedFilesAndRemovesOwnedMissingSources() throws {
@@ -60,7 +112,7 @@ final class CodexGlobalInstructionsProjectionTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: manifestURL.path))
     }
 
-    func testPrepareRejectsUnmanifestedDestinationWithoutMutatingEitherFile() throws {
+    func testPrepareRejectsUnmanifestedDestinationWithoutMutatingManagedFiles() throws {
         let cases = [
             (name: "foreign-content", data: Data("foreign".utf8)),
             (name: "matching-content-without-ownership", data: Data("source".utf8))
@@ -73,7 +125,7 @@ final class CodexGlobalInstructionsProjectionTests: XCTestCase {
             try write(testCase.data, to: managed("AGENTS.override.md"))
 
             XCTAssertThrowsError(try project(), "case=\(testCase.name)") { error in
-                guard case CodexGlobalInstructionsProjection.Failure.unownedDestination = error else {
+                guard case CodexGlobalFilesProjection.Failure.unownedDestination = error else {
                     return XCTFail("Expected unowned destination failure for \(testCase.name), got \(error)")
                 }
             }
@@ -93,7 +145,7 @@ final class CodexGlobalInstructionsProjectionTests: XCTestCase {
         }
     }
 
-    func testPrepareRejectsModifiedOwnedDestinationWithoutMutatingEitherFile() throws {
+    func testPrepareRejectsModifiedOwnedDestinationWithoutMutatingManagedFiles() throws {
         try write(Data("override".utf8), to: ordinary("AGENTS.override.md"))
         try write(Data("old fallback".utf8), to: ordinary("AGENTS.md"))
         try project()
@@ -103,7 +155,7 @@ final class CodexGlobalInstructionsProjectionTests: XCTestCase {
         try write(Data("new fallback".utf8), to: ordinary("AGENTS.md"))
 
         XCTAssertThrowsError(try project()) { error in
-            guard case CodexGlobalInstructionsProjection.Failure.modifiedDestination = error else {
+            guard case CodexGlobalFilesProjection.Failure.modifiedDestination = error else {
                 return XCTFail("Expected modified destination failure, got \(error)")
             }
         }
@@ -196,6 +248,10 @@ final class CodexGlobalInstructionsProjectionTests: XCTestCase {
         managed(".repoprompt-agents-projection.json")
     }
 
+    private var hooksManifestURL: URL {
+        managed(".repoprompt-hooks-projection.json")
+    }
+
     private func ordinary(_ name: String) -> URL {
         ordinaryHome.appendingPathComponent(name)
     }
@@ -205,7 +261,7 @@ final class CodexGlobalInstructionsProjectionTests: XCTestCase {
     }
 
     private func project() throws {
-        try CodexGlobalInstructionsProjection.prepare(
+        try CodexGlobalFilesProjection.prepare(
             ordinaryCodexHome: ordinaryHome,
             managedCodexHome: managedHome
         )
@@ -220,10 +276,13 @@ final class CodexGlobalInstructionsProjectionTests: XCTestCase {
         try data.write(to: url, options: .atomic)
     }
 
-    private func manifestHashes() throws -> [String: String] {
-        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL))
-        let dictionary = try XCTUnwrap(object as? [String: Any])
-        return try XCTUnwrap(dictionary["projectedFileHashes"] as? [String: String])
+    private func manifestObject(at url: URL) throws -> [String: Any] {
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url))
+        return try XCTUnwrap(object as? [String: Any])
+    }
+
+    private func manifestHashes(at url: URL? = nil) throws -> [String: String] {
+        try XCTUnwrap(manifestObject(at: url ?? manifestURL)["projectedFileHashes"] as? [String: String])
     }
 
     private func hash(_ data: Data) -> String {

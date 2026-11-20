@@ -195,6 +195,11 @@
           "nullable": false
         },
         {
+          "path": "data[].hooks[].matcher",
+          "presence": "optional",
+          "nullable": true
+        },
+        {
           "path": "data[].hooks[].sourcePath",
           "presence": "required",
           "nullable": false

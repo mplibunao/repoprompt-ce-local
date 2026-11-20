@@ -76,7 +76,7 @@ struct CodexHookReviewCard: View {
             state.strictModeDidChange(isEnabled: isEnabled)
         }
         .confirmationDialog(
-            "Continue without enabling project hooks?",
+            "Continue without trusting these hooks?",
             isPresented: $state.isContinueConfirmationPresented,
             titleVisibility: .visible
         ) {
@@ -95,7 +95,7 @@ struct CodexHookReviewCard: View {
                 .font(.title2)
                 .foregroundColor(.orange)
             VStack(alignment: .leading, spacing: 2) {
-                Text(usesDiscoveryFailureLayout ? "Project Hook Discovery Failed" : "Project Hooks Need Approval")
+                Text(usesDiscoveryFailureLayout ? "Codex Hook Discovery Failed" : "Codex Hooks Need Approval")
                     .font(.headline)
                 Text("The initial Codex turn is paused")
                     .font(.caption)
@@ -112,7 +112,7 @@ struct CodexHookReviewCard: View {
     private func discoveryFailureContent(strictModeEnabled: Bool) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             metadataRow(label: "Execution directory", value: request.executionCWD, isCode: true)
-            Text(request.errorMessage ?? "Codex could not discover project hooks for this directory.")
+            Text(request.errorMessage ?? "Codex could not completely discover global and project hooks for this directory.")
                 .font(.callout)
                 .foregroundColor(.red)
                 .textSelection(.enabled)
@@ -141,9 +141,13 @@ struct CodexHookReviewCard: View {
 
     private func reviewContent(strictModeEnabled: Bool) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Review the repository-provided hooks below. No hook is selected by default.")
-                .font(.callout)
-                .foregroundColor(.secondary)
+            Text(
+                "Review these global and project Codex hooks. No hook is selected by default. "
+                    + "Trust is saved for this RepoPrompt profile and may enable hooks in other Codex sessions. "
+                    + "Global hooks are copied from ~/.codex/hooks.json at launch and are edited there."
+            )
+            .font(.callout)
+            .foregroundColor(.secondary)
             metadataRow(label: "Execution directory", value: request.executionCWD, isCode: true)
 
             if let errorMessage = request.errorMessage, !errorMessage.isEmpty {
@@ -226,20 +230,22 @@ struct CodexHookReviewCard: View {
             .accessibilityLabel(state.selectedHookKeys.contains(hook.key) ? "Deselect hook" : "Select hook")
 
             VStack(alignment: .leading, spacing: 5) {
-                Text(hook.key)
+                Text(hook.key.escapedForDisplay())
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
                 HStack(spacing: 8) {
-                    Text(hook.eventName)
+                    Text(hook.eventName.escapedForDisplay())
                     Text(hook.enabled ? "Enabled" : "Disabled")
                     Text(hook.trustStatus.rawValue.capitalized)
                 }
                 .font(.caption)
                 .foregroundColor(.secondary)
-                metadataRow(label: "Source", value: hook.sourcePath, isCode: true)
+                metadataRow(label: "Source", value: hook.sourceLabel, isCode: false)
+                metadataRow(label: "Source path", value: hook.sourcePath, isCode: true)
+                metadataRow(label: "Matcher", value: hook.matcherDisplay, isCode: hook.matcher != nil)
                 metadataRow(label: "Current hash", value: hook.currentHash, isCode: true)
                 if let command = hook.commandOrHandler, !command.isEmpty {
-                    metadataRow(label: "Command / handler", value: command, isCode: true)
+                    metadataRow(label: "Command / handler", value: command, isCode: true, showsLineBreaks: true)
                 }
             }
         }
@@ -251,9 +257,11 @@ struct CodexHookReviewCard: View {
 
     private var continueConfirmationMessage: String {
         if request.phase == .discoveryFailed {
-            return "This skips an unknown number of project hooks for the current Codex session. Repository guardrails may not run."
+            return "Hook discovery is incomplete, so the number of skipped hooks is unknown. "
+                + "Already trusted or managed hooks can still run. Global or project guardrails may not run."
         }
-        return "This skips \(request.hooks.count) project hook(s) for the current Codex session. Repository guardrails may not run."
+        return "Continue without trusting \(request.hooks.count) shown Codex hook(s). "
+            + "Already trusted or managed hooks can still run. Global or project guardrails may not run."
     }
 
     private func submit(_ decision: AgentCodexHookReviewDecision) {
@@ -267,12 +275,14 @@ struct CodexHookReviewCard: View {
         }
     }
 
-    private func metadataRow(label: String, value: String, isCode: Bool) -> some View {
+    /// Shows a value with its control and bidi characters escaped, so what a person approves reads as what it holds.
+    /// Only a command keeps its line breaks and tabs, because the card shows it over several lines.
+    private func metadataRow(label: String, value: String, isCode: Bool, showsLineBreaks: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
                 .font(.caption2)
                 .foregroundColor(.secondary)
-            Text(value)
+            Text(value.escapedForDisplay(keepingLineBreaksAndTabs: showsLineBreaks))
                 .font(isCode ? .caption.monospaced() : .caption)
                 .textSelection(.enabled)
         }

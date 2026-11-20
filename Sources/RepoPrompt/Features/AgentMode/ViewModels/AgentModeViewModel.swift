@@ -7102,16 +7102,19 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         var option: AgentRunMCPSnapshot.Interaction.Option {
             switch self {
             case .approveSelected:
-                .init(label: rawValue, description: "Trust only the hook_keys answer and continue")
+                .init(
+                    label: rawValue,
+                    description: "Trust only the hooks listed in answers.hook_keys and continue"
+                )
             case .trustAll:
                 .init(label: rawValue, description: "Trust every hook shown and continue")
             case .continueWithoutHooks:
                 .init(
                     label: rawValue,
-                    description: "Continue this Codex session without enabling the shown project hooks"
+                    description: "Continue without trusting the shown hooks. Trusted and managed hooks can still run."
                 )
             case .retry:
-                .init(label: rawValue, description: "Retry project-hook discovery")
+                .init(label: rawValue, description: "Retry Codex hook discovery")
             }
         }
     }
@@ -7151,7 +7154,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             let prefix = "Hook \(index + 1)"
             details.append(.init(label: "\(prefix) Key", value: hook.key, isCode: true))
             details.append(.init(label: "\(prefix) Event", value: hook.eventName, isCode: false))
-            details.append(.init(label: "\(prefix) Source", value: hook.sourcePath, isCode: true))
+            details.append(.init(label: "\(prefix) Source", value: hook.sourceLabel, isCode: false))
+            details.append(.init(label: "\(prefix) Source Path", value: hook.sourcePath, isCode: true))
+            details.append(.init(label: "\(prefix) Matcher", value: hook.matcherDisplay, isCode: hook.matcher != nil))
             details.append(.init(label: "\(prefix) Enabled", value: hook.enabled ? "true" : "false", isCode: false))
             details.append(.init(label: "\(prefix) Trust", value: hook.trustStatus.rawValue, isCode: false))
             details.append(.init(label: "\(prefix) Current Hash", value: hook.currentHash, isCode: true))
@@ -7175,7 +7180,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     options: request.hooks.map { hook in
                         .init(
                             label: hook.key,
-                            description: "\(hook.eventName) · \(hook.sourcePath) · \(hook.trustStatus.rawValue)"
+                            description: "\(hook.eventName) · \(hook.sourceLabel) · \(hook.trustStatus.rawValue)"
                         )
                     }
                 )
@@ -7185,9 +7190,10 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             id: request.id,
             kind: .hookApproval,
             responseType: .decision,
-            title: "Project Hook Approval",
-            prompt: "The initial Codex turn is blocked pending project-hook trust.",
-            context: "Execution directory: \(request.executionCWD)",
+            title: "Codex Hook Approval",
+            prompt: "The initial Codex turn is paused until global and project hook trust is reviewed.",
+            context: "Execution directory: \(request.executionCWD). "
+                + "Trust is saved for this RepoPrompt profile and may enable hooks in other Codex sessions.",
             allowsMultiple: nil,
             options: mcpCodexHookDecisionOptions(for: request, strictModeEnabled: strictModeEnabled),
             fields: fields,

@@ -922,6 +922,11 @@ import XCTest
         var startupError: Error?
         var compactError: Error?
         var compactHold: StartupTestHeldGate?
+        /// Answers hook discovery when set; otherwise discovery reports an empty inventory.
+        var hookList: (() throws -> CodexHookInventory)?
+        /// Answers a hook-trust write with the verified inventory when set; otherwise the write
+        /// fails as unsupported, like a controller without hook trust.
+        var hookTrust: (([CodexHookTrustCandidate], String) throws -> CodexHookInventory)?
         /// Returns the gate `shutdown()` waits for after it begins, if any.
         var shutdownHold: () -> StartupTestHeldGate? = { nil }
         var onShutdownFinished: () -> Void = {}
@@ -1022,9 +1027,21 @@ import XCTest
 
         func setThreadName(_: String, threadID _: String?) async throws {}
 
-        /// An empty inventory lets the first turn pass the project-hooks gate without a review.
         func listHooksForCurrentWorkspace() async throws -> CodexHookInventory {
-            try CodexHookInventory(executionCWD: FileManager.default.temporaryDirectory.path, hooks: [])
+            if let hookList {
+                return try hookList()
+            }
+            return try CodexHookInventory(executionCWD: FileManager.default.temporaryDirectory.path, hooks: [])
+        }
+
+        func trustHooksForCurrentWorkspace(
+            expectedCandidates: [CodexHookTrustCandidate],
+            expectedInventoryFingerprint: String
+        ) async throws -> CodexHookInventory {
+            guard let hookTrust else {
+                throw CodexHookTrustError.unsupportedMethod(method: "config/batchWrite")
+            }
+            return try hookTrust(expectedCandidates, expectedInventoryFingerprint)
         }
 
         func startUserTurn(

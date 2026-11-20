@@ -33,6 +33,7 @@ struct CodexHookMetadataIdentity: Hashable {
     let handlerType: CodexHookUTF8Identity
     let trustStatus: CodexHookTrustStatus
     let commandOrHandler: CodexHookUTF8Identity?
+    let matcher: CodexHookUTF8Identity?
 }
 
 enum CodexHookTrustStatus: String, Hashable {
@@ -63,6 +64,9 @@ struct CodexHookMetadata: Hashable {
     let handlerType: String
     let trustStatus: CodexHookTrustStatus
     let commandOrHandler: String?
+    /// The hook's matcher exactly as Codex reports it. `nil` means Codex reported no matcher;
+    /// an empty string is a distinct, reported value.
+    let matcher: String?
 
     init(
         eventName: String,
@@ -73,7 +77,8 @@ struct CodexHookMetadata: Hashable {
         enabled: Bool,
         handlerType: String,
         trustStatus: CodexHookTrustStatus,
-        commandOrHandler: String?
+        commandOrHandler: String?,
+        matcher: String? = nil
     ) throws {
         guard !eventName.isBlank,
               !source.isBlank,
@@ -93,6 +98,7 @@ struct CodexHookMetadata: Hashable {
         self.handlerType = handlerType
         self.trustStatus = trustStatus
         self.commandOrHandler = commandOrHandler
+        self.matcher = matcher
     }
 
     var keyIdentity: CodexHookUTF8Identity {
@@ -124,7 +130,8 @@ struct CodexHookMetadata: Hashable {
             enabled: enabled,
             handlerType: CodexHookUTF8Identity(handlerType),
             trustStatus: trustStatus,
-            commandOrHandler: commandOrHandler.map(CodexHookUTF8Identity.init)
+            commandOrHandler: commandOrHandler.map(CodexHookUTF8Identity.init),
+            matcher: matcher.map(CodexHookUTF8Identity.init)
         )
     }
 }
@@ -188,15 +195,18 @@ struct CodexHookInventory: Hashable {
         )
     }
 
-    var projectHooks: [CodexHookMetadata] {
-        hooks.filter { $0.source == "project" }
+    /// Hooks the approval flow reviews and trusts: exactly those whose source is `project` or
+    /// `user`. Hooks from every other source are decoded but never offered for approval.
+    var reviewableHooks: [CodexHookMetadata] {
+        hooks.filter { $0.source == "project" || $0.source == "user" }
     }
 
-    var unresolvedProjectHooks: [CodexHookMetadata] {
-        projectHooks.filter { !$0.trustStatus.isResolved }
+    /// Reviewable hooks that are neither trusted nor managed, including disabled ones.
+    var unresolvedReviewableHooks: [CodexHookMetadata] {
+        reviewableHooks.filter { !$0.trustStatus.isResolved }
     }
 
-    func validatesUnresolvedProjectHooks(
+    func validatesUnresolvedReviewableHooks(
         for candidates: [CodexHookTrustCandidate]
     ) -> Bool {
         guard !candidates.isEmpty else { return false }
@@ -204,7 +214,7 @@ struct CodexHookInventory: Hashable {
         for candidate in candidates {
             guard candidate.isValid,
                   selectedKeys.insert(candidate.keyIdentity).inserted,
-                  let hook = unresolvedProjectHooks.first(where: { $0.keyIdentity == candidate.keyIdentity }),
+                  let hook = unresolvedReviewableHooks.first(where: { $0.keyIdentity == candidate.keyIdentity }),
                   hook.hashIdentity == candidate.hashIdentity
             else {
                 return false
@@ -215,7 +225,7 @@ struct CodexHookInventory: Hashable {
 
     func verifies(_ candidates: [CodexHookTrustCandidate]) -> Bool {
         candidates.allSatisfy { candidate in
-            projectHooks.contains {
+            reviewableHooks.contains {
                 $0.selectionIdentity == candidate.selectionIdentity && $0.trustStatus.isResolved
             }
         }
@@ -281,6 +291,9 @@ struct CodexHookInventory: Hashable {
             if let commandOrHandler = hook.commandOrHandler {
                 fields.append(commandOrHandler)
             }
+            if let matcher = hook.matcher {
+                fields.append(matcher)
+            }
             for field in fields {
                 try addInventoryUTF8Bytes(field, total: &inventoryUTF8Bytes)
             }
@@ -318,19 +331,6 @@ struct CodexHookInventory: Hashable {
             throw CodexHookTrustError.malformedListResponse
         }
 
-        let command: String?
-        if let rawCommand = raw["command"] {
-            if rawCommand is NSNull {
-                command = nil
-            } else if let rawCommand = rawCommand as? String {
-                command = rawCommand
-            } else {
-                throw CodexHookTrustError.malformedListResponse
-            }
-        } else {
-            command = nil
-        }
-
         return try CodexHookMetadata(
             eventName: eventName,
             source: source,
@@ -340,8 +340,22 @@ struct CodexHookInventory: Hashable {
             enabled: enabled,
             handlerType: handlerType,
             trustStatus: CodexHookTrustStatus(protocolValue: rawTrustStatus),
-            commandOrHandler: command
+            commandOrHandler: optionalString(raw["command"]),
+            matcher: optionalString(raw["matcher"])
         )
+    }
+
+    /// A missing key or JSON null decodes as `nil` and a string is kept exactly; any other type is
+    /// malformed.
+    private static func optionalString(_ raw: Any?) throws -> String? {
+        switch raw {
+        case .none, is NSNull:
+            nil
+        case let value as String:
+            value
+        default:
+            throw CodexHookTrustError.malformedListResponse
+        }
     }
 
     private static func standardizedPath(_ path: String) -> String {
@@ -402,9 +416,9 @@ enum CodexHookTrustError: Error, LocalizedError {
         case .malformedListResponse:
             "Codex hook discovery returned an invalid result. Retry hook discovery."
         case let .discoveryFailed(cwdErrors):
-            "Codex reported \(cwdErrors.count) hook discovery error(s). Review the project hook configuration and retry."
+            "Codex reported \(cwdErrors.count) hook discovery error(s). Review the global and project hook configuration and retry."
         case .inventoryChanged:
-            "The project hook inventory changed before approval. Review the refreshed inventory and retry."
+            "The Codex hook inventory changed before approval. Review the refreshed inventory and retry."
         case .batchWriteFailed:
             "Codex could not persist hook trust. Retry approval."
         case .postWriteVerificationFailed:
