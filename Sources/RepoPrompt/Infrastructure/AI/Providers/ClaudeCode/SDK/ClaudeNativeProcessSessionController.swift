@@ -73,7 +73,10 @@ final actor ClaudeNativeProcessSessionController {
         case runtimeInit(RuntimeInitStatus)
         case approvalRequest(AgentApprovalRequest)
         case approvalCancelled(requestID: String)
+        /// Positional settlement, and per-input failure when the transport retires.
         case turnCompleted(turnID: UUID, status: TurnStatus)
+        /// The host inputs one result answers on the matched path, settled together.
+        case turnsCompleted(turnIDs: [UUID], status: TurnStatus)
         case error(String)
     }
 
@@ -83,7 +86,8 @@ final actor ClaudeNativeProcessSessionController {
 
     /// What the idle timer asks before it shuts an idle process down.
     struct IdleProbe: Equatable {
-        /// A turn RepoPrompt sent is still running.
+        /// A turn RepoPrompt sent is still running, or Claude Code is running a turn it started
+        /// itself, such as its wake-up after a background task ends.
         let turnInFlight: Bool
         /// The CLI reports a background task, such as a backgrounded shell command, still running.
         let hasLiveBackgroundTasks: Bool
@@ -183,13 +187,16 @@ final actor ClaudeNativeProcessSessionController {
     private var pendingPermissionRequests: [String: PendingPermissionRequest] = [:]
     private var translator: ClaudeSDKNDJSONTranslator
     private var sessionID: String?
+    /// A host input is unanswered, or its answer waits for the `idle` signal.
     private var turnInFlight: Bool {
-        pendingTurnIDHead < pendingTurnIDBuffer.count
+        correlation.hasOutstanding || !deferredCompletions.isEmpty
     }
 
-    /// FIFO queue of turn IDs (head-pointer deque to avoid O(n) removeFirst).
-    private var pendingTurnIDBuffer: ContiguousArray<UUID> = []
-    private var pendingTurnIDHead: Int = 0
+    private var correlation = ClaudeNativeTurnCorrelation()
+    /// Set when a frame's input identities can't be matched. The process is failing: its later
+    /// output is dropped and sends are refused until a new process starts.
+    private var correlationFailed = false
+    /// Positional settlement only; the matched path cancels through interrupt tokens.
     private var turnWasInterrupted = false
 
     /// Task IDs of the background tasks the CLI last reported live in `background_tasks_changed`,
@@ -204,10 +211,18 @@ final actor ClaudeNativeProcessSessionController {
     /// timeout) rather than completing immediately on `result/message_stop`.
     private var observedSessionStateChangedEvents = false
 
-    /// FIFO queue of result-derived turn statuses waiting for an `idle` signal.
-    /// Turn IDs remain in `pendingTurnIDBuffer` until the deferred completion fires
-    /// so that `turnInFlight` stays true during the result→idle window.
-    private var pendingAuthoritativeTurnStatuses: [TurnStatus] = []
+    private struct DeferredCompletion {
+        let executionID: UUID
+        let inputIDs: [UUID]
+        let status: TurnStatus
+        /// Emitted as `turnsCompleted`; positional records are emitted as `turnCompleted`.
+        var keyed = false
+    }
+
+    /// Completions waiting for an `idle` signal. Each record's inputs are resolved when its result
+    /// arrives, so an input sent before the signal can't become its target. The records keep
+    /// `turnInFlight` true during the result-to-idle window.
+    private var deferredCompletions: [DeferredCompletion] = []
 
     /// Fallback task that fires when `idle` does not arrive within the expected window.
     private var authoritativeIdleFallbackTask: Task<Void, Never>?
@@ -321,12 +336,17 @@ final actor ClaudeNativeProcessSessionController {
         }
     }
 
+    /// Host work only. A turn Claude Code started itself isn't shown yet, so a send during it
+    /// queues behind it instead of interrupting it.
     var hasTurnInFlight: Bool {
-        pendingTurnIDHead < pendingTurnIDBuffer.count
+        turnInFlight
     }
 
     func idleProbe() -> IdleProbe {
-        IdleProbe(turnInFlight: hasTurnInFlight, hasLiveBackgroundTasks: !liveBackgroundTaskIDs.isEmpty)
+        IdleProbe(
+            turnInFlight: turnInFlight || correlation.providerTurnID != nil,
+            hasLiveBackgroundTasks: !liveBackgroundTaskIDs.isEmpty
+        )
     }
 
     #if DEBUG
@@ -466,41 +486,53 @@ final actor ClaudeNativeProcessSessionController {
 
     @discardableResult
     func sendUserMessage(_ text: String) async throws -> UUID {
-        guard process != nil else {
+        guard process != nil, !isShuttingDown, !correlationFailed else {
             throw ControllerError.processNotRunning
         }
-        let payload = try ClaudeSDKProtocolCodec.encodeUserMessage(text: text, sessionID: sessionID)
+        let id = UUID()
+        let payload = try ClaudeSDKProtocolCodec.encodeUserMessage(text: text, sessionID: sessionID, uuid: id)
         try sendLine(payload)
-        return beginTurnTracking()
+        // No suspension between the write and registration, so the echo can't arrive first.
+        correlation.register(id)
+        return id
     }
 
     func interruptTurn(reason: String) async -> InterruptOutcome {
         guard process != nil else { return .failed }
-        guard turnInFlight else { return .noTurnInFlight }
+        // An answered input waiting for `idle` has nothing left to cancel; an interrupt sent then
+        // could only cancel the next queued input.
+        guard correlation.hasOutstanding else { return .noTurnInFlight }
+        let target = correlation.enabled ? correlation.beginInterrupt() : nil
         do {
             // Wait for interrupt control-response ACK to confirm Claude received the interrupt.
             _ = try await sendControlRequest(
                 request: ["subtype": "interrupt", "reason": reason],
                 timeoutSeconds: 1.5
             )
-            turnWasInterrupted = true
+            guard hasActiveSession, isInitialized, !isShuttingDown else { return .failed }
+            if let target {
+                // A result that arrived first already settled the interrupted execution.
+                guard correlation.isInterruptPending(target) else { return .noTurnInFlight }
+                correlation.acknowledgeInterrupt(target)
+            } else if !correlation.enabled {
+                turnWasInterrupted = true
+            }
             writeRawEventLogRecord(kind: "turn.interrupted", payload: [
                 "reason": reason
             ] as [String: Any])
             return .acknowledged
-        } catch let controllerError as ControllerError {
-            if case .controlRequestTimedOut = controllerError {
+        } catch {
+            guard hasActiveSession, isInitialized, !isShuttingDown else { return .failed }
+            if let target {
+                guard correlation.isInterruptPending(target) else { return .noTurnInFlight }
+                correlation.abandonInterrupt(target)
+            }
+            if let controllerError = error as? ControllerError, case .controlRequestTimedOut = controllerError {
                 writeRawEventLogRecord(kind: "turn.interrupt.timedOut", payload: [
                     "reason": reason
                 ] as [String: Any])
                 return .timedOut
             }
-            writeRawEventLogRecord(kind: "turn.interrupt.failed", payload: [
-                "reason": reason,
-                "error": controllerError.localizedDescription
-            ] as [String: Any])
-            return .failed
-        } catch {
             writeRawEventLogRecord(kind: "turn.interrupt.failed", payload: [
                 "reason": reason,
                 "error": error.localizedDescription
@@ -539,8 +571,9 @@ final actor ClaudeNativeProcessSessionController {
 
         failPendingControlRequests(with: ControllerError.processNotRunning)
         pendingPermissionRequests.removeAll()
-        clearTurnIDQueue()
+        // Emit the outcomes results already settled before forgetting the unanswered inputs.
         cancelAuthoritativeLifecycleState()
+        resetTurnCorrelation()
 
         closeOutputChannelsAndInput()
 
@@ -636,6 +669,8 @@ final actor ClaudeNativeProcessSessionController {
         // don't inherit the previous process's capability negotiation.
         observedSessionStateChangedEvents = false
         cancelAuthoritativeLifecycleState()
+        correlation = ClaudeNativeTurnCorrelation()
+        correlationFailed = false
         liveBackgroundTaskIDs.removeAll()
         // Reset runtime init aggregation state so stale metadata doesn't leak across runs.
         initializeResponseSnapshot = nil
@@ -1172,7 +1207,11 @@ final actor ClaudeNativeProcessSessionController {
             "preview": String(text.prefix(200)),
             "length": text.count
         ] as [String: Any])
-        emit(.stream(AIStreamResult(type: "content", text: text)))
+        // Recovered text follows the same ownership as any other output; a queued host input
+        // doesn't own it.
+        if !correlationFailed, !correlation.enabled || correlation.ownsOutput {
+            emit(.stream(AIStreamResult(type: "content", text: text)))
+        }
         return true
     }
 
@@ -1284,6 +1323,7 @@ final actor ClaudeNativeProcessSessionController {
     }
 
     private func handleStreamPayload(_ payload: [String: Any]) {
+        guard !isShuttingDown else { return }
         recordObservedSessionID(Self.firstSessionIdentifier(in: payload))
         #if DEBUG
             if ClaudeReasoningExtractionFeature.isEnabled {
@@ -1298,6 +1338,12 @@ final actor ClaudeNativeProcessSessionController {
             }
         #endif
         if let (tools, mcpStatuses) = Self.parseSystemInitFields(from: payload) {
+            let wasMatching = correlation.enabled
+            correlation.observeInit(payload)
+            // A positional interrupt flag must not mark the first matched result cancelled.
+            if !wasMatching, correlation.enabled {
+                turnWasInterrupted = false
+            }
             latestRuntimeInitTools = tools
             latestRuntimeInitMcpServerStatuses = mcpStatuses
             writeRawEventLogRecord(kind: "runtime.init.stream", payload: [
@@ -1311,7 +1357,55 @@ final actor ClaudeNativeProcessSessionController {
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
             return
         }
+        // Translation runs even for output no host input owns, so the translator keeps its
+        // session, model, and tool context.
         let streamResults = translator.parseNDJSONLine(data)
+        guard !correlationFailed else { return }
+        let isResultPayload = payload["type"] as? String == "result"
+        var completion: DeferredCompletion?
+        var ownsOutput = true
+        if correlation.enabled {
+            do {
+                var frameOwnsOutput: Bool?
+                if Self.isMainThreadActivity(payload) {
+                    frameOwnsOutput = try correlation.observeActivity(payload)
+                } else if payload["type"] as? String == "command_lifecycle",
+                          payload["state"] as? String == "started",
+                          let commandID = payload["command_uuid"] as? String,
+                          UUID(uuidString: commandID) != nil
+                {
+                    frameOwnsOutput = try correlation.observeActivity(["user_message_uuid": commandID])
+                }
+                if isResultPayload {
+                    // Resolve before forwarding, so a result that answers no host input forwards
+                    // none of its output.
+                    let resolved = try correlation.resolve(payload)
+                    ownsOutput = !resolved.inputIDs.isEmpty
+                    let stopReason = streamResults.last(where: { $0.type == "message_stop" })?.stopReason
+                    let status: TurnStatus = resolved.interrupted
+                        ? .cancelled
+                        : determineTurnStatus(from: payload, stopReasonHint: stopReason)
+                    completion = DeferredCompletion(
+                        executionID: resolved.executionID,
+                        inputIDs: resolved.inputIDs,
+                        status: status,
+                        keyed: true
+                    )
+                } else {
+                    // Subagent frames have their own stream. They own no main-thread output and
+                    // don't change which message later unstamped deltas belong to.
+                    ownsOutput = !Self.isSubagentActivity(payload) && (frameOwnsOutput ?? correlation.ownsOutput)
+                }
+            } catch {
+                // Report before this actor turn ends, so EOF or shutdown can't finish the stream
+                // first; only the transport teardown waits. Reporting drains the correlation, so
+                // nothing else in this frame may run: it would settle by position.
+                correlationFailed = true
+                reportProtocolFailure(message: "Claude input correlation failed; the process must be restarted.")
+                Task { await self.shutdown() }
+                return
+            }
+        }
         #if DEBUG
             if ClaudeReasoningExtractionFeature.isEnabled {
                 let debugPayloadType = (payload["type"] as? String) ?? "<missing>"
@@ -1343,9 +1437,6 @@ final actor ClaudeNativeProcessSessionController {
         // "message_stop" results, but they are NOT turn boundaries; using them would
         // cause pendingTurnIDs to desynchronize when multiple message_stop results
         // arrive per turn.
-        let payloadType = (payload["type"] as? String) ?? ""
-        let isResultPayload = payloadType == "result"
-
         for result in streamResults {
             #if DEBUG
                 if ClaudeReasoningExtractionFeature.isEnabled, result.type == "reasoning" {
@@ -1386,48 +1477,89 @@ final actor ClaudeNativeProcessSessionController {
                 continue
             }
 
+            if correlation.enabled, !ownsOutput, Self.requiresHostOutputOwner(result) {
+                writeRawEventLogRecord(kind: "translator.unownedStreamResult", payload: logPayload)
+                continue
+            }
             if Self.shouldSuppressUserFacingStreamResult(result) {
                 writeRawEventLogRecord(kind: "translator.streamResultSuppressed", payload: logPayload)
                 continue
             }
             writeRawEventLogRecord(kind: "translator.streamResult", payload: logPayload)
             emit(.stream(result))
-            if isResultPayload, result.type == "message_stop" {
+            if isResultPayload, result.type == "message_stop", !correlation.enabled {
                 guard hasPendingTurnIDs else {
                     assertionFailure("[ClaudeController] result message_stop with no pending turn IDs — possible protocol drift")
                     continue
                 }
                 let status = determineTurnStatus(from: payload, stopReasonHint: result.stopReason)
-                if observedSessionStateChangedEvents {
-                    // Defer completion until `idle` arrives or fallback timer fires.
-                    // Do NOT dequeue the turn ID yet — keep turnInFlight == true so
-                    // callers (e.g. coordinator steering) don't send a new user message
-                    // before the authoritative idle boundary.
-                    pendingAuthoritativeTurnStatuses.append(status)
-                    scheduleAuthoritativeIdleFallbackIfNeeded()
-                } else {
-                    // Legacy mode: complete immediately on result/message_stop.
-                    let completedTurnID = dequeueTurnID()
-                    emit(.turnCompleted(turnID: completedTurnID, status: status))
-                }
+                let id = dequeueTurnID()
+                emitOrDeferCompletion(DeferredCompletion(executionID: id, inputIDs: [id], status: status))
             }
+        }
+        // A result that answers no host input settles nothing here.
+        if let completion, !completion.inputIDs.isEmpty {
+            emitOrDeferCompletion(completion)
+        }
+    }
+
+    private static func isSubagentActivity(_ payload: [String: Any]) -> Bool {
+        ["parent_tool_use_id", "parentToolUseId"].contains { key in
+            guard let parent = payload[key] as? String else { return false }
+            return !parent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    /// Frames that start or continue a main-thread message, and so carry execution evidence.
+    private static func isMainThreadActivity(_ payload: [String: Any]) -> Bool {
+        guard !isSubagentActivity(payload) else { return false }
+        switch payload["type"] as? String {
+        case "assistant", "message":
+            return true
+        case "stream_event":
+            return (payload["event"] as? [String: Any])?["type"] as? String == "message_start"
+        default:
+            return false
+        }
+    }
+
+    /// Output that belongs to a run, and so is withheld when no host input owns it.
+    private static func requiresHostOutputOwner(_ result: AIStreamResult) -> Bool {
+        switch result.type {
+        case "content", "final_content", "reasoning", "usage", "message_stop", "tool_call", "tool_result":
+            true
+        default:
+            false
+        }
+    }
+
+    private func emitOrDeferCompletion(_ completion: DeferredCompletion) {
+        if observedSessionStateChangedEvents {
+            // The record keeps turnInFlight true until idle or the fallback, and a later
+            // send cannot become the target of this completion.
+            deferredCompletions.append(completion)
+            scheduleAuthoritativeIdleFallbackIfNeeded()
+        } else {
+            emitCompletion(completion)
+        }
+    }
+
+    private func emitCompletion(_ completion: DeferredCompletion) {
+        if !completion.keyed, let id = completion.inputIDs.first {
+            emit(.turnCompleted(turnID: id, status: completion.status))
+        } else if !completion.inputIDs.isEmpty {
+            emit(.turnsCompleted(turnIDs: completion.inputIDs, status: completion.status))
         }
     }
 
     /// Completes the next deferred turn waiting for `idle`, if any, and reschedules/cancels
-    /// the fallback timer as needed. Dequeues the turn ID from `pendingTurnIDBuffer` at
-    /// this point so `turnInFlight` transitions to false.
+    /// the fallback timer as needed.
     private func completeNextDeferredTurnIfPending() {
-        guard !pendingAuthoritativeTurnStatuses.isEmpty else { return }
-        let status = pendingAuthoritativeTurnStatuses.removeFirst()
+        guard !deferredCompletions.isEmpty else { return }
+        let completion = deferredCompletions.removeFirst()
         authoritativeIdleFallbackTask?.cancel()
         authoritativeIdleFallbackTask = nil
-        guard hasPendingTurnIDs else {
-            assertionFailure("[ClaudeController] deferred idle completion with no pending turn IDs — possible protocol drift")
-            return
-        }
-        let turnID = dequeueTurnID()
-        emit(.turnCompleted(turnID: turnID, status: status))
+        emitCompletion(completion)
         // If more deferred completions remain, schedule a new fallback.
         scheduleAuthoritativeIdleFallbackIfNeeded()
     }
@@ -1437,7 +1569,7 @@ final actor ClaudeNativeProcessSessionController {
     /// the turn completes anyway. Each task carries a generation token so stale
     /// tasks that wake after cancellation are safely ignored.
     private func scheduleAuthoritativeIdleFallbackIfNeeded() {
-        guard !pendingAuthoritativeTurnStatuses.isEmpty else {
+        guard !deferredCompletions.isEmpty else {
             authoritativeIdleFallbackTask?.cancel()
             authoritativeIdleFallbackTask = nil
             return
@@ -1458,18 +1590,14 @@ final actor ClaudeNativeProcessSessionController {
         // Ignore stale firings from superseded tasks.
         guard generation == authoritativeIdleFallbackGeneration else { return }
         authoritativeIdleFallbackTask = nil
-        guard !pendingAuthoritativeTurnStatuses.isEmpty else { return }
-        let status = pendingAuthoritativeTurnStatuses.removeFirst()
-        guard hasPendingTurnIDs else {
-            assertionFailure("[ClaudeController] idle fallback with no pending turn IDs — possible protocol drift")
-            return
-        }
-        let turnID = dequeueTurnID()
+        guard !deferredCompletions.isEmpty else { return }
+        let completion = deferredCompletions.removeFirst()
         writeRawEventLogRecord(kind: "lifecycle.idleFallback", payload: [
-            "turnID": turnID.uuidString,
-            "status": String(describing: status)
+            "executionID": completion.executionID.uuidString,
+            "turnIDs": completion.inputIDs.map(\.uuidString),
+            "status": String(describing: completion.status)
         ] as [String: Any])
-        emit(.turnCompleted(turnID: turnID, status: status))
+        emitCompletion(completion)
         scheduleAuthoritativeIdleFallbackIfNeeded()
     }
 
@@ -1480,13 +1608,13 @@ final actor ClaudeNativeProcessSessionController {
         authoritativeIdleFallbackTask?.cancel()
         authoritativeIdleFallbackTask = nil
         // Emit deferred completions with their original status — the result/message_stop
-        // already established the correct turn outcome; only idle was missing.
-        for status in pendingAuthoritativeTurnStatuses {
-            guard hasPendingTurnIDs else { break }
-            let turnID = dequeueTurnID()
-            emit(.turnCompleted(turnID: turnID, status: status))
+        // already established the correct turn outcome; only idle was missing. The records are
+        // cleared first, so a later EOF or shutdown can't emit them again.
+        let completions = deferredCompletions
+        deferredCompletions.removeAll()
+        for completion in completions {
+            emitCompletion(completion)
         }
-        pendingAuthoritativeTurnStatuses.removeAll()
     }
 
     static func shouldSuppressUserFacingStreamResult(_ result: AIStreamResult) -> Bool {
@@ -1712,9 +1840,12 @@ final actor ClaudeNativeProcessSessionController {
             buildArguments(existingSessionID: existingSessionID, model: model)
         }
 
+        /// Registers a host input as `sendUserMessage` does after a successful write.
         @discardableResult
         func test_beginTurnTracking() -> UUID {
-            beginTurnTracking()
+            let id = UUID()
+            correlation.register(id)
+            return id
         }
 
         func test_storePendingPermissionRequest(id: String, request: [String: Any]) {
@@ -1739,6 +1870,16 @@ final actor ClaudeNativeProcessSessionController {
         func test_handleInboundLine(_ lineData: Data) async {
             await handleLine(lineData)
         }
+
+        /// Frames a stdout chunk as if the CLI had written it; an unterminated line waits for EOF.
+        func test_handleStdoutChunk(_ data: Data) async {
+            await handleStdoutChunk(data)
+        }
+
+        /// Handles stdout closing as if the CLI had exited.
+        func test_handleStdoutEOF() async {
+            await handleStdoutEOF()
+        }
     #endif
 
     private func handleControlRequest(_ request: ClaudeSDKProtocolCodec.ControlRequest) {
@@ -1749,6 +1890,9 @@ final actor ClaudeNativeProcessSessionController {
         ] as [String: Any])
         switch request.subtype {
         case "can_use_tool":
+            // An approval can be the first evidence of a turn Claude Code started itself. The
+            // payload carries no input identity, so this can't throw.
+            try? correlation.observeActivity([:])
             let payload = request.request
             let toolName = (payload["tool_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let input = payload["input"] as? [String: Any] ?? [:]
@@ -2173,15 +2317,19 @@ final actor ClaudeNativeProcessSessionController {
 
     private func failProtocolAndShutdown(message: String) async {
         guard !isShuttingDown else { return }
+        reportProtocolFailure(message: message)
+        await shutdown()
+    }
+
+    /// Emits the failure and fails every unanswered input. Inputs whose results already arrived
+    /// keep their outcome.
+    private func reportProtocolFailure(message: String) {
         writeRawEventLogRecord(kind: "session.failProtocol", payload: ["message": message])
         emit(.error(message))
-        let staleIDs = drainAllTurnIDs()
-        if !staleIDs.isEmpty {
-            for id in staleIDs {
-                emit(.turnCompleted(turnID: id, status: .failed))
-            }
+        cancelAuthoritativeLifecycleState()
+        for id in drainAllTurnIDs() {
+            emit(.turnCompleted(turnID: id, status: .failed))
         }
-        await shutdown()
     }
 
     private func resolvedLaunchEnvironment(
@@ -2443,48 +2591,32 @@ final actor ClaudeNativeProcessSessionController {
         return "rp-claude-\(value)"
     }
 
-    @discardableResult
-    private func beginTurnTracking() -> UUID {
-        let id = UUID()
-        pendingTurnIDBuffer.append(id)
-        return id
-    }
+    // MARK: - Positional settlement
 
-    // MARK: - Pending turn ID deque helpers
-
-    /// O(1) check whether the FIFO queue has entries.
+    /// Unanswered host inputs only; a deferred completion already holds its resolved inputs.
     private var hasPendingTurnIDs: Bool {
-        pendingTurnIDHead < pendingTurnIDBuffer.count
+        correlation.hasOutstanding
     }
 
-    /// O(1) dequeue from the front.  Compacts the buffer when half is consumed.
+    /// Settles the oldest unanswered input when Claude Code doesn't echo input identities.
+    /// Callers check `hasPendingTurnIDs` first.
     private func dequeueTurnID() -> UUID {
-        let id = pendingTurnIDBuffer[pendingTurnIDHead]
-        pendingTurnIDHead += 1
-        compactTurnIDBufferIfNeeded()
+        guard let id = correlation.takeFirst() else {
+            preconditionFailure("[ClaudeController] dequeueTurnID called with no pending turn IDs")
+        }
         return id
     }
 
-    /// Drain all remaining IDs and reset.
+    /// Returns the unanswered inputs in send order and resets the correlation for the next process.
     private func drainAllTurnIDs() -> [UUID] {
-        guard hasPendingTurnIDs else { return [] }
-        let remaining = Array(pendingTurnIDBuffer[pendingTurnIDHead...])
-        clearTurnIDQueue()
-        return remaining
+        correlation.drain()
     }
 
-    /// Reset the queue to empty.
-    private func clearTurnIDQueue() {
-        pendingTurnIDBuffer.removeAll(keepingCapacity: false)
-        pendingTurnIDHead = 0
-    }
-
-    private func compactTurnIDBufferIfNeeded() {
-        // Compact when more than half is consumed and at least 4 slots are wasted.
-        if pendingTurnIDHead > 4, pendingTurnIDHead >= pendingTurnIDBuffer.count / 2 {
-            pendingTurnIDBuffer.removeFirst(pendingTurnIDHead)
-            pendingTurnIDHead = 0
-        }
+    /// Resets turn correlation and its failure and interruption flags without reporting unanswered inputs.
+    private func resetTurnCorrelation() {
+        correlation = ClaudeNativeTurnCorrelation()
+        correlationFailed = false
+        turnWasInterrupted = false
     }
 
     private func emit(_ event: Event) {
