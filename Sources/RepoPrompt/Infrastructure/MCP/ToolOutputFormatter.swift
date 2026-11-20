@@ -507,7 +507,8 @@ enum ToolOutputFormatter {
 
     // MARK: - Apply Edits
 
-    static func applyEdits(editsRequested: Int?, editsApplied: Int?, linesChanged: Int?, chunks: Int?, diff: String?) -> String {
+    static func applyEdits(editsRequested: Int?, editsApplied: Int?, linesChanged: Int?, chunks: Int?, diff: String?, status: String? = nil) -> String {
+        let isNoChange = status?.lowercased() == "no_change"
         let applied = editsApplied ?? 0
         let requested = editsRequested ?? 0
         // Status icon rules:
@@ -527,7 +528,11 @@ enum ToolOutputFormatter {
         let isFailure = editsRequested != nil && editsApplied != nil && requested > 0 && applied == 0
         var out: [String] = []
         out.reserveCapacity(diff?.isEmpty == false ? 12 : 8)
-        out.append("## Apply Edits \(statusIcon(success: isFailure ? false : (isWarning ? nil : isSuccess), warning: isWarning))")
+        let icon = isNoChange ? "ℹ️" : statusIcon(success: isFailure ? false : (isWarning ? nil : isSuccess), warning: isWarning)
+        out.append("## Apply Edits \(icon)")
+        if isNoChange {
+            out.append("- **Result**: No net change")
+        }
         if let requested = editsRequested {
             out.append("- **Requested**: \(requested)")
         }
@@ -2327,7 +2332,8 @@ extension ToolOutputFormatter {
                     editsApplied: dto.editsApplied,
                     linesChanged: dto.totalLinesChanged,
                     chunks: dto.totalChunks,
-                    diff: dto.unifiedDiff
+                    diff: dto.unifiedDiff,
+                    status: dto.status
                 )
             }
             outBlocks.append(summary)
@@ -2341,7 +2347,8 @@ extension ToolOutputFormatter {
                     if let err = r.error, !err.isEmpty {
                         lines.append("- Edit \(idx): failed – \(err)")
                     } else {
-                        lines.append("- Edit \(idx): success")
+                        let outcome = dto.status.lowercased() == "no_change" ? "matched (no net change)" : "success"
+                        lines.append("- Edit \(idx): \(outcome)")
                     }
                 }
                 outBlocks.append(lines.joined(separator: "\n"))
@@ -2447,7 +2454,8 @@ extension ToolOutputFormatter {
                     editsApplied: applied,
                     linesChanged: lines,
                     chunks: chunks,
-                    diff: diff
+                    diff: diff,
+                    status: obj["status"]?.stringValue
                 )
             }
             outBlocks.append(summary)
@@ -2465,7 +2473,8 @@ extension ToolOutputFormatter {
                         let msg = err.isEmpty ? "unknown error" : err
                         lines.append("- Edit \(idx): failed – \(msg)")
                     } else {
-                        lines.append("- Edit \(idx): success")
+                        let outcome = obj["status"]?.stringValue?.lowercased() == "no_change" ? "matched (no net change)" : "success"
+                        lines.append("- Edit \(idx): \(outcome)")
                     }
                 }
                 outBlocks.append(lines.joined(separator: "\n"))
