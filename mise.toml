@@ -1,5 +1,5 @@
 [tools]
-"github:nicklockwood/SwiftFormat" = "0.64.5"
+"github:nicklockwood/SwiftFormat" = "0.64.7"
 "aqua:realm/SwiftLint" = "0.65.1"
 
 [settings]
