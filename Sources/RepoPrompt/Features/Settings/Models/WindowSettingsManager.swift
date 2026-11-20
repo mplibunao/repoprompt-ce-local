@@ -17,9 +17,6 @@ protocol SettingsManaging {
     func updateChatSettings(_ settings: ChatGlobalSettings, commit: Bool?)
     func contextBuilderBehaviorSettings() -> ContextBuilderBehaviorSettings
     func setContextBuilderBehaviorSettings(_ settings: ContextBuilderBehaviorSettings, commit: Bool)
-    func globalContextBuilderAgentSelection() -> (agentRaw: String?, modelRaw: String?)
-    func persistedGlobalContextBuilderAgentSelection() -> (agentRaw: String?, modelRaw: String?)
-    func setGlobalContextBuilderAgentSelection(agentRaw: String, modelRaw: String, markUserDefined: Bool)
     func globalRecommendationProviderFilter() -> Set<RecommendationProviderKind>
     func promptSectionsOrderRaw() -> String
     func setPromptSectionsOrderRaw(_ raw: String, commit: Bool)
@@ -90,15 +87,6 @@ extension GlobalSettingsStore: SettingsManaging {
 
     func updateChatSettings(_ settings: ChatGlobalSettings, commit: Bool?) {
         updateChatSettings(settings, commit: commit ?? true)
-    }
-
-    func setGlobalContextBuilderAgentSelection(agentRaw: String, modelRaw: String, markUserDefined: Bool) {
-        setGlobalContextBuilderAgentSelection(
-            agentRaw: agentRaw,
-            modelRaw: modelRaw,
-            markUserDefined: markUserDefined,
-            reason: nil
-        )
     }
 
     func setPreferredComposeModelRaw(_ raw: String?, commit: Bool, reason: String?, honorSync: Bool) {
@@ -213,22 +201,6 @@ final class WindowSettingsManager: ObservableObject, SettingsManaging {
         commit: Bool = true
     ) {
         store.setContextBuilderBehaviorSettings(settings, commit: commit)
-    }
-
-    func globalContextBuilderAgentSelection() -> (agentRaw: String?, modelRaw: String?) {
-        store.globalContextBuilderAgentSelection()
-    }
-
-    func persistedGlobalContextBuilderAgentSelection() -> (agentRaw: String?, modelRaw: String?) {
-        store.persistedGlobalContextBuilderAgentSelection()
-    }
-
-    func setGlobalContextBuilderAgentSelection(agentRaw: String, modelRaw: String, markUserDefined: Bool = true) {
-        store.setGlobalContextBuilderAgentSelection(
-            agentRaw: agentRaw,
-            modelRaw: modelRaw,
-            markUserDefined: markUserDefined
-        )
     }
 
     func globalRecommendationProviderFilter() -> Set<RecommendationProviderKind> {
