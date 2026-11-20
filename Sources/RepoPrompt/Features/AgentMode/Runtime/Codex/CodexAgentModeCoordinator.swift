@@ -1186,7 +1186,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 status: .continuedWithoutHooks,
                 approvedCount: 0,
                 skippedCount: skippedCount,
-                notice: "Continued without trusting \(skippedDescription). This decision does not disable already trusted or managed hooks."
+                notice: "Continued without trusting \(skippedDescription). Trusted and managed hooks can still run."
             )
 
         case .retryDiscovery:
@@ -1332,7 +1332,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 status: status,
                 approvedCount: candidates.count,
                 skippedCount: selectionSkippedCount,
-                notice: "Trusted \(candidates.count) Codex hook(s); \(verifiedUnresolvedIdentities.count) remain unresolved for this controller binding."
+                notice: "Trusted \(candidates.count) Codex hook(s) and left \(verifiedUnresolvedIdentities.count) untrusted."
             )
         } catch is CancellationError {
             guard session.codexHookGateAttemptToken == token else { return }

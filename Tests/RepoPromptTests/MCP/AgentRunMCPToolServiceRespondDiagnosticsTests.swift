@@ -251,7 +251,7 @@ final class AgentRunMCPToolServiceRespondDiagnosticsTests: XCTestCase {
         XCTAssertEqual(details["Hook 1 Matcher"], "Bash")
         XCTAssertEqual(details["Hook 1 Command / Handler"], command)
         XCTAssertEqual(details["Hook 2 Key"], projectKey)
-        XCTAssertEqual(details["Hook 2 Source"], "Project (project)")
+        XCTAssertEqual(details["Hook 2 Source"], "Project")
         XCTAssertEqual(details["Hook 2 Source Path"], "/workspace/repo/.codex/hooks.json")
         XCTAssertEqual(details["Hook 2 Matcher"], "Not provided by Codex")
     }

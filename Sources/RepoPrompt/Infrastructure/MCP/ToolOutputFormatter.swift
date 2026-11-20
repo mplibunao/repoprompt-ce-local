@@ -6153,10 +6153,9 @@ extension ToolOutputFormatter {
             }
             let details = [
                 text("Event").map { "event \($0)" },
-                [text("Source"), text("Source Path")].compactMap(\.self).joined(separator: " "),
+                text("Source"),
                 text("Matcher").map { "matcher \($0)" },
-                text("Trust").map { "trust \($0)" },
-                text("Current Hash").map { "hash \($0)" }
+                text("Trust").map { "trust \($0)" }
             ].compactMap(\.self).filter { !$0.isEmpty }
             let heading = text("Key") ?? "Hook \(number)"
             lines.append("  - \(heading)" + (details.isEmpty ? "" : ": " + details.joined(separator: " · ")))

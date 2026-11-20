@@ -31,7 +31,7 @@ struct AgentCodexHookReviewHook: Hashable {
         case "user":
             "Global (user)"
         case "project":
-            "Project (project)"
+            "Project"
         default:
             source
         }

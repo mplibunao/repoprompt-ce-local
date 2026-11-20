@@ -512,7 +512,7 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
                 .init(label: "Hook 1 Command / Handler", value: "`\u{301}rtk hook codex --flag a b c", isCode: true),
                 .init(label: "Hook 2 Key", value: "/workspace/repo/.codex/hooks.json:stop:\u{202E}0:0", isCode: true),
                 .init(label: "Hook 2 Event", value: "stop", isCode: false),
-                .init(label: "Hook 2 Source", value: "Project (project)", isCode: false),
+                .init(label: "Hook 2 Source", value: "Project", isCode: false),
                 .init(label: "Hook 2 Source Path", value: "/workspace/repo/.codex/hooks.json", isCode: true),
                 .init(label: "Hook 2 Matcher", value: "Not provided by Codex", isCode: false),
                 .init(label: "Hook 2 Trust", value: "modified", isCode: false),
@@ -548,8 +548,8 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
         // for hook 1's command, and the fence length for hook 2's.
         XCTAssertTrue(
             text.contains(
-                "  - `/home/hooks.json:pre_tool_use:0:0`: event preToolUse · Global (user) `/home/hooks.json` · "
-                    + "matcher `Bash\\n  - /forged:0:0: event stop` · trust untrusted · hash `sha256:global`\n"
+                "  - `/home/hooks.json:pre_tool_use:0:0`: event preToolUse · Global (user) · "
+                    + "matcher `Bash\\n  - /forged:0:0: event stop` · trust untrusted\n"
                     + "    command: `` `\u{301}rtk hook codex --flag a b c ``"
             ),
             text
@@ -558,8 +558,8 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
         // multiline command keeps its line breaks and tab in a fence while its bidi character is escaped.
         XCTAssertTrue(
             text.contains(
-                "  - `/workspace/repo/.codex/hooks.json:stop:\\u{202E}0:0`: event stop · Project (project) "
-                    + "`/workspace/repo/.codex/hooks.json` · matcher Not provided by Codex · trust modified · hash `sha256:project`\n"
+                "  - `/workspace/repo/.codex/hooks.json:stop:\\u{202E}0:0`: event stop · Project · "
+                    + "matcher Not provided by Codex · trust modified\n"
                     + "    command:\n    ````\n    echo `date`\n    ```\u{301}\n    ./guard.sh\t\\u{202E}\n    ````\n"
             ),
             text

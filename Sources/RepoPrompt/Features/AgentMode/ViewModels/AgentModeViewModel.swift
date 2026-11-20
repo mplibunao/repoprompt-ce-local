@@ -7104,14 +7104,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             case .approveSelected:
                 .init(
                     label: rawValue,
-                    description: "Trust only the hooks identified by answers.hook_keys and continue without trusting the other shown hooks"
+                    description: "Trust only the hooks listed in answers.hook_keys and continue"
                 )
             case .trustAll:
                 .init(label: rawValue, description: "Trust every hook shown and continue")
             case .continueWithoutHooks:
                 .init(
                     label: rawValue,
-                    description: "Continue without completing hook trust; already trusted or managed hooks can still run"
+                    description: "Continue without trusting the shown hooks. Trusted and managed hooks can still run."
                 )
             case .retry:
                 .init(label: rawValue, description: "Retry Codex hook discovery")
@@ -7180,7 +7180,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     options: request.hooks.map { hook in
                         .init(
                             label: hook.key,
-                            description: "\(hook.eventName) · \(hook.sourceLabel) · \(hook.sourcePath) · \(hook.trustStatus.rawValue)"
+                            description: "\(hook.eventName) · \(hook.sourceLabel) · \(hook.trustStatus.rawValue)"
                         )
                     }
                 )
