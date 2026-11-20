@@ -188,6 +188,8 @@
             requestUIRefresh(tabID: tabID, urgent: urgentUIRefresh)
         }
 
+        private static let testTextDerivationFixtureRequest = "Seed DEBUG text-derivation fixture for transcript rendering measurement."
+
         @discardableResult
         func testSeedTextDerivationFixture(tabID: UUID, reset: Bool = true) async -> [String: Int] {
             if reset {
@@ -213,7 +215,7 @@
                 appended[bucket, default: 0] += 1
             }
 
-            append(.user("Seed DEBUG text-derivation fixture for transcript rendering measurement.", sequenceIndex: session.nextSequenceIndex), bucket: "user")
+            append(.user(Self.testTextDerivationFixtureRequest, sequenceIndex: session.nextSequenceIndex), bucket: "user")
             append(.assistant(Self.testLongAssistantText(label: "old-collapsible-assistant", includeCodeFence: true), sequenceIndex: session.nextSequenceIndex), bucket: "assistant")
 
             let plainInvocationID = UUID()
@@ -287,6 +289,38 @@
             session.clearDerivedTranscriptCaches()
             requestUIRefresh(tabID: tabID, urgent: true)
             return appended
+        }
+
+        func testMutateCompletedTextDerivationConclusion(tabID: UUID) -> [String: Any]? {
+            guard let session = sessions[tabID], !session.runState.isActive else { return nil }
+
+            refreshDerivedTranscriptState(for: session, reason: .manualRefresh)
+            let cacheEntryCountBefore = session.turnProjectionCaches.count
+            guard session.transcript.turns.count >= 2,
+                  let turn = session.transcript.turns.first,
+                  turn.request?.text == Self.testTextDerivationFixtureRequest,
+                  turn.isCompleted,
+                  let conclusionID = turn.conclusionActivityID,
+                  let itemIndex = session.items.firstIndex(where: { $0.id == conclusionID })
+            else { return nil }
+
+            let itemCountBefore = session.items.count
+            let marker = "DEBUG projection cache check: conclusion rewritten in place."
+            session.mutateItem(at: itemIndex) { item in
+                item.text = marker
+            }
+            refreshDerivedTranscriptState(for: session, reason: .liveMutation)
+
+            let projectedItem = session.transcriptProjection.workingRows.first { $0.id == conclusionID }
+                ?? session.transcriptProjection.archivedRows.first { $0.id == conclusionID }
+            return [
+                "mutated_item_id": conclusionID.uuidString,
+                "turn_cache_entry_count_before": cacheEntryCountBefore,
+                "item_count_before": itemCountBefore,
+                "item_count_after": session.items.count,
+                "turn_completed": session.transcript.turns.first?.isCompleted == true,
+                "projected_text_matches_source": projectedItem?.text == marker
+            ]
         }
 
         private static func testLongAssistantText(label: String, includeCodeFence: Bool) -> String {
