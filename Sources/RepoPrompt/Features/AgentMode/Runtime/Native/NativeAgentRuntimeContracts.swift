@@ -11,6 +11,9 @@ protocol NativeAgentRuntimeControlling: Actor {
     var hasActiveSession: Bool { get async }
     var hasTurnInFlight: Bool { get async }
     var events: AsyncStream<NativeAgentRuntimeEvent> { get async }
+    /// The current event stream and its generation, read together. A runtime that replaces its
+    /// stream gives the replacement a new generation; finishing a stream doesn't change it.
+    var eventStreamSnapshot: (generation: UInt64, stream: AsyncStream<NativeAgentRuntimeEvent>) { get async }
 
     func ensureEventsStreamReady() async
     func resetEventsStreamForNewRun() async
@@ -33,7 +36,28 @@ protocol NativeAgentRuntimeControlling: Actor {
     func idleProbe() async -> NativeAgentRuntimeIdleProbe
 }
 
+/// One generation of a native runtime's event stream.
+struct NativeAgentRuntimeEventStreamHandle {
+    let generation: UInt64
+    let stream: AsyncStream<NativeAgentRuntimeEvent>
+}
+
 extension NativeAgentRuntimeControlling {
+    /// For runtimes that never replace their stream. A runtime that does must override this.
+    var eventStreamSnapshot: (generation: UInt64, stream: AsyncStream<NativeAgentRuntimeEvent>) {
+        get async {
+            let stream = await events
+            return (0, stream)
+        }
+    }
+
+    var eventStreamHandle: NativeAgentRuntimeEventStreamHandle {
+        get async {
+            let snapshot = await eventStreamSnapshot
+            return NativeAgentRuntimeEventStreamHandle(generation: snapshot.generation, stream: snapshot.stream)
+        }
+    }
+
     func cleanupConversation(_ handle: ProviderConversationCleanupHandle, action: ProviderConversationCleanupAction) async -> ProviderConversationCleanupOutcome {
         .unsupported(message: "Native runtime has no local API for \(action.rawValue) cleanup of conversations.")
     }

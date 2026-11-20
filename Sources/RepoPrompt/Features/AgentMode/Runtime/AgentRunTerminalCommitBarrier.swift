@@ -42,6 +42,16 @@ final class AgentRunTerminalCommitBarrier {
         ) -> Bool
     }
 
+    /// The transcript turn a terminal is attributed to.
+    enum TerminalAnchor: Equatable {
+        /// The session's latest user row.
+        case automatic
+        /// No row: a turn Claude Code started by itself has no user message.
+        case none
+        /// This user row.
+        case exact(UUID)
+    }
+
     struct Request {
         // This request carries no concrete app session class. Its domain command values
         // carry no settlement authority; the exact-object binding applies them
@@ -60,6 +70,7 @@ final class AgentRunTerminalCommitBarrier {
         let supportsFollowUp: Bool
         let providerSuccessor: ProviderSuccessor?
         let notifyTurnComplete: Bool
+        let terminalAnchor: TerminalAnchor
         let providerDrainGeneration: UInt64
         let providerBuffersAreDrained: () -> Bool
         let prepareProviderState: () -> (@MainActor () async -> Void)?
@@ -80,6 +91,7 @@ final class AgentRunTerminalCommitBarrier {
             supportsFollowUp: Bool,
             providerSuccessor: ProviderSuccessor? = nil,
             notifyTurnComplete: Bool,
+            terminalAnchor: TerminalAnchor = .automatic,
             providerDrainGeneration: UInt64 = 0,
             providerBuffersAreDrained: @escaping () -> Bool = { true },
             prepareProviderState: @escaping () -> (@MainActor () async -> Void)? = { nil },
@@ -99,6 +111,7 @@ final class AgentRunTerminalCommitBarrier {
             self.supportsFollowUp = supportsFollowUp
             self.providerSuccessor = providerSuccessor
             self.notifyTurnComplete = notifyTurnComplete
+            self.terminalAnchor = terminalAnchor
             self.providerDrainGeneration = providerDrainGeneration
             self.providerBuffersAreDrained = providerBuffersAreDrained
             self.prepareProviderState = prepareProviderState
@@ -192,7 +205,11 @@ final class AgentRunTerminalCommitBarrier {
             recordRejection("provider_buffers_pending", request: request)
             return nil
         }
-        let terminalTurnID = binding.terminalTurnID
+        let terminalTurnID: UUID? = switch request.terminalAnchor {
+        case .automatic: binding.terminalTurnID
+        case .none: nil
+        case let .exact(userItemID): userItemID
+        }
 
         let acquiredTerminalCommitPhase = lifecycle.beginTerminalCommit()
         assert(acquiredTerminalCommitPhase, "Terminal commit phase acquisition must succeed after the in-progress guard")
