@@ -57,7 +57,6 @@ actor ExecMCPService: Service {
         } catch {
             await session.disconnect()
             self.session = nil
-            handleConnectionError(error)
             throw error
         }
 
@@ -344,17 +343,6 @@ actor ExecMCPService: Service {
             resolved = (base as NSString).appendingPathComponent(resolved)
         }
         return resolved
-    }
-
-    // MARK: - Error Handling
-
-    private func handleConnectionError(_ error: any Error) {
-        guard let error = error as? InteractiveSessionError else {
-            fputs("Error: \(error)\n", stderr)
-            return
-        }
-
-        fputs("Error: \(error.description)\n", stderr)
     }
 }
 

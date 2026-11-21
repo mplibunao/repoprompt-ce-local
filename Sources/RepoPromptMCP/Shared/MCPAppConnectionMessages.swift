@@ -15,7 +15,9 @@ enum MCPAppConnectionMessages {
         /// The bootstrap socket is missing or refuses connections. The app may not be running, or its
         /// MCP Server may be switched off; the socket alone cannot tell which.
         case unavailable
-        /// The app accepted the socket and is waiting for a person to approve this client.
+        /// The app accepted the socket and has not finished admitting this client. Admission can
+        /// include waiting for a person to approve it, but a client the app already allows also
+        /// passes through this state.
         case awaitingApproval
         /// The app refused this client's connection request.
         case approvalDenied
@@ -48,19 +50,20 @@ enum MCPAppConnectionMessages {
             return "Cannot connect to \(app). The app is not running or its MCP Server is disabled. "
                 + "Start \(app) and enable MCP Server in Settings > MCP, then retry."
         case .awaitingApproval:
-            return "\(app) is running and waiting for you to approve this client. "
-                + "Approve it in \(app), then retry."
+            return "\(app) is still admitting this client, which can mean waiting for the user "
+                + "to approve it in the app. Retry in a moment."
         case .approvalDenied:
-            return "Connection approval denied. Your connection request was rejected by \(app). "
-                + "Check the MCP approval dialog in \(app)."
+            // The app also denies a request that no one answers within its 300-second approval
+            // timeout, so the text can't assume a person refused.
+            return "\(app) denied this client, either by a person or because no one approved it "
+                + "within 5 minutes. Reconnect and approve it in \(app)."
         case let .socketPermissionDenied(errno):
             return "Cannot connect to \(app): permission denied on its MCP socket (errno \(errno)). "
                 + "If this client runs in a sandbox, for example Codex, disable the sandbox "
                 + "or grant it Unix socket access, then retry."
         case .bootstrapTimeout:
-            return "\(app) did not respond to the bootstrap handshake. "
-                + "It accepted the socket connection too slowly or is wedged. "
-                + "If it recently crashed under the debugger, restart it and try again."
+            return "\(app) accepted the connection but didn't answer the bootstrap handshake in time. "
+                + "It may be busy or stuck. If retrying doesn't help, restart it."
         case let .transportFailure(reason):
             return "Cannot connect to \(app) (\(reason)). It may be busy or restarting; retry shortly."
         }

@@ -50,12 +50,7 @@ actor InteractiveMCPService: Service {
         }
 
         // Connect to the app
-        do {
-            try await session.connect()
-        } catch {
-            handleConnectionError(error)
-            throw error
-        }
+        try await session.connect()
 
         defer {
             Task {
@@ -80,14 +75,5 @@ actor InteractiveMCPService: Service {
     private static func timeoutPolicy(from seconds: Double?) -> ToolCallTimeoutPolicy {
         guard let seconds else { return .default }
         return seconds == 0 ? .none : .seconds(seconds)
-    }
-
-    private func handleConnectionError(_ error: Error) {
-        guard let error = error as? InteractiveSessionError else {
-            fputs("\u{001B}[31mError: \(String(describing: error))\u{001B}[0m\n", stderr)
-            return
-        }
-
-        fputs("\u{001B}[31mError: \(error.description)\u{001B}[0m\n", stderr)
     }
 }
