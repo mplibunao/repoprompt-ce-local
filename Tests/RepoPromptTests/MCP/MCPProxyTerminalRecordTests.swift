@@ -122,6 +122,43 @@ final class MCPProxyTerminalRecordTests: XCTestCase {
         XCTAssertEqual(record.errno, EIO)
     }
 
+    func testFirstAttemptFailureDisposition() {
+        let cases: [(label: String, error: CLIRuntimeError, expected: MCPProxyFirstAttemptDisposition)] = [
+            ("missing socket or directory", .connectionFailed(underlying: SocketProxyError.connectFailed(errno: ENOENT)), .offline),
+            ("path that is not a live socket", .connectionFailed(underlying: SocketProxyError.connectFailed(errno: ECONNREFUSED)), .offline),
+            ("socket file present but refused", .connectionFailed(underlying: SocketProxyError.connectionRefused), .retryOnce),
+            ("socket permission denied", .connectionFailed(underlying: SocketProxyError.connectFailed(errno: EACCES)), .retryOnce),
+            ("bootstrap response timeout", .connectionFailed(underlying: SocketProxyError.bootstrapResponseTimeout), .retryOnce),
+            ("app closed the socket during bootstrap", .connectionFailed(underlying: SocketProxyError.serverClosed), .retryOnce),
+            (
+                "transient bootstrap rejection",
+                .connectionFailed(underlying: SocketProxyError.handshakeRejected(
+                    errorCode: MCPBootstrapErrorCode.serverNotReady.rawValue,
+                    reason: "Server not ready"
+                )),
+                .retryOnce
+            ),
+            (
+                "terminal bootstrap rejection",
+                .connectionFailed(underlying: SocketProxyError.handshakeRejected(
+                    errorCode: MCPBootstrapErrorCode.sessionBlocked.rawValue,
+                    reason: "Session blocked"
+                )),
+                .terminal
+            ),
+            ("approval denied", .approvalDenied, .terminal),
+            ("protocol version mismatch", .connectionFailed(underlying: SocketProxyError.protocolVersionMismatch), .terminal)
+        ]
+
+        for testCase in cases {
+            XCTAssertEqual(
+                CLIProxyRuntimePolicy.firstAttemptDisposition(after: testCase.error),
+                testCase.expected,
+                testCase.label
+            )
+        }
+    }
+
     func testCancellationNormalizesToStableHostTaskProvenance() async throws {
         let runtimeError = try XCTUnwrap(
             CLIProxyRuntimePolicy.normalizedTerminalRuntimeError(for: CancellationError())

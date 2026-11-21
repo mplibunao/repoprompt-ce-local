@@ -57,7 +57,6 @@ actor ExecMCPService: Service {
         } catch {
             await session.disconnect()
             self.session = nil
-            handleConnectionError(error)
             throw error
         }
 
@@ -239,13 +238,13 @@ actor ExecMCPService: Service {
                         throw error
                     case .appNotRunning where Date() < deadline:
                         if options.verbose {
-                            fputs("Waiting for RepoPrompt app (attempt \(attempt))...\n", stderr)
+                            fputs("\(MCPAppConnectionMessages.waitingForApp(attempt: attempt, identity: MCPFilesystemConstants.identity))\n", stderr)
                         }
                         try await MCPCompatibilitySleep.sleep(.milliseconds(500))
                         continue
                     case .bootstrapResponseTimeout where Date() < deadline:
                         if options.verbose {
-                            fputs("Retrying stalled RepoPrompt bootstrap handshake (attempt \(attempt))...\n", stderr)
+                            fputs("\(MCPAppConnectionMessages.retryingStalledBootstrap(attempt: attempt, identity: MCPFilesystemConstants.identity))\n", stderr)
                         }
                         try await MCPCompatibilitySleep.sleep(.milliseconds(500))
                         continue
@@ -344,47 +343,6 @@ actor ExecMCPService: Service {
             resolved = (base as NSString).appendingPathComponent(resolved)
         }
         return resolved
-    }
-
-    // MARK: - Error Handling
-
-    private func handleConnectionError(_ error: any Error) {
-        guard let error = error as? InteractiveSessionError else {
-            fputs("Error: \(error)\n", stderr)
-            return
-        }
-
-        switch error {
-        case .appNotRunning:
-            fputs("""
-            Error: Cannot connect to RepoPrompt
-
-            The RepoPrompt app is not running or MCP is disabled.
-
-            To fix:
-            1. Launch RepoPrompt.app
-            2. Ensure MCP Server is enabled in Settings > MCP
-
-            """, stderr)
-        case .approvalDenied:
-            fputs("""
-            Error: Connection approval denied
-
-            Your connection request was rejected by RepoPrompt.
-            Check the MCP approval dialog in RepoPrompt.
-
-            """, stderr)
-        case .bootstrapResponseTimeout:
-            fputs("""
-            Error: RepoPrompt did not respond to the bootstrap handshake
-
-            The app accepted the socket connection too slowly or is wedged.
-            If RepoPrompt recently crashed under the debugger, restart it and try again.
-
-            """, stderr)
-        default:
-            fputs("Error: \(error.description)\n", stderr)
-        }
     }
 }
 

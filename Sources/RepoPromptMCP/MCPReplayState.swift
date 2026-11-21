@@ -1,4 +1,5 @@
 import Foundation
+import MCP
 import RepoPromptShared
 
 struct MCPInitializeReplayPlan: Equatable {
@@ -117,6 +118,8 @@ actor MCPInitializeReplayState {
     }
 }
 
+/// Requests the app received and has not answered, kept so a later connection can replay them,
+/// and a complete tool list the app answered one of them with.
 actor MCPOutstandingRequestReplayState {
     private struct EntryKey: Hashable {
         let id: JSONRPCBridgeID
@@ -129,8 +132,16 @@ actor MCPOutstandingRequestReplayState {
         var frame: Data
     }
 
+    private struct RememberedToolList {
+        let result: Value
+        let toolCount: Int
+        /// False from the start of a later attachment until the app lists its tools on it.
+        var isFromCurrentAttachment: Bool
+    }
+
     private var nextFallbackOrdinal: UInt64 = 0
     private var entries: [EntryKey: Entry] = [:]
+    private var rememberedToolList: RememberedToolList?
 
     func recordForwardedClientFrame(
         _ frame: Data,
@@ -138,6 +149,11 @@ actor MCPOutstandingRequestReplayState {
     ) {
         recordReplayableClientRequests(frame, prepared: prepared)
         recordClientCancellations(frame)
+    }
+
+    /// Takes every held request with this id out of replay, as the client cancelled it.
+    func recordClientCancellation(for id: JSONRPCBridgeID) {
+        removeEntries(withID: id)
     }
 
     @discardableResult
@@ -172,6 +188,10 @@ actor MCPOutstandingRequestReplayState {
     ) {
         let preparedResponses = prepared?.messages.filter { $0.kind == .response } ?? []
         if !preparedResponses.isEmpty {
+            // Only a frame that answers a single request can complete a recorded tool list.
+            if prepared?.messages.count == 1, let message = preparedResponses.first {
+                rememberCompleteToolList(frame, answering: message)
+            }
             for message in preparedResponses {
                 guard let id = message.id else { continue }
                 removeDeliveredResponse(id: id, requestOrdinal: message.requestOrdinal)
@@ -193,6 +213,58 @@ actor MCPOutstandingRequestReplayState {
         entries.values
             .sorted { $0.ordinal < $1.ordinal }
             .map(\.frame)
+    }
+
+    /// Records that the helper is connecting to the app again. The app's first complete tool list
+    /// on the new connection replaces the remembered one even when it is shorter, because the app
+    /// may have changed its catalog while it was away. Until then the remembered list stays.
+    func beginAttachment() {
+        rememberedToolList?.isFromCurrentAttachment = false
+    }
+
+    /// The `result` of a `tools/list` the app answered with every tool: a reply to a single request
+    /// without a cursor whose result has no `nextCursor`. The helper answers `tools/list` with it
+    /// while the app is away, so the client keeps the app's tools. Nil until the app has answered one.
+    func rememberedToolListResult() -> Value? {
+        rememberedToolList?.result
+    }
+
+    /// Keeps the frame's result when it answers a recorded `tools/list` with the whole catalog. The
+    /// result is kept as generic JSON, so fields this helper's SDK doesn't know survive, as they do
+    /// when the app's SDK is newer than the helper's.
+    ///
+    /// Within one attachment the remembered list never shrinks: an app that is quitting can answer
+    /// a re-list with part of its catalog before it closes the socket, and the helper would then
+    /// list only that part for the whole outage.
+    private func rememberCompleteToolList(_ frame: Data, answering message: JSONRPCBridgeMessageMetadata) {
+        guard message.method == ListTools.name,
+              let id = message.id,
+              let ordinal = message.requestOrdinal,
+              let request = entries[EntryKey(id: id, ordinal: ordinal)],
+              !Self.requestCarriesCursor(request.frame),
+              case let .object(response)? = try? JSONDecoder().decode(Value.self, from: frame),
+              response["error"] == nil,
+              case let .object(result)? = response["result"],
+              case let .array(tools)? = result["tools"],
+              (result["nextCursor"] ?? .null) == .null
+        else {
+            return
+        }
+        if let remembered = rememberedToolList, remembered.isFromCurrentAttachment, tools.count < remembered.toolCount {
+            return
+        }
+        rememberedToolList = RememberedToolList(
+            result: .object(result),
+            toolCount: tools.count,
+            isFromCurrentAttachment: true
+        )
+    }
+
+    /// True when a list request asks for a page after the first.
+    private static func requestCarriesCursor(_ frame: Data) -> Bool {
+        let params = MCPInitializeReplayState.jsonObject(from: frame)?["params"] as? [String: Any]
+        guard let cursor = params?["cursor"] else { return false }
+        return !(cursor is NSNull)
     }
 
     @discardableResult
@@ -238,7 +310,7 @@ actor MCPOutstandingRequestReplayState {
             else {
                 continue
             }
-            removeEntries(withID: cancelledID)
+            recordClientCancellation(for: cancelledID)
         }
     }
 

@@ -153,6 +153,17 @@ public struct MCPFilesystemIdentity: Equatable, Sendable {
         }
     }
 
+    /// The name users see for the app this identity belongs to, for messages that must say which
+    /// app a helper could not reach. It is not derived from the invoked alias or the enclosing bundle.
+    public var appDisplayName: String {
+        switch (product, buildFlavor) {
+        case (.repoPromptCE, .debug):
+            "RepoPrompt CE Debug"
+        case (.repoPromptCE, .release):
+            "RepoPrompt CE"
+        }
+    }
+
     public var killSignalsDirectoryName: String {
         switch (product, buildFlavor) {
         case (.repoPromptCE, .debug):

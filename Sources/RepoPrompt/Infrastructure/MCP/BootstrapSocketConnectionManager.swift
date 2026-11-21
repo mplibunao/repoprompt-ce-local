@@ -156,11 +156,7 @@ actor BootstrapSocketConnectionManager: MCPServerConnection {
             name: Bundle.main.appName,
             version: Bundle.main.appVersion,
             instructions: RepoPromptMCPInstructions.text(for: purpose, codeMapsDisabled: codeMapsDisabled),
-            capabilities: MCP.Server.Capabilities(
-                prompts: .init(listChanged: false),
-                resources: .init(subscribe: false, listChanged: false),
-                tools: .init(listChanged: true)
-            ),
+            capabilities: MCPAppServerCapabilities.value,
             configuration: MCP.Server.Configuration(
                 responseSendTimeout: MCPTimeoutPolicy.responseSendDeadline
             )

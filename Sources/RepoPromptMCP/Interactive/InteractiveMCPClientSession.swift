@@ -2122,22 +2122,15 @@ enum InteractiveSessionError: Swift.Error, CustomStringConvertible {
         case .pathTooLong:
             return "Socket path too long"
         case let .connectFailed(errno):
-            if errno == EPERM || errno == EACCES {
-                return "Failed to connect: permission denied (errno \(errno)). If running in a sandboxed environment (e.g., Codex), disable sandbox or grant socket access."
-            } else if errno == ENOENT {
-                return "Failed to connect: socket not found. Is RepoPrompt running with MCP enabled?"
-            } else if errno == ECONNREFUSED {
-                return "Failed to connect: connection refused. RepoPrompt may need to be restarted."
-            }
-            return "Failed to connect: \(errno)"
+            return MCPAppConnectionMessages.connectFailure(errno: errno, identity: MCPFilesystemConstants.identity)
         case .appNotRunning:
-            return "RepoPrompt app is not running or MCP is disabled"
+            return MCPAppConnectionMessages.text(for: .unavailable, identity: MCPFilesystemConstants.identity)
         case .approvalDenied:
-            return "Connection approval was denied"
+            return MCPAppConnectionMessages.text(for: .approvalDenied, identity: MCPFilesystemConstants.identity)
         case let .handshakeFailed(reason):
             return "Handshake failed: \(reason)"
         case .bootstrapResponseTimeout:
-            return "Timed out waiting for RepoPrompt bootstrap response"
+            return MCPAppConnectionMessages.text(for: .bootstrapTimeout, identity: MCPFilesystemConstants.identity)
         case let .toolCallTimeout(toolName, seconds):
             let renderedSeconds = seconds.rounded(.down) == seconds ? String(Int(seconds)) : String(format: "%.1f", seconds)
             return "Timed out waiting for tool '\(toolName)' after \(renderedSeconds)s"
