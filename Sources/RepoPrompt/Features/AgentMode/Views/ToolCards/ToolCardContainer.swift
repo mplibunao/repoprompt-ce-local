@@ -13,10 +13,6 @@ extension EnvironmentValues {
 
     @Entry var agentLiveBashExecutionByItemID: [UUID: AgentModeViewModel.BashLiveExecutionState] = [:]
 
-    @Entry var agentRecentAssistantItemIDs: Set<UUID> = []
-
-    @Entry var agentMessageRuntimeFooterByItemID: [UUID: AgentMessageRuntimeFooter] = [:]
-
     @Entry var agentApprovalVisible: Bool = false
 }
 

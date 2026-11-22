@@ -1,6 +1,31 @@
 @testable import RepoPromptApp
 import XCTest
 
+final class WindowPresentationVisibilityPolicyTests: XCTestCase {
+    func testPresentationRequiresEveryOnScreenCondition() {
+        let cases: [(name: String, visible: Bool, minimized: Bool, unoccluded: Bool, hidden: Bool, expected: Bool)] = [
+            ("on screen", true, false, true, false, true),
+            ("not visible", false, false, true, false, false),
+            ("miniaturized", true, true, true, false, false),
+            ("occluded", true, false, false, false, false),
+            ("app hidden", true, false, true, true, false)
+        ]
+
+        for testCase in cases {
+            XCTAssertEqual(
+                WindowPresentationVisibility.isVisible(
+                    windowIsVisible: testCase.visible,
+                    isMiniaturized: testCase.minimized,
+                    occlusionIsVisible: testCase.unoccluded,
+                    appIsHidden: testCase.hidden
+                ),
+                testCase.expected,
+                testCase.name
+            )
+        }
+    }
+}
+
 @MainActor
 final class WindowCloseCoordinatorPolicyTests: XCTestCase {
     func testTerminationAndAuthorizationAllowDespiteOtherwiseBlockingImpact() {
