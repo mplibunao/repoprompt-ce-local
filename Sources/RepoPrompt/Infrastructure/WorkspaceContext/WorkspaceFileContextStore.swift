@@ -601,9 +601,40 @@ actor WorkspaceFileContextStore {
         var fileIDsByRelativePath: [String: UUID]
         var childFolderIDsByFolderID: [UUID: [UUID]]
         var childFileIDsByFolderID: [UUID: [UUID]]
+        /// How many of the root's discoverable files have each `fileExtensionKey(of:)`, so the keys match the
+        /// files `files(inRoot:)` returns. A key is removed when its count reaches zero. `indexFiles`,
+        /// `indexFile(managedOnly:)`, `removeFile` and `promoteToDiscoverable` update it through
+        /// `addFileExtension(of:)` and `removeFileExtension(of:)`; other code that adds or removes a canonical
+        /// file, or changes whether one is discoverable, must update it too.
+        var fileExtensionCounts: [String: Int]
 
         var identity: RootIdentity {
             RootIdentity(lifetimeID: lifetimeID, root: root, service: service)
+        }
+
+        /// The `fileExtensionCounts` key for a file: its name's lowercased extension, or an empty string when
+        /// it has none. Token counting maps these keys to languages.
+        static func fileExtensionKey(of file: WorkspaceFileRecord) -> String {
+            (file.name as NSString).pathExtension.lowercased()
+        }
+
+        /// Counts a file that just became discoverable, because it was indexed or promoted from managed-only.
+        mutating func addFileExtension(of file: WorkspaceFileRecord) {
+            fileExtensionCounts[Self.fileExtensionKey(of: file), default: 0] += 1
+        }
+
+        /// Takes back the count for a discoverable file that is removed or becomes managed-only.
+        mutating func removeFileExtension(of file: WorkspaceFileRecord) {
+            let key = Self.fileExtensionKey(of: file)
+            guard let count = fileExtensionCounts[key] else {
+                assertionFailure("A file stopped being discoverable without an extension count to take back")
+                return
+            }
+            if count > 1 {
+                fileExtensionCounts[key] = count - 1
+            } else {
+                fileExtensionCounts.removeValue(forKey: key)
+            }
         }
     }
 
@@ -2372,7 +2403,8 @@ actor WorkspaceFileContextStore {
                 folderIDsByRelativePath: state.folderIDsByRelativePath,
                 fileIDsByRelativePath: state.fileIDsByRelativePath,
                 childFolderIDsByFolderID: state.childFolderIDsByFolderID,
-                childFileIDsByFolderID: state.childFileIDsByFolderID
+                childFileIDsByFolderID: state.childFileIDsByFolderID,
+                fileExtensionCounts: state.fileExtensionCounts
             )
             return replacementLifetimeID
         }
@@ -7182,6 +7214,17 @@ actor WorkspaceFileContextStore {
             .sorted { $0.standardizedRelativePath < $1.standardizedRelativePath }
     }
 
+    /// The `fileExtensionKey(of:)` of every file that `files(inRoot:)` returns for the roots in `roots()`,
+    /// hidden and system roots included, read from each root's counts without enumerating file records.
+    func allLoadedFileExtensions() -> Set<String> {
+        var extensions = Set<String>()
+        for rootID in rootLoadOrder {
+            guard let state = rootStatesByID[rootID] else { continue }
+            extensions.formUnion(state.fileExtensionCounts.keys)
+        }
+        return extensions
+    }
+
     func file(id fileID: UUID) -> WorkspaceFileRecord? {
         guard isDiscoverableFileID(fileID) else { return nil }
         return filesByID[fileID]
@@ -11050,7 +11093,8 @@ actor WorkspaceFileContextStore {
                 folderIDsByRelativePath: state.folderIDsByRelativePath,
                 fileIDsByRelativePath: state.fileIDsByRelativePath,
                 childFolderIDsByFolderID: state.childFolderIDsByFolderID,
-                childFileIDsByFolderID: state.childFileIDsByFolderID
+                childFileIDsByFolderID: state.childFileIDsByFolderID,
+                fileExtensionCounts: state.fileExtensionCounts
             )
         }
 
@@ -12172,7 +12216,8 @@ actor WorkspaceFileContextStore {
             folderIDsByRelativePath: [:],
             fileIDsByRelativePath: [:],
             childFolderIDsByFolderID: [:],
-            childFileIDsByFolderID: [:]
+            childFileIDsByFolderID: [:],
+            fileExtensionCounts: [:]
         )
 
         var stagedIndexes = RootIndexBuffers()
@@ -12327,7 +12372,8 @@ actor WorkspaceFileContextStore {
             folderIDsByRelativePath: [:],
             fileIDsByRelativePath: [:],
             childFolderIDsByFolderID: [:],
-            childFileIDsByFolderID: [:]
+            childFileIDsByFolderID: [:],
+            fileExtensionCounts: [:]
         )
         var indexes = RootIndexBuffers()
         let rootFolder = WorkspaceFolderRecord(
@@ -22856,7 +22902,11 @@ actor WorkspaceFileContextStore {
         commit(stagedIndexes)
         if let file = file(rootID: root.id, relativePath: relativePath) {
             if managedOnly {
-                managedOnlyFileIDs.insert(file.id)
+                // Until this insertion the file counted as discoverable, whether `indexFiles` just added it or
+                // it was already indexed.
+                if managedOnlyFileIDs.insert(file.id).inserted {
+                    rootStatesByID[root.id]?.removeFileExtension(of: file)
+                }
                 managedOnlyFolderIDs.formUnion(stagedIndexes.foldersByID.keys)
             } else {
                 promoteToDiscoverable(file)
@@ -22990,7 +23040,9 @@ actor WorkspaceFileContextStore {
         invalidateSearchContent(file)
         searchContentInvalidationEpochsByFileID.removeValue(forKey: fileID)
         fileIDsByStandardizedFullPath.removeValue(forKey: file.standardizedFullPath)
-        managedOnlyFileIDs.remove(fileID)
+        if managedOnlyFileIDs.remove(fileID) == nil {
+            state.removeFileExtension(of: file)
+        }
         if let parentID = file.parentFolderID {
             state.childFileIDsByFolderID[parentID]?.removeAll { $0 == fileID }
         }
@@ -23105,7 +23157,9 @@ actor WorkspaceFileContextStore {
     }
 
     private func promoteToDiscoverable(_ file: WorkspaceFileRecord) {
-        managedOnlyFileIDs.remove(file.id)
+        if managedOnlyFileIDs.remove(file.id) != nil {
+            rootStatesByID[file.rootID]?.addFileExtension(of: file)
+        }
         if let folderID = file.parentFolderID, let folder = foldersByID[folderID] {
             promoteFolderToDiscoverable(folder)
         }
@@ -23256,6 +23310,7 @@ actor WorkspaceFileContextStore {
                 fullPath: StandardizedPath.join(standardizedRoot: root.fullPath, standardizedRelativePath: relativePath),
                 parentFolderID: parentID
             )
+            state.addFileExtension(of: file)
             indexes.filesByID[file.id] = file
             indexes.fileIDsByStandardizedFullPath[file.standardizedFullPath] = file.id
             state.fileIDsByRelativePath[file.standardizedRelativePath] = file.id
