@@ -212,7 +212,7 @@ dev-codex-schema-check:
 	./conductor codex-schema-check
 
 dev-test:
-	./conductor test$(if $(TEST_PRODUCT), --test-product $(TEST_PRODUCT))$(if $(FILTER), --filter $(FILTER))
+	./conductor test --xctest-stall-seconds 180$(if $(TEST_PRODUCT), --test-product $(TEST_PRODUCT))$(if $(FILTER), --filter $(FILTER))
 
 dev-provider-test:
 	./conductor provider-test$(if $(TEST_PRODUCT), --test-product $(TEST_PRODUCT))$(if $(FILTER), --filter $(FILTER))

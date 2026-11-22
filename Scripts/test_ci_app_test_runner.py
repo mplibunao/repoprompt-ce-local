@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Pure self-tests for the CI app-test runner."""
+"""Self-tests for the CI app-test runner; the supervised-executor ones run short real subprocesses."""
 
 from __future__ import annotations
 
+import errno
 import io
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -263,6 +266,109 @@ class TestExecutionTests(unittest.TestCase):
         self.assertEqual(result, 9)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][-1], "RepoPromptTests.FirstTests")
+
+
+class SupervisedExecutionTests(unittest.TestCase):
+    """Process groups and signals can't be established with mocks, so these launch real shells."""
+
+    def short_limits(self):
+        # Generous against shell startup under load, short enough to keep the suite quick.
+        return mock.patch.multiple(
+            runner,
+            SUITE_TIMEOUT_SECONDS=2.0,
+            TERMINATION_GRACE_SECONDS=1.0,
+        )
+
+    def wait_until_gone(self, pid: int) -> bool:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError as error:
+                # macOS reports a zombie awaiting its reaper as EPERM.
+                if error.errno == errno.ESRCH:
+                    return True
+            time.sleep(0.05)
+        return False
+
+    def test_suites_that_finish_keep_their_status_and_launch_failures_report_127(self) -> None:
+        execute = runner.execute_supervised_command
+
+        self.assertEqual(execute(("/bin/sh", "-c", "exit 0"), None, {}), 0)
+        self.assertEqual(execute(("/bin/sh", "-c", "exit 3"), None, {}), 3)
+        # A crash reports the signal the way `subprocess.run` does.
+        self.assertEqual(execute(("/bin/sh", "-c", "kill -9 $$"), None, {}), -9)
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(execute(("/nonexistent/suite-runner",), None, {}), 127)
+        self.assertIn("Unable to launch /nonexistent/suite-runner", stderr.getvalue())
+
+    def test_timeout_terminates_the_leader_then_kills_descendants_that_survive_it(self) -> None:
+        # The leader exits on TERM, but its descendant ignores TERM, so only a group-wide KILL
+        # ends the suite's processes.
+        script = (
+            "trap 'echo terminated > \"$2\"; exit 0' TERM\n"
+            "(trap '' TERM; exec sleep 30) &\n"
+            'echo $! > "$1"\n'
+            "wait\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / "descendant.pid"
+            marker = Path(directory) / "leader.terminated"
+            started = time.monotonic()
+            with self.short_limits(), mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                status = runner.execute_supervised_command(
+                    ("/bin/sh", "-c", script, "sh", str(pid_file), str(marker)),
+                    None,
+                    {},
+                )
+            elapsed = time.monotonic() - started
+            descendant = int(pid_file.read_text(encoding="utf-8"))
+
+            self.assertEqual(status, 70)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "terminated\n")
+            self.assertTrue(self.wait_until_gone(descendant), "descendant outlived the timeout")
+            # Without the KILL deadline the group would empty only when the descendant's own
+            # 30 s sleep ended, and everything above would still hold.
+            self.assertLess(elapsed, 15, "the descendant exited on its own instead of being killed")
+            self.assertIn("Suite timed out after 2 s", stderr.getvalue())
+
+    def test_runner_stops_at_a_suite_that_times_out_and_reports_it_like_any_failure(self) -> None:
+        # Goes through run_selected_suites' own default executor, which is the wiring under test.
+        fake_swift = (
+            "#!/bin/sh\n"
+            'here=$(dirname "$0")\n'
+            'echo "$4" >> "$here/launched"\n'
+            'if [ "$4" = RepoPromptTests.FirstTests ]; then\n'
+            "  exec sleep 30\n"
+            "fi\n"
+        )
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            swift = root / "swift"
+            swift.write_text(fake_swift, encoding="utf-8")
+            swift.chmod(0o755)
+            with self.short_limits(), mock.patch("sys.stderr", new_callable=io.StringIO):
+                result = runner.run_selected_suites(
+                    ("RepoPromptTests.FirstTests", "RepoPromptTests.SecondTests"),
+                    swift_binary=str(swift),
+                    cwd=None,
+                    bundle_selection=runner.BundleSelection(None, {}, None),
+                    sandbox_root=root / "sandbox",
+                    output=output,
+                )
+            launched = (root / "launched").read_text(encoding="utf-8")
+
+            self.assertEqual(result, 70)
+            self.assertEqual(launched, "RepoPromptTests.FirstTests\n")
+        self.assertEqual(
+            [line for line in output.getvalue().splitlines() if line.startswith("::")],
+            [
+                "::group::RepoPromptTests.FirstTests",
+                "::endgroup::",
+                "::error::RepoPromptTests.FirstTests failed with exit status 70",
+            ],
+        )
 
 
 class LocalExecutionTests(unittest.TestCase):
