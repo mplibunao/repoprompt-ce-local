@@ -239,6 +239,41 @@ enum MCPAgentRoleDefaultsService {
         )?.effective
     }
 
+    /// Validate a role's stored pin on its own, whether or not a recommended default exists.
+    /// Returns the pinned selection with its matching model-parameter pin, or `nil` when the
+    /// role has no pin or the pin is not executable now.
+    static func executableStoredSelection(
+        for role: AgentModelCatalog.TaskLabelKind,
+        overrides: [String: String]?,
+        roleModelParameters: [String: [ACPModelParameterSelection]]?,
+        availability: AgentModelCatalog.AvailabilityContext
+    ) -> (selection: AgentModelCatalog.NormalizedAgentSelection, modelParameters: [ACPModelParameterSelection])? {
+        guard let overrideRaw = overrides?[role.rawValue],
+              let parsed = AgentModelSelectionID.parse(overrideRaw),
+              let agent = AgentProviderKind(rawValue: parsed.agentRaw),
+              AgentModelCatalog.isAgentAvailable(agent, availability: availability)
+        else { return nil }
+        // Codex may have dynamic model IDs, so defer its model-level validation. Other
+        // providers must still expose the stored model or the stale pin is non-executable.
+        guard agent == .codexExec
+            || AgentModelCatalog.isValid(rawModel: parsed.modelRaw, for: agent, availability: availability)
+        else { return nil }
+
+        let selection = AgentModelCatalog.NormalizedAgentSelection(agent: agent, modelRaw: parsed.modelRaw)
+        // A stored bucket applies only to selections matching the pinned provider and canonical model.
+        guard let providerID = agent.acpProviderID,
+              let bucket = roleModelParameters?[role.rawValue]
+        else { return (selection, []) }
+        return (
+            selection,
+            ACPModelParameterSelection.selections(
+                for: providerID,
+                activeBaseModelRaw: selection.modelRaw,
+                from: bucket
+            )
+        )
+    }
+
     // MARK: - Mutations
 
     /// Set a user-selected override for a role. An explicit selection is always
@@ -345,51 +380,17 @@ enum MCPAgentRoleDefaultsService {
 
         // Check for stored override
         let hasStoredOverride = overrides?[kind.rawValue] != nil
-        let effective: AgentModelCatalog.NormalizedAgentSelection
-        var hasCustomOverride = false
-        var overrideUnavailable = false
-
-        if let overrideRaw = overrides?[kind.rawValue],
-           let parsed = AgentModelSelectionID.parse(overrideRaw),
-           let agent = AgentProviderKind(rawValue: parsed.agentRaw)
-        {
-            // Codex may have dynamic model IDs, so defer its model-level validation. Other
-            // providers must still expose the stored model or the stale pin is non-executable.
-            let modelIsExecutable = agent == .codexExec
-                || AgentModelCatalog.isValid(rawModel: parsed.modelRaw, for: agent, availability: availability)
-            if AgentModelCatalog.isAgentAvailable(agent, availability: availability), modelIsExecutable {
-                let sel = AgentModelCatalog.NormalizedAgentSelection(agent: agent, modelRaw: parsed.modelRaw)
-                effective = sel
-                hasCustomOverride = (sel != recommended)
-            } else {
-                effective = recommended
-                hasCustomOverride = true
-                overrideUnavailable = true
-            }
-        } else {
-            effective = recommended
-            if overrides?[kind.rawValue] != nil {
-                hasCustomOverride = true
-                overrideUnavailable = true
-            }
-        }
+        let stored = executableStoredSelection(
+            for: kind,
+            overrides: overrides,
+            roleModelParameters: roleModelParameters,
+            availability: availability
+        )
+        let effective = stored?.selection ?? recommended
+        let overrideUnavailable = hasStoredOverride && stored == nil
+        let hasCustomOverride = overrideUnavailable || (hasStoredOverride && effective != recommended)
 
         let effectiveDisplayName = "\(effective.agent.displayName) \(AgentModelCatalog.displayName(for: effective.modelRaw, agentKind: effective.agent, codexDynamicModels: codexDynamicModels))"
-
-        // Eligibility: a stored bucket is authoritative only while the role still has a valid
-        // explicit choice, and only for selections matching the effective provider + canonical
-        // model. Availability-driven fallback (overrideUnavailable) yields no pin.
-        let modelParameters: [ACPModelParameterSelection] = {
-            guard hasStoredOverride, !overrideUnavailable,
-                  let providerID = effective.agent.acpProviderID,
-                  let bucket = roleModelParameters?[kind.rawValue]
-            else { return [] }
-            return ACPModelParameterSelection.selections(
-                for: providerID,
-                activeBaseModelRaw: effective.modelRaw,
-                from: bucket
-            )
-        }()
 
         return RoleDefaultResolution(
             role: kind,
@@ -402,7 +403,8 @@ enum MCPAgentRoleDefaultsService {
             hasStoredOverride: hasStoredOverride,
             hasCustomOverride: hasCustomOverride,
             overrideUnavailable: overrideUnavailable,
-            modelParameters: modelParameters
+            // Availability-driven fallback (overrideUnavailable) yields no pin.
+            modelParameters: stored?.modelParameters ?? []
         )
     }
 

@@ -23,8 +23,8 @@ enum AgentMCPSelectionResolver {
         static var testRoleDefaultsStore: (any MCPAgentRoleDefaultsStoring)?
     #endif
 
-    /// The role-defaults store role resolution reads. Production always passes `nil`, which makes
-    /// `MCPAgentRoleDefaultsService` fall back to `GlobalSettingsStore.shared`.
+    /// The role-defaults store role resolution reads. Production always returns `nil`, so
+    /// `resolveRoleSelection` reads `GlobalSettingsStore.shared`.
     @MainActor
     private static func roleDefaultsStoreForResolution() -> (any MCPAgentRoleDefaultsStoring)? {
         #if DEBUG
@@ -156,13 +156,24 @@ enum AgentMCPSelectionResolver {
         if let provided = roleSelectionProvider?(role, availability) {
             return (provided, [])
         }
+        // One store for the whole resolution, so the pin fallback reads what `effectiveSelection` read.
+        let store = roleDefaultsStoreForResolution() ?? GlobalSettingsStore.shared
         if let resolution = MCPAgentRoleDefaultsService.effectiveSelection(
             for: role,
             availability: availability,
             workspaceID: workspaceID,
-            settingsStore: roleDefaultsStoreForResolution()
+            settingsStore: store
         ) {
             return (resolution.effective, resolution.modelParameters)
+        }
+        // No recommendation for this role: an executable stored pin still applies.
+        if let stored = MCPAgentRoleDefaultsService.executableStoredSelection(
+            for: role,
+            overrides: store.mcpAgentRoleOverrides(workspaceID: workspaceID),
+            roleModelParameters: store.mcpAgentRoleModelParameters(workspaceID: workspaceID),
+            availability: availability
+        ) {
+            return (stored.selection, stored.modelParameters)
         }
         guard let fallback = AgentModelCatalog.resolveTaskLabelKind(role, availability: availability) else {
             return nil

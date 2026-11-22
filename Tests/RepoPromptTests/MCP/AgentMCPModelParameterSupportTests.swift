@@ -476,14 +476,412 @@ final class AgentMCPModelParameterSupportTests: XCTestCase {
         XCTAssertEqual(explore.modelParameters, [explorePin], "a pin for another base model must be filtered, not retargeted")
     }
 
+    // MARK: - Role pins without a recommendation
+
+    /// OpenCode is in no role's recommendation chain, so an OpenCode-only install has no
+    /// recommendation for any role. A stored executable pin must still resolve, with only the
+    /// parameters that match its provider and model.
+    @MainActor
+    func testRecommendationlessRolePinsResolveWithMatchingParameters() throws {
+        let availability = openCodeOnlyAvailability
+        let roles = AgentModelCatalog.TaskLabelKind.allCases
+        let models = [Self.openCodeGlobalModel, Self.openCodeWorkspaceModel]
+        let values = ["low", "medium", "high", "xhigh"]
+
+        var overrides: [String: String] = [:]
+        var buckets: [String: [ACPModelParameterSelection]] = [:]
+        for (index, role) in roles.enumerated() {
+            let model = models[index % models.count]
+            let otherModel = models[(index + 1) % models.count]
+            overrides[role.rawValue] = openCodeSelectionID(model)
+            buckets[role.rawValue] = [
+                openCodePin(baseModelRaw: " \(model.uppercased()) ", valueRaw: values[index]),
+                openCodePin(baseModelRaw: otherModel, valueRaw: "ignored-other-model"),
+                cursorPin(baseModelRaw: model, kind: .thinking, configID: "effort", valueRaw: "ignored-other-provider")
+            ]
+        }
+
+        try withOpenCodeRolePinFixture(
+            store: AgentModelsProfileRoleDefaultsStore(overrides: overrides, roleModelParameters: buckets),
+            availability: availability
+        ) {
+            for (index, role) in roles.enumerated() {
+                let model = models[index % models.count]
+                try assertRolePinResolves(
+                    role: role,
+                    availability: availability,
+                    model: model,
+                    parameters: [openCodePin(baseModelRaw: " \(model.uppercased()) ", valueRaw: values[index])],
+                    role.rawValue
+                )
+            }
+        }
+
+        try withOpenCodeRolePinFixture(
+            store: AgentModelsProfileRoleDefaultsStore(
+                overrides: [AgentModelCatalog.TaskLabelKind.pair.rawValue: openCodeSelectionID(Self.openCodeGlobalModel)]
+            ),
+            availability: availability
+        ) {
+            let resolved = try AgentMCPSelectionResolver.resolve(modelID: "pair", availability: availability)
+            assertResolved(resolved, model: Self.openCodeGlobalModel, role: .pair, parameters: [], "pin without a bucket")
+        }
+    }
+
+    /// Role resolution reads the effective Agent Models profile for the workspace: a workspace
+    /// override replaces the global profile instead of overlaying it.
+    @MainActor
+    func testRecommendationlessRolePinsUseEffectiveWorkspaceProfile() throws {
+        let availability = openCodeOnlyAvailability
+        let store = try makeIsolatedSettingsStore()
+        let workspaceID = UUID()
+        let roleLessWorkspaceID = UUID()
+        let pair = AgentModelCatalog.TaskLabelKind.pair.rawValue
+
+        store.setGlobalAgentModelsProfile(
+            AgentModelsSettingsProfile(
+                mcpAgentRoleOverrides: [pair: openCodeSelectionID(Self.openCodeGlobalModel)],
+                mcpAgentRoleModelParameters: [pair: [openCodePin(baseModelRaw: Self.openCodeGlobalModel, valueRaw: "high")]]
+            ),
+            contextBuilderWriteIntent: .preserveExistingOwnership
+        )
+        store.setWorkspaceAgentModelsProfile(
+            workspaceID: workspaceID,
+            profile: AgentModelsSettingsProfile(
+                mcpAgentRoleOverrides: [pair: openCodeSelectionID(Self.openCodeWorkspaceModel)],
+                mcpAgentRoleModelParameters: [pair: [openCodePin(baseModelRaw: Self.openCodeWorkspaceModel, valueRaw: "low")]]
+            )
+        )
+        // Save the role-less profile before selecting it; the reverse order on a workspace
+        // with no saved profile would copy the global profile, including its pair pin.
+        store.setWorkspaceAgentModelsProfile(workspaceID: roleLessWorkspaceID, profile: AgentModelsSettingsProfile())
+        store.setWorkspaceAgentModelsInheritanceMode(workspaceID: roleLessWorkspaceID, mode: .useWorkspaceOverrides)
+
+        try withOpenCodeRolePinFixture(store: store, availability: availability) {
+            let globalPin = openCodePin(baseModelRaw: Self.openCodeGlobalModel, valueRaw: "high")
+            let workspacePin = openCodePin(baseModelRaw: Self.openCodeWorkspaceModel, valueRaw: "low")
+
+            try assertRolePinResolves(
+                role: .pair, availability: availability, workspaceID: nil,
+                model: Self.openCodeGlobalModel, parameters: [globalPin], "global"
+            )
+            try assertRolePinResolves(
+                role: .pair, availability: availability, workspaceID: workspaceID,
+                model: Self.openCodeWorkspaceModel, parameters: [workspacePin], "workspace override"
+            )
+
+            store.setWorkspaceAgentModelsInheritanceMode(workspaceID: workspaceID, mode: .useGlobalSettings)
+            try assertRolePinResolves(
+                role: .pair, availability: availability, workspaceID: workspaceID,
+                model: Self.openCodeGlobalModel, parameters: [globalPin], "inherited global"
+            )
+
+            assertNoRolePin(workspaceID: roleLessWorkspaceID, availability: availability, "override profile without the role")
+        }
+    }
+
+    /// Negative boundary of the stored-pin fallback: a pin that is missing, malformed, from an
+    /// unknown or unavailable provider, or for a model the catalog lacks keeps the existing
+    /// result (error for a label, all-nil for an omitted request).
+    @MainActor
+    func testIneligibleRecommendationlessRolePinsPreserveFallback() {
+        let pair = AgentModelCatalog.TaskLabelKind.pair.rawValue
+        let rows: [(name: String, overrides: [String: String], availability: AgentModelCatalog.AvailabilityContext)] = [
+            ("no role override", [:], openCodeOnlyAvailability),
+            ("malformed pin", [pair: "not-a-compound-id"], openCodeOnlyAvailability),
+            ("unknown provider", [pair: "unknownProvider:\(Self.openCodeGlobalModel)"], openCodeOnlyAvailability),
+            ("provider unavailable", [pair: openCodeSelectionID(Self.openCodeGlobalModel)], .none),
+            // Codex skips model validation, so availability is the only check its pin gets.
+            ("Codex unavailable", [pair: codexSelectionID], openCodeOnlyAvailability),
+            ("model missing from catalog", [pair: openCodeSelectionID("rolepin/missing")], openCodeOnlyAvailability)
+        ]
+
+        for row in rows {
+            let store = AgentModelsProfileRoleDefaultsStore(
+                overrides: row.overrides,
+                roleModelParameters: [pair: [openCodePin(baseModelRaw: Self.openCodeGlobalModel, valueRaw: "high")]]
+            )
+            withOpenCodeRolePinFixture(store: store, availability: row.availability) {
+                assertNoRolePin(workspaceID: nil, availability: row.availability, row.name)
+            }
+        }
+    }
+
+    /// With a recommendation, resolution reports the effective selection, pin flags, pin state and
+    /// parameters the Agent Models rows display. A pin that is not executable falls back to the
+    /// recommendation, is flagged unavailable, and carries no parameters.
+    @MainActor
+    func testRecommendedRoleResolutionPreservesPinMetadata() throws {
+        let availability = AgentModelCatalog.AvailabilityContext.none.assumingAvailable(.cursor)
+        let role = AgentModelCatalog.TaskLabelKind.engineer
+        let recommended = try XCTUnwrap(AgentModelCatalog.resolveTaskLabelKind(role, availability: availability))
+        XCTAssertEqual(recommended.agent, .cursor, "fixture: Cursor must back the recommendation")
+        let customModel = "grok-4.6"
+        XCTAssertNotEqual(customModel, recommended.modelRaw, "fixture: the custom pin must differ from the recommendation")
+
+        func cursorID(_ modelRaw: String) -> String {
+            AgentModelSelectionID(agentRaw: AgentProviderKind.cursor.rawValue, modelRaw: modelRaw).rawValue
+        }
+
+        let recommendedPin = cursorPin(baseModelRaw: recommended.modelRaw, kind: .thinking, configID: "effort", valueRaw: "low")
+        let customPin = cursorPin(baseModelRaw: customModel, kind: .thinking, configID: "effort", valueRaw: "high")
+        let bucket = [recommendedPin, customPin]
+
+        func resolve(override: String?) throws -> MCPAgentRoleDefaultsService.RoleDefaultResolution {
+            let store = AgentModelsProfileRoleDefaultsStore(
+                overrides: override.map { [role.rawValue: $0] },
+                roleModelParameters: [role.rawValue: bucket]
+            )
+            return try XCTUnwrap(MCPAgentRoleDefaultsService.effectiveSelection(
+                for: role,
+                availability: availability,
+                settingsStore: store
+            ))
+        }
+
+        struct Row {
+            let name: String
+            let override: String?
+            let effective: AgentModelCatalog.NormalizedAgentSelection
+            let stored: Bool
+            let custom: Bool
+            let unavailable: Bool
+            let pinState: MCPAgentRoleDefaultsService.PinState
+            let parameters: [ACPModelParameterSelection]
+        }
+        let recommendedDisplayName = try resolve(override: nil).recommendedDisplayName
+        let customSelection = AgentModelCatalog.NormalizedAgentSelection(agent: .cursor, modelRaw: customModel)
+        let rows = [
+            Row(
+                name: "absent", override: nil, effective: recommended,
+                stored: false, custom: false, unavailable: false, pinState: .none, parameters: []
+            ),
+            Row(
+                name: "equals the recommendation", override: cursorID(recommended.modelRaw), effective: recommended,
+                stored: true, custom: false, unavailable: false, pinState: .pinnedToRecommended,
+                parameters: [recommendedPin]
+            ),
+            Row(
+                name: "valid and different", override: cursorID(customModel), effective: customSelection,
+                stored: true, custom: true, unavailable: false,
+                pinState: .custom(recommendedDisplayName: recommendedDisplayName), parameters: [customPin]
+            ),
+            Row(
+                name: "malformed", override: "not-a-compound-id", effective: recommended,
+                stored: true, custom: true, unavailable: true, pinState: .unavailable, parameters: []
+            ),
+            Row(
+                name: "provider unavailable", override: openCodeSelectionID(Self.openCodeGlobalModel),
+                effective: recommended,
+                stored: true, custom: true, unavailable: true, pinState: .unavailable, parameters: []
+            ),
+            Row(
+                name: "Codex unavailable", override: codexSelectionID, effective: recommended,
+                stored: true, custom: true, unavailable: true, pinState: .unavailable, parameters: []
+            )
+        ]
+
+        for row in rows {
+            let resolution = try resolve(override: row.override)
+            XCTAssertEqual(resolution.recommended, recommended, row.name)
+            XCTAssertEqual(resolution.effective, row.effective, row.name)
+            XCTAssertEqual(resolution.hasStoredOverride, row.stored, row.name)
+            XCTAssertEqual(resolution.hasCustomOverride, row.custom, row.name)
+            XCTAssertEqual(resolution.overrideUnavailable, row.unavailable, row.name)
+            XCTAssertEqual(resolution.pinState, row.pinState, row.name)
+            XCTAssertEqual(resolution.modelParameters, row.parameters, row.name)
+        }
+    }
+
+    private static let openCodeGlobalModel = "rolepin/global"
+    private static let openCodeWorkspaceModel = "rolepin/workspace"
+
+    /// OpenCode available and nothing else: no role has a recommendation.
+    private var openCodeOnlyAvailability: AgentModelCatalog.AvailabilityContext {
+        AgentModelCatalog.AvailabilityContext.none.assumingAvailable(.openCode)
+    }
+
+    /// A Codex pin. Codex model IDs are not validated, so the model is arbitrary.
+    private var codexSelectionID: String {
+        AgentModelSelectionID(agentRaw: AgentProviderKind.codexExec.rawValue, modelRaw: AgentModel.gpt56SolHigh.rawValue).rawValue
+    }
+
+    private func openCodeSelectionID(_ modelRaw: String) -> String {
+        AgentModelSelectionID(agentRaw: AgentProviderKind.openCode.rawValue, modelRaw: modelRaw).rawValue
+    }
+
+    private func openCodePin(baseModelRaw: String, valueRaw: String) -> ACPModelParameterSelection {
+        ACPModelParameterSelection(
+            providerID: .openCode,
+            baseModelRaw: baseModelRaw,
+            kind: .thinking,
+            configID: "effort",
+            valueRaw: valueRaw
+        )
+    }
+
+    /// A settings store that owns its defaults suite and settings file, removed at teardown. It
+    /// never touches `GlobalSettingsStore.shared` or the developer's settings.
+    @MainActor
+    private func makeIsolatedSettingsStore() throws -> GlobalSettingsStore {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AgentMCPModelParameterSupportTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+
+        let suiteName = "AgentMCPModelParameterSupportTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+
+        return GlobalSettingsStore(
+            defaults: defaults,
+            fileStore: GlobalSettingsFileStore(fileURL: root.appendingPathComponent("globalSettings.json"))
+        )
+    }
+
+    /// Stages two discovered OpenCode models and installs `store` as the role-defaults store for
+    /// `body`, then restores the previous store and clears the registry. `body` must not suspend.
+    /// The registry also writes its dynamic-model file, so these tests belong in the disposable
+    /// conductor test profile.
+    @MainActor
+    private func withOpenCodeRolePinFixture(
+        store: any MCPAgentRoleDefaultsStoring,
+        availability: AgentModelCatalog.AvailabilityContext,
+        _ body: @MainActor () throws -> Void
+    ) rethrows {
+        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
+        let previousStore = AgentMCPSelectionResolver.testRoleDefaultsStore
+        AgentMCPSelectionResolver.testRoleDefaultsStore = store
+        defer {
+            AgentMCPSelectionResolver.testRoleDefaultsStore = previousStore
+            AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
+        }
+
+        let options = [Self.openCodeGlobalModel, Self.openCodeWorkspaceModel].map {
+            AgentModelOption(
+                rawValue: $0,
+                displayName: $0,
+                description: nil,
+                isPlaceholderDefault: false,
+                isProviderDefault: false
+            )
+        }
+        let registered = AgentACPModelRegistry.shared.updateDiscoveredModels(
+            ACPDiscoveredSessionModels(options: options, currentModelRaw: Self.openCodeGlobalModel),
+            for: .openCode
+        )
+        XCTAssertTrue(registered, "fixture: OpenCode models were not registered")
+        if availability.openCodeAvailable {
+            XCTAssertTrue(
+                AgentModelCatalog.isValid(rawModel: Self.openCodeGlobalModel, for: .openCode, availability: availability),
+                "fixture: the registered OpenCode model must be valid"
+            )
+        }
+        for role in AgentModelCatalog.TaskLabelKind.allCases {
+            XCTAssertNil(
+                AgentModelCatalog.resolveTaskLabelKind(role, availability: availability),
+                "fixture: \(role.rawValue) must have no recommendation"
+            )
+        }
+        try body()
+    }
+
+    /// Resolves `role` as an explicit label and as an omitted `model_id` with that default role.
+    /// Both must return the same pin.
+    @MainActor
+    private func assertRolePinResolves(
+        role: AgentModelCatalog.TaskLabelKind,
+        availability: AgentModelCatalog.AvailabilityContext,
+        workspaceID: UUID? = nil,
+        model: String,
+        parameters: [ACPModelParameterSelection],
+        _ context: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let explicit = try AgentMCPSelectionResolver.resolve(
+            modelID: role.rawValue,
+            availability: availability,
+            workspaceID: workspaceID
+        )
+        assertResolved(
+            explicit, model: model, role: role, parameters: parameters,
+            "explicit, \(context)", file: file, line: line
+        )
+        let omitted = try AgentMCPSelectionResolver.resolve(
+            modelID: nil,
+            defaultTaskLabel: role,
+            availability: availability,
+            workspaceID: workspaceID
+        )
+        assertResolved(
+            omitted, model: model, role: role, parameters: parameters,
+            "omitted, \(context)", file: file, line: line
+        )
+    }
+
+    private func assertResolved(
+        _ resolved: AgentMCPSelectionResolver.ResolvedSelection,
+        model: String,
+        role: AgentModelCatalog.TaskLabelKind,
+        parameters: [ACPModelParameterSelection],
+        _ context: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(resolved.agentRaw, AgentProviderKind.openCode.rawValue, context, file: file, line: line)
+        XCTAssertEqual(resolved.modelRaw, model, context, file: file, line: line)
+        XCTAssertEqual(resolved.taskLabelKind, role, context, file: file, line: line)
+        XCTAssertEqual(resolved.modelParameterSelections, parameters, context, file: file, line: line)
+    }
+
+    /// With no usable pin, an explicit `pair` throws the existing error and an omitted request
+    /// resolves to nothing, so the caller runs with the agent default.
+    @MainActor
+    private func assertNoRolePin(
+        workspaceID: UUID?,
+        availability: AgentModelCatalog.AvailabilityContext,
+        _ context: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(
+            try AgentMCPSelectionResolver.resolve(modelID: "pair", availability: availability, workspaceID: workspaceID),
+            context,
+            file: file,
+            line: line
+        ) { error in
+            guard let mcpError = error as? MCPError, case let .invalidParams(message) = mcpError else {
+                XCTFail("Expected MCPError.invalidParams, got \(error). \(context)", file: file, line: line)
+                return
+            }
+            XCTAssertEqual(message, "No available agent/model for task label 'pair'.", context, file: file, line: line)
+        }
+        do {
+            let omitted = try AgentMCPSelectionResolver.resolve(
+                modelID: nil,
+                defaultTaskLabel: .pair,
+                availability: availability,
+                workspaceID: workspaceID
+            )
+            XCTAssertNil(omitted.agentRaw, context, file: file, line: line)
+            XCTAssertNil(omitted.modelRaw, context, file: file, line: line)
+            XCTAssertNil(omitted.taskLabelKind, context, file: file, line: line)
+            XCTAssertTrue(omitted.modelParameterSelections.isEmpty, context, file: file, line: line)
+        } catch {
+            XCTFail("Omitted request must not throw: \(error). \(context)", file: file, line: line)
+        }
+    }
+
     private func cursorPin(
+        baseModelRaw: String = "grok-4.6",
         kind: ACPModelParameterKind,
         configID: String,
         valueRaw: String
     ) -> ACPModelParameterSelection {
         ACPModelParameterSelection(
             providerID: .cursor,
-            baseModelRaw: "grok-4.6",
+            baseModelRaw: baseModelRaw,
             kind: kind,
             configID: configID,
             valueRaw: valueRaw
