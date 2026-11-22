@@ -8,7 +8,7 @@ final class ClaudeAgentModeCoordinator {
     static let eventsUnavailableMessage = "No message was sent because another Claude run in this session is still active. Send it again when that run finishes."
     static let unexpectedStreamEndMessage = "Claude events stream ended unexpectedly. The run may need to be restarted."
     /// Shown when Claude Code started a turn by itself and no run could take it.
-    static let providerTurnRefusedMessage = "RepoPrompt stopped Claude work because it could not attach it to this session."
+    static let providerTurnRefusedMessage = "RepoPrompt stopped a turn that Claude Code started by itself, such as checking a background command's result, because it couldn't show that turn in this session. Send a message to continue."
 
     static func mcpInitializationFailureMessage(sessionID: String?) -> String {
         "RepoPrompt MCP failed to initialize for Claude (session \(sessionID ?? "unknown"))."
