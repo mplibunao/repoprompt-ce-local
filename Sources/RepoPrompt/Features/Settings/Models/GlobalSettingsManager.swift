@@ -315,7 +315,6 @@ struct GlobalSettingsWriteDiagnostic: Equatable {
     let oldValue: String?
     let newValue: String?
     let commit: Bool
-    let markUserDefined: Bool?
     let reason: String
     let caller: String
 }
@@ -406,7 +405,6 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
         oldValue: String?,
         newValue: String?,
         commit: Bool,
-        markUserDefined: Bool? = nil,
         reason: String?,
         fileID: StaticString,
         line: UInt,
@@ -420,7 +418,6 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
             oldValue: oldValue,
             newValue: newValue,
             commit: commit,
-            markUserDefined: markUserDefined,
             reason: trimmedReason?.isEmpty == false ? trimmedReason! : fallbackReason,
             caller: "\(fileID):\(line) \(function)"
         )
@@ -474,16 +471,13 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
 
     func updateChatSettings(_ settings: ChatGlobalSettings) {
         chatSettings[settings.workspaceID] = settings
-        // NOTE: We no longer sync workspace Context Builder agent/model to global defaults here.
-        // Global Context Builder settings are now the single source of truth, updated only via
-        // setGlobalContextBuilderAgentSelection() when the user explicitly changes them.
+        // Context Builder agent/model selection belongs to Agent Models profiles, not chat settings.
         save()
     }
 
     func updateChatSettings(_ settings: ChatGlobalSettings, commit: Bool) {
         chatSettings[settings.workspaceID] = settings
-        // NOTE: We no longer sync workspace Context Builder agent/model to global defaults here.
-        // Global Context Builder settings are now the single source of truth.
+        // Context Builder agent/model selection belongs to Agent Models profiles, not chat settings.
         if commit {
             save()
         }
@@ -714,11 +708,11 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
         modelRaw: String,
         scope: AgentModelsEditingScope
     ) -> Bool {
-        // The write durably commits the displayed Context Builder agent+model alongside the pin,
-        // so it must claim user ownership exactly as the existing Context Builder model setters
-        // do. With `.preserveExistingOwnership` the global ownership flag stays false, automatic
-        // recommendation application stays eligible, it moves the Context Builder model, and
-        // profile coherence then drops the bucket — silently erasing the pin the user just set.
+        // Persisting the displayed Context Builder agent and model claims user ownership
+        // (`.userInitiated`). With `.preserveExistingOwnership` the global ownership flag stays
+        // false, automatic recommendation application stays eligible, it moves the Context Builder
+        // model, and profile coherence then drops the bucket — silently erasing the pin the user
+        // just set.
         // Skip a no-op. `.userInitiated` claims user ownership of the Context Builder defaults,
         // so writing it for a click that changes nothing would silently revoke automatic
         // recommendation eligibility.
@@ -2002,17 +1996,11 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
         }
     }
 
-    /// Publishes `objectWillChange` when `globalDefaults` changed and persists if `commit`.
-    /// Centralizes the publish-on-mutate contract for the global-defaults surface (Context
-    /// Builder agent, MCP role overrides, recommendation provider filter) so any change
-    /// propagates to every observing window; route all `globalDefaults` mutations through here.
+    /// Applies profile-owned parameter-pin coherence, publishes when global defaults change,
+    /// and saves when requested.
     private func persistGlobalDefaultsChange(before: GlobalDefaults, commit: Bool) {
-        // Direct `globalDefaults` writers (the legacy Context Builder selection setters, reached
-        // from `app_settings` and window settings) bypass profile normalization. Normalization
-        // only *masks* a pin whose model no longer matches, so the stale bucket would survive in
-        // backing state and resurrect if the user later switched back to that model. Re-derive
-        // the buckets through the profile, which is the single owner of the coherence rule —
-        // rather than restating that rule here.
+        // Derive pin buckets through the profile's coherence rules before persisting, so stale
+        // buckets are removed from backing state rather than merely hidden on reads.
         let coherent = globalAgentModelsProfile()
         globalDefaults.mcpAgentRoleModelParameters = coherent.mcpAgentRoleModelParameters
         globalDefaults.contextBuilderModelParametersByAgent = coherent.contextBuilderModelParametersByAgent
@@ -2024,155 +2012,7 @@ class GlobalSettingsStore: ObservableObject, CodexHookApprovalSettingsProviding 
         }
     }
 
-    // MARK: - Global Context Builder Agent Selection (Single Source of Truth)
-
-    /// Returns the raw persisted global Context Builder selection without synthesizing a fallback.
-    /// Startup restoration needs to distinguish a real saved value from the catalog's historical
-    /// Claude Code / Opus default so it can validate availability and use recommendations instead.
-    func persistedGlobalContextBuilderAgentSelection() -> (agentRaw: String?, modelRaw: String?) {
-        guard let agentRaw = globalDefaults.discoverAgentRaw?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !agentRaw.isEmpty
-        else {
-            return (nil, nil)
-        }
-        let modelRaw = globalDefaults.discoverModelsByAgent?[agentRaw]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (agentRaw, modelRaw?.isEmpty == false ? modelRaw : nil)
-    }
-
-    /// Returns a normalized global Context Builder agent and model selection.
-    /// Callers performing startup restoration should use
-    /// `persistedGlobalContextBuilderAgentSelection()` and validate against current availability.
-    func globalContextBuilderAgentSelection() -> (agentRaw: String?, modelRaw: String?) {
-        let persisted = persistedGlobalContextBuilderAgentSelection()
-        let normalized = AgentModelCatalog.normalizeSelection(
-            agentRaw: persisted.agentRaw,
-            modelRaw: persisted.modelRaw
-        )
-        return (normalized.agent.rawValue, normalized.modelRaw)
-    }
-
-    /// Returns the remembered raw model for a specific global Context Builder agent slot.
-    /// This intentionally exposes only the per-agent memory entry needed by
-    /// allowlisted settings surfaces; callers that need an executable selection
-    /// should continue using `globalContextBuilderAgentSelection()`.
-    func globalContextBuilderRememberedModelRaw(for agentRaw: String) -> String? {
-        let trimmedAgentRaw = agentRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard AgentProviderKind(rawValue: trimmedAgentRaw) != nil,
-              let raw = globalDefaults.discoverModelsByAgent?[trimmedAgentRaw]?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty
-        else {
-            return nil
-        }
-        return raw
-    }
-
-    /// Sets the global Context Builder agent and model selection.
-    /// This is the only way to update the global Context Builder agent/model - workspace settings
-    /// should NOT be used for this purpose.
-    /// - Parameters:
-    ///   - agentRaw: The agent rawValue (e.g., "claudeCode", "codexExec", "openCode")
-    ///   - modelRaw: The model rawValue for the selected agent
-    ///   - markUserDefined: If true, marks this as a user-defined selection (prevents auto-apply override)
-    func setGlobalContextBuilderAgentSelection(
-        agentRaw: String,
-        modelRaw: String,
-        markUserDefined: Bool = true,
-        reason: String? = nil,
-        fileID: StaticString = #fileID,
-        line: UInt = #line,
-        function: StaticString = #function
-    ) {
-        let oldSelection = globalContextBuilderAgentSelection()
-        let globalDefaultsBeforeMutation = globalDefaults
-        let normalized = AgentModelCatalog.normalizeSelection(agentRaw: agentRaw, modelRaw: modelRaw)
-        globalDefaults.discoverAgentRaw = normalized.agent.rawValue
-        if globalDefaults.discoverModelsByAgent == nil {
-            globalDefaults.discoverModelsByAgent = [:]
-        }
-        globalDefaults.discoverModelsByAgent?[normalized.agent.rawValue] = normalized.modelRaw
-        if markUserDefined {
-            globalDefaults.didUserSetDiscoverAgentDefaults = true
-        }
-        recordSettingsWriteDiagnostic(
-            key: "globalContextBuilderAgentSelection",
-            oldValue: oldSelection.agentRaw.flatMap { oldAgentRaw in
-                oldSelection.modelRaw.map { "\(oldAgentRaw):\($0)" } ?? oldAgentRaw
-            },
-            newValue: "\(normalized.agent.rawValue):\(normalized.modelRaw)",
-            commit: true,
-            markUserDefined: markUserDefined,
-            reason: reason,
-            fileID: fileID,
-            line: line,
-            function: function
-        )
-        let globalDefaultsChanged = globalDefaultsBeforeMutation != globalDefaults
-        persistGlobalDefaultsChange(before: globalDefaultsBeforeMutation, commit: true)
-        if globalDefaultsChanged {
-            postAgentModelsSettingsDidChange(scope: .global)
-        }
-    }
-
-    /// Sets the global Context Builder agent and optionally updates/clears that agent's
-    /// remembered model slot. Passing `nil` or an empty string clears the current
-    /// remembered model entry for the selected agent; `globalContextBuilderAgentSelection()`
-    /// will still synthesize a runtime default when a concrete model is required.
-    func setGlobalContextBuilderAgentSelection(
-        agentRaw: String,
-        modelRaw: String?,
-        markUserDefined: Bool = true,
-        reason: String? = nil,
-        fileID: StaticString = #fileID,
-        line: UInt = #line,
-        function: StaticString = #function
-    ) {
-        let oldSelection = globalContextBuilderAgentSelection()
-        let globalDefaultsBeforeMutation = globalDefaults
-        let trimmedAgentRaw = agentRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let agent = AgentProviderKind(rawValue: trimmedAgentRaw)
-            ?? AgentModelCatalog.normalizeSelection(agentRaw: trimmedAgentRaw, modelRaw: modelRaw).agent
-        globalDefaults.discoverAgentRaw = agent.rawValue
-
-        let trimmedModelRaw = modelRaw?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let newModelRaw: String?
-        if let trimmedModelRaw, !trimmedModelRaw.isEmpty {
-            let normalized = AgentModelCatalog.normalizeSelection(
-                agentRaw: agent.rawValue,
-                modelRaw: trimmedModelRaw
-            )
-            if globalDefaults.discoverModelsByAgent == nil {
-                globalDefaults.discoverModelsByAgent = [:]
-            }
-            globalDefaults.discoverModelsByAgent?[normalized.agent.rawValue] = normalized.modelRaw
-            newModelRaw = normalized.modelRaw
-        } else {
-            globalDefaults.discoverModelsByAgent?[agent.rawValue] = nil
-            newModelRaw = nil
-        }
-
-        if markUserDefined {
-            globalDefaults.didUserSetDiscoverAgentDefaults = true
-        }
-        recordSettingsWriteDiagnostic(
-            key: "globalContextBuilderAgentSelection",
-            oldValue: oldSelection.agentRaw.flatMap { oldAgentRaw in
-                oldSelection.modelRaw.map { "\(oldAgentRaw):\($0)" } ?? oldAgentRaw
-            },
-            newValue: newModelRaw.map { "\(agent.rawValue):\($0)" } ?? agent.rawValue,
-            commit: true,
-            markUserDefined: markUserDefined,
-            reason: reason,
-            fileID: fileID,
-            line: line,
-            function: function
-        )
-        let globalDefaultsChanged = globalDefaultsBeforeMutation != globalDefaults
-        persistGlobalDefaultsChange(before: globalDefaultsBeforeMutation, commit: true)
-        if globalDefaultsChanged {
-            postAgentModelsSettingsDidChange(scope: .global)
-        }
-    }
+    // MARK: - Global Context Builder Ownership
 
     /// Returns whether the user has explicitly set the global Context Builder agent defaults.
     /// Used by recommendation engine to determine if auto-apply should be allowed.
