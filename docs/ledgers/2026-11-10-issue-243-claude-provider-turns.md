@@ -6,11 +6,11 @@ Port the #243 share of upstream PR 1565, so a turn that Claude Code starts by it
 
 | Item | Outcome | Agent session | Commits |
 |------|---------|---------------|---------|
-| 1. Provider start event and stream snapshot (plan item 2.1) | done | pair (Claude Code Opus) · Orchestrate 1/4: provider start event + stream snapshot, then engineer (Codex GPT-6.1) · Refactor: provider-aware names | `feat(claude): announce turns Claude Code starts by itself` |
-| 2. Controller event listener and attempt inbox (plan item 2.2) | done | pair (Claude Code Opus) · Orchestrate 2/4: controller event listener + attempt inbox, then engineer (Codex GPT-6.1) · Refactor: listener transport teardown | `feat(claude): add a process-lifetime listener for Claude Code events` |
-| 3. Ingestion cutover and provider-turn adoption (plan item 2.3) | done | pair (Claude Code Opus) · Orchestrate 3/4: ingestion cutover + provider-turn adoption, then engineer (Codex GPT-6.1) · Refactor: retirement helper + naming | `feat(claude): show turns Claude Code starts by itself as Agent Mode runs` |
-| 4. Races, Stop, idle failures, and the idle gate (plan item 2.4) | done | pair (Claude Code Opus) · Orchestrate 4/4: races, Stop, idle failures, idle gate, then engineer (Codex GPT-6.1) · Refactor: cancelRun waits + approval test | `fix(claude): account for Claude Code's own turns in sends, approvals, and Stop` |
-| 5. Validation and handoff (plan item 2.5) | done | orchestrator | `docs(ledgers): add the run ledger for Claude Code provider-started turns`, `docs(ledgers): record the live check for Claude Code provider-started turns` |
+| 1. Provider start event and stream snapshot | done | pair (Claude Code Opus) · Orchestrate 1/4: provider start event + stream snapshot, then engineer (Codex GPT-6.1) · Refactor: provider-aware names | `feat(claude): announce turns Claude Code starts by itself` |
+| 2. Controller event listener and attempt inbox | done | pair (Claude Code Opus) · Orchestrate 2/4: controller event listener + attempt inbox, then engineer (Codex GPT-6.1) · Refactor: listener transport teardown | `feat(claude): add a process-lifetime listener for Claude Code events` |
+| 3. Ingestion cutover and provider-turn adoption | done | pair (Claude Code Opus) · Orchestrate 3/4: ingestion cutover + provider-turn adoption, then engineer (Codex GPT-6.1) · Refactor: retirement helper + naming | `feat(claude): show turns Claude Code starts by itself as Agent Mode runs` |
+| 4. Races, Stop, idle failures, and the idle gate | done | pair (Claude Code Opus) · Orchestrate 4/4: races, Stop, idle failures, idle gate, then engineer (Codex GPT-6.1) · Refactor: cancelRun waits + approval test | `fix(claude): account for Claude Code's own turns in sends, approvals, and Stop` |
+| 5. Validation and handoff | done | orchestrator | `docs(ledgers): add the run ledger for Claude Code provider-started turns`, `docs(ledgers): record the live check for Claude Code provider-started turns` |
 
 ## 1. Provider start event and stream snapshot
 
@@ -21,7 +21,6 @@ Port the #243 share of upstream PR 1565, so a turn that Claude Code starts by it
 - Decision: kept upstream's rule that a provider turn closes only on a result naming its execution. A wake-up turn whose assistant frames carry no input UUID but whose result carries one would stay open, and after this item it would also make the next host send interrupt it. #379's live run on Claude Code 2.1.319 saw no such stamping. Item 5's live run checks for it again. Source: orchestrator judgment.
 - Decision (refactor gate): `DeferredCompletion.inputIDs` became `turnIDs` and `requiresHostOutputOwner` became `requiresRunOutputOwner`, because both now cover provider turns. Declined merging `eventStreamSnapshot`'s tuple with `NativeAgentRuntimeEventStreamHandle`: the plan approved upstream's snapshot-plus-derived-handle shape, which makes later ports easier. Source: refactor review, orchestrator judgment.
 - Evidence: `ClaudeNativeTurnCorrelationTests`, `ClaudeNativeApprovalAndResumeTests`, `ClaudeIdleShutdownTests`, and `AgentRunStartupSnapshotTests` passed (49 tests), and after the refactor the first three passed again. `make dev-swift-build PRODUCT=RepoPrompt`, `make dev-format`, and `make dev-lint` passed. The agent broke the code five ways (start after output, no start on an approval request, provider turn left out of the in-flight state, adapter not forwarding the snapshot, orphan tool results counted as activity), and each break failed its test. The interrupt guard has no test, because `interruptTurn` fails without a live process.
-- Note: `make dev-test FILTER='A|B'` doesn't work, because the Makefile leaves `FILTER` unquoted (#375). Use `./conductor test --filter 'A|B'`.
 
 ## 2. Controller event listener and attempt inbox
 
