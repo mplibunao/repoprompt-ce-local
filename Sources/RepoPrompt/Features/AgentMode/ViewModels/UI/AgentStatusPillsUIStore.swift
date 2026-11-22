@@ -24,6 +24,9 @@ struct AgentStatusPillsSnapshot: Equatable {
     let executionLocation: AgentExecutionLocationProps?
     let activeAgentSessionID: UUID?
     let activeRunID: UUID?
+    /// Changes when the current tab's Agent session or its worktree bindings change. The context
+    /// drawer refreshes on it; it isn't binding authority.
+    let contextLookupIdentity: AgentWorkspaceLookupContextIdentity
 
     static let empty = AgentStatusPillsSnapshot(
         currentTabID: nil,
@@ -36,7 +39,8 @@ struct AgentStatusPillsSnapshot: Equatable {
         interviewFirst: false,
         executionLocation: nil,
         activeAgentSessionID: nil,
-        activeRunID: nil
+        activeRunID: nil,
+        contextLookupIdentity: AgentWorkspaceLookupContextSource(activeAgentSessionID: nil, worktreeBindings: []).identity
     )
 }
 

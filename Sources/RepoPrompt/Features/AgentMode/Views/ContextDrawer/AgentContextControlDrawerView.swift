@@ -3,6 +3,7 @@ import SwiftUI
 private struct AgentContextDrawerSwitchKey: Equatable {
     let tabID: UUID?
     let activeAgentSessionID: UUID?
+    let contextLookupIdentity: AgentWorkspaceLookupContextIdentity
 }
 
 @MainActor
@@ -19,7 +20,9 @@ struct AgentContextControlDrawerView: View {
     @ObservedObject var detailStore: AgentContextDrawerDetailStore
     let isPresented: Bool
     @ObservedObject var promptManager: PromptViewModel
-    @ObservedObject var runtimeVM: AgentRuntimeSidebarViewModel
+    /// Not observed: runtime metrics publish on most streamed chunks, and only the token estimate
+    /// pill, which observes it, shows them.
+    let runtimeVM: AgentRuntimeSidebarViewModel
     let contextBuilderAgentVM: ContextBuilderAgentViewModel
     let oracleViewModel: OracleViewModel
     let selectionCoordinator: WorkspaceSelectionCoordinator
@@ -27,6 +30,7 @@ struct AgentContextControlDrawerView: View {
     let windowID: Int
     let currentTabID: UUID?
     let activeAgentSessionID: UUID?
+    let contextLookupIdentity: AgentWorkspaceLookupContextIdentity
     let worktreeBindingsProvider: @MainActor (UUID, UUID?) -> [AgentSessionWorktreeBinding]
 
     @StateObject private var modelCoordinator = AgentSelectedFilesModelCoordinator()
@@ -34,6 +38,10 @@ struct AgentContextControlDrawerView: View {
     @State private var observedSwitchKey: AgentContextDrawerSwitchKey?
     @State private var selectedFilesBlankingIdentity: AgentSelectedFilesModelIdentity?
     @State private var tokenBlankingSelection: StoredSelection?
+    /// Bumped on a selection change for this drawer's tab while it's presented. The selection
+    /// coordinator isn't observable, and on the Context Builder tab no child refreshes the model,
+    /// so without it the Selections count keeps the previous selection.
+    @State private var selectionChangeRevision: UInt64 = 0
     @ObservedObject private var fontScale = FontScaleManager.shared
 
     private var fontPreset: FontScalePreset {
@@ -41,7 +49,8 @@ struct AgentContextControlDrawerView: View {
     }
 
     private var exportContext: AgentContextExportViewContext {
-        AgentContextExportViewContext(
+        _ = selectionChangeRevision
+        return AgentContextExportViewContext(
             promptManager: promptManager,
             selectionCoordinator: selectionCoordinator,
             currentTabID: currentTabID,
@@ -57,7 +66,8 @@ struct AgentContextControlDrawerView: View {
     private var currentSwitchKey: AgentContextDrawerSwitchKey {
         AgentContextDrawerSwitchKey(
             tabID: currentTabID ?? promptManager.activeComposeTabID,
-            activeAgentSessionID: activeAgentSessionID
+            activeAgentSessionID: activeAgentSessionID,
+            contextLookupIdentity: contextLookupIdentity
         )
     }
 
@@ -135,6 +145,9 @@ struct AgentContextControlDrawerView: View {
         }
         .onReceive(exportContext.selectionChangesPublisher) { change in
             guard exportContext.tabMatchesSelectionChange(change) else { return }
+            if isPresented {
+                selectionChangeRevision &+= 1
+            }
             updateBlankingTargetsIfNeeded()
         }
         .onChange(of: exportContext.modelRequestIdentity) { _, _ in

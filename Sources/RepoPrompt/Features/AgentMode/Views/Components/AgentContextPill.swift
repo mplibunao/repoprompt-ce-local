@@ -11,9 +11,6 @@ struct AgentContextPill: View {
     let openContextDrawerFiles: () -> Void
     let selectionCoordinator: WorkspaceSelectionCoordinator
     @ObservedObject var runtimeVM: AgentRuntimeSidebarViewModel
-    let currentTabID: UUID?
-    let activeAgentSessionID: UUID?
-    let worktreeBindingsProvider: @MainActor (UUID, UUID?) -> [AgentSessionWorktreeBinding]
 
     @ObservedObject private var fontScale = FontScaleManager.shared
     @State private var contextComposerShortcut = KeyboardShortcuts.getShortcut(for: .toggleContextComposer)
@@ -44,21 +41,17 @@ struct AgentContextPill: View {
         AgentContextFileCodemapCountSummary.selectionDisplayText(from: selectionSummary)
     }
 
+    /// The active tab's selection, resolved without the worktree bindings that a full export source looks up.
     private var currentExportSourceSelection: StoredSelection {
-        let requestedTabID = currentTabID ?? promptManager.activeComposeTabID
-        let selectionSnapshot = requestedTabID.flatMap {
+        let activeTabID = promptManager.activeComposeTabID
+        let selectionSnapshot = activeTabID.flatMap {
             selectionCoordinator.selectionSnapshot(for: $0, flushPendingUIIfActive: false)
         }
-        return AgentContextExportSourceBuilder.makeSource(
-            AgentContextExportSourceBuildRequest(
-                requestedTabID: requestedTabID,
-                activeComposeTabID: promptManager.activeComposeTabID,
-                activePromptText: promptManager.promptText,
-                selectionSnapshot: selectionSnapshot,
-                composeTabs: promptManager.currentComposeTabs,
-                explicitActiveAgentSessionID: activeAgentSessionID,
-                worktreeBindingsProvider: worktreeBindingsProvider
-            )
+        return AgentContextExportSourceBuilder.resolveSelection(
+            requestedTabID: activeTabID,
+            activeComposeTabID: activeTabID,
+            selectionSnapshot: selectionSnapshot,
+            composeTabs: promptManager.currentComposeTabs
         ).selection
     }
 

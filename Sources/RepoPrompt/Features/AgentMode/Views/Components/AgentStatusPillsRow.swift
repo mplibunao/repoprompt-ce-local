@@ -77,12 +77,7 @@ struct AgentStatusPillsRow: View {
                     promptManager: promptManager,
                     openContextDrawerFiles: openContextDrawerFiles,
                     selectionCoordinator: selectionCoordinator,
-                    runtimeVM: runtimeVM,
-                    currentTabID: snapshot.currentTabID,
-                    activeAgentSessionID: snapshot.activeAgentSessionID,
-                    worktreeBindingsProvider: { sessionID, tabID in
-                        agentModeVM.worktreeBindings(forAgentSessionID: sessionID, tabID: tabID)
-                    }
+                    runtimeVM: runtimeVM
                 )
             }
         }
