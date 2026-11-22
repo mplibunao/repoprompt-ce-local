@@ -80,7 +80,7 @@ import XCTest
         func testBusySessionKeepsProcessUntilWorkClears() async throws {
             let protections: [Protection] = [
                 Protection("pending interaction") { fixture in
-                    fixture.session.pendingApproval = Self.claudeApprovalRequest(id: "approval")
+                    fixture.session.pendingApproval = startupTestClaudeApprovalRequest(id: "approval")
                     return { fixture.session.pendingApproval = nil }
                 },
                 Protection("pending instruction") { fixture in
@@ -206,6 +206,41 @@ import XCTest
             clock.advance(by: .seconds(60))
             try await expectIdleOutcomes(Array(repeating: .rearmed, count: 17) + [.retired], on: fixture, label)
             try await startupTestEventually { fixture.claude.shutdownObservations.count == 1 }
+        }
+
+        /// A turn Claude Code starts while the deadline's probe is out keeps the process, though
+        /// the probe saw no work: the recheck after the probe sees the provider turn waiting for
+        /// adoption. The process stays while the adopted run works and retires a full interval after
+        /// that run publishes.
+        func testProviderTurnStartedDuringTheProbeKeepsTheProcessUntilItsRunPublishes() async throws {
+            let fixture = makeFixture()
+            try await fixture.runTurn("turn")
+            let runtime = try XCTUnwrap(fixture.claude.runtimes.last)
+            let probeHold = StartupTestHeldGate()
+            fixture.cleanup.heldGates.append(probeHold)
+            fixture.claude.probeHold = probeHold
+            fixture.idle.clock.advance(by: Self.interval)
+            try await startupTestEventually { probeHold.isWaiting }
+
+            let wakeUp = UUID()
+            await runtime.emit(.providerTurnStarted(turnID: wakeUp))
+            try await startupTestEventually { fixture.coordinator.hasPendingProviderWork(for: fixture.session) }
+            probeHold.release()
+            try await expectIdleOutcomes([.rearmed], on: fixture, "provider turn during the probe")
+            try await startupTestEventually { fixture.session.runState == .running }
+            XCTAssertNotNil(fixture.session.activeRunOwnership)
+
+            fixture.idle.clock.advance(by: Self.interval)
+            try await expectIdleOutcomes([.rearmed, .rearmed], on: fixture, "adopted run working")
+            XCTAssertEqual(fixture.claude.shutdownsStarted, 0)
+
+            await runtime.emit(.turnsCompleted(turnIDs: [wakeUp], status: .completed))
+            try await startupTestEventually(seconds: 15) {
+                fixture.session.runState == .completed && !fixture.session.terminalCommitInProgress
+            }
+            fixture.idle.clock.advance(by: Self.interval)
+            try await expectIdleOutcomes([.rearmed, .rearmed, .retired], on: fixture, "after publication")
+            XCTAssertEqual(fixture.claude.runtimesCreated, 1)
         }
 
         func testTimerEndsWithoutShutdownWhenControllerReplacedOrSettingOff() async throws {
@@ -689,23 +724,6 @@ import XCTest
                 label,
                 file: file,
                 line: line
-            )
-        }
-
-        private static func claudeApprovalRequest(id: String) -> AgentApprovalRequest {
-            AgentApprovalRequest(
-                requestID: .claudeControl(id),
-                method: "can_use_tool",
-                kind: .commandExecution,
-                threadID: "thread",
-                turnID: "turn",
-                itemID: "item",
-                reason: nil,
-                command: nil,
-                cwd: nil,
-                grantRoot: nil,
-                proposedExecpolicyAmendmentJSON: nil,
-                details: []
             )
         }
 

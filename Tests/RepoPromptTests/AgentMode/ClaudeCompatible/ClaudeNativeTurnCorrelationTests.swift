@@ -134,7 +134,7 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
         }
     }
 
-    func testActivityWithoutKnownHostInputTracksProviderExecutionWithoutOwningOutput() throws {
+    func testProviderExecutionOwnsItsOutputAndIsNamedByItsResult() throws {
         let queued = UUID(), foreign = UUID()
         let cases: [(label: String, activity: [String: Any], answer: [String: Any])] = [
             ("unstamped activity", assistant(), result()),
@@ -143,47 +143,155 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
         for testCase in cases {
             var correlation = matchingCorrelation()
             correlation.register(queued)
-            XCTAssertFalse(try correlation.observeActivity(testCase.activity), testCase.label)
-            XCTAssertFalse(correlation.ownsOutput, testCase.label)
-            XCTAssertNotNil(correlation.providerTurnID, testCase.label)
+            XCTAssertEqual(try correlation.observeActivity(testCase.activity), .provider, testCase.label)
+            let providerTurnID = try XCTUnwrap(correlation.providerTurnID, testCase.label)
+            var retired = correlation
+            XCTAssertEqual(retired.drain(), [queued, providerTurnID], "Retiring the transport also fails the provider turn: \(testCase.label)")
 
-            XCTAssertEqual(try correlation.resolve(testCase.answer).inputIDs, [], testCase.label)
+            let resolution = try correlation.resolve(testCase.answer)
+            XCTAssertEqual(resolution.inputIDs, [], testCase.label)
+            XCTAssertEqual(resolution.providerTurnID, providerTurnID, testCase.label)
             XCTAssertNil(correlation.providerTurnID, testCase.label)
             XCTAssertEqual(try correlation.resolve(result([queued])).inputIDs, [queued], testCase.label)
         }
 
         var hostExecution = matchingCorrelation()
         hostExecution.register(queued)
-        XCTAssertTrue(try hostExecution.observeActivity(assistant(queued)))
+        XCTAssertEqual(try hostExecution.observeActivity(assistant(queued)), .host)
         XCTAssertNil(hostExecution.providerTurnID, "Activity for a known host input isn't provider work")
+    }
+
+    func testProviderExecutionThatPicksUpHostInputHandsItTheOutputAndSettlesBoth() throws {
+        let host = UUID()
+        var correlation = matchingCorrelation()
+        correlation.register(host)
+        XCTAssertEqual(try correlation.observeActivity(assistant()), .provider)
+        let providerTurnID = try XCTUnwrap(correlation.providerTurnID)
+
+        XCTAssertEqual(try correlation.observeActivity(assistant(host)), .host, "Claude Code picked the host input up into its own turn")
+        XCTAssertEqual(correlation.providerTurnID, providerTurnID, "Picking up input doesn't start another turn")
+        XCTAssertNil(try correlation.observeActivity(assistant(UUID())), "A foreign message in that turn belongs to no run")
+
+        let resolution = try correlation.resolve(result([host]))
+        XCTAssertEqual(resolution.inputIDs, [host])
+        XCTAssertEqual(resolution.providerTurnID, providerTurnID, "One result settles the host input and the provider turn together")
     }
 
     // MARK: - Controller ingress
 
-    func testProviderStartedTurnKeepsIdleProbeBusyWithoutCountingAsHostWork() async throws {
+    func testProviderStartedTurnIsInFlightUntilItsCompletion() async throws {
         let controller = makeController()
         try await feed(initPayload(), to: controller)
+        try await feed(sessionState("running"), to: controller)
         try await feed(assistant(text: "The background task finished; reading its output."), to: controller)
         let probeDuringTurn = await controller.idleProbe()
-        let hostWorkDuringTurn = await controller.hasTurnInFlight
+        let sendSeesTurn = await controller.hasTurnInFlight
         XCTAssertTrue(probeDuringTurn.turnInFlight, "The idle gate must not retire the process during the turn")
-        XCTAssertFalse(hostWorkDuringTurn, "A send during a turn the user can't see queues instead of interrupting it")
+        XCTAssertTrue(sendSeesTurn, "A send during the turn must treat it as running")
 
         try await feed(result(text: "Done."), to: controller)
+        let probeAwaitingIdle = await controller.idleProbe()
+        let sendSeesDeferredCompletion = await controller.hasTurnInFlight
+        XCTAssertTrue(probeAwaitingIdle.turnInFlight, "The turn stays busy until Claude Code reports idle")
+        XCTAssertTrue(sendSeesDeferredCompletion)
+
+        try await feed(sessionState("idle"), to: controller)
         let probeAfterTurn = await controller.idleProbe()
-        let hostWorkAfterTurn = await controller.hasTurnInFlight
+        let sendAfterTurn = await controller.hasTurnInFlight
         XCTAssertFalse(probeAfterTurn.turnInFlight)
-        XCTAssertFalse(hostWorkAfterTurn)
+        XCTAssertFalse(sendAfterTurn)
+
+        let events = await eventsAfterShutdown(of: controller)
+        let started = providerTurnStarts(in: events)
+        XCTAssertEqual(started.count, 1)
+        XCTAssertEqual(
+            settlements(in: events),
+            started.map { Settlement(turnIDs: [$0], status: .completed) },
+            "The completion names the turn its start announced"
+        )
+    }
+
+    func testProviderTurnIsAnnouncedBeforeItsOutputOrApprovalRequest() async throws {
+        let cases: [(label: String, firstEvidence: [String: Any])] = [
+            ("output first", assistant(text: "wake-up output")),
+            ("approval request first", approvalRequest())
+        ]
+        for testCase in cases {
+            let controller = makeController()
+            try await feed(initPayload(), to: controller)
+            try await feed(testCase.firstEvidence, to: controller)
+            try await feed(assistant(text: "more wake-up output"), to: controller)
+            try await feed(result(text: "wake-up answer"), to: controller)
+
+            let events = await eventsAfterShutdown(of: controller)
+            let started = providerTurnStarts(in: events)
+            XCTAssertEqual(started.count, 1, testCase.label)
+            let startIndex = try XCTUnwrap(events.firstIndex { event in
+                if case .providerTurnStarted = event {
+                    return true
+                }
+                return false
+            }, testCase.label)
+            let firstTurnEventIndex = try XCTUnwrap(events.firstIndex { event in
+                switch event {
+                case .approvalRequest: true
+                case let .stream(result): result.text?.contains("wake-up") == true
+                default: false
+                }
+            }, testCase.label)
+            XCTAssertLessThan(startIndex, firstTurnEventIndex, testCase.label)
+            let text = streamText(in: events)
+            XCTAssertTrue(text.contains("more wake-up output"), testCase.label)
+            XCTAssertTrue(text.contains("wake-up answer"), testCase.label)
+            XCTAssertEqual(settlements(in: events), started.map { Settlement(turnIDs: [$0], status: .completed) }, testCase.label)
+        }
+    }
+
+    func testFramesWithoutMainThreadActivityStartNoProviderTurn() async throws {
+        let controller = makeController()
+        try await feed(initPayload(), to: controller)
+        // The frames Claude Code 2.1.319 sent around a background command's end, before its wake-up
+        // turn, plus subagent and orphan tool output and results no execution preceded.
+        var subagentMessage = assistant(text: "subagent text")
+        subagentMessage["parent_tool_use_id"] = "toolu_agent"
+        let frames: [[String: Any]] = [
+            ["type": "system", "subtype": "task_started", "task_id": "task-1", "task_type": "local_bash", "tool_use_id": "toolu_bg", "description": "Sleep 60 seconds"],
+            ["type": "system", "subtype": "task_updated", "task_id": "task-1", "patch": ["status": "completed"]],
+            ["type": "system", "subtype": "task_notification", "task_id": "task-1", "tool_use_id": "toolu_bg", "status": "completed", "summary": "Background command completed (exit code 0)"],
+            ["type": "system", "subtype": "background_tasks_changed", "tasks": [[String: Any]]()],
+            initPayload(),
+            ["type": "system", "subtype": "thinking_tokens", "estimated_tokens": 50, "estimated_tokens_delta": 50],
+            ["type": "system", "subtype": "notification", "key": "stop-hook-error", "text": "Stop hook error occurred"],
+            subagentMessage,
+            ["type": "stream_event", "parentToolUseId": "toolu_agent", "event": ["type": "message_start"]],
+            ["type": "command_lifecycle", "parent_tool_use_id": "toolu_agent", "state": "started", "command_uuid": UUID().uuidString],
+            ["type": "user", "message": ["role": "user", "content": [["type": "tool_result", "tool_use_id": "toolu_orphan", "content": "orphan output"]]]],
+            result(text: "result with no execution"),
+            result([UUID()], text: "foreign result with no execution")
+        ]
+        for frame in frames {
+            try await feed(frame, to: controller)
+        }
+        let probeAfterFrames = await controller.idleProbe()
+        let sendSeesTurn = await controller.hasTurnInFlight
+        XCTAssertFalse(probeAfterFrames.turnInFlight)
+        XCTAssertFalse(sendSeesTurn)
+
+        // The wake-up turn's first main-thread frame does start it.
+        try await feed(assistant(text: "The background command finished."), to: controller)
+        let events = await eventsAfterShutdown(of: controller)
+        XCTAssertEqual(providerTurnStarts(in: events).count, 1)
+        XCTAssertEqual(settlements(in: events), [], "Results no execution preceded settle nothing")
     }
 
     func testUnsolicitedTurnCannotSettleOrSpeakForQueuedHostInput() async throws {
         let controller = makeController()
         try await feed(initPayload(), to: controller)
-        try await feed(assistant(text: "unowned wake-up text"), to: controller)
+        try await feed(assistant(text: "provider wake-up text"), to: controller)
         let host = await controller.test_beginTurnTracking()
         try await feed(approvalRequest(), to: controller)
-        await controller.test_handleInboundLine(Data("unowned plaintext recovered while the queued input waited for service".utf8))
-        try await feed(result(text: "unowned wake-up answer"), to: controller)
+        await controller.test_handleInboundLine(Data("provider plaintext recovered while the queued input waited for service".utf8))
+        try await feed(result(text: "provider wake-up answer"), to: controller)
         let hostStillPending = await controller.hasTurnInFlight
         XCTAssertTrue(hostStillPending, "The wake-up turn's result must not settle the queued input")
 
@@ -192,18 +300,30 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
             subagent[parentKey] = "toolu_parent"
             try await feed(subagent, to: controller)
         }
-        // Had a subagent frame claimed the main thread for the host input, this text would be owned.
-        try await feed(assistant(text: "unowned main-thread text after subagent frames"), to: controller)
+        // Had a subagent frame claimed the main thread for the host input, this text would belong
+        // to the host input instead of starting a second provider turn.
+        try await feed(assistant(text: "provider main-thread text after subagent frames"), to: controller)
         try await feed(assistant(host, text: "owned text"), to: controller)
         try await feed(assistant(UUID(), text: "unowned text from a foreign input"), to: controller)
         try await feed(result([host], text: "owned final"), to: controller)
         try await feed(result([host], text: "unowned duplicate answer"), to: controller)
 
         let events = await eventsAfterShutdown(of: controller)
-        XCTAssertEqual(settlements(in: events), [Settlement(turnIDs: [host], status: .completed)])
+        // The unstamped text after the subagent frames starts a second provider turn, which then
+        // picks up the host input, so one result settles both.
+        let started = providerTurnStarts(in: events)
+        XCTAssertEqual(started.count, 2)
+        XCTAssertEqual(settlements(in: events), [
+            Settlement(turnIDs: Array(started.prefix(1)), status: .completed),
+            Settlement(turnIDs: [host] + started.dropFirst(), status: .completed)
+        ])
         let text = streamText(in: events)
         XCTAssertFalse(text.contains("unowned"), text)
-        XCTAssertFalse(text.contains("subagent"), text)
+        XCTAssertFalse(text.contains("subagent text"), text)
+        XCTAssertTrue(text.contains("provider wake-up text"), text)
+        XCTAssertTrue(text.contains("provider plaintext recovered"), text)
+        XCTAssertTrue(text.contains("provider wake-up answer"), text)
+        XCTAssertTrue(text.contains("provider main-thread text after subagent frames"), text)
         XCTAssertTrue(text.contains("owned text"), text)
         XCTAssertTrue(text.contains("owned final"), text)
         XCTAssertTrue(events.contains { event in
@@ -275,7 +395,13 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
         for await event in stream {
             events.append(event)
         }
-        XCTAssertEqual(settlements(in: events), [Settlement(turnIDs: [first], status: .completed)], "The idle frame settles the first input only")
+        let wakeUp = providerTurnStarts(in: events)
+        XCTAssertEqual(wakeUp.count, 1)
+        XCTAssertEqual(
+            settlements(in: events),
+            [Settlement(turnIDs: wakeUp, status: .completed), Settlement(turnIDs: [first], status: .completed)],
+            "Each idle frame settles one earlier result's targets, never the second input"
+        )
         await controller.shutdown()
     }
 
@@ -400,6 +526,13 @@ final class ClaudeNativeTurnCorrelationTests: XCTestCase {
             case let .turnsCompleted(turnIDs, status): Settlement(turnIDs: turnIDs, status: status)
             default: nil
             }
+        }
+    }
+
+    private func providerTurnStarts(in events: [ClaudeNativeProcessSessionController.Event]) -> [UUID] {
+        events.compactMap { event in
+            guard case let .providerTurnStarted(turnID) = event else { return nil }
+            return turnID
         }
     }
 

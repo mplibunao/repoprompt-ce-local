@@ -448,11 +448,16 @@ import XCTest
     @MainActor
     final class StartupTestPublicationRecorder {
         private(set) var revisions: [AgentRunTerminalCommitRevision] = []
+        /// When set, each publication waits for it after it is recorded.
+        var hold: StartupTestHeldGate?
 
         func install(on viewModel: AgentModeViewModel) {
             viewModel.test_setTerminalPublicationOverride { [weak self, weak viewModel] revision, successorKind, session in
                 guard let self, let viewModel else { return .rejected(reason: "fixture released") }
                 revisions.append(revision)
+                if let hold {
+                    await hold.wait()
+                }
                 viewModel.test_setTerminalPublicationOverride(nil)
                 defer { install(on: viewModel) }
                 return await viewModel.test_publishTerminalCommit(revision, successorKind: successorKind, for: session)
@@ -526,6 +531,24 @@ import XCTest
         ).registration
     }
 
+    /// A Claude permission request for a command, as the controller reports one.
+    func startupTestClaudeApprovalRequest(id: String) -> AgentApprovalRequest {
+        AgentApprovalRequest(
+            requestID: .claudeControl(id),
+            method: "can_use_tool",
+            kind: .commandExecution,
+            threadID: "thread",
+            turnID: "turn",
+            itemID: "item",
+            reason: nil,
+            command: nil,
+            cwd: nil,
+            grantRoot: nil,
+            proposedExecpolicyAmendmentJSON: nil,
+            details: []
+        )
+    }
+
     /// Counts the Claude-compatible runtimes a view model creates, their session starts, the
     /// messages sent to them, and their shutdowns, and answers their idle probes.
     @MainActor
@@ -536,6 +559,12 @@ import XCTest
             case sessionStarted(runtime: Int)
             case messageSent(runtime: Int)
             case shutdownFinished(runtime: Int)
+        }
+
+        /// A control call a runtime received, in the order its runtimes received them.
+        enum Control: Equatable {
+            case permissionAnswered(requestID: String, decision: AgentApprovalDecision)
+            case interrupt
         }
 
         /// Whether the task running a shutdown was cancelled when it began and when it finished.
@@ -557,6 +586,18 @@ import XCTest
         private(set) var sentMessages: [String] = []
         /// The provider turn each sent message started, in send order.
         private(set) var sentTurnIDs: [UUID] = []
+        /// Events the next send emits after its write and before it registers the input, as Claude
+        /// Code output that reaches the controller while the input is being written.
+        var eventsDuringNextSend: [NativeAgentRuntimeEvent] = []
+        /// When set, every send waits for it before writing.
+        var sendHold: StartupTestHeldGate?
+        /// Errors the next sends throw after `sendHold`, one per send in order, as failed writes.
+        var failingSends: [NativeAgentRuntimeControllerError] = []
+        /// What `hasTurnInFlight` reports, read once `turnInFlightHold` is released.
+        var reportsTurnInFlight = false
+        /// When set, `hasTurnInFlight` waits for it before answering.
+        var turnInFlightHold: StartupTestHeldGate?
+        private(set) var controls: [Control] = []
         private(set) var events: [Event] = []
         private(set) var shutdownsStarted = 0
         private(set) var shutdownObservations: [ShutdownObservation] = []
@@ -600,6 +641,26 @@ import XCTest
             events.append(.messageSent(runtime: runtime))
         }
 
+        fileprivate func beginSend() -> (hold: StartupTestHeldGate?, failure: NativeAgentRuntimeControllerError?) {
+            (sendHold, failingSends.isEmpty ? nil : failingSends.removeFirst())
+        }
+
+        fileprivate func takeEventsDuringSend() -> [NativeAgentRuntimeEvent] {
+            defer { eventsDuringNextSend = [] }
+            return eventsDuringNextSend
+        }
+
+        fileprivate func recordControl(_ control: Control) {
+            controls.append(control)
+        }
+
+        fileprivate func answerTurnInFlight() async -> Bool {
+            if let turnInFlightHold {
+                await turnInFlightHold.wait()
+            }
+            return reportsTurnInFlight
+        }
+
         fileprivate func answerIdleProbe() async -> NativeAgentRuntimeIdleProbe {
             if let probeHold {
                 await probeHold.wait()
@@ -630,6 +691,7 @@ import XCTest
         private var startedSessionID: String?
         private var eventStream: AsyncStream<NativeAgentRuntimeEvent>
         private var eventContinuation: AsyncStream<NativeAgentRuntimeEvent>.Continuation
+        private var eventStreamGeneration: UInt64 = 1
 
         init(recorder: StartupTestClaudeRecorder, index: Int) {
             self.recorder = recorder
@@ -642,17 +704,22 @@ import XCTest
         }
 
         var hasTurnInFlight: Bool {
-            false
+            get async { await recorder.answerTurnInFlight() }
         }
 
         var events: AsyncStream<NativeAgentRuntimeEvent> {
             eventStream
         }
 
+        var eventStreamSnapshot: (generation: UInt64, stream: AsyncStream<NativeAgentRuntimeEvent>) {
+            (eventStreamGeneration, eventStream)
+        }
+
         func ensureEventsStreamReady() {}
 
         func resetEventsStreamForNewRun() {
             eventContinuation.finish()
+            eventStreamGeneration &+= 1
             (eventStream, eventContinuation) = AsyncStream.makeStream()
         }
 
@@ -678,9 +745,21 @@ import XCTest
 
         func applyModelAndEffort(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws {}
 
+        /// Registers the input after the write and announces it, as the real controller does.
         func sendUserMessage(_ text: String) async throws -> UUID {
+            let send = await recorder.beginSend()
+            if let hold = send.hold {
+                await hold.wait()
+            }
+            if let failure = send.failure {
+                throw failure
+            }
             let turnID = UUID()
             await recorder.recordSentMessage(text, turnID: turnID, runtime: index)
+            for event in await recorder.takeEventsDuringSend() {
+                eventContinuation.yield(event)
+            }
+            eventContinuation.yield(.inputRegistered(turnID: turnID))
             return turnID
         }
 
@@ -688,8 +767,14 @@ import XCTest
             eventContinuation.yield(event)
         }
 
-        func interruptTurn(reason _: String) -> NativeAgentRuntimeInterruptOutcome {
-            .noTurnInFlight
+        /// Ends the event stream as the process exiting does.
+        func finishEventStream() {
+            eventContinuation.finish()
+        }
+
+        func interruptTurn(reason _: String) async -> NativeAgentRuntimeInterruptOutcome {
+            await recorder.recordControl(.interrupt)
+            return .noTurnInFlight
         }
 
         func shutdown() async {
@@ -706,7 +791,9 @@ import XCTest
             ))
         }
 
-        func respondToPermissionRequest(id _: String, decision _: AgentApprovalDecision) {}
+        func respondToPermissionRequest(id: String, decision: AgentApprovalDecision) async {
+            await recorder.recordControl(.permissionAnswered(requestID: id, decision: decision))
+        }
 
         func idleProbe() async -> NativeAgentRuntimeIdleProbe {
             await recorder.answerIdleProbe()
