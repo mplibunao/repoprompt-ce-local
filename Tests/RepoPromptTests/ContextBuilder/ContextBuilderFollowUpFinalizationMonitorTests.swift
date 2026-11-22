@@ -273,6 +273,55 @@ final class ContextBuilderFollowUpFinalizationMonitorTests: XCTestCase {
         XCTAssertEqual(cancellationCount, 0)
     }
 
+    func testLivenessRenewedLaneCompletesAcrossInactivityBudgets() async throws {
+        let lane = ContextBuilderFollowUpLivenessLane()
+        let monitor = await lane.start(partialText: "unused partial")
+
+        // Activity every 8 s against a 10 s budget, each check 7 s after the latest renewal.
+        for renewal in stride(from: 8.0, through: 40.0, by: 8.0) {
+            let recorded = await lane.deliverActivity(at: renewal)
+            XCTAssertTrue(recorded, "the monitor didn't record activity at \(renewal) s")
+            let survived = await lane.check(at: renewal + 7)
+            XCTAssertTrue(survived, "the lane timed out 7 s after activity at \(renewal) s")
+        }
+        let survivedBeforeBudget = await lane.check(at: 49.9)
+        XCTAssertTrue(survivedBeforeBudget, "the lane timed out 9.9 s after its last activity")
+        lane.finalization.resolve("final answer")
+
+        let result = try await monitor.value
+        XCTAssertFalse(lane.deadlineExpired, "the monitor ended only when the lane's deadline cancelled it")
+        XCTAssertEqual(result, .completed("final answer"))
+        let cancellationCount = await lane.cancellations.count()
+        XCTAssertEqual(cancellationCount, 0)
+    }
+
+    func testLaneWithoutFurtherLivenessTimesOut() async throws {
+        let lane = ContextBuilderFollowUpLivenessLane()
+        let monitor = await lane.start(partialText: "Partial answer")
+
+        for renewal in [8.0, 16.0] {
+            let recorded = await lane.deliverActivity(at: renewal)
+            XCTAssertTrue(recorded, "the monitor didn't record activity at \(renewal) s")
+        }
+        let survivedBeforeBudget = await lane.check(at: 25.9)
+        XCTAssertTrue(survivedBeforeBudget, "the lane timed out 9.9 s after its last activity")
+        let survivedAtBudget = await lane.check(at: 26)
+        guard !survivedAtBudget else {
+            monitor.cancel()
+            return XCTFail("the lane survived 10 s without activity")
+        }
+
+        let result = try await monitor.value
+        XCTAssertFalse(lane.deadlineExpired, "the monitor ended only when the lane's deadline cancelled it")
+        guard case let .timedOut(timeout) = result else {
+            return XCTFail("Expected a typed timeout result, got \(result)")
+        }
+        XCTAssertEqual(timeout.reason, .inactivity(seconds: 10))
+        XCTAssertEqual(timeout.partialText, "Partial answer")
+        let cancellationCount = await lane.cancellations.count()
+        XCTAssertEqual(cancellationCount, 1)
+    }
+
     func testUIFollowUpShowsTypedCompletionErrorDescription() async throws {
         let (composition, _, tabID) = try await makeCompositionWithComposeTab(
             workspaceName: "Context Builder UI follow-up failure"
@@ -415,6 +464,142 @@ private actor ContextBuilderTimeoutSaveGate {
     }
 }
 
+/// Runs the monitor with a 10 s inactivity budget against a clock the test sets. Each inactivity
+/// check waits for `check(at:)`, and each method returns only after the monitor has recorded the
+/// activity or finished the check, so nothing races the clock.
+private final class ContextBuilderFollowUpLivenessLane {
+    let clock = ContextBuilderFollowUpFinalizationTestClock()
+    let cancellations = ContextBuilderFollowUpCancellationRecorder()
+    let finalization = ContextBuilderFollowUpCancellationGate()
+    private let activity = AsyncStream<OracleMessageLifecycleActivityEvent>.makeStream()
+    // Buffered: the check task asks for its first step as soon as the monitor starts.
+    private let checkSteps = AsyncStream<Void>.makeStream()
+    private let recordedActivity = AsyncStream<Void>.makeStream()
+    private let waitingChecks = AsyncStream<Void>.makeStream()
+    private var recordedActivityIterator: AsyncStream<Void>.Iterator
+    private var waitingChecksIterator: AsyncStream<Void>.Iterator
+    private let deadline = ContextBuilderFollowUpLaneDeadline()
+    private var deadlineTask: Task<Void, Never>?
+
+    /// True when the deadline, not the monitor, ended the run. Cancelling a stuck monitor can still
+    /// return the result it had chosen, so a test must reject a run the deadline ended.
+    var deadlineExpired: Bool {
+        deadline.expired
+    }
+
+    init() {
+        recordedActivityIterator = recordedActivity.stream.makeAsyncIterator()
+        waitingChecksIterator = waitingChecks.stream.makeAsyncIterator()
+    }
+
+    deinit {
+        deadlineTask?.cancel()
+        activity.continuation.finish()
+        checkSteps.continuation.finish()
+    }
+
+    /// Starts the monitor and returns once its first inactivity check is waiting.
+    func start(partialText: String) async -> Task<ContextBuilderFollowUpFinalizationResult, Error> {
+        let clock = clock
+        let cancellations = cancellations
+        let finalization = finalization
+        let activityEvents = activity.stream
+        let checkSteps = checkSteps.stream
+        let recordedActivity = recordedActivity.continuation
+        let waitingChecks = waitingChecks.continuation
+        let deadline = deadline
+        let monitor = Task {
+            // A monitor that has ended can't acknowledge anything; finishing the acknowledgements
+            // ends the test's wait instead of hanging it.
+            defer {
+                deadline.settle()
+                recordedActivity.finish()
+                waitingChecks.finish()
+            }
+            return try await ContextBuilderFollowUpFinalizationMonitor.wait(
+                activityEvents: activityEvents,
+                configuration: ContextBuilderFollowUpFinalizationConfiguration(
+                    overallTimeout: 1000,
+                    inactivityTimeout: 10,
+                    checkInterval: 1
+                ),
+                clock: { clock.now() },
+                sleep: { _ in
+                    waitingChecks.yield()
+                    // Cancellation ends the wait for a step, as it ends a real sleep.
+                    var steps = checkSteps.makeAsyncIterator()
+                    guard await steps.next() != nil else {
+                        throw CancellationError()
+                    }
+                },
+                waitForFinalization: {
+                    try await finalization.wait()
+                },
+                partialResponse: {
+                    partialText
+                },
+                cancelStreaming: {
+                    await cancellations.record()
+                },
+                reportActivity: { _, _ in
+                    recordedActivity.yield()
+                }
+            )
+        }
+        // A broken monitor can stop acknowledging without ending. The deadline ends the test's
+        // waits and cancels the monitor, so the test fails instead of hanging the run.
+        deadlineTask = Task {
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled, deadline.expire() else { return }
+            recordedActivity.finish()
+            waitingChecks.finish()
+            monitor.cancel()
+        }
+        _ = await waitingChecksIterator.next()
+        return monitor
+    }
+
+    /// Delivers stream activity at `time`; false when the monitor ended, or the lane's deadline
+    /// passed, before the monitor recorded it.
+    func deliverActivity(at time: TimeInterval) async -> Bool {
+        clock.set(to: time)
+        activity.continuation.yield(OracleMessageLifecycleActivityEvent(kind: .streamActivity))
+        return await recordedActivityIterator.next() != nil
+    }
+
+    /// Runs one inactivity check at `time`; true when the monitor survived it and waits for the
+    /// next check, false when the monitor ended or the lane's deadline passed.
+    func check(at time: TimeInterval) async -> Bool {
+        clock.set(to: time)
+        checkSteps.continuation.yield()
+        return await waitingChecksIterator.next() != nil
+    }
+}
+
+/// Decides, under one lock, whether the monitor settled before the lane's deadline expired.
+private final class ContextBuilderFollowUpLaneDeadline: @unchecked Sendable {
+    private let lock = NSLock()
+    private var settled = false
+    private var didExpire = false
+
+    var expired: Bool {
+        lock.withLock { didExpire }
+    }
+
+    func settle() {
+        lock.withLock { settled = true }
+    }
+
+    /// Returns false when the monitor has already settled.
+    func expire() -> Bool {
+        lock.withLock {
+            guard !settled else { return false }
+            didExpire = true
+            return true
+        }
+    }
+}
+
 private final class ContextBuilderFollowUpFinalizationTestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var value: TimeInterval = 0
@@ -428,6 +613,12 @@ private final class ContextBuilderFollowUpFinalizationTestClock: @unchecked Send
     func advance(by interval: TimeInterval) {
         lock.lock()
         value += interval
+        lock.unlock()
+    }
+
+    func set(to time: TimeInterval) {
+        lock.lock()
+        value = time
         lock.unlock()
     }
 }
@@ -444,16 +635,27 @@ private actor ContextBuilderFollowUpCancellationRecorder {
     }
 }
 
+/// Holds a follow-up's finalization until the test resolves it or the waiting task is cancelled.
 private final class ContextBuilderFollowUpCancellationGate: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Never>?
     private var cancelledBeforeWait = false
+    private var response: String?
+
+    func resolve(_ response: String) {
+        lock.lock()
+        self.response = response
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
 
     func wait() async throws -> String {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 lock.lock()
-                if cancelledBeforeWait {
+                if cancelledBeforeWait || response != nil {
                     lock.unlock()
                     continuation.resume()
                     return
@@ -470,6 +672,6 @@ private final class ContextBuilderFollowUpCancellationGate: @unchecked Sendable 
             continuation?.resume()
         }
         try Task.checkCancellation()
-        return "unexpected completion"
+        return lock.withLock { response } ?? "unexpected completion"
     }
 }

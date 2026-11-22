@@ -182,6 +182,9 @@ final class CLIProcessRunner {
         return access(path, X_OK) == 0
     }
 
+    /// `onStdoutChunk` receives each stdout chunk as the reader captures it, in read order, on the
+    /// stdout reader's queue. It never sees stderr, and every call returns before `run` returns or
+    /// throws. The reader waits for it before the next read, so it must return quickly.
     func run(
         args: [String],
         stdin: String?,
@@ -189,7 +192,8 @@ final class CLIProcessRunner {
         timeout: TimeInterval?,
         additionalEnvironment: [String: String] = [:],
         additionalRemovedKeys: Set<String> = [],
-        cancelChildOnTaskCancellation: Bool = false
+        cancelChildOnTaskCancellation: Bool = false,
+        onStdoutChunk: (@Sendable (Data) -> Void)? = nil
     ) async throws -> Result {
         try await gate.withPermit { [self] in
             let environment = await resolvedEnvironment(
@@ -309,6 +313,7 @@ final class CLIProcessRunner {
                         beforeStart: beforeOutputReaderStarts
                     ) { chunk in
                         stdoutData.append(chunk)
+                        onStdoutChunk?(chunk)
                     }
                 }
 
