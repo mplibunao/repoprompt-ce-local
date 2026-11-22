@@ -116,7 +116,7 @@ actor DirectHeadlessFilesystemBackend: DomainFilesystemMutationBackend {
             "mutation_acknowledgement": .object([
                 "operation_id": args["operation_id"] ?? .null,
                 "freshness": .string("fresh"),
-                "mutation": .string("applied")
+                "mutation": .string(result.editsApplied > 0 ? "applied" : "not_applied")
             ])
         ]
         if let stats = result.stats {
